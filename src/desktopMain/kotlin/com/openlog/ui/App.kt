@@ -27,8 +27,7 @@ import java.awt.Frame
 import java.io.File
 
 @Composable
-fun App() {
-    val state = remember { AppState() }
+fun App(state: AppState = remember { AppState() }) {
     val theme = themeColors(state.settings.theme)
 
     CompositionLocalProvider(

@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -50,9 +51,12 @@ fun HoverBox(
 }
 
 // ── Resizable dividers ───────────────────────────────────────────────
+// Compose pointer events are in layout pixels; panel widths are stored in dp.
+// Dividing by density converts px → dp so the divider tracks the cursor exactly.
 @Composable
 fun HDivider(onDelta: (Float) -> Unit) {
     val tc = tc()
+    val density = LocalDensity.current.density
     var hovered by remember { mutableStateOf(false) }
     Box(
         Modifier
@@ -60,17 +64,23 @@ fun HDivider(onDelta: (Float) -> Unit) {
             .background(if (hovered) tc.ac.copy(.5f) else tc.br)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .pointerInput(Unit) {
+            .pointerInput(density) {
                 awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false).also { it.consume() }
+                    val down = awaitFirstDown(requireUnconsumed = false).also { it.consume() }
+                    var lastX = down.position.x
                     var active = true
                     while (active) {
                         val event = awaitPointerEvent()
-                        event.changes.forEach { ch ->
-                            if (ch.pressed) onDelta(ch.positionChange().x)
+                        val ch = event.changes.firstOrNull { it.id == down.id }
+                        if (ch != null) {
+                            if (ch.pressed) {
+                                onDelta((ch.position.x - lastX) / density)
+                                lastX = ch.position.x
+                            } else {
+                                active = false
+                            }
                             ch.consume()
                         }
-                        if (event.changes.none { it.pressed }) active = false
                     }
                 }
             }
@@ -81,6 +91,7 @@ fun HDivider(onDelta: (Float) -> Unit) {
 @Composable
 fun VDivider(onDelta: (Float) -> Unit) {
     val tc = tc()
+    val density = LocalDensity.current.density
     var hovered by remember { mutableStateOf(false) }
     Box(
         Modifier
@@ -88,17 +99,23 @@ fun VDivider(onDelta: (Float) -> Unit) {
             .background(if (hovered) tc.ac.copy(.5f) else tc.br)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .pointerInput(Unit) {
+            .pointerInput(density) {
                 awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false).also { it.consume() }
+                    val down = awaitFirstDown(requireUnconsumed = false).also { it.consume() }
+                    var lastY = down.position.y
                     var active = true
                     while (active) {
                         val event = awaitPointerEvent()
-                        event.changes.forEach { ch ->
-                            if (ch.pressed) onDelta(ch.positionChange().y)
+                        val ch = event.changes.firstOrNull { it.id == down.id }
+                        if (ch != null) {
+                            if (ch.pressed) {
+                                onDelta((ch.position.y - lastY) / density)
+                                lastY = ch.position.y
+                            } else {
+                                active = false
+                            }
                             ch.consume()
                         }
-                        if (event.changes.none { it.pressed }) active = false
                     }
                 }
             }

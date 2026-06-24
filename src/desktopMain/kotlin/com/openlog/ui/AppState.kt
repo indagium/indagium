@@ -364,16 +364,16 @@ class AppState {
         tabs = next
     }
     fun openFile(file: File) {
+        val n = tabCounter++  // capture on calling thread before launching
         isLoading = true
         ioScope.launch {
             val logData = runCatching { parseLogcat(file) }.getOrElse { emptyList() }
-            val n = tabCounter++
             val t = mkTab("t$n", file.name, logData)
-            withContext(Dispatchers.Main) {
-                tabs = tabs + t
-                activeTabId = t.id
-                isLoading = false
-            }
+            // Compose MutableState is snapshot-safe to write from any thread;
+            // recomposition is automatically scheduled on the UI thread.
+            tabs = tabs + t
+            activeTabId = t.id
+            isLoading = false
         }
     }
 
