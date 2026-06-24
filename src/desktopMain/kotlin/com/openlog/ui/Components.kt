@@ -3,7 +3,8 @@
 package com.openlog.ui
 
 import androidx.compose.foundation.*
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -59,7 +60,20 @@ fun HDivider(onDelta: (Float) -> Unit) {
             .background(if (hovered) tc.ac.copy(.5f) else tc.br)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .pointerInput(Unit) { detectDragGestures { ch, d -> ch.consume(); onDelta(d.x) } }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false).also { it.consume() }
+                    var active = true
+                    while (active) {
+                        val event = awaitPointerEvent()
+                        event.changes.forEach { ch ->
+                            if (ch.pressed) onDelta(ch.positionChange().x)
+                            ch.consume()
+                        }
+                        if (event.changes.none { it.pressed }) active = false
+                    }
+                }
+            }
             .pointerHoverIcon(PointerIcon.Hand)
     )
 }
@@ -74,7 +88,20 @@ fun VDivider(onDelta: (Float) -> Unit) {
             .background(if (hovered) tc.ac.copy(.5f) else tc.br)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .pointerInput(Unit) { detectDragGestures { ch, d -> ch.consume(); onDelta(d.y) } }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false).also { it.consume() }
+                    var active = true
+                    while (active) {
+                        val event = awaitPointerEvent()
+                        event.changes.forEach { ch ->
+                            if (ch.pressed) onDelta(ch.positionChange().y)
+                            ch.consume()
+                        }
+                        if (event.changes.none { it.pressed }) active = false
+                    }
+                }
+            }
             .pointerHoverIcon(PointerIcon.Hand)
     )
 }

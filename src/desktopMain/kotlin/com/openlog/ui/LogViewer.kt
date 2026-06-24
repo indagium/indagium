@@ -4,6 +4,9 @@ package com.openlog.ui
 
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
@@ -94,10 +97,9 @@ fun LogViewer(
 ) {
     val tc       = tc()
     val mono     = monoFont()
-    val items    = computeItems(tab, sequences, true)
+    val items    = remember(tab.id, tab.filter, tab.expanded, sequences) { computeItems(tab, sequences, true) }
     val visCnt   = items.count { it is LogItem.Row }
     val totalCnt = tab.logData.size
-    val scrollState = rememberScrollState()
 
     // Row bounds for global drag-select (plain HashMap avoids recomposition on scroll updates)
     val rowBoundsAbs = remember { HashMap<Int, Pair<Float, Float>>() }
@@ -121,6 +123,7 @@ fun LogViewer(
         @Composable
         fun ItemList(listItems: List<LogItem>) {
             if (listItems.isEmpty()) { EmptyState(tc, onClearFilter); return }
+            val lazyState = rememberLazyListState()
             Box(
                 Modifier.fillMaxSize()
                     .onGloballyPositioned { boxPosY[0] = it.positionInRoot().y }
@@ -148,10 +151,16 @@ fun LogViewer(
                         }
                     }
             ) {
-                Column(Modifier.fillMaxSize().verticalScroll(scrollState)) {
-                    listItems.forEach { item ->
+                LazyColumn(state = lazyState, modifier = Modifier.fillMaxSize()) {
+                    items(
+                        items = listItems,
+                        key = { item -> when (item) {
+                            is LogItem.Row       -> "r${item.entry.id}"
+                            is LogItem.SeqHeader -> "h${item.gid}"
+                        }}
+                    ) { item ->
                         when (item) {
-                            is LogItem.Row -> LogRow(item, tab, mono, tc, onSelRow, onCtxMenu, rowBoundsAbs)
+                            is LogItem.Row       -> LogRow(item, tab, mono, tc, onSelRow, onCtxMenu, rowBoundsAbs)
                             is LogItem.SeqHeader -> SeqHeaderRow(item, mono, tc, onToggleGroup)
                         }
                     }
@@ -160,7 +169,7 @@ fun LogViewer(
         }
 
         if (tab.showUnfiltered) {
-            val allItems = computeItems(tab, sequences, false)
+            val allItems = remember(tab.id, tab.expanded, sequences) { computeItems(tab, sequences, false) }
             Column(Modifier.fillMaxWidth().weight(0.45f)) {
                 SectionBanner("Original — $totalCnt lines", tc.seq1, tc); ColHeader()
                 ItemList(allItems)

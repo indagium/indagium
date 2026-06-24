@@ -51,6 +51,16 @@ fun App() {
                 }
             }
 
+            // ── Loading overlay ───────────────────────────────────────
+            if (state.isLoading) {
+                Box(
+                    Modifier.fillMaxSize().background(tc.bg.copy(alpha = 0.75f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    AppText("Loading file…", color = tc.ts, fontSize = 14.sp)
+                }
+            }
+
             // ── Context menu ──────────────────────────────────────────
             state.ctx?.let { ctx ->
                 val ctxTab = state.tab(ctx.tabId)
@@ -327,11 +337,11 @@ private fun CompareView(state: AppState) {
     val rightTab = state.tab(state.compareTabId) ?: state.tabs.getOrNull(1) ?: state.tabs.first()
     val tc = tc()
 
-    fun picker(curId: String, onChange: (String) -> Unit): @Composable () -> Unit = {
-        Row(Modifier.fillMaxWidth().background(tc.p2).padding(4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            state.tabs.forEach { t -> PillBtn(t.filename, active = t.id == curId) { onChange(t.id) } }
-        }
-    }
+    // Right side shows all entries when filter is off; mirrors left filter when on.
+    val effectiveRightTab = if (state.compareFilterRight)
+        rightTab.copy(filter = leftTab.filter)
+    else
+        rightTab.copy(filter = Filter())
 
     @Composable
     fun filterPanelFor(tab: LogTab) {
@@ -381,47 +391,88 @@ private fun CompareView(state: AppState) {
         HDivider { d -> state.filterPanelWidth = (state.filterPanelWidth + d).coerceIn(140f, 420f) }
     }
 
-    Row(Modifier.fillMaxSize()) {
-        Column(Modifier.weight(1f).fillMaxHeight().border(BorderStroke(2.dp, tc.br.copy(.53f)))) {
-            picker(leftTab.id) { state.activeTabId = it }()
-            Row(Modifier.fillMaxSize()) {
-                filterPanelFor(leftTab)
-                LogViewer(tab = leftTab, sequences = state.sequences, modifier = Modifier.weight(1f),
-                    onSelRow = { id, m, r -> state.selRow(leftTab.id, id, m, r) },
-                    onSelRowRange = { f, t -> state.selRowRange(leftTab.id, f, t) },
-                    onCtxMenu = { id, x, y, sel -> state.ctx = CtxMenuState(leftTab.id, id, x, y, sel) },
-                    onToggleGroup = { state.toggleGroup(leftTab.id, it) },
-                    onClearFilter = { state.clearFilter(leftTab.id) },
-                    onExpandAll = { state.expandAll(leftTab.id) }, onCollapseAll = { state.collapseAll(leftTab.id) },
-                    onToggleUnfiltered = { state.toggleUnfiltered(leftTab.id) })
-            }
-        }
-        Column(Modifier.weight(1f).fillMaxHeight()) {
-            picker(rightTab.id) { state.compareTabId = it }()
-            Row(Modifier.fillMaxSize()) {
-                filterPanelFor(rightTab)
-                LogViewer(tab = rightTab, sequences = state.sequences, modifier = Modifier.weight(1f),
-                    onSelRow = { id, m, r -> state.selRow(rightTab.id, id, m, r) },
-                    onSelRowRange = { f, t -> state.selRowRange(rightTab.id, f, t) },
-                    onCtxMenu = { id, x, y, sel -> state.ctx = CtxMenuState(rightTab.id, id, x, y, sel) },
-                    onToggleGroup = { state.toggleGroup(rightTab.id, it) },
-                    onClearFilter = { state.clearFilter(rightTab.id) },
-                    onExpandAll = { state.expandAll(rightTab.id) }, onCollapseAll = { state.collapseAll(rightTab.id) },
-                    onToggleUnfiltered = { state.toggleUnfiltered(rightTab.id) })
-                if (state.annotationVisible) {
-                    HDivider { d -> state.annotationPanelWidth = (state.annotationPanelWidth - d).coerceIn(180f, 500f) }
-                    AnnotationPanel(tab = rightTab,
-                        onToggleMd     = { state.toggleMd(rightTab.id) },
-                        onCopy         = { state.copyAnn(rightTab.id) },
-                        onSave         = { state.saveAnalysis(rightTab.id) },
-                        onUpdatePrefix = { state.setPrefix(rightTab.id, it) },
-                        onUpdateSuffix = { state.setSuffix(rightTab.id, it) },
-                        onUpdateBlock  = { bid, t -> state.updateBlock(rightTab.id, bid, t) },
-                        onRemoveBlock  = { state.removeBlock(rightTab.id, it) },
-                        onMoveBlock    = { bid, d -> state.moveBlock(rightTab.id, bid, d) },
-                        onAddNoteAfter = { state.addNoteBlock(rightTab.id, it) },
-                        width          = state.annotationPanelWidth,
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val totalWidthDp = maxWidth.value
+
+        Row(Modifier.fillMaxSize()) {
+            // ── Left panel ──────────────────────────────────────────
+            Column(
+                Modifier
+                    .width((totalWidthDp * state.compareSplit).dp)
+                    .fillMaxHeight()
+                    .border(BorderStroke(1.dp, tc.br.copy(.53f)))
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().background(tc.p2).padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    state.tabs.forEach { t -> PillBtn(t.filename, active = t.id == leftTab.id) { state.activeTabId = t.id } }
+                }
+                Row(Modifier.weight(1f).fillMaxWidth()) {
+                    filterPanelFor(leftTab)
+                    LogViewer(
+                        tab = leftTab, sequences = state.sequences, modifier = Modifier.weight(1f),
+                        onSelRow          = { id, m, r -> state.selRow(leftTab.id, id, m, r) },
+                        onSelRowRange     = { f, t -> state.selRowRange(leftTab.id, f, t) },
+                        onCtxMenu         = { id, x, y, sel -> state.ctx = CtxMenuState(leftTab.id, id, x, y, sel) },
+                        onToggleGroup     = { state.toggleGroup(leftTab.id, it) },
+                        onClearFilter     = { state.clearFilter(leftTab.id) },
+                        onExpandAll       = { state.expandAll(leftTab.id) },
+                        onCollapseAll     = { state.collapseAll(leftTab.id) },
+                        onToggleUnfiltered = { state.toggleUnfiltered(leftTab.id) },
                     )
+                }
+            }
+
+            // ── Split divider ────────────────────────────────────────
+            HDivider { delta ->
+                val newFrac = (state.compareSplit * totalWidthDp + delta) / totalWidthDp
+                state.compareSplit = newFrac.coerceIn(0.2f, 0.8f)
+            }
+
+            // ── Right panel ──────────────────────────────────────────
+            Column(Modifier.weight(1f).fillMaxHeight()) {
+                Row(
+                    Modifier.fillMaxWidth().background(tc.p2).padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    state.tabs.forEach { t -> PillBtn(t.filename, active = t.id == rightTab.id) { state.compareTabId = t.id } }
+                    Spacer(Modifier.weight(1f))
+                    PillBtn(
+                        label  = if (state.compareFilterRight) "⊟ Filter" else "⊞ Filter",
+                        active = state.compareFilterRight,
+                        onClick = { state.compareFilterRight = !state.compareFilterRight },
+                    )
+                }
+                Row(Modifier.weight(1f).fillMaxWidth()) {
+                    LogViewer(
+                        tab = effectiveRightTab, sequences = state.sequences, modifier = Modifier.weight(1f),
+                        onSelRow          = { id, m, r -> state.selRow(rightTab.id, id, m, r) },
+                        onSelRowRange     = { f, t -> state.selRowRange(rightTab.id, f, t) },
+                        onCtxMenu         = { id, x, y, sel -> state.ctx = CtxMenuState(rightTab.id, id, x, y, sel) },
+                        onToggleGroup     = { state.toggleGroup(rightTab.id, it) },
+                        onClearFilter     = { state.clearFilter(rightTab.id) },
+                        onExpandAll       = { state.expandAll(rightTab.id) },
+                        onCollapseAll     = { state.collapseAll(rightTab.id) },
+                        onToggleUnfiltered = { state.toggleUnfiltered(rightTab.id) },
+                    )
+                    if (state.annotationVisible) {
+                        HDivider { d -> state.annotationPanelWidth = (state.annotationPanelWidth - d).coerceIn(180f, 500f) }
+                        AnnotationPanel(
+                            tab            = rightTab,
+                            onToggleMd     = { state.toggleMd(rightTab.id) },
+                            onCopy         = { state.copyAnn(rightTab.id) },
+                            onSave         = { state.saveAnalysis(rightTab.id) },
+                            onUpdatePrefix = { state.setPrefix(rightTab.id, it) },
+                            onUpdateSuffix = { state.setSuffix(rightTab.id, it) },
+                            onUpdateBlock  = { bid, t -> state.updateBlock(rightTab.id, bid, t) },
+                            onRemoveBlock  = { state.removeBlock(rightTab.id, it) },
+                            onMoveBlock    = { bid, d -> state.moveBlock(rightTab.id, bid, d) },
+                            onAddNoteAfter = { state.addNoteBlock(rightTab.id, it) },
+                            width          = state.annotationPanelWidth,
+                        )
+                    }
                 }
             }
         }
@@ -436,10 +487,6 @@ private fun TabBar(state: AppState) {
         Modifier.fillMaxWidth().height(36.dp).background(tc.p2).border(BorderStroke(1.dp, tc.br)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(Modifier.padding(horizontal = 12.dp).border(BorderStroke(1.dp, tc.br)).fillMaxHeight(),
-            verticalAlignment = Alignment.CenterVertically) {
-            AppText("openLog", color = tc.tx, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp))
-        }
         Row(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
             state.tabs.forEach { tab ->
                 TabItem(tab, tab.id == state.activeTabId, state.tabs.size > 1,

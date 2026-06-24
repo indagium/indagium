@@ -12,6 +12,7 @@ import java.awt.Frame
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.io.File
+import kotlinx.coroutines.*
 
 fun mkTab(id: String, filename: String, logData: List<LogEntry>) = LogTab(
     id = id, filename = filename, logData = logData, rmap = mkRmap(logData),
@@ -29,6 +30,11 @@ class AppState {
     var annotationVisible    by mutableStateOf(true)
     var filterPanelWidth     by mutableStateOf(220f)
     var annotationPanelWidth by mutableStateOf(300f)
+    var compareSplit         by mutableStateOf(0.5f)
+    var compareFilterRight   by mutableStateOf(true)
+    var isLoading            by mutableStateOf(false)
+
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // ── Sequences ───────────────────────────────────────────────────
     var sequences by mutableStateOf(emptyList<SequenceDef>())
@@ -358,10 +364,17 @@ class AppState {
         tabs = next
     }
     fun openFile(file: File) {
-        val logData = parseLogcat(file.readText())
-        val n = tabCounter++
-        val t = mkTab("t$n", file.name, logData)
-        tabs = tabs + t; activeTabId = t.id
+        isLoading = true
+        ioScope.launch {
+            val logData = runCatching { parseLogcat(file) }.getOrElse { emptyList() }
+            val n = tabCounter++
+            val t = mkTab("t$n", file.name, logData)
+            withContext(Dispatchers.Main) {
+                tabs = tabs + t
+                activeTabId = t.id
+                isLoading = false
+            }
+        }
     }
 
     // ── Copy / Save ──────────────────────────────────────────────────
