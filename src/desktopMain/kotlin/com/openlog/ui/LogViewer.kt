@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
@@ -95,15 +96,19 @@ fun LogViewer(
     onCollapseAll: () -> Unit,
     onToggleUnfiltered: () -> Unit,
 ) {
-    val tc       = tc()
-    val mono     = monoFont()
-    val items    = remember(tab.id, tab.filter, tab.expanded, sequences) { computeItems(tab, sequences, true) }
-    val visCnt   = items.count { it is LogItem.Row }
-    val totalCnt = tab.logData.size
+    val tc        = tc()
+    val mono      = monoFont()
+    val items     = remember(tab.id, tab.filter, tab.expanded, sequences) { computeItems(tab, sequences, true) }
+    val visCnt    = items.count { it is LogItem.Row }
+    val totalCnt  = tab.logData.size
+    val hasPidTid = remember(tab.id) { tab.logData.any { it.pid > 0 } }
 
     // Row bounds for global drag-select (plain HashMap avoids recomposition on scroll updates)
     val rowBoundsAbs = remember { HashMap<Int, Pair<Float, Float>>() }
     val boxPosY      = remember { floatArrayOf(0f) }
+
+    // Clear stale bounds from previous tab so drag-select uses correct positions
+    LaunchedEffect(tab.id) { rowBoundsAbs.clear() }
 
     Column(modifier.fillMaxSize().background(tc.bg)) {
         Row(
@@ -124,6 +129,7 @@ fun LogViewer(
         fun ItemList(listItems: List<LogItem>) {
             if (listItems.isEmpty()) { EmptyState(tc, onClearFilter); return }
             val lazyState = rememberLazyListState()
+            val hScroll   = rememberScrollState()
             Box(
                 Modifier.fillMaxSize()
                     .onGloballyPositioned { boxPosY[0] = it.positionInRoot().y }
@@ -151,19 +157,37 @@ fun LogViewer(
                         }
                     }
             ) {
-                LazyColumn(state = lazyState, modifier = Modifier.fillMaxSize()) {
-                    items(
-                        items = listItems,
-                        key = { item -> when (item) {
-                            is LogItem.Row       -> "r${item.entry.id}"
-                            is LogItem.SeqHeader -> "h${item.gid}"
-                        }}
-                    ) { item ->
-                        when (item) {
-                            is LogItem.Row       -> LogRow(item, tab, mono, tc, onSelRow, onCtxMenu, rowBoundsAbs)
-                            is LogItem.SeqHeader -> SeqHeaderRow(item, mono, tc, onToggleGroup)
+                Column(Modifier.fillMaxSize()) {
+                    // Content area: horizontal scroll wraps LazyColumn
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        Box(Modifier.fillMaxSize().horizontalScroll(hScroll)) {
+                            LazyColumn(
+                                state = lazyState,
+                                modifier = Modifier.fillMaxHeight().widthIn(min = 2000.dp),
+                            ) {
+                                items(
+                                    items = listItems,
+                                    key = { item -> when (item) {
+                                        is LogItem.Row       -> "r${item.entry.id}"
+                                        is LogItem.SeqHeader -> "h${item.gid}"
+                                    }}
+                                ) { item ->
+                                    when (item) {
+                                        is LogItem.Row       -> LogRow(item, tab, mono, tc, onSelRow, onCtxMenu, rowBoundsAbs)
+                                        is LogItem.SeqHeader -> SeqHeaderRow(item, mono, tc, onToggleGroup)
+                                    }
+                                }
+                            }
                         }
+                        VerticalScrollbar(
+                            adapter = rememberScrollbarAdapter(lazyState),
+                            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+                        )
                     }
+                    HorizontalScrollbar(
+                        adapter = rememberScrollbarAdapter(hScroll),
+                        modifier = Modifier.fillMaxWidth().padding(end = 8.dp),
+                    )
                 }
             }
         }
@@ -171,15 +195,16 @@ fun LogViewer(
         if (tab.showUnfiltered) {
             val allItems = remember(tab.id, tab.expanded, sequences) { computeItems(tab, sequences, false) }
             Column(Modifier.fillMaxWidth().weight(0.45f)) {
-                SectionBanner("Original — $totalCnt lines", tc.seq1, tc); ColHeader()
+                SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
+                ColHeader(hasPidTid)
                 ItemList(allItems)
             }
             SectionBanner("Filtered — $visCnt lines", tc.ac, tc)
             Column(Modifier.fillMaxWidth().weight(0.45f)) {
-                ColHeader(); ItemList(items)
+                ColHeader(hasPidTid); ItemList(items)
             }
         } else {
-            ColHeader(); ItemList(items)
+            ColHeader(hasPidTid); ItemList(items)
         }
     }
 }
@@ -217,8 +242,8 @@ private fun LogRow(
                 rowBoundsAbs[entry.id] = pos.y to (pos.y + coords.size.height)
                 rowRoot = pos
             }
-            // Initial pass: right-click and modifier+click (before BasicTextField steals them)
-            .pointerInput("rc", entry.id) {
+            // Keys include tab.id so coroutines restart when the same entry ID appears in a different tab
+            .pointerInput("rc", tab.id, entry.id) {
                 awaitPointerEventScope {
                     while (true) {
                         val ev = awaitPointerEvent(PointerEventPass.Initial)
@@ -244,8 +269,7 @@ private fun LogRow(
                     }
                 }
             }
-            // Main pass: hover + plain click → select row
-            .pointerInput("hd", entry.id) {
+            .pointerInput("hd", tab.id, entry.id) {
                 awaitPointerEventScope {
                     while (true) {
                         val ev = awaitPointerEvent()
@@ -307,11 +331,9 @@ private fun SeqHeaderRow(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         AppText(if (item.expanded) "▼" else "▶", color = sc, fontSize = 9.sp, fontFamily = mono)
-        AppText(
-            "${item.entry.ts}  ${item.entry.level.key}  ${item.entry.tag}:",
-            color = sc, fontSize = 11.sp, fontFamily = mono,
-            modifier = Modifier.width(248.dp), overflow = TextOverflow.Ellipsis,
-        )
+        AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
+        AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
+            modifier = Modifier.widthIn(max = 240.dp), overflow = TextOverflow.Ellipsis)
         AppText(item.entry.msg, color = sc, fontSize = 12.sp, fontFamily = mono, fontWeight = FontWeight.Medium,
             modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
         if (!item.expanded) AppText("${item.count} entries", color = sc.copy(.6f), fontSize = 11.sp)

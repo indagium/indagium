@@ -57,16 +57,18 @@ fun HoverBox(
 fun HDivider(onDelta: (Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
-    var hovered by remember { mutableStateOf(false) }
+    var hovered  by remember { mutableStateOf(false) }
+    var dragging by remember { mutableStateOf(false) }
     Box(
         Modifier
             .width(4.dp).fillMaxHeight()
-            .background(if (hovered) tc.ac.copy(.5f) else tc.br)
+            .background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .pointerInput(density) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false).also { it.consume() }
+                    dragging = true
                     var lastX = down.position.x
                     var active = true
                     while (active) {
@@ -82,6 +84,7 @@ fun HDivider(onDelta: (Float) -> Unit) {
                             ch.consume()
                         }
                     }
+                    dragging = false
                 }
             }
             .pointerHoverIcon(PointerIcon.Hand)
@@ -92,16 +95,18 @@ fun HDivider(onDelta: (Float) -> Unit) {
 fun VDivider(onDelta: (Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
-    var hovered by remember { mutableStateOf(false) }
+    var hovered  by remember { mutableStateOf(false) }
+    var dragging by remember { mutableStateOf(false) }
     Box(
         Modifier
             .height(4.dp).fillMaxWidth()
-            .background(if (hovered) tc.ac.copy(.5f) else tc.br)
+            .background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .pointerInput(density) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false).also { it.consume() }
+                    dragging = true
                     var lastY = down.position.y
                     var active = true
                     while (active) {
@@ -117,6 +122,7 @@ fun VDivider(onDelta: (Float) -> Unit) {
                             ch.consume()
                         }
                     }
+                    dragging = false
                 }
             }
             .pointerHoverIcon(PointerIcon.Hand)
@@ -170,7 +176,7 @@ fun LevelBadge(level: LogLevel) {
 }
 
 @Composable
-fun ColHeader() {
+fun ColHeader(hasPidTid: Boolean = false) {
     val tc = tc()
     Row(
         Modifier.fillMaxWidth().background(tc.p2).border(BorderStroke(1.dp, tc.br))
@@ -179,6 +185,10 @@ fun ColHeader() {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AppText("TIMESTAMP", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(90.dp))
+        if (hasPidTid) {
+            AppText("PID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(40.dp))
+            AppText("TID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(40.dp))
+        }
         AppText("LVL", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(28.dp))
         AppText("TAG", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(100.dp))
         AppText("MESSAGE", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))

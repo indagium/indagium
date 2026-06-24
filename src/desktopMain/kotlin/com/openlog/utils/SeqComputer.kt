@@ -8,9 +8,11 @@ fun computeSeqGroups(logData: List<LogEntry>, defs: List<SequenceDef>): List<Seq
     val enabled = defs.filter { it.enabled }.sortedBy { it.priority }
     if (enabled.isEmpty()) return emptyList()
 
-    fun matches(entry: LogEntry, def: SequenceDef): Boolean =
-        if (def.isRegex) runCatching { Regex(def.matchText, RegexOption.IGNORE_CASE).containsMatchIn(entry.msg) }.getOrElse { false }
-        else entry.msg.contains(def.matchText, ignoreCase = true)
+    fun matches(entry: LogEntry, def: SequenceDef): Boolean {
+        val haystack = "${entry.tag} ${entry.msg}"
+        return if (def.isRegex) runCatching { Regex(def.matchText, RegexOption.IGNORE_CASE).containsMatchIn(haystack) }.getOrElse { false }
+        else haystack.contains(def.matchText, ignoreCase = true)
+    }
 
     // Collect all boundary hits; first-priority def wins per entry
     data class Hit(val idx: Int, val def: SequenceDef)

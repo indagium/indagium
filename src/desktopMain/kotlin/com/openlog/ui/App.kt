@@ -1,8 +1,12 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+)
 
 package com.openlog.ui
 
 import androidx.compose.foundation.*
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -10,6 +14,10 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.DragData
+import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -25,6 +33,7 @@ import com.openlog.model.*
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
+import java.net.URI
 
 @Composable
 fun App(state: AppState = remember { AppState() }) {
@@ -36,7 +45,33 @@ fun App(state: AppState = remember { AppState() }) {
         LocalUseMono  provides state.settings.fontMono,
     ) {
         val tc = tc()
-        Box(Modifier.fillMaxSize().background(tc.bg)) {
+        val dropTarget = remember {
+            object : DragAndDropTarget {
+                override fun onDrop(event: DragAndDropEvent): Boolean {
+                    val files = runCatching {
+                        (event.dragData() as DragData.FilesList).readFiles()
+                    }.getOrElse { return false }
+                    files.forEach { uri ->
+                        runCatching {
+                            val file = File(URI.create(uri))
+                            if (file.exists() && file.extension.lowercase() in listOf("log", "txt")) {
+                                state.openFile(file)
+                            }
+                        }
+                    }
+                    return true
+                }
+            }
+        }
+        Box(
+            Modifier.fillMaxSize().background(tc.bg)
+                .dragAndDropTarget(
+                    shouldStartDragAndDrop = { event ->
+                        runCatching { event.dragData() is DragData.FilesList }.getOrElse { false }
+                    },
+                    target = dropTarget,
+                )
+        ) {
             Column(Modifier.fillMaxSize()) {
                 TabBar(state)
                 val activeTab = state.activeTab()

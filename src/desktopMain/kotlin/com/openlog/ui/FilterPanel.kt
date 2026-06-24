@@ -69,14 +69,24 @@ fun FilterPanel(
 ) {
     val tc = tc()
     val filter = tab.filter
-    val allTags = tab.logData.map { it.tag }.distinct()
-    val sortedTags = allTags.sortedWith(compareByDescending { tagUsage[it] ?: 0 })
+
+    // Tags sorted by frequency in log data; show top 10 unless user is searching
+    val tagCounts  = remember(tab.id) { tab.logData.groupBy { it.tag }.mapValues { it.value.size } }
+    val sortedTags = remember(tab.id, tagCounts) { tagCounts.entries.sortedByDescending { it.value }.map { it.key } }
 
     var tagSearch by remember { mutableStateOf("") }
     var colorPickerSeqId by remember { mutableStateOf<String?>(null) }
 
-    val filteredTags = if (tagSearch.isBlank()) sortedTags
-    else sortedTags.filter { it.contains(tagSearch, ignoreCase = true) }
+    // When searching show all matches; otherwise top 10 + any already-active tags
+    val filteredTags = if (tagSearch.isBlank())
+        (sortedTags.take(10) + filter.activeTags).distinct()
+    else
+        sortedTags.filter { it.contains(tagSearch, ignoreCase = true) }
+
+    // Debounced keyword state — display updates immediately, filter applies after 150ms pause
+    var kwDisplay by remember(tab.id) { mutableStateOf(filter.kwText) }
+    LaunchedEffect(tab.id, filter.kwText) { if (filter.kwText != kwDisplay) kwDisplay = filter.kwText }
+    LaunchedEffect(kwDisplay) { kotlinx.coroutines.delay(150); if (kwDisplay != filter.kwText) onSetKw(kwDisplay) }
 
     val scroll = rememberScrollState()
     Column(
@@ -228,7 +238,7 @@ fun FilterPanel(
         if (filter.mode == FilterMode.KEYWORD) {
             SectionHeader("INCLUDE KEYWORD")
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(filter.kwText, onSetKw, if (filter.kwRegex) "/pattern/…" else "keyword…", Modifier.weight(1f))
+                InlineField(kwDisplay, { kwDisplay = it }, if (filter.kwRegex) "/pattern/…" else "keyword…", Modifier.weight(1f))
                 PillBtn(".*", active = filter.kwRegex, onClick = onToggleKwRx)
             }
             // Negative keyword
