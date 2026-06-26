@@ -235,10 +235,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         InlineField(state.sfName, { state.sfName = it }, "Preset name…", Modifier.fillMaxWidth(), fontSize = 13.sp)
                         Spacer(Modifier.height(12.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            PillBtn("Save", active = state.sfName.isNotBlank()) {
-                                if (state.sfName.isNotBlank()) state.saveFilter(state.sfTabId ?: return@PillBtn, state.sfName)
+                            DialogActionButton("Save", active = state.sfName.isNotBlank()) {
+                                if (state.sfName.isNotBlank()) state.saveFilter(state.sfTabId ?: return@DialogActionButton, state.sfName)
                             }
-                            PillBtn("Cancel", active = false) { state.sfDialog = false }
+                            DialogActionButton("Cancel", active = false) { state.sfDialog = false }
                         }
                     }
                 }
@@ -262,10 +262,40 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             maxLines = 3,
                         )
                         Spacer(Modifier.height(14.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                DialogActionButton("Save as new", active = true) { state.beginSavePendingFilterAsNew() }
+                                DialogActionButton("Update existing", active = current != null) { state.updateCurrentPresetAndLoadPending() }
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                DialogActionButton("Do not save", active = true, danger = true) { state.discardPendingFilterChangesAndLoad() }
+                                DialogActionButton("Cancel", active = false) { state.cancelPendingFilterLoad() }
+                            }
+                        }
+                    }
+                }
+            }
+
+            state.pendingClearFilterTabId?.let { tabId ->
+                Dialog(onDismissRequest = { state.cancelClearFilter() }) {
+                    val tc2 = tc()
+                    val tabName = state.tab(tabId)?.filename ?: "current file"
+                    Column(
+                        Modifier.width(380.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Clear filters?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "Reset levels, tags, keyword rules, highlighters, message rules, and the active preset for \"$tabName\".",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 3,
+                        )
+                        Spacer(Modifier.height(14.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            PillBtn("Save as new", active = true) { state.beginSavePendingFilterAsNew() }
-                            PillBtn("Update existing", active = current != null) { state.updateCurrentPresetAndLoadPending() }
-                            PillBtn("Cancel", active = false) { state.cancelPendingFilterLoad() }
+                            DialogActionButton("Clear filters", active = true, danger = true) { state.confirmClearFilter() }
+                            DialogActionButton("Cancel", active = false) { state.cancelClearFilter() }
                         }
                     }
                 }
@@ -334,25 +364,31 @@ private fun AddAnnDialog(
         )
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            AddAnnotationButton { onConfirm(caption) }
-            PillBtn("Cancel", active = false, onClick = onDismiss)
+            DialogActionButton("Add annotation", active = true) { onConfirm(caption) }
+            DialogActionButton("Cancel", active = false, onClick = onDismiss)
         }
     }
 }
 
 @Composable
-private fun AddAnnotationButton(onClick: () -> Unit) {
+private fun DialogActionButton(
+    label: String,
+    active: Boolean,
+    danger: Boolean = false,
+    onClick: () -> Unit,
+) {
     val tc = tc()
+    val accent = if (danger) Color(0xFFf85149) else tc.ac
     Box(
         Modifier
-            .heightIn(min = 34.dp)
-            .border(1.dp, tc.ac, RoundedCornerShape(5.dp))
-            .background(tc.ac.copy(.18f), RoundedCornerShape(5.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .width(132.dp)
+            .height(38.dp)
+            .border(1.dp, if (active) accent else tc.br, RoundedCornerShape(5.dp))
+            .background(if (active) accent.copy(.18f) else Color.Transparent, RoundedCornerShape(5.dp))
+            .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        AppText("Add annotation", color = tc.ac, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        AppText(label, color = if (active) accent else tc.ts, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -363,6 +399,7 @@ private fun FileView(state: AppState, tab: LogTab) {
         if (state.filterVisible) {
             FilterPanel(
                 tab = tab, sequences = state.sequences, savedFilters = state.savedFilters,
+                activeSavedFilterId = state.activeSavedFilterId(tab.id),
                 tagUsage = state.tagUsage,
                 newHlPat = state.newHlPat, newHlRx = state.newHlRx, newHlColor = state.newHlColor,
                 newSeqText = state.newSeqText, newSeqRegex = state.newSeqRegex,
@@ -415,6 +452,7 @@ private fun FileView(state: AppState, tab: LogTab) {
                 onAddHl             = { p, r, c -> state.addHl(tab.id, p, r, c) },
                 onRemoveHl          = { state.removeHl(tab.id, it) },
                 onToggleHl          = { state.toggleHl(tab.id, it) },
+                onSetHlColor        = { id, c -> state.setHighlighterColor(tab.id, id, c) },
                 onSetNewHlPat       = { state.newHlPat = it },
                 onSetNewHlRx        = { state.newHlRx = it },
                 onSetNewHlColor     = { state.newHlColor = it },
@@ -429,7 +467,7 @@ private fun FileView(state: AppState, tab: LogTab) {
                 onExportFilters     = { state.exportFiltersToFile() },
                 onImportFilters     = { state.importFiltersFromFile() },
                 onImportFiltersFromFiles = { files -> files.forEach { state.importFiltersFromFile(it) } },
-                onClearFilter       = { state.clearFilter(tab.id) },
+                onClearFilter       = { state.requestClearFilter(tab.id) },
                 mostUsedTagLimit    = state.settings.mostUsedTagLimit,
                 width               = state.filterPanelWidth,
             )
@@ -441,7 +479,7 @@ private fun FileView(state: AppState, tab: LogTab) {
             onSelRowRange   = { ids -> state.setSelectedRows(tab.id, ids) },
             onCtxMenu       = { id, x, y, sel -> state.ctx = CtxMenuState(tab.id, id, x, y, sel) },
             onToggleGroup   = { state.toggleGroup(tab.id, it) },
-            onClearFilter   = { state.clearFilter(tab.id) },
+            onClearFilter   = { state.requestClearFilter(tab.id) },
             onExpandAll     = { state.expandAll(tab.id) },
             onCollapseAll   = { state.collapseAll(tab.id) },
             onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
@@ -482,7 +520,8 @@ private fun CompareView(state: AppState) {
     fun filterPanelFor(tab: LogTab) {
         if (!state.filterVisible) return
         FilterPanel(
-            tab = tab, sequences = state.sequences, savedFilters = state.savedFilters, tagUsage = state.tagUsage,
+            tab = tab, sequences = state.sequences, savedFilters = state.savedFilters,
+            activeSavedFilterId = state.activeSavedFilterId(tab.id), tagUsage = state.tagUsage,
             newHlPat = state.newHlPat, newHlRx = state.newHlRx, newHlColor = state.newHlColor,
             newSeqText = state.newSeqText, newSeqRegex = state.newSeqRegex,
             newSeqEndText = state.newSeqEndText, newSeqEndRegex = state.newSeqEndRegex,
@@ -534,6 +573,7 @@ private fun CompareView(state: AppState) {
             onAddHl             = { p, r, c -> state.addHl(tab.id, p, r, c) },
             onRemoveHl          = { state.removeHl(tab.id, it) },
             onToggleHl          = { state.toggleHl(tab.id, it) },
+            onSetHlColor        = { id, c -> state.setHighlighterColor(tab.id, id, c) },
             onSetNewHlPat       = { state.newHlPat = it },
             onSetNewHlRx        = { state.newHlRx = it },
             onSetNewHlColor     = { state.newHlColor = it },
@@ -548,7 +588,7 @@ private fun CompareView(state: AppState) {
             onExportFilters     = { state.exportFiltersToFile() },
             onImportFilters     = { state.importFiltersFromFile() },
             onImportFiltersFromFiles = { files -> files.forEach { state.importFiltersFromFile(it) } },
-            onClearFilter       = { state.clearFilter(tab.id) },
+            onClearFilter       = { state.requestClearFilter(tab.id) },
             mostUsedTagLimit    = state.settings.mostUsedTagLimit,
             width               = state.filterPanelWidth,
         )
@@ -580,7 +620,7 @@ private fun CompareView(state: AppState) {
                         onSelRowRange     = { ids -> state.setSelectedRows(leftTab.id, ids) },
                         onCtxMenu         = { id, x, y, sel -> state.ctx = CtxMenuState(leftTab.id, id, x, y, sel) },
                         onToggleGroup     = { state.toggleGroup(leftTab.id, it) },
-                        onClearFilter     = { state.clearFilter(leftTab.id) },
+                        onClearFilter     = { state.requestClearFilter(leftTab.id) },
                         onExpandAll       = { state.expandAll(leftTab.id) },
                         onCollapseAll     = { state.collapseAll(leftTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(leftTab.id) },
@@ -616,7 +656,7 @@ private fun CompareView(state: AppState) {
                         onSelRowRange     = { ids -> state.setSelectedRows(rightTab.id, ids) },
                         onCtxMenu         = { id, x, y, sel -> state.ctx = CtxMenuState(rightTab.id, id, x, y, sel) },
                         onToggleGroup     = { state.toggleGroup(rightTab.id, it) },
-                        onClearFilter     = { state.clearFilter(rightTab.id) },
+                        onClearFilter     = { state.requestClearFilter(rightTab.id) },
                         onExpandAll       = { state.expandAll(rightTab.id) },
                         onCollapseAll     = { state.collapseAll(rightTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(rightTab.id) },

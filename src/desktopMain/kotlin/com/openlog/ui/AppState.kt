@@ -76,6 +76,7 @@ class AppState(
     var settingsOpen  by mutableStateOf(false)
     var pendingSequenceStart by mutableStateOf<PendingSequenceStart?>(null)
     var pendingFilterLoad by mutableStateOf<PendingFilterLoad?>(null)
+    var pendingClearFilterTabId by mutableStateOf<String?>(null)
     var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
 
     var newHlPat   by mutableStateOf("")
@@ -120,7 +121,17 @@ class AppState(
     fun setKw(tabId: String, v: String) = upFlt(tabId) { it.copy(kwText = v) }
     fun toggleKwRx(tabId: String) = upFlt(tabId) { it.copy(kwRegex = !it.kwRegex) }
     fun toggleSeq(tabId: String) = upFlt(tabId) { it.copy(seqOn = !it.seqOn) }
-    fun clearFilter(tabId: String) = upFlt(tabId) { Filter() }
+    fun clearFilter(tabId: String) {
+        upFlt(tabId) { Filter() }
+        activeSavedFilterIds = activeSavedFilterIds - tabId
+    }
+    fun requestClearFilter(tabId: String) { pendingClearFilterTabId = tabId }
+    fun cancelClearFilter() { pendingClearFilterTabId = null }
+    fun confirmClearFilter() {
+        val tabId = pendingClearFilterTabId ?: return
+        clearFilter(tabId)
+        pendingClearFilterTabId = null
+    }
     fun toggleExcludeTag(tabId: String, tag: String) = upFlt(tabId) { f ->
         f.copy(excludeTags = if (tag in f.excludeTags) f.excludeTags - tag else f.excludeTags + tag)
     }.also { tagUsage = tagUsage + (tag to ((tagUsage[tag] ?: 0) + 1)) }
@@ -169,8 +180,24 @@ class AppState(
     fun toggleHl(tabId: String, id: String) = upFlt(tabId) { f ->
         f.copy(highlighters = f.highlighters.map { if (it.id == id) it.copy(on = !it.on) else it })
     }
+    fun setHighlighterColor(tabId: String, id: String, color: Color) = upFlt(tabId) { f ->
+        f.copy(highlighters = f.highlighters.map { if (it.id == id) it.copy(color = color) else it })
+    }
 
     // ── Sequences ───────────────────────────────────────────────────
+    private fun nextSequenceColor(from: Color, existing: List<SequenceDef> = sequences): Color {
+        val start = SEQ_COLORS.indexOf(from).takeIf { it >= 0 } ?: 0
+        val used = existing.map { it.color }.toSet()
+        for (offset in 0 until SEQ_COLORS.size) {
+            val candidate = SEQ_COLORS[(start + offset) % SEQ_COLORS.size]
+            if (candidate !in used) return candidate
+        }
+        return SEQ_COLORS[start]
+    }
+    private fun colorAfterSequenceColor(color: Color): Color {
+        val start = SEQ_COLORS.indexOf(color).takeIf { it >= 0 } ?: 0
+        return nextSequenceColor(SEQ_COLORS[(start + 1) % SEQ_COLORS.size])
+    }
     fun addSequence(
         text: String,
         isRegex: Boolean,
@@ -182,12 +209,13 @@ class AppState(
     ) {
         if (text.isBlank()) return
         val maxP = sequences.maxOfOrNull { it.priority } ?: 0
+        val assignedColor = nextSequenceColor(color)
         sequences = sequences + SequenceDef(
             "seq${System.currentTimeMillis()}",
             text,
             isRegex,
             maxP + 1,
-            color,
+            assignedColor,
             tag = tag?.trim()?.takeIf { it.isNotBlank() },
             endMatchText = endText?.takeIf { it.isNotBlank() },
             endIsRegex = endIsRegex,
@@ -197,7 +225,7 @@ class AppState(
         newSeqEndText = ""
         newSeqTag = ""
         newSeqEndTag = ""
-        newSeqColor = SEQ_COLORS[(SEQ_COLORS.indexOf(color) + 1) % SEQ_COLORS.size]
+        newSeqColor = colorAfterSequenceColor(assignedColor)
     }
     fun updateSequence(
         id: String,
@@ -276,6 +304,10 @@ class AppState(
     fun cancelPendingFilterLoad() {
         pendingFilterLoad = null
     }
+    fun discardPendingFilterChangesAndLoad() {
+        val pending = pendingFilterLoad ?: return
+        loadPendingFilter(pending)
+    }
     fun beginSavePendingFilterAsNew() {
         val pending = pendingFilterLoad ?: return
         sfDialog = true
@@ -336,6 +368,7 @@ class AppState(
         }
         activeSavedFilterIds = activeSavedFilterIds + (tabId to sf.id)
     }
+    fun activeSavedFilterId(tabId: String): String? = activeSavedFilterIds[tabId]
     fun deleteSF(id: String) { savedFilters = savedFilters.filter { it.id != id } }
 
     fun exportFilters(): String = buildString {

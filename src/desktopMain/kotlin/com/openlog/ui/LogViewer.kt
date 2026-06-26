@@ -44,6 +44,22 @@ private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
         }
     }
 
+private fun fullLineText(entry: LogEntry): String = buildString {
+    append(entry.ts)
+    if (entry.pid > 0) {
+        append("  ")
+        append(entry.pid.toString().padStart(5))
+        append(" ")
+        append(entry.tid.toString().padStart(5))
+    }
+    append("  ")
+    append(entry.level.key)
+    append("  ")
+    append(entry.tag)
+    append(": ")
+    append(entry.msg)
+}
+
 // Full selectable line matching raw logcat threadtime layout:
 //   ts  pid  tid  L  tag: msg
 // Level key sits at its natural position (after pid/tid) and is coloured by level.
@@ -71,12 +87,12 @@ fun buildFullLineAnnotation(
     append("  ")
     withStyle(SpanStyle(color = tagColor)) { append(entry.tag); append(":") }
     append(" ")
-    val msgOff = length
     withStyle(SpanStyle(color = msgColor)) { append(entry.msg) }
+    val lineText = fullLineText(entry)
     for (hl in highlighters.filter { it.on && it.pattern.isNotBlank() }) {
-        hlRanges(entry.msg, hl).forEach { (s, e) ->
-            if (s < e && e <= entry.msg.length)
-                addStyle(SpanStyle(background = hl.color.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold), msgOff + s, msgOff + e)
+        hlRanges(lineText, hl).forEach { (s, e) ->
+            if (s < e && e <= lineText.length)
+                addStyle(SpanStyle(background = hl.color.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold), s, e)
         }
     }
 }
@@ -358,7 +374,10 @@ private fun SeqHeaderRow(
                 hov -> sc.copy(.15f)
                 else -> sc.copy(.07f)
             })
-            .drawBehind { drawRect(sc, topLeft = Offset.Zero, size = Size(4f, size.height)) }
+            .drawBehind {
+                val guideX = item.indent * 18.dp.toPx()
+                drawRect(sc, topLeft = Offset(guideX, 0f), size = Size(4f, size.height))
+            }
             .onGloballyPositioned { coords ->
                 val pos = coords.positionInRoot()
                 rowBoundsAbs[item.entry.id] = pos.y to (pos.y + coords.size.height)

@@ -1,13 +1,16 @@
 package com.openlog
 
 import com.openlog.model.AnnBlock
+import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
+import com.openlog.model.SequenceDef
 import com.openlog.model.ThemePreset
 import com.openlog.ui.AppState
 import com.openlog.model.CtxMenuState
 import androidx.compose.ui.graphics.Color
+import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.mkTab
 import java.io.File
 import kotlin.io.path.createTempDirectory
@@ -205,6 +208,30 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun pendingFilterLoadCanDiscardChangesBeforeSwitching() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+
+        state.addPkgPrefix(tabId, "com.one")
+        state.saveFilter(tabId, "one")
+        state.clearFilter(tabId)
+        state.addPkgPrefix(tabId, "com.two")
+        state.saveFilter(tabId, "two")
+        val one = state.savedFilters.first { it.name == "one" }
+        val two = state.savedFilters.first { it.name == "two" }
+        state.loadFilter(tabId, one)
+        state.addPkgPrefix(tabId, "com.extra")
+
+        state.requestLoadFilter(tabId, two)
+        state.discardPendingFilterChangesAndLoad()
+
+        assertEquals(null, state.pendingFilterLoad)
+        assertEquals(setOf("com.one"), state.savedFilters.first { it.id == one.id }.pkgPrefixes)
+        assertEquals(setOf("com.two"), state.tabs.single().filter.pkgPrefixes)
+    }
+
+    @Test
     fun changingSavedFilterWithDirtyUnsavedFilterRequestsConfirmation() {
         val source = AppState()
         source.addTab()
@@ -238,6 +265,56 @@ class AppStateBehaviorTest {
         target.importFiltersFromFile(file)
 
         assertEquals("dropped", target.savedFilters.single().name)
+    }
+
+    @Test
+    fun confirmedClearFilterClearsActiveSavedFilter() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addPkgPrefix(tabId, "com.app")
+        state.saveFilter(tabId, "app")
+        val savedId = state.savedFilters.single().id
+        assertEquals(savedId, state.activeSavedFilterId(tabId))
+
+        state.requestClearFilter(tabId)
+        state.confirmClearFilter()
+
+        assertEquals(Filter(), state.tabs.single().filter)
+        assertEquals(null, state.activeSavedFilterId(tabId))
+        assertEquals(null, state.pendingClearFilterTabId)
+    }
+
+    @Test
+    fun addingSequenceUsesNextUnusedColorAfterRestore() {
+        val state = AppState()
+        state.sequences = listOf(
+            SequenceDef(
+                id = "outer",
+                matchText = "start",
+                priority = 1,
+                color = SEQ_COLORS[0],
+            ),
+        )
+        state.newSeqColor = SEQ_COLORS[0]
+
+        state.addSequence("inner", false, state.newSeqColor)
+
+        assertEquals(SEQ_COLORS[1], state.sequences.last().color)
+        assertEquals(SEQ_COLORS[2], state.newSeqColor)
+    }
+
+    @Test
+    fun canChangeHighlighterColorAfterCreation() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addHl(tabId, "Network", false, Color.Yellow)
+        val highlighterId = state.tabs.single().filter.highlighters.single().id
+
+        state.setHighlighterColor(tabId, highlighterId, Color.Cyan)
+
+        assertEquals(Color.Cyan, state.tabs.single().filter.highlighters.single().color)
     }
 
     @Test

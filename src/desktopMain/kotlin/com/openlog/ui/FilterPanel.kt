@@ -37,6 +37,7 @@ fun FilterPanel(
     tab: LogTab,
     sequences: List<SequenceDef>,
     savedFilters: List<SavedFilter>,
+    activeSavedFilterId: String?,
     tagUsage: Map<String, Int>,
     newHlPat: String, newHlRx: Boolean, newHlColor: Color,
     newSeqText: String,
@@ -88,6 +89,7 @@ fun FilterPanel(
     onAddHl: (String, Boolean, Color) -> Unit,
     onRemoveHl: (String) -> Unit,
     onToggleHl: (String) -> Unit,
+    onSetHlColor: (String, Color) -> Unit,
     onSetNewHlPat: (String) -> Unit,
     onSetNewHlRx: (Boolean) -> Unit,
     onSetNewHlColor: (Color) -> Unit,
@@ -118,6 +120,7 @@ fun FilterPanel(
     var exTagInput by remember { mutableStateOf("") }
     var exTagSearch by remember { mutableStateOf("") }
     var colorPickerSeqId by remember { mutableStateOf<String?>(null) }
+    var colorPickerHlId by remember { mutableStateOf<String?>(null) }
     var editingSeqId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(tagInput) {
@@ -181,9 +184,7 @@ fun FilterPanel(
             .verticalScroll(scroll),
     ) {
         // ── Log Level ─────────────────────────────────────────────
-        SectionHeader("LOG LEVEL", trailing = {
-            AppText("clear", color = tc.td, fontSize = 10.sp, modifier = Modifier.clickable(onClick = onClearFilter))
-        })
+        SectionHeader("LOG LEVEL")
         LogLevel.entries.forEach { lvl ->
             val on = lvl in filter.levels
             val cnt = tab.logData.count { it.level == lvl }
@@ -422,18 +423,31 @@ fun FilterPanel(
         // ── Highlighters ──────────────────────────────────────────
         SectionHeader("HIGHLIGHTERS")
         filter.highlighters.forEach { hl ->
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Box(
-                    Modifier.size(10.dp).background(hl.color, RoundedCornerShape(2.dp))
-                        .border(2.dp, if (hl.on) hl.color else tc.br, RoundedCornerShape(2.dp))
-                        .clickable { onToggleHl(hl.id) },
-                )
-                AppText((if (hl.regex) "/" else "") + hl.pattern + (if (hl.regex) "/i" else ""),
-                    color = tc.tx, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
-                AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onRemoveHl(hl.id) })
+            Column {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Box(
+                        Modifier.size(12.dp).background(hl.color, RoundedCornerShape(2.dp))
+                            .border(2.dp, if (colorPickerHlId == hl.id) tc.tx else hl.color, RoundedCornerShape(2.dp))
+                            .clickable { colorPickerHlId = if (colorPickerHlId == hl.id) null else hl.id },
+                    )
+                    AppText((if (hl.regex) "/" else "") + hl.pattern + (if (hl.regex) "/i" else ""),
+                        color = if (hl.on) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                    AppText(if (hl.on) "●" else "○", color = if (hl.on) hl.color else tc.td,
+                        fontSize = 11.sp, modifier = Modifier.clickable { onToggleHl(hl.id) })
+                    AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onRemoveHl(hl.id) })
+                }
+                if (colorPickerHlId == hl.id) {
+                    FlowRow(
+                        Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        verticalArrangement = Arrangement.spacedBy(3.dp),
+                    ) {
+                        HL_COLORS.forEach { c -> ColorSwatch(c, c == hl.color) { onSetHlColor(hl.id, c); colorPickerHlId = null } }
+                    }
+                }
             }
         }
         Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -602,13 +616,14 @@ fun FilterPanel(
         // ── Saved Filters ─────────────────────────────────────────
         SectionHeader("SAVED FILTERS")
         savedFilters.forEach { sf ->
-            HoverBox(modifier = Modifier.fillMaxWidth()) {
+            val active = activeSavedFilterId == sf.id
+            HoverBox(modifier = Modifier.fillMaxWidth(), baseBg = if (active) tc.abg else Color.Transparent) {
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    Modifier.fillMaxWidth().clickable { onLoadFilter(sf) }.padding(horizontal = 12.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    AppText("▸", color = tc.td, fontSize = 10.sp)
-                    AppText(sf.name, color = tc.ts, fontSize = 11.sp, modifier = Modifier.weight(1f).clickable { onLoadFilter(sf) }, overflow = TextOverflow.Ellipsis)
+                    AppText(if (active) "●" else "○", color = if (active) tc.ac else tc.td, fontSize = 12.sp)
+                    AppText(sf.name, color = if (active) tc.tx else tc.ts, fontSize = 11.sp, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
                     AppText("×", color = tc.td, fontSize = 12.sp, modifier = Modifier.clickable { onDeleteSF(sf.id) })
                 }
             }
@@ -619,6 +634,12 @@ fun FilterPanel(
                     .clickable(onClick = onOpenSFDialog).padding(vertical = 5.dp),
                 contentAlignment = Alignment.Center,
             ) { AppText("+ Save current filter…", color = tc.td, fontSize = 11.sp) }
+            Box(
+                Modifier.fillMaxWidth().border(1.dp, Color(0xFFf85149).copy(.45f), RoundedCornerShape(4.dp))
+                    .background(Color(0xFFf85149).copy(.08f), RoundedCornerShape(4.dp))
+                    .clickable(onClick = onClearFilter).padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center,
+            ) { AppText("Clear filters", color = Color(0xFFf85149), fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 PillBtn("Export", active = false, onClick = onExportFilters)
                 PillBtn("Import", active = false, onClick = onImportFilters)

@@ -1,9 +1,12 @@
 package com.openlog
 
+import androidx.compose.ui.graphics.Color
 import com.openlog.model.Filter
+import com.openlog.model.Highlighter
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
 import com.openlog.model.MessageRule
+import com.openlog.ui.buildFullLineAnnotation
 import com.openlog.utils.passesFilter
 import kotlin.test.Test
 import kotlin.test.assertFalse
@@ -55,5 +58,26 @@ class FilterBehaviorTest {
         assertFalse(passesFilter(spam, filter))
         assertTrue(passesFilter(desired, filter))
         assertTrue(passesFilter(otherPackage, filter))
+    }
+
+    @Test
+    fun highlighterMatchesFullRenderedLineIncludingTag() {
+        val line = buildFullLineAnnotation(
+            entry = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "request complete"),
+            highlighters = listOf(Highlighter("h1", "Network", false, Color.Yellow, true)),
+            tsColor = Color.Gray,
+            pidColor = Color.Gray,
+            tagColor = Color.DarkGray,
+            msgColor = Color.Black,
+        )
+
+        val start = line.text.indexOf("Network")
+        val end = start + "Network".length
+
+        assertTrue(
+            line.spanStyles.any { span ->
+                span.start <= start && span.end >= end && span.item.background == Color.Yellow.copy(alpha = 0.6f)
+            },
+        )
     }
 }
