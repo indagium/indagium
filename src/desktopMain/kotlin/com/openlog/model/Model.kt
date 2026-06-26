@@ -22,10 +22,24 @@ data class SequenceDef(
     val priority: Int,
     val color: Color,
     val enabled: Boolean = true,
+    val tag: String? = null,
+    val endMatchText: String? = null,
+    val endIsRegex: Boolean = false,
+    val endTag: String? = null,
 )
 
-data class NestedSeqGroup(val gid: String, val rid: Int, val ch: List<Int>)
+data class NestedSeqGroup(val gid: String, val rid: Int, val ch: List<Int>, val defId: String = "")
 data class SeqGroup(val gid: String, val rid: Int, val plain: List<Int>, val nested: List<NestedSeqGroup>, val defId: String)
+
+enum class ManualCollapseDirection { TO_START, TO_END }
+
+data class ManualCollapseBlock(
+    val id: String,
+    val anchorId: Int,
+    val direction: ManualCollapseDirection,
+    val color: Color = Color(0xFF06b6d4),
+    val enabled: Boolean = true,
+)
 
 // ── Filter ─────────────────────────────────────────────────────────
 enum class FilterMode { TAGS, KEYWORD }
@@ -40,6 +54,7 @@ data class Filter(
     val excludeKw: String = "",
     val excludeKwRegex: Boolean = false,
     val highlighters: List<Highlighter> = emptyList(),
+    val messageRules: List<MessageRule> = emptyList(),
     val seqOn: Boolean = true,
     // TAGS-mode secondary filters
     val kwInTag: String = "",           // message text filter applied within tag result set
@@ -50,6 +65,16 @@ data class Filter(
 )
 
 data class Highlighter(val id: String, val pattern: String, val regex: Boolean, val color: Color, val on: Boolean)
+
+data class MessageRule(
+    val id: String,
+    val include: Boolean,
+    val pattern: String,
+    val regex: Boolean = false,
+    val tag: String? = null,
+    val packagePrefix: String? = null,
+    val enabled: Boolean = true,
+)
 
 // ── Annotations (block model) ──────────────────────────────────────
 sealed class AnnBlock {
@@ -78,6 +103,8 @@ data class LogTab(
     val selected: Set<Int> = emptySet(),
     val annotations: Annotations = Annotations(),
     val showAnnMd: Boolean = false,
+    val manualBlocks: List<ManualCollapseBlock> = emptyList(),
+    val sourcePath: String? = null,
 )
 
 data class SavedFilter(
@@ -86,14 +113,19 @@ data class SavedFilter(
     val kwText: String, val kwRegex: Boolean, val mode: FilterMode,
     val excludeTags: Set<String>, val excludeKw: String, val excludeKwRegex: Boolean,
     val highlighters: List<Highlighter>, val seqOn: Boolean,
+    val kwInTag: String = "", val kwInTagRegex: Boolean = false,
+    val pkgPrefixes: Set<String> = emptySet(), val pidTidFilter: String = "",
+    val sequences: List<SequenceDef> = emptyList(),
+    val messageRules: List<MessageRule> = emptyList(),
 )
 
 // ── Settings ───────────────────────────────────────────────────────
 data class AppSettings(
-    val theme: ThemePreset = ThemePreset.DARK_GITHUB,
+    val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
     val fontMono: Boolean = true,
     val defaultSaveDir: String? = null,
+    val mostUsedTagLimit: Int = 5,
 )
 
 enum class ThemePreset(val label: String) {
@@ -110,6 +142,7 @@ data class CtxMenuState(val tabId: String, val entryId: Int, val x: Float, val y
 data class AddAnnRequest(val tabId: String, val logIds: List<Int>)
 
 sealed class LogItem {
-    data class Row(val entry: LogEntry, val indent: Int) : LogItem()
+    data class Row(val entry: LogEntry, val indent: Int, val groupColor: Color? = null) : LogItem()
     data class SeqHeader(val entry: LogEntry, val gid: String, val indent: Int, val expanded: Boolean, val count: Int, val color: Color) : LogItem()
+    data class ManualHeader(val entry: LogEntry, val gid: String, val direction: ManualCollapseDirection, val expanded: Boolean, val count: Int, val color: Color) : LogItem()
 }

@@ -1,3 +1,5 @@
+@file:OptIn(org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class)
+
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
@@ -7,7 +9,11 @@ plugins {
 }
 
 kotlin {
-    jvm("desktop")
+    jvm("desktop") {
+        mainRun {
+            mainClass.set("MainKt")
+        }
+    }
 
     sourceSets {
         val desktopMain by getting {
@@ -18,6 +24,9 @@ kotlin {
             }
         }
         val desktopTest by getting
+        desktopTest.dependencies {
+            implementation(kotlin("test"))
+        }
     }
 }
 

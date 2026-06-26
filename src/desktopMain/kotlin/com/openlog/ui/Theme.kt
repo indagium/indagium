@@ -36,7 +36,7 @@ fun themeColors(preset: ThemePreset) = when (preset) {
     ThemePreset.SOLARIZED_DARK -> SOLARIZED_DK
 }
 
-val LocalTheme     = staticCompositionLocalOf { DARK_GITHUB }
+val LocalTheme     = staticCompositionLocalOf { LIGHT_THEME }
 val LocalFontBase  = staticCompositionLocalOf { 12 }
 val LocalUseMono   = staticCompositionLocalOf { true }
 
@@ -44,11 +44,17 @@ val HL_COLORS = listOf(
     Color(0xFFfacc15), Color(0xFFf97316), Color(0xFFec4899), Color(0xFF22c55e),
     Color(0xFF06b6d4), Color(0xFFa78bfa), Color(0xFF38bdf8), Color(0xFFfb923c),
     Color(0xFF4ade80), Color(0xFFf472b6), Color(0xFFe879f9), Color(0xFF34d399),
+    Color(0xFFfde047), Color(0xFFfb7185), Color(0xFFc084fc), Color(0xFF2dd4bf),
+    Color(0xFF818cf8), Color(0xFFbef264), Color(0xFFfda4af), Color(0xFF67e8f9),
+    Color(0xFFd946ef), Color(0xFF84cc16), Color(0xFFef4444), Color(0xFF14b8a6),
 )
 val SEQ_COLORS = listOf(
     Color(0xFF8957e5), Color(0xFFf0883e), Color(0xFF3fb950), Color(0xFF388bfd),
     Color(0xFFec4899), Color(0xFF06b6d4), Color(0xFFfacc15), Color(0xFFa78bfa),
     Color(0xFF34d399), Color(0xFFf87171), Color(0xFF60a5fa), Color(0xFFfb923c),
+    Color(0xFF22c55e), Color(0xFFeab308), Color(0xFF8b5cf6), Color(0xFF0ea5e9),
+    Color(0xFFf43f5e), Color(0xFF10b981), Color(0xFF6366f1), Color(0xFFd946ef),
+    Color(0xFF84cc16), Color(0xFFef4444), Color(0xFF14b8a6), Color(0xFFf59e0b),
 )
 
 val MONO = FontFamily.Monospace

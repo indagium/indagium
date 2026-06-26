@@ -8,23 +8,74 @@ fun computeSeqGroups(logData: List<LogEntry>, defs: List<SequenceDef>): List<Seq
     val enabled = defs.filter { it.enabled }.sortedBy { it.priority }
     if (enabled.isEmpty()) return emptyList()
 
-    fun matches(entry: LogEntry, def: SequenceDef): Boolean {
+    fun matchesText(entry: LogEntry, text: String, isRegex: Boolean, tag: String?): Boolean {
+        if (tag != null && entry.tag != tag) return false
         val haystack = "${entry.tag} ${entry.msg}"
-        return if (def.isRegex) runCatching { Regex(def.matchText, RegexOption.IGNORE_CASE).containsMatchIn(haystack) }.getOrElse { false }
-        else haystack.contains(def.matchText, ignoreCase = true)
+        return if (isRegex) runCatching { Regex(text, RegexOption.IGNORE_CASE).containsMatchIn(haystack) }.getOrElse { false }
+        else haystack.contains(text, ignoreCase = true)
     }
 
-    // Collect all boundary hits; first-priority def wins per entry
-    data class Hit(val idx: Int, val def: SequenceDef)
-    val hits: List<Hit> = logData.indices.mapNotNull { i ->
-        val def = enabled.firstOrNull { matches(logData[i], it) } ?: return@mapNotNull null
-        Hit(i, def)
-    }
-    if (hits.isEmpty()) return emptyList()
+    fun matchesStart(entry: LogEntry, def: SequenceDef) =
+        matchesText(entry, def.matchText, def.isRegex, def.tag)
 
-    return hits.mapIndexed { k, hit ->
-        val endIdx = if (k + 1 < hits.size) hits[k + 1].idx else logData.size
-        val plain  = (hit.idx + 1 until endIdx).map { logData[it].id }
-        SeqGroup("sg_${hit.def.id}_${hit.idx}", logData[hit.idx].id, plain, emptyList(), hit.def.id)
+    fun matchesEnd(entry: LogEntry, def: SequenceDef): Boolean {
+        val endText = def.endMatchText?.takeIf { it.isNotBlank() } ?: return false
+        return matchesText(entry, endText, def.endIsRegex, def.endTag)
     }
+
+    data class Candidate(val idx: Int, val endExclusive: Int, val def: SequenceDef)
+
+    fun endExclusiveFor(idx: Int, def: SequenceDef): Int =
+        if (!def.endMatchText.isNullOrBlank()) {
+            val endIdx = (idx + 1 until logData.size).firstOrNull { matchesEnd(logData[it], def) }
+                ?: logData.lastIndex
+            endIdx + 1
+        } else {
+            (idx + 1 until logData.size).firstOrNull { nextIdx ->
+                enabled.any { matchesStart(logData[nextIdx], it) }
+            } ?: logData.size
+        }
+
+    val candidates = logData.indices.mapNotNull { idx ->
+        val def = enabled.firstOrNull { matchesStart(logData[idx], it) } ?: return@mapNotNull null
+        Candidate(idx, endExclusiveFor(idx, def), def)
+    }
+    if (candidates.isEmpty()) return emptyList()
+
+    val parentByChild = candidates.associateWith { child ->
+        candidates
+            .filter { parent -> parent.idx < child.idx && child.endExclusive <= parent.endExclusive }
+            .minByOrNull { parent -> parent.endExclusive - parent.idx }
+    }
+
+    fun childRanges(parent: Candidate): List<Candidate> =
+        candidates.filter { parentByChild[it] == parent }.sortedBy { it.idx }
+
+    fun childIds(candidate: Candidate, children: List<Candidate>): List<Int> {
+        val childRanges = children.map { it.idx until it.endExclusive }
+        return (candidate.idx + 1 until candidate.endExclusive)
+            .filter { idx -> childRanges.none { idx in it } }
+            .map { logData[it].id }
+    }
+
+    return candidates
+        .filter { parentByChild[it] == null }
+        .sortedBy { it.idx }
+        .map { candidate ->
+            val children = childRanges(candidate)
+            SeqGroup(
+                gid = "sg_${candidate.def.id}_${candidate.idx}",
+                rid = logData[candidate.idx].id,
+                plain = childIds(candidate, children),
+                nested = children.map { child ->
+                    NestedSeqGroup(
+                        gid = "sg_${child.def.id}_${child.idx}",
+                        rid = logData[child.idx].id,
+                        ch = childIds(child, childRanges(child)),
+                        defId = child.def.id,
+                    )
+                },
+                defId = candidate.def.id,
+            )
+        }
 }

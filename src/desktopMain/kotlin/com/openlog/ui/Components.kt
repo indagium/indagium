@@ -3,8 +3,7 @@
 package com.openlog.ui
 
 import androidx.compose.foundation.*
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -66,26 +65,15 @@ fun HDivider(onDelta: (Float) -> Unit) {
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .pointerInput(density) {
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false).also { it.consume() }
-                    dragging = true
-                    var lastX = down.position.x
-                    var active = true
-                    while (active) {
-                        val event = awaitPointerEvent()
-                        val ch = event.changes.firstOrNull { it.id == down.id }
-                        if (ch != null) {
-                            if (ch.pressed) {
-                                onDelta((ch.position.x - lastX) / density)
-                                lastX = ch.position.x
-                            } else {
-                                active = false
-                            }
-                            ch.consume()
-                        }
-                    }
-                    dragging = false
-                }
+                detectDragGestures(
+                    onDragStart = { dragging = true },
+                    onDragEnd = { dragging = false },
+                    onDragCancel = { dragging = false },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        onDelta(dragAmount.x / density)
+                    },
+                )
             }
             .pointerHoverIcon(PointerIcon.Hand)
     )
@@ -104,26 +92,15 @@ fun VDivider(onDelta: (Float) -> Unit) {
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .pointerInput(density) {
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false).also { it.consume() }
-                    dragging = true
-                    var lastY = down.position.y
-                    var active = true
-                    while (active) {
-                        val event = awaitPointerEvent()
-                        val ch = event.changes.firstOrNull { it.id == down.id }
-                        if (ch != null) {
-                            if (ch.pressed) {
-                                onDelta((ch.position.y - lastY) / density)
-                                lastY = ch.position.y
-                            } else {
-                                active = false
-                            }
-                            ch.consume()
-                        }
-                    }
-                    dragging = false
-                }
+                detectDragGestures(
+                    onDragStart = { dragging = true },
+                    onDragEnd = { dragging = false },
+                    onDragCancel = { dragging = false },
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        onDelta(dragAmount.y / density)
+                    },
+                )
             }
             .pointerHoverIcon(PointerIcon.Hand)
     )

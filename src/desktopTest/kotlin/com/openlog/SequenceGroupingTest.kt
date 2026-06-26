@@ -1,0 +1,199 @@
+package com.openlog
+
+import androidx.compose.ui.graphics.Color
+import com.openlog.model.Filter
+import com.openlog.model.LogItem
+import com.openlog.model.LogTab
+import com.openlog.model.LogEntry
+import com.openlog.model.LogLevel
+import com.openlog.model.ManualCollapseBlock
+import com.openlog.model.ManualCollapseDirection
+import com.openlog.model.SequenceDef
+import com.openlog.utils.computeItems
+import com.openlog.utils.computeSeqGroups
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+class SequenceGroupingTest {
+    @Test
+    fun tagScopedSequencesDoNotMatchTheSameMessageFromOtherTags() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Auth", "request started"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "com.app.Network", "request started"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "com.app.Auth", "request finished"),
+        )
+        val sequence = SequenceDef("auth-start", "request started", priority = 1, color = Color.Red, tag = "com.app.Auth")
+
+        val groups = computeSeqGroups(logs, listOf(sequence))
+
+        assertEquals(listOf(1), groups.map { it.rid })
+        assertEquals(listOf(2, 3), groups.single().plain)
+    }
+
+    @Test
+    fun startEndSequenceCanUseDifferentTagsAndIncludesEndLine() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Auth", "flow started"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "com.app.Auth", "flow finished"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "com.app.Worker", "middle event"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "com.app.Lifecycle", "flow finished"),
+            LogEntry(5, "10:00:00.400", LogLevel.I, "com.app.Auth", "after flow"),
+        )
+        val sequence = SequenceDef(
+            id = "auth-flow",
+            matchText = "flow started",
+            priority = 1,
+            color = Color.Red,
+            tag = "com.app.Auth",
+            endMatchText = "flow finished",
+            endTag = "com.app.Lifecycle",
+        )
+
+        val groups = computeSeqGroups(logs, listOf(sequence))
+
+        assertEquals(listOf(1), groups.map { it.rid })
+        assertEquals(listOf(2, 3, 4), groups.single().plain)
+    }
+
+    @Test
+    fun startEndSequenceCanContainNestedStartEndSequence() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Outer", "outer start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Inner", "inner start"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Inner", "inner work"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "Inner", "inner end"),
+            LogEntry(5, "10:00:00.400", LogLevel.I, "Outer", "outer tail"),
+            LogEntry(6, "10:00:00.500", LogLevel.I, "Outer", "outer end"),
+        )
+        val outer = SequenceDef("outer", "outer start", priority = 1, color = Color.Red, tag = "Outer", endMatchText = "outer end", endTag = "Outer")
+        val inner = SequenceDef("inner", "inner start", priority = 2, color = Color.Blue, tag = "Inner", endMatchText = "inner end", endTag = "Inner")
+
+        val groups = computeSeqGroups(logs, listOf(outer, inner))
+
+        assertEquals(listOf(1), groups.map { it.rid })
+        assertEquals(listOf(5, 6), groups.single().plain)
+        val nested = groups.single().nested.single()
+        assertEquals(2, nested.rid)
+        assertEquals(listOf(3, 4), nested.ch)
+    }
+
+    @Test
+    fun expandedNestedSequenceItemsKeepOriginalLineOrder() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Outer", "outer start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Inner", "inner start"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Inner", "inner work"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "Inner", "inner end"),
+            LogEntry(5, "10:00:00.400", LogLevel.I, "Outer", "outer tail"),
+            LogEntry(6, "10:00:00.500", LogLevel.I, "Outer", "outer end"),
+        )
+        val outer = SequenceDef("outer", "outer start", priority = 1, color = Color.Red, tag = "Outer", endMatchText = "outer end", endTag = "Outer")
+        val inner = SequenceDef("inner", "inner start", priority = 2, color = Color.Blue, tag = "Inner", endMatchText = "inner end", endTag = "Inner")
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            expanded = setOf("sg_outer_0", "sg_inner_1"),
+        )
+
+        val items = computeItems(tab, listOf(outer, inner), applyFilter = true)
+        val orderedIds = items.map {
+            when (it) {
+                is LogItem.Row -> it.entry.id
+                is LogItem.SeqHeader -> it.entry.id
+                is LogItem.ManualHeader -> it.entry.id
+            }
+        }
+
+        assertEquals(listOf(1, 2, 3, 4, 5, 6), orderedIds)
+    }
+
+    @Test
+    fun singleBoundarySequenceStillEndsAtNextBoundary() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Auth", "request started"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "com.app.Auth", "inside first"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "com.app.Auth", "request started"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "com.app.Auth", "inside second"),
+        )
+        val sequence = SequenceDef("auth-start", "request started", priority = 1, color = Color.Red, tag = "com.app.Auth")
+
+        val groups = computeSeqGroups(logs, listOf(sequence))
+
+        assertEquals(listOf(1, 3), groups.map { it.rid })
+        assertEquals(listOf(2), groups[0].plain)
+        assertEquals(listOf(4), groups[1].plain)
+    }
+
+    @Test
+    fun manualCollapseToEndHidesRowsAfterAnchor() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "before"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "App", "anchor"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "App", "hidden"),
+        )
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(),
+            manualBlocks = listOf(ManualCollapseBlock("m1", 2, ManualCollapseDirection.TO_END)),
+        )
+
+        val items = computeItems(tab, emptyList(), applyFilter = true)
+
+        assertEquals(listOf(1), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+        val header = items.filterIsInstance<LogItem.ManualHeader>().single()
+        assertEquals(2, header.entry.id)
+        assertEquals(2, header.count)
+    }
+
+    @Test
+    fun expandedManualCollapseShowsRangeRowsWithGuideColor() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "before"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "App", "anchor"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "App", "hidden"),
+        )
+        val block = ManualCollapseBlock("m1", 2, ManualCollapseDirection.TO_END, color = Color.Red)
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(),
+            expanded = setOf(block.id),
+            manualBlocks = listOf(block),
+        )
+
+        val items = computeItems(tab, emptyList(), applyFilter = true)
+
+        val guidedRows = items.filterIsInstance<LogItem.Row>().filter { it.groupColor == Color.Red }
+        assertEquals(listOf(3), guidedRows.map { it.entry.id })
+    }
+
+    @Test
+    fun disabledManualCollapseDoesNotHideRows() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "before"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "App", "anchor"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "App", "hidden"),
+        )
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(),
+            manualBlocks = listOf(ManualCollapseBlock("m1", 2, ManualCollapseDirection.TO_END, enabled = false)),
+        )
+
+        val items = computeItems(tab, emptyList(), applyFilter = true)
+
+        assertEquals(listOf(1, 2, 3), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+        assertTrue(items.filterIsInstance<LogItem.ManualHeader>().isEmpty())
+    }
+}

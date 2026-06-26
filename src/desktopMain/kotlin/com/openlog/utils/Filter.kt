@@ -19,14 +19,12 @@ fun passesFilter(entry: LogEntry, filter: Filter): Boolean {
         val pidStr = entry.pid.toString(); val tidStr = entry.tid.toString()
         if (tokens.none { it == pidStr || it == tidStr }) return false
     }
-    return when (filter.mode) {
+    val basePass = when (filter.mode) {
         FilterMode.TAGS -> {
-            // Tag passes if: no active-tag / prefix filter  OR  exact match  OR  prefix match
-            val hasTagFilter = filter.activeTags.isNotEmpty() || filter.pkgPrefixes.isNotEmpty()
-            val tagPass = if (hasTagFilter) {
-                entry.tag in filter.activeTags ||
+            val prefixPass = filter.pkgPrefixes.isEmpty() ||
                 filter.pkgPrefixes.any { pfx -> entry.tag == pfx || entry.tag.startsWith("$pfx.") }
-            } else true
+            val activeTagPass = filter.activeTags.isEmpty() || entry.tag in filter.activeTags
+            val tagPass = prefixPass && activeTagPass
             if (!tagPass) return false
             // Secondary message keyword filter within the tag result set
             if (filter.kwInTag.isNotBlank()) {
@@ -46,54 +44,127 @@ fun passesFilter(entry: LogEntry, filter: Filter): Boolean {
             }
         }
     }
+    if (!basePass) return false
+    return passesMessageRules(entry, filter.messageRules)
 }
+
+private fun passesMessageRules(entry: LogEntry, rules: List<MessageRule>): Boolean {
+    val enabled = rules.filter { it.enabled && it.pattern.isNotBlank() && ruleScopeMatches(entry, it) }
+    val includeRules = enabled.filter { it.include }
+    if (includeRules.isNotEmpty() && includeRules.none { rulePatternMatches(entry, it) }) return false
+    if (enabled.any { !it.include && rulePatternMatches(entry, it) }) return false
+    return true
+}
+
+private fun ruleScopeMatches(entry: LogEntry, rule: MessageRule): Boolean {
+    val exact = rule.tag?.takeIf { it.isNotBlank() }
+    val prefix = rule.packagePrefix?.takeIf { it.isNotBlank() }
+    if (exact != null && entry.tag != exact) return false
+    if (prefix != null && entry.tag != prefix && !entry.tag.startsWith("$prefix.")) return false
+    return true
+}
+
+private fun rulePatternMatches(entry: LogEntry, rule: MessageRule): Boolean =
+    if (rule.regex) runCatching { Regex(rule.pattern, RegexOption.IGNORE_CASE).containsMatchIn(entry.msg) }.getOrElse { false }
+    else entry.msg.contains(rule.pattern, ignoreCase = true)
 
 fun computeItems(tab: LogTab, sequences: List<SequenceDef>, applyFilter: Boolean): List<LogItem> {
     // Filter first, then detect sequences in filtered data only
     val data = if (applyFilter) tab.logData.filter { passesFilter(it, tab.filter) } else tab.logData
 
-    val seqGroups = if (tab.filter.seqOn && sequences.any { it.enabled })
-        computeSeqGroups(data, sequences)
-    else emptyList()
+    fun sequenceItems(segment: List<LogEntry>): List<LogItem> {
+        val seqGroups = if (tab.filter.seqOn && sequences.any { it.enabled })
+            computeSeqGroups(segment, sequences)
+        else emptyList()
 
-    if (seqGroups.isEmpty()) return data.map { LogItem.Row(it, 0) }
+        if (seqGroups.isEmpty()) return segment.map { LogItem.Row(it, 0) }
 
-    val defMap = sequences.associateBy { it.id }
-    val skipIds = buildSet<Int> {
-        seqGroups.forEach { g ->
-            addAll(g.plain)
-            g.nested.forEach { ng -> add(ng.rid); addAll(ng.ch) }
+        val defMap = sequences.associateBy { it.id }
+        val skipIds = buildSet<Int> {
+            seqGroups.forEach { g ->
+                addAll(g.plain)
+                g.nested.forEach { ng -> add(ng.rid); addAll(ng.ch) }
+            }
         }
-    }
 
-    val secondaryColor = sequences.filter { it.enabled }.sortedBy { it.priority }.getOrNull(1)?.color
-        ?: Color(0xFFf0883e)
-
-    val items = mutableListOf<LogItem>()
-    for (entry in data) {
-        val sg = seqGroups.find { it.rid == entry.id }
-        if (sg != null) {
-            val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
-            val exp = sg.gid in tab.expanded
-            val outerColor = defMap[sg.defId]?.color ?: Color(0xFF8957e5)
-            items += LogItem.SeqHeader(entry, sg.gid, 0, exp, totalCh, outerColor)
-            if (exp) {
-                sg.plain.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 1) } }
-                for (ng in sg.nested) {
-                    val nr = tab.rmap[ng.rid] ?: continue
-                    val nexp = ng.gid in tab.expanded
-                    items += LogItem.SeqHeader(nr, ng.gid, 1, nexp, ng.ch.size, secondaryColor)
-                    if (nexp) {
-                        ng.ch.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 2) } }
+        val items = mutableListOf<LogItem>()
+        for (entry in segment) {
+            val sg = seqGroups.find { it.rid == entry.id }
+            if (sg != null) {
+                val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
+                val exp = sg.gid in tab.expanded
+                val outerColor = defMap[sg.defId]?.color ?: Color(0xFF8957e5)
+                items += LogItem.SeqHeader(entry, sg.gid, 0, exp, totalCh, outerColor)
+                if (exp) {
+                    val plainIds = sg.plain.toSet()
+                    val nestedByRoot = sg.nested.associateBy { it.rid }
+                    for (inner in segment) {
+                        if (inner.id in plainIds) {
+                            items += LogItem.Row(inner, 1, outerColor)
+                            continue
+                        }
+                        val ng = nestedByRoot[inner.id] ?: continue
+                        val nestedColor = defMap[ng.defId]?.color ?: outerColor
+                        val nexp = ng.gid in tab.expanded
+                        items += LogItem.SeqHeader(inner, ng.gid, 1, nexp, ng.ch.size, nestedColor)
+                        if (nexp) {
+                            ng.ch.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 2, nestedColor) } }
+                        }
                     }
                 }
+                continue
             }
+            if (entry.id in skipIds) continue
+            items += LogItem.Row(entry, 0)
+        }
+        return items
+    }
+
+    val manualBlocks = tab.manualBlocks.filter { it.enabled }
+    if (manualBlocks.isEmpty()) return sequenceItems(data)
+
+    val indexById = data.withIndex().associate { it.value.id to it.index }
+    data class ManualRange(val block: ManualCollapseBlock, val range: IntRange)
+    val ranges = manualBlocks.mapNotNull { block ->
+        val anchor = indexById[block.anchorId] ?: return@mapNotNull null
+        val range = when (block.direction) {
+            ManualCollapseDirection.TO_START -> 0..anchor
+            ManualCollapseDirection.TO_END -> anchor..data.lastIndex
+        }
+        ManualRange(block, range)
+    }.sortedWith(compareBy<ManualRange> { it.range.first }.thenByDescending { it.range.last })
+
+    val result = mutableListOf<LogItem>()
+    val segment = mutableListOf<LogEntry>()
+    fun flushSegment() {
+        if (segment.isNotEmpty()) {
+            result += sequenceItems(segment.toList())
+            segment.clear()
+        }
+    }
+
+    var i = 0
+    while (i < data.size) {
+        val manual = ranges.firstOrNull { it.range.first == i }
+        if (manual == null) {
+            segment += data[i]
+            i += 1
             continue
         }
-        if (entry.id in skipIds) continue
-        items += LogItem.Row(entry, 0)
+        flushSegment()
+        val block = manual.block
+        val headerEntry = data[indexById[block.anchorId] ?: manual.range.first]
+        val expanded = block.id in tab.expanded
+        result += LogItem.ManualHeader(headerEntry, block.id, block.direction, expanded, manual.range.count(), block.color)
+        if (expanded) {
+            manual.range.forEach { idx ->
+                if (data[idx].id != block.anchorId) result += LogItem.Row(data[idx], 1, block.color)
+            }
+        }
+        i = manual.range.last + 1
     }
-    return items
+    flushSegment()
+    return result
 }
 
 fun buildMd(tab: LogTab): String = buildString {

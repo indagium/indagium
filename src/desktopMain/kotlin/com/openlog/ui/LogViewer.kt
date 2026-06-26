@@ -8,7 +8,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollbarAdapter
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -88,7 +87,7 @@ fun LogViewer(
     sequences: List<SequenceDef>,
     modifier: Modifier = Modifier,
     onSelRow: (Int, Boolean, Boolean) -> Unit,
-    onSelRowRange: (Int, Int) -> Unit = { _, _ -> },
+    onSelRowRange: (List<Int>) -> Unit = { _ -> },
     onCtxMenu: (Int, Float, Float, String) -> Unit,
     onToggleGroup: (String) -> Unit,
     onClearFilter: () -> Unit,
@@ -98,7 +97,7 @@ fun LogViewer(
 ) {
     val tc        = tc()
     val mono      = monoFont()
-    val items     = remember(tab.id, tab.filter, tab.expanded, sequences) { computeItems(tab, sequences, true) }
+    val items     = remember(tab.id, tab.filter, tab.expanded, tab.manualBlocks, sequences) { computeItems(tab, sequences, true) }
     val visCnt    = items.count { it is LogItem.Row }
     val totalCnt  = tab.logData.size
     val hasPidTid = remember(tab.id) { tab.logData.any { it.pid > 0 } }
@@ -127,13 +126,25 @@ fun LogViewer(
 
         @Composable
         fun ItemList(listItems: List<LogItem>) {
-            if (listItems.isEmpty()) { EmptyState(tc, onClearFilter); return }
+            if (listItems.isEmpty()) { EmptyState(tc, totalCnt, onClearFilter); return }
             val lazyState = rememberLazyListState()
             val hScroll   = rememberScrollState()
+            val visibleIds = remember(listItems) {
+                listItems.map { item ->
+                    when (item) {
+                        is LogItem.Row -> item.entry.id
+                        is LogItem.SeqHeader -> item.entry.id
+                        is LogItem.ManualHeader -> item.entry.id
+                    }
+                }
+            }
+            SideEffect {
+                rowBoundsAbs.keys.retainAll(visibleIds.toSet())
+            }
             Box(
                 Modifier.fillMaxSize()
                     .onGloballyPositioned { boxPosY[0] = it.positionInRoot().y }
-                    .pointerInput("drag") {
+                    .pointerInput("drag", tab.id, visibleIds) {
                         awaitPointerEventScope {
                             var startId: Int? = null; var lastId: Int? = null
                             while (true) {
@@ -148,7 +159,14 @@ fun LogViewer(
                                     PointerEventType.Move -> if (ev.buttons.isPrimaryPressed && startId != null) {
                                         val absY = boxPosY[0] + ch.position.y
                                         val id   = rowBoundsAbs.entries.firstOrNull { (_, b) -> absY >= b.first && absY < b.second }?.key
-                                        if (id != null && id != lastId) { lastId = id; onSelRowRange(startId!!, id) }
+                                        if (id != null && id != lastId) {
+                                            val a = visibleIds.indexOf(startId)
+                                            val b = visibleIds.indexOf(id)
+                                            if (a >= 0 && b >= 0) {
+                                                lastId = id
+                                                onSelRowRange(visibleIds.subList(minOf(a, b), maxOf(a, b) + 1))
+                                            }
+                                        }
                                     }
                                     PointerEventType.Release -> { startId = null; lastId = null }
                                     else -> {}
@@ -159,24 +177,27 @@ fun LogViewer(
             ) {
                 Column(Modifier.fillMaxSize()) {
                     // Content area: horizontal scroll wraps LazyColumn
-                    Box(Modifier.weight(1f).fillMaxWidth()) {
-                        Box(Modifier.fillMaxSize().horizontalScroll(hScroll)) {
-                            LazyColumn(
-                                state = lazyState,
-                                modifier = Modifier.fillMaxHeight().widthIn(min = 2000.dp),
-                            ) {
-                                items(
-                                    items = listItems,
-                                    key = { item -> when (item) {
-                                        is LogItem.Row       -> "r${item.entry.id}"
-                                        is LogItem.SeqHeader -> "h${item.gid}"
-                                    }}
-                                ) { item ->
-                                    when (item) {
-                                        is LogItem.Row       -> LogRow(item, tab, mono, tc, onSelRow, onCtxMenu, rowBoundsAbs)
-                                        is LogItem.SeqHeader -> SeqHeaderRow(item, mono, tc, onToggleGroup)
-                                    }
+                    BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                        LazyColumn(
+                            state = lazyState,
+                            modifier = Modifier.fillMaxSize(),
+                        ) {
+                            items(
+                                items = listItems,
+                                key = { item -> when (item) {
+                                    is LogItem.Row       -> "r${item.entry.id}"
+                                    is LogItem.SeqHeader -> "h${item.gid}"
+                                    is LogItem.ManualHeader -> "m${item.gid}"
+                                }}
+                            ) { item ->
+                                when (item) {
+                                    is LogItem.Row       -> LogRow(item, tab, mono, tc, hScroll, onSelRow, onCtxMenu, rowBoundsAbs)
+                                    is LogItem.SeqHeader -> SeqHeaderRow(item, tab, mono, tc, hScroll, onSelRow, onCtxMenu, onToggleGroup, rowBoundsAbs)
+                                    is LogItem.ManualHeader -> ManualHeaderRow(item, tab, mono, tc, hScroll, onSelRow, onCtxMenu, onToggleGroup, rowBoundsAbs)
                                 }
+                            }
+                            item(key = "tail-space") {
+                                Spacer(Modifier.height(maxHeight * 0.5f))
                             }
                         }
                         VerticalScrollbar(
@@ -193,7 +214,7 @@ fun LogViewer(
         }
 
         if (tab.showUnfiltered) {
-            val allItems = remember(tab.id, tab.expanded, sequences) { computeItems(tab, sequences, false) }
+            val allItems = remember(tab.id, tab.expanded, tab.manualBlocks, sequences) { computeItems(tab, sequences, false) }
             Column(Modifier.fillMaxWidth().weight(0.45f)) {
                 SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
                 ColHeader(hasPidTid)
@@ -215,6 +236,7 @@ private fun LogRow(
     tab: LogTab,
     mono: FontFamily,
     tc: ThemeColors,
+    hScroll: ScrollState,
     onSelRow: (Int, Boolean, Boolean) -> Unit,
     onCtxMenu: (Int, Float, Float, String) -> Unit,
     rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
@@ -225,6 +247,7 @@ private fun LogRow(
     var hov      by remember { mutableStateOf(false) }
     var rowRoot  by remember { mutableStateOf(Offset.Zero) }
     var sel      by remember(entry.id) { mutableStateOf(TextRange.Zero) }
+    val fontSize = baseSp()
 
     val annoLine = remember(entry.id, tab.filter.highlighters, tc.td, tc.ts, tc.tx) {
         buildFullLineAnnotation(entry, tab.filter.highlighters, tc.td, tc.td.copy(0.5f), tc.ts, tc.tx)
@@ -232,10 +255,12 @@ private fun LogRow(
 
     val levelColor = entry.level.defaultColor
     val bg = when { isSel -> tc.sl; hov -> tc.hv; else -> Color.Transparent }
+    val groupColor = item.groupColor
 
     Row(
         Modifier
             .fillMaxWidth()
+            .heightIn(min = 22.dp)
             .background(bg)
             .onGloballyPositioned { coords ->
                 val pos = coords.positionInRoot()
@@ -283,59 +308,203 @@ private fun LogRow(
                 }
             }
             // Level-coloured left edge stripe
-            .drawBehind { drawRect(levelColor.copy(alpha = if (isSel) 0.7f else 0.35f), topLeft = Offset.Zero, size = Size(3f, size.height)) }
+            .drawBehind {
+                drawRect(levelColor.copy(alpha = if (isSel) 0.7f else 0.35f), topLeft = Offset.Zero, size = Size(3f, size.height))
+                if (groupColor != null && item.indent > 0) {
+                    val x = 6.dp.toPx() + ((item.indent - 1).coerceAtLeast(0) * 18.dp.toPx())
+                    drawRect(groupColor.copy(alpha = 0.85f), topLeft = Offset(x, 0f), size = Size(2f, size.height))
+                }
+            }
             .padding(start = (11 + item.indent * 18).dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        BasicTextField(
-            value         = TextFieldValue(annotatedString = annoLine, selection = sel),
-            onValueChange = { new -> sel = new.selection },
-            readOnly      = true,
-            singleLine    = true,
-            textStyle     = TextStyle(fontFamily = mono, fontSize = baseSp()),
-            cursorBrush   = SolidColor(Color.Transparent),
-            modifier      = Modifier.weight(1f),
-        )
+        Box(Modifier.fillMaxWidth().horizontalScroll(hScroll)) {
+            BasicTextField(
+                value         = TextFieldValue(annotatedString = annoLine, selection = sel),
+                onValueChange = { new -> sel = new.selection },
+                readOnly      = true,
+                singleLine    = true,
+                textStyle     = TextStyle(color = tc.tx, fontFamily = mono, fontSize = fontSize, lineHeight = (fontSize.value + 4).sp),
+                cursorBrush   = SolidColor(Color.Transparent),
+                modifier      = Modifier.widthIn(min = 2000.dp).heightIn(min = 18.dp),
+            )
+        }
     }
 }
 
 @Composable
 private fun SeqHeaderRow(
     item: LogItem.SeqHeader,
+    tab: LogTab,
     mono: FontFamily,
     tc: ThemeColors,
+    hScroll: ScrollState,
+    onSelRow: (Int, Boolean, Boolean) -> Unit,
+    onCtxMenu: (Int, Float, Float, String) -> Unit,
     onToggleGroup: (String) -> Unit,
+    rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
 ) {
+    val density = LocalDensity.current.density
     val sc  = item.color
+    val isSel = item.entry.id in tab.selected
     var hov by remember { mutableStateOf(false) }
+    var rowRoot by remember { mutableStateOf(Offset.Zero) }
+    var lastClickMs by remember { mutableStateOf(0L) }
     Row(
         Modifier
             .fillMaxWidth()
-            .background(if (hov) sc.copy(.15f) else sc.copy(.07f))
+            .background(when {
+                isSel -> tc.sl
+                hov -> sc.copy(.15f)
+                else -> sc.copy(.07f)
+            })
             .drawBehind { drawRect(sc, topLeft = Offset.Zero, size = Size(4f, size.height)) }
-            .pointerInput("hd", item.gid) {
+            .onGloballyPositioned { coords ->
+                val pos = coords.positionInRoot()
+                rowBoundsAbs[item.entry.id] = pos.y to (pos.y + coords.size.height)
+                rowRoot = pos
+            }
+            .pointerInput("hd", tab.id, item.gid) {
                 awaitPointerEventScope {
                     while (true) {
-                        val ev = awaitPointerEvent()
+                        val ev = awaitPointerEvent(PointerEventPass.Initial)
                         when (ev.type) {
                             PointerEventType.Enter -> hov = true
                             PointerEventType.Exit  -> hov = false
+                            PointerEventType.Press -> {
+                                val mods = ev.keyboardModifiers
+                                when {
+                                    ev.buttons.isSecondaryPressed -> {
+                                        ev.changes.forEach { it.consume() }
+                                        val ch = ev.changes.firstOrNull() ?: continue
+                                        onCtxMenu(
+                                            item.entry.id,
+                                            (rowRoot.x + ch.position.x) / density,
+                                            (rowRoot.y + ch.position.y) / density,
+                                            "",
+                                        )
+                                    }
+                                    ev.buttons.isPrimaryPressed && (mods.isShiftPressed || mods.isCtrlPressed) -> {
+                                        ev.changes.forEach { it.consume() }
+                                        onSelRow(item.entry.id, mods.isShiftPressed, mods.isCtrlPressed)
+                                    }
+                                    ev.buttons.isPrimaryPressed -> {
+                                        val now = System.currentTimeMillis()
+                                        if (now - lastClickMs < 350) onToggleGroup(item.gid)
+                                        else onSelRow(item.entry.id, false, false)
+                                        lastClickMs = now
+                                    }
+                                }
+                            }
                             else -> {}
                         }
                     }
                 }
             }
-            .clickable { onToggleGroup(item.gid) }
+            .horizontalScroll(hScroll)
+            .widthIn(min = 2000.dp)
             .padding(start = (11 + item.indent * 18).dp, end = 8.dp, top = 3.dp, bottom = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        AppText(if (item.expanded) "▼" else "▶", color = sc, fontSize = 9.sp, fontFamily = mono)
+        Box(
+            Modifier.size(24.dp).clickable { onToggleGroup(item.gid) },
+            contentAlignment = Alignment.Center,
+        ) {
+            AppText(if (item.expanded) "▼" else "▶", color = sc, fontSize = 14.sp, fontFamily = mono)
+        }
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
-            modifier = Modifier.widthIn(max = 240.dp), overflow = TextOverflow.Ellipsis)
+            modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
         AppText(item.entry.msg, color = sc, fontSize = 12.sp, fontFamily = mono, fontWeight = FontWeight.Medium,
-            modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+            modifier = Modifier.weight(1f), overflow = TextOverflow.Clip)
+        if (!item.expanded) AppText("${item.count} entries", color = sc.copy(.6f), fontSize = 11.sp)
+    }
+}
+
+@Composable
+private fun ManualHeaderRow(
+    item: LogItem.ManualHeader,
+    tab: LogTab,
+    mono: FontFamily,
+    tc: ThemeColors,
+    hScroll: ScrollState,
+    onSelRow: (Int, Boolean, Boolean) -> Unit,
+    onCtxMenu: (Int, Float, Float, String) -> Unit,
+    onToggleGroup: (String) -> Unit,
+    rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
+) {
+    val density = LocalDensity.current.density
+    val sc = item.color
+    val isSel = item.entry.id in tab.selected
+    var hov by remember { mutableStateOf(false) }
+    var rowRoot by remember { mutableStateOf(Offset.Zero) }
+    var lastClickMs by remember { mutableStateOf(0L) }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(when {
+                isSel -> tc.sl
+                hov -> sc.copy(.13f)
+                else -> sc.copy(.06f)
+            })
+            .drawBehind { drawRect(sc, topLeft = Offset.Zero, size = Size(4f, size.height)) }
+            .onGloballyPositioned { coords ->
+                val pos = coords.positionInRoot()
+                rowBoundsAbs[item.entry.id] = pos.y to (pos.y + coords.size.height)
+                rowRoot = pos
+            }
+            .pointerInput("manual", tab.id, item.gid) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val ev = awaitPointerEvent(PointerEventPass.Initial)
+                        when (ev.type) {
+                            PointerEventType.Enter -> hov = true
+                            PointerEventType.Exit -> hov = false
+                            PointerEventType.Press -> {
+                                val mods = ev.keyboardModifiers
+                                when {
+                                    ev.buttons.isSecondaryPressed -> {
+                                        ev.changes.forEach { it.consume() }
+                                        val ch = ev.changes.firstOrNull() ?: continue
+                                        onCtxMenu(item.entry.id, (rowRoot.x + ch.position.x) / density, (rowRoot.y + ch.position.y) / density, "")
+                                    }
+                                    ev.buttons.isPrimaryPressed && (mods.isShiftPressed || mods.isCtrlPressed) -> {
+                                        ev.changes.forEach { it.consume() }
+                                        onSelRow(item.entry.id, mods.isShiftPressed, mods.isCtrlPressed)
+                                    }
+                                    ev.buttons.isPrimaryPressed -> {
+                                        val now = System.currentTimeMillis()
+                                        if (now - lastClickMs < 350) onToggleGroup(item.gid)
+                                        else onSelRow(item.entry.id, false, false)
+                                        lastClickMs = now
+                                    }
+                                }
+                            }
+                            else -> {}
+                        }
+                    }
+                }
+            }
+            .horizontalScroll(hScroll)
+            .widthIn(min = 2000.dp)
+            .padding(start = 11.dp, end = 8.dp, top = 3.dp, bottom = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            Modifier.size(24.dp).clickable { onToggleGroup(item.gid) },
+            contentAlignment = Alignment.Center,
+        ) {
+            AppText(if (item.expanded) "▼" else "▶", color = sc, fontSize = 14.sp, fontFamily = mono)
+        }
+        val direction = if (item.direction == ManualCollapseDirection.TO_START) "file start" else "file end"
+        AppText("Collapsed to $direction", color = sc, fontSize = 11.sp, fontFamily = mono, fontWeight = FontWeight.SemiBold)
+        AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
+        AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
+            modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
+        AppText(item.entry.msg, color = sc, fontSize = 12.sp, fontFamily = mono, fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f), overflow = TextOverflow.Clip)
         if (!item.expanded) AppText("${item.count} entries", color = sc.copy(.6f), fontSize = 11.sp)
     }
 }
@@ -348,13 +517,17 @@ private fun SectionBanner(label: String, color: Color, tc: ThemeColors) {
 }
 
 @Composable
-private fun ColumnScope.EmptyState(tc: ThemeColors, onClear: () -> Unit) {
+private fun ColumnScope.EmptyState(tc: ThemeColors, totalCount: Int, onClear: () -> Unit) {
     Column(
         Modifier.fillMaxSize().weight(1f),
         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
     ) {
-        AppText("No entries match current filters", color = tc.ts, fontSize = 13.sp)
-        Spacer(Modifier.height(12.dp))
-        PillBtn("Clear filters", active = true, onClick = onClear)
+        if (totalCount == 0) {
+            AppText("Open a log file to begin", color = tc.ts, fontSize = 13.sp)
+        } else {
+            AppText("No entries match current filters", color = tc.ts, fontSize = 13.sp)
+            Spacer(Modifier.height(12.dp))
+            PillBtn("Clear filters", active = true, onClick = onClear)
+        }
     }
 }

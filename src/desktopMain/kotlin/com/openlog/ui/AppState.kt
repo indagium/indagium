@@ -12,16 +12,36 @@ import java.awt.Frame
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.io.File
+import java.util.Base64
 import kotlinx.coroutines.*
+
+private fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = data.associateBy { it.id }
 
 fun mkTab(id: String, filename: String, logData: List<LogEntry>) = LogTab(
     id = id, filename = filename, logData = logData, rmap = mkRmap(logData),
     annotations = Annotations(prefix = "## $filename"),
 )
 
-private var tabCounter = 3
+fun emptyWorkspaceTab() = LogTab(
+    id = "untitled",
+    filename = "Untitled workspace",
+    logData = emptyList(),
+    rmap = emptyMap(),
+    annotations = Annotations(),
+)
 
-class AppState {
+private var tabCounter = 1
+
+private fun defaultAutosaveFile(): File =
+    File(System.getProperty("user.home"), ".openlog2/autosave.cache")
+
+data class PendingSequenceStart(val text: String, val tag: String)
+data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val currentFilterId: String?)
+
+class AppState(
+    private val autosaveFile: File = defaultAutosaveFile(),
+    restoreOnCreate: Boolean = false,
+) {
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
 
@@ -40,13 +60,10 @@ class AppState {
     var sequences by mutableStateOf(emptyList<SequenceDef>())
 
     // ── Tabs ────────────────────────────────────────────────────────
-    var tabs by mutableStateOf(listOf(
-        mkTab("a", "login_crash.log", LOG_A),
-        mkTab("b", "boot_seq.log",    LOG_B),
-    ))
-    var activeTabId  by mutableStateOf("a")
+    var tabs by mutableStateOf(emptyList<LogTab>())
+    var activeTabId  by mutableStateOf("")
     var compareMode  by mutableStateOf(false)
-    var compareTabId by mutableStateOf("b")
+    var compareTabId by mutableStateOf("")
 
     // ── Transient UI ─────────────────────────────────────────────────
     var ctx           by mutableStateOf<CtxMenuState?>(null)
@@ -57,6 +74,9 @@ class AppState {
     var savedFilters  by mutableStateOf<List<SavedFilter>>(emptyList())
     var tagUsage      by mutableStateOf<Map<String, Int>>(emptyMap())
     var settingsOpen  by mutableStateOf(false)
+    var pendingSequenceStart by mutableStateOf<PendingSequenceStart?>(null)
+    var pendingFilterLoad by mutableStateOf<PendingFilterLoad?>(null)
+    var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
 
     var newHlPat   by mutableStateOf("")
     var newHlRx    by mutableStateOf(false)
@@ -64,7 +84,20 @@ class AppState {
 
     var newSeqText  by mutableStateOf("")
     var newSeqRegex by mutableStateOf(false)
+    var newSeqEndText  by mutableStateOf("")
+    var newSeqEndRegex by mutableStateOf(false)
+    var newSeqTag by mutableStateOf("")
+    var newSeqEndTag by mutableStateOf("")
     var newSeqColor by mutableStateOf(SEQ_COLORS[0])
+    var newMsgRulePattern by mutableStateOf("")
+    var newMsgRuleRegex by mutableStateOf(false)
+    var newMsgRuleInclude by mutableStateOf(false)
+    var newMsgRuleTag by mutableStateOf("")
+    var newMsgRulePrefix by mutableStateOf("")
+
+    init {
+        if (restoreOnCreate) restoreAutosave()
+    }
 
     // ── Helpers ─────────────────────────────────────────────────────
     fun upTab(tabId: String, fn: (LogTab) -> LogTab) {
@@ -90,7 +123,7 @@ class AppState {
     fun clearFilter(tabId: String) = upFlt(tabId) { Filter() }
     fun toggleExcludeTag(tabId: String, tag: String) = upFlt(tabId) { f ->
         f.copy(excludeTags = if (tag in f.excludeTags) f.excludeTags - tag else f.excludeTags + tag)
-    }
+    }.also { tagUsage = tagUsage + (tag to ((tagUsage[tag] ?: 0) + 1)) }
     fun setExcludeKw(tabId: String, v: String) = upFlt(tabId) { it.copy(excludeKw = v) }
     fun toggleExcludeKwRx(tabId: String) = upFlt(tabId) { it.copy(excludeKwRegex = !it.excludeKwRegex) }
     fun setKwInTag(tabId: String, v: String) = upFlt(tabId) { it.copy(kwInTag = v) }
@@ -98,6 +131,32 @@ class AppState {
     fun addPkgPrefix(tabId: String, v: String) { if (v.isNotBlank()) upFlt(tabId) { it.copy(pkgPrefixes = it.pkgPrefixes + v.trim()) } }
     fun removePkgPrefix(tabId: String, v: String) = upFlt(tabId) { it.copy(pkgPrefixes = it.pkgPrefixes - v) }
     fun setPidTidFilter(tabId: String, v: String) = upFlt(tabId) { it.copy(pidTidFilter = v) }
+    fun addMessageRule(
+        tabId: String,
+        include: Boolean,
+        pattern: String,
+        regex: Boolean,
+        tag: String?,
+        packagePrefix: String?,
+    ) {
+        if (pattern.isBlank()) return
+        val rule = MessageRule(
+            id = "mr${System.currentTimeMillis()}_${pattern.hashCode()}",
+            include = include,
+            pattern = pattern,
+            regex = regex,
+            tag = tag?.trim()?.takeIf { it.isNotBlank() },
+            packagePrefix = packagePrefix?.trim()?.takeIf { it.isNotBlank() },
+        )
+        upFlt(tabId) { it.copy(messageRules = it.messageRules + rule) }
+        newMsgRulePattern = ""
+    }
+    fun toggleMessageRule(tabId: String, id: String) = upFlt(tabId) { f ->
+        f.copy(messageRules = f.messageRules.map { if (it.id == id) it.copy(enabled = !it.enabled) else it })
+    }
+    fun removeMessageRule(tabId: String, id: String) = upFlt(tabId) { f ->
+        f.copy(messageRules = f.messageRules.filterNot { it.id == id })
+    }
 
     // ── Highlighters ────────────────────────────────────────────────
     fun addHl(tabId: String, pat: String, rx: Boolean, color: Color) {
@@ -112,12 +171,54 @@ class AppState {
     }
 
     // ── Sequences ───────────────────────────────────────────────────
-    fun addSequence(text: String, isRegex: Boolean, color: Color) {
+    fun addSequence(
+        text: String,
+        isRegex: Boolean,
+        color: Color,
+        tag: String? = null,
+        endText: String? = null,
+        endIsRegex: Boolean = false,
+        endTag: String? = null,
+    ) {
         if (text.isBlank()) return
         val maxP = sequences.maxOfOrNull { it.priority } ?: 0
-        sequences = sequences + SequenceDef("seq${System.currentTimeMillis()}", text, isRegex, maxP + 1, color)
+        sequences = sequences + SequenceDef(
+            "seq${System.currentTimeMillis()}",
+            text,
+            isRegex,
+            maxP + 1,
+            color,
+            tag = tag?.trim()?.takeIf { it.isNotBlank() },
+            endMatchText = endText?.takeIf { it.isNotBlank() },
+            endIsRegex = endIsRegex,
+            endTag = endTag?.trim()?.takeIf { it.isNotBlank() },
+        )
         newSeqText = ""
+        newSeqEndText = ""
+        newSeqTag = ""
+        newSeqEndTag = ""
         newSeqColor = SEQ_COLORS[(SEQ_COLORS.indexOf(color) + 1) % SEQ_COLORS.size]
+    }
+    fun updateSequence(
+        id: String,
+        matchText: String,
+        isRegex: Boolean,
+        tag: String?,
+        endMatchText: String?,
+        endIsRegex: Boolean,
+        endTag: String?,
+    ) {
+        if (matchText.isBlank()) return
+        sequences = sequences.map {
+            if (it.id != id) it else it.copy(
+                matchText = matchText,
+                isRegex = isRegex,
+                tag = tag?.trim()?.takeIf { value -> value.isNotBlank() },
+                endMatchText = endMatchText?.takeIf { value -> value.isNotBlank() },
+                endIsRegex = endIsRegex,
+                endTag = endTag?.trim()?.takeIf { value -> value.isNotBlank() },
+            )
+        }
     }
     fun removeSequence(id: String) { sequences = sequences.filter { it.id != id } }
     fun toggleSequence(id: String) { sequences = sequences.map { if (it.id == id) it.copy(enabled = !it.enabled) else it } }
@@ -145,15 +246,95 @@ class AppState {
 
     // ── Saved filters ────────────────────────────────────────────────
     fun saveFilter(tabId: String, name: String) {
-        val t = tab(tabId) ?: return; val f = t.filter
-        savedFilters = savedFilters + SavedFilter(
-            "sf${System.currentTimeMillis()}", name, f.levels, f.activeTags, f.kwText, f.kwRegex,
-            f.mode, f.excludeTags, f.excludeKw, f.excludeKwRegex, f.highlighters, f.seqOn,
-        )
+        val sf = snapshotFilter(tabId, "sf${System.nanoTime()}_${savedFilters.size}", name) ?: return
+        savedFilters = savedFilters + sf
+        activeSavedFilterIds = activeSavedFilterIds + (tabId to sf.id)
         sfDialog = false; sfName = ""
+        loadPendingFilterAfterSaving(tabId)
     }
-    fun loadFilter(tabId: String, sf: SavedFilter) = upFlt(tabId) { _ ->
-        Filter(sf.levels, sf.activeTags, sf.kwText, sf.kwRegex, sf.mode, sf.excludeTags, sf.excludeKw, sf.excludeKwRegex, sf.highlighters, sf.seqOn)
+    fun requestLoadFilter(tabId: String, sf: SavedFilter) {
+        val currentId = activeSavedFilterIds[tabId]
+        val current = currentId?.let { id -> savedFilters.find { it.id == id } }
+        if (current != null && !currentFilterMatches(tabId, current)) {
+            pendingFilterLoad = PendingFilterLoad(tabId, sf.id, current.id)
+            return
+        }
+        if (current == null && !currentFilterIsEmpty(tabId)) {
+            pendingFilterLoad = PendingFilterLoad(tabId, sf.id, null)
+            return
+        }
+        loadFilter(tabId, sf)
+    }
+    fun updateCurrentPresetAndLoadPending() {
+        val pending = pendingFilterLoad ?: return
+        val currentId = pending.currentFilterId ?: return
+        val current = savedFilters.find { it.id == currentId } ?: return
+        val updated = snapshotFilter(pending.tabId, current.id, current.name) ?: return
+        savedFilters = savedFilters.map { if (it.id == currentId) updated else it }
+        loadPendingFilter(pending)
+    }
+    fun cancelPendingFilterLoad() {
+        pendingFilterLoad = null
+    }
+    fun beginSavePendingFilterAsNew() {
+        val pending = pendingFilterLoad ?: return
+        sfDialog = true
+        sfTabId = pending.tabId
+        val currentName = pending.currentFilterId?.let { id -> savedFilters.find { it.id == id }?.name }
+        sfName = currentName?.let { "$it copy" } ?: ""
+    }
+    private fun snapshotFilter(tabId: String, id: String, name: String): SavedFilter? {
+        val t = tab(tabId) ?: return null; val f = t.filter
+        return SavedFilter(
+            id, name, f.levels, f.activeTags, f.kwText, f.kwRegex,
+            f.mode, f.excludeTags, f.excludeKw, f.excludeKwRegex, f.highlighters, f.seqOn,
+            f.kwInTag, f.kwInTagRegex, f.pkgPrefixes, f.pidTidFilter, sequences, f.messageRules,
+        )
+    }
+    private fun currentFilterMatches(tabId: String, sf: SavedFilter): Boolean {
+        val current = snapshotFilter(tabId, sf.id, sf.name) ?: return false
+        return current == sf
+    }
+    private fun currentFilterIsEmpty(tabId: String): Boolean {
+        val current = snapshotFilter(tabId, "", "") ?: return true
+        val empty = SavedFilter("", "", LogLevel.entries.toSet(), emptySet(), "", false, FilterMode.TAGS,
+            emptySet(), "", false, emptyList(), true, "", false, emptySet(), "", emptyList(), emptyList())
+        return current == empty
+    }
+    private fun loadPendingFilterAfterSaving(tabId: String) {
+        val pending = pendingFilterLoad?.takeIf { it.tabId == tabId } ?: return
+        loadPendingFilter(pending)
+    }
+    private fun loadPendingFilter(pending: PendingFilterLoad) {
+        val target = savedFilters.find { it.id == pending.targetFilterId } ?: run {
+            pendingFilterLoad = null
+            return
+        }
+        pendingFilterLoad = null
+        loadFilter(pending.tabId, target)
+    }
+    fun loadFilter(tabId: String, sf: SavedFilter) {
+        sequences = sf.sequences
+        upFlt(tabId) { _ ->
+            Filter(
+                levels = sf.levels,
+                activeTags = sf.activeTags,
+                kwText = sf.kwText,
+                kwRegex = sf.kwRegex,
+                mode = sf.mode,
+                excludeTags = sf.excludeTags,
+                excludeKw = sf.excludeKw,
+                excludeKwRegex = sf.excludeKwRegex,
+                highlighters = sf.highlighters,
+                seqOn = sf.seqOn,
+                kwInTag = sf.kwInTag,
+                kwInTagRegex = sf.kwInTagRegex,
+                pkgPrefixes = sf.pkgPrefixes,
+                pidTidFilter = sf.pidTidFilter,
+                messageRules = sf.messageRules,
+            )
+        }
+        activeSavedFilterIds = activeSavedFilterIds + (tabId to sf.id)
     }
     fun deleteSF(id: String) { savedFilters = savedFilters.filter { it.id != id } }
 
@@ -171,7 +352,13 @@ class AppState {
             appendLine("    \"kwRegex\": ${sf.kwRegex},")
             appendLine("    \"excludeKw\": ${sf.excludeKw.jsonStr()},")
             appendLine("    \"excludeKwRegex\": ${sf.excludeKwRegex},")
-            appendLine("    \"seqOn\": ${sf.seqOn}")
+            appendLine("    \"seqOn\": ${sf.seqOn},")
+            appendLine("    \"kwInTag\": ${sf.kwInTag.jsonStr()},")
+            appendLine("    \"kwInTagRegex\": ${sf.kwInTagRegex},")
+            appendLine("    \"pkgPrefixes\": [${sf.pkgPrefixes.joinToString(",") { it.jsonStr() }}],")
+            appendLine("    \"pidTidFilter\": ${sf.pidTidFilter.jsonStr()},")
+            appendLine("    \"sequences\": [${sf.sequences.joinToString(",") { it.sequenceToken().jsonStr() }}],")
+            appendLine("    \"messageRules\": [${sf.messageRules.joinToString(",") { it.messageRuleToken().jsonStr() }}]")
             append("  }")
             if (i < savedFilters.lastIndex) appendLine(",") else appendLine()
         }
@@ -192,10 +379,17 @@ class AppState {
             val excludeKw = chunk.jsonField("excludeKw") ?: ""
             val excludeKwRegex = chunk.jsonField("excludeKwRegex") == "true"
             val seqOn = chunk.jsonField("seqOn") != "false"
+            val kwInTag = chunk.jsonField("kwInTag") ?: ""
+            val kwInTagRegex = chunk.jsonField("kwInTagRegex") == "true"
+            val pkgPrefixes = chunk.jsonArrayStr("pkgPrefixes").toSet()
+            val pidTidFilter = chunk.jsonField("pidTidFilter") ?: ""
+            val sequences = chunk.jsonArrayStr("sequences").mapNotNull { it.sequenceFromToken() }
+            val messageRules = chunk.jsonArrayStr("messageRules").mapNotNull { it.messageRuleFromToken() }
             SavedFilter(
                 "sf${System.currentTimeMillis()}_${name.hashCode()}", name,
                 levels.ifEmpty { LogLevel.entries.toSet() }, activeTags, kwText, kwRegex, mode,
                 excludeTags, excludeKw, excludeKwRegex, emptyList(), seqOn,
+                kwInTag, kwInTagRegex, pkgPrefixes, pidTidFilter, sequences, messageRules,
             )
         }
         savedFilters = savedFilters + imported
@@ -224,6 +418,9 @@ class AppState {
         if (a < 0 || b < 0) return@upTab t
         t.copy(selected = ids.subList(minOf(a, b), maxOf(a, b) + 1).toSet())
     }
+    fun setSelectedRows(tabId: String, ids: List<Int>) = upTab(tabId) { t ->
+        t.copy(selected = ids.toSet())
+    }
     fun clearSelection(tabId: String) = upTab(tabId) { it.copy(selected = emptySet()) }
 
     // ── Sequence expand/collapse ─────────────────────────────────────
@@ -232,7 +429,7 @@ class AppState {
     }
     fun expandAll(tabId: String) = upTab(tabId) { t ->
         val groups = computeSeqGroups(t.logData, sequences)
-        t.copy(expanded = (groups.map { it.gid } + groups.flatMap { g -> g.nested.map { it.gid } }).toSet())
+        t.copy(expanded = (groups.map { it.gid } + groups.flatMap { g -> g.nested.map { it.gid } } + t.manualBlocks.map { it.id }).toSet())
     }
     fun collapseAll(tabId: String) = upTab(tabId) { it.copy(expanded = emptySet()) }
     fun toggleUnfiltered(tabId: String) = upTab(tabId) { it.copy(showUnfiltered = !it.showUnfiltered) }
@@ -244,12 +441,7 @@ class AppState {
     }
     fun confirmAddAnn(tabId: String, logIds: List<Int>, caption: String) {
         upTab(tabId) { t ->
-            val lines = logIds.sorted().mapNotNull { t.rmap[it] }.joinToString("\n") { e ->
-                val pid = if (e.pid > 0) "  ${e.pid.toString().padStart(5)} ${e.tid.toString().padStart(5)}" else ""
-                "${e.ts}$pid  ${e.level.key}  ${e.tag}: ${e.msg}"
-            }
-            val body = if (caption.isNotBlank()) "$caption\n\n```\n$lines\n```" else "```\n$lines\n```"
-            val block = AnnBlock.Note("n${System.currentTimeMillis()}", body)
+            val block = AnnBlock.LogRef("r${System.currentTimeMillis()}", logIds.sorted(), caption)
             t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block))
         }
         addAnnRequest = null
@@ -326,13 +518,65 @@ class AppState {
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
         val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
-        addSequence(text, false, newSeqColor); ctx = null
+        addSequence(text, false, newSeqColor, entry.tag); ctx = null
+    }
+    fun collapseToStartFromCtx() {
+        val c = ctx ?: return
+        val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
+        addManualCollapse(c.tabId, entry.id, ManualCollapseDirection.TO_START)
+        ctx = null
+    }
+    fun collapseToEndFromCtx() {
+        val c = ctx ?: return
+        val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
+        addManualCollapse(c.tabId, entry.id, ManualCollapseDirection.TO_END)
+        ctx = null
+    }
+    private fun addManualCollapse(tabId: String, anchorId: Int, direction: ManualCollapseDirection) = upTab(tabId) { t ->
+        val id = "mc${System.currentTimeMillis()}_${anchorId}_${direction.name}"
+        t.copy(manualBlocks = t.manualBlocks + ManualCollapseBlock(id, anchorId, direction))
+    }
+    fun toggleManualCollapse(tabId: String, id: String) = upTab(tabId) { t ->
+        t.copy(manualBlocks = t.manualBlocks.map { if (it.id == id) it.copy(enabled = !it.enabled) else it })
+    }
+    fun removeManualCollapse(tabId: String, id: String) = upTab(tabId) { t ->
+        t.copy(manualBlocks = t.manualBlocks.filterNot { it.id == id }, expanded = t.expanded - id)
+    }
+    fun setSequenceStartFromCtx() {
+        val c = ctx ?: return
+        val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
+        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
+        pendingSequenceStart = PendingSequenceStart(text, entry.tag)
+        ctx = null
+    }
+    fun completeSequenceEndFromCtx() {
+        val c = ctx ?: return
+        val start = pendingSequenceStart ?: return
+        val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
+        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
+        addSequence(start.text, false, newSeqColor, start.tag, text, false, entry.tag)
+        pendingSequenceStart = null
+        ctx = null
     }
     fun addNegKwFromCtx() {
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
         val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
         setExcludeKw(c.tabId, text); ctx = null
+    }
+    fun hideMessagesLikeCtx() {
+        val c = ctx ?: return
+        val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
+        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
+        addMessageRule(c.tabId, include = false, pattern = text, regex = false, tag = entry.tag, packagePrefix = null)
+        ctx = null
+    }
+    fun showOnlyMessagesLikeCtx() {
+        val c = ctx ?: return
+        val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
+        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
+        addMessageRule(c.tabId, include = true, pattern = text, regex = false, tag = entry.tag, packagePrefix = null)
+        ctx = null
     }
     fun addKwFilterFromCtx() {
         val c = ctx ?: return
@@ -354,13 +598,14 @@ class AppState {
     // ── Tab management ───────────────────────────────────────────────
     fun addTab() {
         val n = tabCounter++
-        val t = mkTab("t$n", "sample_$n.log", LOG_A.take(20))
+        val t = emptyWorkspaceTab().copy(id = "t$n")
         tabs = tabs + t; activeTabId = t.id
     }
     fun closeTab(tabId: String) {
-        val next = tabs.filter { it.id != tabId }; if (next.isEmpty()) return
-        if (activeTabId == tabId) activeTabId = next.last().id
-        if (compareTabId == tabId) compareTabId = next.first().id
+        val next = tabs.filter { it.id != tabId }
+        if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
+        if (compareTabId == tabId) compareTabId = next.firstOrNull()?.id ?: ""
+        if (next.isEmpty()) compareMode = false
         tabs = next
     }
     fun openFile(file: File) {
@@ -409,7 +654,64 @@ class AppState {
             setFilenameFilter { _, n -> n.endsWith(".json") }; isVisible = true
         }
         val path = dlg.file ?: return; val dir = dlg.directory ?: return
-        runCatching { importFilters(File(dir + path).readText()) }
+        importFiltersFromFile(File(dir + path))
+    }
+    fun importFiltersFromFile(file: File) {
+        runCatching { importFilters(file.readText()) }
+    }
+
+    // ── Autosave ─────────────────────────────────────────────────────
+    fun autosaveNow() {
+        runCatching {
+            autosaveFile.parentFile?.mkdirs()
+            autosaveFile.writeText(serializeAutosave())
+        }
+    }
+
+    private fun restoreAutosave() {
+        if (!autosaveFile.exists()) return
+        runCatching {
+            val lines = autosaveFile.readLines()
+            if (lines.firstOrNull() != "openLog2-cache-v1") return
+            val tabLines = mutableListOf<String>()
+            var inTabs = false
+            lines.drop(1).forEach { line ->
+                if (line == "tabs") {
+                    inTabs = true
+                    return@forEach
+                }
+                if (inTabs) {
+                    tabLines += line
+                    return@forEach
+                }
+                val key = line.substringBefore('\t')
+                val value = line.substringAfter('\t', "")
+                when (key) {
+                    "settings" -> settingsFromToken(value.unb64())?.let { settings = it }
+                    "active" -> activeTabId = value.unb64()
+                    "compare" -> restoreCompareState(value.unb64())
+                    "sequences" -> sequences = value.tokenList().mapNotNull { it.sequenceFromToken() }
+                    "saved" -> importFilters(value.unb64())
+                    "activeFilters" -> activeSavedFilterIds = activeFilterMapFromToken(value.unb64())
+                }
+            }
+            tabs = tabLines.mapNotNull { it.removePrefix("tab\t").tabFromToken() }
+            if (tabs.none { it.id == activeTabId }) activeTabId = tabs.firstOrNull()?.id ?: ""
+            if (tabs.none { it.id == compareTabId }) compareTabId = tabs.getOrNull(1)?.id ?: tabs.firstOrNull()?.id ?: ""
+            tabCounter = (tabs.mapNotNull { it.id.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1
+        }
+    }
+
+    private fun serializeAutosave(): String = buildString {
+        appendLine("openLog2-cache-v1")
+        appendLine("settings\t${settings.settingsToken().b64()}")
+        appendLine("active\t${activeTabId.b64()}")
+        appendLine("compare\t${compareStateToken().b64()}")
+        appendLine("sequences\t${sequences.joinToString(",") { it.sequenceToken() }.b64()}")
+        appendLine("saved\t${exportFilters().b64()}")
+        appendLine("activeFilters\t${activeFilterMapToken().b64()}")
+        appendLine("tabs")
+        tabs.forEach { appendLine("tab\t${it.tabToken()}") }
     }
 }
 
@@ -422,3 +724,306 @@ private fun String.jsonField(key: String): String? =
 private fun String.jsonArrayStr(key: String): List<String> =
     Regex("\"$key\"\\s*:\\s*\\[([^]]*)]").find(this)?.groupValues?.get(1)
         ?.split(",")?.map { it.trim().trim('"') }?.filter { it.isNotEmpty() } ?: emptyList()
+
+private fun SequenceDef.sequenceToken(): String =
+    listOf(
+        id,
+        matchText,
+        isRegex.toString(),
+        priority.toString(),
+        color.value.toString(),
+        enabled.toString(),
+        tag.orEmpty(),
+        endMatchText.orEmpty(),
+        endIsRegex.toString(),
+        endTag.orEmpty(),
+    ).joinToString("|") { it.b64() }
+
+private fun String.sequenceFromToken(): SequenceDef? = runCatching {
+    val parts = split("|").map { it.unb64() }
+    if (parts.size < 10) return@runCatching null
+    SequenceDef(
+        id = parts[0],
+        matchText = parts[1],
+        isRegex = parts[2].toBoolean(),
+        priority = parts[3].toIntOrNull() ?: 0,
+        color = Color(parts[4].toULong()),
+        enabled = parts[5].toBoolean(),
+        tag = parts[6].takeIf { it.isNotBlank() },
+        endMatchText = parts[7].takeIf { it.isNotBlank() },
+        endIsRegex = parts[8].toBoolean(),
+        endTag = parts[9].takeIf { it.isNotBlank() },
+    )
+}.getOrNull()
+
+private fun MessageRule.messageRuleToken(): String =
+    listOf(
+        id,
+        include.toString(),
+        pattern,
+        regex.toString(),
+        tag.orEmpty(),
+        packagePrefix.orEmpty(),
+        enabled.toString(),
+    ).joinToString("|") { it.b64() }
+
+private fun String.messageRuleFromToken(): MessageRule? = runCatching {
+    val parts = split("|").map { it.unb64() }
+    if (parts.size < 7) return@runCatching null
+    MessageRule(
+        id = parts[0],
+        include = parts[1].toBoolean(),
+        pattern = parts[2],
+        regex = parts[3].toBoolean(),
+        tag = parts[4].takeIf { it.isNotBlank() },
+        packagePrefix = parts[5].takeIf { it.isNotBlank() },
+        enabled = parts[6].toBoolean(),
+    )
+}.getOrNull()
+
+private fun String.fieldToken(): String = if (isEmpty()) "~" else b64()
+private fun String.fieldValue(): String = if (this == "~") "" else unb64()
+private fun tokenFields(vararg values: String): String = values.joinToString("|") { it.fieldToken() }
+private fun String.tokenFields(): List<String> = split("|", limit = Int.MAX_VALUE).map { it.fieldValue() }
+private fun String.tokenList(): List<String> =
+    if (isBlank()) emptyList() else unb64().split(",").filter { it.isNotBlank() }
+
+private fun AppSettings.settingsToken(): String = tokenFields(
+    theme.name,
+    fontSize.toString(),
+    fontMono.toString(),
+    defaultSaveDir.orEmpty(),
+    mostUsedTagLimit.toString(),
+)
+
+private fun settingsFromToken(token: String): AppSettings? = runCatching {
+    val p = token.tokenFields()
+    if (p.size < 5) return@runCatching null
+    AppSettings(
+        theme = runCatching { ThemePreset.valueOf(p[0]) }.getOrElse { ThemePreset.LIGHT },
+        fontSize = p[1].toIntOrNull() ?: 12,
+        fontMono = p[2].toBoolean(),
+        defaultSaveDir = p[3].takeIf { it.isNotBlank() },
+        mostUsedTagLimit = p[4].toIntOrNull() ?: 5,
+    )
+}.getOrNull()
+
+private fun AppState.compareStateToken(): String = tokenFields(
+    compareTabId,
+    compareMode.toString(),
+    compareFilterRight.toString(),
+    filterVisible.toString(),
+    annotationVisible.toString(),
+    filterPanelWidth.toString(),
+    annotationPanelWidth.toString(),
+    compareSplit.toString(),
+)
+
+private fun AppState.restoreCompareState(token: String) {
+    val p = token.tokenFields()
+    if (p.size < 8) return
+    compareTabId = p[0]
+    compareMode = p[1].toBoolean()
+    compareFilterRight = p[2].toBoolean()
+    filterVisible = p[3].toBoolean()
+    annotationVisible = p[4].toBoolean()
+    filterPanelWidth = p[5].toFloatOrNull() ?: filterPanelWidth
+    annotationPanelWidth = p[6].toFloatOrNull() ?: annotationPanelWidth
+    compareSplit = p[7].toFloatOrNull() ?: compareSplit
+}
+
+private fun AppState.activeFilterMapToken(): String =
+    activeSavedFilterIds.entries.joinToString(",") { tokenFields(it.key, it.value) }
+
+private fun activeFilterMapFromToken(token: String): Map<String, String> =
+    if (token.isBlank()) emptyMap()
+    else token.split(",").mapNotNull { item ->
+        val p = item.tokenFields()
+        if (p.size >= 2) p[0] to p[1] else null
+    }.toMap()
+
+private fun Highlighter.highlighterToken(): String = tokenFields(
+    id,
+    pattern,
+    regex.toString(),
+    color.value.toString(),
+    on.toString(),
+)
+
+private fun String.highlighterFromToken(): Highlighter? = runCatching {
+    val p = tokenFields()
+    if (p.size < 5) return@runCatching null
+    Highlighter(
+        id = p[0],
+        pattern = p[1],
+        regex = p[2].toBoolean(),
+        color = Color(p[3].toULong()),
+        on = p[4].toBoolean(),
+    )
+}.getOrNull()
+
+private fun SavedFilter.savedFilterToken(): String = tokenFields(
+    id,
+    name,
+    levels.joinToString("") { it.key.toString() },
+    activeTags.joinToString(",") { it.b64() },
+    kwText,
+    kwRegex.toString(),
+    mode.name,
+    excludeTags.joinToString(",") { it.b64() },
+    excludeKw,
+    excludeKwRegex.toString(),
+    highlighters.joinToString(",") { it.highlighterToken().b64() },
+    seqOn.toString(),
+    kwInTag,
+    kwInTagRegex.toString(),
+    pkgPrefixes.joinToString(",") { it.b64() },
+    pidTidFilter,
+    sequences.joinToString(",") { it.sequenceToken().b64() },
+    messageRules.joinToString(",") { it.messageRuleToken().b64() },
+)
+
+private fun String.savedFilterFromToken(): SavedFilter? = runCatching {
+    val p = tokenFields()
+    if (p.size < 18) return@runCatching null
+    SavedFilter(
+        id = p[0],
+        name = p[1],
+        levels = p[2].mapNotNull { key -> LogLevel.entries.find { it.key == key } }.toSet().ifEmpty { LogLevel.entries.toSet() },
+        activeTags = p[3].encodedSet(),
+        kwText = p[4],
+        kwRegex = p[5].toBoolean(),
+        mode = runCatching { FilterMode.valueOf(p[6]) }.getOrElse { FilterMode.TAGS },
+        excludeTags = p[7].encodedSet(),
+        excludeKw = p[8],
+        excludeKwRegex = p[9].toBoolean(),
+        highlighters = p[10].encodedList().mapNotNull { it.highlighterFromToken() },
+        seqOn = p[11].toBoolean(),
+        kwInTag = p[12],
+        kwInTagRegex = p[13].toBoolean(),
+        pkgPrefixes = p[14].encodedSet(),
+        pidTidFilter = p[15],
+        sequences = p[16].encodedList().mapNotNull { it.sequenceFromToken() },
+        messageRules = p[17].encodedList().mapNotNull { it.messageRuleFromToken() },
+    )
+}.getOrNull()
+
+private fun SavedFilter.toFilter(): Filter = Filter(
+    levels = levels,
+    activeTags = activeTags,
+    kwText = kwText,
+    kwRegex = kwRegex,
+    mode = mode,
+    excludeTags = excludeTags,
+    excludeKw = excludeKw,
+    excludeKwRegex = excludeKwRegex,
+    highlighters = highlighters,
+    messageRules = messageRules,
+    seqOn = seqOn,
+    kwInTag = kwInTag,
+    kwInTagRegex = kwInTagRegex,
+    pkgPrefixes = pkgPrefixes,
+    pidTidFilter = pidTidFilter,
+)
+
+private fun String.encodedList(): List<String> =
+    if (isBlank()) emptyList() else split(",").filter { it.isNotBlank() }.map { it.unb64() }
+
+private fun String.encodedSet(): Set<String> = encodedList().toSet()
+
+private fun AnnBlock.annBlockToken(): String = when (this) {
+    is AnnBlock.Note -> tokenFields("N", id, text)
+    is AnnBlock.LogRef -> tokenFields("R", id, logIds.joinToString(","), caption)
+}
+
+private fun String.annBlockFromToken(): AnnBlock? = runCatching {
+    val p = tokenFields()
+    if (p.size < 3) return@runCatching null
+    when (p[0]) {
+        "N" -> AnnBlock.Note(p[1], p[2])
+        "R" -> AnnBlock.LogRef(p[1], p[2].split(",").mapNotNull { it.toIntOrNull() }, p.getOrElse(3) { "" })
+        else -> null
+    }
+}.getOrNull()
+
+private fun Annotations.annotationsToken(): String = tokenFields(
+    prefix,
+    suffix,
+    blocks.joinToString(",") { it.annBlockToken().b64() },
+)
+
+private fun String.annotationsFromToken(): Annotations? = runCatching {
+    val p = tokenFields()
+    if (p.size < 3) return@runCatching null
+    Annotations(
+        prefix = p[0],
+        suffix = p[1],
+        blocks = p[2].encodedList().mapNotNull { it.annBlockFromToken() },
+    )
+}.getOrNull()
+
+private fun ManualCollapseBlock.manualBlockToken(): String = tokenFields(
+    id,
+    anchorId.toString(),
+    direction.name,
+    color.value.toString(),
+    enabled.toString(),
+)
+
+private fun String.manualBlockFromToken(): ManualCollapseBlock? = runCatching {
+    val p = tokenFields()
+    if (p.size < 5) return@runCatching null
+    ManualCollapseBlock(
+        id = p[0],
+        anchorId = p[1].toIntOrNull() ?: return@runCatching null,
+        direction = runCatching { ManualCollapseDirection.valueOf(p[2]) }.getOrElse { ManualCollapseDirection.TO_END },
+        color = Color(p[3].toULong()),
+        enabled = p[4].toBoolean(),
+    )
+}.getOrNull()
+
+private fun LogTab.tabToken(): String {
+    val filter = SavedFilter("tab", "tab", filter.levels, filter.activeTags, filter.kwText, filter.kwRegex,
+        filter.mode, filter.excludeTags, filter.excludeKw, filter.excludeKwRegex, filter.highlighters, filter.seqOn,
+        filter.kwInTag, filter.kwInTagRegex, filter.pkgPrefixes, filter.pidTidFilter, emptyList(), filter.messageRules)
+    return tokenFields(
+        id,
+        filename,
+        sourcePath.orEmpty(),
+        filter.savedFilterToken(),
+        annotations.annotationsToken(),
+        showAnnMd.toString(),
+        showUnfiltered.toString(),
+        expanded.joinToString(",") { it.b64() },
+        manualBlocks.joinToString(",") { it.manualBlockToken().b64() },
+    )
+}
+
+private fun String.tabFromToken(): LogTab? = runCatching {
+    val p = tokenFields()
+    if (p.size < 9) return@runCatching null
+    val sourcePath = p[2].takeIf { it.isNotBlank() }
+    val data = sourcePath
+        ?.let { path -> File(path).takeIf { it.exists() } }
+        ?.let { file -> runCatching { parseLogcat(file) }.getOrElse { emptyList() } }
+        ?: emptyList()
+    LogTab(
+        id = p[0],
+        filename = p[1],
+        logData = data,
+        rmap = mkRmap(data),
+        filter = p[3].savedFilterFromToken()?.toFilter() ?: Filter(),
+        showUnfiltered = p[6].toBoolean(),
+        expanded = p[7].encodedSet(),
+        annotations = p[4].annotationsFromToken() ?: Annotations(),
+        showAnnMd = p[5].toBoolean(),
+        manualBlocks = p[8].encodedList().mapNotNull { it.manualBlockFromToken() },
+        sourcePath = sourcePath,
+    )
+}.getOrNull()
+
+private fun String.b64(): String =
+    Base64.getUrlEncoder().withoutPadding().encodeToString(toByteArray(Charsets.UTF_8))
+
+private fun String.unb64(): String =
+    String(Base64.getUrlDecoder().decode(this), Charsets.UTF_8)

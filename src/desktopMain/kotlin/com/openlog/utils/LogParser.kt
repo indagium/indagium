@@ -15,36 +15,35 @@ private val RE_BARE       = Regex("""^(\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEA])/([^:
 
 fun parseLogcat(file: File): List<LogEntry> {
     var id = 1
-    return file.bufferedReader().useLines { lines ->
-        lines.mapNotNull { raw ->
-            val line = raw.trim()
-            if (line.isEmpty() || line.startsWith("-----") || line.length > 8192) return@mapNotNull null
+    return file.readLines().mapNotNull { raw ->
+        val line = raw.trim()
+        if (line.isEmpty() || line.startsWith("-----") || line.length > 8192) return@mapNotNull null
 
-            RE_THREADTIME.matchEntire(line)?.let { m ->
-                return@mapNotNull LogEntry(
-                    id++, m.groupValues[1].substringAfter(' '),
-                    LogLevel.from(m.groupValues[4][0]), m.groupValues[5].trim(), m.groupValues[6],
-                    pid = m.groupValues[2].toIntOrNull() ?: 0,
-                    tid = m.groupValues[3].toIntOrNull() ?: 0,
-                )
-            }
-            RE_TIME.matchEntire(line)?.let { m ->
-                return@mapNotNull LogEntry(
-                    id++, m.groupValues[1].substringAfter(' '),
-                    LogLevel.from(m.groupValues[2][0]), m.groupValues[3].trim(), m.groupValues[5],
-                    pid = m.groupValues[4].toIntOrNull() ?: 0,
-                )
-            }
-            RE_BARE.matchEntire(line)?.let { m ->
-                return@mapNotNull LogEntry(id++, m.groupValues[1], LogLevel.from(m.groupValues[2][0]), m.groupValues[3].trim(), m.groupValues[4])
-            }
-            RE_BRIEF.matchEntire(line)?.let { m ->
-                return@mapNotNull LogEntry(
-                    id++, "", LogLevel.from(m.groupValues[1][0]), m.groupValues[2].trim(), m.groupValues[4],
-                    pid = m.groupValues[3].toIntOrNull() ?: 0,
-                )
-            }
-            null
-        }.toList()
+        RE_THREADTIME.matchEntire(line)?.let { m ->
+            return@mapNotNull LogEntry(
+                id++, m.groupValues[1].substringAfter(' '),
+                LogLevel.from(m.groupValues[4][0]), m.groupValues[5].trim(), m.groupValues[6],
+                pid = m.groupValues[2].toIntOrNull() ?: 0,
+                tid = m.groupValues[3].toIntOrNull() ?: 0,
+            )
+        }
+        RE_TIME.matchEntire(line)?.let { m ->
+            return@mapNotNull LogEntry(
+                id++, m.groupValues[1].substringAfter(' '),
+                LogLevel.from(m.groupValues[2][0]), m.groupValues[3].trim(), m.groupValues[5],
+                pid = m.groupValues[4].toIntOrNull() ?: 0,
+            )
+        }
+        RE_BARE.matchEntire(line)?.let { m ->
+            return@mapNotNull LogEntry(id++, m.groupValues[1], LogLevel.from(m.groupValues[2][0]), m.groupValues[3].trim(), m.groupValues[4])
+        }
+        RE_BRIEF.matchEntire(line)?.let { m ->
+            return@mapNotNull LogEntry(
+                id++, "", LogLevel.from(m.groupValues[1][0]), m.groupValues[2].trim(), m.groupValues[4],
+                pid = m.groupValues[3].toIntOrNull() ?: 0,
+            )
+        }
+
+        LogEntry(id++, "", LogLevel.I, "RAW", raw.trimEnd())
     }
 }
