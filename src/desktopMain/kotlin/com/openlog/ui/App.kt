@@ -905,7 +905,14 @@ private fun TabItem(tab: LogTab, isActive: Boolean, showClose: Boolean, onClick:
             .clickable(onClick = onClick).padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
-        AppText(tab.filename, color = if (isActive) tc.tx else tc.ts, fontSize = 12.sp, fontFamily = MONO)
+        AppText(
+            tab.filename,
+            color = if (isActive) tc.tx else tc.ts,
+            fontSize = 12.sp,
+            fontFamily = MONO,
+            modifier = Modifier.widthIn(max = 180.dp),
+            overflow = TextOverflow.Ellipsis,
+        )
         if (showClose) AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable(onClick = onClose))
     }
 }

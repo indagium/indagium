@@ -16,6 +16,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
+import java.awt.Cursor as AwtCursor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -75,7 +76,7 @@ fun HDivider(onDelta: (Float) -> Unit) {
                     },
                 )
             }
-            .pointerHoverIcon(PointerIcon.Hand)
+            .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.E_RESIZE_CURSOR)))
     )
 }
 
@@ -102,7 +103,7 @@ fun VDivider(onDelta: (Float) -> Unit) {
                     },
                 )
             }
-            .pointerHoverIcon(PointerIcon.Hand)
+            .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.S_RESIZE_CURSOR)))
     )
 }
 

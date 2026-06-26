@@ -141,7 +141,11 @@ fun LogViewer(
         }
 
         @Composable
-        fun ItemList(listItems: List<LogItem>) {
+        fun ItemList(
+            listItems: List<LogItem>,
+            boundsMap: HashMap<Int, Pair<Float, Float>>,
+            posY: FloatArray,
+        ) {
             if (listItems.isEmpty()) { EmptyState(tc, totalCnt, onClearFilter); return }
             val lazyState = rememberLazyListState()
             val hScroll   = rememberScrollState()
@@ -155,11 +159,11 @@ fun LogViewer(
                 }
             }
             SideEffect {
-                rowBoundsAbs.keys.retainAll(visibleIds.toSet())
+                boundsMap.keys.retainAll(visibleIds.toSet())
             }
             Box(
                 Modifier.fillMaxSize()
-                    .onGloballyPositioned { boxPosY[0] = it.positionInRoot().y }
+                    .onGloballyPositioned { posY[0] = it.positionInRoot().y }
                     .pointerInput("drag", tab.id, visibleIds) {
                         awaitPointerEventScope {
                             var startId: Int? = null; var lastId: Int? = null
@@ -168,13 +172,13 @@ fun LogViewer(
                                 val ch = ev.changes.firstOrNull() ?: continue
                                 when (ev.type) {
                                     PointerEventType.Press -> if (ev.buttons.isPrimaryPressed) {
-                                        val absY = boxPosY[0] + ch.position.y
-                                        startId = rowBoundsAbs.entries.firstOrNull { (_, b) -> absY >= b.first && absY < b.second }?.key
+                                        val absY = posY[0] + ch.position.y
+                                        startId = boundsMap.entries.firstOrNull { (_, b) -> absY >= b.first && absY < b.second }?.key
                                         lastId  = startId
                                     }
                                     PointerEventType.Move -> if (ev.buttons.isPrimaryPressed && startId != null) {
-                                        val absY = boxPosY[0] + ch.position.y
-                                        val id   = rowBoundsAbs.entries.firstOrNull { (_, b) -> absY >= b.first && absY < b.second }?.key
+                                        val absY = posY[0] + ch.position.y
+                                        val id   = boundsMap.entries.firstOrNull { (_, b) -> absY >= b.first && absY < b.second }?.key
                                         if (id != null && id != lastId) {
                                             val a = visibleIds.indexOf(startId)
                                             val b = visibleIds.indexOf(id)
@@ -207,9 +211,9 @@ fun LogViewer(
                                 }}
                             ) { item ->
                                 when (item) {
-                                    is LogItem.Row       -> LogRow(item, tab, mono, tc, hScroll, onSelRow, onCtxMenu, rowBoundsAbs)
-                                    is LogItem.SeqHeader -> SeqHeaderRow(item, tab, mono, tc, hScroll, onSelRow, onCtxMenu, onToggleGroup, rowBoundsAbs)
-                                    is LogItem.ManualHeader -> ManualHeaderRow(item, tab, mono, tc, hScroll, onSelRow, onCtxMenu, onToggleGroup, rowBoundsAbs)
+                                    is LogItem.Row       -> LogRow(item, tab, mono, tc, hScroll, onSelRow, onCtxMenu, boundsMap)
+                                    is LogItem.SeqHeader -> SeqHeaderRow(item, tab, mono, tc, hScroll, onSelRow, onCtxMenu, onToggleGroup, boundsMap)
+                                    is LogItem.ManualHeader -> ManualHeaderRow(item, tab, mono, tc, hScroll, onSelRow, onCtxMenu, onToggleGroup, boundsMap)
                                 }
                             }
                             item(key = "tail-space") {
@@ -231,17 +235,36 @@ fun LogViewer(
 
         if (tab.showUnfiltered) {
             val allItems = remember(tab.id, tab.expanded, tab.manualBlocks, sequences) { computeItems(tab, sequences, false) }
-            Column(Modifier.fillMaxWidth().weight(0.45f)) {
-                SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
-                ColHeader(hasPidTid)
-                ItemList(allItems)
-            }
-            SectionBanner("Filtered — $visCnt lines", tc.ac, tc)
-            Column(Modifier.fillMaxWidth().weight(0.45f)) {
-                ColHeader(hasPidTid); ItemList(items)
+            // Each panel needs its own bounds map so row IDs from "Original" and "Filtered"
+            // panels don't overwrite each other (both show some of the same entries).
+            val allBoundsAbs = remember(tab.id) { HashMap<Int, Pair<Float, Float>>() }
+            val allBoxPosY   = remember { floatArrayOf(0f) }
+            var unfilteredSplit by remember(tab.id) { mutableStateOf(0.5f) }
+            var containerH by remember { mutableStateOf(1f) }
+            val density = LocalDensity.current.density
+
+            Column(
+                Modifier.fillMaxWidth().weight(1f)
+                    .onGloballyPositioned { containerH = it.size.height / density }
+            ) {
+                Column(Modifier.fillMaxWidth().weight(unfilteredSplit)) {
+                    SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
+                    ColHeader(hasPidTid)
+                    ItemList(allItems, allBoundsAbs, allBoxPosY)
+                }
+                VDivider { delta ->
+                    if (containerH > 0f) {
+                        unfilteredSplit = ((unfilteredSplit * containerH + delta) / containerH).coerceIn(0.1f, 0.9f)
+                    }
+                }
+                Column(Modifier.fillMaxWidth().weight(1f - unfilteredSplit)) {
+                    SectionBanner("Filtered — $visCnt lines", tc.ac, tc)
+                    ColHeader(hasPidTid)
+                    ItemList(items, rowBoundsAbs, boxPosY)
+                }
             }
         } else {
-            ColHeader(hasPidTid); ItemList(items)
+            ColHeader(hasPidTid); ItemList(items, rowBoundsAbs, boxPosY)
         }
     }
 }
