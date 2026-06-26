@@ -245,9 +245,12 @@ fun LogViewer(
             // panels don't overwrite each other (both show some of the same entries).
             val allBoundsAbs = remember(tab.id) { HashMap<Int, Pair<Float, Float>>() }
             val allBoxPosY   = remember { floatArrayOf(0f) }
-            var unfilteredSplit by remember(tab.id) { mutableStateOf(0.5f) }
-            var containerH by remember { mutableStateOf(1f) }
+            // Split stored in dp so drag delta adds directly → border tracks cursor 1:1.
+            // -1 means "not yet set; use 50% of containerH once measured."
+            var splitDp by remember(tab.id) { mutableStateOf(-1f) }
+            var containerH by remember { mutableStateOf(0f) }
             val density = LocalDensity.current.density
+            val effectiveSplitDp = if (splitDp < 0f) maxOf(50f, (containerH - 10f) / 2f) else splitDp
 
             // Independent selection for the "Original" panel so clicks there don't
             // highlight rows in the "Filtered" panel and vice-versa.
@@ -281,7 +284,8 @@ fun LogViewer(
                 Modifier.fillMaxWidth().weight(1f)
                     .onGloballyPositioned { containerH = it.size.height / density }
             ) {
-                Column(Modifier.fillMaxWidth().weight(unfilteredSplit)) {
+                // Fixed height for Panel1 → cursor drag adds directly to splitDp → 1:1 tracking.
+                Column(Modifier.fillMaxWidth().height(effectiveSplitDp.dp)) {
                     SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
                     ColHeader(hasPidTid)
                     ItemList(
@@ -295,11 +299,11 @@ fun LogViewer(
                     )
                 }
                 VDivider { delta ->
-                    if (containerH > 0f) {
-                        unfilteredSplit = ((unfilteredSplit * containerH + delta) / containerH).coerceIn(0.1f, 0.9f)
-                    }
+                    val cur = if (splitDp < 0f) maxOf(50f, (containerH - 10f) / 2f) else splitDp
+                    splitDp = (cur + delta).coerceIn(50f, (containerH - 60f).coerceAtLeast(100f))
                 }
-                Column(Modifier.fillMaxWidth().weight(1f - unfilteredSplit)) {
+                // Panel2 fills the rest with weight(1f).
+                Column(Modifier.fillMaxWidth().weight(1f)) {
                     SectionBanner("Filtered — $visCnt lines", tc.ac, tc)
                     ColHeader(hasPidTid)
                     ItemList(items, rowBoundsAbs, boxPosY)

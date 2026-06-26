@@ -79,6 +79,9 @@ fun HDivider(onDelta: (Float) -> Unit) {
                     onDrag = { change, dragAmount ->
                         change.consume()
                         onDelta(dragAmount.x / density)
+                        // Re-assert after every pointer event; Compose's hover tracking
+                        // can overwrite the window cursor between drag events otherwise.
+                        activeWindow()?.cursor = cursor
                     },
                 )
             }
@@ -109,6 +112,7 @@ fun VDivider(onDelta: (Float) -> Unit) {
                     onDrag = { change, dragAmount ->
                         change.consume()
                         onDelta(dragAmount.y / density)
+                        activeWindow()?.cursor = cursor
                     },
                 )
             }
