@@ -59,16 +59,17 @@ fun HDivider(onDelta: (Float) -> Unit) {
     val density = LocalDensity.current.density
     var hovered  by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
+    // 10dp hit area so the cursor doesn't leave the target during fast horizontal drags.
+    // The 4dp visual stripe is centered inside; only the stripe is coloured.
     Box(
         Modifier
-            .width(4.dp).fillMaxHeight()
-            .background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br)
+            .width(10.dp).fillMaxHeight()
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .onPointerEvent(PointerEventType.Exit)  { hovered = false }
             .pointerInput(density) {
                 detectDragGestures(
-                    onDragStart = { dragging = true },
-                    onDragEnd = { dragging = false },
+                    onDragStart  = { dragging = true },
+                    onDragEnd    = { dragging = false },
                     onDragCancel = { dragging = false },
                     onDrag = { change, dragAmount ->
                         change.consume()
@@ -76,8 +77,11 @@ fun HDivider(onDelta: (Float) -> Unit) {
                     },
                 )
             }
-            .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.E_RESIZE_CURSOR)))
-    )
+            .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.E_RESIZE_CURSOR))),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.width(4.dp).fillMaxHeight().background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br))
+    }
 }
 
 @Composable
@@ -86,16 +90,16 @@ fun VDivider(onDelta: (Float) -> Unit) {
     val density = LocalDensity.current.density
     var hovered  by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
+    // 10dp hit area so the cursor doesn't leave the target during fast vertical drags.
     Box(
         Modifier
-            .height(4.dp).fillMaxWidth()
-            .background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br)
+            .height(10.dp).fillMaxWidth()
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .onPointerEvent(PointerEventType.Exit)  { hovered = false }
             .pointerInput(density) {
                 detectDragGestures(
-                    onDragStart = { dragging = true },
-                    onDragEnd = { dragging = false },
+                    onDragStart  = { dragging = true },
+                    onDragEnd    = { dragging = false },
                     onDragCancel = { dragging = false },
                     onDrag = { change, dragAmount ->
                         change.consume()
@@ -103,8 +107,11 @@ fun VDivider(onDelta: (Float) -> Unit) {
                     },
                 )
             }
-            .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.S_RESIZE_CURSOR)))
-    )
+            .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.S_RESIZE_CURSOR))),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.fillMaxWidth().height(4.dp).background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br))
+    }
 }
 
 // ── Basic ────────────────────────────────────────────────────────────

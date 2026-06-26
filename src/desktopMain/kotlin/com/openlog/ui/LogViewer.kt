@@ -145,6 +145,10 @@ fun LogViewer(
             listItems: List<LogItem>,
             boundsMap: HashMap<Int, Pair<Float, Float>>,
             posY: FloatArray,
+            // Allows each panel to own its selection independently when showUnfiltered is active.
+            effectiveTab: LogTab = tab,
+            itemOnSelRow: (Int, Boolean, Boolean) -> Unit = onSelRow,
+            itemOnSelRowRange: (List<Int>) -> Unit = onSelRowRange,
         ) {
             if (listItems.isEmpty()) { EmptyState(tc, totalCnt, onClearFilter); return }
             val lazyState = rememberLazyListState()
@@ -164,7 +168,7 @@ fun LogViewer(
             Box(
                 Modifier.fillMaxSize()
                     .onGloballyPositioned { posY[0] = it.positionInRoot().y }
-                    .pointerInput("drag", tab.id, visibleIds) {
+                    .pointerInput("drag", effectiveTab.id, visibleIds) {
                         awaitPointerEventScope {
                             var startId: Int? = null; var lastId: Int? = null
                             while (true) {
@@ -184,7 +188,7 @@ fun LogViewer(
                                             val b = visibleIds.indexOf(id)
                                             if (a >= 0 && b >= 0) {
                                                 lastId = id
-                                                onSelRowRange(visibleIds.subList(minOf(a, b), maxOf(a, b) + 1))
+                                                itemOnSelRowRange(visibleIds.subList(minOf(a, b), maxOf(a, b) + 1))
                                             }
                                         }
                                     }
@@ -211,9 +215,9 @@ fun LogViewer(
                                 }}
                             ) { item ->
                                 when (item) {
-                                    is LogItem.Row       -> LogRow(item, tab, mono, tc, hScroll, onSelRow, onCtxMenu, boundsMap)
-                                    is LogItem.SeqHeader -> SeqHeaderRow(item, tab, mono, tc, hScroll, onSelRow, onCtxMenu, onToggleGroup, boundsMap)
-                                    is LogItem.ManualHeader -> ManualHeaderRow(item, tab, mono, tc, hScroll, onSelRow, onCtxMenu, onToggleGroup, boundsMap)
+                                    is LogItem.Row       -> LogRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, onCtxMenu, boundsMap)
+                                    is LogItem.SeqHeader -> SeqHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, onCtxMenu, onToggleGroup, boundsMap)
+                                    is LogItem.ManualHeader -> ManualHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, onCtxMenu, onToggleGroup, boundsMap)
                                 }
                             }
                             item(key = "tail-space") {
@@ -243,6 +247,34 @@ fun LogViewer(
             var containerH by remember { mutableStateOf(1f) }
             val density = LocalDensity.current.density
 
+            // Independent selection for the "Original" panel so clicks there don't
+            // highlight rows in the "Filtered" panel and vice-versa.
+            var localAllSelected by remember(tab.id) { mutableStateOf(emptySet<Int>()) }
+            val allOnSelRow: (Int, Boolean, Boolean) -> Unit = { id, multi, range ->
+                val visIds = allItems.map { item ->
+                    when (item) {
+                        is LogItem.Row        -> item.entry.id
+                        is LogItem.SeqHeader  -> item.entry.id
+                        is LogItem.ManualHeader -> item.entry.id
+                    }
+                }
+                localAllSelected = when {
+                    multi -> if (id in localAllSelected) localAllSelected - id else localAllSelected + id
+                    range -> {
+                        val last = localAllSelected.lastOrNull { it in visIds.toSet() }
+                            ?: localAllSelected.maxOrNull()
+                        if (last == null) setOf(id)
+                        else {
+                            val a = visIds.indexOf(last); val b = visIds.indexOf(id)
+                            if (a >= 0 && b >= 0) visIds.subList(minOf(a, b), maxOf(a, b) + 1).toSet()
+                            else localAllSelected + id
+                        }
+                    }
+                    else -> if (localAllSelected == setOf(id)) emptySet() else setOf(id)
+                }
+            }
+            val allOnSelRowRange: (List<Int>) -> Unit = { ids -> localAllSelected = ids.toSet() }
+
             Column(
                 Modifier.fillMaxWidth().weight(1f)
                     .onGloballyPositioned { containerH = it.size.height / density }
@@ -250,7 +282,14 @@ fun LogViewer(
                 Column(Modifier.fillMaxWidth().weight(unfilteredSplit)) {
                     SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
                     ColHeader(hasPidTid)
-                    ItemList(allItems, allBoundsAbs, allBoxPosY)
+                    ItemList(
+                        listItems = allItems,
+                        boundsMap = allBoundsAbs,
+                        posY = allBoxPosY,
+                        effectiveTab = tab.copy(selected = localAllSelected),
+                        itemOnSelRow = allOnSelRow,
+                        itemOnSelRowRange = allOnSelRowRange,
+                    )
                 }
                 VDivider { delta ->
                     if (containerH > 0f) {
