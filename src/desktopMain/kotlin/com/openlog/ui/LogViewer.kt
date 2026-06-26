@@ -104,7 +104,7 @@ fun LogViewer(
     modifier: Modifier = Modifier,
     onSelRow: (Int, Boolean, Boolean) -> Unit,
     onSelRowRange: (List<Int>) -> Unit = { _ -> },
-    onCtxMenu: (Int, Float, Float, String) -> Unit,
+    onCtxMenu: (Int, Float, Float, String, Set<Int>) -> Unit,
     onToggleGroup: (String) -> Unit,
     onClearFilter: () -> Unit,
     onExpandAll: () -> Unit,
@@ -145,10 +145,12 @@ fun LogViewer(
             listItems: List<LogItem>,
             boundsMap: HashMap<Int, Pair<Float, Float>>,
             posY: FloatArray,
-            // Allows each panel to own its selection independently when showUnfiltered is active.
+            // Allows each panel to own its selection/context independently when showUnfiltered is active.
             effectiveTab: LogTab = tab,
             itemOnSelRow: (Int, Boolean, Boolean) -> Unit = onSelRow,
             itemOnSelRowRange: (List<Int>) -> Unit = onSelRowRange,
+            // Wraps the outer 5-arg onCtxMenu; callers may inject a different selectedIds set.
+            itemOnCtxMenu: (Int, Float, Float, String) -> Unit = { id, x, y, sel -> onCtxMenu(id, x, y, sel, emptySet()) },
         ) {
             if (listItems.isEmpty()) { EmptyState(tc, totalCnt, onClearFilter); return }
             val lazyState = rememberLazyListState()
@@ -215,9 +217,9 @@ fun LogViewer(
                                 }}
                             ) { item ->
                                 when (item) {
-                                    is LogItem.Row       -> LogRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, onCtxMenu, boundsMap)
-                                    is LogItem.SeqHeader -> SeqHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, onCtxMenu, onToggleGroup, boundsMap)
-                                    is LogItem.ManualHeader -> ManualHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, onCtxMenu, onToggleGroup, boundsMap)
+                                    is LogItem.Row       -> LogRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, boundsMap)
+                                    is LogItem.SeqHeader -> SeqHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
+                                    is LogItem.ManualHeader -> ManualHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
                                 }
                             }
                             item(key = "tail-space") {
@@ -289,6 +291,7 @@ fun LogViewer(
                         effectiveTab = tab.copy(selected = localAllSelected),
                         itemOnSelRow = allOnSelRow,
                         itemOnSelRowRange = allOnSelRowRange,
+                        itemOnCtxMenu = { id, x, y, sel -> onCtxMenu(id, x, y, sel, localAllSelected) },
                     )
                 }
                 VDivider { delta ->

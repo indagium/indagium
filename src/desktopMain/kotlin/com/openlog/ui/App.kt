@@ -117,7 +117,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         val x = ctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
                         val y = ctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
                         val menuScroll = rememberScrollState()
-                        val selectedIds = ctxTab.selected
+                        // panelSelectedIds is non-empty when the right-click came from a panel
+                        // with its own local selection (e.g. the "Original" unfiltered panel).
+                        val selectedIds = ctx.panelSelectedIds.ifEmpty { ctxTab.selected }
                         val selCount = selectedIds.size
                         // Position is already in dp (converted from px in LogRow)
                         Box(
@@ -560,7 +562,7 @@ private fun FileView(state: AppState, tab: LogTab) {
             tab = tab, sequences = state.sequences, modifier = Modifier.weight(1f),
             onSelRow        = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
             onSelRowRange   = { ids -> state.setSelectedRows(tab.id, ids) },
-            onCtxMenu       = { id, x, y, sel -> state.ctx = CtxMenuState(tab.id, id, x, y, sel) },
+            onCtxMenu       = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(tab.id, id, x, y, sel, panelSel) },
             onToggleGroup   = { state.toggleGroup(tab.id, it) },
             onClearFilter   = { state.requestClearFilter(tab.id) },
             onExpandAll     = { state.expandAll(tab.id) },
@@ -705,7 +707,7 @@ private fun CompareView(state: AppState) {
                         tab = leftTab, sequences = state.sequences, modifier = Modifier.weight(1f),
                         onSelRow          = { id, m, r -> state.selRow(leftTab.id, id, m, r) },
                         onSelRowRange     = { ids -> state.setSelectedRows(leftTab.id, ids) },
-                        onCtxMenu         = { id, x, y, sel -> state.ctx = CtxMenuState(leftTab.id, id, x, y, sel) },
+                        onCtxMenu         = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(leftTab.id, id, x, y, sel, panelSel) },
                         onToggleGroup     = { state.toggleGroup(leftTab.id, it) },
                         onClearFilter     = { state.requestClearFilter(leftTab.id) },
                         onExpandAll       = { state.expandAll(leftTab.id) },
@@ -741,7 +743,7 @@ private fun CompareView(state: AppState) {
                         tab = effectiveRightTab, sequences = state.sequences, modifier = Modifier.weight(1f),
                         onSelRow          = { id, m, r -> state.selRow(rightTab.id, id, m, r) },
                         onSelRowRange     = { ids -> state.setSelectedRows(rightTab.id, ids) },
-                        onCtxMenu         = { id, x, y, sel -> state.ctx = CtxMenuState(rightTab.id, id, x, y, sel) },
+                        onCtxMenu         = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(rightTab.id, id, x, y, sel, panelSel) },
                         onToggleGroup     = { state.toggleGroup(rightTab.id, it) },
                         onClearFilter     = { state.requestClearFilter(rightTab.id) },
                         onExpandAll       = { state.expandAll(rightTab.id) },

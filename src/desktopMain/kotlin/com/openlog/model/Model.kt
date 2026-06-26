@@ -145,7 +145,16 @@ enum class ThemePreset(val label: String) {
 }
 
 // ── Misc ───────────────────────────────────────────────────────────
-data class CtxMenuState(val tabId: String, val entryId: Int, val x: Float, val y: Float, val selText: String)
+data class CtxMenuState(
+    val tabId: String,
+    val entryId: Int,
+    val x: Float,
+    val y: Float,
+    val selText: String,
+    /** Non-empty when the right-click came from a panel with its own local selection
+     *  (e.g. the "Original" panel in split/unfiltered view). Preferred over tab.selected. */
+    val panelSelectedIds: Set<Int> = emptySet(),
+)
 
 // Request to open the add-annotation dialog
 data class AddAnnRequest(

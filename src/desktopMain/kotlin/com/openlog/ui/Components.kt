@@ -17,6 +17,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
 import java.awt.Cursor as AwtCursor
+import java.awt.KeyboardFocusManager
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -53,14 +54,18 @@ fun HoverBox(
 // ── Resizable dividers ───────────────────────────────────────────────
 // Compose pointer events are in layout pixels; panel widths are stored in dp.
 // Dividing by density converts px → dp so the divider tracks the cursor exactly.
+private fun activeWindow() = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
+
 @Composable
 fun HDivider(onDelta: (Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
+    val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.E_RESIZE_CURSOR) }
     var hovered  by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
-    // 10dp hit area so the cursor doesn't leave the target during fast horizontal drags.
-    // The 4dp visual stripe is centered inside; only the stripe is coloured.
+    // 10dp hit area keeps the pointer inside during normal drags.
+    // For fast drags the AWT window cursor is locked for the entire drag so no
+    // flicker occurs when the pointer briefly exits the visual stripe.
     Box(
         Modifier
             .width(10.dp).fillMaxHeight()
@@ -68,16 +73,16 @@ fun HDivider(onDelta: (Float) -> Unit) {
             .onPointerEvent(PointerEventType.Exit)  { hovered = false }
             .pointerInput(density) {
                 detectDragGestures(
-                    onDragStart  = { dragging = true },
-                    onDragEnd    = { dragging = false },
-                    onDragCancel = { dragging = false },
+                    onDragStart  = { dragging = true;  activeWindow()?.cursor = cursor },
+                    onDragEnd    = { dragging = false; activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
+                    onDragCancel = { dragging = false; activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
                     onDrag = { change, dragAmount ->
                         change.consume()
                         onDelta(dragAmount.x / density)
                     },
                 )
             }
-            .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.E_RESIZE_CURSOR))),
+            .pointerHoverIcon(PointerIcon(cursor)),
         contentAlignment = Alignment.Center,
     ) {
         Box(Modifier.width(4.dp).fillMaxHeight().background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br))
@@ -88,9 +93,9 @@ fun HDivider(onDelta: (Float) -> Unit) {
 fun VDivider(onDelta: (Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
+    val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.S_RESIZE_CURSOR) }
     var hovered  by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
-    // 10dp hit area so the cursor doesn't leave the target during fast vertical drags.
     Box(
         Modifier
             .height(10.dp).fillMaxWidth()
@@ -98,16 +103,16 @@ fun VDivider(onDelta: (Float) -> Unit) {
             .onPointerEvent(PointerEventType.Exit)  { hovered = false }
             .pointerInput(density) {
                 detectDragGestures(
-                    onDragStart  = { dragging = true },
-                    onDragEnd    = { dragging = false },
-                    onDragCancel = { dragging = false },
+                    onDragStart  = { dragging = true;  activeWindow()?.cursor = cursor },
+                    onDragEnd    = { dragging = false; activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
+                    onDragCancel = { dragging = false; activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
                     onDrag = { change, dragAmount ->
                         change.consume()
                         onDelta(dragAmount.y / density)
                     },
                 )
             }
-            .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.S_RESIZE_CURSOR))),
+            .pointerHoverIcon(PointerIcon(cursor)),
         contentAlignment = Alignment.Center,
     ) {
         Box(Modifier.fillMaxWidth().height(4.dp).background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br))
