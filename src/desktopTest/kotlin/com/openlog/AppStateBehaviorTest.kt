@@ -49,7 +49,7 @@ class AppStateBehaviorTest {
         val state = AppState()
         state.tabs = listOf(mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.E, "App", "Boom"))))
 
-        state.confirmAddAnn("log", listOf(1), "Investigate")
+        state.confirmAddAnn("log", "log", listOf(1), "Investigate", null)
 
         val block = assertIs<AnnBlock.LogRef>(state.tabs.single().annotations.blocks.single())
         assertEquals(listOf(1), block.logIds)
@@ -330,7 +330,7 @@ class AppStateBehaviorTest {
         state.tabs = listOf(tab)
         state.activeTabId = "log"
         state.addPkgPrefix("log", "App")
-        state.confirmAddAnn("log", listOf(1), "remember this")
+        state.confirmAddAnn("log", "log", listOf(1), "remember this", null)
         state.saveFilter("log", "app only")
 
         state.autosaveNow()

@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+
 package com.openlog.ui
 
 import androidx.compose.foundation.*
@@ -14,16 +16,26 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.openlog.model.AnnBlock
 import com.openlog.model.LogTab
 import com.openlog.utils.buildMd
+import java.awt.FileDialog
+import java.awt.Frame
+import java.io.File
 
 @Composable
 fun AnnotationPanel(
     tab: LogTab,
+    headerNote: String? = null,
+    recentNotes: List<String> = emptyList(),
+    recentNotesMenuOpen: Boolean = false,
     onToggleMd: () -> Unit,
     onCopy: () -> Unit,
     onSave: () -> Unit,
+    onToggleRecentNotes: () -> Unit,
+    onOpenNote: (File) -> Unit,
     onUpdatePrefix: (String) -> Unit,
     onUpdateSuffix: (String) -> Unit,
     onUpdateBlock: (String, String) -> Unit,
@@ -38,15 +50,59 @@ fun AnnotationPanel(
     val blockCount = ann.blocks.size
 
     Column(Modifier.width(width.dp).fillMaxHeight().background(tc.p).border(BorderStroke(1.dp, tc.br))) {
-        // Header
+        // Header row 1: title + action buttons
         Row(
-            Modifier.fillMaxWidth().height(36.dp).background(tc.p2).border(BorderStroke(1.dp, tc.br)).padding(horizontal = 12.dp),
+            Modifier.fillMaxWidth().height(if (headerNote != null) 46.dp else 36.dp).background(tc.p2)
+                .border(BorderStroke(1.dp, tc.br)).padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            AppText("Annotation · $blockCount", color = tc.ts, fontSize = 12.sp, modifier = Modifier.weight(1f))
-            PillBtn("MD",   active = tab.showAnnMd, onClick = onToggleMd)
+            Column(Modifier.weight(1f)) {
+                AppText("Annotation · $blockCount", color = tc.ts, fontSize = 12.sp)
+                if (headerNote != null) {
+                    AppText(headerNote, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            PillBtn("Preview", active = tab.showAnnMd, onClick = onToggleMd)
             PillBtn("Copy", active = true, onClick = onCopy)
             PillBtn("Save", active = true, onClick = onSave)
+            PillBtn("Open Note", active = false) {
+                val fd = FileDialog(null as Frame?, "Open Note File", FileDialog.LOAD)
+                fd.setFilenameFilter { _, n -> n.endsWith(".md") || n.endsWith(".txt") }
+                fd.isVisible = true
+                fd.file?.let { onOpenNote(File(fd.directory, it)) }
+            }
+            if (recentNotes.isNotEmpty()) {
+                PillBtn("▾", active = recentNotesMenuOpen, onClick = onToggleRecentNotes)
+            }
+        }
+        // Recent notes dropdown (inline, below header)
+        if (recentNotesMenuOpen && recentNotes.isNotEmpty()) {
+            val displayNotes = recentNotes.take(10)
+            Column(
+                Modifier.fillMaxWidth().background(tc.p2).border(BorderStroke(1.dp, tc.br))
+            ) {
+                Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp)) {
+                    AppText("Recent Notes (autosaved)", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                }
+                Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                val listH = (displayNotes.size * 42).coerceAtMost(210).dp
+                Column(Modifier.fillMaxWidth().height(listH).verticalScroll(rememberScrollState())) {
+                    displayNotes.forEach { path ->
+                        val file = File(path)
+                        val exists = file.exists()
+                        HoverBox(modifier = Modifier.fillMaxWidth(), onClick = { if (exists) { onOpenNote(file); onToggleRecentNotes() } }) {
+                            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp)) {
+                                AppText(file.name, color = if (exists) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                                AppText(file.parent ?: path, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Inline preview popup
+        if (tab.showAnnMd && ann.blocks.isNotEmpty()) {
+            MdPreviewDialog(tab = tab, mono = mono, onCopy = onCopy, onDismiss = onToggleMd)
         }
 
         val scroll = rememberScrollState()
@@ -117,21 +173,44 @@ fun AnnotationPanel(
                 }
             }
 
-            // MD preview
-            if (tab.showAnnMd && ann.blocks.isNotEmpty()) {
-                Column(Modifier.fillMaxWidth().padding(12.dp).border(BorderStroke(1.dp, tc.br))) {
-                    Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
-                        AppText("MARKDOWN PREVIEW", color = tc.td, fontSize = 10.sp)
-                    }
-                    Box(Modifier.fillMaxWidth().background(tc.bg).padding(10.dp)) {
-                        AppText(buildMd(tab), color = tc.tx, fontSize = 10.sp, fontFamily = mono,
-                            maxLines = Int.MAX_VALUE, overflow = TextOverflow.Clip)
-                    }
+        }
+    }
+}
+
+// ── Markdown preview dialog ────────────────────────────────────────────
+@Composable
+private fun MdPreviewDialog(tab: LogTab, mono: FontFamily, onCopy: () -> Unit, onDismiss: () -> Unit) {
+    val tc = tc()
+    var copied by remember { mutableStateOf(false) }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            Modifier.fillMaxWidth(0.75f).fillMaxHeight(0.8f)
+                .background(tc.p, RoundedCornerShape(8.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(8.dp)),
+        ) {
+            Row(
+                Modifier.fillMaxWidth().height(40.dp).background(tc.p2, RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
+                    .padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AppText("Markdown Preview", color = tc.ts, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                PillBtn(if (copied) "Copied!" else "Copy", active = copied) {
+                    onCopy()
+                    copied = true
                 }
+                AppText("×", color = tc.td, fontSize = 16.sp, modifier = Modifier.clickable(onClick = onDismiss))
+            }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+            val scroll = rememberScrollState()
+            Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp)) {
+                AppText(buildMd(tab), color = tc.tx, fontSize = 12.sp, fontFamily = mono,
+                    maxLines = Int.MAX_VALUE, overflow = TextOverflow.Clip)
             }
         }
     }
 }
+
 
 // ── Note block ─────────────────────────────────────────────────────────
 @Composable
@@ -181,7 +260,7 @@ private fun LogRefBlock(
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onAddBelow: () -> Unit,
 ) {
-    val rows = block.logIds.mapNotNull { tab.rmap[it] }
+    val rows = block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }
     val borderColor = rows.firstOrNull()?.level?.defaultColor ?: tc.ac
 
     Column(
@@ -189,8 +268,15 @@ private fun LogRefBlock(
             .border(BorderStroke(2.dp, borderColor))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        // Caption / note text — shown FIRST
         BlockControls(tc, "◆", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow)
+        if (block.sourceFilename != null) {
+            Spacer(Modifier.height(3.dp))
+            Box(
+                Modifier.background(tc.ac.copy(.12f), RoundedCornerShape(3.dp))
+                    .border(1.dp, tc.ac.copy(.25f), RoundedCornerShape(3.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            ) { AppText("from ${block.sourceFilename}", color = tc.ac, fontSize = 9.sp, fontFamily = MONO) }
+        }
         Spacer(Modifier.height(5.dp))
         BasicTextField(
             value = block.caption,

@@ -81,8 +81,17 @@ sealed class AnnBlock {
     abstract val id: String
     /** Pure text / commentary block */
     data class Note(override val id: String, val text: String) : AnnBlock()
-    /** One or more log lines with an optional caption */
-    data class LogRef(override val id: String, val logIds: List<Int>, val caption: String) : AnnBlock()
+    /** One or more log lines with an optional caption.
+     *  sourceTabId / sourceFilename are set when the lines come from a different tab (compare mode).
+     *  sourceEntries caches the actual rows so the annotation survives tab switches. */
+    data class LogRef(
+        override val id: String,
+        val logIds: List<Int>,
+        val caption: String,
+        val sourceTabId: String? = null,
+        val sourceFilename: String? = null,
+        val sourceEntries: List<LogEntry>? = null,
+    ) : AnnBlock()
 }
 
 data class Annotations(
@@ -139,7 +148,12 @@ enum class ThemePreset(val label: String) {
 data class CtxMenuState(val tabId: String, val entryId: Int, val x: Float, val y: Float, val selText: String)
 
 // Request to open the add-annotation dialog
-data class AddAnnRequest(val tabId: String, val logIds: List<Int>)
+data class AddAnnRequest(
+    val targetTabId: String,
+    val sourceTabId: String,
+    val logIds: List<Int>,
+    val sourceFilename: String? = null,
+)
 
 sealed class LogItem {
     data class Row(val entry: LogEntry, val indent: Int, val groupColor: Color? = null) : LogItem()

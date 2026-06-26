@@ -4,6 +4,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.*
 import com.openlog.utils.buildMd
+import com.openlog.utils.computeItems
 import com.openlog.utils.computeSeqGroups
 import com.openlog.utils.parseLogcat
 import com.openlog.utils.passesFilter
@@ -74,6 +75,10 @@ class AppState(
     var savedFilters  by mutableStateOf<List<SavedFilter>>(emptyList())
     var tagUsage      by mutableStateOf<Map<String, Int>>(emptyMap())
     var settingsOpen  by mutableStateOf(false)
+    var recentFiles    by mutableStateOf<List<String>>(emptyList())
+    var recentMenuOpen by mutableStateOf(false)
+    var recentNotes    by mutableStateOf<List<String>>(emptyList())
+    var recentNotesMenuOpen by mutableStateOf(false)
     var pendingSequenceStart by mutableStateOf<PendingSequenceStart?>(null)
     var pendingFilterLoad by mutableStateOf<PendingFilterLoad?>(null)
     var pendingClearFilterTabId by mutableStateOf<String?>(null)
@@ -433,7 +438,15 @@ class AppState(
         val n = when {
             multi -> if (id in t.selected) t.selected - id else t.selected + id
             range -> {
-                val visIds = t.logData.filter { passesFilter(it, t.filter) }.map { it.id }.ifEmpty { t.logData.map { it.id } }
+                // Use the actual visible items list so shift-click doesn't expand through
+                // collapsed blocks (same as drag-select which uses visibleIds from LogViewer).
+                val visIds = computeItems(t, sequences, true).map { item ->
+                    when (item) {
+                        is LogItem.Row -> item.entry.id
+                        is LogItem.SeqHeader -> item.entry.id
+                        is LogItem.ManualHeader -> item.entry.id
+                    }
+                }
                 val last = t.selected.lastOrNull { it in visIds.toSet() } ?: t.selected.maxOrNull()
                 if (last == null) setOf(id)
                 else {
@@ -468,19 +481,38 @@ class AppState(
     fun toggleUnfiltered(tabId: String) = upTab(tabId) { it.copy(showUnfiltered = !it.showUnfiltered) }
 
     // ── Annotations (block model) ────────────────────────────────────
-    fun requestAddAnn(tabId: String, logIds: List<Int>) {
-        addAnnRequest = AddAnnRequest(tabId, logIds)
+    fun requestAddAnn(sourceTabId: String, logIds: List<Int>) {
+        val targetTabId = if (compareMode && sourceTabId != activeTabId) activeTabId else sourceTabId
+        val crossFile = targetTabId != sourceTabId
+        addAnnRequest = AddAnnRequest(
+            targetTabId = targetTabId,
+            sourceTabId = sourceTabId,
+            logIds = logIds,
+            sourceFilename = if (crossFile) tab(sourceTabId)?.filename else null,
+        )
         ctx = null
     }
-    fun confirmAddAnn(tabId: String, logIds: List<Int>, caption: String) {
-        upTab(tabId) { t ->
-            val block = AnnBlock.LogRef("r${System.currentTimeMillis()}", logIds.sorted(), caption)
+    fun confirmAddAnn(targetTabId: String, sourceTabId: String, logIds: List<Int>, caption: String, sourceFilename: String?) {
+        val crossFile = sourceTabId != targetTabId
+        val sourceEntries = if (crossFile) {
+            val rmap = tab(sourceTabId)?.rmap ?: emptyMap()
+            logIds.sorted().mapNotNull { rmap[it] }
+        } else null
+        upAnn(targetTabId) { t ->
+            val block = AnnBlock.LogRef(
+                id = "r${System.currentTimeMillis()}",
+                logIds = logIds.sorted(),
+                caption = caption,
+                sourceTabId = if (crossFile) sourceTabId else null,
+                sourceFilename = if (crossFile) sourceFilename else null,
+                sourceEntries = sourceEntries,
+            )
             t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block))
         }
         addAnnRequest = null
     }
     fun addNoteBlock(tabId: String, afterId: String? = null) {
-        upTab(tabId) { t ->
+        upAnn(tabId) { t ->
             val note = AnnBlock.Note("n${System.currentTimeMillis()}", "")
             val blocks = t.annotations.blocks.toMutableList()
             val idx = if (afterId != null) (blocks.indexOfFirst { it.id == afterId } + 1).coerceAtLeast(0) else blocks.size
@@ -488,7 +520,7 @@ class AppState(
             t.copy(annotations = t.annotations.copy(blocks = blocks))
         }
     }
-    fun updateBlock(tabId: String, blockId: String, newText: String) = upTab(tabId) { t ->
+    fun updateBlock(tabId: String, blockId: String, newText: String) = upAnn(tabId) { t ->
         t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks.map { b ->
             when {
                 b.id != blockId -> b
@@ -498,18 +530,18 @@ class AppState(
             }
         }))
     }
-    fun removeBlock(tabId: String, blockId: String) = upTab(tabId) { t ->
+    fun removeBlock(tabId: String, blockId: String) = upAnn(tabId) { t ->
         t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks.filter { it.id != blockId }))
     }
-    fun moveBlock(tabId: String, blockId: String, delta: Int) = upTab(tabId) { t ->
+    fun moveBlock(tabId: String, blockId: String, delta: Int) = upAnn(tabId) { t ->
         val list = t.annotations.blocks.toMutableList()
-        val idx = list.indexOfFirst { it.id == blockId }.takeIf { it >= 0 } ?: return@upTab t
+        val idx = list.indexOfFirst { it.id == blockId }.takeIf { it >= 0 } ?: return@upAnn t
         val to = (idx + delta).coerceIn(0, list.lastIndex)
         val item = list.removeAt(idx); list.add(to, item)
         t.copy(annotations = t.annotations.copy(blocks = list))
     }
-    fun setPrefix(tabId: String, v: String) = upTab(tabId) { t -> t.copy(annotations = t.annotations.copy(prefix = v)) }
-    fun setSuffix(tabId: String, v: String) = upTab(tabId) { t -> t.copy(annotations = t.annotations.copy(suffix = v)) }
+    fun setPrefix(tabId: String, v: String) = upAnn(tabId) { t -> t.copy(annotations = t.annotations.copy(prefix = v)) }
+    fun setSuffix(tabId: String, v: String) = upAnn(tabId) { t -> t.copy(annotations = t.annotations.copy(suffix = v)) }
     fun toggleMd(tabId: String) = upTab(tabId) { it.copy(showAnnMd = !it.showAnnMd) }
 
     // ── Context menu shortcuts ───────────────────────────────────────
@@ -644,9 +676,12 @@ class AppState(
     fun openFile(file: File) {
         val n = tabCounter++  // capture on calling thread before launching
         isLoading = true
+        val path = file.absolutePath
+        recentFiles = (listOf(path) + recentFiles.filter { it != path }).take(30)
+        recentMenuOpen = false
         ioScope.launch {
             val logData = runCatching { parseLogcat(file) }.getOrElse { emptyList() }
-            val t = mkTab("t$n", file.name, logData)
+            val t = mkTab("t$n", file.name, logData).copy(sourcePath = path)
             // Compose MutableState is snapshot-safe to write from any thread;
             // recomposition is automatically scheduled on the UI thread.
             tabs = tabs + t
@@ -669,11 +704,68 @@ class AppState(
         }
         val path = dlg.file ?: return; val dir = dlg.directory ?: return
         settings = settings.copy(defaultSaveDir = dir)
-        File(dir + path).writeText(buildMd(t))
+        val saved = File(dir + path)
+        saved.writeText(buildMd(t))
+        File(saved.parent, saved.nameWithoutExtension + ".ann").writeText(t.annotations.annotationsToken())
+        val absPath = saved.absolutePath
+        recentNotes = (listOf(absPath) + recentNotes.filter { it != absPath }).take(30)
+    }
+    fun openNoteFile(tabId: String, file: File) {
+        val absPath = file.absolutePath
+        recentNotes = (listOf(absPath) + recentNotes.filter { it != absPath }).take(30)
+        recentNotesMenuOpen = false
+        // Prefer .ann sidecar — restores exact blocks and structure
+        val sidecar = File(file.parent, file.nameWithoutExtension + ".ann")
+        if (sidecar.exists()) {
+            val annotations = runCatching { sidecar.readText().annotationsFromToken() }.getOrNull()
+            if (annotations != null) {
+                upTab(tabId) { t -> t.copy(annotations = annotations) }
+                return
+            }
+        }
+        // Fallback: load raw text as a single note block (e.g. plain .md without sidecar)
+        val text = runCatching { file.readText() }.getOrElse { return }
+        upTab(tabId) { t ->
+            val block = AnnBlock.Note("n${System.currentTimeMillis()}", text)
+            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block))
+        }
+    }
+
+    private val notesDir = File(System.getProperty("user.home"), ".openlog2/notes")
+
+    private fun autoExportAnnotations(tab: LogTab) {
+        if (tab.annotations.blocks.isEmpty()) return
+        ioScope.launch {
+            runCatching {
+                notesDir.mkdirs()
+                val safeName = tab.filename.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                val mdFile = File(notesDir, "${safeName}_notes.md")
+                mdFile.writeText(buildMd(tab))
+                // Sidecar stores full block state for restoration
+                File(notesDir, "${safeName}_notes.ann").writeText(tab.annotations.annotationsToken())
+                val absPath = mdFile.absolutePath
+                recentNotes = (listOf(absPath) + recentNotes.filter { it != absPath }).take(30)
+            }
+        }
+    }
+
+    // Annotation-aware tab updater — auto-exports after any annotation change.
+    private fun upAnn(tabId: String, fn: (LogTab) -> LogTab) {
+        upTab(tabId, fn)
+        tab(tabId)?.let { autoExportAnnotations(it) }
     }
     fun pickSaveFolder() {
-        val dlg = FileDialog(null as Frame?, "Choose Save Folder", FileDialog.LOAD).apply { isVisible = true }
-        dlg.directory?.let { settings = settings.copy(defaultSaveDir = it) }
+        System.setProperty("apple.awt.fileDialogForDirectories", "true")
+        try {
+            val dlg = FileDialog(null as Frame?, "Choose Save Folder", FileDialog.LOAD)
+            dlg.isVisible = true
+            val dir = dlg.directory ?: return
+            val file = dlg.file ?: return
+            val chosen = java.io.File(dir, file)
+            settings = settings.copy(defaultSaveDir = chosen.absolutePath)
+        } finally {
+            System.setProperty("apple.awt.fileDialogForDirectories", "false")
+        }
     }
     fun exportFiltersToFile() {
         val dlg = FileDialog(null as Frame?, "Export Filters", FileDialog.SAVE).apply {
@@ -726,6 +818,8 @@ class AppState(
                     "sequences" -> sequences = value.tokenList().mapNotNull { it.sequenceFromToken() }
                     "saved" -> importFilters(value.unb64())
                     "activeFilters" -> activeSavedFilterIds = activeFilterMapFromToken(value.unb64())
+                    "recent" -> recentFiles = value.tokenList()
+                    "recentNotes" -> recentNotes = value.tokenList()
                 }
             }
             tabs = tabLines.mapNotNull { it.removePrefix("tab\t").tabFromToken() }
@@ -743,6 +837,8 @@ class AppState(
         appendLine("sequences\t${sequences.joinToString(",") { it.sequenceToken() }.b64()}")
         appendLine("saved\t${exportFilters().b64()}")
         appendLine("activeFilters\t${activeFilterMapToken().b64()}")
+        appendLine("recent\t${recentFiles.joinToString(",") { it.b64() }.b64()}")
+        appendLine("recentNotes\t${recentNotes.joinToString(",") { it.b64() }.b64()}")
         appendLine("tabs")
         tabs.forEach { appendLine("tab\t${it.tabToken()}") }
     }
@@ -964,9 +1060,34 @@ private fun String.encodedList(): List<String> =
 
 private fun String.encodedSet(): Set<String> = encodedList().toSet()
 
+private fun LogEntry.toAnnToken(): String =
+    listOf(id.toString(), ts, level.key.toString(), tag, msg, pid.toString(), tid.toString())
+        .joinToString("|") { it.b64() }
+
+private fun String.toLogEntryFromAnnToken(): LogEntry? = runCatching {
+    val p = split("|").map { it.unb64() }
+    if (p.size < 5) return@runCatching null
+    LogEntry(
+        id = p[0].toIntOrNull() ?: 0,
+        ts = p[1],
+        level = LogLevel.from(p[2].firstOrNull() ?: 'I'),
+        tag = p[3],
+        msg = p[4],
+        pid = p.getOrNull(5)?.toIntOrNull() ?: 0,
+        tid = p.getOrNull(6)?.toIntOrNull() ?: 0,
+    )
+}.getOrNull()
+
 private fun AnnBlock.annBlockToken(): String = when (this) {
     is AnnBlock.Note -> tokenFields("N", id, text)
-    is AnnBlock.LogRef -> tokenFields("R", id, logIds.joinToString(","), caption)
+    is AnnBlock.LogRef -> tokenFields(
+        "R", id,
+        logIds.joinToString(","),
+        caption,
+        sourceTabId.orEmpty(),
+        sourceFilename.orEmpty(),
+        sourceEntries?.joinToString(";") { it.toAnnToken() }.orEmpty(),
+    )
 }
 
 private fun String.annBlockFromToken(): AnnBlock? = runCatching {
@@ -974,7 +1095,15 @@ private fun String.annBlockFromToken(): AnnBlock? = runCatching {
     if (p.size < 3) return@runCatching null
     when (p[0]) {
         "N" -> AnnBlock.Note(p[1], p[2])
-        "R" -> AnnBlock.LogRef(p[1], p[2].split(",").mapNotNull { it.toIntOrNull() }, p.getOrElse(3) { "" })
+        "R" -> AnnBlock.LogRef(
+            id = p[1],
+            logIds = p[2].split(",").mapNotNull { it.toIntOrNull() },
+            caption = p.getOrElse(3) { "" },
+            sourceTabId = p.getOrElse(4) { "" }.takeIf { it.isNotBlank() },
+            sourceFilename = p.getOrElse(5) { "" }.takeIf { it.isNotBlank() },
+            sourceEntries = p.getOrElse(6) { "" }.takeIf { it.isNotBlank() }
+                ?.split(";")?.mapNotNull { it.toLogEntryFromAnnToken() },
+        )
         else -> null
     }
 }.getOrNull()

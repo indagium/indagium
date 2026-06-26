@@ -176,13 +176,9 @@ fun buildMd(tab: LogTab): String = buildString {
             }
             is AnnBlock.LogRef -> {
                 if (block.caption.isNotBlank()) { appendLine(block.caption); appendLine() }
-                val rows = block.logIds.mapNotNull { tab.rmap[it] }
-                if (rows.size == 1) {
-                    val r = rows[0]
-                    appendLine("> `[${r.ts}] ${r.level.key}/${r.tag}: ${r.msg}`")
-                } else {
-                    rows.forEach { r -> appendLine("> `[${r.ts}] ${r.level.key}/${r.tag}: ${r.msg}`") }
-                }
+                if (block.sourceFilename != null) appendLine("*(from ${block.sourceFilename})*")
+                val rows = block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }
+                rows.forEach { r -> appendLine("    ${r.ts}  ${r.level.key}/${r.tag}  ${r.msg}") }
                 appendLine()
             }
         }

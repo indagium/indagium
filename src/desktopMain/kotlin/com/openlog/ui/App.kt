@@ -208,12 +208,14 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
 
             // ── Add annotation dialog ─────────────────────────────────
             state.addAnnRequest?.let { req ->
-                val ctxTab = state.tab(req.tabId)
-                val rows = req.logIds.mapNotNull { ctxTab?.rmap?.get(it) }
+                val rows = req.logIds.mapNotNull { state.tab(req.sourceTabId)?.rmap?.get(it) }
                 Dialog(onDismissRequest = { state.addAnnRequest = null }) {
                     AddAnnDialog(
                         rows = rows,
-                        onConfirm = { caption -> state.confirmAddAnn(req.tabId, req.logIds, caption) },
+                        sourceFilename = req.sourceFilename,
+                        onConfirm = { caption ->
+                            state.confirmAddAnn(req.targetTabId, req.sourceTabId, req.logIds, caption, req.sourceFilename)
+                        },
                         onDismiss = { state.addAnnRequest = null },
                     )
                 }
@@ -265,7 +267,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 DialogActionButton("Save as new", active = true) { state.beginSavePendingFilterAsNew() }
-                                DialogActionButton("Update existing", active = current != null) { state.updateCurrentPresetAndLoadPending() }
+                                DialogActionButton("Update existing", active = current != null, enabled = current != null) { state.updateCurrentPresetAndLoadPending() }
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                 DialogActionButton("Do not save", active = true, danger = true) { state.discardPendingFilterChangesAndLoad() }
@@ -301,6 +303,76 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                 }
             }
 
+            // ── Recent files popup ────────────────────────────────────
+            if (state.recentMenuOpen && state.recentFiles.isNotEmpty()) {
+                BoxWithConstraints(
+                    Modifier.fillMaxSize().clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = { state.recentMenuOpen = false },
+                    )
+                ) {
+                    val menuWidth = 320.dp
+                    Box(
+                        Modifier
+                            .align(Alignment.TopEnd)
+                            .offset(x = (-8).dp, y = 44.dp)
+                            .width(menuWidth)
+                            .background(tc.p, RoundedCornerShape(7.dp))
+                            .border(1.dp, tc.br, RoundedCornerShape(7.dp)),
+                    ) {
+                        Column {
+                            Box(
+                                Modifier.fillMaxWidth().background(tc.p2)
+                                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                            ) {
+                                AppText("Recent Files (${state.recentFiles.size})", color = tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                            Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                            // Show 10 items, scrollable; list stores up to 30
+                            val displayFiles = state.recentFiles.take(10)
+                            val listH = (displayFiles.size * 46).coerceAtMost(460).dp
+                            Column(Modifier.fillMaxWidth().height(listH).verticalScroll(rememberScrollState())) {
+                                displayFiles.forEach { path ->
+                                    val file = File(path)
+                                    val exists = file.exists()
+                                    HoverBox(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        onClick = { if (exists) state.openFile(file) },
+                                    ) {
+                                        Column(
+                                            Modifier.fillMaxWidth()
+                                                .padding(horizontal = 14.dp, vertical = 7.dp),
+                                        ) {
+                                            AppText(
+                                                file.name,
+                                                color = if (exists) tc.tx else tc.td,
+                                                fontSize = 12.sp,
+                                                fontFamily = MONO,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                            AppText(
+                                                file.parent ?: path,
+                                                color = tc.td,
+                                                fontSize = 10.sp,
+                                                fontFamily = MONO,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            if (state.recentFiles.size > 10) {
+                                Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                                Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)) {
+                                    AppText("… ${state.recentFiles.size - 10} more", color = tc.td, fontSize = 10.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // ── Settings dialog ───────────────────────────────────────
             if (state.settingsOpen) {
                 Dialog(onDismissRequest = { state.settingsOpen = false }) {
@@ -315,6 +387,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
 @Composable
 private fun AddAnnDialog(
     rows: List<LogEntry>,
+    sourceFilename: String? = null,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -327,7 +400,16 @@ private fun AddAnnDialog(
             .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        AppText("Add annotation", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AppText("Add annotation", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            if (sourceFilename != null) {
+                Box(
+                    Modifier.background(tc.ac.copy(.15f), RoundedCornerShape(3.dp))
+                        .border(1.dp, tc.ac.copy(.3f), RoundedCornerShape(3.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                ) { AppText("from $sourceFilename", color = tc.ac, fontSize = 10.sp, fontFamily = MONO) }
+            }
+        }
 
         // Show referenced log lines
         Column(
@@ -375,6 +457,7 @@ private fun DialogActionButton(
     label: String,
     active: Boolean,
     danger: Boolean = false,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val tc = tc()
@@ -385,7 +468,7 @@ private fun DialogActionButton(
             .height(38.dp)
             .border(1.dp, if (active) accent else tc.br, RoundedCornerShape(5.dp))
             .background(if (active) accent.copy(.18f) else Color.Transparent, RoundedCornerShape(5.dp))
-            .clickable(onClick = onClick),
+            .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         AppText(label, color = if (active) accent else tc.ts, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
@@ -487,17 +570,21 @@ private fun FileView(state: AppState, tab: LogTab) {
         if (state.annotationVisible) {
             HDivider { delta -> state.annotationPanelWidth = (state.annotationPanelWidth - delta).coerceIn(180f, 500f) }
             AnnotationPanel(
-                tab             = tab,
-                onToggleMd      = { state.toggleMd(tab.id) },
-                onCopy          = { state.copyAnn(tab.id) },
-                onSave          = { state.saveAnalysis(tab.id) },
-                onUpdatePrefix  = { state.setPrefix(tab.id, it) },
-                onUpdateSuffix  = { state.setSuffix(tab.id, it) },
-                onUpdateBlock   = { blockId, text -> state.updateBlock(tab.id, blockId, text) },
-                onRemoveBlock   = { state.removeBlock(tab.id, it) },
-                onMoveBlock     = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
-                onAddNoteAfter  = { state.addNoteBlock(tab.id, it) },
-                width           = state.annotationPanelWidth,
+                tab                 = tab,
+                recentNotes         = state.recentNotes,
+                recentNotesMenuOpen = state.recentNotesMenuOpen,
+                onToggleMd          = { state.toggleMd(tab.id) },
+                onCopy              = { state.copyAnn(tab.id) },
+                onSave              = { state.saveAnalysis(tab.id) },
+                onToggleRecentNotes = { state.recentNotesMenuOpen = !state.recentNotesMenuOpen },
+                onOpenNote          = { state.openNoteFile(tab.id, it) },
+                onUpdatePrefix      = { state.setPrefix(tab.id, it) },
+                onUpdateSuffix      = { state.setSuffix(tab.id, it) },
+                onUpdateBlock       = { blockId, text -> state.updateBlock(tab.id, blockId, text) },
+                onRemoveBlock       = { state.removeBlock(tab.id, it) },
+                onMoveBlock         = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
+                onAddNoteAfter      = { state.addNoteBlock(tab.id, it) },
+                width               = state.annotationPanelWidth,
             )
         }
     }
@@ -664,17 +751,22 @@ private fun CompareView(state: AppState) {
                     if (state.annotationVisible) {
                         HDivider { d -> state.annotationPanelWidth = (state.annotationPanelWidth - d).coerceIn(180f, 500f) }
                         AnnotationPanel(
-                            tab            = rightTab,
-                            onToggleMd     = { state.toggleMd(rightTab.id) },
-                            onCopy         = { state.copyAnn(rightTab.id) },
-                            onSave         = { state.saveAnalysis(rightTab.id) },
-                            onUpdatePrefix = { state.setPrefix(rightTab.id, it) },
-                            onUpdateSuffix = { state.setSuffix(rightTab.id, it) },
-                            onUpdateBlock  = { bid, t -> state.updateBlock(rightTab.id, bid, t) },
-                            onRemoveBlock  = { state.removeBlock(rightTab.id, it) },
-                            onMoveBlock    = { bid, d -> state.moveBlock(rightTab.id, bid, d) },
-                            onAddNoteAfter = { state.addNoteBlock(rightTab.id, it) },
-                            width          = state.annotationPanelWidth,
+                            tab                 = leftTab,
+                            headerNote          = leftTab.filename,
+                            recentNotes         = state.recentNotes,
+                            recentNotesMenuOpen = state.recentNotesMenuOpen,
+                            onToggleMd          = { state.toggleMd(leftTab.id) },
+                            onCopy              = { state.copyAnn(leftTab.id) },
+                            onSave              = { state.saveAnalysis(leftTab.id) },
+                            onToggleRecentNotes = { state.recentNotesMenuOpen = !state.recentNotesMenuOpen },
+                            onOpenNote          = { state.openNoteFile(leftTab.id, it) },
+                            onUpdatePrefix      = { state.setPrefix(leftTab.id, it) },
+                            onUpdateSuffix      = { state.setSuffix(leftTab.id, it) },
+                            onUpdateBlock       = { bid, t -> state.updateBlock(leftTab.id, bid, t) },
+                            onRemoveBlock       = { state.removeBlock(leftTab.id, it) },
+                            onMoveBlock         = { bid, d -> state.moveBlock(leftTab.id, bid, d) },
+                            onAddNoteAfter      = { state.addNoteBlock(leftTab.id, it) },
+                            width               = state.annotationPanelWidth,
                         )
                     }
                 }
@@ -710,6 +802,9 @@ private fun TabBar(state: AppState) {
             fd.isVisible = true
             fd.file?.let { state.openFile(File(fd.directory, it)) }
         }
+        if (state.recentFiles.isNotEmpty()) {
+            ToolbarBtn("▾", active = state.recentMenuOpen) { state.recentMenuOpen = !state.recentMenuOpen }
+        }
         Spacer(Modifier.width(2.dp))
         ToolbarBtn("⚙") { state.settingsOpen = true }
     }
@@ -726,7 +821,7 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
     ) {
         AppText("Settings", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AppText("THEME", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+            AppText("THEME", color = tc.td, fontSize = 11.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 ThemePreset.entries.forEach { preset ->
                     val active = state.settings.theme == preset
@@ -734,13 +829,13 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                         Modifier.border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
                             .background(if (active) tc.ac.copy(.15f) else Color.Transparent, RoundedCornerShape(4.dp))
                             .clickable { state.settings = state.settings.copy(theme = preset) }
-                            .padding(horizontal = 8.dp, vertical = 5.dp),
-                    ) { AppText(preset.label, color = if (active) tc.ac else tc.ts, fontSize = 10.sp) }
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                    ) { AppText(preset.label, color = if (active) tc.ac else tc.ts, fontSize = 12.sp) }
                 }
             }
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AppText("FONT SIZE — ${state.settings.fontSize}sp", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+            AppText("FONT SIZE — ${state.settings.fontSize}sp", color = tc.td, fontSize = 11.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(10, 11, 12, 13, 14, 15, 16).forEach { size ->
                     val active = state.settings.fontSize == size
@@ -748,13 +843,13 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                         Modifier.border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
                             .background(if (active) tc.ac.copy(.15f) else Color.Transparent, RoundedCornerShape(4.dp))
                             .clickable { state.settings = state.settings.copy(fontSize = size) }
-                            .padding(horizontal = 8.dp, vertical = 5.dp),
-                    ) { AppText("$size", color = if (active) tc.ac else tc.ts, fontSize = 11.sp) }
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                    ) { AppText("$size", color = if (active) tc.ac else tc.ts, fontSize = 13.sp) }
                 }
             }
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AppText("FONT FAMILY", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+            AppText("FONT FAMILY", color = tc.td, fontSize = 11.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(true to "Monospace", false to "Proportional").forEach { (mono, label) ->
                     val active = state.settings.fontMono == mono
@@ -762,13 +857,13 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                         Modifier.border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
                             .background(if (active) tc.ac.copy(.15f) else Color.Transparent, RoundedCornerShape(4.dp))
                             .clickable { state.settings = state.settings.copy(fontMono = mono) }
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
-                    ) { AppText(label, color = if (active) tc.ac else tc.ts, fontSize = 11.sp) }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    ) { AppText(label, color = if (active) tc.ac else tc.ts, fontSize = 13.sp) }
                 }
             }
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AppText("MOST-USED TAGS — ${state.settings.mostUsedTagLimit}", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+            AppText("MOST-USED TAGS — ${state.settings.mostUsedTagLimit}", color = tc.td, fontSize = 11.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(0, 3, 5, 10, 20).forEach { limit ->
                     val active = state.settings.mostUsedTagLimit == limit
@@ -776,8 +871,8 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                         Modifier.border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
                             .background(if (active) tc.ac.copy(.15f) else Color.Transparent, RoundedCornerShape(4.dp))
                             .clickable { state.settings = state.settings.copy(mostUsedTagLimit = limit) }
-                            .padding(horizontal = 8.dp, vertical = 5.dp),
-                    ) { AppText(limit.toString(), color = if (active) tc.ac else tc.ts, fontSize = 11.sp) }
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                    ) { AppText(limit.toString(), color = if (active) tc.ac else tc.ts, fontSize = 13.sp) }
                 }
             }
         }
@@ -786,12 +881,12 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 AppText(state.settings.defaultSaveDir ?: "(not set)", color = tc.ts, fontSize = 11.sp, fontFamily = MONO,
                     modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
-                PillBtn("Browse", active = false) { state.pickSaveFolder() }
-                if (state.settings.defaultSaveDir != null) PillBtn("Clear", active = false) { state.settings = state.settings.copy(defaultSaveDir = null) }
+                ToolbarBtn("Browse") { state.pickSaveFolder() }
+                if (state.settings.defaultSaveDir != null) ToolbarBtn("Clear") { state.settings = state.settings.copy(defaultSaveDir = null) }
             }
         }
         Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-            PillBtn("Done", active = true, onClick = onDismiss)
+            ToolbarBtn("Done", active = true, onClick = onDismiss)
         }
     }
 }

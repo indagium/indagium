@@ -159,6 +159,19 @@ fun FilterPanel(
     LaunchedEffect(tab.id, filter.kwText) { if (filter.kwText != kwDisplay) kwDisplay = filter.kwText }
     LaunchedEffect(kwDisplay) { kotlinx.coroutines.delay(150); if (kwDisplay != filter.kwText) onSetKw(kwDisplay) }
 
+    var levelExpanded    by remember { mutableStateOf(true) }
+    var modeExpanded     by remember { mutableStateOf(true) }
+    var pkgExpanded      by remember { mutableStateOf(true) }
+    var incTagsExpanded  by remember { mutableStateOf(true) }
+    var excTagsExpanded  by remember { mutableStateOf(true) }
+    var msgContainsExpanded by remember { mutableStateOf(true) }
+    var kwExpanded       by remember { mutableStateOf(true) }
+    var msgRulesExpanded by remember { mutableStateOf(true) }
+    var hlExpanded       by remember { mutableStateOf(true) }
+    var pidExpanded      by remember { mutableStateOf(true) }
+    var seqExpanded      by remember { mutableStateOf(true) }
+    var sfExpanded       by remember { mutableStateOf(true) }
+
     val scroll = rememberScrollState()
     val filterDropTarget = remember(onImportFiltersFromFiles) {
         object : DragAndDropTarget {
@@ -184,114 +197,127 @@ fun FilterPanel(
             .verticalScroll(scroll),
     ) {
         // ── Log Level ─────────────────────────────────────────────
-        SectionHeader("LOG LEVEL")
-        LogLevel.entries.forEach { lvl ->
-            val on = lvl in filter.levels
-            val cnt = tab.logData.count { it.level == lvl }
-            Row(
-                Modifier.fillMaxWidth().clickable { onToggleLevel(lvl) }.padding(horizontal = 12.dp, vertical = 3.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                androidx.compose.material3.Checkbox(
-                    checked = on, onCheckedChange = { onToggleLevel(lvl) },
-                    colors = androidx.compose.material3.CheckboxDefaults.colors(
-                        checkedColor = lvl.defaultColor, uncheckedColor = tc.td, checkmarkColor = tc.bg),
-                    modifier = Modifier.size(16.dp),
-                )
-                LevelBadge(lvl)
-                AppText(lvl.label, color = tc.ts, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                AppText(cnt.toString(), color = tc.td, fontSize = 11.sp, fontFamily = MONO)
+        SectionHeader("LOG LEVEL", expanded = levelExpanded, onToggle = { levelExpanded = !levelExpanded })
+        if (levelExpanded) {
+            LogLevel.entries.forEach { lvl ->
+                val on = lvl in filter.levels
+                val cnt = tab.logData.count { it.level == lvl }
+                Row(
+                    Modifier.fillMaxWidth().clickable { onToggleLevel(lvl) }.padding(horizontal = 12.dp, vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    androidx.compose.material3.Checkbox(
+                        checked = on, onCheckedChange = { onToggleLevel(lvl) },
+                        colors = androidx.compose.material3.CheckboxDefaults.colors(
+                            checkedColor = lvl.defaultColor, uncheckedColor = tc.td, checkmarkColor = tc.bg),
+                        modifier = Modifier.size(16.dp),
+                    )
+                    LevelBadge(lvl)
+                    AppText(lvl.label, color = tc.ts, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                    AppText(cnt.toString(), color = tc.td, fontSize = 11.sp, fontFamily = MONO)
+                }
             }
         }
         Divider()
 
         // ── Filter mode toggle ────────────────────────────────────
-        SectionHeader("FILTER MODE")
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            ModeBtn("Tags", filter.mode == FilterMode.TAGS) { onSetFilterMode(FilterMode.TAGS) }
-            ModeBtn("Keyword/Regex", filter.mode == FilterMode.KEYWORD) { onSetFilterMode(FilterMode.KEYWORD) }
+        SectionHeader("FILTER MODE", expanded = modeExpanded, onToggle = { modeExpanded = !modeExpanded })
+        if (modeExpanded) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ModeBtn("Tags", filter.mode == FilterMode.TAGS) { onSetFilterMode(FilterMode.TAGS) }
+                ModeBtn("Keyword/Regex", filter.mode == FilterMode.KEYWORD) { onSetFilterMode(FilterMode.KEYWORD) }
+            }
         }
         Divider()
 
         // ── Positive: Tags ────────────────────────────────────────
         if (filter.mode == FilterMode.TAGS) {
             // ── Package prefix ───────────────────────────────────
-            SectionHeader("PACKAGE / TAG PREFIX")
-            if (filter.pkgPrefixes.isNotEmpty()) {
-                FlowRow(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    filter.pkgPrefixes.forEach { pfx ->
-                        TagPill(pfx, Color(0xFF06b6d4)) { onRemovePkgPrefix(pfx) }
+            SectionHeader("PACKAGE / TAG PREFIX", expanded = pkgExpanded, onToggle = { pkgExpanded = !pkgExpanded })
+            if (pkgExpanded) {
+                if (filter.pkgPrefixes.isNotEmpty()) {
+                    FlowRow(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        filter.pkgPrefixes.forEach { pfx ->
+                            TagPill(pfx, Color(0xFF06b6d4)) { onRemovePkgPrefix(pfx) }
+                        }
                     }
                 }
-            }
-            var pkgInput by remember { mutableStateOf("") }
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(pkgInput, { pkgInput = it }, "com.myapp.example…", Modifier.weight(1f))
-                PillBtn("+ Add", active = pkgInput.isNotBlank()) {
-                    onAddPkgPrefix(pkgInput); pkgInput = ""
+                var pkgInput by remember { mutableStateOf("") }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    InlineField(pkgInput, { pkgInput = it }, "com.myapp.example…", Modifier.weight(1f))
+                    PillBtn("+ Add", active = pkgInput.isNotBlank()) {
+                        onAddPkgPrefix(pkgInput); pkgInput = ""
+                    }
                 }
-            }
-            packagePrefixCandidates(sortedTags, pkgInput).forEach { candidate ->
-                HoverBox(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
-                    onClick = { onAddPkgPrefix(candidate); pkgInput = "" },
-                ) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        AppText("+", color = Color(0xFF06b6d4), fontSize = 11.sp)
-                        AppText(candidate, color = tc.ts, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                val pkgCandidates = packagePrefixCandidates(sortedTags, pkgInput)
+                if (pkgCandidates.isNotEmpty()) {
+                    ScrollableItems(pkgCandidates.size) {
+                        pkgCandidates.forEach { candidate ->
+                            HoverBox(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                                onClick = { onAddPkgPrefix(candidate); pkgInput = "" },
+                            ) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    AppText("+", color = Color(0xFF06b6d4), fontSize = 11.sp)
+                                    AppText(candidate, color = tc.ts, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        }
                     }
                 }
             }
             Divider()
 
-            SectionHeader("INCLUDE TAGS", trailing = if (filter.activeTags.isNotEmpty()) ({
-                AppText("clear", color = tc.td, fontSize = 10.sp, modifier = Modifier.clickable(onClick = onClearTags))
-            }) else null)
-
-            if (filter.activeTags.isNotEmpty()) {
-                FlowRow(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    filter.activeTags.forEach { tag ->
-                        TagPill(displayTagForPrefix(tag, filter.pkgPrefixes).first, tc.ac) { onToggleTag(tag) }
+            SectionHeader(
+                "INCLUDE TAGS",
+                expanded = incTagsExpanded,
+                onToggle = { incTagsExpanded = !incTagsExpanded },
+            )
+            if (incTagsExpanded) {
+                if (filter.activeTags.isNotEmpty()) {
+                    FlowRow(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        filter.activeTags.forEach { tag ->
+                            TagPill(displayTagForPrefix(tag, filter.pkgPrefixes).first, tc.ac) { onToggleTag(tag) }
+                        }
                     }
                 }
-            }
-
-            // Tag search
-            InlineField(tagInput, { tagInput = it }, "Search tags…", Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
-
-            filteredTags.forEach { tag ->
-                val active = tag in filter.activeTags
-                HoverBox(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
-                    baseBg = if (active) tc.abg else Color.Transparent,
-                    hoverBg = if (active) tc.abg else tc.hv,
-                    onClick = { onToggleTag(tag) },
-                ) {
-                    val (label, packageLabel) = displayTagForPrefix(tag, filter.pkgPrefixes)
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Box(Modifier.size(5.dp).background(if (active) tc.ac else tc.td, RoundedCornerShape(50)))
-                        Column(Modifier.weight(1f)) {
-                            AppText(label, color = if (active) tc.tx else tc.ts, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
-                            if (packageLabel != null)
-                                AppText(packageLabel, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                InlineField(tagInput, { tagInput = it }, "Search tags…", Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
+                ScrollableItems(filteredTags.size) {
+                    filteredTags.forEach { tag ->
+                        val active = tag in filter.activeTags
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                            baseBg = if (active) tc.abg else Color.Transparent,
+                            hoverBg = if (active) tc.abg else tc.hv,
+                            onClick = { onToggleTag(tag) },
+                        ) {
+                            val (label, packageLabel) = displayTagForPrefix(tag, filter.pkgPrefixes)
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Box(Modifier.size(5.dp).background(if (active) tc.ac else tc.td, RoundedCornerShape(50)))
+                                Column(Modifier.weight(1f)) {
+                                    AppText(label, color = if (active) tc.tx else tc.ts, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                                    if (packageLabel != null)
+                                        AppText(packageLabel, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                                }
+                                if ((tagUsage[tag] ?: 0) > 2) AppText("★", color = tc.ac.copy(.8f), fontSize = 9.sp)
+                                AppText((tagCounts[tag] ?: 0).toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                            }
                         }
-                        if ((tagUsage[tag] ?: 0) > 2) AppText("★", color = tc.ac.copy(.8f), fontSize = 9.sp)
-                        AppText((tagCounts[tag] ?: 0).toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
                     }
                 }
             }
@@ -299,354 +325,392 @@ fun FilterPanel(
 
             // ── Negative: Exclude Tags ────────────────────────────
             val exNeg = Color(0xFFf85149)
-            SectionHeader("EXCLUDE TAGS")
-            if (filter.excludeTags.isNotEmpty()) {
-                FlowRow(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    filter.excludeTags.forEach { tag -> TagPill(displayTagForPrefix(tag, filter.pkgPrefixes).first, exNeg) { onToggleExcludeTag(tag) } }
-                }
-            }
-            // Search box for exclude tags
-            InlineField(exTagInput, { exTagInput = it }, "Search to exclude…",
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
-            exCandidates.forEach { tag ->
-                val excluded = tag in filter.excludeTags
-                HoverBox(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
-                    baseBg = if (excluded) exNeg.copy(.12f) else Color.Transparent,
-                    hoverBg = tc.hv,
-                    onClick = { onToggleExcludeTag(tag) },
-                ) {
-                    val (label, packageLabel) = displayTagForPrefix(tag, filter.pkgPrefixes)
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        AppText("−", color = if (excluded) exNeg else tc.td, fontSize = 12.sp)
-                        Column(Modifier.weight(1f)) {
-                            AppText(label, color = if (excluded) exNeg else tc.ts, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
-                            if (packageLabel != null)
-                                AppText(packageLabel, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
-                        }
-                        AppText((tagCounts[tag] ?: 0).toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
-                    }
-                }
-            }
-
-            // ── Message keyword within tag result set ─────────────
-            SectionHeader("MESSAGE CONTAINS (in tag results)")
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(filter.kwInTag, onSetKwInTag, if (filter.kwInTagRegex) "/pattern/…" else "keyword…", Modifier.weight(1f))
-                PillBtn(".*", active = filter.kwInTagRegex, onClick = onToggleKwInTagRx)
-                if (filter.kwInTag.isNotBlank())
-                    AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onSetKwInTag("") })
-            }
-            Divider()
-
-        }
-
-        // ── Positive: Keyword / Regex ─────────────────────────────
-        if (filter.mode == FilterMode.KEYWORD) {
-            SectionHeader("INCLUDE KEYWORD")
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(kwDisplay, { kwDisplay = it }, if (filter.kwRegex) "/pattern/…" else "keyword…", Modifier.weight(1f))
-                PillBtn(".*", active = filter.kwRegex, onClick = onToggleKwRx)
-            }
-            // Negative keyword
-            SectionHeader("EXCLUDE KEYWORD")
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(filter.excludeKw, onSetExcludeKw, "exclude pattern…", Modifier.weight(1f))
-                PillBtn(".*", active = filter.excludeKwRegex, onClick = onToggleExcludeKwRx)
-            }
-            Divider()
-        }
-
-        // ── Explicit include/exclude message rules ───────────────
-        SectionHeader("MESSAGE RULES")
-        filter.messageRules.forEach { rule ->
-            Row(
-                Modifier.fillMaxWidth()
-                    .background(if (rule.enabled) Color.Transparent else tc.hv)
-                    .padding(horizontal = 12.dp, vertical = 3.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-            ) {
-                AppText(if (rule.include) "+" else "−", color = if (rule.include) Color(0xFF3fb950) else Color(0xFFf85149), fontSize = 12.sp)
-                Column(Modifier.weight(1f)) {
-                    AppText(
-                        messageRuleLabel(rule),
-                        color = if (rule.enabled) tc.tx else tc.td,
-                        fontSize = 11.sp,
-                        fontFamily = MONO,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    AppText(
-                        messageRuleScope(rule, filter.pkgPrefixes),
-                        color = tc.td,
-                        fontSize = 9.sp,
-                        fontFamily = MONO,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                AppText(if (rule.enabled) "●" else "○", color = if (rule.enabled) tc.ac else tc.td,
-                    fontSize = 11.sp, modifier = Modifier.clickable { onToggleMessageRule(rule.id) })
-                AppText("×", color = tc.td, fontSize = 13.sp, modifier = Modifier.clickable { onRemoveMessageRule(rule.id) })
-            }
-        }
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(newMsgRulePattern, onSetNewMsgRulePattern, "message text…", Modifier.weight(1f))
-                PillBtn(".*", active = newMsgRuleRegex) { onSetNewMsgRuleRegex(!newMsgRuleRegex) }
-                PillBtn(if (newMsgRuleInclude) "Include" else "Exclude", active = newMsgRuleInclude) {
-                    onSetNewMsgRuleInclude(!newMsgRuleInclude)
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(newMsgRuleTag, onSetNewMsgRuleTag, "exact tag scope…", Modifier.weight(1f))
-                InlineField(newMsgRulePrefix, onSetNewMsgRulePrefix, "package prefix…", Modifier.weight(1f))
-            }
-            PillBtn("+ Add message rule", active = newMsgRulePattern.isNotBlank()) {
-                onAddMessageRule(
-                    newMsgRuleInclude,
-                    newMsgRulePattern,
-                    newMsgRuleRegex,
-                    newMsgRuleTag,
-                    newMsgRulePrefix,
-                )
-            }
-        }
-        Divider()
-
-        // ── Highlighters ──────────────────────────────────────────
-        SectionHeader("HIGHLIGHTERS")
-        filter.highlighters.forEach { hl ->
-            Column {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Box(
-                        Modifier.size(12.dp).background(hl.color, RoundedCornerShape(2.dp))
-                            .border(2.dp, if (colorPickerHlId == hl.id) tc.tx else hl.color, RoundedCornerShape(2.dp))
-                            .clickable { colorPickerHlId = if (colorPickerHlId == hl.id) null else hl.id },
-                    )
-                    AppText((if (hl.regex) "/" else "") + hl.pattern + (if (hl.regex) "/i" else ""),
-                        color = if (hl.on) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
-                    AppText(if (hl.on) "●" else "○", color = if (hl.on) hl.color else tc.td,
-                        fontSize = 11.sp, modifier = Modifier.clickable { onToggleHl(hl.id) })
-                    AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onRemoveHl(hl.id) })
-                }
-                if (colorPickerHlId == hl.id) {
+            SectionHeader("EXCLUDE TAGS", expanded = excTagsExpanded, onToggle = { excTagsExpanded = !excTagsExpanded })
+            if (excTagsExpanded) {
+                if (filter.excludeTags.isNotEmpty()) {
                     FlowRow(
-                        Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(3.dp),
-                        verticalArrangement = Arrangement.spacedBy(3.dp),
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        HL_COLORS.forEach { c -> ColorSwatch(c, c == hl.color) { onSetHlColor(hl.id, c); colorPickerHlId = null } }
+                        filter.excludeTags.forEach { tag -> TagPill(displayTagForPrefix(tag, filter.pkgPrefixes).first, exNeg) { onToggleExcludeTag(tag) } }
                     }
                 }
-            }
-        }
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(newHlPat, onSetNewHlPat, "text or /regex/…", Modifier.weight(1f))
-                PillBtn(".*", active = newHlRx, onClick = { onSetNewHlRx(!newHlRx) })
-                PillBtn("+ Add", active = newHlPat.isNotBlank()) { onAddHl(newHlPat, newHlRx, newHlColor) }
-            }
-            // Color picker row — selected color has bright border
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(3.dp),
-                verticalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-                HL_COLORS.forEach { c -> ColorSwatch(c, c == newHlColor) { onSetNewHlColor(c) } }
-            }
-        }
-        Divider()
-
-        // ── PID / TID filter ──────────────────────────────────────
-        SectionHeader("PID / TID FILTER")
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-            InlineField(filter.pidTidFilter, onSetPidTidFilter, "1234, 5678…", Modifier.weight(1f))
-            if (filter.pidTidFilter.isNotBlank())
-                AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onSetPidTidFilter("") })
-        }
-        Divider()
-
-        // ── Sequences ─────────────────────────────────────────────
-        SectionHeader("SEQUENCES")
-        CheckRow(filter.seqOn, { onToggleSeq() }) {
-            AppText("Group sequences", color = tc.ts, fontSize = 12.sp, modifier = Modifier.weight(1f))
-        }
-        if (sequences.isNotEmpty()) {
-            Spacer(Modifier.height(4.dp))
-            // Drag-and-drop state
-            var dragId by remember { mutableStateOf<String?>(null) }
-            var dragOffsetY by remember { mutableStateOf(0f) }
-            val density = LocalDensity.current.density
-
-            sequences.forEachIndexed { idx, def ->
-                val isDragging = dragId == def.id
-                Column(
-                    Modifier.fillMaxWidth()
-                        .then(if (isDragging) Modifier.offset { IntOffset(0, dragOffsetY.roundToInt()) } else Modifier)
-                ) {
-                    Row(
-                        Modifier.fillMaxWidth()
-                            .background(if (isDragging) tc.ac.copy(.12f) else if (!def.enabled) tc.hv else Color.Transparent)
-                            .padding(horizontal = 12.dp, vertical = 3.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp),
-                    ) {
-                        // Drag handle
-                        AppText("⠿", color = tc.td, fontSize = 12.sp,
-                            modifier = Modifier.pointerInput(def.id) {
-                                detectDragGestures(
-                                    onDragStart = { dragId = def.id; dragOffsetY = 0f },
-                                    onDragEnd = {
-                                        val rowH = 28f * density
-                                        val steps = (dragOffsetY / rowH).roundToInt()
-                                        val targetIdx = (idx + steps).coerceIn(0, sequences.lastIndex)
-                                        if (targetIdx != idx) {
-                                            repeat(kotlin.math.abs(targetIdx - idx)) {
-                                                if (targetIdx < idx) onMoveSeqUp(def.id)
-                                                else onMoveSeqDown(def.id)
-                                            }
-                                        }
-                                        dragId = null; dragOffsetY = 0f
-                                    },
-                                    onDragCancel = { dragId = null; dragOffsetY = 0f },
-                                    onDrag = { ch, d -> ch.consume(); dragOffsetY += d.y },
-                                )
-                            })
-                        AppText("${idx + 1}", color = tc.td, fontSize = 9.sp, fontFamily = MONO, modifier = Modifier.width(12.dp))
-                        Box(
-                            Modifier.size(10.dp)
-                                .background(if (def.enabled) def.color else tc.br, RoundedCornerShape(2.dp))
-                                .clickable { colorPickerSeqId = if (colorPickerSeqId == def.id) null else def.id },
-                        )
-                        AppText(
-                            sequenceLabel(def),
-                            color = if (def.enabled) tc.tx else tc.td,
-                            fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis,
-                        )
-                        AppText("✎", color = tc.td, fontSize = 11.sp, modifier = Modifier.clickable {
-                            editingSeqId = if (editingSeqId == def.id) null else def.id
-                        })
-                        AppText(if (def.enabled) "●" else "○", color = if (def.enabled) def.color else tc.td,
-                            fontSize = 11.sp, modifier = Modifier.clickable { onToggleSeqEnabled(def.id) })
-                        AppText("×", color = tc.td, fontSize = 13.sp, modifier = Modifier.clickable { onRemoveSeq(def.id) })
-                    }
-                    if (editingSeqId == def.id) {
-                        SequenceEditor(def, onUpdateSeq, onCancel = { editingSeqId = null })
-                    }
-                    if (colorPickerSeqId == def.id) {
-                        FlowRow(
-                            Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                InlineField(exTagInput, { exTagInput = it }, "Search to exclude…",
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
+                ScrollableItems(exCandidates.size) {
+                    exCandidates.forEach { tag ->
+                        val excluded = tag in filter.excludeTags
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                            baseBg = if (excluded) exNeg.copy(.12f) else Color.Transparent,
+                            hoverBg = tc.hv,
+                            onClick = { onToggleExcludeTag(tag) },
                         ) {
-                            SEQ_COLORS.forEach { c ->
-                                Box(
-                                    Modifier.size(14.dp).background(c, RoundedCornerShape(3.dp))
-                                        .border(2.dp, if (c == def.color) tc.tx else Color.Transparent, RoundedCornerShape(3.dp))
-                                        .clickable { onSetSeqColor(def.id, c); colorPickerSeqId = null },
-                                )
+                            val (label, packageLabel) = displayTagForPrefix(tag, filter.pkgPrefixes)
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                AppText("−", color = if (excluded) exNeg else tc.td, fontSize = 12.sp)
+                                Column(Modifier.weight(1f)) {
+                                    AppText(label, color = if (excluded) exNeg else tc.ts, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                                    if (packageLabel != null)
+                                        AppText(packageLabel, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                                }
+                                AppText((tagCounts[tag] ?: 0).toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
                             }
                         }
                     }
                 }
             }
+            Divider()
+
+            // ── Message keyword within tag result set ─────────────
+            SectionHeader("MESSAGE CONTAINS", expanded = msgContainsExpanded, onToggle = { msgContainsExpanded = !msgContainsExpanded })
+            if (msgContainsExpanded) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    InlineField(filter.kwInTag, onSetKwInTag, if (filter.kwInTagRegex) "/pattern/…" else "keyword in tag results…", Modifier.weight(1f))
+                    PillBtn(".*", active = filter.kwInTagRegex, onClick = onToggleKwInTagRx)
+                    if (filter.kwInTag.isNotBlank())
+                        AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onSetKwInTag("") })
+                }
+            }
+            Divider()
         }
-        if (tab.manualBlocks.isNotEmpty()) {
-            SectionHeader("COLLAPSED RANGES")
-            tab.manualBlocks.forEach { block ->
-                val entry = tab.rmap[block.anchorId]
-                Row(
-                    Modifier.fillMaxWidth()
-                        .background(if (block.enabled) Color.Transparent else tc.hv)
-                        .padding(horizontal = 12.dp, vertical = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                ) {
-                    Box(Modifier.size(10.dp).background(if (block.enabled) block.color else tc.br, RoundedCornerShape(2.dp)))
-                    val direction = if (block.direction == ManualCollapseDirection.TO_START) "to start" else "to end"
-                    Column(Modifier.weight(1f)) {
-                        AppText(direction, color = if (block.enabled) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO)
-                        AppText(
-                            listOfNotNull(entry?.tag, entry?.msg).joinToString(": "),
-                            color = tc.td,
-                            fontSize = 9.sp,
-                            fontFamily = MONO,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+
+        // ── Positive: Keyword / Regex ─────────────────────────────
+        if (filter.mode == FilterMode.KEYWORD) {
+            SectionHeader("KEYWORD FILTER", expanded = kwExpanded, onToggle = { kwExpanded = !kwExpanded })
+            if (kwExpanded) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    InlineField(kwDisplay, { kwDisplay = it }, if (filter.kwRegex) "/include pattern/…" else "include keyword…", Modifier.weight(1f))
+                    PillBtn(".*", active = filter.kwRegex, onClick = onToggleKwRx)
+                }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    InlineField(filter.excludeKw, onSetExcludeKw, if (filter.excludeKwRegex) "/exclude pattern/…" else "exclude keyword…", Modifier.weight(1f))
+                    PillBtn(".*", active = filter.excludeKwRegex, onClick = onToggleExcludeKwRx)
+                }
+            }
+            Divider()
+        }
+
+        // ── Explicit include/exclude message rules ───────────────
+        SectionHeader("MESSAGE RULES", expanded = msgRulesExpanded, onToggle = { msgRulesExpanded = !msgRulesExpanded })
+        if (msgRulesExpanded) {
+            if (filter.messageRules.isNotEmpty()) {
+                ScrollableItems(filter.messageRules.size) {
+                    filter.messageRules.forEach { rule ->
+                        Row(
+                            Modifier.fillMaxWidth()
+                                .background(if (rule.enabled) Color.Transparent else tc.hv)
+                                .padding(horizontal = 12.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            AppText(if (rule.include) "+" else "−", color = if (rule.include) Color(0xFF3fb950) else Color(0xFFf85149), fontSize = 12.sp)
+                            Column(Modifier.weight(1f)) {
+                                AppText(
+                                    messageRuleLabel(rule),
+                                    color = if (rule.enabled) tc.tx else tc.td,
+                                    fontSize = 11.sp,
+                                    fontFamily = MONO,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                AppText(
+                                    messageRuleScope(rule, filter.pkgPrefixes),
+                                    color = tc.td,
+                                    fontSize = 9.sp,
+                                    fontFamily = MONO,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            AppText(if (rule.enabled) "●" else "○", color = if (rule.enabled) tc.ac else tc.td,
+                                fontSize = 11.sp, modifier = Modifier.clickable { onToggleMessageRule(rule.id) })
+                            AppText("×", color = tc.td, fontSize = 13.sp, modifier = Modifier.clickable { onRemoveMessageRule(rule.id) })
+                        }
                     }
-                    AppText(if (block.enabled) "●" else "○", color = if (block.enabled) block.color else tc.td,
-                        fontSize = 11.sp, modifier = Modifier.clickable { onToggleManualCollapse(block.id) })
-                    AppText("×", color = tc.td, fontSize = 13.sp, modifier = Modifier.clickable { onRemoveManualCollapse(block.id) })
+                }
+            }
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    InlineField(newMsgRulePattern, onSetNewMsgRulePattern, "message text…", Modifier.weight(1f))
+                    PillBtn(".*", active = newMsgRuleRegex) { onSetNewMsgRuleRegex(!newMsgRuleRegex) }
+                    PillBtn(if (newMsgRuleInclude) "Include" else "Exclude", active = newMsgRuleInclude) {
+                        onSetNewMsgRuleInclude(!newMsgRuleInclude)
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    InlineField(newMsgRuleTag, onSetNewMsgRuleTag, "exact tag scope…", Modifier.weight(1f))
+                    InlineField(newMsgRulePrefix, onSetNewMsgRulePrefix, "package prefix…", Modifier.weight(1f))
+                }
+                PillBtn("+ Add message rule", active = newMsgRulePattern.isNotBlank()) {
+                    onAddMessageRule(
+                        newMsgRuleInclude,
+                        newMsgRulePattern,
+                        newMsgRuleRegex,
+                        newMsgRuleTag,
+                        newMsgRulePrefix,
+                    )
                 }
             }
         }
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(newSeqText, onSetNewSeqText, "start message…", Modifier.weight(1f))
-                PillBtn(".*", active = newSeqRegex) { onSetNewSeqRx(!newSeqRegex) }
+        Divider()
+
+        // ── Highlighters ──────────────────────────────────────────
+        SectionHeader("HIGHLIGHTERS", expanded = hlExpanded, onToggle = { hlExpanded = !hlExpanded })
+        if (hlExpanded) {
+            if (filter.highlighters.isNotEmpty()) {
+                Column(Modifier.fillMaxWidth()) {
+                    filter.highlighters.forEach { hl ->
+                        Column {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Box(
+                                    Modifier.size(12.dp).background(hl.color, RoundedCornerShape(2.dp))
+                                        .border(2.dp, if (colorPickerHlId == hl.id) tc.tx else hl.color, RoundedCornerShape(2.dp))
+                                        .clickable { colorPickerHlId = if (colorPickerHlId == hl.id) null else hl.id },
+                                )
+                                AppText((if (hl.regex) "/" else "") + hl.pattern + (if (hl.regex) "/i" else ""),
+                                    color = if (hl.on) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                                AppText(if (hl.on) "●" else "○", color = if (hl.on) hl.color else tc.td,
+                                    fontSize = 11.sp, modifier = Modifier.clickable { onToggleHl(hl.id) })
+                                AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onRemoveHl(hl.id) })
+                            }
+                            if (colorPickerHlId == hl.id) {
+                                FlowRow(
+                                    Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                                ) {
+                                    HL_COLORS.forEach { c -> ColorSwatch(c, c == hl.color) { onSetHlColor(hl.id, c); colorPickerHlId = null } }
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(newSeqEndText, onSetNewSeqEndText, "end message (optional)…", Modifier.weight(1f))
-                PillBtn(".*", active = newSeqEndRegex) { onSetNewSeqEndRx(!newSeqEndRegex) }
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    InlineField(newHlPat, onSetNewHlPat, "text or /regex/…", Modifier.weight(1f))
+                    PillBtn(".*", active = newHlRx, onClick = { onSetNewHlRx(!newHlRx) })
+                    PillBtn("+ Add", active = newHlPat.isNotBlank()) { onAddHl(newHlPat, newHlRx, newHlColor) }
+                }
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    HL_COLORS.forEach { c -> ColorSwatch(c, c == newHlColor) { onSetNewHlColor(c) } }
+                }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(newSeqStartTag, onSetNewSeqStartTag, "start tag (optional)…", Modifier.weight(1f))
-                InlineField(newSeqEndTag, onSetNewSeqEndTag, "end tag (optional)…", Modifier.weight(1f))
+        }
+        Divider()
+
+        // ── PID / TID filter ──────────────────────────────────────
+        SectionHeader("PID / TID FILTER", expanded = pidExpanded, onToggle = { pidExpanded = !pidExpanded })
+        if (pidExpanded) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                InlineField(filter.pidTidFilter, onSetPidTidFilter, "1234, 5678…", Modifier.weight(1f))
+                if (filter.pidTidFilter.isNotBlank())
+                    AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onSetPidTidFilter("") })
             }
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                SEQ_COLORS.forEach { c -> ColorSwatch(c, c == newSeqColor) { onSetNewSeqColor(c) } }
-                PillBtn("+ Add", active = newSeqText.isNotBlank()) {
-                    onAddSeq(newSeqText, newSeqRegex, newSeqColor, newSeqStartTag, newSeqEndText, newSeqEndRegex, newSeqEndTag)
+        }
+        Divider()
+
+        // ── Sequences ─────────────────────────────────────────────
+        SectionHeader("SEQUENCES", expanded = seqExpanded, onToggle = { seqExpanded = !seqExpanded })
+        if (seqExpanded) {
+            CheckRow(filter.seqOn, { onToggleSeq() }) {
+                AppText("Group sequences", color = tc.ts, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            }
+            if (sequences.isNotEmpty()) {
+                var dragId by remember { mutableStateOf<String?>(null) }
+                var dragOffsetY by remember { mutableStateOf(0f) }
+                val density = LocalDensity.current.density
+                Column(Modifier.fillMaxWidth()) {
+                    sequences.forEachIndexed { idx, def ->
+                        val isDragging = dragId == def.id
+                        Column(
+                            Modifier.fillMaxWidth()
+                                .then(if (isDragging) Modifier.offset { IntOffset(0, dragOffsetY.roundToInt()) } else Modifier)
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth()
+                                    .background(if (isDragging) tc.ac.copy(.12f) else if (!def.enabled) tc.hv else Color.Transparent)
+                                    .padding(horizontal = 12.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            ) {
+                                AppText("⠿", color = tc.td, fontSize = 12.sp,
+                                    modifier = Modifier.pointerInput(def.id) {
+                                        detectDragGestures(
+                                            onDragStart = { dragId = def.id; dragOffsetY = 0f },
+                                            onDragEnd = {
+                                                val rowH = 28f * density
+                                                val steps = (dragOffsetY / rowH).roundToInt()
+                                                val targetIdx = (idx + steps).coerceIn(0, sequences.lastIndex)
+                                                if (targetIdx != idx) {
+                                                    repeat(kotlin.math.abs(targetIdx - idx)) {
+                                                        if (targetIdx < idx) onMoveSeqUp(def.id)
+                                                        else onMoveSeqDown(def.id)
+                                                    }
+                                                }
+                                                dragId = null; dragOffsetY = 0f
+                                            },
+                                            onDragCancel = { dragId = null; dragOffsetY = 0f },
+                                            onDrag = { ch, d -> ch.consume(); dragOffsetY += d.y },
+                                        )
+                                    })
+                                AppText("${idx + 1}", color = tc.td, fontSize = 9.sp, fontFamily = MONO, modifier = Modifier.width(12.dp))
+                                Box(
+                                    Modifier.size(10.dp)
+                                        .background(if (def.enabled) def.color else tc.br, RoundedCornerShape(2.dp))
+                                        .clickable { colorPickerSeqId = if (colorPickerSeqId == def.id) null else def.id },
+                                )
+                                AppText(
+                                    sequenceLabel(def),
+                                    color = if (def.enabled) tc.tx else tc.td,
+                                    fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis,
+                                )
+                                AppText("✎", color = tc.td, fontSize = 11.sp, modifier = Modifier.clickable {
+                                    editingSeqId = if (editingSeqId == def.id) null else def.id
+                                })
+                                AppText(if (def.enabled) "●" else "○", color = if (def.enabled) def.color else tc.td,
+                                    fontSize = 11.sp, modifier = Modifier.clickable { onToggleSeqEnabled(def.id) })
+                                AppText("×", color = tc.td, fontSize = 13.sp, modifier = Modifier.clickable { onRemoveSeq(def.id) })
+                            }
+                            if (editingSeqId == def.id) {
+                                SequenceEditor(def, onUpdateSeq, onCancel = { editingSeqId = null })
+                            }
+                            if (colorPickerSeqId == def.id) {
+                                FlowRow(
+                                    Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    SEQ_COLORS.forEach { c ->
+                                        Box(
+                                            Modifier.size(14.dp).background(c, RoundedCornerShape(3.dp))
+                                                .border(2.dp, if (c == def.color) tc.tx else Color.Transparent, RoundedCornerShape(3.dp))
+                                                .clickable { onSetSeqColor(def.id, c); colorPickerSeqId = null },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (tab.manualBlocks.isNotEmpty()) {
+                AppText("COLLAPSED RANGES", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
+                ScrollableItems(tab.manualBlocks.size) {
+                    tab.manualBlocks.forEach { block ->
+                        val entry = tab.rmap[block.anchorId]
+                        Row(
+                            Modifier.fillMaxWidth()
+                                .background(if (block.enabled) Color.Transparent else tc.hv)
+                                .padding(horizontal = 12.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            Box(Modifier.size(10.dp).background(if (block.enabled) block.color else tc.br, RoundedCornerShape(2.dp)))
+                            val direction = if (block.direction == ManualCollapseDirection.TO_START) "to start" else "to end"
+                            Column(Modifier.weight(1f)) {
+                                AppText(direction, color = if (block.enabled) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO)
+                                AppText(
+                                    listOfNotNull(entry?.tag, entry?.msg).joinToString(": "),
+                                    color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            AppText(if (block.enabled) "●" else "○", color = if (block.enabled) block.color else tc.td,
+                                fontSize = 11.sp, modifier = Modifier.clickable { onToggleManualCollapse(block.id) })
+                            AppText("×", color = tc.td, fontSize = 13.sp, modifier = Modifier.clickable { onRemoveManualCollapse(block.id) })
+                        }
+                    }
+                }
+            }
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    InlineField(newSeqText, onSetNewSeqText, "start message…", Modifier.weight(1f))
+                    PillBtn(".*", active = newSeqRegex) { onSetNewSeqRx(!newSeqRegex) }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    InlineField(newSeqEndText, onSetNewSeqEndText, "end message (optional)…", Modifier.weight(1f))
+                    PillBtn(".*", active = newSeqEndRegex) { onSetNewSeqEndRx(!newSeqEndRegex) }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    InlineField(newSeqStartTag, onSetNewSeqStartTag, "start tag (optional)…", Modifier.weight(1f))
+                    InlineField(newSeqEndTag, onSetNewSeqEndTag, "end tag (optional)…", Modifier.weight(1f))
+                }
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    SEQ_COLORS.forEach { c -> ColorSwatch(c, c == newSeqColor) { onSetNewSeqColor(c) } }
+                    PillBtn("+ Add", active = newSeqText.isNotBlank()) {
+                        onAddSeq(newSeqText, newSeqRegex, newSeqColor, newSeqStartTag, newSeqEndText, newSeqEndRegex, newSeqEndTag)
+                    }
                 }
             }
         }
         Divider()
 
         // ── Saved Filters ─────────────────────────────────────────
-        SectionHeader("SAVED FILTERS")
-        savedFilters.forEach { sf ->
-            val active = activeSavedFilterId == sf.id
-            HoverBox(modifier = Modifier.fillMaxWidth(), baseBg = if (active) tc.abg else Color.Transparent) {
-                Row(
-                    Modifier.fillMaxWidth().clickable { onLoadFilter(sf) }.padding(horizontal = 12.dp, vertical = 5.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    AppText(if (active) "●" else "○", color = if (active) tc.ac else tc.td, fontSize = 12.sp)
-                    AppText(sf.name, color = if (active) tc.tx else tc.ts, fontSize = 11.sp, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
-                    AppText("×", color = tc.td, fontSize = 12.sp, modifier = Modifier.clickable { onDeleteSF(sf.id) })
+        SectionHeader("SAVED FILTERS", expanded = sfExpanded, onToggle = { sfExpanded = !sfExpanded })
+        if (sfExpanded) {
+            if (savedFilters.isNotEmpty()) {
+                ScrollableItems(savedFilters.size) {
+                    savedFilters.forEach { sf ->
+                        val active = activeSavedFilterId == sf.id
+                        HoverBox(modifier = Modifier.fillMaxWidth(), baseBg = if (active) tc.abg else Color.Transparent) {
+                            Row(
+                                Modifier.fillMaxWidth().clickable { onLoadFilter(sf) }.padding(horizontal = 12.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                AppText(if (active) "●" else "○", color = if (active) tc.ac else tc.td, fontSize = 12.sp)
+                                AppText(sf.name, color = if (active) tc.tx else tc.ts, fontSize = 11.sp, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                                AppText("×", color = tc.td, fontSize = 12.sp, modifier = Modifier.clickable { onDeleteSF(sf.id) })
+                            }
+                        }
+                    }
                 }
             }
-        }
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Box(
-                Modifier.fillMaxWidth().border(1.dp, tc.br, RoundedCornerShape(4.dp))
-                    .clickable(onClick = onOpenSFDialog).padding(vertical = 5.dp),
-                contentAlignment = Alignment.Center,
-            ) { AppText("+ Save current filter…", color = tc.td, fontSize = 11.sp) }
-            Box(
-                Modifier.fillMaxWidth().border(1.dp, Color(0xFFf85149).copy(.45f), RoundedCornerShape(4.dp))
-                    .background(Color(0xFFf85149).copy(.08f), RoundedCornerShape(4.dp))
-                    .clickable(onClick = onClearFilter).padding(vertical = 8.dp),
-                contentAlignment = Alignment.Center,
-            ) { AppText("Clear filters", color = Color(0xFFf85149), fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                PillBtn("Export", active = false, onClick = onExportFilters)
-                PillBtn("Import", active = false, onClick = onImportFilters)
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Box(
+                    Modifier.fillMaxWidth().border(1.dp, tc.br, RoundedCornerShape(4.dp))
+                        .clickable(onClick = onOpenSFDialog).padding(vertical = 5.dp),
+                    contentAlignment = Alignment.Center,
+                ) { AppText("+ Save current filter…", color = tc.td, fontSize = 11.sp) }
+                Box(
+                    Modifier.fillMaxWidth().border(1.dp, Color(0xFFf85149).copy(.45f), RoundedCornerShape(4.dp))
+                        .background(Color(0xFFf85149).copy(.08f), RoundedCornerShape(4.dp))
+                        .clickable(onClick = onClearFilter).padding(vertical = 8.dp),
+                    contentAlignment = Alignment.Center,
+                ) { AppText("Clear filters", color = Color(0xFFf85149), fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    PillBtn("Export", active = false, onClick = onExportFilters)
+                    PillBtn("Import", active = false, onClick = onImportFilters)
+                }
+                AppText("Drop filter .json here to import", color = tc.td, fontSize = 10.sp)
             }
-            AppText("Drop filter .json here to import", color = tc.td, fontSize = 10.sp)
         }
     }
+}
+
+// Bounded scrollable list that works inside a verticalScroll parent.
+// heightIn(max=X) breaks inside an unbounded parent; height(X) is reliable.
+@Composable
+private fun ScrollableItems(
+    itemCount: Int,
+    rowDp: Int = 28,
+    maxDp: Int = 150,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    if (itemCount == 0) return
+    val h = (itemCount * rowDp).coerceAtMost(maxDp).dp
+    Column(Modifier.fillMaxWidth().height(h).verticalScroll(rememberScrollState()), content = content)
 }
 
 @Composable

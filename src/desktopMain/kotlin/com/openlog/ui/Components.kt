@@ -114,14 +114,28 @@ fun Divider() {
 }
 
 @Composable
-fun SectionHeader(title: String, trailing: (@Composable RowScope.() -> Unit)? = null) {
+fun SectionHeader(
+    title: String,
+    trailing: (@Composable RowScope.() -> Unit)? = null,
+    expanded: Boolean? = null,
+    onToggle: (() -> Unit)? = null,
+) {
     val tc = tc()
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
+        Modifier.fillMaxWidth()
+            .then(if (onToggle != null) Modifier.clickable(onClick = onToggle) else Modifier)
+            .padding(horizontal = 12.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AppText(title, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
         trailing?.invoke(this)
+        if (expanded != null) {
+            Spacer(Modifier.width(6.dp))
+            Box(
+                Modifier.size(18.dp).background(tc.br.copy(.5f), RoundedCornerShape(3.dp)),
+                contentAlignment = Alignment.Center,
+            ) { AppText(if (expanded) "▾" else "▸", color = tc.ts, fontSize = 14.sp) }
+        }
     }
 }
 
