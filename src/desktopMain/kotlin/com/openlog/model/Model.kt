@@ -66,6 +66,8 @@ data class Filter(
 
 data class Highlighter(val id: String, val pattern: String, val regex: Boolean, val color: Color, val on: Boolean)
 
+enum class RuleTarget { MESSAGE, PID_TID }
+
 data class MessageRule(
     val id: String,
     val include: Boolean,
@@ -74,6 +76,7 @@ data class MessageRule(
     val tag: String? = null,
     val packagePrefix: String? = null,
     val enabled: Boolean = true,
+    val target: RuleTarget = RuleTarget.MESSAGE,
 )
 
 // ── Annotations (block model) ──────────────────────────────────────

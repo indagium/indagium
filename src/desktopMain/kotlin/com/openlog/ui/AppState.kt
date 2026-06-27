@@ -95,11 +95,6 @@ class AppState(
     var newSeqTag by mutableStateOf("")
     var newSeqEndTag by mutableStateOf("")
     var newSeqColor by mutableStateOf(SEQ_COLORS[0])
-    var newMsgRulePattern by mutableStateOf("")
-    var newMsgRuleRegex by mutableStateOf(false)
-    var newMsgRuleInclude by mutableStateOf(false)
-    var newMsgRuleTag by mutableStateOf("")
-    var newMsgRulePrefix by mutableStateOf("")
 
     init {
         if (restoreOnCreate) restoreAutosave()
@@ -154,6 +149,7 @@ class AppState(
         regex: Boolean,
         tag: String?,
         packagePrefix: String?,
+        target: RuleTarget = RuleTarget.MESSAGE,
     ) {
         if (pattern.isBlank()) return
         val rule = MessageRule(
@@ -163,9 +159,9 @@ class AppState(
             regex = regex,
             tag = tag?.trim()?.takeIf { it.isNotBlank() },
             packagePrefix = packagePrefix?.trim()?.takeIf { it.isNotBlank() },
+            target = target,
         )
         upFlt(tabId) { it.copy(messageRules = it.messageRules + rule) }
-        newMsgRulePattern = ""
     }
     fun toggleMessageRule(tabId: String, id: String) = upFlt(tabId) { f ->
         f.copy(messageRules = f.messageRules.map { if (it.id == id) it.copy(enabled = !it.enabled) else it })
@@ -894,6 +890,7 @@ private fun MessageRule.messageRuleToken(): String =
         tag.orEmpty(),
         packagePrefix.orEmpty(),
         enabled.toString(),
+        target.name,
     ).joinToString("|") { it.b64() }
 
 private fun String.messageRuleFromToken(): MessageRule? = runCatching {
@@ -907,6 +904,7 @@ private fun String.messageRuleFromToken(): MessageRule? = runCatching {
         tag = parts[4].takeIf { it.isNotBlank() },
         packagePrefix = parts[5].takeIf { it.isNotBlank() },
         enabled = parts[6].toBoolean(),
+        target = if (parts.size > 7) runCatching { RuleTarget.valueOf(parts[7]) }.getOrElse { RuleTarget.MESSAGE } else RuleTarget.MESSAGE,
     )
 }.getOrNull()
 

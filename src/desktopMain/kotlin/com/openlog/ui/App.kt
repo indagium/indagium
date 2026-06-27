@@ -21,7 +21,10 @@ import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import java.awt.Cursor as AwtCursor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -67,6 +70,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                 }
             }
         }
+        val dc by dragCursorOverride
         Box(
             Modifier.fillMaxSize().background(tc.bg)
                 .dragAndDropTarget(
@@ -75,6 +79,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     },
                     target = dropTarget,
                 )
+                .then(if (dc != null) Modifier.pointerHoverIcon(PointerIcon(dc!!), overrideDescendants = true) else Modifier)
         ) {
             Column(Modifier.fillMaxSize()) {
                 TabBar(state)
@@ -181,7 +186,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                 CtxItem("⇡", "Collapse to file start") { state.collapseToStartFromCtx() }
                                 CtxItem("⇣", "Collapse to file end") { state.collapseToEndFromCtx() }
                                 CtxItem("−m", "Hide messages like this") { state.hideMessagesLikeCtx() }
-                                CtxItem("+m", "Show only messages like this") { state.showOnlyMessagesLikeCtx() }
+                                CtxItem("+m", "Show messages like this") { state.showOnlyMessagesLikeCtx() }
                                 Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
                                 // Tag actions
                                 CtxItem("#",  "Include tag")    { state.addTagFilterFromCtx() }
@@ -381,6 +386,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     SettingsDialog(state) { state.settingsOpen = false }
                 }
             }
+
         }
     }
 }
@@ -491,11 +497,6 @@ private fun FileView(state: AppState, tab: LogTab) {
                 newSeqEndText = state.newSeqEndText, newSeqEndRegex = state.newSeqEndRegex,
                 newSeqStartTag = state.newSeqTag, newSeqEndTag = state.newSeqEndTag,
                 newSeqColor = state.newSeqColor,
-                newMsgRulePattern = state.newMsgRulePattern,
-                newMsgRuleRegex = state.newMsgRuleRegex,
-                newMsgRuleInclude = state.newMsgRuleInclude,
-                newMsgRuleTag = state.newMsgRuleTag,
-                newMsgRulePrefix = state.newMsgRulePrefix,
                 onToggleLevel       = { state.toggleLevel(tab.id, it) },
                 onSetFilterMode     = { state.setFilterMode(tab.id, it) },
                 onToggleTag         = { state.toggleTag(tab.id, it) },
@@ -515,16 +516,11 @@ private fun FileView(state: AppState, tab: LogTab) {
                 },
                 onToggleManualCollapse = { state.toggleManualCollapse(tab.id, it) },
                 onRemoveManualCollapse = { state.removeManualCollapse(tab.id, it) },
-                onAddMessageRule    = { include, pattern, regex, tag, prefix ->
-                    state.addMessageRule(tab.id, include, pattern, regex, tag, prefix)
+                onAddMessageRule    = { include, pattern, regex, tag, prefix, target ->
+                    state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
                 },
                 onToggleMessageRule = { state.toggleMessageRule(tab.id, it) },
                 onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
-                onSetNewMsgRulePattern = { state.newMsgRulePattern = it },
-                onSetNewMsgRuleRegex = { state.newMsgRuleRegex = it },
-                onSetNewMsgRuleInclude = { state.newMsgRuleInclude = it },
-                onSetNewMsgRuleTag = { state.newMsgRuleTag = it },
-                onSetNewMsgRulePrefix = { state.newMsgRulePrefix = it },
                 onMoveSeqUp         = { state.moveSequenceUp(it) },
                 onMoveSeqDown       = { state.moveSequenceDown(it) },
                 onSetNewSeqText     = { state.newSeqText = it },
@@ -548,7 +544,6 @@ private fun FileView(state: AppState, tab: LogTab) {
                 onToggleKwInTagRx   = { state.toggleKwInTagRx(tab.id) },
                 onAddPkgPrefix      = { state.addPkgPrefix(tab.id, it) },
                 onRemovePkgPrefix   = { state.removePkgPrefix(tab.id, it) },
-                onSetPidTidFilter   = { state.setPidTidFilter(tab.id, it) },
                 onExportFilters     = { state.exportFiltersToFile() },
                 onImportFilters     = { state.importFiltersFromFile() },
                 onImportFiltersFromFiles = { files -> files.forEach { state.importFiltersFromFile(it) } },
@@ -616,11 +611,6 @@ private fun CompareView(state: AppState) {
             newSeqEndText = state.newSeqEndText, newSeqEndRegex = state.newSeqEndRegex,
             newSeqStartTag = state.newSeqTag, newSeqEndTag = state.newSeqEndTag,
             newSeqColor = state.newSeqColor,
-            newMsgRulePattern = state.newMsgRulePattern,
-            newMsgRuleRegex = state.newMsgRuleRegex,
-            newMsgRuleInclude = state.newMsgRuleInclude,
-            newMsgRuleTag = state.newMsgRuleTag,
-            newMsgRulePrefix = state.newMsgRulePrefix,
             onToggleLevel       = { state.toggleLevel(tab.id, it) },
             onSetFilterMode     = { state.setFilterMode(tab.id, it) },
             onToggleTag         = { state.toggleTag(tab.id, it) },
@@ -640,16 +630,11 @@ private fun CompareView(state: AppState) {
             },
             onToggleManualCollapse = { state.toggleManualCollapse(tab.id, it) },
             onRemoveManualCollapse = { state.removeManualCollapse(tab.id, it) },
-            onAddMessageRule    = { include, pattern, regex, tag, prefix ->
-                state.addMessageRule(tab.id, include, pattern, regex, tag, prefix)
+            onAddMessageRule    = { include, pattern, regex, tag, prefix, target ->
+                state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
             },
             onToggleMessageRule = { state.toggleMessageRule(tab.id, it) },
             onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
-            onSetNewMsgRulePattern = { state.newMsgRulePattern = it },
-            onSetNewMsgRuleRegex = { state.newMsgRuleRegex = it },
-            onSetNewMsgRuleInclude = { state.newMsgRuleInclude = it },
-            onSetNewMsgRuleTag = { state.newMsgRuleTag = it },
-            onSetNewMsgRulePrefix = { state.newMsgRulePrefix = it },
             onMoveSeqUp         = { state.moveSequenceUp(it) },
             onMoveSeqDown       = { state.moveSequenceDown(it) },
             onSetNewSeqText     = { state.newSeqText = it },
@@ -673,7 +658,6 @@ private fun CompareView(state: AppState) {
             onToggleKwInTagRx   = { state.toggleKwInTagRx(tab.id) },
             onAddPkgPrefix      = { state.addPkgPrefix(tab.id, it) },
             onRemovePkgPrefix   = { state.removePkgPrefix(tab.id, it) },
-            onSetPidTidFilter   = { state.setPidTidFilter(tab.id, it) },
             onExportFilters     = { state.exportFiltersToFile() },
             onImportFilters     = { state.importFiltersFromFile() },
             onImportFiltersFromFiles = { files -> files.forEach { state.importFiltersFromFile(it) } },

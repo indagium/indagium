@@ -56,6 +56,9 @@ fun HoverBox(
 // Dividing by density converts px → dp so the divider tracks the cursor exactly.
 private fun activeWindow() = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
 
+// Non-null while any HDivider or VDivider is being dragged; App.kt reads this to show a full-window cursor overlay.
+internal val dragCursorOverride = mutableStateOf<AwtCursor?>(null)
+
 @Composable
 fun HDivider(onDelta: (Float) -> Unit) {
     val tc = tc()
@@ -73,16 +76,10 @@ fun HDivider(onDelta: (Float) -> Unit) {
             .onPointerEvent(PointerEventType.Exit)  { hovered = false }
             .pointerInput(density) {
                 detectDragGestures(
-                    onDragStart  = { dragging = true;  activeWindow()?.cursor = cursor },
-                    onDragEnd    = { dragging = false; activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
-                    onDragCancel = { dragging = false; activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
-                    onDrag = { change, dragAmount ->
-                        change.consume()
-                        onDelta(dragAmount.x / density)
-                        // Re-assert after every pointer event; Compose's hover tracking
-                        // can overwrite the window cursor between drag events otherwise.
-                        activeWindow()?.cursor = cursor
-                    },
+                    onDragStart  = { dragging = true;  dragCursorOverride.value = cursor; activeWindow()?.cursor = cursor },
+                    onDragEnd    = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
+                    onDragCancel = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
+                    onDrag = { change, dragAmount -> change.consume(); onDelta(dragAmount.x / density) },
                 )
             }
             .pointerHoverIcon(PointerIcon(cursor)),
@@ -106,14 +103,10 @@ fun VDivider(onDelta: (Float) -> Unit) {
             .onPointerEvent(PointerEventType.Exit)  { hovered = false }
             .pointerInput(density) {
                 detectDragGestures(
-                    onDragStart  = { dragging = true;  activeWindow()?.cursor = cursor },
-                    onDragEnd    = { dragging = false; activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
-                    onDragCancel = { dragging = false; activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
-                    onDrag = { change, dragAmount ->
-                        change.consume()
-                        onDelta(dragAmount.y / density)
-                        activeWindow()?.cursor = cursor
-                    },
+                    onDragStart  = { dragging = true;  dragCursorOverride.value = cursor; activeWindow()?.cursor = cursor },
+                    onDragEnd    = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
+                    onDragCancel = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
+                    onDrag = { change, dragAmount -> change.consume(); onDelta(dragAmount.y / density) },
                 )
             }
             .pointerHoverIcon(PointerIcon(cursor)),
