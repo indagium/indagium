@@ -20,9 +20,9 @@ import androidx.compose.ui.draganddrop.DragData
 import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.*
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.*
@@ -37,6 +37,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.zIndex
 import com.openlog.model.*
 import java.awt.FileDialog
 import java.awt.Frame
@@ -310,43 +313,6 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             DialogActionButton("Clear filters", active = true, danger = true) { state.confirmClearFilter() }
                             DialogActionButton("Cancel", active = false) { state.cancelClearFilter() }
-                        }
-                    }
-                }
-            }
-
-            // ── Tab overflow dropdown ─────────────────────────────────
-            if (state.tabOverflowOpen && state.tabOverflowIds.isNotEmpty()) {
-                val overflowTabs = state.tabs.filter { it.id in state.tabOverflowIds }
-                BoxWithConstraints(
-                    Modifier.fillMaxSize().clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() },
-                        onClick = { state.tabOverflowOpen = false },
-                    )
-                ) {
-                    Box(
-                        Modifier
-                            .align(Alignment.TopStart)
-                            .offset(y = 36.dp)
-                            .width(240.dp)
-                            .background(tc.p, RoundedCornerShape(7.dp))
-                            .border(1.dp, tc.br, RoundedCornerShape(7.dp)),
-                    ) {
-                        Column(Modifier.padding(vertical = 4.dp)) {
-                            overflowTabs.forEach { tab ->
-                                HoverBox(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    onClick = { state.moveTabToFront(tab.id); state.tabOverflowOpen = false },
-                                ) {
-                                    AppText(
-                                        tab.filename, color = tc.tx, fontSize = 12.sp,
-                                        fontFamily = MONO,
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                            }
                         }
                     }
                 }
@@ -837,29 +803,30 @@ private fun TabBar(state: AppState) {
 // Drag-and-drop reorder: press-and-move >8px to start drag; a 3dp accent line marks the drop point.
 @Composable
 private fun TabOverflowRow(state: AppState, modifier: Modifier) {
-    val tc      = tc()
-    val density = LocalDensity.current.density
-    val tabWidths  = remember { mutableStateMapOf<String, Int>() }
-    val tabXPx     = remember { mutableStateMapOf<String, Int>() }
-    var containerPx by remember { mutableStateOf(Int.MAX_VALUE) }
-    var dragTabId   by remember { mutableStateOf<String?>(null) }
+    val tc       = tc()
+    val density  = LocalDensity.current.density
+    val tabWidths    = remember { mutableStateMapOf<String, Int>() }
+    val tabXPx       = remember { mutableStateMapOf<String, Int>() }
+    var containerPx  by remember { mutableStateOf(Int.MAX_VALUE) }
+    var dragTabId    by remember { mutableStateOf<String?>(null) }
+    var dragOffsetX  by remember { mutableStateOf(0f) }
     var dropBeforeId by remember { mutableStateOf<String?>(null) }
+    var overflowOpen by remember { mutableStateOf(false) }
 
     SideEffect {
         val ids = state.tabs.map { it.id }.toSet()
         tabWidths.keys.retainAll(ids); tabXPx.keys.retainAll(ids)
     }
 
-    // Compute visible / overflow from measured widths.
     val (visibleTabs, overflowTabs) = remember(
         state.tabs, state.activeTabId, containerPx, tabWidths.toMap()
     ) {
         if (containerPx == Int.MAX_VALUE || tabWidths.isEmpty()) return@remember state.tabs to emptyList()
-        val ovBtnPx  = (64 * density).toInt()
-        val totalPx  = state.tabs.sumOf { tabWidths[it.id] ?: (160 * density).toInt() }
-        val needsOv  = totalPx > containerPx
-        val activeW  = tabWidths[state.activeTabId] ?: (160 * density).toInt()
-        var budget   = (if (needsOv) containerPx - ovBtnPx else containerPx) - activeW
+        val ovBtnPx = (40 * density).toInt()
+        val totalPx = state.tabs.sumOf { tabWidths[it.id] ?: (160 * density).toInt() }
+        val needsOv = totalPx > containerPx
+        val activeW = tabWidths[state.activeTabId] ?: (160 * density).toInt()
+        var budget  = (if (needsOv) containerPx - ovBtnPx else containerPx) - activeW
         val vis = mutableListOf<String>(); val ov = mutableListOf<String>()
         for (tab in state.tabs) {
             if (tab.id == state.activeTabId) continue
@@ -871,13 +838,11 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
         state.tabs.filter { it.id in visSet } to state.tabs.filter { it.id in ov }
     }
 
-    LaunchedEffect(overflowTabs.map { it.id }) { state.tabOverflowIds = overflowTabs.map { it.id } }
-
     Row(
         modifier
             .onSizeChanged { containerPx = it.width }
             .pointerInput("tabdrag") {
-                var downPos  = Offset.Zero
+                var downPos = Offset.Zero
                 var downId: String? = null
                 var dragging = false
                 awaitPointerEventScope {
@@ -886,7 +851,7 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
                         val ch = ev.changes.firstOrNull() ?: continue
                         when (ev.type) {
                             PointerEventType.Press -> {
-                                downPos = ch.position; dragging = false
+                                downPos = ch.position; dragging = false; dragOffsetX = 0f
                                 downId = tabXPx.entries
                                     .sortedByDescending { it.value }
                                     .firstOrNull { (_, x) -> ch.position.x.toInt() >= x }?.key
@@ -897,11 +862,17 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                 }
                                 if (dragging && dragTabId != null) {
                                     ch.consume()
-                                    val x = ch.position.x.toInt()
-                                    val over = tabXPx.entries
-                                        .sortedByDescending { it.value }
-                                        .firstOrNull { (_, ox) -> x >= ox }?.key
-                                    dropBeforeId = if (over != null && over != dragTabId) over else null
+                                    dragOffsetX = ch.position.x - downPos.x
+                                    // Drop target = first tab whose center is to the right of the dragged tab's current center
+                                    val tabStartX = tabXPx[dragTabId] ?: 0
+                                    val tabW      = tabWidths[dragTabId] ?: 0
+                                    val dragCenter = (tabStartX + tabW / 2 + dragOffsetX).toInt()
+                                    dropBeforeId = tabXPx.entries
+                                        .filter { (id, _) -> id != dragTabId }
+                                        .sortedBy { it.value }
+                                        .firstOrNull { (id, x) ->
+                                            dragCenter < x + (tabWidths[id] ?: 0) / 2
+                                        }?.key
                                 }
                             }
                             PointerEventType.Release -> {
@@ -909,7 +880,8 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                     val from = dragTabId; val to = dropBeforeId
                                     if (from != null && to != null) state.reorderTabs(from, to)
                                 }
-                                dragTabId = null; dropBeforeId = null; downId = null; dragging = false
+                                dragTabId = null; dragOffsetX = 0f; dropBeforeId = null
+                                downId = null; dragging = false
                             }
                             else -> {}
                         }
@@ -919,27 +891,60 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         visibleTabs.forEach { tab ->
+            val isDragging = tab.id == dragTabId
             Box(
                 Modifier.fillMaxHeight()
                     .onSizeChanged { tabWidths[tab.id] = it.width }
                     .onGloballyPositioned { tabXPx[tab.id] = it.positionInRoot().x.toInt() }
-                    .then(if (dropBeforeId == tab.id) Modifier.drawBehind {
+                    .zIndex(if (isDragging) 1f else 0f)
+                    .graphicsLayer { if (isDragging) translationX = dragOffsetX }
+                    .then(if (dropBeforeId == tab.id && !isDragging) Modifier.drawBehind {
                         drawRect(tc.ac, topLeft = Offset.Zero, size = Size(3f, size.height))
                     } else Modifier)
             ) {
                 TabItem(
                     tab = tab,
-                    isActive = tab.id == state.activeTabId && dragTabId != tab.id,
+                    isActive = tab.id == state.activeTabId,
                     showClose = true,
-                    dimmed = tab.id == dragTabId,
-                    onClick = { if (dragTabId == null) { state.activeTabId = tab.id; state.tabOverflowOpen = false } },
+                    onClick = { if (dragTabId == null) state.activeTabId = tab.id },
                     onClose = { state.closeTab(tab.id) },
                 )
             }
         }
         if (overflowTabs.isNotEmpty()) {
-            ToolbarBtn("▾ ${overflowTabs.size}", active = state.tabOverflowOpen) {
-                state.tabOverflowOpen = !state.tabOverflowOpen
+            Box(Modifier.fillMaxHeight()) {
+                ToolbarBtn("▾ ${overflowTabs.size}", active = overflowOpen) { overflowOpen = !overflowOpen }
+                if (overflowOpen) {
+                    Popup(
+                        alignment = Alignment.TopStart,
+                        offset = androidx.compose.ui.unit.IntOffset(0, (36 * density).toInt()),
+                        onDismissRequest = { overflowOpen = false },
+                        properties = PopupProperties(focusable = true),
+                    ) {
+                        Box(
+                            Modifier
+                                .width(240.dp)
+                                .background(tc.p, RoundedCornerShape(7.dp))
+                                .border(1.dp, tc.br, RoundedCornerShape(7.dp)),
+                        ) {
+                            Column(Modifier.padding(vertical = 4.dp)) {
+                                overflowTabs.forEach { tab ->
+                                    HoverBox(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        onClick = { state.moveTabToFront(tab.id); overflowOpen = false },
+                                    ) {
+                                        AppText(
+                                            tab.filename, color = tc.tx, fontSize = 12.sp,
+                                            fontFamily = MONO,
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1028,14 +1033,13 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
 
 // ── Shared ────────────────────────────────────────────────────────────
 @Composable
-private fun TabItem(tab: LogTab, isActive: Boolean, showClose: Boolean, dimmed: Boolean = false, onClick: () -> Unit, onClose: () -> Unit) {
+private fun TabItem(tab: LogTab, isActive: Boolean, showClose: Boolean, onClick: () -> Unit, onClose: () -> Unit) {
     val tc = tc()
     var hov by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxHeight()
             .background(if (isActive) tc.bg else if (hov) tc.p else tc.p2)
             .border(BorderStroke(2.dp, if (isActive) tc.ac else Color.Transparent))
-            .alpha(if (dimmed) 0.4f else 1f)
             .onPointerEvent(PointerEventType.Enter) { hov = true }
             .onPointerEvent(PointerEventType.Exit)  { hov = false }
             .clickable(onClick = onClick).padding(horizontal = 12.dp),

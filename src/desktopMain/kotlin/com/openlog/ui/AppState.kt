@@ -86,10 +86,6 @@ class AppState(
 
     val fpState = FilterPanelUiState()
 
-    // Tab overflow menu UI state (populated by TabOverflowRow from layout)
-    var tabOverflowOpen by mutableStateOf(false)
-    var tabOverflowIds  by mutableStateOf<List<String>>(emptyList())
-
     var newHlPat   by mutableStateOf("")
     var newHlRx    by mutableStateOf(false)
     var newHlColor by mutableStateOf(HL_COLORS[0])
