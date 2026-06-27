@@ -36,6 +36,18 @@ import com.openlog.utils.passesFilter
 import java.io.File
 import java.net.URI
 
+// Collapse/expand state for the filter panel. Held outside the composable so it survives
+// the panel being hidden and re-shown (FilterPanel is removed from the tree when invisible).
+class FilterPanelUiState {
+    var hlListExpanded      by mutableStateOf(true)
+    var lvlExpanded         by mutableStateOf(true)
+    var seqExpanded         by mutableStateOf(true)
+    var sfExpanded          by mutableStateOf(true)
+    var incPillsExpanded    by mutableStateOf(true)
+    var incMsgPillsExpanded by mutableStateOf(true)
+    var excMsgPillsExpanded by mutableStateOf(true)
+}
+
 @OptIn(
     ExperimentalLayoutApi::class,
     androidx.compose.foundation.ExperimentalFoundationApi::class,
@@ -44,6 +56,7 @@ import java.net.URI
 @Composable
 fun FilterPanel(
     tab: LogTab,
+    fpState: FilterPanelUiState,
     sequences: List<SequenceDef>,
     savedFilters: List<SavedFilter>,
     activeSavedFilterId: String?,
@@ -159,10 +172,6 @@ fun FilterPanel(
     }
     LaunchedEffect(filter.kwText) { if (filter.kwText != kwLastSent) kwDisplay = filter.kwText }
 
-    var incPillsExpanded by remember { mutableStateOf(false) }
-    LaunchedEffect(filter.activeTags.isEmpty(), filter.pkgPrefixes.isEmpty()) {
-        if (filter.activeTags.isNotEmpty() || filter.pkgPrefixes.isNotEmpty()) incPillsExpanded = true
-    }
     var msgRuleInput by remember(tab.id) { mutableStateOf(filter.kwInTag) }
     var msgRuleLastSent by remember(tab.id) { mutableStateOf(filter.kwInTag) }
     var msgRuleSearch by remember { mutableStateOf("") }
@@ -171,9 +180,6 @@ fun FilterPanel(
     var msgCandidatesHovered by remember { mutableStateOf(false) }
     var msgRuleSelectedIdx by remember { mutableStateOf(-1) }
     var msgRuleSelectedAction by remember { mutableStateOf(0) } // 0 = include, 1 = exclude
-    var incMsgPillsExpanded by remember { mutableStateOf(false) }
-    var excMsgPillsExpanded by remember { mutableStateOf(false) }
-
     LaunchedEffect(msgRuleInput) {
         val snap = msgRuleInput
         kotlinx.coroutines.delay(120)
@@ -188,16 +194,9 @@ fun FilterPanel(
         if (msgRuleFieldFocused || msgCandidatesHovered) showMsgRuleCandidates = true
         else { kotlinx.coroutines.delay(100); if (!msgRuleFieldFocused && !msgCandidatesHovered) showMsgRuleCandidates = false }
     }
-    LaunchedEffect(filter.messageRules.none { it.include }) {
-        if (filter.messageRules.any { it.include }) { incMsgPillsExpanded = true; excMsgPillsExpanded = false }
-    }
-    LaunchedEffect(filter.messageRules.none { !it.include }) {
-        if (filter.messageRules.any { !it.include }) { excMsgPillsExpanded = true; incMsgPillsExpanded = false }
-    }
-    var hlExpanded       by remember { mutableStateOf(true) }
-    var pidExpanded      by remember { mutableStateOf(true) }
-    var seqExpanded      by remember { mutableStateOf(true) }
-    var sfExpanded       by remember { mutableStateOf(true) }
+    var hlColorPickerOpen   by remember { mutableStateOf(false) }
+    var seqAddOpen          by remember { mutableStateOf(false) }
+    var seqColorPickerOpen  by remember { mutableStateOf(false) }
 
     // Unified candidates: PIDs when field is blank, message stems + matching PIDs when not blank.
     // Each candidate carries its RuleTarget so the correct rule type is added on click.
@@ -252,30 +251,6 @@ fun FilterPanel(
             )
             .verticalScroll(scroll),
     ) {
-        // ── Log Level ─────────────────────────────────────────────
-        SectionHeader("LOG LEVEL")
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            LogLevel.entries.forEach { lvl ->
-                val on = lvl in filter.levels
-                val color = lvl.defaultColor
-                Box(
-                    Modifier
-                        .size(22.dp)
-                        .background(if (on) color.copy(.28f) else Color.Transparent, RoundedCornerShape(4.dp))
-                        .border(1.dp, if (on) color else tc.br.copy(.45f), RoundedCornerShape(4.dp))
-                        .clickable { onToggleLevel(lvl) },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    AppText(lvl.key.toString(), color = if (on) color else tc.td.copy(.4f), fontSize = 11.sp, fontFamily = MONO, fontWeight = FontWeight.SemiBold)
-                }
-            }
-        }
-        Divider()
-
         // ── Filter mode tabs ──────────────────────────────────────
         Row(Modifier.fillMaxWidth()) {
             listOf("Tags" to FilterMode.TAGS, "Regex" to FilterMode.KEYWORD).forEach { (label, mode) ->
@@ -309,7 +284,7 @@ fun FilterPanel(
                 "TAGS",
                 trailing = if (totalActive > 0) ({
                     Row(
-                        Modifier.clickable { incPillsExpanded = !incPillsExpanded }
+                        Modifier.clickable { fpState.incPillsExpanded = !fpState.incPillsExpanded }
                             .padding(horizontal = 4.dp, vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(3.dp),
@@ -320,12 +295,12 @@ fun FilterPanel(
                             AppText("${filter.activeTags.size}+", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
                         if (filter.excludeTags.isNotEmpty())
                             AppText("${filter.excludeTags.size}−", color = exNeg, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                        AppText(if (incPillsExpanded) "▾" else "▸", color = tc.ts, fontSize = 10.sp)
+                        AppText(if (fpState.incPillsExpanded) "▾" else "▸", color = tc.ts, fontSize = 10.sp)
                     }
                 }) else null,
             )
             // Combined pills for pkg prefixes + included/excluded tags
-            if (totalActive > 0 && incPillsExpanded) {
+            if (totalActive > 0 && fpState.incPillsExpanded) {
                 FlowRow(
                     Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -489,32 +464,32 @@ fun FilterPanel(
                 if (msgInc.isNotEmpty()) {
                     Row(
                         Modifier.clickable {
-                            incMsgPillsExpanded = !incMsgPillsExpanded
-                            if (incMsgPillsExpanded) excMsgPillsExpanded = false
+                            fpState.incMsgPillsExpanded = !fpState.incMsgPillsExpanded
+                            if (fpState.incMsgPillsExpanded) fpState.excMsgPillsExpanded = false
                         }.padding(horizontal = 4.dp, vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(3.dp),
                     ) {
                         AppText("${msgInc.size} included", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                        AppText(if (incMsgPillsExpanded) "▾" else "▸", color = tc.ac, fontSize = 10.sp)
+                        AppText(if (fpState.incMsgPillsExpanded) "▾" else "▸", color = tc.ac, fontSize = 10.sp)
                     }
                 }
                 if (msgExc.isNotEmpty()) {
                     Row(
                         Modifier.clickable {
-                            excMsgPillsExpanded = !excMsgPillsExpanded
-                            if (excMsgPillsExpanded) incMsgPillsExpanded = false
+                            fpState.excMsgPillsExpanded = !fpState.excMsgPillsExpanded
+                            if (fpState.excMsgPillsExpanded) fpState.incMsgPillsExpanded = false
                         }.padding(horizontal = 4.dp, vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(3.dp),
                     ) {
                         AppText("${msgExc.size} excluded", color = msgExNeg, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                        AppText(if (excMsgPillsExpanded) "▾" else "▸", color = msgExNeg, fontSize = 10.sp)
+                        AppText(if (fpState.excMsgPillsExpanded) "▾" else "▸", color = msgExNeg, fontSize = 10.sp)
                     }
                 }
             }) else null,
         )
-        if (msgInc.isNotEmpty() && incMsgPillsExpanded) {
+        if (msgInc.isNotEmpty() && fpState.incMsgPillsExpanded) {
             FlowRow(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -527,7 +502,7 @@ fun FilterPanel(
                 }
             }
         }
-        if (msgExc.isNotEmpty() && excMsgPillsExpanded) {
+        if (msgExc.isNotEmpty() && fpState.excMsgPillsExpanded) {
             FlowRow(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -645,65 +620,130 @@ fun FilterPanel(
         } // end TAGS-only MESSAGE RULES block
 
         // ── Highlighters ──────────────────────────────────────────
-        SectionHeader("HIGHLIGHTERS", expanded = hlExpanded, onToggle = { hlExpanded = !hlExpanded })
-        if (hlExpanded) {
-            if (filter.highlighters.isNotEmpty()) {
-                Column(Modifier.fillMaxWidth()) {
-                    filter.highlighters.forEach { hl ->
-                        Column {
-                            Row(
-                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
-                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+        // Trailing shows colored dots for each highlighter; clicking collapses/expands the list.
+        // The add form is always visible, matching the TAGS section pattern.
+        SectionHeader(
+            "HIGHLIGHTERS",
+            trailing = if (filter.highlighters.isNotEmpty()) ({
+                Row(
+                    Modifier.clickable { fpState.hlListExpanded = !fpState.hlListExpanded }
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    val onCount = filter.highlighters.count { it.on }
+                    if (onCount > 0)
+                        AppText("$onCount active", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                    val offCount = filter.highlighters.size - onCount
+                    if (offCount > 0)
+                        AppText("$offCount off", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                    AppText(if (fpState.hlListExpanded) "▾" else "▸", color = tc.ts, fontSize = 10.sp)
+                }
+            }) else null,
+        )
+        if (filter.highlighters.isNotEmpty() && fpState.hlListExpanded) {
+            Column(Modifier.fillMaxWidth()) {
+                filter.highlighters.forEach { hl ->
+                    Column {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Box(
+                                Modifier.size(12.dp).background(hl.color, RoundedCornerShape(2.dp))
+                                    .border(2.dp, if (colorPickerHlId == hl.id) tc.tx else hl.color, RoundedCornerShape(2.dp))
+                                    .clickable { colorPickerHlId = if (colorPickerHlId == hl.id) null else hl.id },
+                            )
+                            AppText((if (hl.regex) "/" else "") + hl.pattern + (if (hl.regex) "/i" else ""),
+                                color = if (hl.on) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                            AppText(if (hl.on) "●" else "○", color = if (hl.on) hl.color else tc.td,
+                                fontSize = 11.sp, modifier = Modifier.clickable { onToggleHl(hl.id) })
+                            AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onRemoveHl(hl.id) })
+                        }
+                        if (colorPickerHlId == hl.id) {
+                            FlowRow(
+                                Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp),
                             ) {
-                                Box(
-                                    Modifier.size(12.dp).background(hl.color, RoundedCornerShape(2.dp))
-                                        .border(2.dp, if (colorPickerHlId == hl.id) tc.tx else hl.color, RoundedCornerShape(2.dp))
-                                        .clickable { colorPickerHlId = if (colorPickerHlId == hl.id) null else hl.id },
-                                )
-                                AppText((if (hl.regex) "/" else "") + hl.pattern + (if (hl.regex) "/i" else ""),
-                                    color = if (hl.on) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
-                                AppText(if (hl.on) "●" else "○", color = if (hl.on) hl.color else tc.td,
-                                    fontSize = 11.sp, modifier = Modifier.clickable { onToggleHl(hl.id) })
-                                AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onRemoveHl(hl.id) })
-                            }
-                            if (colorPickerHlId == hl.id) {
-                                FlowRow(
-                                    Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                                    verticalArrangement = Arrangement.spacedBy(3.dp),
-                                ) {
-                                    HL_COLORS.forEach { c -> ColorSwatch(c, c == hl.color) { onSetHlColor(hl.id, c); colorPickerHlId = null } }
-                                }
+                                HL_COLORS.forEach { c -> ColorSwatch(c, c == hl.color) { onSetHlColor(hl.id, c); colorPickerHlId = null } }
                             }
                         }
                     }
                 }
             }
-            Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    InlineField(
-                        newHlPat, onSetNewHlPat, "text or /regex/…",
-                        Modifier.weight(1f).onPreviewKeyEvent { ev ->
-                            if (ev.type == KeyEventType.KeyDown && ev.key == Key.Enter && newHlPat.isNotBlank()) {
-                                onAddHl(newHlPat, newHlRx, newHlColor); true
-                            } else false
-                        },
-                    )
-                    PillBtn(".*", active = newHlRx, onClick = { onSetNewHlRx(!newHlRx) })
+        }
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            val doAddHl = {
+                if (newHlPat.isNotBlank()) {
+                    onAddHl(newHlPat, newHlRx, newHlColor)
+                    onSetNewHlPat("")
+                    val usedColors = (filter.highlighters.map { it.color } + newHlColor).toSet()
+                    val idx = HL_COLORS.indexOf(newHlColor)
+                    val next = (HL_COLORS.drop(idx + 1) + HL_COLORS).firstOrNull { it !in usedColors }
+                        ?: HL_COLORS[(idx + 1) % HL_COLORS.size]
+                    onSetNewHlColor(next)
                 }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(20.dp)
+                        .background(newHlColor, RoundedCornerShape(3.dp))
+                        .border(1.dp, if (hlColorPickerOpen) tc.tx else tc.br, RoundedCornerShape(3.dp))
+                        .clickable { hlColorPickerOpen = !hlColorPickerOpen },
+                )
+                InlineField(
+                    newHlPat, onSetNewHlPat, "text or /regex/…",
+                    Modifier.weight(1f).onPreviewKeyEvent { ev ->
+                        if (ev.type == KeyEventType.KeyDown && ev.key == Key.Enter) { doAddHl(); true }
+                        else false
+                    },
+                )
+                PillBtn(".*", active = newHlRx, onClick = { onSetNewHlRx(!newHlRx) })
+                PillBtn("+ Add", active = newHlPat.isNotBlank(), onClick = doAddHl)
+            }
+            if (hlColorPickerOpen) {
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(3.dp),
                     verticalArrangement = Arrangement.spacedBy(3.dp),
                 ) {
-                    HL_COLORS.forEach { c -> ColorSwatch(c, c == newHlColor) { onSetNewHlColor(c) } }
+                    HL_COLORS.forEach { c ->
+                        ColorSwatch(c, c == newHlColor) { onSetNewHlColor(c); hlColorPickerOpen = false }
+                    }
+                }
+            }
+        }
+        Divider()
+
+        // ── Log Level ─────────────────────────────────────────────
+        SectionHeader("LOG LEVEL", expanded = fpState.lvlExpanded, onToggle = { fpState.lvlExpanded = !fpState.lvlExpanded })
+        if (fpState.lvlExpanded) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                LogLevel.entries.forEach { lvl ->
+                    val on = lvl in filter.levels
+                    val color = lvl.defaultColor
+                    Box(
+                        Modifier
+                            .size(22.dp)
+                            .background(if (on) color.copy(.28f) else Color.Transparent, RoundedCornerShape(4.dp))
+                            .border(1.dp, if (on) color else tc.br.copy(.45f), RoundedCornerShape(4.dp))
+                            .clickable { onToggleLevel(lvl) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        AppText(lvl.key.toString(), color = if (on) color else tc.td.copy(.4f), fontSize = 11.sp, fontFamily = MONO, fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
         }
         Divider()
 
         // ── Sequences ─────────────────────────────────────────────
-        SectionHeader("SEQUENCES", expanded = seqExpanded, onToggle = { seqExpanded = !seqExpanded })
-        if (seqExpanded) {
+        SectionHeader("SEQUENCES", expanded = fpState.seqExpanded, onToggle = { fpState.seqExpanded = !fpState.seqExpanded })
+        if (fpState.seqExpanded) {
             CheckRow(filter.seqOn, { onToggleSeq() }) {
                 AppText("Group sequences", color = tc.ts, fontSize = 12.sp, modifier = Modifier.weight(1f))
             }
@@ -813,26 +853,58 @@ fun FilterPanel(
                     }
                 }
             }
-            Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    InlineField(newSeqText, onSetNewSeqText, "start message…", Modifier.weight(1f))
-                    PillBtn(".*", active = newSeqRegex) { onSetNewSeqRx(!newSeqRegex) }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    InlineField(newSeqEndText, onSetNewSeqEndText, "end message (optional)…", Modifier.weight(1f))
-                    PillBtn(".*", active = newSeqEndRegex) { onSetNewSeqEndRx(!newSeqEndRegex) }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    InlineField(newSeqStartTag, onSetNewSeqStartTag, "start tag (optional)…", Modifier.weight(1f))
-                    InlineField(newSeqEndTag, onSetNewSeqEndTag, "end tag (optional)…", Modifier.weight(1f))
-                }
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    SEQ_COLORS.forEach { c -> ColorSwatch(c, c == newSeqColor) { onSetNewSeqColor(c) } }
-                    PillBtn("+ Add", active = newSeqText.isNotBlank()) {
-                        onAddSeq(newSeqText, newSeqRegex, newSeqColor, newSeqStartTag, newSeqEndText, newSeqEndRegex, newSeqEndTag)
+            Row(
+                Modifier.fillMaxWidth()
+                    .clickable { seqAddOpen = !seqAddOpen }
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                AppText(
+                    "+ New sequence…",
+                    color = if (seqAddOpen) tc.ac else tc.td,
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                AppText(if (seqAddOpen) "▾" else "▸", color = tc.ts, fontSize = 10.sp)
+            }
+            if (seqAddOpen) {
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        InlineField(newSeqText, onSetNewSeqText, "start message…", Modifier.weight(1f))
+                        PillBtn(".*", active = newSeqRegex) { onSetNewSeqRx(!newSeqRegex) }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        InlineField(newSeqEndText, onSetNewSeqEndText, "end message (optional)…", Modifier.weight(1f))
+                        PillBtn(".*", active = newSeqEndRegex) { onSetNewSeqEndRx(!newSeqEndRegex) }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        InlineField(newSeqStartTag, onSetNewSeqStartTag, "start tag (optional)…", Modifier.weight(1f))
+                        InlineField(newSeqEndTag, onSetNewSeqEndTag, "end tag (optional)…", Modifier.weight(1f))
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier.size(20.dp)
+                                .background(newSeqColor, RoundedCornerShape(3.dp))
+                                .border(1.dp, if (seqColorPickerOpen) tc.tx else tc.br, RoundedCornerShape(3.dp))
+                                .clickable { seqColorPickerOpen = !seqColorPickerOpen },
+                        )
+                        Spacer(Modifier.weight(1f))
+                        PillBtn("+ Add", active = newSeqText.isNotBlank()) {
+                            onAddSeq(newSeqText, newSeqRegex, newSeqColor, newSeqStartTag, newSeqEndText, newSeqEndRegex, newSeqEndTag)
+                            seqAddOpen = false
+                            seqColorPickerOpen = false
+                        }
+                    }
+                    if (seqColorPickerOpen) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            SEQ_COLORS.forEach { c ->
+                                ColorSwatch(c, c == newSeqColor) { onSetNewSeqColor(c); seqColorPickerOpen = false }
+                            }
+                        }
                     }
                 }
             }
@@ -840,8 +912,8 @@ fun FilterPanel(
         Divider()
 
         // ── Saved Filters ─────────────────────────────────────────
-        SectionHeader("SAVED FILTERS", expanded = sfExpanded, onToggle = { sfExpanded = !sfExpanded })
-        if (sfExpanded) {
+        SectionHeader("SAVED FILTERS", expanded = fpState.sfExpanded, onToggle = { fpState.sfExpanded = !fpState.sfExpanded })
+        if (fpState.sfExpanded) {
             if (savedFilters.isNotEmpty()) {
                 ScrollableItems(savedFilters.size) {
                     savedFilters.forEach { sf ->

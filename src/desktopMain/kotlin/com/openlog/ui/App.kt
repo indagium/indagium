@@ -491,7 +491,7 @@ private fun FileView(state: AppState, tab: LogTab) {
             FilterPanel(
                 tab = tab, sequences = state.sequences, savedFilters = state.savedFilters,
                 activeSavedFilterId = state.activeSavedFilterId(tab.id),
-                tagUsage = state.tagUsage,
+                tagUsage = state.tagUsage, fpState = state.fpState,
                 newHlPat = state.newHlPat, newHlRx = state.newHlRx, newHlColor = state.newHlColor,
                 newSeqText = state.newSeqText, newSeqRegex = state.newSeqRegex,
                 newSeqEndText = state.newSeqEndText, newSeqEndRegex = state.newSeqEndRegex,
@@ -606,6 +606,7 @@ private fun CompareView(state: AppState) {
         FilterPanel(
             tab = tab, sequences = state.sequences, savedFilters = state.savedFilters,
             activeSavedFilterId = state.activeSavedFilterId(tab.id), tagUsage = state.tagUsage,
+            fpState = state.fpState,
             newHlPat = state.newHlPat, newHlRx = state.newHlRx, newHlColor = state.newHlColor,
             newSeqText = state.newSeqText, newSeqRegex = state.newSeqRegex,
             newSeqEndText = state.newSeqEndText, newSeqEndRegex = state.newSeqEndRegex,

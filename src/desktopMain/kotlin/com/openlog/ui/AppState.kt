@@ -84,6 +84,8 @@ class AppState(
     var pendingClearFilterTabId by mutableStateOf<String?>(null)
     var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
 
+    val fpState = FilterPanelUiState()
+
     var newHlPat   by mutableStateOf("")
     var newHlRx    by mutableStateOf(false)
     var newHlColor by mutableStateOf(HL_COLORS[0])
