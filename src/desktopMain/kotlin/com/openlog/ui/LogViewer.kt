@@ -322,7 +322,7 @@ fun LogViewer(
                         itemOnSelRow = { id, multi, range ->
                             onSelRow(id, multi, range)
                             if (!multi && !range) {
-                                localAllSelected = setOf(id)
+                                if (localAllSelected.size <= 1) localAllSelected = setOf(id)
                                 val idx = allItems.indexOfFirst { item ->
                                     when (item) {
                                         is LogItem.Row -> item.entry.id == id
