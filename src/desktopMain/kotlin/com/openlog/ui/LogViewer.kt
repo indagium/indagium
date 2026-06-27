@@ -5,8 +5,10 @@ package com.openlog.ui
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
@@ -151,9 +153,10 @@ fun LogViewer(
             itemOnSelRowRange: (List<Int>) -> Unit = onSelRowRange,
             // Wraps the outer 5-arg onCtxMenu; callers may inject a different selectedIds set.
             itemOnCtxMenu: (Int, Float, Float, String) -> Unit = { id, x, y, sel -> onCtxMenu(id, x, y, sel, emptySet()) },
+            listState: LazyListState = rememberLazyListState(),
         ) {
             if (listItems.isEmpty()) { EmptyState(tc, totalCnt, onClearFilter); return }
-            val lazyState = rememberLazyListState()
+            val lazyState = listState
             val hScroll   = rememberScrollState()
             val visibleIds = remember(listItems) {
                 listItems.map { item ->
@@ -252,6 +255,10 @@ fun LogViewer(
             val density = LocalDensity.current.density
             val effectiveSplitDp = if (splitDp < 0f) maxOf(50f, (containerH - 10f) / 2f) else splitDp
 
+            // Hoisted lazy state for the Original panel so the Filtered panel can scroll it.
+            val allLazyState = rememberLazyListState()
+            val syncScope    = rememberCoroutineScope()
+
             // Independent selection for the "Original" panel so clicks there don't
             // highlight rows in the "Filtered" panel and vice-versa.
             var localAllSelected by remember(tab.id) { mutableStateOf(emptySet<Int>()) }
@@ -296,6 +303,7 @@ fun LogViewer(
                         itemOnSelRow = allOnSelRow,
                         itemOnSelRowRange = allOnSelRowRange,
                         itemOnCtxMenu = { id, x, y, sel -> onCtxMenu(id, x, y, sel, localAllSelected) },
+                        listState = allLazyState,
                     )
                 }
                 VDivider { delta ->
@@ -303,10 +311,30 @@ fun LogViewer(
                     splitDp = (cur + delta).coerceIn(50f, (containerH - 60f).coerceAtLeast(100f))
                 }
                 // Panel2 fills the rest with weight(1f).
+                // Clicking a row here scrolls the Original panel to the same entry.
                 Column(Modifier.fillMaxWidth().weight(1f)) {
                     SectionBanner("Filtered — $visCnt lines", tc.ac, tc)
                     ColHeader(hasPidTid)
-                    ItemList(items, rowBoundsAbs, boxPosY)
+                    ItemList(
+                        listItems = items,
+                        boundsMap = rowBoundsAbs,
+                        posY = boxPosY,
+                        itemOnSelRow = { id, multi, range ->
+                            onSelRow(id, multi, range)
+                            if (!multi && !range) {
+                                val idx = allItems.indexOfFirst { item ->
+                                    when (item) {
+                                        is LogItem.Row -> item.entry.id == id
+                                        is LogItem.SeqHeader -> item.entry.id == id
+                                        is LogItem.ManualHeader -> item.entry.id == id
+                                    }
+                                }
+                                if (idx >= 0) syncScope.launch {
+                                    allLazyState.animateScrollToItem(maxOf(0, idx - 2))
+                                }
+                            }
+                        },
+                    )
                 }
             }
         } else {

@@ -86,6 +86,10 @@ class AppState(
 
     val fpState = FilterPanelUiState()
 
+    // Tab overflow menu UI state (populated by TabOverflowRow from layout)
+    var tabOverflowOpen by mutableStateOf(false)
+    var tabOverflowIds  by mutableStateOf<List<String>>(emptyList())
+
     var newHlPat   by mutableStateOf("")
     var newHlRx    by mutableStateOf(false)
     var newHlColor by mutableStateOf(HL_COLORS[0])
@@ -664,6 +668,17 @@ class AppState(
         val t = emptyWorkspaceTab().copy(id = "t$n")
         tabs = tabs + t; activeTabId = t.id
     }
+    fun moveTabToFront(tabId: String) {
+        val tab = tabs.find { it.id == tabId } ?: return
+        tabs = listOf(tab) + tabs.filter { it.id != tabId }
+        activeTabId = tabId
+    }
+    fun reorderTabs(fromId: String, beforeId: String) {
+        val from = tabs.find { it.id == fromId } ?: return
+        val without = tabs.filter { it.id != fromId }
+        val idx = without.indexOfFirst { it.id == beforeId }.takeIf { it >= 0 } ?: without.size
+        tabs = without.take(idx) + from + without.drop(idx)
+    }
     fun closeTab(tabId: String) {
         val next = tabs.filter { it.id != tabId }
         if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
@@ -672,11 +687,14 @@ class AppState(
         tabs = next
     }
     fun openFile(file: File) {
-        val n = tabCounter++  // capture on calling thread before launching
-        isLoading = true
         val path = file.absolutePath
         recentFiles = (listOf(path) + recentFiles.filter { it != path }).take(30)
         recentMenuOpen = false
+        // Switch to existing tab if this file is already open
+        val existing = tabs.find { it.sourcePath == path }
+        if (existing != null) { activeTabId = existing.id; return }
+        val n = tabCounter++  // capture on calling thread before launching
+        isLoading = true
         ioScope.launch {
             val logData = runCatching { parseLogcat(file) }.getOrElse { emptyList() }
             val t = mkTab("t$n", file.name, logData).copy(sourcePath = path)
