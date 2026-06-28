@@ -35,38 +35,26 @@ class SplitViewAndTabRegressionTest {
 
     @Test
     fun filteredRangeSelectionMirrorsIntoOriginalPanel() {
-        val currentOriginalSelection = setOf(1, 2)
-
         val next = nextOriginalSelectionAfterFilteredSelection(
-            currentOriginalSelection = currentOriginalSelection,
             filteredSelection = setOf(4, 5, 6),
-            singlePlainClick = false,
         )
 
         assertEquals(setOf(4, 5, 6), next)
     }
 
     @Test
-    fun filteredSingleClickPreservesExistingOriginalRangeSelection() {
-        val currentOriginalSelection = setOf(1, 2)
-
+    fun filteredSingleClickReplacesExistingOriginalRangeSelection() {
         val next = nextOriginalSelectionAfterFilteredSelection(
-            currentOriginalSelection = currentOriginalSelection,
             filteredSelection = setOf(4),
-            singlePlainClick = true,
         )
 
-        assertEquals(setOf(1, 2), next)
+        assertEquals(setOf(4), next)
     }
 
     @Test
     fun filteredSingleClickMirrorsWhenOriginalSelectionIsNotARange() {
-        val currentOriginalSelection = setOf(1)
-
         val next = nextOriginalSelectionAfterFilteredSelection(
-            currentOriginalSelection = currentOriginalSelection,
             filteredSelection = setOf(4),
-            singlePlainClick = true,
         )
 
         assertEquals(setOf(4), next)

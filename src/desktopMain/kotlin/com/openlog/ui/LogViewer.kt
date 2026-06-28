@@ -45,12 +45,7 @@ private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
         }
     }
 
-internal fun nextOriginalSelectionAfterFilteredSelection(
-    currentOriginalSelection: Set<Int>,
-    filteredSelection: Set<Int>,
-    singlePlainClick: Boolean,
-): Set<Int> =
-    if (singlePlainClick && currentOriginalSelection.size > 1) currentOriginalSelection else filteredSelection
+internal fun nextOriginalSelectionAfterFilteredSelection(filteredSelection: Set<Int>): Set<Int> = filteredSelection
 
 internal fun visibleRowRangeIds(fromId: Int, toId: Int, visibleIds: List<Int>): List<Int> {
     val a = visibleIds.indexOf(fromId)
@@ -369,9 +364,7 @@ fun LogViewer(
                             onSelRow(id, multi, range)
                             if (!multi && !range) {
                                 localAllSelected = nextOriginalSelectionAfterFilteredSelection(
-                                    currentOriginalSelection = localAllSelected,
                                     filteredSelection = setOf(id),
-                                    singlePlainClick = true,
                                 )
                                 val idx = allItems.indexOfFirst { item ->
                                     when (item) {
@@ -388,9 +381,7 @@ fun LogViewer(
                         itemOnSelRowRange = { ids ->
                             onSelRowRange(ids)
                             localAllSelected = nextOriginalSelectionAfterFilteredSelection(
-                                currentOriginalSelection = localAllSelected,
                                 filteredSelection = ids.toSet(),
-                                singlePlainClick = false,
                             )
                         },
                         panelKey = "${tab.id}:filtered",
