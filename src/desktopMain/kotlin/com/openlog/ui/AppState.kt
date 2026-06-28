@@ -5,7 +5,6 @@ import androidx.compose.ui.graphics.Color
 import com.openlog.model.*
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
-import com.openlog.utils.computeSeqGroups
 import com.openlog.utils.parseLogcat
 import com.openlog.utils.passesFilter
 import java.awt.FileDialog
@@ -472,9 +471,28 @@ class AppState(
     fun toggleGroup(tabId: String, gid: String) = upTab(tabId) { t ->
         t.copy(expanded = if (gid in t.expanded) t.expanded - gid else t.expanded + gid)
     }
+    private fun visibleExpandableGroupIds(t: LogTab): Set<String> {
+        var expanded = t.expanded
+        while (true) {
+            fun idsFrom(applyFilter: Boolean): Set<String> =
+                computeItems(t.copy(expanded = expanded), sequences, applyFilter)
+                    .mapNotNull { item ->
+                        when (item) {
+                            is LogItem.SeqHeader -> item.gid
+                            is LogItem.ManualHeader -> item.gid
+                            is LogItem.Row -> null
+                        }
+                    }
+                    .toSet()
+
+            val next = expanded + idsFrom(applyFilter = true) +
+                if (t.showUnfiltered) idsFrom(applyFilter = false) else emptySet()
+            if (next == expanded) return expanded
+            expanded = next
+        }
+    }
     fun expandAll(tabId: String) = upTab(tabId) { t ->
-        val groups = computeSeqGroups(t.logData, sequences)
-        t.copy(expanded = (groups.map { it.gid } + groups.flatMap { g -> g.nested.map { it.gid } } + t.manualBlocks.map { it.id }).toSet())
+        t.copy(expanded = visibleExpandableGroupIds(t))
     }
     fun collapseAll(tabId: String) = upTab(tabId) { it.copy(expanded = emptySet()) }
     fun toggleUnfiltered(tabId: String) = upTab(tabId) { it.copy(showUnfiltered = !it.showUnfiltered) }

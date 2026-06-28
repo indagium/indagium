@@ -158,6 +158,17 @@ fun computeItems(tab: LogTab, sequences: List<SequenceDef>, applyFilter: Boolean
             segment.clear()
         }
     }
+    fun nestedManualItems(items: List<LogItem>, manualColor: Color): List<LogItem> =
+        items.map { item ->
+            when (item) {
+                is LogItem.Row -> item.copy(
+                    indent = item.indent + 1,
+                    groupColor = item.groupColor ?: manualColor,
+                )
+                is LogItem.SeqHeader -> item.copy(indent = item.indent + 1)
+                is LogItem.ManualHeader -> item
+            }
+        }
 
     var i = 0
     while (i < data.size) {
@@ -173,9 +184,9 @@ fun computeItems(tab: LogTab, sequences: List<SequenceDef>, applyFilter: Boolean
         val expanded = block.id in tab.expanded
         result += LogItem.ManualHeader(headerEntry, block.id, block.direction, expanded, manual.range.count(), block.color)
         if (expanded) {
-            manual.range.forEach { idx ->
-                if (data[idx].id != block.anchorId) result += LogItem.Row(data[idx], 1, block.color)
-            }
+            val expandedItems = sequenceItems(manual.range.map { data[it] })
+                .filterNot { item -> item is LogItem.Row && item.entry.id == block.anchorId }
+            result += nestedManualItems(expandedItems, block.color)
         }
         i = manual.range.last + 1
     }

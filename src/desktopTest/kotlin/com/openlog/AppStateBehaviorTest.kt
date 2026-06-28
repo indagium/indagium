@@ -4,6 +4,7 @@ import com.openlog.model.AnnBlock
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.LogEntry
+import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
 import com.openlog.model.SequenceDef
 import com.openlog.model.ThemePreset
@@ -12,6 +13,7 @@ import com.openlog.model.CtxMenuState
 import androidx.compose.ui.graphics.Color
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.mkTab
+import com.openlog.utils.computeItems
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -87,6 +89,165 @@ class AppStateBehaviorTest {
         assertEquals(listOf("t2", "t3", "t4", "t5", "t1"), state.tabs.map { it.id })
         assertSame(hidden, state.tabs.last())
         assertEquals(setOf(1), state.activeTab()?.selected)
+    }
+
+    @Test
+    fun expandAllUsesFilteredVisibleSequenceGroupIds() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Drop", "drop start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Drop", "drop child"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Keep", "keep start"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "Keep", "keep child"),
+        )
+        val state = AppState()
+        state.sequences = listOf(
+            SequenceDef("drop", "drop start", priority = 1, color = Color.Red, tag = "Drop"),
+            SequenceDef("keep", "keep start", priority = 2, color = Color.Blue, tag = "Keep"),
+        )
+        state.tabs = listOf(
+            mkTab("log", "test.log", logs).copy(
+                filter = Filter(mode = FilterMode.TAGS, activeTags = setOf("Keep")),
+            ),
+        )
+
+        state.expandAll("log")
+
+        val tab = state.tabs.single()
+        val header = computeItems(tab, state.sequences, applyFilter = true)
+            .filterIsInstance<LogItem.SeqHeader>()
+            .single()
+        assertEquals("sg_keep_0", header.gid)
+        assertTrue(header.expanded)
+    }
+
+    @Test
+    fun expandAllAlsoExpandsOriginalPanelSequencesWhenUnfilteredIsShown() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Drop", "drop start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Drop", "drop child"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Keep", "keep start"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "Keep", "keep child"),
+        )
+        val state = AppState()
+        state.sequences = listOf(
+            SequenceDef("drop", "drop start", priority = 1, color = Color.Red, tag = "Drop"),
+            SequenceDef("keep", "keep start", priority = 2, color = Color.Blue, tag = "Keep"),
+        )
+        state.tabs = listOf(
+            mkTab("log", "test.log", logs).copy(
+                filter = Filter(mode = FilterMode.TAGS, activeTags = setOf("Keep")),
+                showUnfiltered = true,
+            ),
+        )
+
+        state.expandAll("log")
+
+        val originalHeaders = computeItems(state.tabs.single(), state.sequences, applyFilter = false)
+            .filterIsInstance<LogItem.SeqHeader>()
+        assertEquals(listOf("sg_drop_0", "sg_keep_2"), originalHeaders.map { it.gid })
+        assertTrue(originalHeaders.all { it.expanded })
+    }
+
+    @Test
+    fun expandAllExpandsSequencesAfterManualCollapseToStart() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "intro"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "App", "manual anchor"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Seq", "flow start"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "Seq", "flow child"),
+        )
+        val block = com.openlog.model.ManualCollapseBlock(
+            id = "m1",
+            anchorId = 2,
+            direction = com.openlog.model.ManualCollapseDirection.TO_START,
+        )
+        val state = AppState()
+        state.sequences = listOf(SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq"))
+        state.tabs = listOf(
+            mkTab("log", "test.log", logs).copy(manualBlocks = listOf(block)),
+        )
+
+        state.expandAll("log")
+
+        val headers = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
+            .filterIsInstance<LogItem.SeqHeader>()
+        assertEquals(listOf("sg_flow_0"), headers.map { it.gid })
+        assertTrue(headers.single().expanded)
+    }
+
+    @Test
+    fun expandAllExpandsSequenceInsideManualCollapseToStart() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Seq", "flow start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Seq", "flow child"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "App", "manual anchor"),
+        )
+        val block = com.openlog.model.ManualCollapseBlock(
+            id = "m1",
+            anchorId = 3,
+            direction = com.openlog.model.ManualCollapseDirection.TO_START,
+        )
+        val state = AppState()
+        state.sequences = listOf(SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq"))
+        state.tabs = listOf(
+            mkTab("log", "test.log", logs).copy(manualBlocks = listOf(block)),
+        )
+
+        state.expandAll("log")
+
+        val items = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
+        val headers = items.filterIsInstance<LogItem.SeqHeader>()
+        assertEquals(listOf("sg_flow_0"), headers.map { it.gid })
+        assertTrue(headers.single().expanded)
+        assertEquals(listOf(2), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+    }
+
+    @Test
+    fun expandAllExpandsSequenceWhenManualCollapseAnchorStartsSequence() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "intro"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Seq", "flow start"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Seq", "flow child"),
+        )
+        val block = com.openlog.model.ManualCollapseBlock(
+            id = "m1",
+            anchorId = 2,
+            direction = com.openlog.model.ManualCollapseDirection.TO_START,
+        )
+        val state = AppState()
+        state.sequences = listOf(SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq"))
+        state.tabs = listOf(
+            mkTab("log", "test.log", logs).copy(manualBlocks = listOf(block)),
+        )
+
+        state.expandAll("log")
+
+        val headers = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
+            .filterIsInstance<LogItem.SeqHeader>()
+        assertEquals(listOf("sg_flow_1"), headers.map { it.gid })
+        assertTrue(headers.single().expanded)
+    }
+
+    @Test
+    fun expandAllDoesNotPreExpandSequencesWhenSequenceGroupingIsOff() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Keep", "keep start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Keep", "keep child"),
+        )
+        val state = AppState()
+        state.sequences = listOf(SequenceDef("keep", "keep start", priority = 1, color = Color.Blue, tag = "Keep"))
+        state.tabs = listOf(
+            mkTab("log", "test.log", logs).copy(filter = Filter(seqOn = false)),
+        )
+
+        state.expandAll("log")
+        state.toggleSeq("log")
+
+        val header = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
+            .filterIsInstance<LogItem.SeqHeader>()
+            .single()
+        assertEquals("sg_keep_0", header.gid)
+        assertTrue(!header.expanded)
     }
 
     @Test

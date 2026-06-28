@@ -151,6 +151,17 @@ fun LogViewer(
     val visCnt    = items.count { it is LogItem.Row }
     val totalCnt  = tab.logData.size
     val hasPidTid = remember(tab.id) { tab.logData.any { it.pid > 0 } }
+    val visibleGroupStates = remember(items) {
+        items.mapNotNull { item ->
+            when (item) {
+                is LogItem.SeqHeader -> item.expanded
+                is LogItem.ManualHeader -> item.expanded
+                is LogItem.Row -> null
+            }
+        }
+    }
+    val canExpandAll = visibleGroupStates.any { !it }
+    val canCollapseAll = visibleGroupStates.any { it }
 
     // Row bounds for global drag-select (plain HashMap avoids recomposition on scroll updates)
     val rowBoundsAbs = remember { HashMap<Int, Pair<Float, Float>>() }
@@ -166,9 +177,9 @@ fun LogViewer(
         ) {
             Spacer(Modifier.width(12.dp))
             AppText("$visCnt / $totalCnt entries", color = tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
-            PillBtn("Expand all",   active = false, onClick = onExpandAll)
+            PillBtn("Expand all",   active = canExpandAll, onClick = onExpandAll)
             Spacer(Modifier.width(4.dp))
-            PillBtn("Collapse all", active = false, onClick = onCollapseAll)
+            PillBtn("Collapse all", active = canCollapseAll, onClick = onCollapseAll)
             Spacer(Modifier.width(4.dp))
             PillBtn(if (tab.showUnfiltered) "⊘ Hide original" else "⊙ Unfiltered", active = tab.showUnfiltered, onClick = onToggleUnfiltered)
             Spacer(Modifier.width(8.dp))
