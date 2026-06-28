@@ -66,6 +66,8 @@ data class Filter(
 
 data class Highlighter(val id: String, val pattern: String, val regex: Boolean, val color: Color, val on: Boolean)
 
+enum class RuleTarget { MESSAGE, PID_TID }
+
 data class MessageRule(
     val id: String,
     val include: Boolean,
@@ -74,6 +76,7 @@ data class MessageRule(
     val tag: String? = null,
     val packagePrefix: String? = null,
     val enabled: Boolean = true,
+    val target: RuleTarget = RuleTarget.MESSAGE,
 )
 
 // ── Annotations (block model) ──────────────────────────────────────
@@ -135,6 +138,7 @@ data class AppSettings(
     val fontMono: Boolean = true,
     val defaultSaveDir: String? = null,
     val mostUsedTagLimit: Int = 5,
+    val visibleTabLimit: Int = 8,
 )
 
 enum class ThemePreset(val label: String) {
@@ -145,7 +149,16 @@ enum class ThemePreset(val label: String) {
 }
 
 // ── Misc ───────────────────────────────────────────────────────────
-data class CtxMenuState(val tabId: String, val entryId: Int, val x: Float, val y: Float, val selText: String)
+data class CtxMenuState(
+    val tabId: String,
+    val entryId: Int,
+    val x: Float,
+    val y: Float,
+    val selText: String,
+    /** Non-empty when the right-click came from a panel with its own local selection
+     *  (e.g. the "Original" panel in split/unfiltered view). Preferred over tab.selected. */
+    val panelSelectedIds: Set<Int> = emptySet(),
+)
 
 // Request to open the add-annotation dialog
 data class AddAnnRequest(

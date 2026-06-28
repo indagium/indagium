@@ -5,7 +5,6 @@ import androidx.compose.ui.graphics.Color
 import com.openlog.model.*
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
-import com.openlog.utils.computeSeqGroups
 import com.openlog.utils.parseLogcat
 import com.openlog.utils.passesFilter
 import java.awt.FileDialog
@@ -54,6 +53,7 @@ class AppState(
     var compareSplit         by mutableStateOf(0.5f)
     var compareFilterRight   by mutableStateOf(true)
     var isLoading            by mutableStateOf(false)
+    val logViewerScrollStateStore = LogViewerScrollStateStore()
 
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -84,6 +84,8 @@ class AppState(
     var pendingClearFilterTabId by mutableStateOf<String?>(null)
     var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
 
+    val fpState = FilterPanelUiState()
+
     var newHlPat   by mutableStateOf("")
     var newHlRx    by mutableStateOf(false)
     var newHlColor by mutableStateOf(HL_COLORS[0])
@@ -95,11 +97,6 @@ class AppState(
     var newSeqTag by mutableStateOf("")
     var newSeqEndTag by mutableStateOf("")
     var newSeqColor by mutableStateOf(SEQ_COLORS[0])
-    var newMsgRulePattern by mutableStateOf("")
-    var newMsgRuleRegex by mutableStateOf(false)
-    var newMsgRuleInclude by mutableStateOf(false)
-    var newMsgRuleTag by mutableStateOf("")
-    var newMsgRulePrefix by mutableStateOf("")
 
     init {
         if (restoreOnCreate) restoreAutosave()
@@ -154,6 +151,7 @@ class AppState(
         regex: Boolean,
         tag: String?,
         packagePrefix: String?,
+        target: RuleTarget = RuleTarget.MESSAGE,
     ) {
         if (pattern.isBlank()) return
         val rule = MessageRule(
@@ -163,9 +161,9 @@ class AppState(
             regex = regex,
             tag = tag?.trim()?.takeIf { it.isNotBlank() },
             packagePrefix = packagePrefix?.trim()?.takeIf { it.isNotBlank() },
+            target = target,
         )
         upFlt(tabId) { it.copy(messageRules = it.messageRules + rule) }
-        newMsgRulePattern = ""
     }
     fun toggleMessageRule(tabId: String, id: String) = upFlt(tabId) { f ->
         f.copy(messageRules = f.messageRules.map { if (it.id == id) it.copy(enabled = !it.enabled) else it })
@@ -473,9 +471,28 @@ class AppState(
     fun toggleGroup(tabId: String, gid: String) = upTab(tabId) { t ->
         t.copy(expanded = if (gid in t.expanded) t.expanded - gid else t.expanded + gid)
     }
+    private fun visibleExpandableGroupIds(t: LogTab): Set<String> {
+        var expanded = t.expanded
+        while (true) {
+            fun idsFrom(applyFilter: Boolean): Set<String> =
+                computeItems(t.copy(expanded = expanded), sequences, applyFilter)
+                    .mapNotNull { item ->
+                        when (item) {
+                            is LogItem.SeqHeader -> item.gid
+                            is LogItem.ManualHeader -> item.gid
+                            is LogItem.Row -> null
+                        }
+                    }
+                    .toSet()
+
+            val next = expanded + idsFrom(applyFilter = true) +
+                if (t.showUnfiltered) idsFrom(applyFilter = false) else emptySet()
+            if (next == expanded) return expanded
+            expanded = next
+        }
+    }
     fun expandAll(tabId: String) = upTab(tabId) { t ->
-        val groups = computeSeqGroups(t.logData, sequences)
-        t.copy(expanded = (groups.map { it.gid } + groups.flatMap { g -> g.nested.map { it.gid } } + t.manualBlocks.map { it.id }).toSet())
+        t.copy(expanded = visibleExpandableGroupIds(t))
     }
     fun collapseAll(tabId: String) = upTab(tabId) { it.copy(expanded = emptySet()) }
     fun toggleUnfiltered(tabId: String) = upTab(tabId) { it.copy(showUnfiltered = !it.showUnfiltered) }
@@ -666,19 +683,37 @@ class AppState(
         val t = emptyWorkspaceTab().copy(id = "t$n")
         tabs = tabs + t; activeTabId = t.id
     }
+    fun activateTab(tabId: String) {
+        if (tabs.any { it.id == tabId }) activeTabId = tabId
+    }
+    fun activateOverflowTab(tabId: String) {
+        val tab = tabs.find { it.id == tabId } ?: return
+        tabs = tabs.filter { it.id != tabId } + tab
+        activeTabId = tabId
+    }
+    fun reorderTabs(fromId: String, beforeId: String?) {
+        val from = tabs.find { it.id == fromId } ?: return
+        val without = tabs.filter { it.id != fromId }
+        val idx = beforeId?.let { id -> without.indexOfFirst { it.id == id }.takeIf { it >= 0 } } ?: without.size
+        tabs = without.take(idx) + from + without.drop(idx)
+    }
     fun closeTab(tabId: String) {
         val next = tabs.filter { it.id != tabId }
         if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
         if (compareTabId == tabId) compareTabId = next.firstOrNull()?.id ?: ""
         if (next.isEmpty()) compareMode = false
+        logViewerScrollStateStore.removeTab(tabId)
         tabs = next
     }
     fun openFile(file: File) {
-        val n = tabCounter++  // capture on calling thread before launching
-        isLoading = true
         val path = file.absolutePath
         recentFiles = (listOf(path) + recentFiles.filter { it != path }).take(30)
         recentMenuOpen = false
+        // Switch to existing tab if this file is already open
+        val existing = tabs.find { it.sourcePath == path }
+        if (existing != null) { activeTabId = existing.id; return }
+        val n = tabCounter++  // capture on calling thread before launching
+        isLoading = true
         ioScope.launch {
             val logData = runCatching { parseLogcat(file) }.getOrElse { emptyList() }
             val t = mkTab("t$n", file.name, logData).copy(sourcePath = path)
@@ -894,6 +929,7 @@ private fun MessageRule.messageRuleToken(): String =
         tag.orEmpty(),
         packagePrefix.orEmpty(),
         enabled.toString(),
+        target.name,
     ).joinToString("|") { it.b64() }
 
 private fun String.messageRuleFromToken(): MessageRule? = runCatching {
@@ -907,6 +943,7 @@ private fun String.messageRuleFromToken(): MessageRule? = runCatching {
         tag = parts[4].takeIf { it.isNotBlank() },
         packagePrefix = parts[5].takeIf { it.isNotBlank() },
         enabled = parts[6].toBoolean(),
+        target = if (parts.size > 7) runCatching { RuleTarget.valueOf(parts[7]) }.getOrElse { RuleTarget.MESSAGE } else RuleTarget.MESSAGE,
     )
 }.getOrNull()
 
@@ -923,6 +960,7 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     fontMono.toString(),
     defaultSaveDir.orEmpty(),
     mostUsedTagLimit.toString(),
+    visibleTabLimit.toString(),
 )
 
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
@@ -934,6 +972,7 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         fontMono = p[2].toBoolean(),
         defaultSaveDir = p[3].takeIf { it.isNotBlank() },
         mostUsedTagLimit = p[4].toIntOrNull() ?: 5,
+        visibleTabLimit = p.getOrNull(5)?.toIntOrNull()?.coerceIn(2, 20) ?: 8,
     )
 }.getOrNull()
 

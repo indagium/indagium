@@ -16,6 +16,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
+import java.awt.Cursor as AwtCursor
+import java.awt.KeyboardFocusManager
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -52,58 +54,66 @@ fun HoverBox(
 // ── Resizable dividers ───────────────────────────────────────────────
 // Compose pointer events are in layout pixels; panel widths are stored in dp.
 // Dividing by density converts px → dp so the divider tracks the cursor exactly.
+private fun activeWindow() = KeyboardFocusManager.getCurrentKeyboardFocusManager().activeWindow
+
+// Non-null while any HDivider or VDivider is being dragged; App.kt reads this to show a full-window cursor overlay.
+internal val dragCursorOverride = mutableStateOf<AwtCursor?>(null)
+
 @Composable
 fun HDivider(onDelta: (Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
+    val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.E_RESIZE_CURSOR) }
     var hovered  by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
+    // 10dp hit area keeps the pointer inside during normal drags.
+    // For fast drags the AWT window cursor is locked for the entire drag so no
+    // flicker occurs when the pointer briefly exits the visual stripe.
     Box(
         Modifier
-            .width(4.dp).fillMaxHeight()
-            .background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br)
+            .width(10.dp).fillMaxHeight()
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .onPointerEvent(PointerEventType.Exit)  { hovered = false }
             .pointerInput(density) {
                 detectDragGestures(
-                    onDragStart = { dragging = true },
-                    onDragEnd = { dragging = false },
-                    onDragCancel = { dragging = false },
-                    onDrag = { change, dragAmount ->
-                        change.consume()
-                        onDelta(dragAmount.x / density)
-                    },
+                    onDragStart  = { dragging = true;  dragCursorOverride.value = cursor; activeWindow()?.cursor = cursor },
+                    onDragEnd    = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
+                    onDragCancel = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
+                    onDrag = { change, dragAmount -> change.consume(); onDelta(dragAmount.x / density) },
                 )
             }
-            .pointerHoverIcon(PointerIcon.Hand)
-    )
+            .pointerHoverIcon(PointerIcon(cursor)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.width(4.dp).fillMaxHeight().background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br))
+    }
 }
 
 @Composable
 fun VDivider(onDelta: (Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
+    val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.S_RESIZE_CURSOR) }
     var hovered  by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
     Box(
         Modifier
-            .height(4.dp).fillMaxWidth()
-            .background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br)
+            .height(10.dp).fillMaxWidth()
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .onPointerEvent(PointerEventType.Exit)  { hovered = false }
             .pointerInput(density) {
                 detectDragGestures(
-                    onDragStart = { dragging = true },
-                    onDragEnd = { dragging = false },
-                    onDragCancel = { dragging = false },
-                    onDrag = { change, dragAmount ->
-                        change.consume()
-                        onDelta(dragAmount.y / density)
-                    },
+                    onDragStart  = { dragging = true;  dragCursorOverride.value = cursor; activeWindow()?.cursor = cursor },
+                    onDragEnd    = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
+                    onDragCancel = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
+                    onDrag = { change, dragAmount -> change.consume(); onDelta(dragAmount.y / density) },
                 )
             }
-            .pointerHoverIcon(PointerIcon.Hand)
-    )
+            .pointerHoverIcon(PointerIcon(cursor)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.fillMaxWidth().height(4.dp).background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br))
+    }
 }
 
 // ── Basic ────────────────────────────────────────────────────────────
@@ -202,17 +212,18 @@ fun PillBtn(label: String, active: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-fun ToolbarBtn(label: String, active: Boolean = false, onClick: () -> Unit) {
+fun ToolbarBtn(label: String, active: Boolean = false, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     Box(
-        Modifier
+        modifier
             .border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
             .background(if (active) tc.ac.copy(.15f) else if (hovered) tc.hv else Color.Transparent, RoundedCornerShape(4.dp))
             .clickable(onClick = onClick)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .padding(horizontal = 10.dp, vertical = 5.dp),
+        contentAlignment = Alignment.Center,
     ) { AppText(label, color = if (active) tc.ac else tc.ts, fontSize = 12.sp) }
 }
 
@@ -221,6 +232,7 @@ fun InlineField(
     value: String, onValue: (String) -> Unit,
     placeholder: String = "", modifier: Modifier = Modifier,
     fontSize: TextUnit = LocalFontBase.current.sp,
+    onClear: (() -> Unit)? = null,
 ) {
     val tc = tc()
     BasicTextField(
@@ -232,8 +244,21 @@ fun InlineField(
             .border(1.dp, tc.br, RoundedCornerShape(3.dp))
             .padding(horizontal = 7.dp, vertical = 4.dp),
         decorationBox = { inner ->
-            if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
-            inner()
+            if (onClear != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f)) {
+                        if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                        inner()
+                    }
+                    if (value.isNotEmpty()) {
+                        AppText("×", color = tc.td, fontSize = 14.sp,
+                            modifier = Modifier.clickable(onClick = onClear).padding(start = 4.dp))
+                    }
+                }
+            } else {
+                if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                inner()
+            }
         },
     )
 }

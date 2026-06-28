@@ -176,6 +176,60 @@ class SequenceGroupingTest {
     }
 
     @Test
+    fun expandedManualCollapseCanShowExpandedSequencesInsideItsRange() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Seq", "flow start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Seq", "flow child"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "App", "anchor"),
+        )
+        val block = ManualCollapseBlock("m1", 3, ManualCollapseDirection.TO_START, color = Color.Red)
+        val sequence = SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq")
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(),
+            expanded = setOf(block.id, "sg_flow_0"),
+            manualBlocks = listOf(block),
+        )
+
+        val items = computeItems(tab, listOf(sequence), applyFilter = true)
+
+        val sequenceHeader = items.filterIsInstance<LogItem.SeqHeader>().single()
+        assertEquals(1, sequenceHeader.entry.id)
+        assertTrue(sequenceHeader.expanded)
+        assertEquals(listOf(2), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+    }
+
+    @Test
+    fun expandedManualCollapseCanShowSequenceStartedByAnchor() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "before"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Seq", "flow start"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Seq", "flow child"),
+        )
+        val block = ManualCollapseBlock("m1", 2, ManualCollapseDirection.TO_START, color = Color.Red)
+        val sequence = SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq")
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(),
+            expanded = setOf(block.id, "sg_flow_1"),
+            manualBlocks = listOf(block),
+        )
+
+        val items = computeItems(tab, listOf(sequence), applyFilter = true)
+
+        val sequenceHeader = items.filterIsInstance<LogItem.SeqHeader>().single()
+        assertEquals(2, sequenceHeader.entry.id)
+        assertTrue(sequenceHeader.expanded)
+        assertEquals(listOf(1, 3), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+    }
+
+    @Test
     fun disabledManualCollapseDoesNotHideRows() {
         val logs = listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "App", "before"),

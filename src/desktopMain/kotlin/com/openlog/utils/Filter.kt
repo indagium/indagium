@@ -3,37 +3,55 @@ package com.openlog.utils
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.*
 
+// When positive message/PID rules (or the kwInTag live-search) are active they act as the
+// sole positive filter — every matching entry is shown from any tag, overriding the tag filter.
+// The tag/keyword filter only applies when NO positive rules are set.
+// Negative rules and exclusions always apply regardless.
 fun passesFilter(entry: LogEntry, filter: Filter): Boolean {
+    // ── Mandatory exclusions ─────────────────────────────────────────
     if (entry.level !in filter.levels) return false
     if (entry.tag in filter.excludeTags) return false
     if (filter.excludeKw.isNotBlank()) {
         val hay = "${entry.tag} ${entry.msg}"
-        val excluded = if (filter.excludeKwRegex)
+        val excl = if (filter.excludeKwRegex)
             runCatching { Regex(filter.excludeKw, RegexOption.IGNORE_CASE).containsMatchIn(hay) }.getOrElse { false }
         else hay.contains(filter.excludeKw, ignoreCase = true)
-        if (excluded) return false
+        if (excl) return false
     }
-    // PID / TID filter — comma-separated list, entry passes if its pid OR tid matches any
-    if (filter.pidTidFilter.isNotBlank()) {
-        val tokens = filter.pidTidFilter.split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
-        val pidStr = entry.pid.toString(); val tidStr = entry.tid.toString()
-        if (tokens.none { it == pidStr || it == tidStr }) return false
+    val enabledRules = filter.messageRules.filter { it.enabled && it.pattern.isNotBlank() }
+    for (rule in enabledRules.filter { !it.include }) {
+        if (ruleScopeMatches(entry, rule) && matchesRule(entry, rule)) return false
     }
-    val basePass = when (filter.mode) {
+
+    // ── Positive rules override tag filter ───────────────────────────
+    val posRules = enabledRules.filter { it.include }
+    val hasKwInTag = filter.kwInTag.isNotBlank()
+    val hasPosPidTid = filter.pidTidFilter.isNotBlank()
+    if (posRules.isNotEmpty() || hasKwInTag || hasPosPidTid) {
+        if (posRules.any { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule) }) return true
+        if (hasKwInTag) {
+            val kwPass = if (filter.kwInTagRegex)
+                runCatching { Regex(filter.kwInTag, RegexOption.IGNORE_CASE).containsMatchIn(entry.msg) }.getOrElse { false }
+            else entry.msg.contains(filter.kwInTag, ignoreCase = true)
+            if (kwPass) return true
+        }
+        if (hasPosPidTid) {
+            val tokens = filter.pidTidFilter.split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
+            if (tokens.any { it == entry.pid.toString() || it == entry.tid.toString() }) return true
+        }
+        return false
+    }
+
+    // ── No positive rules: apply tag / keyword filter ────────────────
+    return when (filter.mode) {
         FilterMode.TAGS -> {
-            val prefixPass = filter.pkgPrefixes.isEmpty() ||
-                filter.pkgPrefixes.any { pfx -> entry.tag == pfx || entry.tag.startsWith("$pfx.") }
-            val activeTagPass = filter.activeTags.isEmpty() || entry.tag in filter.activeTags
-            val tagPass = prefixPass && activeTagPass
-            if (!tagPass) return false
-            // Secondary message keyword filter within the tag result set
-            if (filter.kwInTag.isNotBlank()) {
-                val msgPass = if (filter.kwInTagRegex)
-                    runCatching { Regex(filter.kwInTag, RegexOption.IGNORE_CASE).containsMatchIn(entry.msg) }.getOrElse { false }
-                else entry.msg.contains(filter.kwInTag, ignoreCase = true)
-                if (!msgPass) return false
+            if (filter.activeTags.isEmpty() && filter.pkgPrefixes.isEmpty()) true
+            else {
+                val prefixPass = filter.pkgPrefixes.isEmpty() ||
+                    filter.pkgPrefixes.any { pfx -> entry.tag == pfx || entry.tag.startsWith("$pfx.") }
+                val activeTagPass = filter.activeTags.isEmpty() || entry.tag in filter.activeTags
+                prefixPass && activeTagPass
             }
-            true
         }
         FilterMode.KEYWORD -> {
             if (filter.kwText.isBlank()) true
@@ -44,16 +62,14 @@ fun passesFilter(entry: LogEntry, filter: Filter): Boolean {
             }
         }
     }
-    if (!basePass) return false
-    return passesMessageRules(entry, filter.messageRules)
 }
 
-private fun passesMessageRules(entry: LogEntry, rules: List<MessageRule>): Boolean {
-    val enabled = rules.filter { it.enabled && it.pattern.isNotBlank() && ruleScopeMatches(entry, it) }
-    val includeRules = enabled.filter { it.include }
-    if (includeRules.isNotEmpty() && includeRules.none { rulePatternMatches(entry, it) }) return false
-    if (enabled.any { !it.include && rulePatternMatches(entry, it) }) return false
-    return true
+private fun matchesRule(entry: LogEntry, rule: MessageRule): Boolean = when (rule.target) {
+    RuleTarget.PID_TID -> {
+        val tokens = rule.pattern.split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
+        tokens.any { it == entry.pid.toString() || it == entry.tid.toString() }
+    }
+    RuleTarget.MESSAGE -> rulePatternMatches(entry, rule)
 }
 
 private fun ruleScopeMatches(entry: LogEntry, rule: MessageRule): Boolean {
@@ -142,6 +158,17 @@ fun computeItems(tab: LogTab, sequences: List<SequenceDef>, applyFilter: Boolean
             segment.clear()
         }
     }
+    fun nestedManualItems(items: List<LogItem>, manualColor: Color): List<LogItem> =
+        items.map { item ->
+            when (item) {
+                is LogItem.Row -> item.copy(
+                    indent = item.indent + 1,
+                    groupColor = item.groupColor ?: manualColor,
+                )
+                is LogItem.SeqHeader -> item.copy(indent = item.indent + 1)
+                is LogItem.ManualHeader -> item
+            }
+        }
 
     var i = 0
     while (i < data.size) {
@@ -157,9 +184,9 @@ fun computeItems(tab: LogTab, sequences: List<SequenceDef>, applyFilter: Boolean
         val expanded = block.id in tab.expanded
         result += LogItem.ManualHeader(headerEntry, block.id, block.direction, expanded, manual.range.count(), block.color)
         if (expanded) {
-            manual.range.forEach { idx ->
-                if (data[idx].id != block.anchorId) result += LogItem.Row(data[idx], 1, block.color)
-            }
+            val expandedItems = sequenceItems(manual.range.map { data[it] })
+                .filterNot { item -> item is LogItem.Row && item.entry.id == block.anchorId }
+            result += nestedManualItems(expandedItems, block.color)
         }
         i = manual.range.last + 1
     }

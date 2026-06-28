@@ -41,6 +41,13 @@ compose.desktop {
             description = "Android logcat analysis tool"
             macOS {
                 bundleID = "com.romanarnaut.openlog"
+                iconFile.set(project.file("icons/openlog.icns"))
+            }
+            windows {
+                iconFile.set(project.file("icons/openlog.ico"))
+            }
+            linux {
+                iconFile.set(project.file("icons/openlog.png"))
             }
         }
     }
