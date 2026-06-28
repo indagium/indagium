@@ -1,4 +1,7 @@
+@file:Suppress("DEPRECATION") // painterResource(String) — Compose resources Res class not generated for single-JVM-target projects
+
 import androidx.compose.runtime.remember
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
@@ -13,6 +16,7 @@ fun main() = application {
     Window(
         onCloseRequest = ::exitApplication,
         title = "openLog",
+        icon = painterResource("icons/openlog.png"),
         state = windowState,
     ) {
         App(appState)
