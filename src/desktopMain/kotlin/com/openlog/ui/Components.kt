@@ -142,7 +142,7 @@ fun SectionHeader(
         if (expanded != null) {
             Spacer(Modifier.width(6.dp))
             Box(
-                Modifier.size(18.dp).background(tc.br.copy(.5f), RoundedCornerShape(3.dp)),
+                Modifier.size(18.dp).background(tc.br.copy(.5f), CORNER_SM),
                 contentAlignment = Alignment.Center,
             ) { AppText(if (expanded) "▾" else "▸", color = tc.ts, fontSize = 14.sp) }
         }
@@ -170,8 +170,8 @@ fun AppText(
 fun LevelBadge(level: LogLevel) {
     val color = level.defaultColor
     Box(
-        Modifier.background(color.copy(.13f), RoundedCornerShape(3.dp))
-            .border(1.dp, color.copy(.27f), RoundedCornerShape(3.dp))
+        Modifier.background(color.copy(.13f), CORNER_SM)
+            .border(1.dp, color.copy(.27f), CORNER_SM)
             .padding(horizontal = 4.dp, vertical = 1.dp),
     ) { AppText(level.key.toString(), color = color, fontSize = 10.sp, fontFamily = MONO, fontWeight = FontWeight.SemiBold) }
 }
@@ -202,8 +202,8 @@ fun PillBtn(label: String, active: Boolean, onClick: () -> Unit) {
     var hovered by remember { mutableStateOf(false) }
     Box(
         Modifier
-            .border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
-            .background(if (active) tc.ac.copy(.15f) else if (hovered) tc.hv else Color.Transparent, RoundedCornerShape(4.dp))
+            .border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
+            .background(if (active) tc.ac.copy(.15f) else if (hovered) tc.hv else Color.Transparent, CORNER_MD)
             .clickable(onClick = onClick)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
@@ -217,8 +217,8 @@ fun ToolbarBtn(label: String, active: Boolean = false, modifier: Modifier = Modi
     var hovered by remember { mutableStateOf(false) }
     Box(
         modifier
-            .border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
-            .background(if (active) tc.ac.copy(.15f) else if (hovered) tc.hv else Color.Transparent, RoundedCornerShape(4.dp))
+            .border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
+            .background(if (active) tc.ac.copy(.15f) else if (hovered) tc.hv else Color.Transparent, CORNER_MD)
             .clickable(onClick = onClick)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
@@ -240,8 +240,8 @@ fun InlineField(
         textStyle = TextStyle(color = tc.tx, fontSize = fontSize, fontFamily = FontFamily.Default),
         cursorBrush = SolidColor(tc.ac),
         modifier = modifier
-            .background(tc.bg, RoundedCornerShape(3.dp))
-            .border(1.dp, tc.br, RoundedCornerShape(3.dp))
+            .background(tc.bg, CORNER_SM)
+            .border(1.dp, tc.br, CORNER_SM)
             .padding(horizontal = 7.dp, vertical = 4.dp),
         decorationBox = { inner ->
             if (onClear != null) {
@@ -286,8 +286,8 @@ fun ColorSwatch(color: Color, selected: Boolean, onClick: () -> Unit) {
     val tc = tc()
     Box(
         Modifier.size(14.dp)
-            .background(color, RoundedCornerShape(3.dp))
-            .border(2.dp, if (selected) tc.tx else Color.Transparent, RoundedCornerShape(3.dp))
+            .background(color, CORNER_SM)
+            .border(2.dp, if (selected) tc.tx else Color.Transparent, CORNER_SM)
             .clickable(onClick = onClick),
     )
 }

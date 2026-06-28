@@ -282,8 +282,8 @@ fun FilterPanel(
 
         // ── Positive: Tags ────────────────────────────────────────
         if (filter.mode == FilterMode.TAGS) {
-            val pkgColor = Color(0xFF06b6d4)
-            val exNeg = Color(0xFFf85149)
+            val pkgColor = PKG_CYAN
+            val exNeg = DANGER_RED
             val totalActive = filter.pkgPrefixes.size + filter.activeTags.size + filter.excludeTags.size
             // ── unified TAGS section header with combined pill count ──
             SectionHeader(
@@ -386,8 +386,8 @@ fun FilterPanel(
                                         modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
                                     Box(
                                         Modifier.size(20.dp)
-                                            .background(if (isRowSelected) pkgColor.copy(.2f) else Color.Transparent, RoundedCornerShape(3.dp))
-                                            .border(1.dp, if (isRowSelected) pkgColor else tc.br, RoundedCornerShape(3.dp))
+                                            .background(if (isRowSelected) pkgColor.copy(.2f) else Color.Transparent, CORNER_SM)
+                                            .border(1.dp, if (isRowSelected) pkgColor else tc.br, CORNER_SM)
                                             .clickable { onAddPkgPrefix(value); tagInput = ""; tagSelectedIdx = -1 },
                                         contentAlignment = Alignment.Center,
                                     ) { AppText("+", color = if (isRowSelected) pkgColor else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
@@ -428,8 +428,8 @@ fun FilterPanel(
                                     val incKbd = isRowSelected && tagSelectedAction == 0
                                     Box(
                                         Modifier.size(20.dp)
-                                            .background(if (incHighlight) tc.ac.copy(.2f) else if (incKbd) tc.ac.copy(.1f) else Color.Transparent, RoundedCornerShape(3.dp))
-                                            .border(1.dp, if (incHighlight || incKbd) tc.ac else tc.br, RoundedCornerShape(3.dp))
+                                            .background(if (incHighlight) tc.ac.copy(.2f) else if (incKbd) tc.ac.copy(.1f) else Color.Transparent, CORNER_SM)
+                                            .border(1.dp, if (incHighlight || incKbd) tc.ac else tc.br, CORNER_SM)
                                             .clickable { onToggleTag(tag) },
                                         contentAlignment = Alignment.Center,
                                     ) { AppText("+", color = if (incHighlight || incKbd) tc.ac else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
@@ -437,11 +437,11 @@ fun FilterPanel(
                                     val exKbd = isRowSelected && tagSelectedAction == 1
                                     Box(
                                         Modifier.size(20.dp)
-                                            .background(if (exHighlight) exNeg.copy(.2f) else if (exKbd) exNeg.copy(.1f) else Color.Transparent, RoundedCornerShape(3.dp))
-                                            .border(1.dp, if (exHighlight || exKbd) exNeg else tc.br, RoundedCornerShape(3.dp))
+                                            .background(if (exHighlight) exNeg.copy(.2f) else if (exKbd) exNeg.copy(.1f) else Color.Transparent, CORNER_SM)
+                                            .border(1.dp, if (exHighlight || exKbd) exNeg else tc.br, CORNER_SM)
                                             .clickable { onToggleExcludeTag(tag) },
                                         contentAlignment = Alignment.Center,
-                                    ) { AppText("−", color = if (exHighlight || exKbd) exNeg else tc.ts, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
+                                    ) { AppText("−", color = if (exHighlight || exKbd) exNeg else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
                                 }
                             }
                         }
@@ -464,7 +464,7 @@ fun FilterPanel(
 
         if (filter.mode == FilterMode.TAGS) {
         // ── Message Rules (combined search + include/exclude) ─────────────
-        val msgExNeg = Color(0xFFf85149)
+        val msgExNeg = DANGER_RED
         val msgInc = filter.messageRules.filter { it.include }
         val msgExc = filter.messageRules.filter { !it.include }
         SectionHeader(
@@ -607,8 +607,8 @@ fun FilterPanel(
                             val incKbd = isRowSelected && msgRuleSelectedAction == 0
                             Box(
                                 Modifier.size(20.dp)
-                                    .background(if (incHighlight) tc.ac.copy(.2f) else if (incKbd) tc.ac.copy(.1f) else Color.Transparent, RoundedCornerShape(3.dp))
-                                    .border(1.dp, if (incHighlight || incKbd) tc.ac else tc.br, RoundedCornerShape(3.dp))
+                                    .background(if (incHighlight) tc.ac.copy(.2f) else if (incKbd) tc.ac.copy(.1f) else Color.Transparent, CORNER_SM)
+                                    .border(1.dp, if (incHighlight || incKbd) tc.ac else tc.br, CORNER_SM)
                                     .clickable { onAddMessageRule(true, pattern, false, null, null, target); msgRuleInput = "" },
                                 contentAlignment = Alignment.Center,
                             ) { AppText("+", color = if (incHighlight || incKbd) tc.ac else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
@@ -616,11 +616,11 @@ fun FilterPanel(
                             val exKbd = isRowSelected && msgRuleSelectedAction == 1
                             Box(
                                 Modifier.size(20.dp)
-                                    .background(if (exHighlight) msgExNeg.copy(.2f) else if (exKbd) msgExNeg.copy(.1f) else Color.Transparent, RoundedCornerShape(3.dp))
-                                    .border(1.dp, if (exHighlight || exKbd) msgExNeg else tc.br, RoundedCornerShape(3.dp))
+                                    .background(if (exHighlight) msgExNeg.copy(.2f) else if (exKbd) msgExNeg.copy(.1f) else Color.Transparent, CORNER_SM)
+                                    .border(1.dp, if (exHighlight || exKbd) msgExNeg else tc.br, CORNER_SM)
                                     .clickable { onAddMessageRule(false, pattern, false, null, null, target); msgRuleInput = "" },
                                 contentAlignment = Alignment.Center,
-                            ) { AppText("−", color = if (exHighlight || exKbd) msgExNeg else tc.ts, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
+                            ) { AppText("−", color = if (exHighlight || exKbd) msgExNeg else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
                         }
                     }
                 }
@@ -698,8 +698,8 @@ fun FilterPanel(
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier.size(20.dp)
-                        .background(newHlColor, RoundedCornerShape(3.dp))
-                        .border(1.dp, if (hlColorPickerOpen) tc.tx else tc.br, RoundedCornerShape(3.dp))
+                        .background(newHlColor, CORNER_SM)
+                        .border(1.dp, if (hlColorPickerOpen) tc.tx else tc.br, CORNER_SM)
                         .clickable { hlColorPickerOpen = !hlColorPickerOpen },
                 )
                 InlineField(
@@ -744,8 +744,8 @@ fun FilterPanel(
                     Box(
                         Modifier
                             .size(22.dp)
-                            .background(if (on) color.copy(.28f) else Color.Transparent, RoundedCornerShape(4.dp))
-                            .border(1.dp, if (on) color else tc.br.copy(.45f), RoundedCornerShape(4.dp))
+                            .background(if (on) color.copy(.28f) else Color.Transparent, CORNER_MD)
+                            .border(1.dp, if (on) color else tc.br.copy(.45f), CORNER_MD)
                             .clickable { onToggleLevel(lvl) },
                         contentAlignment = Alignment.Center,
                     ) {
@@ -815,7 +815,7 @@ fun FilterPanel(
                                 })
                                 AppText(if (def.enabled) "●" else "○", color = if (def.enabled) def.color else tc.td,
                                     fontSize = 11.sp, modifier = Modifier.clickable { onToggleSeqEnabled(def.id) })
-                                AppText("×", color = tc.td, fontSize = 13.sp, modifier = Modifier.clickable { onRemoveSeq(def.id) })
+                                AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onRemoveSeq(def.id) })
                             }
                             if (editingSeqId == def.id) {
                                 SequenceEditor(def, onUpdateSeq, onCancel = { editingSeqId = null })
@@ -828,8 +828,8 @@ fun FilterPanel(
                                 ) {
                                     SEQ_COLORS.forEach { c ->
                                         Box(
-                                            Modifier.size(14.dp).background(c, RoundedCornerShape(3.dp))
-                                                .border(2.dp, if (c == def.color) tc.tx else Color.Transparent, RoundedCornerShape(3.dp))
+                                            Modifier.size(14.dp).background(c, CORNER_SM)
+                                                .border(2.dp, if (c == def.color) tc.tx else Color.Transparent, CORNER_SM)
                                                 .clickable { onSetSeqColor(def.id, c); colorPickerSeqId = null },
                                         )
                                     }
@@ -863,7 +863,7 @@ fun FilterPanel(
                             }
                             AppText(if (block.enabled) "●" else "○", color = if (block.enabled) block.color else tc.td,
                                 fontSize = 11.sp, modifier = Modifier.clickable { onToggleManualCollapse(block.id) })
-                            AppText("×", color = tc.td, fontSize = 13.sp, modifier = Modifier.clickable { onRemoveManualCollapse(block.id) })
+                            AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onRemoveManualCollapse(block.id) })
                         }
                     }
                 }
@@ -871,7 +871,7 @@ fun FilterPanel(
             Row(
                 Modifier.fillMaxWidth()
                     .clickable { seqAddOpen = !seqAddOpen }
-                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
@@ -900,8 +900,8 @@ fun FilterPanel(
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             Modifier.size(20.dp)
-                                .background(newSeqColor, RoundedCornerShape(3.dp))
-                                .border(1.dp, if (seqColorPickerOpen) tc.tx else tc.br, RoundedCornerShape(3.dp))
+                                .background(newSeqColor, CORNER_SM)
+                                .border(1.dp, if (seqColorPickerOpen) tc.tx else tc.br, CORNER_SM)
                                 .clickable { seqColorPickerOpen = !seqColorPickerOpen },
                         )
                         Spacer(Modifier.weight(1f))
@@ -940,7 +940,7 @@ fun FilterPanel(
                             ) {
                                 AppText(if (active) "●" else "○", color = if (active) tc.ac else tc.td, fontSize = 12.sp)
                                 AppText(sf.name, color = if (active) tc.tx else tc.ts, fontSize = 11.sp, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
-                                AppText("×", color = tc.td, fontSize = 12.sp, modifier = Modifier.clickable { onDeleteSF(sf.id) })
+                                AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onDeleteSF(sf.id) })
                             }
                         }
                     }
@@ -948,16 +948,16 @@ fun FilterPanel(
             }
             Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Box(
-                    Modifier.fillMaxWidth().border(1.dp, tc.br, RoundedCornerShape(4.dp))
+                    Modifier.fillMaxWidth().border(1.dp, tc.br, CORNER_MD)
                         .clickable(onClick = onOpenSFDialog).padding(vertical = 5.dp),
                     contentAlignment = Alignment.Center,
                 ) { AppText("+ Save current filter…", color = tc.td, fontSize = 11.sp) }
                 Box(
-                    Modifier.fillMaxWidth().border(1.dp, Color(0xFFf85149).copy(.45f), RoundedCornerShape(4.dp))
-                        .background(Color(0xFFf85149).copy(.08f), RoundedCornerShape(4.dp))
+                    Modifier.fillMaxWidth().border(1.dp, DANGER_RED.copy(.45f), CORNER_MD)
+                        .background(DANGER_RED.copy(.08f), CORNER_MD)
                         .clickable(onClick = onClearFilter).padding(vertical = 8.dp),
                     contentAlignment = Alignment.Center,
-                ) { AppText("Clear filters", color = Color(0xFFf85149), fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+                ) { AppText("Clear filters", color = DANGER_RED, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     PillBtn("Export", active = false, onClick = onExportFilters)
                     PillBtn("Import", active = false, onClick = onImportFilters)
@@ -1075,8 +1075,8 @@ private fun ModeBtn(label: String, active: Boolean, onClick: () -> Unit) {
     val tc = tc()
     Box(
         Modifier
-            .border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
-            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, RoundedCornerShape(4.dp))
+            .border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
+            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, CORNER_MD)
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp, vertical = 4.dp),
         contentAlignment = Alignment.Center,
@@ -1086,14 +1086,14 @@ private fun ModeBtn(label: String, active: Boolean, onClick: () -> Unit) {
 @Composable
 private fun TagPill(tag: String, color: Color, onRemove: () -> Unit) {
     Box(
-        Modifier.background(color.copy(.13f), RoundedCornerShape(3.dp))
-            .border(1.dp, color.copy(.27f), RoundedCornerShape(3.dp))
+        Modifier.background(color.copy(.13f), CORNER_SM)
+            .border(1.dp, color.copy(.27f), CORNER_SM)
             .clickable(onClick = onRemove)
             .padding(start = 7.dp, end = 4.dp, top = 1.dp, bottom = 1.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
             AppText(tag, color = color, fontSize = 11.sp, fontFamily = MONO)
-            AppText("×", color = color.copy(.7f), fontSize = 13.sp)
+            AppText("×", color = color.copy(.7f), fontSize = 14.sp)
         }
     }
 }

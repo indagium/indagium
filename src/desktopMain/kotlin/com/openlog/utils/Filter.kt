@@ -2,6 +2,7 @@ package com.openlog.utils
 
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.*
+import com.openlog.ui.SEQ_COLORS
 
 // When positive message/PID rules (or the kwInTag live-search) are active they act as the
 // sole positive filter — every matching entry is shown from any tag, overriding the tag filter.
@@ -109,7 +110,7 @@ fun computeItems(tab: LogTab, sequences: List<SequenceDef>, applyFilter: Boolean
             if (sg != null) {
                 val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
                 val exp = sg.gid in tab.expanded
-                val outerColor = defMap[sg.defId]?.color ?: Color(0xFF8957e5)
+                val outerColor = defMap[sg.defId]?.color ?: SEQ_COLORS.first()
                 items += LogItem.SeqHeader(entry, sg.gid, 0, exp, totalCh, outerColor)
                 if (exp) {
                     val plainIds = sg.plain.toSet()

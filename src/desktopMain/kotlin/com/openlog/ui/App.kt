@@ -419,8 +419,8 @@ private fun AddAnnDialog(
             AppText("Add annotation", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             if (sourceFilename != null) {
                 Box(
-                    Modifier.background(tc.ac.copy(.15f), RoundedCornerShape(3.dp))
-                        .border(1.dp, tc.ac.copy(.3f), RoundedCornerShape(3.dp))
+                    Modifier.background(tc.ac.copy(.15f), CORNER_SM)
+                        .border(1.dp, tc.ac.copy(.3f), CORNER_SM)
                         .padding(horizontal = 6.dp, vertical = 2.dp),
                 ) { AppText("from $sourceFilename", color = tc.ac, fontSize = 10.sp, fontFamily = MONO) }
             }
@@ -428,8 +428,8 @@ private fun AddAnnDialog(
 
         // Show referenced log lines
         Column(
-            Modifier.fillMaxWidth().background(tc.bg, RoundedCornerShape(4.dp))
-                .border(1.dp, tc.br, RoundedCornerShape(4.dp)).padding(8.dp),
+            Modifier.fillMaxWidth().background(tc.bg, CORNER_MD)
+                .border(1.dp, tc.br, CORNER_MD).padding(8.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             rows.take(5).forEach { r ->
@@ -451,8 +451,8 @@ private fun AddAnnDialog(
             textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
             cursorBrush = SolidColor(tc.ac),
             modifier = Modifier.fillMaxWidth()
-                .background(tc.bg, RoundedCornerShape(4.dp))
-                .border(1.dp, tc.ac.copy(.5f), RoundedCornerShape(4.dp))
+                .background(tc.bg, CORNER_MD)
+                .border(1.dp, tc.ac.copy(.5f), CORNER_MD)
                 .padding(10.dp).defaultMinSize(minHeight = 72.dp),
             decorationBox = { inner ->
                 if (caption.isEmpty()) AppText("Add your analysis note here…", color = tc.td, fontSize = 12.sp)
@@ -476,7 +476,7 @@ private fun DialogActionButton(
     onClick: () -> Unit,
 ) {
     val tc = tc()
-    val accent = if (danger) Color(0xFFf85149) else tc.ac
+    val accent = if (danger) DANGER_RED else tc.ac
     Box(
         Modifier
             .width(132.dp)
@@ -1064,8 +1064,8 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 ThemePreset.entries.forEach { preset ->
                     val active = state.settings.theme == preset
                     Box(
-                        Modifier.border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
-                            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, RoundedCornerShape(4.dp))
+                        Modifier.border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
+                            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, CORNER_MD)
                             .clickable { state.settings = state.settings.copy(theme = preset) }
                             .padding(horizontal = 10.dp, vertical = 7.dp),
                     ) { AppText(preset.label, color = if (active) tc.ac else tc.ts, fontSize = 12.sp) }
@@ -1078,8 +1078,8 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 listOf(10, 11, 12, 13, 14, 15, 16).forEach { size ->
                     val active = state.settings.fontSize == size
                     Box(
-                        Modifier.border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
-                            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, RoundedCornerShape(4.dp))
+                        Modifier.border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
+                            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, CORNER_MD)
                             .clickable { state.settings = state.settings.copy(fontSize = size) }
                             .padding(horizontal = 10.dp, vertical = 7.dp),
                     ) { AppText("$size", color = if (active) tc.ac else tc.ts, fontSize = 13.sp) }
@@ -1092,10 +1092,10 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 listOf(true to "Monospace", false to "Proportional").forEach { (mono, label) ->
                     val active = state.settings.fontMono == mono
                     Box(
-                        Modifier.border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
-                            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, RoundedCornerShape(4.dp))
+                        Modifier.border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
+                            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, CORNER_MD)
                             .clickable { state.settings = state.settings.copy(fontMono = mono) }
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
                     ) { AppText(label, color = if (active) tc.ac else tc.ts, fontSize = 13.sp) }
                 }
             }
@@ -1106,8 +1106,8 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 listOf(0, 3, 5, 10, 20).forEach { limit ->
                     val active = state.settings.mostUsedTagLimit == limit
                     Box(
-                        Modifier.border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
-                            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, RoundedCornerShape(4.dp))
+                        Modifier.border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
+                            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, CORNER_MD)
                             .clickable { state.settings = state.settings.copy(mostUsedTagLimit = limit) }
                             .padding(horizontal = 10.dp, vertical = 7.dp),
                     ) { AppText(limit.toString(), color = if (active) tc.ac else tc.ts, fontSize = 13.sp) }
@@ -1120,8 +1120,8 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 listOf(4, 6, 8, 10, 12, 16).forEach { limit ->
                     val active = state.settings.visibleTabLimit == limit
                     Box(
-                        Modifier.border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
-                            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, RoundedCornerShape(4.dp))
+                        Modifier.border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
+                            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, CORNER_MD)
                             .clickable { state.settings = state.settings.copy(visibleTabLimit = limit) }
                             .padding(horizontal = 10.dp, vertical = 7.dp),
                     ) { AppText(limit.toString(), color = if (active) tc.ac else tc.ts, fontSize = 13.sp) }

@@ -489,11 +489,11 @@ private fun LogRow(
             .drawBehind {
                 drawRect(levelColor.copy(alpha = if (isSel) 0.7f else 0.35f), topLeft = Offset.Zero, size = Size(3f, size.height))
                 if (groupColor != null && item.indent > 0) {
-                    val x = 6.dp.toPx() + ((item.indent - 1).coerceAtLeast(0) * 18.dp.toPx())
+                    val x = 6.dp.toPx() + ((item.indent - 1).coerceAtLeast(0) * INDENT_STEP.toPx())
                     drawRect(groupColor.copy(alpha = 0.85f), topLeft = Offset(x, 0f), size = Size(2f, size.height))
                 }
             }
-            .padding(start = (11 + item.indent * 18).dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
+            .padding(start = ROW_START_PAD + INDENT_STEP * item.indent, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.fillMaxWidth().horizontalScroll(hScroll)) {
@@ -540,7 +540,7 @@ private fun SeqHeaderRow(
                 else -> sc.copy(.07f)
             })
             .drawBehind {
-                val guideX = item.indent * 18.dp.toPx()
+                val guideX = item.indent * INDENT_STEP.toPx()
                 drawRect(sc, topLeft = Offset(guideX, 0f), size = Size(4f, size.height))
             }
             .onGloballyPositioned { coords ->
@@ -587,7 +587,7 @@ private fun SeqHeaderRow(
             }
             .horizontalScroll(hScroll)
             .widthIn(min = 2000.dp)
-            .padding(start = (11 + item.indent * 18).dp, end = 8.dp, top = 3.dp, bottom = 3.dp),
+            .padding(start = ROW_START_PAD + INDENT_STEP * item.indent, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -675,7 +675,7 @@ private fun ManualHeaderRow(
             }
             .horizontalScroll(hScroll)
             .widthIn(min = 2000.dp)
-            .padding(start = 11.dp, end = 8.dp, top = 3.dp, bottom = 3.dp),
+            .padding(start = ROW_START_PAD, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {

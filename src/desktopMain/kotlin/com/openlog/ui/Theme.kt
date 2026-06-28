@@ -1,8 +1,10 @@
 package com.openlog.ui
 
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
 import com.openlog.model.ThemePreset
 
 data class ThemeColors(
@@ -59,3 +61,16 @@ val SEQ_COLORS = listOf(
 
 val MONO = FontFamily.Monospace
 val UI   = FontFamily.Default
+
+// Semantic colour constants (theme-agnostic — same across all themes)
+val DANGER_RED = Color(0xFFf85149)   // error / danger / exclude
+val PKG_CYAN   = Color(0xFF06b6d4)   // package-prefix indicator
+
+// Corner radius tokens
+val CORNER_SM = RoundedCornerShape(3.dp)   // badges, text fields, small pills
+val CORNER_MD = RoundedCornerShape(4.dp)   // buttons (PillBtn, ToolbarBtn), note rows
+
+// Log-row layout constants
+val INDENT_STEP   = 18.dp   // per-level nesting indent
+val ROW_START_PAD = 11.dp   // base horizontal start padding before indent
+val ROW_V_PAD     =  3.dp   // vertical (top/bottom) padding for all log rows

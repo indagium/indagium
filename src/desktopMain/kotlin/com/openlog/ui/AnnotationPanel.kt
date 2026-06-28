@@ -118,7 +118,7 @@ fun AnnotationPanel(
                 // Add note button + empty state
                 Box(
                     Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
-                        .border(1.dp, tc.br, RoundedCornerShape(4.dp))
+                        .border(1.dp, tc.br, CORNER_MD)
                         .clickable { onAddNoteAfter(null) }.padding(vertical = 5.dp),
                     contentAlignment = Alignment.Center,
                 ) { AppText("+ Add text block", color = tc.td, fontSize = 11.sp) }
@@ -160,7 +160,7 @@ fun AnnotationPanel(
                 // Global + text block button
                 Box(
                     Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
-                        .border(1.dp, tc.br, RoundedCornerShape(4.dp))
+                        .border(1.dp, tc.br, CORNER_MD)
                         .clickable { onAddNoteAfter(ann.blocks.last().id) }.padding(vertical = 5.dp),
                     contentAlignment = Alignment.Center,
                 ) { AppText("+ Add text block", color = tc.td, fontSize = 11.sp) }
@@ -190,7 +190,7 @@ private fun MdPreviewDialog(tab: LogTab, mono: FontFamily, onCopy: () -> Unit, o
         ) {
             Row(
                 Modifier.fillMaxWidth().height(40.dp).background(tc.p2, RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
-                    .padding(horizontal = 16.dp),
+                    .padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -236,8 +236,8 @@ private fun NoteBlock(
             textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
             cursorBrush = SolidColor(tc.ac),
             modifier = Modifier.fillMaxWidth()
-                .background(tc.bg, RoundedCornerShape(3.dp))
-                .border(1.dp, tc.br, RoundedCornerShape(3.dp))
+                .background(tc.bg, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM)
                 .padding(8.dp).defaultMinSize(minHeight = 60.dp),
             decorationBox = { inner ->
                 if (block.text.isEmpty()) AppText("Write your note here…", color = tc.td, fontSize = 12.sp)
@@ -272,8 +272,8 @@ private fun LogRefBlock(
         if (block.sourceFilename != null) {
             Spacer(Modifier.height(3.dp))
             Box(
-                Modifier.background(tc.ac.copy(.12f), RoundedCornerShape(3.dp))
-                    .border(1.dp, tc.ac.copy(.25f), RoundedCornerShape(3.dp))
+                Modifier.background(tc.ac.copy(.12f), CORNER_SM)
+                    .border(1.dp, tc.ac.copy(.25f), CORNER_SM)
                     .padding(horizontal = 6.dp, vertical = 2.dp),
             ) { AppText("from ${block.sourceFilename}", color = tc.ac, fontSize = 9.sp, fontFamily = MONO) }
         }
@@ -284,8 +284,8 @@ private fun LogRefBlock(
             textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
             cursorBrush = SolidColor(tc.ac),
             modifier = Modifier.fillMaxWidth()
-                .background(tc.bg, RoundedCornerShape(3.dp))
-                .border(1.dp, tc.br, RoundedCornerShape(3.dp))
+                .background(tc.bg, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM)
                 .padding(8.dp).defaultMinSize(minHeight = 52.dp),
             decorationBox = { inner ->
                 if (block.caption.isEmpty()) AppText("Add a note or analysis…", color = tc.td, fontSize = 12.sp)
@@ -297,8 +297,8 @@ private fun LogRefBlock(
         // Referenced log lines shown BELOW the text
         Column(
             Modifier.fillMaxWidth()
-                .background(tc.bg.copy(.7f), RoundedCornerShape(3.dp))
-                .border(1.dp, tc.br.copy(.6f), RoundedCornerShape(3.dp))
+                .background(tc.bg.copy(.7f), CORNER_SM)
+                .border(1.dp, tc.br.copy(.6f), CORNER_SM)
                 .padding(6.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
@@ -336,8 +336,8 @@ private fun BlockControls(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Box(
-            Modifier.size(16.dp).background(typeColor.copy(.2f), RoundedCornerShape(3.dp))
-                .border(1.dp, typeColor.copy(.4f), RoundedCornerShape(3.dp)),
+            Modifier.size(16.dp).background(typeColor.copy(.2f), CORNER_SM)
+                .border(1.dp, typeColor.copy(.4f), CORNER_SM),
             contentAlignment = Alignment.Center,
         ) { AppText(typeLabel, color = typeColor, fontSize = 9.sp) }
 
