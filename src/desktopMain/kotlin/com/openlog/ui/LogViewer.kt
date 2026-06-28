@@ -181,7 +181,7 @@ fun LogViewer(
             Spacer(Modifier.width(4.dp))
             AppButton("Collapse all", onClick = onCollapseAll, enabled = canCollapseAll)
             Spacer(Modifier.width(4.dp))
-            PillBtn(if (tab.showUnfiltered) "⊘ Hide original" else "⊙ Unfiltered", active = tab.showUnfiltered, onClick = onToggleUnfiltered)
+            AppButton(if (tab.showUnfiltered) "Hide original" else "Unfiltered", onClick = onToggleUnfiltered)
             Spacer(Modifier.width(8.dp))
         }
 

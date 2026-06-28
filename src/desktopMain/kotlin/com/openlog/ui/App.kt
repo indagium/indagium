@@ -16,6 +16,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.DragData
@@ -1155,26 +1156,44 @@ private fun TabItem(
 ) {
     val tc = tc()
     var hov by remember { mutableStateOf(false) }
-    val lifted = isActive || dragging
+    val accent = tc.ac
     Row(
-        Modifier.fillMaxWidth().fillMaxHeight()
-            .background(if (lifted) tc.bg else if (hov) tc.p else tc.p2)
-            .border(BorderStroke(if (lifted) 2.dp else 1.dp, if (lifted) tc.ac else tc.br.copy(alpha = 0.95f)))
+        Modifier.fillMaxWidth().height(36.dp)
+            .background(if (isActive) tc.bg else if (hov || dragging) tc.p else tc.p2)
+            .border(BorderStroke(1.dp, tc.br.copy(alpha = 0.95f)))
+            .drawBehind {
+                if (isActive) {
+                    val stroke = 2.dp.toPx()
+                    drawRect(
+                        color = accent,
+                        topLeft = Offset(0f, size.height - stroke),
+                        size = androidx.compose.ui.geometry.Size(size.width, stroke),
+                    )
+                }
+            }
             .onPointerEvent(PointerEventType.Enter) { hov = true }
             .onPointerEvent(PointerEventType.Exit)  { hov = false }
-            .clickable(onClick = onClick).padding(horizontal = 12.dp),
+            .clickable(onClick = onClick).padding(start = 12.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
         AppText(
             tab.filename,
-            color = if (lifted) tc.tx else tc.ts,
+            color = if (isActive || dragging) tc.tx else tc.ts,
             fontSize = 12.sp,
             fontFamily = MONO,
             modifier = Modifier.weight(1f),
             overflow = TextOverflow.Ellipsis,
+            maxLines = 1,
         )
-        if (showClose) AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable(onClick = onClose))
+        if (showClose) {
+            Box(
+                Modifier.size(24.dp).clickable(onClick = onClose),
+                contentAlignment = Alignment.Center,
+            ) {
+                AppText("×", color = tc.td, fontSize = 16.sp)
+            }
+        }
     }
 }
 
