@@ -11,19 +11,24 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.AnnBlock
 import com.openlog.model.LogTab
 import com.openlog.utils.buildMd
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
+import kotlin.math.roundToInt
 
 @Composable
 fun AnnotationPanel(
@@ -47,132 +52,184 @@ fun AnnotationPanel(
     val tc = tc()
     val mono = monoFont()
     val ann = tab.annotations
-    val blockCount = ann.blocks.size
+    val hasAnnotationBlocks = ann.blocks.isNotEmpty()
+    val hasRecentNotes = recentNotes.isNotEmpty()
+    val headerButtonModifier = Modifier.height(28.dp)
+    val recentButtonModifier = Modifier.height(28.dp).widthIn(min = 40.dp)
 
     Column(Modifier.width(width.dp).fillMaxHeight().background(tc.p).border(BorderStroke(1.dp, tc.br))) {
         // Header row 1: title + action buttons
-        Row(
+        Box(
             Modifier.fillMaxWidth().height(if (headerNote != null) 46.dp else 36.dp).background(tc.p2)
                 .border(BorderStroke(1.dp, tc.br)).padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Column(Modifier.weight(1f)) {
-                AppText("Annotation · $blockCount", color = tc.ts, fontSize = 12.sp)
-                if (headerNote != null) {
-                    AppText(headerNote, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+            if (headerNote != null) {
+                AppText(
+                    headerNote,
+                    color = tc.td,
+                    fontSize = 9.sp,
+                    fontFamily = MONO,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.align(Alignment.CenterStart).widthIn(max = 88.dp),
+                )
+            }
+            Row(
+                Modifier.align(Alignment.Center),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
+            ) {
+                AppButton("Preview", onClick = onToggleMd, enabled = hasAnnotationBlocks, modifier = headerButtonModifier)
+                AppButton("Copy", onClick = onCopy, modifier = headerButtonModifier)
+                AppButton("Save", onClick = onSave, modifier = headerButtonModifier)
+                AppButton("Open Note", onClick = {
+                    val fd = FileDialog(null as Frame?, "Open Note File", FileDialog.LOAD)
+                    fd.setFilenameFilter { _, n -> n.endsWith(".md") || n.endsWith(".txt") }
+                    fd.isVisible = true
+                    fd.file?.let { onOpenNote(File(fd.directory, it)) }
+                }, modifier = headerButtonModifier)
+                Box {
+                    ToolbarBtn(
+                        "▾ ${recentNotes.size}",
+                        active = recentNotesMenuOpen,
+                        enabled = hasRecentNotes,
+                        modifier = recentButtonModifier,
+                        onClick = onToggleRecentNotes,
+                    )
+                    if (recentNotesMenuOpen && hasRecentNotes) {
+                        RecentNotesPopup(
+                            recentNotes = recentNotes,
+                            onOpenNote = onOpenNote,
+                            onDismiss = onToggleRecentNotes,
+                            tc = tc,
+                        )
+                    }
                 }
-            }
-            PillBtn("Preview", active = tab.showAnnMd, onClick = onToggleMd)
-            PillBtn("Copy", active = true, onClick = onCopy)
-            PillBtn("Save", active = true, onClick = onSave)
-            PillBtn("Open Note", active = false) {
-                val fd = FileDialog(null as Frame?, "Open Note File", FileDialog.LOAD)
-                fd.setFilenameFilter { _, n -> n.endsWith(".md") || n.endsWith(".txt") }
-                fd.isVisible = true
-                fd.file?.let { onOpenNote(File(fd.directory, it)) }
-            }
-            if (recentNotes.isNotEmpty()) {
-                PillBtn("▾", active = recentNotesMenuOpen, onClick = onToggleRecentNotes)
             }
         }
-        // Recent notes dropdown (inline, below header)
-        if (recentNotesMenuOpen && recentNotes.isNotEmpty()) {
-            val displayNotes = recentNotes.take(10)
-            Column(
-                Modifier.fillMaxWidth().background(tc.p2).border(BorderStroke(1.dp, tc.br))
-            ) {
-                Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp)) {
-                    AppText("Recent Notes (autosaved)", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+        // Inline preview popup
+        if (tab.showAnnMd && hasAnnotationBlocks) {
+            MdPreviewDialog(tab = tab, mono = mono, onCopy = onCopy, onDismiss = onToggleMd)
+        }
+
+        val scroll = rememberScrollState()
+        Box(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 8.dp)) {
+                // Prefix
+                AnnSection(tc) {
+                    AppText("Prefix", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                    Spacer(Modifier.height(3.dp))
+                    InlineField(ann.prefix, onUpdatePrefix, "Heading, context…", Modifier.fillMaxWidth(), fontSize = 12.sp)
                 }
-                Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
-                val listH = (displayNotes.size * 42).coerceAtMost(210).dp
-                Column(Modifier.fillMaxWidth().height(listH).verticalScroll(rememberScrollState())) {
+
+                if (ann.blocks.isEmpty()) {
+                    // Add note button + empty state
+                    Box(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                            .border(1.dp, tc.br, CORNER_MD)
+                            .clickable { onAddNoteAfter(null) }.padding(vertical = 5.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { AppText("+ Add text block", color = tc.td, fontSize = 11.sp) }
+                    Column(
+                        Modifier.fillMaxWidth().padding(40.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        AppText("◆", color = tc.td.copy(.33f), fontSize = 22.sp)
+                        AppText("Right-click a log line\nto annotate it", color = tc.td, fontSize = 11.sp, maxLines = 2)
+                    }
+                }
+
+                ann.blocks.forEachIndexed { idx, block ->
+                    val isFirst = idx == 0
+                    val isLast  = idx == ann.blocks.lastIndex
+
+                    when (block) {
+                        is AnnBlock.Note -> NoteBlock(
+                            block = block, tc = tc, isFirst = isFirst, isLast = isLast,
+                            onUpdate = { onUpdateBlock(block.id, it) },
+                            onRemove = { onRemoveBlock(block.id) },
+                            onMoveUp = { onMoveBlock(block.id, -1) },
+                            onMoveDown = { onMoveBlock(block.id, 1) },
+                            onAddBelow = { onAddNoteAfter(block.id) },
+                        )
+                        is AnnBlock.LogRef -> LogRefBlock(
+                            block = block, tab = tab, mono = mono, tc = tc,
+                            isFirst = isFirst, isLast = isLast,
+                            onUpdateCaption = { onUpdateBlock(block.id, it) },
+                            onRemove = { onRemoveBlock(block.id) },
+                            onMoveUp = { onMoveBlock(block.id, -1) },
+                            onMoveDown = { onMoveBlock(block.id, 1) },
+                            onAddBelow = { onAddNoteAfter(block.id) },
+                        )
+                    }
+                }
+
+                if (ann.blocks.isNotEmpty()) {
+                    // Global + text block button
+                    Box(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                            .border(1.dp, tc.br, CORNER_MD)
+                            .clickable { onAddNoteAfter(ann.blocks.last().id) }.padding(vertical = 5.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { AppText("+ Add text block", color = tc.td, fontSize = 11.sp) }
+
+                    // Suffix
+                    AnnSection(tc) {
+                        AppText("Next steps", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                        Spacer(Modifier.height(3.dp))
+                        InlineField(ann.suffix, onUpdateSuffix, "Add follow-up notes…", Modifier.fillMaxWidth(), fontSize = 11.sp)
+                    }
+                }
+            }
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(scroll),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun RecentNotesPopup(
+    recentNotes: List<String>,
+    onOpenNote: (File) -> Unit,
+    onDismiss: () -> Unit,
+    tc: ThemeColors,
+) {
+    val density = LocalDensity.current.density
+    Popup(
+        alignment = Alignment.TopEnd,
+        offset = IntOffset(0, (34 * density).roundToInt()),
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        val displayNotes = recentNotes.take(10)
+        Box(
+            Modifier.width(300.dp)
+                .background(tc.p, RoundedCornerShape(7.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(7.dp)),
+        ) {
+            val popupScroll = rememberScrollState()
+            Box(Modifier.heightIn(max = 260.dp)) {
+                Column(Modifier.fillMaxWidth().verticalScroll(popupScroll).padding(vertical = 4.dp)) {
                     displayNotes.forEach { path ->
                         val file = File(path)
                         val exists = file.exists()
-                        HoverBox(modifier = Modifier.fillMaxWidth(), onClick = { if (exists) { onOpenNote(file); onToggleRecentNotes() } }) {
-                            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp)) {
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = if (exists) ({ onOpenNote(file) }) else null,
+                        ) {
+                            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
                                 AppText(file.name, color = if (exists) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
                                 AppText(file.parent ?: path, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
                             }
                         }
                     }
                 }
+                VerticalScrollbar(
+                    adapter = rememberScrollbarAdapter(popupScroll),
+                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+                )
             }
-        }
-        // Inline preview popup
-        if (tab.showAnnMd && ann.blocks.isNotEmpty()) {
-            MdPreviewDialog(tab = tab, mono = mono, onCopy = onCopy, onDismiss = onToggleMd)
-        }
-
-        val scroll = rememberScrollState()
-        Column(Modifier.fillMaxSize().verticalScroll(scroll)) {
-            // Prefix
-            AnnSection(tc) {
-                AppText("Prefix", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-                Spacer(Modifier.height(3.dp))
-                InlineField(ann.prefix, onUpdatePrefix, "Heading, context…", Modifier.fillMaxWidth(), fontSize = 12.sp)
-            }
-
-            if (ann.blocks.isEmpty()) {
-                // Add note button + empty state
-                Box(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
-                        .border(1.dp, tc.br, CORNER_MD)
-                        .clickable { onAddNoteAfter(null) }.padding(vertical = 5.dp),
-                    contentAlignment = Alignment.Center,
-                ) { AppText("+ Add text block", color = tc.td, fontSize = 11.sp) }
-                Column(
-                    Modifier.fillMaxWidth().padding(40.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    AppText("◆", color = tc.td.copy(.33f), fontSize = 22.sp)
-                    AppText("Right-click a log line\nto annotate it", color = tc.td, fontSize = 11.sp, maxLines = 2)
-                }
-            }
-
-            ann.blocks.forEachIndexed { idx, block ->
-                val isFirst = idx == 0
-                val isLast  = idx == ann.blocks.lastIndex
-
-                when (block) {
-                    is AnnBlock.Note -> NoteBlock(
-                        block = block, tc = tc, isFirst = isFirst, isLast = isLast,
-                        onUpdate = { onUpdateBlock(block.id, it) },
-                        onRemove = { onRemoveBlock(block.id) },
-                        onMoveUp = { onMoveBlock(block.id, -1) },
-                        onMoveDown = { onMoveBlock(block.id, 1) },
-                        onAddBelow = { onAddNoteAfter(block.id) },
-                    )
-                    is AnnBlock.LogRef -> LogRefBlock(
-                        block = block, tab = tab, mono = mono, tc = tc,
-                        isFirst = isFirst, isLast = isLast,
-                        onUpdateCaption = { onUpdateBlock(block.id, it) },
-                        onRemove = { onRemoveBlock(block.id) },
-                        onMoveUp = { onMoveBlock(block.id, -1) },
-                        onMoveDown = { onMoveBlock(block.id, 1) },
-                        onAddBelow = { onAddNoteAfter(block.id) },
-                    )
-                }
-            }
-
-            if (ann.blocks.isNotEmpty()) {
-                // Global + text block button
-                Box(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
-                        .border(1.dp, tc.br, CORNER_MD)
-                        .clickable { onAddNoteAfter(ann.blocks.last().id) }.padding(vertical = 5.dp),
-                    contentAlignment = Alignment.Center,
-                ) { AppText("+ Add text block", color = tc.td, fontSize = 11.sp) }
-
-                // Suffix
-                AnnSection(tc) {
-                    AppText("Next steps", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-                    Spacer(Modifier.height(3.dp))
-                    InlineField(ann.suffix, onUpdateSuffix, "Add follow-up notes…", Modifier.fillMaxWidth(), fontSize = 11.sp)
-                }
-            }
-
         }
     }
 }
@@ -252,7 +309,7 @@ private fun NoteBlock(
 private fun LogRefBlock(
     block: AnnBlock.LogRef,
     tab: LogTab,
-    mono: androidx.compose.ui.text.font.FontFamily,
+    mono: FontFamily,
     tc: ThemeColors,
     isFirst: Boolean, isLast: Boolean,
     onUpdateCaption: (String) -> Unit,

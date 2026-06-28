@@ -35,6 +35,8 @@ private var tabCounter = 1
 private fun defaultAutosaveFile(): File =
     File(System.getProperty("user.home"), ".openlog2/autosave.cache")
 
+internal const val ANNOTATION_PANEL_MIN_WIDTH = 360f
+
 data class PendingSequenceStart(val text: String, val tag: String)
 data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val currentFilterId: String?)
 
@@ -49,7 +51,7 @@ class AppState(
     var filterVisible        by mutableStateOf(true)
     var annotationVisible    by mutableStateOf(true)
     var filterPanelWidth     by mutableStateOf(220f)
-    var annotationPanelWidth by mutableStateOf(300f)
+    var annotationPanelWidth by mutableStateOf(ANNOTATION_PANEL_MIN_WIDTH)
     var compareSplit         by mutableStateOf(0.5f)
     var compareFilterRight   by mutableStateOf(true)
     var isLoading            by mutableStateOf(false)
@@ -709,6 +711,7 @@ class AppState(
         val path = file.absolutePath
         recentFiles = (listOf(path) + recentFiles.filter { it != path }).take(30)
         recentMenuOpen = false
+        rememberAutoExportedNoteFor(file.name)
         // Switch to existing tab if this file is already open
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) { activeTabId = existing.id; return }
@@ -742,12 +745,10 @@ class AppState(
         val saved = File(dir + path)
         saved.writeText(buildMd(t))
         File(saved.parent, saved.nameWithoutExtension + ".ann").writeText(t.annotations.annotationsToken())
-        val absPath = saved.absolutePath
-        recentNotes = (listOf(absPath) + recentNotes.filter { it != absPath }).take(30)
+        rememberRecentNote(saved)
     }
     fun openNoteFile(tabId: String, file: File) {
-        val absPath = file.absolutePath
-        recentNotes = (listOf(absPath) + recentNotes.filter { it != absPath }).take(30)
+        rememberRecentNote(file)
         recentNotesMenuOpen = false
         // Prefer .ann sidecar — restores exact blocks and structure
         val sidecar = File(file.parent, file.nameWithoutExtension + ".ann")
@@ -768,18 +769,32 @@ class AppState(
 
     private val notesDir = File(System.getProperty("user.home"), ".openlog2/notes")
 
+    private fun autoExportedNoteFile(filename: String): File {
+        val safeName = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        return File(notesDir, "${safeName}_notes.md")
+    }
+
+    private fun rememberAutoExportedNoteFor(filename: String) {
+        val noteFile = autoExportedNoteFile(filename)
+        if (noteFile.exists()) rememberRecentNote(noteFile)
+    }
+
+    private fun rememberRecentNote(file: File) {
+        val absPath = file.absolutePath
+        recentNotes = (listOf(absPath) + recentNotes.filter { it != absPath }).take(30)
+        autosaveNow()
+    }
+
     private fun autoExportAnnotations(tab: LogTab) {
         if (tab.annotations.blocks.isEmpty()) return
         ioScope.launch {
             runCatching {
                 notesDir.mkdirs()
-                val safeName = tab.filename.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-                val mdFile = File(notesDir, "${safeName}_notes.md")
+                val mdFile = autoExportedNoteFile(tab.filename)
                 mdFile.writeText(buildMd(tab))
                 // Sidecar stores full block state for restoration
-                File(notesDir, "${safeName}_notes.ann").writeText(tab.annotations.annotationsToken())
-                val absPath = mdFile.absolutePath
-                recentNotes = (listOf(absPath) + recentNotes.filter { it != absPath }).take(30)
+                File(notesDir, "${mdFile.nameWithoutExtension}.ann").writeText(tab.annotations.annotationsToken())
+                rememberRecentNote(mdFile)
             }
         }
     }
@@ -853,8 +868,8 @@ class AppState(
                     "sequences" -> sequences = value.tokenList().mapNotNull { it.sequenceFromToken() }
                     "saved" -> importFilters(value.unb64())
                     "activeFilters" -> activeSavedFilterIds = activeFilterMapFromToken(value.unb64())
-                    "recent" -> recentFiles = value.tokenList()
-                    "recentNotes" -> recentNotes = value.tokenList()
+                    "recent" -> recentFiles = value.pathTokenList()
+                    "recentNotes" -> recentNotes = value.pathTokenList()
                 }
             }
             tabs = tabLines.mapNotNull { it.removePrefix("tab\t").tabFromToken() }
@@ -953,6 +968,8 @@ private fun tokenFields(vararg values: String): String = values.joinToString("|"
 private fun String.tokenFields(): List<String> = split("|", limit = Int.MAX_VALUE).map { it.fieldValue() }
 private fun String.tokenList(): List<String> =
     if (isBlank()) emptyList() else unb64().split(",").filter { it.isNotBlank() }
+private fun String.pathTokenList(): List<String> =
+    tokenList().map { item -> runCatching { item.unb64() }.getOrElse { item } }
 
 private fun AppSettings.settingsToken(): String = tokenFields(
     theme.name,
@@ -996,7 +1013,7 @@ private fun AppState.restoreCompareState(token: String) {
     filterVisible = p[3].toBoolean()
     annotationVisible = p[4].toBoolean()
     filterPanelWidth = p[5].toFloatOrNull() ?: filterPanelWidth
-    annotationPanelWidth = p[6].toFloatOrNull() ?: annotationPanelWidth
+    annotationPanelWidth = (p[6].toFloatOrNull() ?: annotationPanelWidth).coerceIn(ANNOTATION_PANEL_MIN_WIDTH, 500f)
     compareSplit = p[7].toFloatOrNull() ?: compareSplit
 }
 

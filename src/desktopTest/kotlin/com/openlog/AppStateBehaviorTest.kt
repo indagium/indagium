@@ -552,6 +552,32 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun openFileRemembersExistingAutoExportedNoteAndPersistsRecentNotes() {
+        val originalHome = System.getProperty("user.home")
+        val home = createTempDirectory("openlog-home").toFile()
+        try {
+            System.setProperty("user.home", home.absolutePath)
+            val notesDir = File(home, ".openlog2/notes").apply { mkdirs() }
+            val logFile = File(home, "sample.log").apply {
+                writeText("06-26 10:00:00.000  123  456 I App: hello\n")
+            }
+            val noteFile = File(notesDir, "sample.log_notes.md").apply {
+                writeText("## sample.log\n\nremember this")
+            }
+            val cacheFile = File(home, "state.cache")
+            val state = AppState(cacheFile)
+
+            state.openFile(logFile)
+
+            assertEquals(listOf(noteFile.absolutePath), state.recentNotes)
+            val restored = AppState(cacheFile, restoreOnCreate = true)
+            assertEquals(listOf(noteFile.absolutePath), restored.recentNotes)
+        } finally {
+            System.setProperty("user.home", originalHome)
+        }
+    }
+
+    @Test
     fun contextMenuCanAddHideAndShowOnlyMessageRules() {
         val state = AppState()
         state.tabs = listOf(mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "heartbeat"))))

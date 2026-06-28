@@ -74,7 +74,15 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
         LocalUseMono  provides state.settings.fontMono,
     ) {
         val tc = tc()
-        LaunchedEffect(state.tabs, state.savedFilters, state.sequences, state.settings, state.activeSavedFilterIds) {
+        LaunchedEffect(
+            state.tabs,
+            state.savedFilters,
+            state.sequences,
+            state.settings,
+            state.activeSavedFilterIds,
+            state.recentFiles,
+            state.recentNotes,
+        ) {
             kotlinx.coroutines.delay(400)
             state.autosaveNow()
         }
@@ -595,7 +603,7 @@ private fun FileView(state: AppState, tab: LogTab) {
             scrollStateStore = state.logViewerScrollStateStore,
         )
         if (state.annotationVisible) {
-            HDivider { delta -> state.annotationPanelWidth = (state.annotationPanelWidth - delta).coerceIn(180f, 500f) }
+            HDivider { delta -> state.annotationPanelWidth = (state.annotationPanelWidth - delta).coerceIn(ANNOTATION_PANEL_MIN_WIDTH, 500f) }
             AnnotationPanel(
                 tab                 = tab,
                 recentNotes         = state.recentNotes,
@@ -768,7 +776,7 @@ private fun CompareView(state: AppState) {
                         scrollStateStore = state.logViewerScrollStateStore,
                     )
                     if (state.annotationVisible) {
-                        HDivider { d -> state.annotationPanelWidth = (state.annotationPanelWidth - d).coerceIn(180f, 500f) }
+                        HDivider { d -> state.annotationPanelWidth = (state.annotationPanelWidth - d).coerceIn(ANNOTATION_PANEL_MIN_WIDTH, 500f) }
                         AnnotationPanel(
                             tab                 = leftTab,
                             headerNote          = leftTab.filename,
