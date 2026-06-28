@@ -5,6 +5,8 @@
 
 package com.openlog.ui
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.*
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -20,19 +22,16 @@ import androidx.compose.ui.draganddrop.DragData
 import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.draw.*
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.*
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.layout.positionInRoot
-import java.awt.Cursor as AwtCursor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -44,6 +43,7 @@ import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
 import java.net.URI
+import kotlin.math.roundToInt
 
 @Composable
 fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
@@ -570,6 +570,7 @@ private fun FileView(state: AppState, tab: LogTab) {
             onExpandAll     = { state.expandAll(tab.id) },
             onCollapseAll   = { state.collapseAll(tab.id) },
             onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
+            scrollStateStore = state.logViewerScrollStateStore,
         )
         if (state.annotationVisible) {
             HDivider { delta -> state.annotationPanelWidth = (state.annotationPanelWidth - delta).coerceIn(180f, 500f) }
@@ -705,6 +706,7 @@ private fun CompareView(state: AppState) {
                         onExpandAll       = { state.expandAll(leftTab.id) },
                         onCollapseAll     = { state.collapseAll(leftTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(leftTab.id) },
+                        scrollStateStore = state.logViewerScrollStateStore,
                     )
                 }
             }
@@ -741,6 +743,7 @@ private fun CompareView(state: AppState) {
                         onExpandAll       = { state.expandAll(rightTab.id) },
                         onCollapseAll     = { state.collapseAll(rightTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(rightTab.id) },
+                        scrollStateStore = state.logViewerScrollStateStore,
                     )
                     if (state.annotationVisible) {
                         HDivider { d -> state.annotationPanelWidth = (state.annotationPanelWidth - d).coerceIn(180f, 500f) }
@@ -800,50 +803,114 @@ private fun TabBar(state: AppState) {
 
 // Renders visible tabs and an overflow "▾ N" button for any that don't fit.
 // Drag-and-drop reorder: press-and-move >8px to start drag; a 3dp accent line marks the drop point.
+internal fun browserTabOrderDuringDrag(
+    visibleIds: List<String>,
+    draggedId: String?,
+    dragStartIndex: Int,
+    dragOffsetX: Float,
+    tabWidth: Float,
+): List<String> {
+    val dragged = draggedId?.takeIf { it in visibleIds } ?: return visibleIds
+    if (tabWidth <= 0f || dragStartIndex !in visibleIds.indices) return visibleIds
+    val sensitivityBias = tabWidth * 0.25f * dragOffsetX.compareTo(0f)
+    val draggedCenter = dragStartIndex * tabWidth + tabWidth / 2f + dragOffsetX + sensitivityBias
+    val without = visibleIds.filter { it != dragged }
+    val insertAt = without.indexOfFirst { id ->
+        val center = visibleIds.indexOf(id) * tabWidth + tabWidth / 2f
+        draggedCenter < center
+    }.takeIf { it >= 0 } ?: without.size
+    return without.take(insertAt) + dragged + without.drop(insertAt)
+}
+
+internal fun tabRenderX(
+    isDragging: Boolean,
+    isJustReleased: Boolean,
+    pointerX: Float,
+    targetX: Float,
+    animatedX: Float,
+): Float = when {
+    isDragging -> pointerX
+    isJustReleased -> targetX
+    else -> animatedX
+}
+
+internal fun splitTabsForVisibility(
+    tabs: List<LogTab>,
+    activeTabId: String,
+    containerPx: Int,
+    minTabPx: Int,
+    overflowButtonPx: Int,
+    visibleTabLimit: Int,
+): Pair<List<LogTab>, List<LogTab>> {
+    if (containerPx == 0) return tabs to emptyList()
+    if (tabs.isEmpty()) return emptyList<LogTab>() to emptyList()
+    var n = minOf(tabs.size, visibleTabLimit.coerceIn(1, tabs.size))
+    while (n > 1) {
+        val avail = if (n < tabs.size) containerPx - overflowButtonPx else containerPx
+        if (avail / n >= minTabPx) break
+        n--
+    }
+    val active = tabs.find { it.id == activeTabId }
+    val others = tabs.filter { it.id != activeTabId }
+    val visibleIds = ((if (active != null) listOf(active) else emptyList()) + others.take(if (active != null) n - 1 else n))
+        .map { it.id }
+        .toSet()
+    return tabs.filter { it.id in visibleIds } to tabs.filter { it.id !in visibleIds }
+}
+
 @Composable
 private fun TabOverflowRow(state: AppState, modifier: Modifier) {
     val tc           = tc()
     val density      = LocalDensity.current.density
-    val tabXPx       = remember { mutableStateMapOf<String, Int>() }
     var containerPx  by remember { mutableStateOf(0) }
+    var tabAreaPx    by remember { mutableStateOf(0) }
     var dragTabId    by remember { mutableStateOf<String?>(null) }
-    var dropBeforeId by remember { mutableStateOf<String?>(null) }
+    var dragStartIndex by remember { mutableStateOf(-1) }
+    var dragOffsetX  by remember { mutableStateOf(0f) }
+    var justReleasedTabId by remember { mutableStateOf<String?>(null) }
+    var liveVisualTabIds by remember { mutableStateOf(emptyList<String>()) }
     var overflowOpen by remember { mutableStateOf(false) }
-
-    SideEffect { tabXPx.keys.retainAll(state.tabs.map { it.id }.toSet()) }
 
     val minTabPx = (80 * density).toInt()
     val ovBtnPx  = (40 * density).toInt()
 
-    // Equal-width tab visibility: expand to fill the bar, overflow only when min width violated.
-    val (visibleTabs, overflowTabs) = remember(state.tabs, state.activeTabId, containerPx) {
-        if (containerPx == 0) return@remember state.tabs to emptyList<LogTab>()
-        var n = state.tabs.size
-        while (n > 1) {
-            val avail = if (n < state.tabs.size) containerPx - ovBtnPx else containerPx
-            if (avail / n >= minTabPx) break
-            n--
-        }
-        val active = state.tabs.find { it.id == state.activeTabId }
-        val others = state.tabs.filter { it.id != state.activeTabId }
-        val visSet  = ((if (active != null) listOf(active) else emptyList()) + others.take(if (active != null) n - 1 else n))
-            .map { it.id }.toSet()
-        state.tabs.filter { it.id in visSet } to state.tabs.filter { it.id !in visSet }
+    val visibleTabLimit = state.settings.visibleTabLimit
+    val (visibleTabs, overflowTabs) = remember(state.tabs, state.activeTabId, containerPx, visibleTabLimit) {
+        splitTabsForVisibility(
+            tabs = state.tabs,
+            activeTabId = state.activeTabId,
+            containerPx = containerPx,
+            minTabPx = minTabPx,
+            overflowButtonPx = ovBtnPx,
+            visibleTabLimit = visibleTabLimit,
+        )
     }
 
-    // Visual order recomputes live during drag — tabs snap to new positions immediately.
-    val visualOrder = remember(visibleTabs, dragTabId, dropBeforeId) {
-        val dt = dragTabId ?: return@remember visibleTabs
-        val dragged = visibleTabs.find { it.id == dt } ?: return@remember visibleTabs
-        val without = visibleTabs.filter { it.id != dt }
-        val idx = without.indexOfFirst { it.id == dropBeforeId }.takeIf { it >= 0 } ?: without.size
-        without.take(idx) + dragged + without.drop(idx)
+    val visibleTabIds = visibleTabs.map { it.id }
+    val overflowTabIds = overflowTabs.map { it.id }
+    LaunchedEffect(visibleTabIds, dragTabId) {
+        if (dragTabId == null) liveVisualTabIds = visibleTabIds
     }
+    LaunchedEffect(justReleasedTabId) {
+        if (justReleasedTabId != null) {
+            kotlinx.coroutines.delay(120)
+            justReleasedTabId = null
+        }
+    }
+    val tabWidthPx = if (visibleTabs.isNotEmpty() && tabAreaPx > 0) tabAreaPx.toFloat() / visibleTabs.size else minTabPx.toFloat()
+    val visualOrderIds = liveVisualTabIds.takeIf { it.toSet() == visibleTabIds.toSet() && it.size == visibleTabIds.size } ?: visibleTabIds
+    val currentVisualOrderIds by rememberUpdatedState(visualOrderIds)
+    val currentOverflowTabIds by rememberUpdatedState(overflowTabIds)
 
     Row(
         modifier
-            .onSizeChanged { containerPx = it.width }
-            .pointerInput("tabdrag") {
+            .onSizeChanged { containerPx = it.width },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.weight(1f).fillMaxHeight()
+                .onSizeChanged { tabAreaPx = it.width }
+                .pointerInput(visibleTabIds, tabWidthPx) {
                 var downPos  = Offset.Zero
                 var downId: String? = null
                 var dragging = false
@@ -854,70 +921,101 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
                         when (ev.type) {
                             PointerEventType.Press -> {
                                 downPos = ch.position; dragging = false
-                                downId = tabXPx.entries
-                                    .sortedByDescending { it.value }
-                                    .firstOrNull { (_, x) -> ch.position.x.toInt() >= x }?.key
+                                val idx = (ch.position.x / tabWidthPx).toInt().coerceIn(0, visibleTabIds.lastIndex.coerceAtLeast(0))
+                                downId = visibleTabIds.getOrNull(idx)
                             }
                             PointerEventType.Move -> {
                                 if (downId != null && !dragging && (ch.position - downPos).getDistance() > 8f) {
-                                    dragging = true; dragTabId = downId
+                                    dragging = true
+                                    dragTabId = downId
+                                    justReleasedTabId = null
+                                    dragStartIndex = visibleTabIds.indexOf(downId)
+                                    dragOffsetX = 0f
                                 }
                                 if (dragging && dragTabId != null) {
                                     ch.consume()
-                                    val tabW = if (visibleTabs.isNotEmpty()) containerPx / visibleTabs.size else minTabPx
-                                    dropBeforeId = tabXPx.entries
-                                        .filter { (id, _) -> id != dragTabId }
-                                        .sortedBy { it.value }
-                                        .firstOrNull { (_, x) -> ch.position.x.toInt() < x + tabW / 2 }?.key
+                                    dragOffsetX = ch.position.x - downPos.x
+                                    liveVisualTabIds = browserTabOrderDuringDrag(
+                                        visibleIds = visibleTabIds,
+                                        draggedId = dragTabId,
+                                        dragStartIndex = dragStartIndex,
+                                        dragOffsetX = dragOffsetX,
+                                        tabWidth = tabWidthPx,
+                                    )
                                 }
                             }
                             PointerEventType.Release -> {
                                 if (dragging && dragTabId != null) {
-                                    // Commit current visual order to state.tabs
-                                    val from    = dragTabId!!
-                                    val drop    = dropBeforeId
-                                    val dragged = visibleTabs.find { it.id == from }
-                                    if (dragged != null) {
-                                        val without  = visibleTabs.filter { it.id != from }
-                                        val ins      = without.indexOfFirst { it.id == drop }.takeIf { it >= 0 } ?: without.size
-                                        val newVis   = without.take(ins) + dragged + without.drop(ins)
-                                        val newOrder = newVis.map { it.id } + overflowTabs.map { it.id }
-                                        state.tabs   = newOrder.mapNotNull { id -> state.tabs.find { it.id == id } }
-                                    }
+                                    justReleasedTabId = dragTabId
+                                    val newOrder = currentVisualOrderIds + currentOverflowTabIds
+                                    state.tabs = newOrder.mapNotNull { id -> state.tabs.find { it.id == id } }
                                 }
-                                dragTabId = null; dropBeforeId = null; downId = null; dragging = false
+                                dragTabId = null
+                                dragStartIndex = -1
+                                dragOffsetX = 0f
+                                downId = null
+                                dragging = false
                             }
                             else -> {}
                         }
                     }
                 }
             },
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        visualOrder.forEach { tab ->
-            val isDragging = tab.id == dragTabId
-            Box(
-                Modifier.weight(1f).fillMaxHeight()
-                    .onGloballyPositioned { tabXPx[tab.id] = it.positionInRoot().x.toInt() }
-                    .zIndex(if (isDragging) 1f else 0f)
-            ) {
-                TabItem(
-                    tab = tab,
-                    isActive = tab.id == state.activeTabId,
-                    showClose = true,
-                    dragging = isDragging,
-                    onClick = { if (dragTabId == null) state.activeTabId = tab.id },
-                    onClose = { state.closeTab(tab.id) },
-                )
+        ) {
+            visibleTabs.forEach { tab ->
+                key(tab.id) {
+                    val isDragging = tab.id == dragTabId
+                    val targetIndex = visualOrderIds.indexOf(tab.id).takeIf { it >= 0 } ?: visibleTabs.indexOf(tab)
+                    val targetX = targetIndex * tabWidthPx
+                    val animatedX by animateFloatAsState(
+                        targetValue = targetX,
+                        animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
+                        label = "tab-x-${tab.id}",
+                    )
+                    val startX = (dragStartIndex.takeIf { it >= 0 } ?: targetIndex) * tabWidthPx
+                    val tabX = tabRenderX(
+                        isDragging = isDragging,
+                        isJustReleased = tab.id == justReleasedTabId,
+                        pointerX = startX + dragOffsetX,
+                        targetX = targetX,
+                        animatedX = animatedX,
+                    )
+                    Box(
+                        Modifier
+                            .offset { IntOffset(tabX.roundToInt(), 0) }
+                            .width((tabWidthPx / density).dp)
+                            .fillMaxHeight()
+                            .zIndex(if (isDragging) 1f else 0f)
+                            .graphicsLayer {
+                                if (isDragging) {
+                                    scaleX = 1.02f
+                                    scaleY = 1.02f
+                                }
+                            }
+                    ) {
+                        TabItem(
+                            tab = tab,
+                            isActive = tab.id == state.activeTabId,
+                            showClose = true,
+                            dragging = isDragging,
+                            onClick = { if (dragTabId == null) state.activeTabId = tab.id },
+                            onClose = { state.closeTab(tab.id) },
+                        )
+                    }
+                }
             }
         }
         if (overflowTabs.isNotEmpty()) {
             Box(Modifier.fillMaxHeight()) {
-                ToolbarBtn("▾ ${overflowTabs.size}", active = overflowOpen) { overflowOpen = !overflowOpen }
+                ToolbarBtn(
+                    "▾ ${overflowTabs.size}",
+                    active = overflowOpen,
+                    modifier = Modifier.fillMaxHeight(),
+                ) { overflowOpen = !overflowOpen }
                 if (overflowOpen) {
                     Popup(
                         alignment = Alignment.TopStart,
-                        offset = androidx.compose.ui.unit.IntOffset(0, (36 * density).toInt()),
+                        offset = IntOffset(0, (36 * density).toInt()),
                         onDismissRequest = { overflowOpen = false },
                         properties = PopupProperties(focusable = true),
                     ) {
@@ -1016,6 +1114,20 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
             }
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppText("VISIBLE TABS — ${state.settings.visibleTabLimit}", color = tc.td, fontSize = 11.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf(4, 6, 8, 10, 12, 16).forEach { limit ->
+                    val active = state.settings.visibleTabLimit == limit
+                    Box(
+                        Modifier.border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
+                            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, RoundedCornerShape(4.dp))
+                            .clickable { state.settings = state.settings.copy(visibleTabLimit = limit) }
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                    ) { AppText(limit.toString(), color = if (active) tc.ac else tc.ts, fontSize = 13.sp) }
+                }
+            }
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             AppText("DEFAULT SAVE FOLDER", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 AppText(state.settings.defaultSaveDir ?: "(not set)", color = tc.ts, fontSize = 11.sp, fontFamily = MONO,
@@ -1042,7 +1154,7 @@ private fun TabItem(
     Row(
         Modifier.fillMaxWidth().fillMaxHeight()
             .background(if (lifted) tc.bg else if (hov) tc.p else tc.p2)
-            .border(BorderStroke(2.dp, if (lifted) tc.ac else Color.Transparent))
+            .border(BorderStroke(if (lifted) 2.dp else 1.dp, if (lifted) tc.ac else tc.br.copy(alpha = 0.95f)))
             .onPointerEvent(PointerEventType.Enter) { hov = true }
             .onPointerEvent(PointerEventType.Exit)  { hov = false }
             .clickable(onClick = onClick).padding(horizontal = 12.dp),

@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.text.BasicTextField
@@ -45,6 +44,42 @@ private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
             add(idx to idx + hl.pattern.length); i = idx + 1
         }
     }
+
+internal fun nextOriginalSelectionAfterFilteredSelection(
+    currentOriginalSelection: Set<Int>,
+    filteredSelection: Set<Int>,
+    singlePlainClick: Boolean,
+): Set<Int> =
+    if (singlePlainClick && currentOriginalSelection.size > 1) currentOriginalSelection else filteredSelection
+
+internal fun visibleRowRangeIds(fromId: Int, toId: Int, visibleIds: List<Int>): List<Int> {
+    val a = visibleIds.indexOf(fromId)
+    val b = visibleIds.indexOf(toId)
+    return if (a >= 0 && b >= 0) visibleIds.subList(minOf(a, b), maxOf(a, b) + 1) else emptyList()
+}
+
+internal fun logItemStableKey(tabId: String, item: LogItem): String = when (item) {
+    is LogItem.Row -> "$tabId:r${item.entry.id}"
+    is LogItem.SeqHeader -> "$tabId:h${item.gid}"
+    is LogItem.ManualHeader -> "$tabId:m${item.gid}"
+}
+
+class LogViewerScrollStateStore {
+    private val lazyStates = mutableMapOf<String, LazyListState>()
+    private val horizontalStates = mutableMapOf<String, ScrollState>()
+
+    fun lazyState(panelKey: String): LazyListState =
+        lazyStates.getOrPut(panelKey) { LazyListState() }
+
+    fun horizontalState(panelKey: String): ScrollState =
+        horizontalStates.getOrPut(panelKey) { ScrollState(0) }
+
+    fun removeTab(tabId: String) {
+        val prefix = "$tabId:"
+        lazyStates.keys.removeAll { it.startsWith(prefix) }
+        horizontalStates.keys.removeAll { it.startsWith(prefix) }
+    }
+}
 
 private fun fullLineText(entry: LogEntry): String = buildString {
     append(entry.ts)
@@ -112,9 +147,11 @@ fun LogViewer(
     onExpandAll: () -> Unit,
     onCollapseAll: () -> Unit,
     onToggleUnfiltered: () -> Unit,
+    scrollStateStore: LogViewerScrollStateStore? = null,
 ) {
     val tc        = tc()
     val mono      = monoFont()
+    val scrollStates = scrollStateStore ?: remember { LogViewerScrollStateStore() }
     val items     = remember(tab.id, tab.filter, tab.expanded, tab.manualBlocks, sequences) { computeItems(tab, sequences, true) }
     val visCnt    = items.count { it is LogItem.Row }
     val totalCnt  = tab.logData.size
@@ -153,11 +190,12 @@ fun LogViewer(
             itemOnSelRowRange: (List<Int>) -> Unit = onSelRowRange,
             // Wraps the outer 5-arg onCtxMenu; callers may inject a different selectedIds set.
             itemOnCtxMenu: (Int, Float, Float, String) -> Unit = { id, x, y, sel -> onCtxMenu(id, x, y, sel, emptySet()) },
-            listState: LazyListState = rememberLazyListState(),
+            panelKey: String = effectiveTab.id,
+            listState: LazyListState? = null,
         ) {
             if (listItems.isEmpty()) { EmptyState(tc, totalCnt, onClearFilter); return }
-            val lazyState = listState
-            val hScroll   = rememberScrollState()
+            val lazyState = listState ?: scrollStates.lazyState(panelKey)
+            val hScroll   = scrollStates.horizontalState(panelKey)
             val visibleIds = remember(listItems) {
                 listItems.map { item ->
                     when (item) {
@@ -167,6 +205,7 @@ fun LogViewer(
                     }
                 }
             }
+            val currentOnSelRowRange by rememberUpdatedState(itemOnSelRowRange)
             SideEffect {
                 boundsMap.keys.retainAll(visibleIds.toSet())
             }
@@ -175,29 +214,39 @@ fun LogViewer(
                     .onGloballyPositioned { posY[0] = it.positionInRoot().y }
                     .pointerInput("drag", effectiveTab.id, visibleIds) {
                         awaitPointerEventScope {
-                            var startId: Int? = null; var lastId: Int? = null
+                            var startId: Int? = null
+                            var lastId: Int? = null
+                            var startPos = Offset.Zero
+                            var dragSelecting = false
                             while (true) {
                                 val ev = awaitPointerEvent(PointerEventPass.Initial)
                                 val ch = ev.changes.firstOrNull() ?: continue
                                 when (ev.type) {
                                     PointerEventType.Press -> if (ev.buttons.isPrimaryPressed) {
+                                        startPos = ch.position
+                                        dragSelecting = false
                                         val absY = posY[0] + ch.position.y
                                         startId = boundsMap.entries.firstOrNull { (_, b) -> absY >= b.first && absY < b.second }?.key
                                         lastId  = startId
                                     }
                                     PointerEventType.Move -> if (ev.buttons.isPrimaryPressed && startId != null) {
+                                        if (!dragSelecting && (ch.position - startPos).getDistance() > 4f) dragSelecting = true
+                                        if (dragSelecting) ch.consume()
                                         val absY = posY[0] + ch.position.y
                                         val id   = boundsMap.entries.firstOrNull { (_, b) -> absY >= b.first && absY < b.second }?.key
                                         if (id != null && id != lastId) {
-                                            val a = visibleIds.indexOf(startId)
-                                            val b = visibleIds.indexOf(id)
-                                            if (a >= 0 && b >= 0) {
+                                            val rangeIds = visibleRowRangeIds(startId, id, visibleIds)
+                                            if (rangeIds.isNotEmpty()) {
                                                 lastId = id
-                                                itemOnSelRowRange(visibleIds.subList(minOf(a, b), maxOf(a, b) + 1))
+                                                currentOnSelRowRange(rangeIds)
                                             }
                                         }
                                     }
-                                    PointerEventType.Release -> { startId = null; lastId = null }
+                                    PointerEventType.Release -> {
+                                        startId = null
+                                        lastId = null
+                                        dragSelecting = false
+                                    }
                                     else -> {}
                                 }
                             }
@@ -213,11 +262,7 @@ fun LogViewer(
                         ) {
                             items(
                                 items = listItems,
-                                key = { item -> when (item) {
-                                    is LogItem.Row       -> "r${item.entry.id}"
-                                    is LogItem.SeqHeader -> "h${item.gid}"
-                                    is LogItem.ManualHeader -> "m${item.gid}"
-                                }}
+                                key = { item -> logItemStableKey(effectiveTab.id, item) }
                             ) { item ->
                                 when (item) {
                                     is LogItem.Row       -> LogRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, boundsMap)
@@ -256,7 +301,7 @@ fun LogViewer(
             val effectiveSplitDp = if (splitDp < 0f) maxOf(50f, (containerH - 10f) / 2f) else splitDp
 
             // Hoisted lazy state for the Original panel so the Filtered panel can scroll it.
-            val allLazyState = rememberLazyListState()
+            val allLazyState = scrollStates.lazyState("${tab.id}:original")
             val syncScope    = rememberCoroutineScope()
 
             // Independent selection for the "Original" panel so clicks there don't
@@ -303,6 +348,7 @@ fun LogViewer(
                         itemOnSelRow = allOnSelRow,
                         itemOnSelRowRange = allOnSelRowRange,
                         itemOnCtxMenu = { id, x, y, sel -> onCtxMenu(id, x, y, sel, localAllSelected) },
+                        panelKey = "${tab.id}:original",
                         listState = allLazyState,
                     )
                 }
@@ -322,7 +368,11 @@ fun LogViewer(
                         itemOnSelRow = { id, multi, range ->
                             onSelRow(id, multi, range)
                             if (!multi && !range) {
-                                if (localAllSelected.size <= 1) localAllSelected = setOf(id)
+                                localAllSelected = nextOriginalSelectionAfterFilteredSelection(
+                                    currentOriginalSelection = localAllSelected,
+                                    filteredSelection = setOf(id),
+                                    singlePlainClick = true,
+                                )
                                 val idx = allItems.indexOfFirst { item ->
                                     when (item) {
                                         is LogItem.Row -> item.entry.id == id
@@ -335,11 +385,20 @@ fun LogViewer(
                                 }
                             }
                         },
+                        itemOnSelRowRange = { ids ->
+                            onSelRowRange(ids)
+                            localAllSelected = nextOriginalSelectionAfterFilteredSelection(
+                                currentOriginalSelection = localAllSelected,
+                                filteredSelection = ids.toSet(),
+                                singlePlainClick = false,
+                            )
+                        },
+                        panelKey = "${tab.id}:filtered",
                     )
                 }
             }
         } else {
-            ColHeader(hasPidTid); ItemList(items, rowBoundsAbs, boxPosY)
+            ColHeader(hasPidTid); ItemList(items, rowBoundsAbs, boxPosY, panelKey = "${tab.id}:main")
         }
     }
 }
@@ -360,10 +419,13 @@ private fun LogRow(
     val isSel    = entry.id in tab.selected
     var hov      by remember { mutableStateOf(false) }
     var rowRoot  by remember { mutableStateOf(Offset.Zero) }
-    var sel      by remember(entry.id) { mutableStateOf(TextRange.Zero) }
+    var sel      by remember(tab.id, entry.id) { mutableStateOf(TextRange.Zero) }
     val fontSize = baseSp()
+    DisposableEffect(entry.id, rowBoundsAbs) {
+        onDispose { rowBoundsAbs.remove(entry.id) }
+    }
 
-    val annoLine = remember(entry.id, tab.filter.highlighters, tc.td, tc.ts, tc.tx) {
+    val annoLine = remember(tab.id, entry, tab.filter.highlighters, tc.td, tc.ts, tc.tx) {
         buildFullLineAnnotation(entry, tab.filter.highlighters, tc.td, tc.td.copy(0.5f), tc.ts, tc.tx)
     }
 
@@ -464,6 +526,9 @@ private fun SeqHeaderRow(
     var hov by remember { mutableStateOf(false) }
     var rowRoot by remember { mutableStateOf(Offset.Zero) }
     var lastClickMs by remember { mutableStateOf(0L) }
+    DisposableEffect(item.entry.id, rowBoundsAbs) {
+        onDispose { rowBoundsAbs.remove(item.entry.id) }
+    }
     Row(
         Modifier
             .fillMaxWidth()
@@ -557,6 +622,9 @@ private fun ManualHeaderRow(
     var hov by remember { mutableStateOf(false) }
     var rowRoot by remember { mutableStateOf(Offset.Zero) }
     var lastClickMs by remember { mutableStateOf(0L) }
+    DisposableEffect(item.entry.id, rowBoundsAbs) {
+        onDispose { rowBoundsAbs.remove(item.entry.id) }
+    }
     Row(
         Modifier
             .fillMaxWidth()

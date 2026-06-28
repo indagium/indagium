@@ -138,6 +138,7 @@ data class AppSettings(
     val fontMono: Boolean = true,
     val defaultSaveDir: String? = null,
     val mostUsedTagLimit: Int = 5,
+    val visibleTabLimit: Int = 8,
 )
 
 enum class ThemePreset(val label: String) {

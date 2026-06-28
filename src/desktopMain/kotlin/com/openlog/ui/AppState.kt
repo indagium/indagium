@@ -54,6 +54,7 @@ class AppState(
     var compareSplit         by mutableStateOf(0.5f)
     var compareFilterRight   by mutableStateOf(true)
     var isLoading            by mutableStateOf(false)
+    val logViewerScrollStateStore = LogViewerScrollStateStore()
 
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -669,10 +670,10 @@ class AppState(
         tabs = listOf(tab) + tabs.filter { it.id != tabId }
         activeTabId = tabId
     }
-    fun reorderTabs(fromId: String, beforeId: String) {
+    fun reorderTabs(fromId: String, beforeId: String?) {
         val from = tabs.find { it.id == fromId } ?: return
         val without = tabs.filter { it.id != fromId }
-        val idx = without.indexOfFirst { it.id == beforeId }.takeIf { it >= 0 } ?: without.size
+        val idx = beforeId?.let { id -> without.indexOfFirst { it.id == id }.takeIf { it >= 0 } } ?: without.size
         tabs = without.take(idx) + from + without.drop(idx)
     }
     fun closeTab(tabId: String) {
@@ -680,6 +681,7 @@ class AppState(
         if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
         if (compareTabId == tabId) compareTabId = next.firstOrNull()?.id ?: ""
         if (next.isEmpty()) compareMode = false
+        logViewerScrollStateStore.removeTab(tabId)
         tabs = next
     }
     fun openFile(file: File) {
@@ -937,6 +939,7 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     fontMono.toString(),
     defaultSaveDir.orEmpty(),
     mostUsedTagLimit.toString(),
+    visibleTabLimit.toString(),
 )
 
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
@@ -948,6 +951,7 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         fontMono = p[2].toBoolean(),
         defaultSaveDir = p[3].takeIf { it.isNotBlank() },
         mostUsedTagLimit = p[4].toIntOrNull() ?: 5,
+        visibleTabLimit = p.getOrNull(5)?.toIntOrNull()?.coerceIn(2, 20) ?: 8,
     )
 }.getOrNull()
 

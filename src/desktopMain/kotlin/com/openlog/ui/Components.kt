@@ -212,17 +212,18 @@ fun PillBtn(label: String, active: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-fun ToolbarBtn(label: String, active: Boolean = false, onClick: () -> Unit) {
+fun ToolbarBtn(label: String, active: Boolean = false, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     Box(
-        Modifier
+        modifier
             .border(1.dp, if (active) tc.ac else tc.br, RoundedCornerShape(4.dp))
             .background(if (active) tc.ac.copy(.15f) else if (hovered) tc.hv else Color.Transparent, RoundedCornerShape(4.dp))
             .clickable(onClick = onClick)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .padding(horizontal = 10.dp, vertical = 5.dp),
+        contentAlignment = Alignment.Center,
     ) { AppText(label, color = if (active) tc.ac else tc.ts, fontSize = 12.sp) }
 }
 

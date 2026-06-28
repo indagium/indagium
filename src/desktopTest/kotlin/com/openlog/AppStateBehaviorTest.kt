@@ -329,6 +329,7 @@ class AppStateBehaviorTest {
             .copy(sourcePath = logFile.absolutePath)
         state.tabs = listOf(tab)
         state.activeTabId = "log"
+        state.settings = state.settings.copy(visibleTabLimit = 6)
         state.addPkgPrefix("log", "App")
         state.confirmAddAnn("log", "log", listOf(1), "remember this", null)
         state.saveFilter("log", "app only")
@@ -337,6 +338,7 @@ class AppStateBehaviorTest {
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
         assertEquals("test.log", restored.tabs.single().filename)
+        assertEquals(6, restored.settings.visibleTabLimit)
         assertEquals(setOf("App"), restored.tabs.single().filter.pkgPrefixes)
         val block = assertIs<AnnBlock.LogRef>(restored.tabs.single().annotations.blocks.single())
         assertEquals("remember this", block.caption)
