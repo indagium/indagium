@@ -97,7 +97,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             AppText("No files open — click Open to add a log", color = tc.ts, fontSize = 14.sp)
                         }
                     state.compareMode -> CompareView(state)
-                    activeTab != null  -> FileView(state, activeTab)
+                    activeTab != null  -> key(activeTab.id) { FileView(state, activeTab) }
                 }
             }
 
@@ -692,7 +692,7 @@ private fun CompareView(state: AppState) {
                     Modifier.fillMaxWidth().background(tc.p2).padding(4.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    state.tabs.forEach { t -> PillBtn(t.filename, active = t.id == leftTab.id) { state.activeTabId = t.id } }
+                    state.tabs.forEach { t -> PillBtn(t.filename, active = t.id == leftTab.id) { state.activateTab(t.id) } }
                 }
                 Row(Modifier.weight(1f).fillMaxWidth()) {
                     filterPanelFor(leftTab)
@@ -836,7 +836,6 @@ internal fun tabRenderX(
 
 internal fun splitTabsForVisibility(
     tabs: List<LogTab>,
-    activeTabId: String,
     containerPx: Int,
     minTabPx: Int,
     overflowButtonPx: Int,
@@ -850,13 +849,13 @@ internal fun splitTabsForVisibility(
         if (avail / n >= minTabPx) break
         n--
     }
-    val active = tabs.find { it.id == activeTabId }
-    val others = tabs.filter { it.id != activeTabId }
-    val visibleIds = ((if (active != null) listOf(active) else emptyList()) + others.take(if (active != null) n - 1 else n))
-        .map { it.id }
-        .toSet()
-    return tabs.filter { it.id in visibleIds } to tabs.filter { it.id !in visibleIds }
+    return tabs.takeLast(n) to tabs.dropLast(n)
 }
+
+internal fun tabOrderAfterVisibleReorder(
+    visibleIds: List<String>,
+    overflowIds: List<String>,
+): List<String> = overflowIds + visibleIds
 
 @Composable
 private fun TabOverflowRow(state: AppState, modifier: Modifier) {
@@ -878,7 +877,6 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
     val (visibleTabs, overflowTabs) = remember(state.tabs, state.activeTabId, containerPx, visibleTabLimit) {
         splitTabsForVisibility(
             tabs = state.tabs,
-            activeTabId = state.activeTabId,
             containerPx = containerPx,
             minTabPx = minTabPx,
             overflowButtonPx = ovBtnPx,
@@ -947,7 +945,10 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
                             PointerEventType.Release -> {
                                 if (dragging && dragTabId != null) {
                                     justReleasedTabId = dragTabId
-                                    val newOrder = currentVisualOrderIds + currentOverflowTabIds
+                                    val newOrder = tabOrderAfterVisibleReorder(
+                                        visibleIds = currentVisualOrderIds,
+                                        overflowIds = currentOverflowTabIds,
+                                    )
                                     state.tabs = newOrder.mapNotNull { id -> state.tabs.find { it.id == id } }
                                 }
                                 dragTabId = null
@@ -998,7 +999,7 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
                             isActive = tab.id == state.activeTabId,
                             showClose = true,
                             dragging = isDragging,
-                            onClick = { if (dragTabId == null) state.activeTabId = tab.id },
+                            onClick = { if (dragTabId == null) state.activateTab(tab.id) },
                             onClose = { state.closeTab(tab.id) },
                         )
                     }
@@ -1028,7 +1029,7 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                 overflowTabs.forEach { tab ->
                                     HoverBox(
                                         modifier = Modifier.fillMaxWidth(),
-                                        onClick = { state.moveTabToFront(tab.id); overflowOpen = false },
+                                        onClick = { state.activateOverflowTab(tab.id); overflowOpen = false },
                                     ) {
                                         AppText(
                                             tab.filename, color = tc.tx, fontSize = 12.sp,

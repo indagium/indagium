@@ -11,6 +11,7 @@ import com.openlog.ui.nextOriginalSelectionAfterFilteredSelection
 import com.openlog.ui.mkTab
 import com.openlog.ui.splitTabsForVisibility
 import com.openlog.ui.tabRenderX
+import com.openlog.ui.tabOrderAfterVisibleReorder
 import com.openlog.ui.visibleRowRangeIds
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -152,37 +153,45 @@ class SplitViewAndTabRegressionTest {
     }
 
     @Test
-    fun visibleTabsAreCappedByConfiguredLimit() {
+    fun visibleTabsUseTailOfTabOrderWhenCapped() {
         val tabs = (1..10).map { idx -> mkTab("t$idx", "tab-$idx.log", emptyList()) }
 
         val (visible, overflow) = splitTabsForVisibility(
             tabs = tabs,
-            activeTabId = "t1",
             containerPx = 2000,
             minTabPx = 80,
             overflowButtonPx = 40,
             visibleTabLimit = 8,
         )
 
-        assertEquals((1..8).map { "t$it" }, visible.map { it.id })
-        assertEquals(listOf("t9", "t10"), overflow.map { it.id })
+        assertEquals((3..10).map { "t$it" }, visible.map { it.id })
+        assertEquals(listOf("t1", "t2"), overflow.map { it.id })
     }
 
     @Test
-    fun activeTabStaysVisibleInsideConfiguredLimit() {
-        val tabs = (1..10).map { idx -> mkTab("t$idx", "tab-$idx.log", emptyList()) }
+    fun newlyAddedTabPushesFirstVisibleTabToOverflow() {
+        val tabs = (1..5).map { idx -> mkTab("t$idx", "tab-$idx.log", emptyList()) }
 
         val (visible, overflow) = splitTabsForVisibility(
             tabs = tabs,
-            activeTabId = "t10",
             containerPx = 2000,
             minTabPx = 80,
             overflowButtonPx = 40,
-            visibleTabLimit = 8,
+            visibleTabLimit = 4,
         )
 
-        assertEquals(setOf("t10", "t1", "t2", "t3", "t4", "t5", "t6", "t7"), visible.map { it.id }.toSet())
-        assertEquals(listOf("t8", "t9"), overflow.map { it.id })
+        assertEquals(listOf("t2", "t3", "t4", "t5"), visible.map { it.id })
+        assertEquals(listOf("t1"), overflow.map { it.id })
+    }
+
+    @Test
+    fun visibleDragKeepsOverflowBeforeVisibleTail() {
+        val order = tabOrderAfterVisibleReorder(
+            visibleIds = listOf("t3", "t4", "t5", "t6"),
+            overflowIds = listOf("t1", "t2"),
+        )
+
+        assertEquals(listOf("t1", "t2", "t3", "t4", "t5", "t6"), order)
     }
 
     @Test

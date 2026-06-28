@@ -665,9 +665,12 @@ class AppState(
         val t = emptyWorkspaceTab().copy(id = "t$n")
         tabs = tabs + t; activeTabId = t.id
     }
-    fun moveTabToFront(tabId: String) {
+    fun activateTab(tabId: String) {
+        if (tabs.any { it.id == tabId }) activeTabId = tabId
+    }
+    fun activateOverflowTab(tabId: String) {
         val tab = tabs.find { it.id == tabId } ?: return
-        tabs = listOf(tab) + tabs.filter { it.id != tabId }
+        tabs = tabs.filter { it.id != tabId } + tab
         activeTabId = tabId
     }
     fun reorderTabs(fromId: String, beforeId: String?) {

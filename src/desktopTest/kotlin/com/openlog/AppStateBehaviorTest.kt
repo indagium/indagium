@@ -17,6 +17,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class AppStateBehaviorTest {
@@ -42,6 +43,50 @@ class AppStateBehaviorTest {
         assertEquals(null, state.activeTab())
         assertEquals("", state.activeTabId)
         assertEquals("", state.compareTabId)
+    }
+
+    @Test
+    fun activatingVisibleTabDoesNotReorderTabs() {
+        val state = AppState()
+        state.tabs = (1..5).map { idx ->
+            mkTab(
+                "t$idx",
+                "tab-$idx.log",
+                listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "Tag$idx", "message $idx")),
+            )
+        }
+        state.activeTabId = "t4"
+
+        state.activateTab("t5")
+
+        assertEquals("t5", state.activeTabId)
+        assertEquals((1..5).map { "t$it" }, state.tabs.map { it.id })
+        assertEquals("Tag5", state.activeTab()?.logData?.single()?.tag)
+    }
+
+    @Test
+    fun activatingOverflowTabPromotesExistingTabToEnd() {
+        val state = AppState()
+        val hidden = mkTab(
+            "t1",
+            "tab-1.log",
+            listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "Hidden", "keep state")),
+        ).copy(selected = setOf(1))
+        state.tabs = listOf(hidden) + (2..5).map { idx ->
+            mkTab(
+                "t$idx",
+                "tab-$idx.log",
+                listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "Tag$idx", "message $idx")),
+            )
+        }
+        state.activeTabId = "t5"
+
+        state.activateOverflowTab("t1")
+
+        assertEquals("t1", state.activeTabId)
+        assertEquals(listOf("t2", "t3", "t4", "t5", "t1"), state.tabs.map { it.id })
+        assertSame(hidden, state.tabs.last())
+        assertEquals(setOf(1), state.activeTab()?.selected)
     }
 
     @Test
