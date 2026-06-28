@@ -37,6 +37,23 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ArrowDownward
+import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.Block
+import androidx.compose.material.icons.outlined.Bookmark
+import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Flag
+import androidx.compose.material.icons.automirrored.outlined.Label
+import androidx.compose.material.icons.automirrored.outlined.LabelOff
+import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material3.Icon
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.zIndex
 import com.openlog.model.*
 import java.awt.FileDialog
@@ -145,7 +162,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         ) {
                             Column {
                                 Box(
-                                    Modifier.fillMaxWidth().background(tc.ac.copy(.12f))
+                                    Modifier.fillMaxWidth().background(tc.abg)
                                         .clickable {
                                             val ids = if (selCount > 1) selectedIds.toSortedSet().toList() else listOf(ctx.entryId)
                                             state.requestAddAnn(ctx.tabId, ids)
@@ -159,12 +176,14 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                         fontWeight = FontWeight.SemiBold,
                                     )
                                 }
-                                Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                                CtxDivider()
                                 // Preview row
                                 Column(
-                                    Modifier.fillMaxWidth().background(tc.p2)
-                                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                                        .border(BorderStroke(1.dp, tc.br)),
+                                    Modifier.fillMaxWidth()
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                        .background(tc.p2, CORNER_MD)
+                                        .border(BorderStroke(0.5.dp, tc.br), CORNER_MD)
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
                                 ) {
                                     Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                                         LevelBadge(entry.level)
@@ -180,37 +199,37 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                 }
                                 // Selected text actions
                                 if (ctx.selText.isNotBlank()) {
-                                    CtxItem("◉", "Highlight selection")  { state.addHlFromCtx() }
-                                    CtxItem("≡", "Add as sequence")       { state.addSeqFromCtx() }
-                                    CtxItem("🔍", "Filter by keyword")    { state.addKwFilterFromCtx() }
-                                    CtxItem("⊘", "Exclude keyword")       { state.addNegKwFromCtx() }
-                                    Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                                    CtxItem(Icons.Outlined.Bookmark,              "Highlight selection") { state.addHlFromCtx() }
+                                    CtxItem(Icons.Outlined.Layers,                "Add as sequence")     { state.addSeqFromCtx() }
+                                    CtxItem(Icons.Outlined.Search,                "Filter by keyword")   { state.addKwFilterFromCtx() }
+                                    CtxItem(Icons.Outlined.Block,                 "Exclude keyword")     { state.addNegKwFromCtx() }
+                                    CtxDivider()
                                 }
                                 if (state.pendingSequenceStart != null) {
-                                    CtxItem("⇥", "Complete sequence end") { state.completeSequenceEndFromCtx() }
+                                    CtxItem(Icons.Outlined.Flag,            "Complete sequence end")  { state.completeSequenceEndFromCtx() }
                                 }
-                                CtxItem("⇤", "Set sequence start") { state.setSequenceStartFromCtx() }
-                                CtxItem("⇡", "Collapse to file start") { state.collapseToStartFromCtx() }
-                                CtxItem("⇣", "Collapse to file end") { state.collapseToEndFromCtx() }
-                                CtxItem("−m", "Hide messages like this") { state.hideMessagesLikeCtx() }
-                                CtxItem("+m", "Show messages like this") { state.showOnlyMessagesLikeCtx() }
-                                Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                                CtxItem(Icons.Outlined.PlayArrow,           "Set sequence start")     { state.setSequenceStartFromCtx() }
+                                CtxItem(Icons.Outlined.ArrowUpward,         "Collapse to file start") { state.collapseToStartFromCtx() }
+                                CtxItem(Icons.Outlined.ArrowDownward,       "Collapse to file end")   { state.collapseToEndFromCtx() }
+                                CtxItem(Icons.Outlined.VisibilityOff,       "Hide messages like this") { state.hideMessagesLikeCtx() }
+                                CtxItem(Icons.Outlined.Visibility,          "Show messages like this") { state.showOnlyMessagesLikeCtx() }
+                                CtxDivider()
                                 // Tag actions
-                                CtxItem("#",  "Include tag")    { state.addTagFilterFromCtx() }
-                                CtxItem("◉", "Highlight tag")   { state.addHlTagFromCtx() }
-                                CtxItem("−",  "Exclude tag")    { state.addExcludeTagFromCtx() }
-                                Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                                CtxItem(Icons.AutoMirrored.Outlined.Label,               "Include tag")  { state.addTagFilterFromCtx() }
+                                CtxItem(Icons.Outlined.Bookmark,            "Highlight tag") { state.addHlTagFromCtx() }
+                                CtxItem(Icons.AutoMirrored.Outlined.LabelOff,            "Exclude tag")  { state.addExcludeTagFromCtx() }
+                                CtxDivider()
                                 if (selCount > 1) {
-                                    CtxItem("⎘", "Copy $selCount selected lines") {
+                                    CtxItem(Icons.Outlined.ContentCopy, "Copy $selCount selected lines") {
                                         state.copySelectedLines(ctx.tabId); state.ctx = null
                                     }
                                 }
-                                CtxItem("⎘", "Copy line") {
+                                CtxItem(Icons.Outlined.ContentCopy, "Copy line") {
                                     val pid = if (entry.pid > 0) "  ${entry.pid.toString().padStart(5)} ${entry.tid.toString().padStart(5)}" else ""
                                     state.copyToClipboard("${entry.ts}$pid  ${entry.level.key}  ${entry.tag}: ${entry.msg}")
                                     state.ctx = null
                                 }
-                                CtxItem("M↓", "Copy as Markdown") {
+                                CtxItem(Icons.Outlined.Code, "Copy as Markdown") {
                                     state.copyToClipboard("**[${entry.ts}] `${entry.level.key}/${entry.tag}`:** ${entry.msg}")
                                     state.ctx = null
                                 }
@@ -1175,14 +1194,26 @@ private fun TabItem(
 }
 
 @Composable
-private fun CtxItem(icon: String, label: String, onClick: () -> Unit) {
+private fun CtxItem(icon: ImageVector, label: String, onClick: () -> Unit) {
+    val tc = tc()
     HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onClick) {
         Row(
-            Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+            Modifier.fillMaxWidth().height(32.dp).padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            AppText(icon, color = LocalTheme.current.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.width(20.dp))
-            AppText(label, color = LocalTheme.current.tx, fontSize = 12.sp)
+            Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp), tint = tc.td)
+            }
+            Spacer(Modifier.width(8.dp))
+            AppText(label, color = tc.tx, fontSize = 12.sp, modifier = Modifier.weight(1f))
         }
     }
+}
+
+@Composable
+private fun CtxDivider() {
+    val tc = tc()
+    Spacer(Modifier.height(4.dp))
+    Box(Modifier.fillMaxWidth().height(0.5.dp).background(tc.br))
+    Spacer(Modifier.height(4.dp))
 }
