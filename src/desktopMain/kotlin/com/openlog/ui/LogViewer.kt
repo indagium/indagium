@@ -177,9 +177,9 @@ fun LogViewer(
         ) {
             Spacer(Modifier.width(12.dp))
             AppText("$visCnt / $totalCnt entries", color = tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
-            PillBtn("Expand all",   active = canExpandAll, onClick = onExpandAll)
+            AppButton("Expand all",   onClick = onExpandAll,   enabled = canExpandAll)
             Spacer(Modifier.width(4.dp))
-            PillBtn("Collapse all", active = canCollapseAll, onClick = onCollapseAll)
+            AppButton("Collapse all", onClick = onCollapseAll, enabled = canCollapseAll)
             Spacer(Modifier.width(4.dp))
             PillBtn(if (tab.showUnfiltered) "⊘ Hide original" else "⊙ Unfiltered", active = tab.showUnfiltered, onClick = onToggleUnfiltered)
             Spacer(Modifier.width(8.dp))

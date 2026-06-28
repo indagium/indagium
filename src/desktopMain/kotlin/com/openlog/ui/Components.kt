@@ -12,6 +12,7 @@ import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.*
@@ -290,4 +291,96 @@ fun ColorSwatch(color: Color, selected: Boolean, onClick: () -> Unit) {
             .border(2.dp, if (selected) tc.tx else Color.Transparent, CORNER_SM)
             .clickable(onClick = onClick),
     )
+}
+
+// ── Segmented control ────────────────────────────────────────────────
+@Composable
+fun SegmentedControl(
+    options: List<String>,
+    selectedIndices: Set<Int>,
+    onToggle: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    selectedColors: List<Color>? = null,
+    fillWidth: Boolean = false,
+) {
+    val tc = tc()
+    Row(
+        modifier = modifier
+            .border(0.5.dp, tc.br, RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(6.dp)),
+    ) {
+        options.forEachIndexed { index, label ->
+            val selected = index in selectedIndices
+            val selColor = selectedColors?.getOrNull(index) ?: tc.ac
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = (if (fillWidth) Modifier.weight(1f) else Modifier.defaultMinSize(minWidth = 36.dp))
+                    .height(28.dp)
+                    .background(if (selected) selColor.copy(.2f) else Color.Transparent)
+                    .clickable { onToggle(index) }
+                    .padding(horizontal = 10.dp),
+            ) {
+                AppText(
+                    text = label,
+                    color = if (selected) selColor else tc.ts,
+                    fontSize = 12.sp,
+                    fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+                )
+            }
+            if (index < options.lastIndex) {
+                Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
+            }
+        }
+    }
+}
+
+// ── App button ────────────────────────────────────────────────────────
+enum class ButtonVariant { Primary, Secondary, Ghost }
+
+@Composable
+fun AppButton(
+    label: String,
+    onClick: () -> Unit,
+    variant: ButtonVariant = ButtonVariant.Secondary,
+    isDanger: Boolean = false,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    val accentColor = if (isDanger) DANGER_RED else tc.ac
+    val textColor = when {
+        !enabled -> tc.td.copy(.5f)
+        variant == ButtonVariant.Primary -> Color.White
+        variant == ButtonVariant.Secondary && isDanger -> DANGER_RED
+        variant == ButtonVariant.Ghost -> tc.td
+        else -> tc.tx
+    }
+    Box(
+        modifier = modifier
+            .then(if (variant == ButtonVariant.Secondary)
+                Modifier.border(0.5.dp, if (isDanger) DANGER_RED.copy(.5f) else tc.br, CORNER_MD)
+            else Modifier)
+            .background(
+                when {
+                    variant == ButtonVariant.Primary && enabled -> accentColor
+                    hovered && enabled -> tc.hv
+                    else -> Color.Transparent
+                },
+                CORNER_MD,
+            )
+            .clip(CORNER_MD)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        AppText(
+            label,
+            color = textColor,
+            fontSize = 12.sp,
+            fontWeight = if (variant == ButtonVariant.Primary) FontWeight.Medium else FontWeight.Normal,
+        )
+    }
 }

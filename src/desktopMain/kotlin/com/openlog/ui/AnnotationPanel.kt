@@ -13,6 +13,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -50,29 +51,60 @@ fun AnnotationPanel(
     val blockCount = ann.blocks.size
 
     Column(Modifier.width(width.dp).fillMaxHeight().background(tc.p).border(BorderStroke(1.dp, tc.br))) {
-        // Header row 1: title + action buttons
-        Row(
-            Modifier.fillMaxWidth().height(if (headerNote != null) 46.dp else 36.dp).background(tc.p2)
-                .border(BorderStroke(1.dp, tc.br)).padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
+        // Header: left = tab switcher (Annotations / Preview), right = action buttons
+        Column(
+            Modifier.fillMaxWidth()
+                .background(tc.p2)
+                .border(BorderStroke(1.dp, tc.br)),
         ) {
-            Column(Modifier.weight(1f)) {
-                AppText("Annotation · $blockCount", color = tc.ts, fontSize = 12.sp)
-                if (headerNote != null) {
-                    AppText(headerNote, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+            Row(
+                Modifier.fillMaxWidth().height(36.dp).padding(end = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // Underline-style tabs
+                val annLabel = "Annotations" + if (blockCount > 0) " · $blockCount" else ""
+                listOf(annLabel to false, "Preview" to true).forEach { (label, isPreview) ->
+                    val active = isPreview == tab.showAnnMd
+                    Column(
+                        Modifier
+                            .clickable { if (isPreview != tab.showAnnMd) onToggleMd() }
+                            .padding(horizontal = 10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Bottom,
+                    ) {
+                        AppText(
+                            label,
+                            color = if (active) tc.ac else tc.td,
+                            fontSize = 11.sp,
+                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                            modifier = Modifier.padding(bottom = 6.dp),
+                        )
+                        Box(Modifier.fillMaxWidth().height(2.dp).background(if (active) tc.ac else Color.Transparent))
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                // Action buttons
+                AppButton("Copy", onClick = onCopy)
+                Spacer(Modifier.width(4.dp))
+                AppButton("Save", onClick = onSave)
+                Spacer(Modifier.width(4.dp))
+                AppButton("Open Note", onClick = {
+                    val fd = FileDialog(null as Frame?, "Open Note File", FileDialog.LOAD)
+                    fd.setFilenameFilter { _, n -> n.endsWith(".md") || n.endsWith(".txt") }
+                    fd.isVisible = true
+                    fd.file?.let { onOpenNote(File(fd.directory, it)) }
+                })
+                if (recentNotes.isNotEmpty()) {
+                    Spacer(Modifier.width(2.dp))
+                    PillBtn("▾", active = recentNotesMenuOpen, onClick = onToggleRecentNotes)
                 }
             }
-            PillBtn("Preview", active = tab.showAnnMd, onClick = onToggleMd)
-            PillBtn("Copy", active = true, onClick = onCopy)
-            PillBtn("Save", active = true, onClick = onSave)
-            PillBtn("Open Note", active = false) {
-                val fd = FileDialog(null as Frame?, "Open Note File", FileDialog.LOAD)
-                fd.setFilenameFilter { _, n -> n.endsWith(".md") || n.endsWith(".txt") }
-                fd.isVisible = true
-                fd.file?.let { onOpenNote(File(fd.directory, it)) }
-            }
-            if (recentNotes.isNotEmpty()) {
-                PillBtn("▾", active = recentNotesMenuOpen, onClick = onToggleRecentNotes)
+            if (headerNote != null) {
+                AppText(
+                    headerNote,
+                    color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 4.dp),
+                )
             }
         }
         // Recent notes dropdown (inline, below header)
@@ -109,7 +141,7 @@ fun AnnotationPanel(
         Column(Modifier.fillMaxSize().verticalScroll(scroll)) {
             // Prefix
             AnnSection(tc) {
-                AppText("PREFIX", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                AppText("Prefix", color = tc.td, fontSize = 10.sp, fontFamily = UI)
                 Spacer(Modifier.height(3.dp))
                 InlineField(ann.prefix, onUpdatePrefix, "Heading, context…", Modifier.fillMaxWidth(), fontSize = 12.sp)
             }
@@ -167,7 +199,7 @@ fun AnnotationPanel(
 
                 // Suffix
                 AnnSection(tc) {
-                    AppText("NEXT STEPS", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                    AppText("Next steps", color = tc.td, fontSize = 10.sp, fontFamily = UI)
                     Spacer(Modifier.height(3.dp))
                     InlineField(ann.suffix, onUpdateSuffix, "Add follow-up notes…", Modifier.fillMaxWidth(), fontSize = 11.sp)
                 }

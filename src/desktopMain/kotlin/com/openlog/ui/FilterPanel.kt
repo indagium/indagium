@@ -287,7 +287,7 @@ fun FilterPanel(
             val totalActive = filter.pkgPrefixes.size + filter.activeTags.size + filter.excludeTags.size
             // ── unified TAGS section header with combined pill count ──
             SectionHeader(
-                "TAGS",
+                "Tags",
                 trailing = if (totalActive > 0) ({
                     Row(
                         Modifier.clickable { fpState.incPillsExpanded = !fpState.incPillsExpanded }
@@ -468,7 +468,7 @@ fun FilterPanel(
         val msgInc = filter.messageRules.filter { it.include }
         val msgExc = filter.messageRules.filter { !it.include }
         SectionHeader(
-            "MESSAGE RULES",
+            "Message rules",
             trailing = if (msgInc.isNotEmpty() || msgExc.isNotEmpty()) ({
                 if (msgInc.isNotEmpty()) {
                     Row(
@@ -633,7 +633,7 @@ fun FilterPanel(
         // Trailing shows colored dots for each highlighter; clicking collapses/expands the list.
         // The add form is always visible, matching the TAGS section pattern.
         SectionHeader(
-            "HIGHLIGHTERS",
+            "Highlighters",
             trailing = if (filter.highlighters.isNotEmpty()) ({
                 Row(
                     Modifier.clickable { fpState.hlListExpanded = !fpState.hlListExpanded }
@@ -715,7 +715,7 @@ fun FilterPanel(
                     onClear = { onSetNewHlPat("") },
                 )
                 PillBtn(".*", active = newHlRx, onClick = { onSetNewHlRx(!newHlRx) })
-                PillBtn("+ Add", active = newHlPat.isNotBlank(), onClick = doAddHl)
+                AppButton("+ Add", onClick = doAddHl, variant = ButtonVariant.Ghost, enabled = newHlPat.isNotBlank())
             }
             if (hlColorPickerOpen) {
                 FlowRow(
@@ -731,33 +731,22 @@ fun FilterPanel(
         Divider()
 
         // ── Log Level ─────────────────────────────────────────────
-        SectionHeader("LOG LEVEL", expanded = fpState.lvlExpanded, onToggle = { fpState.lvlExpanded = !fpState.lvlExpanded })
+        SectionHeader("Log level", expanded = fpState.lvlExpanded, onToggle = { fpState.lvlExpanded = !fpState.lvlExpanded })
         if (fpState.lvlExpanded) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                LogLevel.entries.forEach { lvl ->
-                    val on = lvl in filter.levels
-                    val color = lvl.defaultColor
-                    Box(
-                        Modifier
-                            .size(22.dp)
-                            .background(if (on) color.copy(.28f) else Color.Transparent, CORNER_MD)
-                            .border(1.dp, if (on) color else tc.br.copy(.45f), CORNER_MD)
-                            .clickable { onToggleLevel(lvl) },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        AppText(lvl.key.toString(), color = if (on) color else tc.td.copy(.4f), fontSize = 11.sp, fontFamily = MONO, fontWeight = FontWeight.SemiBold)
-                    }
-                }
-            }
+            val levels = LogLevel.entries
+            SegmentedControl(
+                options = levels.map { it.key.toString() },
+                selectedIndices = filter.levels.map { levels.indexOf(it) }.toSet(),
+                onToggle = { idx -> onToggleLevel(levels[idx]) },
+                selectedColors = levels.map { it.defaultColor },
+                fillWidth = true,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            )
         }
         Divider()
 
         // ── Sequences ─────────────────────────────────────────────
-        SectionHeader("SEQUENCES", expanded = fpState.seqExpanded, onToggle = { fpState.seqExpanded = !fpState.seqExpanded })
+        SectionHeader("Sequences", expanded = fpState.seqExpanded, onToggle = { fpState.seqExpanded = !fpState.seqExpanded })
         if (fpState.seqExpanded) {
             CheckRow(filter.seqOn, { onToggleSeq() }) {
                 AppText("Group sequences", color = tc.ts, fontSize = 12.sp, modifier = Modifier.weight(1f))
@@ -840,7 +829,7 @@ fun FilterPanel(
                 }
             }
             if (tab.manualBlocks.isNotEmpty()) {
-                AppText("COLLAPSED RANGES", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                AppText("Collapsed ranges", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
                 ScrollableItems(tab.manualBlocks.size) {
                     tab.manualBlocks.forEach { block ->
@@ -893,23 +882,23 @@ fun FilterPanel(
                         InlineField(newSeqEndText, onSetNewSeqEndText, "end message (optional)…", Modifier.weight(1f))
                         PillBtn(".*", active = newSeqEndRegex) { onSetNewSeqEndRx(!newSeqEndRegex) }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        InlineField(newSeqStartTag, onSetNewSeqStartTag, "start tag (optional)…", Modifier.weight(1f))
-                        InlineField(newSeqEndTag, onSetNewSeqEndTag, "end tag (optional)…", Modifier.weight(1f))
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier.size(20.dp)
-                                .background(newSeqColor, CORNER_SM)
-                                .border(1.dp, if (seqColorPickerOpen) tc.tx else tc.br, CORNER_SM)
-                                .clickable { seqColorPickerOpen = !seqColorPickerOpen },
-                        )
-                        Spacer(Modifier.weight(1f))
-                        PillBtn("+ Add", active = newSeqText.isNotBlank()) {
+                    InlineField(newSeqStartTag, onSetNewSeqStartTag, "start tag (optional)…", Modifier.fillMaxWidth())
+                    InlineField(newSeqEndTag, onSetNewSeqEndTag, "end tag (optional)…", Modifier.fillMaxWidth())
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Bottom) {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            AppText("Color", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                            Box(
+                                Modifier.size(20.dp)
+                                    .border(0.5.dp, if (seqColorPickerOpen) tc.tx else tc.br, CORNER_SM)
+                                    .background(newSeqColor, CORNER_SM)
+                                    .clickable { seqColorPickerOpen = !seqColorPickerOpen },
+                            )
+                        }
+                        AppButton("+ Add", onClick = {
                             onAddSeq(newSeqText, newSeqRegex, newSeqColor, newSeqStartTag, newSeqEndText, newSeqEndRegex, newSeqEndTag)
                             seqAddOpen = false
                             seqColorPickerOpen = false
-                        }
+                        }, variant = ButtonVariant.Ghost, enabled = newSeqText.isNotBlank())
                     }
                     if (seqColorPickerOpen) {
                         FlowRow(
@@ -927,7 +916,7 @@ fun FilterPanel(
         Divider()
 
         // ── Saved Filters ─────────────────────────────────────────
-        SectionHeader("SAVED FILTERS", expanded = fpState.sfExpanded, onToggle = { fpState.sfExpanded = !fpState.sfExpanded })
+        SectionHeader("Saved filters", expanded = fpState.sfExpanded, onToggle = { fpState.sfExpanded = !fpState.sfExpanded })
         if (fpState.sfExpanded) {
             if (savedFilters.isNotEmpty()) {
                 ScrollableItems(savedFilters.size) {
@@ -947,20 +936,11 @@ fun FilterPanel(
                 }
             }
             Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Box(
-                    Modifier.fillMaxWidth().border(1.dp, tc.br, CORNER_MD)
-                        .clickable(onClick = onOpenSFDialog).padding(vertical = 5.dp),
-                    contentAlignment = Alignment.Center,
-                ) { AppText("+ Save current filter…", color = tc.td, fontSize = 11.sp) }
-                Box(
-                    Modifier.fillMaxWidth().border(1.dp, DANGER_RED.copy(.45f), CORNER_MD)
-                        .background(DANGER_RED.copy(.08f), CORNER_MD)
-                        .clickable(onClick = onClearFilter).padding(vertical = 8.dp),
-                    contentAlignment = Alignment.Center,
-                ) { AppText("Clear filters", color = DANGER_RED, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+                AppButton("+ Save current filter…", onClick = onOpenSFDialog, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth())
+                AppButton("Clear filters", onClick = onClearFilter, variant = ButtonVariant.Secondary, isDanger = true, modifier = Modifier.fillMaxWidth())
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    PillBtn("Export", active = false, onClick = onExportFilters)
-                    PillBtn("Import", active = false, onClick = onImportFilters)
+                    AppButton("Export", onClick = onExportFilters)
+                    AppButton("Import", onClick = onImportFilters)
                 }
                 AppText("Drop filter .json here to import", color = tc.td, fontSize = 10.sp)
             }
