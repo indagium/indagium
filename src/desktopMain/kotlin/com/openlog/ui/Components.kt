@@ -232,6 +232,7 @@ fun InlineField(
     value: String, onValue: (String) -> Unit,
     placeholder: String = "", modifier: Modifier = Modifier,
     fontSize: TextUnit = LocalFontBase.current.sp,
+    onClear: (() -> Unit)? = null,
 ) {
     val tc = tc()
     BasicTextField(
@@ -243,8 +244,21 @@ fun InlineField(
             .border(1.dp, tc.br, RoundedCornerShape(3.dp))
             .padding(horizontal = 7.dp, vertical = 4.dp),
         decorationBox = { inner ->
-            if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
-            inner()
+            if (onClear != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f)) {
+                        if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                        inner()
+                    }
+                    if (value.isNotEmpty()) {
+                        AppText("×", color = tc.td, fontSize = 14.sp,
+                            modifier = Modifier.clickable(onClick = onClear).padding(start = 4.dp))
+                    }
+                }
+            } else {
+                if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                inner()
+            }
         },
     )
 }

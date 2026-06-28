@@ -15,6 +15,8 @@ import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.DragData
 import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -125,6 +127,10 @@ fun FilterPanel(
     // Tags sorted by frequency in log data; default suggestions come from user tag usage.
     val tagCounts  = remember(tab.id) { tab.logData.groupBy { it.tag }.mapValues { it.value.size } }
     val sortedTags = remember(tab.id, tagCounts) { tagCounts.entries.sortedByDescending { it.value }.map { it.key } }
+
+    val tagFr = remember { FocusRequester() }
+    val msgRuleFr = remember { FocusRequester() }
+    val hlFr = remember { FocusRequester() }
 
     var tagInput by remember { mutableStateOf("") }
     var tagSearch by remember { mutableStateOf("") }
@@ -324,10 +330,12 @@ fun FilterPanel(
                 { tagInput = it; tagSelectedIdx = -1 },
                 "pkg prefix or tag…",
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                    .focusRequester(tagFr)
                     .onFocusChanged { tagFieldFocused = it.isFocused }
                     .onPreviewKeyEvent { ev ->
                         if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                         when (ev.key) {
+                            Key.Tab -> { runCatching { msgRuleFr.requestFocus() }; true }
                             Key.DirectionDown -> { tagSelectedIdx = (tagSelectedIdx + 1).coerceAtMost(combinedTagCandidates.lastIndex); true }
                             Key.DirectionUp -> { tagSelectedIdx = (tagSelectedIdx - 1).coerceAtLeast(-1); true }
                             Key.DirectionRight -> {
@@ -352,9 +360,10 @@ fun FilterPanel(
                             else -> false
                         }
                     },
+                onClear = { tagInput = ""; tagSelectedIdx = -1 },
             )
             if (showTagCandidates && combinedTagCandidates.isNotEmpty()) {
-                ScrollableItems(combinedTagCandidates.size, maxDp = 220,
+                ScrollableItems(combinedTagCandidates.size, maxDp = 220, scrollToIndex = tagSelectedIdx,
                     modifier = Modifier
                         .onPointerEvent(PointerEventType.Enter) { tagCandidatesHovered = true }
                         .onPointerEvent(PointerEventType.Exit)  { tagCandidatesHovered = false }
@@ -521,10 +530,12 @@ fun FilterPanel(
                 { msgRuleInput = it; msgRuleSelectedIdx = -1 },
                 if (filter.kwInTagRegex) "/pattern/…" else "search in messages…",
                 Modifier.weight(1f)
+                    .focusRequester(msgRuleFr)
                     .onFocusChanged { msgRuleFieldFocused = it.isFocused }
                     .onPreviewKeyEvent { ev ->
                         if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                         when (ev.key) {
+                            Key.Tab -> { runCatching { hlFr.requestFocus() }; true }
                             Key.DirectionDown -> { msgRuleSelectedIdx = (msgRuleSelectedIdx + 1).coerceAtMost(unifiedCandidates.lastIndex); true }
                             Key.DirectionUp -> { msgRuleSelectedIdx = (msgRuleSelectedIdx - 1).coerceAtLeast(-1); true }
                             Key.DirectionRight -> { msgRuleSelectedAction = 1; true }
@@ -545,12 +556,11 @@ fun FilterPanel(
                             else -> false
                         }
                     },
+                onClear = { msgRuleInput = ""; onSetKwInTag("") },
             )
-            if (msgRuleInput.isNotBlank())
-                AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { msgRuleInput = ""; onSetKwInTag("") })
         }
         if (showMsgRuleCandidates && unifiedCandidates.isNotEmpty()) {
-            ScrollableItems(unifiedCandidates.size, maxDp = 220,
+            ScrollableItems(unifiedCandidates.size, maxDp = 220, scrollToIndex = msgRuleSelectedIdx,
                 modifier = Modifier
                     .onPointerEvent(PointerEventType.Enter) { msgCandidatesHovered = true }
                     .onPointerEvent(PointerEventType.Exit)  { msgCandidatesHovered = false }
@@ -694,10 +704,15 @@ fun FilterPanel(
                 )
                 InlineField(
                     newHlPat, onSetNewHlPat, "text or /regex/…",
-                    Modifier.weight(1f).onPreviewKeyEvent { ev ->
-                        if (ev.type == KeyEventType.KeyDown && ev.key == Key.Enter) { doAddHl(); true }
-                        else false
+                    Modifier.weight(1f).focusRequester(hlFr).onPreviewKeyEvent { ev ->
+                        if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        when (ev.key) {
+                            Key.Enter -> { doAddHl(); true }
+                            Key.Tab -> { runCatching { tagFr.requestFocus() }; true }
+                            else -> false
+                        }
                     },
+                    onClear = { onSetNewHlPat("") },
                 )
                 PillBtn(".*", active = newHlRx, onClick = { onSetNewHlRx(!newHlRx) })
                 PillBtn("+ Add", active = newHlPat.isNotBlank(), onClick = doAddHl)
@@ -960,12 +975,34 @@ private fun ScrollableItems(
     itemCount: Int,
     rowDp: Int = 28,
     maxDp: Int = 150,
+    scrollToIndex: Int = -1,
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     if (itemCount == 0) return
     val h = (itemCount * rowDp).coerceAtMost(maxDp).dp
-    Column(modifier.fillMaxWidth().height(h).verticalScroll(rememberScrollState()), content = content)
+    val scrollState = rememberScrollState()
+    val density = LocalDensity.current.density
+    LaunchedEffect(scrollToIndex) {
+        if (scrollToIndex >= 0) {
+            val rowPx = (rowDp * density).roundToInt()
+            val itemTop = scrollToIndex * rowPx
+            val itemBot = itemTop + rowPx
+            val viewTop = scrollState.value
+            val viewBot = viewTop + (maxDp * density).roundToInt()
+            when {
+                itemTop < viewTop -> scrollState.animateScrollTo(itemTop)
+                itemBot > viewBot -> scrollState.animateScrollTo(itemBot - (maxDp * density).roundToInt())
+            }
+        }
+    }
+    Box(modifier.fillMaxWidth().height(h)) {
+        Column(Modifier.fillMaxSize().verticalScroll(scrollState), content = content)
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scrollState),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+        )
+    }
 }
 
 @Composable
