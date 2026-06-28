@@ -552,7 +552,29 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun openFileRemembersExistingAutoExportedNoteAndPersistsRecentNotes() {
+    fun autosaveSkipsTabsWhoseSourceFileNoLongerExists() {
+        val dir = createTempDirectory("openlog-cache").toFile()
+        val logFile = File(dir, "test.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I App: hello\n")
+        }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.tabs = listOf(
+            mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = logFile.absolutePath),
+        )
+        state.activeTabId = "log"
+        state.autosaveNow()
+        logFile.delete()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertTrue(restored.tabs.isEmpty())
+        assertEquals("", restored.activeTabId)
+    }
+
+    @Test
+    fun openFilePersistsRecentFilesAndExistingAutoExportedNote() {
         val originalHome = System.getProperty("user.home")
         val home = createTempDirectory("openlog-home").toFile()
         try {
@@ -569,8 +591,10 @@ class AppStateBehaviorTest {
 
             state.openFile(logFile)
 
+            assertEquals(listOf(logFile.absolutePath), state.recentFiles)
             assertEquals(listOf(noteFile.absolutePath), state.recentNotes)
             val restored = AppState(cacheFile, restoreOnCreate = true)
+            assertEquals(listOf(logFile.absolutePath), restored.recentFiles)
             assertEquals(listOf(noteFile.absolutePath), restored.recentNotes)
         } finally {
             System.setProperty("user.home", originalHome)

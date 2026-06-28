@@ -218,20 +218,30 @@ fun ToolbarBtn(
     active: Boolean = false,
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
+    shape: RoundedCornerShape = CORNER_MD,
+    contentPadding: PaddingValues = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
     onClick: () -> Unit,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     Box(
         modifier
-            .border(1.dp, if (active && enabled) tc.ac else tc.br, CORNER_MD)
-            .background(if (active && enabled) tc.ac.copy(.15f) else if (hovered && enabled) tc.hv else Color.Transparent, CORNER_MD)
+            .border(1.dp, if (active && enabled) tc.ac else tc.br, shape)
+            .background(if (active && enabled) tc.ac.copy(.2f) else if (hovered && enabled) tc.hv else Color.Transparent, shape)
+            .clip(shape)
             .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(horizontal = 10.dp, vertical = 5.dp),
+            .padding(contentPadding),
         contentAlignment = Alignment.Center,
-    ) { AppText(label, color = if (!enabled) tc.td.copy(.5f) else if (active) tc.ac else tc.ts, fontSize = 12.sp) }
+    ) {
+        AppText(
+            label,
+            color = if (!enabled) tc.td.copy(.5f) else if (active) tc.ac else tc.ts,
+            fontSize = 12.sp,
+            fontWeight = if (active && enabled) FontWeight.Medium else FontWeight.Normal,
+        )
+    }
 }
 
 @Composable

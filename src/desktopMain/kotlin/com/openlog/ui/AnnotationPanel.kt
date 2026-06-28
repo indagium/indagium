@@ -55,7 +55,6 @@ fun AnnotationPanel(
     val hasAnnotationBlocks = ann.blocks.isNotEmpty()
     val hasRecentNotes = recentNotes.isNotEmpty()
     val headerButtonModifier = Modifier.height(28.dp)
-    val recentButtonModifier = Modifier.height(28.dp).widthIn(min = 40.dp)
 
     Column(Modifier.width(width.dp).fillMaxHeight().background(tc.p).border(BorderStroke(1.dp, tc.br))) {
         // Header row 1: title + action buttons
@@ -88,11 +87,10 @@ fun AnnotationPanel(
                     fd.file?.let { onOpenNote(File(fd.directory, it)) }
                 }, modifier = headerButtonModifier)
                 Box {
-                    ToolbarBtn(
+                    AppButton(
                         "▾ ${recentNotes.size}",
-                        active = recentNotesMenuOpen,
                         enabled = hasRecentNotes,
-                        modifier = recentButtonModifier,
+                        modifier = headerButtonModifier.widthIn(min = 40.dp),
                         onClick = onToggleRecentNotes,
                     )
                     if (recentNotesMenuOpen && hasRecentNotes) {

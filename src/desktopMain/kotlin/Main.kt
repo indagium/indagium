@@ -28,7 +28,7 @@ fun main() {
 
     application {
         val windowState = rememberWindowState(size = DpSize(1440.dp, 900.dp))
-        val appState = remember { AppState() }
+        val appState = remember { AppState(restoreOnCreate = true) }
         Window(
             onCloseRequest = ::exitApplication,
             title = "openLog",

@@ -806,28 +806,58 @@ private fun CompareView(state: AppState) {
 @Composable
 private fun TabBar(state: AppState) {
     val tc = tc()
+    val toolbarGap = 4.dp
+    val leftShape = RoundedCornerShape(topStart = 7.dp, bottomStart = 7.dp)
+    val middleShape = RoundedCornerShape(0.dp)
+    val rightShape = RoundedCornerShape(topEnd = 7.dp, bottomEnd = 7.dp)
+    val standaloneShape = RoundedCornerShape(7.dp)
+    val hasRecentFiles = state.recentFiles.isNotEmpty()
     Row(
         Modifier.fillMaxWidth().height(36.dp).background(tc.p2).border(BorderStroke(1.dp, tc.br)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TabOverflowRow(state = state, modifier = Modifier.weight(1f).fillMaxHeight())
-        ToolbarBtn(if (state.filterVisible) "⊟ Filter" else "⊞ Filter", active = state.filterVisible) { state.filterVisible = !state.filterVisible }
-        Spacer(Modifier.width(2.dp))
-        ToolbarBtn(if (state.annotationVisible) "⊟ Notes" else "⊞ Notes", active = state.annotationVisible) { state.annotationVisible = !state.annotationVisible }
-        Spacer(Modifier.width(2.dp))
-        ToolbarBtn(if (state.compareMode) "⊟ Compare" else "⊠ Compare", active = state.compareMode) { state.compareMode = !state.compareMode }
-        Spacer(Modifier.width(2.dp))
-        ToolbarBtn("Open") {
+        Spacer(Modifier.width(toolbarGap))
+        ToolbarBtn(
+            if (state.filterVisible) "⊟ Filter" else "⊞ Filter",
+            active = state.filterVisible,
+            modifier = Modifier.fillMaxHeight(),
+            shape = leftShape,
+        ) { state.filterVisible = !state.filterVisible }
+        ToolbarBtn(
+            if (state.annotationVisible) "⊟ Notes" else "⊞ Notes",
+            active = state.annotationVisible,
+            modifier = Modifier.fillMaxHeight(),
+            shape = middleShape,
+        ) { state.annotationVisible = !state.annotationVisible }
+        ToolbarBtn(
+            if (state.compareMode) "⊟ Compare" else "⊠ Compare",
+            active = state.compareMode,
+            modifier = Modifier.fillMaxHeight(),
+            shape = middleShape,
+        ) { state.compareMode = !state.compareMode }
+        ToolbarBtn(
+            "Open",
+            modifier = Modifier.fillMaxHeight(),
+            shape = if (hasRecentFiles) middleShape else rightShape,
+        ) {
             val fd = FileDialog(null as Frame?, "Open Log File", FileDialog.LOAD)
             fd.setFilenameFilter { _, name -> name.endsWith(".log") || name.endsWith(".txt") }
             fd.isVisible = true
             fd.file?.let { state.openFile(File(fd.directory, it)) }
         }
-        if (state.recentFiles.isNotEmpty()) {
-            ToolbarBtn("▾", active = state.recentMenuOpen) { state.recentMenuOpen = !state.recentMenuOpen }
+        if (hasRecentFiles) {
+            ToolbarBtn(
+                "▾",
+                active = state.recentMenuOpen,
+                modifier = Modifier.fillMaxHeight().width(18.dp),
+                shape = rightShape,
+                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 5.dp),
+            ) { state.recentMenuOpen = !state.recentMenuOpen }
         }
-        Spacer(Modifier.width(2.dp))
-        ToolbarBtn("⚙") { state.settingsOpen = true }
+        Spacer(Modifier.width(toolbarGap))
+        ToolbarBtn("⚙", modifier = Modifier.fillMaxHeight().width(36.dp), shape = standaloneShape) { state.settingsOpen = true }
+        Spacer(Modifier.width(toolbarGap))
     }
 }
 

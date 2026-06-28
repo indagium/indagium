@@ -711,6 +711,7 @@ class AppState(
         val path = file.absolutePath
         recentFiles = (listOf(path) + recentFiles.filter { it != path }).take(30)
         recentMenuOpen = false
+        autosaveNow()
         rememberAutoExportedNoteFor(file.name)
         // Switch to existing tab if this file is already open
         val existing = tabs.find { it.sourcePath == path }
@@ -1221,10 +1222,8 @@ private fun String.tabFromToken(): LogTab? = runCatching {
     val p = tokenFields()
     if (p.size < 9) return@runCatching null
     val sourcePath = p[2].takeIf { it.isNotBlank() }
-    val data = sourcePath
-        ?.let { path -> File(path).takeIf { it.exists() } }
-        ?.let { file -> runCatching { parseLogcat(file) }.getOrElse { emptyList() } }
-        ?: emptyList()
+    val sourceFile = sourcePath?.let { path -> File(path).takeIf { it.exists() } } ?: return@runCatching null
+    val data = runCatching { parseLogcat(sourceFile) }.getOrElse { emptyList() }
     LogTab(
         id = p[0],
         filename = p[1],
