@@ -345,7 +345,6 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
     }
 }
 
-
 // ── Note block ─────────────────────────────────────────────────────────
 @Composable
 private fun NoteBlock(

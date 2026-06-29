@@ -1,8 +1,10 @@
 package com.openlog
 
+import androidx.compose.ui.graphics.Color
 import com.openlog.model.AnnBlock
 import com.openlog.model.AnnotationLogBlockStyle
 import com.openlog.model.AppSettings
+import com.openlog.model.CtxMenuState
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.LogEntry
@@ -11,13 +13,11 @@ import com.openlog.model.LogLevel
 import com.openlog.model.SequenceDef
 import com.openlog.model.ThemePreset
 import com.openlog.ui.AppState
-import com.openlog.model.CtxMenuState
 import com.openlog.ui.DesktopStorage
-import androidx.compose.ui.graphics.Color
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.mkTab
-import com.openlog.utils.computeItems
 import com.openlog.utils.buildMd
+import com.openlog.utils.computeItems
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit

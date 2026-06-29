@@ -17,8 +17,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
-import java.awt.Cursor as AwtCursor
-import java.awt.KeyboardFocusManager
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -28,9 +26,13 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openlog.model.LogLevel
+import java.awt.KeyboardFocusManager
+import java.awt.Cursor as AwtCursor
 
 @Composable fun tc() = LocalTheme.current
+
 @Composable fun monoFont() = if (LocalUseMono.current) FontFamily.Monospace else FontFamily.Default
+
 @Composable fun baseSp() = LocalFontBase.current.sp
 
 // ── Hover ────────────────────────────────────────────────────────────

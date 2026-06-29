@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import kotlinx.coroutines.launch
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
@@ -19,7 +18,6 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.*
-import java.awt.Cursor as AwtCursor
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
@@ -33,16 +31,20 @@ import androidx.compose.ui.unit.sp
 import com.openlog.model.*
 import com.openlog.utils.computeItems
 import com.openlog.utils.regexRanges
+import kotlinx.coroutines.launch
+import java.awt.Cursor as AwtCursor
 
 private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
     if (hl.regex) {
         regexRanges(msg, hl.pattern)
-    } else buildList {
-        var i = 0
-        while (true) {
-            val idx = msg.indexOf(hl.pattern, i, ignoreCase = true)
-            if (idx < 0) break
-            add(idx to idx + hl.pattern.length); i = idx + 1
+    } else {
+        buildList {
+            var i = 0
+            while (true) {
+                val idx = msg.indexOf(hl.pattern, i, ignoreCase = true)
+                if (idx < 0) break
+                add(idx to idx + hl.pattern.length); i = idx + 1
+            }
         }
     }
 
@@ -329,6 +331,7 @@ fun LogViewer(
             // Hoisted lazy state for the Original panel so the Filtered panel can scroll it.
             val allLazyState = scrollStates.lazyState("${tab.id}:original")
             val syncScope    = rememberCoroutineScope()
+
             fun originalExpansionAndIndexFor(entryId: Int): Pair<Set<String>, Int>? {
                 var expanded = tab.expanded
                 repeat(24) {
@@ -378,8 +381,9 @@ fun LogViewer(
                     range -> {
                         val last = localAllSelected.lastOrNull { it in visIds.toSet() }
                             ?: localAllSelected.maxOrNull()
-                        if (last == null) setOf(id)
-                        else {
+                        if (last == null) {
+                            setOf(id)
+                        } else {
                             val a = visIds.indexOf(last); val b = visIds.indexOf(id)
                             if (a >= 0 && b >= 0) visIds.subList(minOf(a, b), maxOf(a, b) + 1).toSet()
                             else localAllSelected + id

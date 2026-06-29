@@ -11,8 +11,10 @@ fun tagCandidates(
     searchLimit: Int = 50,
 ): List<String> {
     val rank = sortedTags.withIndex().associate { it.value to it.index }
+
     fun ordered(tags: List<String>) =
         tags.sortedWith(compareByDescending<String> { tagUsage[it] ?: 0 }.thenBy { rank[it] ?: Int.MAX_VALUE })
+
     fun available(tags: List<String>) =
         tags.filter { it !in selectedTags && it !in excludeTags }
 

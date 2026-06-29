@@ -56,18 +56,20 @@ private fun matchesPidTidFilter(entry: LogEntry, pidTidFilter: String): Boolean 
 private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter): Boolean =
     when (filter.mode) {
         FilterMode.TAGS -> {
-            if (filter.activeTags.isEmpty() && filter.pkgPrefixes.isEmpty()) true
-            else {
+            if (filter.activeTags.isEmpty() && filter.pkgPrefixes.isEmpty()) {
+                true
+            } else {
                 val prefixPass = filter.pkgPrefixes.isEmpty() ||
-                        filter.pkgPrefixes.any { pfx -> tagMatchesPrefix(entry.tag, pfx) }
+                    filter.pkgPrefixes.any { pfx -> tagMatchesPrefix(entry.tag, pfx) }
                 val activeTagPass = filter.activeTags.isEmpty() || entry.tag in filter.activeTags
                 prefixPass && activeTagPass
             }
         }
 
         FilterMode.KEYWORD -> {
-            if (filter.kwText.isBlank()) true
-            else {
+            if (filter.kwText.isBlank()) {
+                true
+            } else {
                 val hay = "${entry.tag} ${entry.msg}"
                 containsPattern(hay, filter.kwText, filter.kwRegex)
             }
@@ -170,6 +172,7 @@ fun computeItems(tab: LogTab, sequences: List<SequenceDef>, applyFilter: Boolean
 
     val result = mutableListOf<LogItem>()
     val segment = mutableListOf<LogEntry>()
+
     fun flushSegment() {
         if (segment.isNotEmpty()) {
             result += sequenceItems(segment.toList())

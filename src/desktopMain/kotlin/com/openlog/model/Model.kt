@@ -42,6 +42,7 @@ data class SequenceDef(
 )
 
 data class NestedSeqGroup(val gid: String, val rid: Int, val ch: List<Int>, val defId: String = "")
+
 data class SeqGroup(
     val gid: String,
     val rid: Int,
@@ -76,12 +77,16 @@ data class Filter(
     val messageRules: List<MessageRule> = emptyList(),
     val seqOn: Boolean = true,
     // TAGS-mode secondary filters
-    val kwInTag: String = "",           // message text filter applied within tag result set
+    // message text filter applied within tag result set
+    val kwInTag: String = "",
     val kwInTagRegex: Boolean = false,
-    val pkgPrefixes: Set<String> = emptySet(), // tag prefixes — each matches com.foo.* tags
-    val excludePkgPrefixes: Set<String> = emptySet(), // excluded tag prefixes — each matches com.foo.* tags
+    // tag prefixes — each matches com.foo.* tags
+    val pkgPrefixes: Set<String> = emptySet(),
+    // excluded tag prefixes — each matches com.foo.* tags
+    val excludePkgPrefixes: Set<String> = emptySet(),
     // PID / TID
-    val pidTidFilter: String = "",      // comma-separated PIDs/TIDs to include
+    // comma-separated PIDs/TIDs to include
+    val pidTidFilter: String = "",
 )
 
 data class Highlighter(val id: String, val pattern: String, val regex: Boolean, val color: Color, val on: Boolean)
@@ -200,6 +205,7 @@ data class AddAnnRequest(
 
 sealed class LogItem {
     data class Row(val entry: LogEntry, val indent: Int, val groupColor: Color? = null) : LogItem()
+
     data class SeqHeader(
         val entry: LogEntry,
         val gid: String,

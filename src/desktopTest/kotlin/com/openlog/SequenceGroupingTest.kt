@@ -2,10 +2,10 @@ package com.openlog
 
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.Filter
-import com.openlog.model.LogItem
-import com.openlog.model.LogTab
 import com.openlog.model.LogEntry
+import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
+import com.openlog.model.LogTab
 import com.openlog.model.ManualCollapseBlock
 import com.openlog.model.ManualCollapseDirection
 import com.openlog.model.SequenceDef
