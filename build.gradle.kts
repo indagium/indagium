@@ -125,5 +125,21 @@ koverReport {
     defaults {
         html { onCheck = false }
         xml { onCheck = false }
+        filters {
+            excludes {
+                // Exclude pure Compose UI files — these are rendering-only projections of
+                // AppState and cannot be meaningfully unit-tested without a Compose harness.
+                annotatedBy("androidx.compose.runtime.Composable")
+                classes(
+                    "com.openlog.ui.App*",
+                    "com.openlog.ui.LogViewer*",
+                    "com.openlog.ui.FilterPanel*",
+                    "com.openlog.ui.AnnotationPanel*",
+                    "com.openlog.ui.Components*",
+                    "com.openlog.ui.Theme*",
+                    "com.openlog.ui.MainKt",
+                )
+            }
+        }
     }
 }
