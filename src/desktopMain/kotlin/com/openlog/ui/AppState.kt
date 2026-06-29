@@ -101,6 +101,7 @@ class AppState(
     var pendingDeleteFilterId by mutableStateOf<String?>(null)
     var pendingClearFilterTabId by mutableStateOf<String?>(null)
     var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
+    private var tabSequences by mutableStateOf<Map<String, List<SequenceDef>>>(emptyMap())
 
     val fpState = FilterPanelUiState()
 
@@ -229,6 +230,7 @@ class AppState(
     fun clearFilter(tabId: String) {
         upFlt(tabId) { Filter() }
         sequences = emptyList()
+        tabSequences = tabSequences - tabId
         activeSavedFilterIds = activeSavedFilterIds - tabId
     }
 
@@ -457,6 +459,7 @@ class AppState(
         val sf = snapshotFilter(tabId, "sf${System.nanoTime()}_${savedFilters.size}", cleanName) ?: return
         savedFilters = savedFilters + sf
         activeSavedFilterIds = activeSavedFilterIds + (tabId to sf.id)
+        tabSequences = tabSequences + (tabId to sf.sequences)
         sfDialog = false; sfName = ""
         loadPendingFilterAfterSaving(tabId)
     }
@@ -466,6 +469,7 @@ class AppState(
         val updated = snapshotFilter(pending.tabId, pending.existingId, pending.requestedName) ?: return
         savedFilters = savedFilters.map { if (it.id == pending.existingId) updated else it }
         activeSavedFilterIds = activeSavedFilterIds + (pending.tabId to pending.existingId)
+        tabSequences = tabSequences + (pending.tabId to updated.sequences)
         pendingDuplicateFilterSave = null
         sfDialog = false
         sfName = ""
@@ -553,6 +557,7 @@ class AppState(
 
     fun loadFilter(tabId: String, sf: SavedFilter) {
         sequences = sf.sequences
+        tabSequences = tabSequences + (tabId to sf.sequences)
         upFlt(tabId) { _ ->
             Filter(
                 levels = sf.levels,
@@ -972,13 +977,17 @@ class AppState(
     }
 
     fun activateTab(tabId: String) {
-        if (tabs.any { it.id == tabId }) activeTabId = tabId
+        if (tabs.any { it.id == tabId }) {
+            activeTabId = tabId
+            tabSequences[tabId]?.let { sequences = it }
+        }
     }
 
     fun activateOverflowTab(tabId: String) {
         val tab = tabs.find { it.id == tabId } ?: return
         tabs = tabs.filter { it.id != tabId } + tab
         activeTabId = tabId
+        tabSequences[tabId]?.let { sequences = it }
     }
 
     fun reorderTabs(fromId: String, beforeId: String?) {
@@ -990,10 +999,15 @@ class AppState(
 
     fun closeTab(tabId: String) {
         val next = tabs.filter { it.id != tabId }
-        if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
+        if (activeTabId == tabId) {
+            val nextId = next.lastOrNull()?.id ?: ""
+            activeTabId = nextId
+            tabSequences[nextId]?.let { sequences = it }
+        }
         if (compareTabId == tabId) compareTabId = next.firstOrNull()?.id ?: ""
         if (next.isEmpty()) compareMode = false
         logViewerScrollStateStore.removeTab(tabId)
+        tabSequences = tabSequences - tabId
         tabs = next
     }
 
@@ -1210,6 +1224,10 @@ class AppState(
         if (tabs.none { it.id == compareTabId }) compareTabId =
             tabs.getOrNull(1)?.id ?: tabs.firstOrNull()?.id ?: ""
         tabCounter = (tabs.mapNotNull { it.id.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1
+        tabSequences = activeSavedFilterIds.mapNotNull { (tid, filterId) ->
+            savedFilters.find { it.id == filterId }?.let { tid to it.sequences }
+        }.toMap()
+        tabSequences[activeTabId]?.let { sequences = it }
     }
 
     private fun serializeAutosave(): String = buildString {
