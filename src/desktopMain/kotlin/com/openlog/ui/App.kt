@@ -159,9 +159,8 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                 ) {
                     if (entry != null) {
                         val menuWidth = 270.dp
-                        val estimatedMenuHeight = 500.dp
                         val x = ctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
-                        val y = ctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
+                        val y = ctx.y.dp.coerceIn(8.dp, (maxHeight - 200.dp).coerceAtLeast(8.dp))
                         val menuScroll = rememberScrollState()
                         // panelSelectedIds is non-empty when the right-click came from a panel
                         // with its own local selection (e.g. the "Original" unfiltered panel).
@@ -175,7 +174,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                 .background(tc.p, RoundedCornerShape(7.dp))
                                 .border(1.dp, tc.br, RoundedCornerShape(7.dp))
                                 .width(menuWidth)
-                                .heightIn(max = (maxHeight - 16.dp).coerceAtLeast(160.dp))
+                                .heightIn(max = (maxHeight - y - 8.dp).coerceAtLeast(160.dp))
                                 .verticalScroll(menuScroll),
                         ) {
                             Column {

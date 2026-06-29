@@ -214,6 +214,7 @@ class AppState(
     fun toggleSeq(tabId: String) = upFlt(tabId) { it.copy(seqOn = !it.seqOn) }
     fun clearFilter(tabId: String) {
         upFlt(tabId) { Filter() }
+        sequences = emptyList()
         activeSavedFilterIds = activeSavedFilterIds - tabId
     }
 
