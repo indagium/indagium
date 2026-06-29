@@ -109,21 +109,20 @@ class AppStateBehaviorTest {
             LogEntry(3, "10:00:00.200", LogLevel.I, "Keep", "keep start"),
             LogEntry(4, "10:00:00.300", LogLevel.I, "Keep", "keep child"),
         )
-        val state = AppState()
-        state.sequences = listOf(
+        val seqs = listOf(
             SequenceDef("drop", "drop start", priority = 1, color = Color.Red, tag = "Drop"),
             SequenceDef("keep", "keep start", priority = 2, color = Color.Blue, tag = "Keep"),
         )
+        val state = AppState()
         state.tabs = listOf(
             mkTab("log", "test.log", logs).copy(
-                filter = Filter(mode = FilterMode.TAGS, activeTags = setOf("Keep")),
+                filter = Filter(sequences = seqs, mode = FilterMode.TAGS, activeTags = setOf("Keep")),
             ),
         )
 
         state.expandAll("log")
 
-        val tab = state.tabs.single()
-        val header = computeItems(tab, state.sequences, applyFilter = true)
+        val header = computeItems(state.tabs.single(), applyFilter = true)
             .filterIsInstance<LogItem.SeqHeader>()
             .single()
         assertEquals("sg_keep_3", header.gid)
@@ -138,21 +137,21 @@ class AppStateBehaviorTest {
             LogEntry(3, "10:00:00.200", LogLevel.I, "Keep", "keep start"),
             LogEntry(4, "10:00:00.300", LogLevel.I, "Keep", "keep child"),
         )
-        val state = AppState()
-        state.sequences = listOf(
+        val seqs = listOf(
             SequenceDef("drop", "drop start", priority = 1, color = Color.Red, tag = "Drop"),
             SequenceDef("keep", "keep start", priority = 2, color = Color.Blue, tag = "Keep"),
         )
+        val state = AppState()
         state.tabs = listOf(
             mkTab("log", "test.log", logs).copy(
-                filter = Filter(mode = FilterMode.TAGS, activeTags = setOf("Keep")),
+                filter = Filter(sequences = seqs, mode = FilterMode.TAGS, activeTags = setOf("Keep")),
                 showUnfiltered = true,
             ),
         )
 
         state.expandAll("log")
 
-        val originalHeaders = computeItems(state.tabs.single(), state.sequences, applyFilter = false)
+        val originalHeaders = computeItems(state.tabs.single(), applyFilter = false)
             .filterIsInstance<LogItem.SeqHeader>()
         assertEquals(listOf("sg_drop_1", "sg_keep_3"), originalHeaders.map { it.gid })
         assertTrue(originalHeaders.all { it.expanded })
@@ -171,15 +170,18 @@ class AppStateBehaviorTest {
             anchorId = 2,
             direction = com.openlog.model.ManualCollapseDirection.TO_START,
         )
+        val seq = SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq")
         val state = AppState()
-        state.sequences = listOf(SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq"))
         state.tabs = listOf(
-            mkTab("log", "test.log", logs).copy(manualBlocks = listOf(block)),
+            mkTab("log", "test.log", logs).copy(
+                filter = Filter(sequences = listOf(seq)),
+                manualBlocks = listOf(block),
+            ),
         )
 
         state.expandAll("log")
 
-        val headers = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
+        val headers = computeItems(state.tabs.single(), applyFilter = true)
             .filterIsInstance<LogItem.SeqHeader>()
         assertEquals(listOf("sg_flow_3"), headers.map { it.gid })
         assertTrue(headers.single().expanded)
@@ -197,15 +199,18 @@ class AppStateBehaviorTest {
             anchorId = 3,
             direction = com.openlog.model.ManualCollapseDirection.TO_START,
         )
+        val seq = SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq")
         val state = AppState()
-        state.sequences = listOf(SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq"))
         state.tabs = listOf(
-            mkTab("log", "test.log", logs).copy(manualBlocks = listOf(block)),
+            mkTab("log", "test.log", logs).copy(
+                filter = Filter(sequences = listOf(seq)),
+                manualBlocks = listOf(block),
+            ),
         )
 
         state.expandAll("log")
 
-        val items = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
+        val items = computeItems(state.tabs.single(), applyFilter = true)
         val headers = items.filterIsInstance<LogItem.SeqHeader>()
         assertEquals(listOf("sg_flow_1"), headers.map { it.gid })
         assertTrue(headers.single().expanded)
@@ -224,15 +229,18 @@ class AppStateBehaviorTest {
             anchorId = 2,
             direction = com.openlog.model.ManualCollapseDirection.TO_START,
         )
+        val seq = SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq")
         val state = AppState()
-        state.sequences = listOf(SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq"))
         state.tabs = listOf(
-            mkTab("log", "test.log", logs).copy(manualBlocks = listOf(block)),
+            mkTab("log", "test.log", logs).copy(
+                filter = Filter(sequences = listOf(seq)),
+                manualBlocks = listOf(block),
+            ),
         )
 
         state.expandAll("log")
 
-        val headers = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
+        val headers = computeItems(state.tabs.single(), applyFilter = true)
             .filterIsInstance<LogItem.SeqHeader>()
         assertEquals(listOf("sg_flow_2"), headers.map { it.gid })
         assertTrue(headers.single().expanded)
@@ -244,16 +252,16 @@ class AppStateBehaviorTest {
             LogEntry(1, "10:00:00.000", LogLevel.I, "Keep", "keep start"),
             LogEntry(2, "10:00:00.100", LogLevel.I, "Keep", "keep child"),
         )
+        val seq = SequenceDef("keep", "keep start", priority = 1, color = Color.Blue, tag = "Keep")
         val state = AppState()
-        state.sequences = listOf(SequenceDef("keep", "keep start", priority = 1, color = Color.Blue, tag = "Keep"))
         state.tabs = listOf(
-            mkTab("log", "test.log", logs).copy(filter = Filter(seqOn = false)),
+            mkTab("log", "test.log", logs).copy(filter = Filter(sequences = listOf(seq), seqOn = false)),
         )
 
         state.expandAll("log")
         state.toggleSeq("log")
 
-        val header = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
+        val header = computeItems(state.tabs.single(), applyFilter = true)
             .filterIsInstance<LogItem.SeqHeader>()
             .single()
         assertEquals("sg_keep_1", header.gid)
@@ -268,17 +276,17 @@ class AppStateBehaviorTest {
             LogEntry(3, "10:00:00.200", LogLevel.I, "Keep", "flow start"),
             LogEntry(4, "10:00:00.300", LogLevel.I, "Keep", "flow child"),
         )
+        val seq = SequenceDef("flow", "flow start", priority = 1, color = Color.Blue)
         val state = AppState()
-        state.sequences = listOf(SequenceDef("flow", "flow start", priority = 1, color = Color.Blue))
-        state.tabs = listOf(mkTab("log", "test.log", logs))
-        val keepHeaderBeforeFilter = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
+        state.tabs = listOf(mkTab("log", "test.log", logs).copy(filter = Filter(sequences = listOf(seq))))
+        val keepHeaderBeforeFilter = computeItems(state.tabs.single(), applyFilter = true)
             .filterIsInstance<LogItem.SeqHeader>()
             .first { it.entry.id == 3 }
         state.toggleGroup("log", keepHeaderBeforeFilter.gid)
 
         state.toggleExcludeTag("log", "Drop")
 
-        val keepHeaderAfterFilter = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
+        val keepHeaderAfterFilter = computeItems(state.tabs.single(), applyFilter = true)
             .filterIsInstance<LogItem.SeqHeader>()
             .single { it.entry.id == 3 }
         assertTrue(keepHeaderAfterFilter.expanded)
@@ -392,7 +400,6 @@ class AppStateBehaviorTest {
         state.setPidTidFilter(tabId, "1234,5678")
         state.saveFilter(tabId, "network")
         state.clearFilter(tabId)
-        state.sequences = emptyList()
 
         state.loadFilter(tabId, state.savedFilters.single())
 
@@ -413,7 +420,7 @@ class AppStateBehaviorTest {
         state.toggleSequence(state.sequences.single().id)
 
         state.saveFilter(tabId, "with sequences")
-        state.sequences = emptyList()
+        state.clearFilter(tabId)
         state.loadFilter(tabId, state.savedFilters.single())
 
         val sequence = state.sequences.single()
@@ -628,7 +635,6 @@ class AppStateBehaviorTest {
         source.saveFilter(source.tabs.single().id, "target")
 
         val state = AppState()
-        state.sequences = listOf(SequenceDef("global", "start", priority = 1, color = Color.Blue))
         state.importFilters(source.exportFilters())
         state.addTab()
         val target = state.savedFilters.single()
@@ -730,14 +736,10 @@ class AppStateBehaviorTest {
     @Test
     fun addingSequenceUsesNextUnusedColorAfterRestore() {
         val state = AppState()
-        state.sequences = listOf(
-            SequenceDef(
-                id = "outer",
-                matchText = "start",
-                priority = 1,
-                color = SEQ_COLORS[0],
-            ),
-        )
+        state.addTab()
+        state.upFlt(state.tabs.single().id) { f ->
+            f.copy(sequences = listOf(SequenceDef(id = "outer", matchText = "start", priority = 1, color = SEQ_COLORS[0])))
+        }
         state.newSeqColor = SEQ_COLORS[0]
 
         state.addSequence("inner", false, state.newSeqColor)
@@ -1021,6 +1023,7 @@ class AppStateBehaviorTest {
                 ),
             ),
         )
+        state.activeTabId = "log"
 
         state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
         state.setSequenceStartFromCtx()
@@ -1037,6 +1040,7 @@ class AppStateBehaviorTest {
     @Test
     fun canEditSequenceAndAddEnd() {
         val state = AppState()
+        state.addTab()
         state.addSequence("flow begin", false, Color.Red, "com.app.Start")
         val id = state.sequences.single().id
 
@@ -1263,6 +1267,7 @@ class AppStateBehaviorTest {
     @Test
     fun sequenceColorWrapsAroundWhenPaletteExhausted() {
         val state = AppState()
+        state.addTab()
         SEQ_COLORS.forEachIndexed { i, color -> state.addSequence("seq$i", false, color) }
         val countBefore = state.sequences.size
 
@@ -1275,6 +1280,7 @@ class AppStateBehaviorTest {
     @Test
     fun moveSequenceUpSwapsWithPreviousEntry() {
         val state = AppState()
+        state.addTab()
         state.addSequence("first", false, SEQ_COLORS[0])
         state.addSequence("second", false, SEQ_COLORS[1])
         val firstId = state.sequences[0].id
@@ -1289,6 +1295,7 @@ class AppStateBehaviorTest {
     @Test
     fun moveSequenceDownAtLastIndexIsNoOp() {
         val state = AppState()
+        state.addTab()
         state.addSequence("first", false, SEQ_COLORS[0])
         state.addSequence("second", false, SEQ_COLORS[1])
         val secondId = state.sequences[1].id
@@ -1302,6 +1309,7 @@ class AppStateBehaviorTest {
     @Test
     fun toggleSequenceFlipsEnabledFlag() {
         val state = AppState()
+        state.addTab()
         state.addSequence("flow", false, SEQ_COLORS[0])
         val id = state.sequences.single().id
         assertTrue(state.sequences.single().enabled)

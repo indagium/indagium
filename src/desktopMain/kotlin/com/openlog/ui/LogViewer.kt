@@ -135,7 +135,6 @@ fun buildFullLineAnnotation(
 @Composable
 fun LogViewer(
     tab: LogTab,
-    sequences: List<SequenceDef>,
     modifier: Modifier = Modifier,
     onSelRow: (Int, Boolean, Boolean) -> Unit,
     onSelRowRange: (List<Int>) -> Unit = { _ -> },
@@ -150,7 +149,7 @@ fun LogViewer(
     val tc        = tc()
     val mono      = monoFont()
     val scrollStates = scrollStateStore ?: remember { LogViewerScrollStateStore() }
-    val items     = remember(tab.id, tab.filter, tab.expanded, tab.manualBlocks, sequences) { computeItems(tab, sequences, true) }
+    val items     = remember(tab.id, tab.filter, tab.expanded, tab.manualBlocks) { computeItems(tab, true) }
     val visCnt    = items.count { it is LogItem.Row }
     val totalCnt  = tab.logData.size
     val hasPidTid = remember(tab.id) { tab.logData.any { it.pid > 0 } }
@@ -316,7 +315,7 @@ fun LogViewer(
         }
 
         if (tab.showUnfiltered) {
-            val allItems = remember(tab.id, tab.expanded, tab.manualBlocks, sequences) { computeItems(tab, sequences, false) }
+            val allItems = remember(tab.id, tab.expanded, tab.manualBlocks, tab.filter.sequences) { computeItems(tab, false) }
             // Each panel needs its own bounds map so row IDs from "Original" and "Filtered"
             // panels don't overwrite each other (both show some of the same entries).
             val allBoundsAbs = remember(tab.id) { HashMap<Int, Pair<Float, Float>>() }
@@ -335,7 +334,7 @@ fun LogViewer(
             fun originalExpansionAndIndexFor(entryId: Int): Pair<Set<String>, Int>? {
                 var expanded = tab.expanded
                 repeat(24) {
-                    val candidateItems = computeItems(tab.copy(expanded = expanded), sequences, false)
+                    val candidateItems = computeItems(tab.copy(expanded = expanded), false)
                     val visibleIdx = candidateItems.indexOfFirst { item ->
                         when (item) {
                             is LogItem.Row -> item.entry.id == entryId
@@ -352,7 +351,7 @@ fun LogViewer(
                         }
                     }
                     val groupToOpen = collapsedHeaders.firstOrNull { gid ->
-                        computeItems(tab.copy(expanded = expanded + gid), sequences, false).any { item ->
+                        computeItems(tab.copy(expanded = expanded + gid), false).any { item ->
                             when (item) {
                                 is LogItem.Row -> item.entry.id == entryId
                                 is LogItem.SeqHeader -> item.entry.id == entryId

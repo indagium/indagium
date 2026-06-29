@@ -62,7 +62,6 @@ class FilterPanelUiState {
 fun FilterPanel(
     tab: LogTab,
     fpState: FilterPanelUiState,
-    sequences: List<SequenceDef>,
     savedFilters: List<SavedFilter>,
     activeSavedFilterId: String?,
     tagUsage: Map<String, Int>,
@@ -844,12 +843,12 @@ fun FilterPanel(
             CheckRow(filter.seqOn, { onToggleSeq() }) {
                 AppText("Group sequences", color = tc.ts, fontSize = 12.sp, modifier = Modifier.weight(1f))
             }
-            if (sequences.isNotEmpty()) {
+            if (tab.filter.sequences.isNotEmpty()) {
                 var dragId by remember { mutableStateOf<String?>(null) }
                 var dragOffsetY by remember { mutableStateOf(0f) }
                 val density = LocalDensity.current.density
                 Column(Modifier.fillMaxWidth()) {
-                    sequences.forEachIndexed { idx, def ->
+                    tab.filter.sequences.forEachIndexed { idx, def ->
                         val isDragging = dragId == def.id
                         Column(
                             Modifier.fillMaxWidth()
@@ -868,7 +867,7 @@ fun FilterPanel(
                                             onDragEnd = {
                                                 val rowH = 28f * density
                                                 val steps = (dragOffsetY / rowH).roundToInt()
-                                                val targetIdx = (idx + steps).coerceIn(0, sequences.lastIndex)
+                                                val targetIdx = (idx + steps).coerceIn(0, tab.filter.sequences.lastIndex)
                                                 if (targetIdx != idx) {
                                                     repeat(kotlin.math.abs(targetIdx - idx)) {
                                                         if (targetIdx < idx) onMoveSeqUp(def.id)

@@ -80,7 +80,6 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
         LaunchedEffect(
             state.tabs,
             state.savedFilters,
-            state.sequences,
             state.settings,
             state.activeSavedFilterIds,
             state.recentFiles,
@@ -681,7 +680,7 @@ private fun DialogActionButton(
 private fun BoundFilterPanel(state: AppState, tab: LogTab) {
     if (!state.filterVisible) return
     FilterPanel(
-        tab = tab, sequences = state.sequences, savedFilters = state.savedFilters,
+        tab = tab, savedFilters = state.savedFilters,
         activeSavedFilterId = state.activeSavedFilterId(tab.id),
         tagUsage = state.tagUsage, fpState = state.fpState,
         newHlPat = state.newHlPat, newHlRx = state.newHlRx, newHlColor = state.newHlColor,
@@ -751,7 +750,7 @@ private fun FileView(state: AppState, tab: LogTab) {
     Row(Modifier.fillMaxSize()) {
         BoundFilterPanel(state, tab)
         LogViewer(
-            tab = tab, sequences = state.sequences, modifier = Modifier.weight(1f),
+            tab = tab, modifier = Modifier.weight(1f),
             onSelRow = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
             onSelRowRange = { ids -> state.setSelectedRows(tab.id, ids) },
             onCtxMenu = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(tab.id, id, x, y, sel, panelSel) },
@@ -826,7 +825,7 @@ private fun CompareView(state: AppState) {
                 Row(Modifier.weight(1f).fillMaxWidth()) {
                     BoundFilterPanel(state, leftTab)
                     LogViewer(
-                        tab = leftTab, sequences = state.sequences, modifier = Modifier.weight(1f),
+                        tab = leftTab, modifier = Modifier.weight(1f),
                         onSelRow = { id, m, r -> state.selRow(leftTab.id, id, m, r) },
                         onSelRowRange = { ids -> state.setSelectedRows(leftTab.id, ids) },
                         onCtxMenu = { id, x, y, sel, panelSel ->
@@ -869,7 +868,7 @@ private fun CompareView(state: AppState) {
                 }
                 Row(Modifier.weight(1f).fillMaxWidth()) {
                     LogViewer(
-                        tab = effectiveRightTab, sequences = state.sequences, modifier = Modifier.weight(1f),
+                        tab = effectiveRightTab, modifier = Modifier.weight(1f),
                         onSelRow = { id, m, r -> state.selRow(rightTab.id, id, m, r) },
                         onSelRowRange = { ids -> state.setSelectedRows(rightTab.id, ids) },
                         onCtxMenu = { id, x, y, sel, panelSel ->

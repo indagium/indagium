@@ -102,7 +102,8 @@ private fun rulePatternMatches(entry: LogEntry, rule: MessageRule): Boolean =
 // Complexity is inherent: sequence detection, manual-collapse interleaving, and segment
 // iteration are all coupled — splitting them would require passing shared mutable state.
 @Suppress("CyclomaticComplexMethod")
-fun computeItems(tab: LogTab, sequences: List<SequenceDef>, applyFilter: Boolean): List<LogItem> {
+fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
+    val sequences = tab.filter.sequences
     // Filter first, then detect sequences in filtered data only
     val data = if (applyFilter) tab.logData.filter { passesFilter(it, tab.filter) } else tab.logData
 

@@ -95,10 +95,11 @@ class SequenceGroupingTest {
             filename = "test.log",
             logData = logs,
             rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = listOf(outer, inner)),
             expanded = setOf("sg_outer_1", "sg_inner_2"),
         )
 
-        val items = computeItems(tab, listOf(outer, inner), applyFilter = true)
+        val items = computeItems(tab, applyFilter = true)
         val orderedIds = items.map {
             when (it) {
                 is LogItem.Row -> it.entry.id
@@ -143,7 +144,7 @@ class SequenceGroupingTest {
             manualBlocks = listOf(ManualCollapseBlock("m1", 2, ManualCollapseDirection.TO_END)),
         )
 
-        val items = computeItems(tab, emptyList(), applyFilter = true)
+        val items = computeItems(tab, applyFilter = true)
 
         assertEquals(listOf(1), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
         val header = items.filterIsInstance<LogItem.ManualHeader>().single()
@@ -169,7 +170,7 @@ class SequenceGroupingTest {
             manualBlocks = listOf(block),
         )
 
-        val items = computeItems(tab, emptyList(), applyFilter = true)
+        val items = computeItems(tab, applyFilter = true)
 
         val guidedRows = items.filterIsInstance<LogItem.Row>().filter { it.groupColor == Color.Red }
         assertEquals(listOf(3), guidedRows.map { it.entry.id })
@@ -189,12 +190,12 @@ class SequenceGroupingTest {
             filename = "test.log",
             logData = logs,
             rmap = logs.associateBy { it.id },
-            filter = Filter(),
+            filter = Filter(sequences = listOf(sequence)),
             expanded = setOf(block.id, "sg_flow_1"),
             manualBlocks = listOf(block),
         )
 
-        val items = computeItems(tab, listOf(sequence), applyFilter = true)
+        val items = computeItems(tab, applyFilter = true)
 
         val sequenceHeader = items.filterIsInstance<LogItem.SeqHeader>().single()
         assertEquals(1, sequenceHeader.entry.id)
@@ -216,12 +217,12 @@ class SequenceGroupingTest {
             filename = "test.log",
             logData = logs,
             rmap = logs.associateBy { it.id },
-            filter = Filter(),
+            filter = Filter(sequences = listOf(sequence)),
             expanded = setOf(block.id, "sg_flow_2"),
             manualBlocks = listOf(block),
         )
 
-        val items = computeItems(tab, listOf(sequence), applyFilter = true)
+        val items = computeItems(tab, applyFilter = true)
 
         val sequenceHeader = items.filterIsInstance<LogItem.SeqHeader>().single()
         assertEquals(2, sequenceHeader.entry.id)
@@ -344,7 +345,7 @@ class SequenceGroupingTest {
             manualBlocks = listOf(ManualCollapseBlock("m1", 2, ManualCollapseDirection.TO_END, enabled = false)),
         )
 
-        val items = computeItems(tab, emptyList(), applyFilter = true)
+        val items = computeItems(tab, applyFilter = true)
 
         assertEquals(listOf(1, 2, 3), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
         assertTrue(items.filterIsInstance<LogItem.ManualHeader>().isEmpty())

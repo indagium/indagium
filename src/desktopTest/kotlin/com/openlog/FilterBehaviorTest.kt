@@ -259,8 +259,8 @@ class FilterBehaviorTest {
             filter = Filter(activeTags = setOf("TagA")),
         )
 
-        val filtered = computeItems(tab, emptyList(), applyFilter = true)
-        val unfiltered = computeItems(tab, emptyList(), applyFilter = false)
+        val filtered = computeItems(tab, applyFilter = true)
+        val unfiltered = computeItems(tab, applyFilter = false)
 
         assertEquals(listOf(1, 3), filtered.filterIsInstance<LogItem.Row>().map { it.entry.id })
         assertEquals(listOf(1, 2, 3), unfiltered.filterIsInstance<LogItem.Row>().map { it.entry.id })
@@ -279,10 +279,11 @@ class FilterBehaviorTest {
             filename = "test.log",
             logData = logs,
             rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = listOf(seq)),
             expanded = emptySet(),
         )
 
-        val items = computeItems(tab, listOf(seq), applyFilter = false)
+        val items = computeItems(tab, applyFilter = false)
 
         val header = items.filterIsInstance<LogItem.SeqHeader>().single()
         assertEquals(1, header.entry.id)
@@ -303,10 +304,11 @@ class FilterBehaviorTest {
             filename = "test.log",
             logData = logs,
             rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = listOf(seq)),
             expanded = setOf("sg_flow_1"),
         )
 
-        val items = computeItems(tab, listOf(seq), applyFilter = false)
+        val items = computeItems(tab, applyFilter = false)
 
         val header = items.filterIsInstance<LogItem.SeqHeader>().single()
         val child = items.filterIsInstance<LogItem.Row>().single()

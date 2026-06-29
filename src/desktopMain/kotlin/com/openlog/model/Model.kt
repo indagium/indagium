@@ -87,6 +87,7 @@ data class Filter(
     // PID / TID
     // comma-separated PIDs/TIDs to include
     val pidTidFilter: String = "",
+    val sequences: List<SequenceDef> = emptyList(),
 )
 
 data class Highlighter(val id: String, val pattern: String, val regex: Boolean, val color: Color, val on: Boolean)
