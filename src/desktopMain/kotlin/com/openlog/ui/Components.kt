@@ -19,6 +19,7 @@ import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
 import java.awt.Cursor as AwtCursor
 import java.awt.KeyboardFocusManager
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -160,10 +161,12 @@ fun AppText(
     modifier: Modifier = Modifier,
     maxLines: Int = 1,
     overflow: TextOverflow = TextOverflow.Clip,
+    onTextLayout: ((TextLayoutResult) -> Unit)? = null,
 ) {
     androidx.compose.material3.Text(
         text, color = color, fontSize = fontSize, fontFamily = fontFamily,
         fontWeight = fontWeight, modifier = modifier, maxLines = maxLines, overflow = overflow,
+        onTextLayout = onTextLayout ?: {},
     )
 }
 

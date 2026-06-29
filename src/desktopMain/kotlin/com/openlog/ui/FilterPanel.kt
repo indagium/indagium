@@ -27,6 +27,7 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
@@ -409,13 +410,14 @@ fun FilterPanel(
                                         else -> pkgColor.copy(.7f)
                                     }, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
                                         modifier = Modifier.width(26.dp))
-                                    FullTextHint(value, modifier = Modifier.weight(1f)) {
+                                    FullTextHint(value, modifier = Modifier.weight(1f), forceShow = isRowSelected) { onTextLayout ->
                                         AppText(value, color = when {
                                             isExcluded -> exNeg.copy(.85f)
                                             isRowSelected || isIncluded -> tc.tx
                                             else -> tc.ts
                                         }, fontSize = 11.sp, fontFamily = MONO,
-                                            modifier = Modifier.fillMaxWidth(), overflow = TextOverflow.Ellipsis, maxLines = 1)
+                                            modifier = Modifier.fillMaxWidth(), overflow = TextOverflow.Ellipsis, maxLines = 1,
+                                            onTextLayout = onTextLayout)
                                     }
                                     Spacer(Modifier.width(26.dp))
                                     val incKbd = isRowSelected && tagSelectedAction == 0
@@ -459,12 +461,13 @@ fun FilterPanel(
                                         }, RoundedCornerShape(50)))
                                     }
                                     Column(Modifier.weight(1f)) {
-                                        FullTextHint(tag, modifier = Modifier.fillMaxWidth()) {
+                                        FullTextHint(tag, modifier = Modifier.fillMaxWidth(), forceShow = isRowSelected) { onTextLayout ->
                                             AppText(label, color = when {
                                                 isIncluded -> tc.tx
                                                 isExcluded -> exNeg.copy(.8f)
                                                 else -> tc.ts
-                                            }, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.fillMaxWidth(), overflow = TextOverflow.Ellipsis, maxLines = 1)
+                                            }, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.fillMaxWidth(), overflow = TextOverflow.Ellipsis, maxLines = 1,
+                                                onTextLayout = onTextLayout)
                                         }
                                         if (packageLabel != null)
                                             AppText(packageLabel, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis, maxLines = 1)
@@ -640,18 +643,21 @@ fun FilterPanel(
                                 AppText("pid", color = tc.td.copy(.7f), fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
                                     modifier = Modifier.padding(end = 2.dp))
                             }
-                            AppText(
-                                pattern,
-                                color = when {
-                                    isIncluded -> tc.tx
-                                    isExcluded -> msgExNeg.copy(.8f)
-                                    else -> tc.ts
-                                },
-                                fontSize = 11.sp,
-                                fontFamily = MONO,
-                                modifier = Modifier.weight(1f),
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            FullTextHint(pattern, modifier = Modifier.weight(1f), forceShow = isRowSelected) { onTextLayout ->
+                                AppText(
+                                    pattern,
+                                    color = when {
+                                        isIncluded -> tc.tx
+                                        isExcluded -> msgExNeg.copy(.8f)
+                                        else -> tc.ts
+                                    },
+                                    fontSize = 11.sp,
+                                    fontFamily = MONO,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    overflow = TextOverflow.Ellipsis,
+                                    onTextLayout = onTextLayout,
+                                )
+                            }
                             val incHighlight = isIncluded
                             val incKbd = isRowSelected && msgRuleSelectedAction == 0
                             Box(
@@ -1052,17 +1058,19 @@ private fun ScrollableItems(
 private fun FullTextHint(
     text: String,
     modifier: Modifier = Modifier,
-    content: @Composable BoxScope.() -> Unit,
+    forceShow: Boolean = false,
+    content: @Composable BoxScope.((TextLayoutResult) -> Unit) -> Unit,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
+    var isOverflowing by remember(text) { mutableStateOf(false) }
     Box(
         modifier
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false },
     ) {
-        content()
-        if (hovered && text.length > 18) {
+        content { result -> isOverflowing = result.hasVisualOverflow }
+        if ((hovered || forceShow) && isOverflowing) {
             Popup(
                 alignment = Alignment.TopStart,
                 offset = IntOffset(0, 24),

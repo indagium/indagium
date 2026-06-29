@@ -19,6 +19,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.*
+import java.awt.Cursor as AwtCursor
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
@@ -485,6 +486,7 @@ private fun LogRow(
         Modifier
             .fillMaxWidth()
             .heightIn(min = 22.dp)
+            .pointerHoverIcon(PointerIcon(AwtCursor.getDefaultCursor()), overrideDescendants = true)
             .background(bg)
             .onGloballyPositioned { coords ->
                 val pos = coords.positionInRoot()
