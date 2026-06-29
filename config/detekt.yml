@@ -1,0 +1,38 @@
+# Detekt configuration for openLog2
+# buildUponDefaultConfig = true in build.gradle.kts, so all default rules are active.
+# Override individual rules here when needed.
+
+build:
+  maxIssues: 9999  # never fail the build; this is a situation report
+
+complexity:
+  LongParameterList:
+    # Compose composables routinely have many parameters
+    functionThreshold: 12
+    constructorThreshold: 12
+  LongMethod:
+    # Composable functions tend to be long
+    threshold: 120
+  TooManyFunctions:
+    # UI files contain many small composables
+    thresholdInFiles: 60
+    thresholdInClasses: 30
+    thresholdInObjects: 30
+
+style:
+  MagicNumber:
+    # dp / sp / color literals are idiomatic in Compose
+    ignoreAnnotated:
+      - 'androidx.compose.runtime.Composable'
+    ignoreNumbers:
+      - '-1'
+      - '0'
+      - '1'
+      - '2'
+      - '4'
+      - '8'
+      - '12'
+      - '16'
+      - '24'
+      - '32'
+      - '100'
