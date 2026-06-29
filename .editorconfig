@@ -1,0 +1,39 @@
+root = true
+
+[*.{kt,kts}]
+# ── Line length — match detekt ───────────────────────────────────────────────
+max_line_length = 160
+
+# ── Compose: PascalCase composable function names are not a violation ────────
+ktlint_function_naming_ignore_when_annotated_with = Composable
+
+# ── Disabled rules — false positives for this Compose Multiplatform codebase ─
+
+# ktlint_official forces 1-arg-per-line; Compose uses grouped inline args
+ktlint_standard_argument-list-wrapping = disabled
+ktlint_standard_function-signature = disabled
+ktlint_standard_parameter-list-wrapping = disabled
+
+# Trailing-lambda { … } on the same line is idiomatic Compose
+ktlint_standard_multiline-expression-wrapping = disabled
+# string-template-indent hard-depends on multiline-expression-wrapping; must disable together
+ktlint_standard_string-template-indent = disabled
+ktlint_standard_statement-wrapping = disabled
+
+# Single-line if/else is idiomatic for guard clauses and short conditions
+ktlint_standard_if-else-wrapping = disabled
+ktlint_standard_multiline-if-else = disabled
+
+# Cascade-wrapping rule that conflicts with the Compose formatting above
+ktlint_standard_wrapping = disabled
+
+# Alignment spaces (val DARK_GITHUB  = …) are intentional in theme tables
+ktlint_standard_no-multi-spaces = disabled
+ktlint_standard_property-wrapping = disabled
+
+# Star imports are the norm for Compose and Foundation namespaces
+ktlint_standard_no-wildcard-imports = disabled
+
+# Trailing commas are optional Kotlin syntax; codebase does not use them
+ktlint_standard_trailing-comma-on-call-site = disabled
+ktlint_standard_trailing-comma-on-declaration-site = disabled

@@ -8,6 +8,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.openlog.model.ThemePreset
 
+private const val ALPHA_HOVER = 0.04f
+private const val ALPHA_ACCENT_BG = 0.15f
+private const val ALPHA_SELECTION = 0.18f
+
 data class ThemeColors(
     val bg: Color, val p: Color, val p2: Color, val br: Color,
     val tx: Color, val ts: Color, val td: Color,
@@ -19,16 +23,17 @@ private fun theme(
     bg: Long, p: Long, p2: Long, br: Long,
     tx: Long, ts: Long, td: Long,
     ac: Long, seq1: Long, seq2: Long,
-    hv: Color = Color.White.copy(.04f),
+    hv: Color = Color.White.copy(ALPHA_HOVER),
 ) = ThemeColors(
     bg = Color(bg), p = Color(p), p2 = Color(p2), br = Color(br),
     tx = Color(tx), ts = Color(ts), td = Color(td),
-    ac = Color(ac), abg = Color(ac).copy(.15f), sl = Color(ac).copy(.18f), hv = hv,
+    ac = Color(ac), abg = Color(ac).copy(ALPHA_ACCENT_BG), sl = Color(ac).copy(ALPHA_SELECTION), hv = hv,
     seq1 = Color(seq1), seq2 = Color(seq2),
 )
 
 val DARK_GITHUB  = theme(0xFF0d1117, 0xFF161b22, 0xFF1c2128, 0xFF21262d, 0xFFc9d1d9, 0xFF8b949e, 0xFF6e7681, 0xFF388bfd, 0xFF8957e5, 0xFFf0883e)
-val LIGHT_THEME  = theme(0xFFf6f8fa, 0xFFffffff, 0xFFf0f2f5, 0xFFd0d7de, 0xFF1f2328, 0xFF636c76, 0xFF9198a1, 0xFF0969da, 0xFF8250df, 0xFFbc4c00, hv = Color.Black.copy(.04f))
+val LIGHT_THEME  = theme(0xFFf6f8fa, 0xFFffffff, 0xFFf0f2f5, 0xFFd0d7de, 0xFF1f2328, 0xFF636c76, 0xFF9198a1, 0xFF0969da, 0xFF8250df, 0xFFbc4c00,
+    hv = Color.Black.copy(ALPHA_HOVER))
 val DRACULA      = theme(0xFF282a36, 0xFF21222c, 0xFF191a21, 0xFF44475a, 0xFFf8f8f2, 0xFF6272a4, 0xFF4d5566, 0xFF8be9fd, 0xFFbd93f9, 0xFFffb86c)
 val SOLARIZED_DK = theme(0xFF002b36, 0xFF073642, 0xFF00212b, 0xFF094252, 0xFF839496, 0xFF657b83, 0xFF586e75, 0xFF268bd2, 0xFF6c71c4, 0xFFcb4b16)
 

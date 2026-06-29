@@ -2,10 +2,10 @@ package com.openlog
 
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.Filter
-import com.openlog.model.LogItem
-import com.openlog.model.LogTab
 import com.openlog.model.LogEntry
+import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
+import com.openlog.model.LogTab
 import com.openlog.model.ManualCollapseBlock
 import com.openlog.model.ManualCollapseDirection
 import com.openlog.model.SequenceDef
@@ -227,6 +227,105 @@ class SequenceGroupingTest {
         assertEquals(2, sequenceHeader.entry.id)
         assertTrue(sequenceHeader.expanded)
         assertEquals(listOf(1, 3), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+    }
+
+    // ── SeqComputer gap coverage ──────────────────────────────────────────────
+
+    @Test
+    fun disabledSequenceDefIsIgnored() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "flow start"),
+            LogEntry(2, "10:00:00.001", LogLevel.I, "App", "child"),
+        )
+        val seq = SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "App", enabled = false)
+
+        val groups = computeSeqGroups(logs, listOf(seq))
+
+        assertTrue(groups.isEmpty())
+    }
+
+    @Test
+    fun lowerPriorityNumberWinsWhenTwoDefsMatchSameEntry() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "start here"),
+            LogEntry(2, "10:00:00.001", LogLevel.I, "App", "child"),
+        )
+        val winner = SequenceDef("winner", "start", priority = 1, color = Color.Red)
+        val loser = SequenceDef("loser", "start", priority = 2, color = Color.Blue)
+
+        // Pass in reverse order to confirm sorting, not insertion order, decides the winner
+        val groups = computeSeqGroups(logs, listOf(loser, winner))
+
+        assertEquals(1, groups.size)
+        assertEquals("winner", groups.single().defId)
+    }
+
+    @Test
+    fun regexMatchTextMatchesEntryByPattern() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "Activity resumed: MainActivity"),
+            LogEntry(2, "10:00:00.001", LogLevel.I, "App", "Activity paused: MainActivity"),
+        )
+        val seq = SequenceDef("activity", """Activity\s+resumed""", isRegex = true, priority = 1, color = Color.Blue)
+
+        val groups = computeSeqGroups(logs, listOf(seq))
+
+        assertEquals(1, groups.size)
+        assertEquals(1, groups.single().rid)
+    }
+
+    @Test
+    fun invalidRegexProducesNoGroupsWithoutException() {
+        val logs = listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "something"))
+        val seq = SequenceDef("bad", "[broken", isRegex = true, priority = 1, color = Color.Blue)
+
+        val groups = computeSeqGroups(logs, listOf(seq))
+
+        assertTrue(groups.isEmpty())
+    }
+
+    @Test
+    fun emptyLogDataProducesNoGroups() {
+        val seq = SequenceDef("flow", "start", priority = 1, color = Color.Blue)
+
+        val groups = computeSeqGroups(emptyList(), listOf(seq))
+
+        assertTrue(groups.isEmpty())
+    }
+
+    @Test
+    fun groupWithNoChildrenHasEmptyPlainAndNested() {
+        val logs = listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "flow start"))
+        val seq = SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "App")
+
+        val groups = computeSeqGroups(logs, listOf(seq))
+
+        assertEquals(1, groups.size)
+        val group = groups.single()
+        assertEquals(1, group.rid)
+        assertTrue(group.plain.isEmpty())
+        assertTrue(group.nested.isEmpty())
+    }
+
+    @Test
+    fun adjacentEndMatchTextGroupsDoNotOverlap() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "flow start"),
+            LogEntry(2, "10:00:00.001", LogLevel.I, "App", "flow content"),
+            LogEntry(3, "10:00:00.002", LogLevel.I, "App", "flow end"),
+            LogEntry(4, "10:00:00.003", LogLevel.I, "App", "flow start"),
+            LogEntry(5, "10:00:00.004", LogLevel.I, "App", "flow content again"),
+            LogEntry(6, "10:00:00.005", LogLevel.I, "App", "flow end"),
+        )
+        val seq = SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, endMatchText = "flow end")
+
+        val groups = computeSeqGroups(logs, listOf(seq))
+
+        assertEquals(2, groups.size)
+        assertEquals(1, groups[0].rid)
+        assertEquals(listOf(2, 3), groups[0].plain)
+        assertEquals(4, groups[1].rid)
+        assertEquals(listOf(5, 6), groups[1].plain)
     }
 
     @Test

@@ -1,0 +1,107 @@
+# Detekt configuration for openLog2 — Compose Multiplatform Desktop
+# buildUponDefaultConfig = true, so all rules not listed here use detekt defaults.
+
+build:
+  maxIssues: 9999  # never fail the build; reports are for review only
+
+# ── Naming ──────────────────────────────────────────────────────────────────
+naming:
+  FunctionNaming:
+    # Compose composable functions use PascalCase by convention — not a violation
+    ignoreAnnotated:
+      - 'Composable'
+
+  MatchingDeclarationName:
+    active: false  # files are named for their primary composable, not helper classes
+
+# ── Complexity ──────────────────────────────────────────────────────────────
+complexity:
+  CyclomaticComplexMethod:
+    threshold: 20
+    # Composable UI functions are inherently branchy; complexity lives in logic files
+    ignoreAnnotated:
+      - 'Composable'
+
+  LongMethod:
+    threshold: 120
+    # Composable UI functions are legitimately long by the nature of declarative UI
+    ignoreAnnotated:
+      - 'Composable'
+
+  LongParameterList:
+    functionThreshold: 12
+    constructorThreshold: 12
+    # Compose prop-drilling produces long parameter lists — this is idiomatic, not a smell
+    ignoreAnnotated:
+      - 'Composable'
+
+  TooManyFunctions:
+    thresholdInFiles: 100
+    thresholdInClasses: 200  # AppState intentionally centralises all state mutations
+    thresholdInObjects: 60
+    thresholdInInterfaces: 40
+    thresholdInEnums: 30
+
+  LargeClass:
+    threshold: 2000  # AppState centralises all state (~1700 LOC by design); test suite is comparably large
+
+  NestedBlockDepth:
+    threshold: 8  # event loops and nested sequence iteration require deeper nesting
+
+  ComplexCondition:
+    threshold: 5  # 4 sub-conditions in one boolean is readable; flag 5+
+
+
+# ── Style ───────────────────────────────────────────────────────────────────
+style:
+  MagicNumber:
+    # dp / sp / alpha / color literals are idiomatic in Compose — ignore inside composables
+    ignoreAnnotated:
+      - 'Composable'
+      - 'Test'            # test assertions use specific literal values by design
+    ignoreNumbers:
+      - '-1'
+      - '0'
+      - '1'
+      - '2'
+      - '3'
+      - '4'
+      - '5'
+      - '6'
+      - '7'
+      - '8'
+      - '9'
+      - '10'
+      - '12'
+      - '14'
+      - '16'
+      - '18'
+      - '20'
+      - '24'
+      - '28'
+      - '30'
+      - '32'
+      - '40'
+      - '48'
+      - '64'
+      - '100'
+    ignoreNamedArgument: true          # e.g. padding(horizontal = 12.dp)
+    ignorePropertyDeclaration: true    # top-level / class-level constants
+    ignoreConstantDeclaration: true
+    ignoreCompanionObjectPropertyDeclaration: true
+    ignoreEnums: true
+    ignoreExtensionFunctions: true
+
+  MaxLineLength:
+    maxLineLength: 160                 # Compose modifier chains are naturally wide
+    excludePackageStatements: true
+    excludeImportStatements: true
+
+  ReturnCount:
+    max: 6                             # early-return / guard-clause style is idiomatic Kotlin
+
+  LoopWithTooManyJumpStatements:
+    maxJumpCount: 2                    # two continue statements in a loop is readable
+
+  WildcardImport:
+    active: false                      # star-imports are fine for Compose namespaces

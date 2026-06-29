@@ -6,10 +6,13 @@ import java.io.File
 
 // Threadtime:  MM-DD HH:MM:SS.mmm  PID  TID Level Tag: message
 private val RE_THREADTIME = Regex("""^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEA])\s+([^:]+):\s*(.*)$""")
+
 // Time:        MM-DD HH:MM:SS.mmm Level/Tag( PID): message
 private val RE_TIME       = Regex("""^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEA])/([^(]+)\(\s*(\d+)\):\s*(.*)$""")
+
 // Brief:       Level/Tag( PID): message
 private val RE_BRIEF      = Regex("""^([VDIWEA])/([^(]+)\(\s*(\d+)\):\s*(.*)$""")
+
 // Bare time:   HH:MM:SS.mmm Level/Tag: message
 private val RE_BARE       = Regex("""^(\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEA])/([^:]+):\s*(.*)$""")
 

@@ -13,21 +13,39 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Label
+import androidx.compose.material.icons.automirrored.outlined.LabelOff
+import androidx.compose.material.icons.outlined.ArrowDownward
+import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.Block
+import androidx.compose.material.icons.outlined.Bookmark
+import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Flag
+import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.DragData
 import androidx.compose.ui.draganddrop.dragData
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -38,24 +56,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.ArrowDownward
-import androidx.compose.material.icons.outlined.ArrowUpward
-import androidx.compose.material.icons.outlined.Block
-import androidx.compose.material.icons.outlined.Bookmark
-import androidx.compose.material.icons.outlined.Code
-import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material.icons.outlined.Flag
-import androidx.compose.material.icons.automirrored.outlined.Label
-import androidx.compose.material.icons.automirrored.outlined.LabelOff
-import androidx.compose.material.icons.outlined.Layers
-import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material.icons.outlined.Visibility
-import androidx.compose.material.icons.outlined.VisibilityOff
-import androidx.compose.material3.Icon
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.zIndex
 import com.openlog.generated.BuildInfo
 import com.openlog.model.*
@@ -64,6 +64,8 @@ import java.awt.Frame
 import java.io.File
 import java.net.URI
 import kotlin.math.roundToInt
+
+private const val TAB_DRAG_SNAP_BIAS = 0.25f
 
 @Composable
 fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
@@ -167,10 +169,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         //   header(37) + divider(9) + preview(63) + 5 items(160) + divider(9)
                         //   + 3 items(96) + divider(9) + 2 items(64) = 447
                         // Selection text adds preview extension(15) + 4 items(128) + divider(9) = 152
-                        val estimatedMenuHeight = (447
-                            + (if (ctx.selText.isNotBlank()) 152 else 0)
-                            + (if (state.pendingSequenceStart != null) 32 else 0)
-                            + (if (selCount > 1) 32 else 0)).dp
+                        val estimatedMenuHeight = (447 +
+                            (if (ctx.selText.isNotBlank()) 152 else 0) +
+                            (if (state.pendingSequenceStart != null) 32 else 0) +
+                            (if (selCount > 1) 32 else 0)).dp
                         val menuScroll = rememberScrollState()
                         val x = ctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
                         val y = ctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
@@ -572,7 +574,6 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     SettingsDialog(state) { state.settingsOpen = false }
                 }
             }
-
         }
     }
 }
@@ -691,12 +692,9 @@ private fun BoundFilterPanel(state: AppState, tab: LogTab) {
         onToggleLevel = { state.toggleLevel(tab.id, it) },
         onSetFilterMode = { state.setFilterMode(tab.id, it) },
         onToggleTag = { state.toggleTag(tab.id, it) },
-        onClearTags = { state.clearTags(tab.id) },
         onToggleExcludeTag = { state.toggleExcludeTag(tab.id, it) },
         onSetKw = { state.setKw(tab.id, it) },
         onToggleKwRx = { state.toggleKwRx(tab.id) },
-        onSetExcludeKw = { state.setExcludeKw(tab.id, it) },
-        onToggleExcludeKwRx = { state.toggleExcludeKwRx(tab.id) },
         onToggleSeq = { state.toggleSeq(tab.id) },
         onAddSeq = { t, r, c, st, et, er, eg -> state.addSequence(t, r, c, st, et, er, eg) },
         onRemoveSeq = { state.removeSequence(it) },
@@ -710,7 +708,6 @@ private fun BoundFilterPanel(state: AppState, tab: LogTab) {
         onAddMessageRule = { include, pattern, regex, tag, prefix, target ->
             state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
         },
-        onToggleMessageRule = { state.toggleMessageRule(tab.id, it) },
         onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
         onMoveSeqUp = { state.moveSequenceUp(it) },
         onMoveSeqDown = { state.moveSequenceDown(it) },
@@ -732,7 +729,6 @@ private fun BoundFilterPanel(state: AppState, tab: LogTab) {
         onDeleteSF = { state.requestDeleteSF(it) },
         onOpenSFDialog = { state.sfDialog = true; state.sfTabId = tab.id; state.sfName = "" },
         onSetKwInTag = { state.setKwInTag(tab.id, it) },
-        onToggleKwInTagRx = { state.toggleKwInTagRx(tab.id) },
         onAddPkgPrefix = { state.addPkgPrefix(tab.id, it) },
         onRemovePkgPrefix = { state.removePkgPrefix(tab.id, it) },
         onAddExcludePkgPrefix = { state.addExcludePkgPrefix(tab.id, it) },
@@ -927,7 +923,7 @@ private fun TabBar(state: AppState) {
     val standaloneShape = RoundedCornerShape(7.dp)
     val hasRecentFiles = state.recentFiles.isNotEmpty()
     Row(
-        Modifier.fillMaxWidth().height(36.dp).background(tc.p2).border(BorderStroke(1.dp, tc.br)),
+        Modifier.fillMaxWidth().height(36.dp).background(tc.p2).border(BorderStroke(1.dp, tc.br)).padding(vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TabOverflowRow(state = state, modifier = Modifier.weight(1f).fillMaxHeight())
@@ -990,7 +986,7 @@ internal fun browserTabOrderDuringDrag(
 ): List<String> {
     val dragged = draggedId?.takeIf { it in visibleIds } ?: return visibleIds
     if (tabWidth <= 0f || dragStartIndex !in visibleIds.indices) return visibleIds
-    val sensitivityBias = tabWidth * 0.25f * dragOffsetX.compareTo(0f)
+    val sensitivityBias = tabWidth * TAB_DRAG_SNAP_BIAS * dragOffsetX.compareTo(0f)
     val draggedCenter = dragStartIndex * tabWidth + tabWidth / 2f + dragOffsetX + sensitivityBias
     val without = visibleIds.filter { it != dragged }
     val insertAt = without.indexOfFirst { id ->

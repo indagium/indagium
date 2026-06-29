@@ -1,29 +1,33 @@
 package com.openlog
 
+import androidx.compose.ui.graphics.Color
 import com.openlog.model.AnnBlock
 import com.openlog.model.AnnotationLogBlockStyle
+import com.openlog.model.Annotations
 import com.openlog.model.AppSettings
+import com.openlog.model.CtxMenuState
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.LogEntry
 import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
+import com.openlog.model.ManualCollapseBlock
+import com.openlog.model.ManualCollapseDirection
 import com.openlog.model.SequenceDef
 import com.openlog.model.ThemePreset
 import com.openlog.ui.AppState
-import com.openlog.model.CtxMenuState
 import com.openlog.ui.DesktopStorage
-import androidx.compose.ui.graphics.Color
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.mkTab
-import com.openlog.utils.computeItems
 import com.openlog.utils.buildMd
+import com.openlog.utils.computeItems
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -1049,6 +1053,542 @@ class AppStateBehaviorTest {
         val sequence = state.sequences.single()
         assertEquals("flow done", sequence.endMatchText)
         assertEquals("com.app.End", sequence.endTag)
+    }
+
+    // ── Token serialization round-trips ───────────────────────────────────────
+
+    @Test
+    fun highlighterRoundTripViaFilterSaveAndLoad() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addHl(tabId, "error", false, Color.Red)
+
+        state.saveFilter(tabId, "hl-filter")
+        state.clearFilter(tabId)
+        state.loadFilter(tabId, state.savedFilters.single())
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertEquals("error", hl.pattern)
+        assertEquals(false, hl.regex)
+        assertEquals(Color.Red, hl.color)
+        assertTrue(hl.on)
+    }
+
+    @Test
+    fun highlighterPatternWithPipeCharSurvivesRoundTrip() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        // | is the field delimiter; b64 encoding must protect it
+        state.addHl(tabId, "error|crash", false, Color.Yellow)
+
+        state.saveFilter(tabId, "special-hl")
+        state.clearFilter(tabId)
+        state.loadFilter(tabId, state.savedFilters.single())
+
+        assertEquals("error|crash", state.tabs.single().filter.highlighters.single().pattern)
+    }
+
+    @Test
+    fun messageRuleRoundTripViaFilterSaveAndLoad() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addMessageRule(tabId, include = true, pattern = "timeout", regex = true, tag = "NetTag", packagePrefix = null)
+
+        state.saveFilter(tabId, "rule-filter")
+        state.clearFilter(tabId)
+        state.loadFilter(tabId, state.savedFilters.single())
+
+        val rule = state.tabs.single().filter.messageRules.single()
+        assertEquals("timeout", rule.pattern)
+        assertEquals(true, rule.include)
+        assertEquals(true, rule.regex)
+        assertEquals("NetTag", rule.tag)
+    }
+
+    @Test
+    fun settingsNonDefaultFieldsRoundTripViaAutosave() {
+        val dir = createTempDirectory("openlog-settings").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.updateSettings {
+            it.copy(
+                fontSize = 16,
+                fontMono = false,
+                mostUsedTagLimit = 10,
+                annotationLogBlockStyle = AnnotationLogBlockStyle.JIRA_JAVA,
+                numberAnnotationBlocks = true,
+            )
+        }
+
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        assertEquals(16, restored.settings.fontSize)
+        assertEquals(false, restored.settings.fontMono)
+        assertEquals(10, restored.settings.mostUsedTagLimit)
+        assertEquals(AnnotationLogBlockStyle.JIRA_JAVA, restored.settings.annotationLogBlockStyle)
+        assertEquals(true, restored.settings.numberAnnotationBlocks)
+    }
+
+    @Test
+    fun noteBlockAutosaveSurvivesRoundTrip() {
+        val dir = createTempDirectory("openlog-note").toFile()
+        val logFile = File(dir, "test.log").apply { writeText("06-26 10:00:00.000  1  1 I App: hello\n") }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.tabs = listOf(mkTab("log", "test.log", emptyList()).copy(sourcePath = logFile.absolutePath))
+        state.activeTabId = "log"
+        state.addNoteBlock("log")
+        val noteId = state.tabs.single().annotations.blocks.single().id
+        state.updateBlock("log", noteId, "My analysis note")
+
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        val block = assertIs<AnnBlock.Note>(restored.tabs.single().annotations.blocks.single())
+        assertEquals("My analysis note", block.text)
+    }
+
+    @Test
+    fun manualCollapseBlockAutosaveSurvivesRoundTrip() {
+        val dir = createTempDirectory("openlog-manual").toFile()
+        val logFile = File(dir, "test.log").apply { writeText("06-26 10:00:00.000  1  1 I App: hello\n") }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        val block = ManualCollapseBlock("m1", 1, ManualCollapseDirection.TO_END, Color.Red, enabled = true)
+        state.tabs = listOf(
+            mkTab("log", "test.log", emptyList()).copy(
+                sourcePath = logFile.absolutePath,
+                manualBlocks = listOf(block),
+            ),
+        )
+        state.activeTabId = "log"
+
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        val restoredBlock = restored.tabs.single().manualBlocks.single()
+        assertEquals("m1", restoredBlock.id)
+        assertEquals(1, restoredBlock.anchorId)
+        assertEquals(ManualCollapseDirection.TO_END, restoredBlock.direction)
+        assertEquals(Color.Red, restoredBlock.color)
+    }
+
+    // ── Filter mutations ──────────────────────────────────────────────────────
+
+    @Test
+    fun toggleLevelRemovesItFromFilter() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        assertTrue(LogLevel.D in state.tabs.single().filter.levels)
+
+        state.toggleLevel(tabId, LogLevel.D)
+
+        assertFalse(LogLevel.D in state.tabs.single().filter.levels)
+    }
+
+    @Test
+    fun toggleLevelAddsItBackAfterRemoval() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.toggleLevel(tabId, LogLevel.D)
+        assertFalse(LogLevel.D in state.tabs.single().filter.levels)
+
+        state.toggleLevel(tabId, LogLevel.D)
+
+        assertTrue(LogLevel.D in state.tabs.single().filter.levels)
+    }
+
+    @Test
+    fun setPidTidFilterStoresValue() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+
+        state.setPidTidFilter(tabId, "1234,5678")
+
+        assertEquals("1234,5678", state.tabs.single().filter.pidTidFilter)
+    }
+
+    @Test
+    fun addMessageRuleAssignsUniqueIds() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+
+        state.addMessageRule(tabId, include = true, pattern = "error", regex = false, tag = null, packagePrefix = null)
+        state.addMessageRule(tabId, include = false, pattern = "debug", regex = false, tag = null, packagePrefix = null)
+
+        val rules = state.tabs.single().filter.messageRules
+        assertEquals(2, rules.size)
+        assertFalse(rules[0].id == rules[1].id)
+    }
+
+    @Test
+    fun removeMessageRuleDeletesOnlyTargetRule() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addMessageRule(tabId, include = true, pattern = "error", regex = false, tag = null, packagePrefix = null)
+        state.addMessageRule(tabId, include = false, pattern = "debug", regex = false, tag = null, packagePrefix = null)
+        val removeId = state.tabs.single().filter.messageRules.first().id
+
+        state.removeMessageRule(tabId, removeId)
+
+        val remaining = state.tabs.single().filter.messageRules
+        assertEquals(1, remaining.size)
+        assertEquals("debug", remaining.single().pattern)
+    }
+
+    @Test
+    fun addPkgPrefixStoresValueAndIsRemovable() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+
+        state.addPkgPrefix(tabId, "com.example")
+        assertEquals(setOf("com.example"), state.tabs.single().filter.pkgPrefixes)
+
+        state.removePkgPrefix(tabId, "com.example")
+        assertTrue(state.tabs.single().filter.pkgPrefixes.isEmpty())
+    }
+
+    // ── Sequence mutations ────────────────────────────────────────────────────
+
+    @Test
+    fun sequenceColorWrapsAroundWhenPaletteExhausted() {
+        val state = AppState()
+        SEQ_COLORS.forEachIndexed { i, color -> state.addSequence("seq$i", false, color) }
+        val countBefore = state.sequences.size
+
+        state.addSequence("overflow", false, SEQ_COLORS[0])
+
+        assertEquals(countBefore + 1, state.sequences.size)
+        assertTrue(state.sequences.last().color in SEQ_COLORS)
+    }
+
+    @Test
+    fun moveSequenceUpSwapsWithPreviousEntry() {
+        val state = AppState()
+        state.addSequence("first", false, SEQ_COLORS[0])
+        state.addSequence("second", false, SEQ_COLORS[1])
+        val firstId = state.sequences[0].id
+        val secondId = state.sequences[1].id
+
+        state.moveSequenceUp(secondId)
+
+        assertEquals(secondId, state.sequences[0].id)
+        assertEquals(firstId, state.sequences[1].id)
+    }
+
+    @Test
+    fun moveSequenceDownAtLastIndexIsNoOp() {
+        val state = AppState()
+        state.addSequence("first", false, SEQ_COLORS[0])
+        state.addSequence("second", false, SEQ_COLORS[1])
+        val secondId = state.sequences[1].id
+
+        state.moveSequenceDown(secondId)
+
+        assertEquals(secondId, state.sequences[1].id)
+        assertEquals(2, state.sequences.size)
+    }
+
+    @Test
+    fun toggleSequenceFlipsEnabledFlag() {
+        val state = AppState()
+        state.addSequence("flow", false, SEQ_COLORS[0])
+        val id = state.sequences.single().id
+        assertTrue(state.sequences.single().enabled)
+
+        state.toggleSequence(id)
+        assertFalse(state.sequences.single().enabled)
+
+        state.toggleSequence(id)
+        assertTrue(state.sequences.single().enabled)
+    }
+
+    // ── Annotation block manipulation ─────────────────────────────────────────
+
+    @Test
+    fun moveBlockUpShiftsPositionInList() {
+        val state = AppState()
+        state.updateSettings { it.copy(autoExportNotes = false) }
+        state.tabs = listOf(
+            mkTab("t1", "test.log", emptyList()).copy(
+                annotations = Annotations(blocks = listOf(AnnBlock.Note("a", "first"), AnnBlock.Note("b", "second"))),
+            ),
+        )
+
+        state.moveBlock("t1", "b", -1)
+
+        val blocks = state.tabs.single().annotations.blocks
+        assertEquals("b", blocks[0].id)
+        assertEquals("a", blocks[1].id)
+    }
+
+    @Test
+    fun moveBlockDownShiftsPositionInList() {
+        val state = AppState()
+        state.updateSettings { it.copy(autoExportNotes = false) }
+        state.tabs = listOf(
+            mkTab("t1", "test.log", emptyList()).copy(
+                annotations = Annotations(blocks = listOf(AnnBlock.Note("a", "first"), AnnBlock.Note("b", "second"))),
+            ),
+        )
+
+        state.moveBlock("t1", "a", 1)
+
+        val blocks = state.tabs.single().annotations.blocks
+        assertEquals("b", blocks[0].id)
+        assertEquals("a", blocks[1].id)
+    }
+
+    @Test
+    fun removeBlockDeletesOnlyTarget() {
+        val state = AppState()
+        state.updateSettings { it.copy(autoExportNotes = false) }
+        state.tabs = listOf(
+            mkTab("t1", "test.log", emptyList()).copy(
+                annotations = Annotations(blocks = listOf(AnnBlock.Note("a", "keep"), AnnBlock.Note("b", "remove"))),
+            ),
+        )
+
+        state.removeBlock("t1", "b")
+
+        val blocks = state.tabs.single().annotations.blocks
+        assertEquals(1, blocks.size)
+        assertEquals("a", blocks.single().id)
+    }
+
+    @Test
+    fun updateBlockReplacesNoteContent() {
+        val state = AppState()
+        state.updateSettings { it.copy(autoExportNotes = false) }
+        state.tabs = listOf(
+            mkTab("t1", "test.log", emptyList()).copy(
+                annotations = Annotations(blocks = listOf(AnnBlock.Note("n1", "old text"))),
+            ),
+        )
+
+        state.updateBlock("t1", "n1", "new content")
+
+        val block = assertIs<AnnBlock.Note>(state.tabs.single().annotations.blocks.single())
+        assertEquals("new content", block.text)
+    }
+
+    @Test
+    fun setPrefixSetsAnnotationPrefix() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", emptyList()))
+
+        state.setPrefix("t1", "## Analysis")
+
+        assertEquals("## Analysis", state.tabs.single().annotations.prefix)
+    }
+
+    // ── Selection ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun selRowRangeSelectsAllIdsInRange() {
+        val state = AppState()
+        val entries = (1..4).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        state.tabs = listOf(mkTab("t1", "test.log", entries))
+
+        state.selRowRange("t1", 1, 3)
+
+        assertEquals(setOf(1, 2, 3), state.tabs.single().selected)
+    }
+
+    @Test
+    fun selRowSingleClickReplacesPreviousSelection() {
+        val state = AppState()
+        val entries = (1..4).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        state.tabs = listOf(mkTab("t1", "test.log", entries).copy(selected = setOf(1, 2, 3)))
+
+        state.selRow("t1", 4, multi = false, range = false)
+
+        assertEquals(setOf(4), state.tabs.single().selected)
+    }
+
+    @Test
+    fun clearSelectionEmptiesSet() {
+        val state = AppState()
+        val entries = (1..3).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        state.tabs = listOf(mkTab("t1", "test.log", entries))
+        state.selRowRange("t1", 1, 3)
+
+        state.clearSelection("t1")
+
+        assertTrue(state.tabs.single().selected.isEmpty())
+    }
+
+    // ── extractMsgText (via addHlFromCtx) ────────────────────────────────────
+
+    @Test
+    fun extractMsgTextStripsTagColonPrefix() {
+        // Branch: sel starts with "tag: " but does not end with full entry.msg
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "MyTag: partial text")
+
+        state.addHlFromCtx()
+
+        assertEquals("partial text", state.tabs.single().filter.highlighters.single().pattern)
+    }
+
+    @Test
+    fun extractMsgTextNoisyPrefixStrippedWhenSelEndsWithMsg() {
+        // Branch: sel ends with entry.msg and is longer → return entry.msg
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "real message")
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "10:00:00.000  I MyTag real message")
+
+        state.addHlFromCtx()
+
+        assertEquals("real message", state.tabs.single().filter.highlighters.single().pattern)
+    }
+
+    @Test
+    fun buildMdIndentedStyleUsesFourSpaceLinePrefix() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")
+        val tab = mkTab("t1", "test.log", listOf(entry)).copy(
+            annotations = Annotations(
+                blocks = listOf(AnnBlock.LogRef("r1", listOf(1), "Evidence")),
+            ),
+        )
+
+        val md = buildMd(tab, AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED))
+
+        assertTrue(md.contains("    10:00:00.000  I/App  hello"))
+        assertFalse(md.contains("{code"))
+    }
+
+    @Test
+    fun buildMdEmptyAnnotationsProducesEmptyString() {
+        val tab = mkTab("t1", "test.log", emptyList()).copy(annotations = Annotations())
+
+        val md = buildMd(tab, AppSettings())
+
+        assertEquals("", md)
+    }
+
+    @Test
+    fun buildMdSpecialCharsInCaptionAreNotHtmlEscaped() {
+        val tab = mkTab("t1", "test.log", emptyList()).copy(
+            annotations = Annotations(
+                blocks = listOf(AnnBlock.LogRef("r1", emptyList(), "Fix <a> & <b>")),
+            ),
+        )
+
+        val md = buildMd(tab, AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED))
+
+        assertTrue(md.contains("Fix <a> & <b>"))
+    }
+
+    // ── Autosave corruption / fallback ────────────────────────────────────────
+
+    @Test
+    fun autosaveWithWrongVersionHeaderIsIgnored() {
+        val dir = createTempDirectory("openlog-badver").toFile()
+        val cacheFile = File(dir, "state.cache").apply { writeText("openLog2-cache-v99\nsome data\n") }
+
+        val state = AppState(cacheFile, restoreOnCreate = true)
+
+        assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
+    fun autosaveWithEmptyFileIsIgnored() {
+        val dir = createTempDirectory("openlog-empty2").toFile()
+        val cacheFile = File(dir, "state.cache").apply { writeText("") }
+
+        val state = AppState(cacheFile, restoreOnCreate = true)
+
+        assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
+    fun autosaveWithTruncatedTabLineProducesNoTab() {
+        val dir = createTempDirectory("openlog-trunc").toFile()
+        val cacheFile = File(dir, "state.cache").apply {
+            writeText("openLog2-cache-v1\ntabs\ntab\tmalformed-not-enough-fields\n")
+        }
+
+        val state = AppState(cacheFile, restoreOnCreate = true)
+
+        assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
+    fun fileLoadErrorProducesEmptyTab() {
+        val dir = createTempDirectory("openlog-err").toFile()
+        val logFile = File(dir, "test.log").apply { writeText("content") }
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            parser = { throw RuntimeException("disk error") },
+        )
+
+        state.openFile(logFile)
+        waitUntil { !state.isLoading }
+
+        assertEquals(1, state.tabs.size)
+        assertTrue(state.tabs.single().logData.isEmpty())
+    }
+
+    @Test
+    fun activeTabIdFallsBackToFirstTabAfterRestore() {
+        val dir = createTempDirectory("openlog-active2").toFile()
+        val logFile = File(dir, "test.log").apply { writeText("06-26 10:00:00.000  1  1 I App: hello\n") }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.tabs = listOf(mkTab("t1", "test.log", emptyList()).copy(sourcePath = logFile.absolutePath))
+        state.activeTabId = "ghost-tab-id"
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals("t1", restored.activeTabId)
+    }
+
+    @Test
+    fun compareTabIdFallsBackToFirstTabAfterRestore() {
+        val dir = createTempDirectory("openlog-compare2").toFile()
+        val logFile = File(dir, "test.log").apply { writeText("06-26 10:00:00.000  1  1 I App: hello\n") }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.tabs = listOf(mkTab("t1", "test.log", emptyList()).copy(sourcePath = logFile.absolutePath))
+        state.compareTabId = "ghost-compare-id"
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals("t1", restored.compareTabId)
+    }
+
+    @Test
+    fun tabCounterStartsAboveHighestRestoredId() {
+        val dir = createTempDirectory("openlog-counter").toFile()
+        val logFile = File(dir, "test.log").apply { writeText("06-26 10:00:00.000  1  1 I App: hello\n") }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.tabs = listOf(
+            mkTab("t3", "a.log", emptyList()).copy(sourcePath = logFile.absolutePath),
+            mkTab("t7", "b.log", emptyList()).copy(sourcePath = logFile.absolutePath),
+        )
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        restored.addTab()
+
+        assertTrue(restored.tabs.any { it.id == "t8" })
     }
 
     private fun waitUntil(timeoutMs: Long = 2_000, condition: () -> Boolean) {

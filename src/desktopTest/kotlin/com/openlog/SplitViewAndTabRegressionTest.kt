@@ -7,11 +7,11 @@ import com.openlog.ui.AppState
 import com.openlog.ui.LogViewerScrollStateStore
 import com.openlog.ui.browserTabOrderDuringDrag
 import com.openlog.ui.logItemStableKey
-import com.openlog.ui.nextOriginalSelectionAfterFilteredSelection
 import com.openlog.ui.mkTab
+import com.openlog.ui.nextOriginalSelectionAfterFilteredSelection
 import com.openlog.ui.splitTabsForVisibility
-import com.openlog.ui.tabRenderX
 import com.openlog.ui.tabOrderAfterVisibleReorder
+import com.openlog.ui.tabRenderX
 import com.openlog.ui.visibleRowRangeIds
 import kotlin.test.Test
 import kotlin.test.assertEquals
