@@ -2,6 +2,8 @@ package com.openlog.model
 
 import androidx.compose.ui.graphics.Color
 
+private val MANUAL_COLLAPSE_DEFAULT_COLOR = Color(0xFF06b6d4)
+
 enum class LogLevel(val key: Char, val label: String, val defaultColor: Color) {
     V('V', "Verbose", Color(0xFF6e7681)),
     D('D', "Debug", Color(0xFF79c0ff)),
@@ -54,7 +56,7 @@ data class ManualCollapseBlock(
     val id: String,
     val anchorId: Int,
     val direction: ManualCollapseDirection,
-    val color: Color = Color(0xFF06b6d4),
+    val color: Color = MANUAL_COLLAPSE_DEFAULT_COLOR,
     val enabled: Boolean = true,
 )
 

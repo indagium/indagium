@@ -65,6 +65,8 @@ import java.io.File
 import java.net.URI
 import kotlin.math.roundToInt
 
+private const val TAB_DRAG_SNAP_BIAS = 0.25f
+
 @Composable
 fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
     val theme = themeColors(state.settings.theme)
@@ -691,12 +693,9 @@ private fun BoundFilterPanel(state: AppState, tab: LogTab) {
         onToggleLevel = { state.toggleLevel(tab.id, it) },
         onSetFilterMode = { state.setFilterMode(tab.id, it) },
         onToggleTag = { state.toggleTag(tab.id, it) },
-        onClearTags = { state.clearTags(tab.id) },
         onToggleExcludeTag = { state.toggleExcludeTag(tab.id, it) },
         onSetKw = { state.setKw(tab.id, it) },
         onToggleKwRx = { state.toggleKwRx(tab.id) },
-        onSetExcludeKw = { state.setExcludeKw(tab.id, it) },
-        onToggleExcludeKwRx = { state.toggleExcludeKwRx(tab.id) },
         onToggleSeq = { state.toggleSeq(tab.id) },
         onAddSeq = { t, r, c, st, et, er, eg -> state.addSequence(t, r, c, st, et, er, eg) },
         onRemoveSeq = { state.removeSequence(it) },
@@ -710,7 +709,6 @@ private fun BoundFilterPanel(state: AppState, tab: LogTab) {
         onAddMessageRule = { include, pattern, regex, tag, prefix, target ->
             state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
         },
-        onToggleMessageRule = { state.toggleMessageRule(tab.id, it) },
         onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
         onMoveSeqUp = { state.moveSequenceUp(it) },
         onMoveSeqDown = { state.moveSequenceDown(it) },
@@ -732,7 +730,6 @@ private fun BoundFilterPanel(state: AppState, tab: LogTab) {
         onDeleteSF = { state.requestDeleteSF(it) },
         onOpenSFDialog = { state.sfDialog = true; state.sfTabId = tab.id; state.sfName = "" },
         onSetKwInTag = { state.setKwInTag(tab.id, it) },
-        onToggleKwInTagRx = { state.toggleKwInTagRx(tab.id) },
         onAddPkgPrefix = { state.addPkgPrefix(tab.id, it) },
         onRemovePkgPrefix = { state.removePkgPrefix(tab.id, it) },
         onAddExcludePkgPrefix = { state.addExcludePkgPrefix(tab.id, it) },
@@ -990,7 +987,7 @@ internal fun browserTabOrderDuringDrag(
 ): List<String> {
     val dragged = draggedId?.takeIf { it in visibleIds } ?: return visibleIds
     if (tabWidth <= 0f || dragStartIndex !in visibleIds.indices) return visibleIds
-    val sensitivityBias = tabWidth * 0.25f * dragOffsetX.compareTo(0f)
+    val sensitivityBias = tabWidth * TAB_DRAG_SNAP_BIAS * dragOffsetX.compareTo(0f)
     val draggedCenter = dragStartIndex * tabWidth + tabWidth / 2f + dragOffsetX + sensitivityBias
     val without = visibleIds.filter { it != dragged }
     val insertAt = without.indexOfFirst { id ->

@@ -77,12 +77,9 @@ fun FilterPanel(
     onToggleLevel: (LogLevel) -> Unit,
     onSetFilterMode: (FilterMode) -> Unit,
     onToggleTag: (String) -> Unit,
-    onClearTags: () -> Unit,
     onToggleExcludeTag: (String) -> Unit,
     onSetKw: (String) -> Unit,
     onToggleKwRx: () -> Unit,
-    onSetExcludeKw: (String) -> Unit,
-    onToggleExcludeKwRx: () -> Unit,
     onToggleSeq: () -> Unit,
     onAddSeq: (String, Boolean, Color, String?, String?, Boolean, String?) -> Unit,
     onRemoveSeq: (String) -> Unit,
@@ -92,7 +89,6 @@ fun FilterPanel(
     onToggleManualCollapse: (String) -> Unit,
     onRemoveManualCollapse: (String) -> Unit,
     onAddMessageRule: (Boolean, String, Boolean, String?, String?, RuleTarget) -> Unit,
-    onToggleMessageRule: (String) -> Unit,
     onRemoveMessageRule: (String) -> Unit,
     onMoveSeqUp: (String) -> Unit,
     onMoveSeqDown: (String) -> Unit,
@@ -114,7 +110,6 @@ fun FilterPanel(
     onDeleteSF: (String) -> Unit,
     onOpenSFDialog: () -> Unit,
     onSetKwInTag: (String) -> Unit,
-    onToggleKwInTagRx: () -> Unit,
     onAddPkgPrefix: (String) -> Unit,
     onRemovePkgPrefix: (String) -> Unit,
     onAddExcludePkgPrefix: (String) -> Unit,
@@ -1164,33 +1159,6 @@ private fun sequenceLabel(def: SequenceDef): String {
 private fun scopedSequencePart(tag: String?, text: String, isRegex: Boolean): String {
     val pattern = if (isRegex) "/$text/" else text
     return (tag?.let { "$it: " } ?: "") + pattern
-}
-
-private fun messageRuleLabel(rule: MessageRule): String {
-    val pattern = if (rule.regex) "/${rule.pattern}/" else rule.pattern
-    return (if (rule.include) "show only " else "hide ") + pattern
-}
-
-private fun messageRuleScope(rule: MessageRule, prefixes: Set<String>): String {
-    rule.tag?.takeIf { it.isNotBlank() }?.let { tag ->
-        val (label, pkg) = displayTagForPrefix(tag, prefixes)
-        return if (pkg == null) "tag: $label" else "tag: $pkg / $label"
-    }
-    rule.packagePrefix?.takeIf { it.isNotBlank() }?.let { return "package: $it" }
-    return "all tags"
-}
-
-@Composable
-private fun ModeBtn(label: String, active: Boolean, onClick: () -> Unit) {
-    val tc = tc()
-    Box(
-        Modifier
-            .border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
-            .background(if (active) tc.ac.copy(.15f) else Color.Transparent, CORNER_MD)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-        contentAlignment = Alignment.Center,
-    ) { AppText(label, color = if (active) tc.ac else tc.ts, fontSize = 11.sp, fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal) }
 }
 
 @Composable

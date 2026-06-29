@@ -36,6 +36,11 @@ private fun defaultAutosaveFile(): File =
     DesktopStorage.autosaveFile()
 
 internal const val ANNOTATION_PANEL_MIN_WIDTH = 360f
+internal const val ANNOTATION_PANEL_MAX_WIDTH = 500f
+internal const val FILTER_PANEL_MIN_WIDTH = 140f
+internal const val FILTER_PANEL_MAX_WIDTH = 420f
+internal const val COMPARE_SPLIT_MIN = 0.2f
+internal const val COMPARE_SPLIT_MAX = 0.8f
 
 data class PendingSequenceStart(val text: String, val tag: String)
 data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val currentFilterId: String?)
@@ -157,21 +162,21 @@ class AppState(
     }
 
     fun updateFilterPanelWidth(width: Float) {
-        val next = width.coerceIn(140f, 420f)
+        val next = width.coerceIn(FILTER_PANEL_MIN_WIDTH, FILTER_PANEL_MAX_WIDTH)
         if (filterPanelWidth == next) return
         filterPanelWidth = next
         autosaveNow()
     }
 
     fun updateAnnotationPanelWidth(width: Float) {
-        val next = width.coerceIn(ANNOTATION_PANEL_MIN_WIDTH, 500f)
+        val next = width.coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
         if (annotationPanelWidth == next) return
         annotationPanelWidth = next
         autosaveNow()
     }
 
     fun updateCompareSplit(split: Float) {
-        val next = split.coerceIn(0.2f, 0.8f)
+        val next = split.coerceIn(COMPARE_SPLIT_MIN, COMPARE_SPLIT_MAX)
         if (compareSplit == next) return
         compareSplit = next
         autosaveNow()
@@ -1503,7 +1508,7 @@ private fun AppState.restoreCompareState(token: String) {
     filterVisible = p[3].toBoolean()
     annotationVisible = p[4].toBoolean()
     filterPanelWidth = p[5].toFloatOrNull() ?: filterPanelWidth
-    annotationPanelWidth = (p[6].toFloatOrNull() ?: annotationPanelWidth).coerceIn(ANNOTATION_PANEL_MIN_WIDTH, 500f)
+    annotationPanelWidth = (p[6].toFloatOrNull() ?: annotationPanelWidth).coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
     compareSplit = p[7].toFloatOrNull() ?: compareSplit
 }
 

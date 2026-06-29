@@ -40,7 +40,10 @@ fun passesFilter(entry: LogEntry, filter: Filter): Boolean {
             val tokens = filter.pidTidFilter.split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
             if (tokens.any { it == entry.pid.toString() || it == entry.tid.toString() }) return true
         }
-        if (unscopedRules.isEmpty() && !hasKwInTag && !hasPosPidTid && scopedEntryRules.isEmpty()) {
+        // No unscoped positive selectors apply to this entry — fall back to tag/keyword filter
+        val entryOutOfScopeOfAllPositiveRules =
+            unscopedRules.isEmpty() && !hasKwInTag && !hasPosPidTid && scopedEntryRules.isEmpty()
+        if (entryOutOfScopeOfAllPositiveRules) {
             return passesTagOrKeywordFilter(entry, filter)
         }
         return false
