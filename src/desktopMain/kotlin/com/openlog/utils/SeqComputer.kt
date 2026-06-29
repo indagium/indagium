@@ -63,12 +63,12 @@ fun computeSeqGroups(logData: List<LogEntry>, defs: List<SequenceDef>): List<Seq
         .map { candidate ->
             val children = childRanges(candidate)
             SeqGroup(
-                gid = "sg_${candidate.def.id}_${candidate.idx}",
+                gid = "sg_${candidate.def.id}_${logData[candidate.idx].id}",
                 rid = logData[candidate.idx].id,
                 plain = childIds(candidate, children),
                 nested = children.map { child ->
                     NestedSeqGroup(
-                        gid = "sg_${child.def.id}_${child.idx}",
+                        gid = "sg_${child.def.id}_${logData[child.idx].id}",
                         rid = logData[child.idx].id,
                         ch = childIds(child, childRanges(child)),
                         defId = child.def.id,

@@ -30,6 +30,31 @@ class FilterBehaviorTest {
     }
 
     @Test
+    fun excludedPackagePrefixRemovesMatchingTags() {
+        val blockedExact = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app", "hidden")
+        val blockedChild = LogEntry(2, "10:00:00.001", LogLevel.I, "com.app.Network", "hidden")
+        val allowed = LogEntry(3, "10:00:00.002", LogLevel.I, "com.other.Network", "shown")
+        val filter = Filter(excludePkgPrefixes = setOf("com.app"))
+
+        assertFalse(passesFilter(blockedExact, filter))
+        assertFalse(passesFilter(blockedChild, filter))
+        assertTrue(passesFilter(allowed, filter))
+    }
+
+    @Test
+    fun excludedPackagePrefixWinsOverIncludedPackagePrefix() {
+        val blocked = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.noisy.Sync", "hidden")
+        val allowed = LogEntry(2, "10:00:00.001", LogLevel.I, "com.app.auth.Login", "shown")
+        val filter = Filter(
+            pkgPrefixes = setOf("com.app"),
+            excludePkgPrefixes = setOf("com.app.noisy"),
+        )
+
+        assertFalse(passesFilter(blocked, filter))
+        assertTrue(passesFilter(allowed, filter))
+    }
+
+    @Test
     fun scopedIncludeMessageRuleNarrowsOnlyMatchingTag() {
         val desired = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "request complete")
         val spam = LogEntry(2, "10:00:00.001", LogLevel.I, "com.app.Network", "heartbeat")

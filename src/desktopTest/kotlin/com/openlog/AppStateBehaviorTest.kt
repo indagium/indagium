@@ -1,6 +1,8 @@
 package com.openlog
 
 import com.openlog.model.AnnBlock
+import com.openlog.model.AnnotationLogBlockStyle
+import com.openlog.model.AppSettings
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.LogEntry
@@ -15,6 +17,7 @@ import androidx.compose.ui.graphics.Color
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.mkTab
 import com.openlog.utils.computeItems
+import com.openlog.utils.buildMd
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -119,7 +122,7 @@ class AppStateBehaviorTest {
         val header = computeItems(tab, state.sequences, applyFilter = true)
             .filterIsInstance<LogItem.SeqHeader>()
             .single()
-        assertEquals("sg_keep_0", header.gid)
+        assertEquals("sg_keep_3", header.gid)
         assertTrue(header.expanded)
     }
 
@@ -147,7 +150,7 @@ class AppStateBehaviorTest {
 
         val originalHeaders = computeItems(state.tabs.single(), state.sequences, applyFilter = false)
             .filterIsInstance<LogItem.SeqHeader>()
-        assertEquals(listOf("sg_drop_0", "sg_keep_2"), originalHeaders.map { it.gid })
+        assertEquals(listOf("sg_drop_1", "sg_keep_3"), originalHeaders.map { it.gid })
         assertTrue(originalHeaders.all { it.expanded })
     }
 
@@ -174,7 +177,7 @@ class AppStateBehaviorTest {
 
         val headers = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
             .filterIsInstance<LogItem.SeqHeader>()
-        assertEquals(listOf("sg_flow_0"), headers.map { it.gid })
+        assertEquals(listOf("sg_flow_3"), headers.map { it.gid })
         assertTrue(headers.single().expanded)
     }
 
@@ -200,7 +203,7 @@ class AppStateBehaviorTest {
 
         val items = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
         val headers = items.filterIsInstance<LogItem.SeqHeader>()
-        assertEquals(listOf("sg_flow_0"), headers.map { it.gid })
+        assertEquals(listOf("sg_flow_1"), headers.map { it.gid })
         assertTrue(headers.single().expanded)
         assertEquals(listOf(2), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
     }
@@ -227,7 +230,7 @@ class AppStateBehaviorTest {
 
         val headers = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
             .filterIsInstance<LogItem.SeqHeader>()
-        assertEquals(listOf("sg_flow_1"), headers.map { it.gid })
+        assertEquals(listOf("sg_flow_2"), headers.map { it.gid })
         assertTrue(headers.single().expanded)
     }
 
@@ -249,8 +252,32 @@ class AppStateBehaviorTest {
         val header = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
             .filterIsInstance<LogItem.SeqHeader>()
             .single()
-        assertEquals("sg_keep_0", header.gid)
+        assertEquals("sg_keep_1", header.gid)
         assertTrue(!header.expanded)
+    }
+
+    @Test
+    fun sequenceExpansionSurvivesFilteringOutEarlierRows() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Drop", "flow start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Drop", "flow child"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Keep", "flow start"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "Keep", "flow child"),
+        )
+        val state = AppState()
+        state.sequences = listOf(SequenceDef("flow", "flow start", priority = 1, color = Color.Blue))
+        state.tabs = listOf(mkTab("log", "test.log", logs))
+        val keepHeaderBeforeFilter = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
+            .filterIsInstance<LogItem.SeqHeader>()
+            .first { it.entry.id == 3 }
+        state.toggleGroup("log", keepHeaderBeforeFilter.gid)
+
+        state.toggleExcludeTag("log", "Drop")
+
+        val keepHeaderAfterFilter = computeItems(state.tabs.single(), state.sequences, applyFilter = true)
+            .filterIsInstance<LogItem.SeqHeader>()
+            .single { it.entry.id == 3 }
+        assertTrue(keepHeaderAfterFilter.expanded)
     }
 
     @Test
@@ -266,6 +293,88 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun newLogTabsUseFromFilenamePrefix() {
+        val tab = mkTab("log", "LOGCAT_example.log", emptyList())
+
+        assertEquals("From LOGCAT_example.log", tab.annotations.prefix)
+    }
+
+    @Test
+    fun markdownCanWrapLogsInJiraJavaCodeBlock() {
+        val tab = mkTab(
+            "log",
+            "LOGCAT_example.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "App", "line 1"),
+                LogEntry(2, "10:00:00.001", LogLevel.E, "App", "line 2"),
+            ),
+        ).copy(
+            annotations = com.openlog.model.Annotations(
+                prefix = "From LOGCAT_example.log",
+                suffix = "Check later",
+                blocks = listOf(AnnBlock.LogRef("r1", listOf(1, 2), "Investigate")),
+            ),
+        )
+
+        val md = buildMd(tab, AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.JIRA_JAVA))
+
+        assertTrue(md.contains("From LOGCAT_example.log"))
+        assertTrue(md.contains("Investigate"))
+        assertTrue(md.contains("{code:java}\n10:00:00.000  I/App  line 1\n10:00:00.001  E/App  line 2\n{code}"))
+        assertTrue(md.contains("Check later"))
+    }
+
+    @Test
+    fun markdownUsesConfiguredSourcePrefixLabel() {
+        val tab = mkTab(
+            "log",
+            "main.log",
+            listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "line 1")),
+        ).copy(
+            annotations = com.openlog.model.Annotations(
+                prefix = "Evidence main.log",
+                blocks = listOf(
+                    AnnBlock.LogRef(
+                        id = "r1",
+                        logIds = listOf(1),
+                        caption = "Cross file",
+                        sourceFilename = "LOGCAT_example.log",
+                    ),
+                ),
+            ),
+        )
+
+        val md = buildMd(tab, AppSettings(annotationPrefixLabel = "Evidence"))
+
+        assertTrue(md.contains("Evidence main.log"))
+        assertTrue(md.contains("Evidence LOGCAT_example.log"))
+    }
+
+    @Test
+    fun markdownCanNumberAnnotationBlocksButNotPrefixOrNextSteps() {
+        val tab = mkTab(
+            "log",
+            "LOGCAT_example.log",
+            listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "line 1")),
+        ).copy(
+            annotations = com.openlog.model.Annotations(
+                prefix = "From LOGCAT_example.log",
+                suffix = "Next action",
+                blocks = listOf(
+                    AnnBlock.Note("n1", "Context"),
+                    AnnBlock.LogRef("r1", listOf(1), "Evidence"),
+                ),
+            ),
+        )
+
+        val md = buildMd(tab, AppSettings(numberAnnotationBlocks = true))
+
+        assertTrue(md.startsWith("From LOGCAT_example.log\n\n1. Context"))
+        assertTrue(md.contains("\n\n2. Evidence"))
+        assertTrue(md.endsWith("Next action"))
+    }
+
+    @Test
     fun savedFiltersRoundTripAllFilterFields() {
         val state = AppState()
         state.addTab()
@@ -275,6 +384,7 @@ class AppStateBehaviorTest {
         state.setKwInTag(tabId, "timeout")
         state.toggleKwInTagRx(tabId)
         state.addPkgPrefix(tabId, "com.example")
+        state.addExcludePkgPrefix(tabId, "com.example.noisy")
         state.setPidTidFilter(tabId, "1234,5678")
         state.saveFilter(tabId, "network")
         state.clearFilter(tabId)
@@ -286,6 +396,7 @@ class AppStateBehaviorTest {
         assertEquals("timeout", filter.kwInTag)
         assertTrue(filter.kwInTagRegex)
         assertEquals(setOf("com.example"), filter.pkgPrefixes)
+        assertEquals(setOf("com.example.noisy"), filter.excludePkgPrefixes)
         assertEquals("1234,5678", filter.pidTidFilter)
     }
 
@@ -337,6 +448,7 @@ class AppStateBehaviorTest {
         source.setKw(tabId, "hello, \"quoted\"\nnext")
         source.addHl(tabId, "warn,\"quoted\"", false, Color.Yellow)
         source.addPkgPrefix(tabId, "com.example,odd")
+        source.addExcludePkgPrefix(tabId, "com.example,odd.noisy")
         source.addMessageRule(
             tabId,
             include = true,
@@ -357,6 +469,7 @@ class AppStateBehaviorTest {
         assertEquals("special, \"filter\"\nname", saved.name)
         assertEquals("hello, \"quoted\"\nnext", filter.kwText)
         assertEquals(setOf("com.example,odd"), filter.pkgPrefixes)
+        assertEquals(setOf("com.example,odd.noisy"), filter.excludePkgPrefixes)
         assertEquals("warn,\"quoted\"", filter.highlighters.single().pattern)
         val rule = filter.messageRules.single()
         assertEquals("value=(\"a,b\")\\s+next", rule.pattern)
@@ -504,6 +617,80 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun loadingFilterOnEmptyNewTabDoesNotRequestConfirmationBecauseGlobalSequencesExist() {
+        val source = AppState()
+        source.addTab()
+        source.addPkgPrefix(source.tabs.single().id, "com.target")
+        source.saveFilter(source.tabs.single().id, "target")
+
+        val state = AppState()
+        state.sequences = listOf(SequenceDef("global", "start", priority = 1, color = Color.Blue))
+        state.importFilters(source.exportFilters())
+        state.addTab()
+        val target = state.savedFilters.single()
+
+        state.requestLoadFilter(state.tabs.single().id, target)
+
+        assertEquals(null, state.pendingFilterLoad)
+        assertEquals(setOf("com.target"), state.tabs.single().filter.pkgPrefixes)
+    }
+
+    @Test
+    fun savingFilterWithDuplicateNameRequestsReplaceChoice() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addPkgPrefix(tabId, "com.first")
+        state.saveFilter(tabId, "network")
+        state.clearFilter(tabId)
+        state.addPkgPrefix(tabId, "com.second")
+
+        state.saveFilter(tabId, " network ")
+
+        assertEquals("network", state.pendingDuplicateFilterSave?.existingName)
+        assertEquals(setOf("com.first"), state.savedFilters.single().pkgPrefixes)
+    }
+
+    @Test
+    fun replacingDuplicateSavedFilterKeepsSinglePresetAndUsesNewSnapshot() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addPkgPrefix(tabId, "com.first")
+        state.saveFilter(tabId, "network")
+        state.clearFilter(tabId)
+        state.addPkgPrefix(tabId, "com.second")
+        state.saveFilter(tabId, "network")
+
+        state.confirmReplaceDuplicateFilter()
+
+        assertEquals(null, state.pendingDuplicateFilterSave)
+        assertEquals(1, state.savedFilters.size)
+        assertEquals(setOf("com.second"), state.savedFilters.single().pkgPrefixes)
+    }
+
+    @Test
+    fun deletingSavedFilterRequiresConfirmation() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addPkgPrefix(tabId, "com.app")
+        state.saveFilter(tabId, "app")
+        val savedId = state.savedFilters.single().id
+
+        state.requestDeleteSF(savedId)
+
+        assertEquals(savedId, state.pendingDeleteFilterId)
+        assertEquals(1, state.savedFilters.size)
+
+        state.confirmDeleteSF()
+
+        assertEquals(null, state.pendingDeleteFilterId)
+        assertTrue(state.savedFilters.isEmpty())
+        assertEquals(null, state.activeSavedFilterId(tabId))
+    }
+
+    @Test
     fun importFiltersFromDroppedFileAddsSavedFilters() {
         val dir = createTempDirectory("openlog-filters").toFile()
         val source = AppState(File(dir, "source.cache"))
@@ -580,7 +767,7 @@ class AppStateBehaviorTest {
             .copy(sourcePath = logFile.absolutePath)
         state.tabs = listOf(tab)
         state.activeTabId = "log"
-        state.settings = state.settings.copy(visibleTabLimit = 6)
+        state.settings = state.settings.copy(visibleTabLimit = 6, annotationPrefixLabel = "Evidence")
         state.addPkgPrefix("log", "App")
         state.confirmAddAnn("log", "log", listOf(1), "remember this", null)
         state.saveFilter("log", "app only")
@@ -590,6 +777,7 @@ class AppStateBehaviorTest {
         val restored = AppState(cacheFile, restoreOnCreate = true)
         assertEquals("test.log", restored.tabs.single().filename)
         assertEquals(6, restored.settings.visibleTabLimit)
+        assertEquals("Evidence", restored.settings.annotationPrefixLabel)
         assertEquals(setOf("App"), restored.tabs.single().filter.pkgPrefixes)
         val block = assertIs<AnnBlock.LogRef>(restored.tabs.single().annotations.blocks.single())
         assertEquals("remember this", block.caption)

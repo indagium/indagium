@@ -27,12 +27,15 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.*
 import com.openlog.utils.passesFilter
 import java.io.File
@@ -114,6 +117,8 @@ fun FilterPanel(
     onToggleKwInTagRx: () -> Unit,
     onAddPkgPrefix: (String) -> Unit,
     onRemovePkgPrefix: (String) -> Unit,
+    onAddExcludePkgPrefix: (String) -> Unit,
+    onRemoveExcludePkgPrefix: (String) -> Unit,
     onExportFilters: () -> Unit,
     onImportFilters: () -> Unit,
     onImportFiltersFromFiles: (List<File>) -> Unit,
@@ -155,7 +160,14 @@ fun FilterPanel(
 
     // Combined candidates: pkg-prefix matches first (only when search has input), then tag matches.
     // Each entry is (value, isPkg): isPkg=true → add as package prefix; false → include/exclude as tag.
-    val combinedTagCandidates = remember(sortedTags, tagSearch, filter.pkgPrefixes, tagUsage, mostUsedTagLimit) {
+    val combinedTagCandidates = remember(
+        sortedTags,
+        tagSearch,
+        filter.pkgPrefixes,
+        filter.excludePkgPrefixes,
+        tagUsage,
+        mostUsedTagLimit,
+    ) {
         val pkgs = packagePrefixCandidates(sortedTags, tagSearch, limit = 4).map { it to true }
         val tags = tagCandidates(
             sortedTags = sortedTags,
@@ -285,7 +297,7 @@ fun FilterPanel(
         if (filter.mode == FilterMode.TAGS) {
             val pkgColor = PKG_CYAN
             val exNeg = DANGER_RED
-            val totalActive = filter.pkgPrefixes.size + filter.activeTags.size + filter.excludeTags.size
+            val totalActive = filter.pkgPrefixes.size + filter.excludePkgPrefixes.size + filter.activeTags.size + filter.excludeTags.size
             // ── unified TAGS section header with combined pill count ──
             SectionHeader(
                 "Tags",
@@ -301,6 +313,8 @@ fun FilterPanel(
                     ) {
                         if (filter.pkgPrefixes.isNotEmpty())
                             AppText("${filter.pkgPrefixes.size} pkg", color = pkgColor, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                        if (filter.excludePkgPrefixes.isNotEmpty())
+                            AppText("${filter.excludePkgPrefixes.size} pkg−", color = exNeg, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
                         if (filter.activeTags.isNotEmpty())
                             AppText("${filter.activeTags.size}+", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
                         if (filter.excludeTags.isNotEmpty())
@@ -317,6 +331,7 @@ fun FilterPanel(
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     filter.pkgPrefixes.forEach { pfx -> TagPill(pfx, pkgColor) { onRemovePkgPrefix(pfx) } }
+                    filter.excludePkgPrefixes.forEach { pfx -> TagPill(pfx, exNeg) { onRemoveExcludePkgPrefix(pfx) } }
                     filter.activeTags.forEach { tag ->
                         TagPill(displayTagForPrefix(tag, filter.pkgPrefixes).first, tc.ac) { onToggleTag(tag) }
                     }
@@ -344,16 +359,18 @@ fun FilterPanel(
                             Key.DirectionUp -> { tagSelectedIdx = (tagSelectedIdx - 1).coerceAtLeast(-1); true }
                             Key.DirectionRight -> {
                                 val c = combinedTagCandidates.getOrNull(tagSelectedIdx)
-                                if (c != null && !c.second) { tagSelectedAction = 1; true } else false
+                                if (c != null) { tagSelectedAction = 1; true } else false
                             }
                             Key.DirectionLeft -> {
                                 val c = combinedTagCandidates.getOrNull(tagSelectedIdx)
-                                if (c != null && !c.second) { tagSelectedAction = 0; true } else false
+                                if (c != null) { tagSelectedAction = 0; true } else false
                             }
                             Key.Enter -> {
                                 val c = combinedTagCandidates.getOrNull(tagSelectedIdx)
                                 if (c != null) {
-                                    if (c.second) onAddPkgPrefix(c.first)
+                                    if (c.second) {
+                                        if (tagSelectedAction == 0) onAddPkgPrefix(c.first) else onAddExcludePkgPrefix(c.first)
+                                    }
                                     else if (tagSelectedAction == 0) onToggleTag(c.first) else onToggleExcludeTag(c.first)
                                 } else if (tagInput.isNotBlank()) {
                                     if (tagInput.contains('.')) onAddPkgPrefix(tagInput) else onToggleTag(tagInput)
@@ -375,6 +392,8 @@ fun FilterPanel(
                     combinedTagCandidates.forEachIndexed { idx, (value, isPkg) ->
                         val isRowSelected = idx == tagSelectedIdx
                         if (isPkg) {
+                            val isIncluded = value in filter.pkgPrefixes
+                            val isExcluded = value in filter.excludePkgPrefixes
                             HoverBox(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
                                 baseBg = if (isRowSelected) tc.abg else Color.Transparent,
@@ -385,16 +404,38 @@ fun FilterPanel(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 ) {
-                                    AppText("pkg", color = pkgColor.copy(.7f), fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                                    AppText(value, color = if (isRowSelected) tc.tx else tc.ts, fontSize = 11.sp, fontFamily = MONO,
-                                        modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                                    AppText("pkg", color = when {
+                                        isExcluded -> exNeg.copy(.8f)
+                                        isIncluded -> pkgColor.copy(.8f)
+                                        else -> pkgColor.copy(.7f)
+                                    }, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.width(26.dp))
+                                    FullTextHint(value, modifier = Modifier.weight(1f), forceShow = isRowSelected) { onTextLayout ->
+                                        AppText(value, color = when {
+                                            isExcluded -> exNeg.copy(.85f)
+                                            isRowSelected || isIncluded -> tc.tx
+                                            else -> tc.ts
+                                        }, fontSize = 11.sp, fontFamily = MONO,
+                                            modifier = Modifier.fillMaxWidth(), overflow = TextOverflow.Ellipsis, maxLines = 1,
+                                            onTextLayout = onTextLayout)
+                                    }
+                                    Spacer(Modifier.width(26.dp))
+                                    val incKbd = isRowSelected && tagSelectedAction == 0
                                     Box(
                                         Modifier.size(20.dp)
-                                            .background(if (isRowSelected) pkgColor.copy(.2f) else Color.Transparent, CORNER_SM)
-                                            .border(1.dp, if (isRowSelected) pkgColor else tc.br, CORNER_SM)
+                                            .background(if (isIncluded) pkgColor.copy(.2f) else if (incKbd) pkgColor.copy(.1f) else Color.Transparent, CORNER_SM)
+                                            .border(1.dp, if (isIncluded || incKbd) pkgColor else tc.br, CORNER_SM)
                                             .clickable { onAddPkgPrefix(value); tagInput = ""; tagSelectedIdx = -1 },
                                         contentAlignment = Alignment.Center,
-                                    ) { AppText("+", color = if (isRowSelected) pkgColor else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+                                    ) { AppText("+", color = if (isIncluded || incKbd) pkgColor else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+                                    val exKbd = isRowSelected && tagSelectedAction == 1
+                                    Box(
+                                        Modifier.size(20.dp)
+                                            .background(if (isExcluded) exNeg.copy(.2f) else if (exKbd) exNeg.copy(.1f) else Color.Transparent, CORNER_SM)
+                                            .border(1.dp, if (isExcluded || exKbd) exNeg else tc.br, CORNER_SM)
+                                            .clickable { onAddExcludePkgPrefix(value); tagInput = ""; tagSelectedIdx = -1 },
+                                        contentAlignment = Alignment.Center,
+                                    ) { AppText("−", color = if (isExcluded || exKbd) exNeg else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
                                 }
                             }
                         } else {
@@ -408,26 +449,31 @@ fun FilterPanel(
                                 hoverBg = tc.hv,
                             ) {
                                 Row(
-                                    Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 3.dp, bottom = 3.dp),
+                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 ) {
-                                    Box(Modifier.size(5.dp).background(when {
-                                        isIncluded -> tc.ac
-                                        isExcluded -> exNeg
-                                        else -> tc.td
-                                    }, RoundedCornerShape(50)))
-                                    Column(Modifier.weight(1f)) {
-                                        AppText(label, color = when {
-                                            isIncluded -> tc.tx
-                                            isExcluded -> exNeg.copy(.8f)
-                                            else -> tc.ts
-                                        }, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
-                                        if (packageLabel != null)
-                                            AppText(packageLabel, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                                    Box(Modifier.width(26.dp), contentAlignment = Alignment.CenterStart) {
+                                        Box(Modifier.size(5.dp).background(when {
+                                            isIncluded -> tc.ac
+                                            isExcluded -> exNeg
+                                            else -> tc.td
+                                        }, RoundedCornerShape(50)))
                                     }
-                                    if ((tagUsage[tag] ?: 0) > 2) AppText("★", color = tc.ac.copy(.8f), fontSize = 9.sp)
-                                    AppText((tagCounts[tag] ?: 0).toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                                    Column(Modifier.weight(1f)) {
+                                        FullTextHint(tag, modifier = Modifier.fillMaxWidth(), forceShow = isRowSelected) { onTextLayout ->
+                                            AppText(label, color = when {
+                                                isIncluded -> tc.tx
+                                                isExcluded -> exNeg.copy(.8f)
+                                                else -> tc.ts
+                                            }, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.fillMaxWidth(), overflow = TextOverflow.Ellipsis, maxLines = 1,
+                                                onTextLayout = onTextLayout)
+                                        }
+                                        if (packageLabel != null)
+                                            AppText(packageLabel, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis, maxLines = 1)
+                                    }
+                                    AppText((tagCounts[tag] ?: 0).toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO,
+                                        modifier = Modifier.width(26.dp), overflow = TextOverflow.Clip)
                                     val incHighlight = isIncluded
                                     val incKbd = isRowSelected && tagSelectedAction == 0
                                     Box(
@@ -597,18 +643,21 @@ fun FilterPanel(
                                 AppText("pid", color = tc.td.copy(.7f), fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
                                     modifier = Modifier.padding(end = 2.dp))
                             }
-                            AppText(
-                                pattern,
-                                color = when {
-                                    isIncluded -> tc.tx
-                                    isExcluded -> msgExNeg.copy(.8f)
-                                    else -> tc.ts
-                                },
-                                fontSize = 11.sp,
-                                fontFamily = MONO,
-                                modifier = Modifier.weight(1f),
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            FullTextHint(pattern, modifier = Modifier.weight(1f), forceShow = isRowSelected) { onTextLayout ->
+                                AppText(
+                                    pattern,
+                                    color = when {
+                                        isIncluded -> tc.tx
+                                        isExcluded -> msgExNeg.copy(.8f)
+                                        else -> tc.ts
+                                    },
+                                    fontSize = 11.sp,
+                                    fontFamily = MONO,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    overflow = TextOverflow.Ellipsis,
+                                    onTextLayout = onTextLayout,
+                                )
+                            }
                             val incHighlight = isIncluded
                             val incKbd = isRowSelected && msgRuleSelectedAction == 0
                             Box(
@@ -956,7 +1005,7 @@ fun FilterPanel(
             Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 AppButton("+ Save current filter…", onClick = onOpenSFDialog, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth())
                 AppButton("Clear filters", onClick = onClearFilter, variant = ButtonVariant.Secondary, isDanger = true, modifier = Modifier.fillMaxWidth())
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
                     AppButton("Export", onClick = onExportFilters)
                     AppButton("Import", onClick = onImportFilters)
                 }
@@ -999,7 +1048,44 @@ private fun ScrollableItems(
         VerticalScrollbar(
             adapter = rememberScrollbarAdapter(scrollState),
             modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+            style = appScrollbarStyle(tc()),
         )
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+private fun FullTextHint(
+    text: String,
+    modifier: Modifier = Modifier,
+    forceShow: Boolean = false,
+    content: @Composable BoxScope.((TextLayoutResult) -> Unit) -> Unit,
+) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    var isOverflowing by remember(text) { mutableStateOf(false) }
+    Box(
+        modifier
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
+    ) {
+        content { result -> isOverflowing = result.hasVisualOverflow }
+        if ((hovered || forceShow) && isOverflowing) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, 24),
+                properties = PopupProperties(focusable = false),
+            ) {
+                Box(
+                    Modifier.widthIn(max = 520.dp)
+                        .background(tc.p, RoundedCornerShape(5.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(5.dp))
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                ) {
+                    AppText(text, color = tc.tx, fontSize = 11.sp, fontFamily = MONO, maxLines = 3, overflow = TextOverflow.Clip)
+                }
+            }
+        }
     }
 }
 

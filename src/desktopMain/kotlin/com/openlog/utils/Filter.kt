@@ -12,6 +12,7 @@ fun passesFilter(entry: LogEntry, filter: Filter): Boolean {
     // ── Mandatory exclusions ─────────────────────────────────────────
     if (entry.level !in filter.levels) return false
     if (entry.tag in filter.excludeTags) return false
+    if (filter.excludePkgPrefixes.any { pfx -> tagMatchesPrefix(entry.tag, pfx) }) return false
     if (filter.excludeKw.isNotBlank()) {
         val hay = "${entry.tag} ${entry.msg}"
         val excl = containsPattern(hay, filter.excludeKw, filter.excludeKwRegex)
@@ -55,7 +56,7 @@ private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter): Boolean =
             if (filter.activeTags.isEmpty() && filter.pkgPrefixes.isEmpty()) true
             else {
                 val prefixPass = filter.pkgPrefixes.isEmpty() ||
-                        filter.pkgPrefixes.any { pfx -> entry.tag == pfx || entry.tag.startsWith("$pfx.") }
+                        filter.pkgPrefixes.any { pfx -> tagMatchesPrefix(entry.tag, pfx) }
                 val activeTagPass = filter.activeTags.isEmpty() || entry.tag in filter.activeTags
                 prefixPass && activeTagPass
             }
@@ -69,6 +70,9 @@ private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter): Boolean =
             }
         }
     }
+
+private fun tagMatchesPrefix(tag: String, prefix: String): Boolean =
+    tag == prefix || tag.startsWith("$prefix.")
 
 private fun matchesRule(entry: LogEntry, rule: MessageRule): Boolean = when (rule.target) {
     RuleTarget.PID_TID -> {
@@ -211,25 +215,43 @@ fun computeItems(tab: LogTab, sequences: List<SequenceDef>, applyFilter: Boolean
     return result
 }
 
-fun buildMd(tab: LogTab): String = buildString {
+private fun sourcePrefixLabel(settings: AppSettings): String =
+    settings.annotationPrefixLabel.trim().ifBlank { "From" }
+
+fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildString {
     if (tab.annotations.prefix.isNotBlank()) {
         appendLine(tab.annotations.prefix); appendLine()
     }
+    var blockNumber = 1
     for (block in tab.annotations.blocks) {
         when (block) {
             is AnnBlock.Note -> {
                 if (block.text.isNotBlank()) {
-                    appendLine(block.text); appendLine()
+                    if (settings.numberAnnotationBlocks) append("${blockNumber++}. ")
+                    appendLine(block.text)
+                    appendLine()
                 }
             }
 
             is AnnBlock.LogRef -> {
+                if (settings.numberAnnotationBlocks) append("${blockNumber++}. ")
                 if (block.caption.isNotBlank()) {
                     appendLine(block.caption); appendLine()
+                } else if (settings.numberAnnotationBlocks) {
+                    appendLine()
                 }
-                if (block.sourceFilename != null) appendLine("*(from ${block.sourceFilename})*")
+                if (block.sourceFilename != null) appendLine("${sourcePrefixLabel(settings)} ${block.sourceFilename}")
                 val rows = block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }
-                rows.forEach { r -> appendLine("    ${r.ts}  ${r.level.key}/${r.tag}  ${r.msg}") }
+                when (settings.annotationLogBlockStyle) {
+                    AnnotationLogBlockStyle.INDENTED ->
+                        rows.forEach { r -> appendLine("    ${r.ts}  ${r.level.key}/${r.tag}  ${r.msg}") }
+
+                    AnnotationLogBlockStyle.JIRA_JAVA -> {
+                        appendLine("{code:java}")
+                        rows.forEach { r -> appendLine("${r.ts}  ${r.level.key}/${r.tag}  ${r.msg}") }
+                        appendLine("{code}")
+                    }
+                }
                 appendLine()
             }
         }

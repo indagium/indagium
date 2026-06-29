@@ -14,6 +14,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -23,8 +24,8 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.AnnBlock
+import com.openlog.model.AppSettings
 import com.openlog.model.LogTab
-import com.openlog.utils.buildMd
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
@@ -33,6 +34,7 @@ import kotlin.math.roundToInt
 @Composable
 fun AnnotationPanel(
     tab: LogTab,
+    settings: AppSettings,
     headerNote: String? = null,
     recentNotes: List<String> = emptyList(),
     recentNotesMenuOpen: Boolean = false,
@@ -106,7 +108,7 @@ fun AnnotationPanel(
         }
         // Inline preview popup
         if (tab.showAnnMd && hasAnnotationBlocks) {
-            MdPreviewDialog(tab = tab, mono = mono, onCopy = onCopy, onDismiss = onToggleMd)
+            MdPreviewDialog(tab = tab, settings = settings, mono = mono, onCopy = onCopy, onDismiss = onToggleMd)
         }
 
         val scroll = rememberScrollState()
@@ -181,6 +183,7 @@ fun AnnotationPanel(
             VerticalScrollbar(
                 adapter = rememberScrollbarAdapter(scroll),
                 modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+                style = appScrollbarStyle(tc),
             )
         }
     }
@@ -226,6 +229,7 @@ private fun RecentNotesPopup(
                 VerticalScrollbar(
                     adapter = rememberScrollbarAdapter(popupScroll),
                     modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+                    style = appScrollbarStyle(tc),
                 )
             }
         }
@@ -234,7 +238,7 @@ private fun RecentNotesPopup(
 
 // ── Markdown preview dialog ────────────────────────────────────────────
 @Composable
-private fun MdPreviewDialog(tab: LogTab, mono: FontFamily, onCopy: () -> Unit, onDismiss: () -> Unit) {
+private fun MdPreviewDialog(tab: LogTab, settings: AppSettings, mono: FontFamily, onCopy: () -> Unit, onDismiss: () -> Unit) {
     val tc = tc()
     var copied by remember { mutableStateOf(false) }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
@@ -263,9 +267,73 @@ private fun MdPreviewDialog(tab: LogTab, mono: FontFamily, onCopy: () -> Unit, o
             Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
             val scroll = rememberScrollState()
             Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp)) {
-                AppText(buildMd(tab), color = tc.tx, fontSize = 12.sp, fontFamily = mono,
-                    maxLines = Int.MAX_VALUE, overflow = TextOverflow.Clip)
+                RenderedMarkdownPreview(tab, settings, mono, tc)
             }
+        }
+    }
+}
+
+@Composable
+private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: FontFamily, tc: ThemeColors) {
+    val label = settings.annotationPrefixLabel.trim().ifBlank { "From" }
+    var blockNumber = 1
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (tab.annotations.prefix.isNotBlank()) {
+            AppText(tab.annotations.prefix, color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        }
+        tab.annotations.blocks.forEach { block ->
+            when (block) {
+                is AnnBlock.Note -> if (block.text.isNotBlank()) {
+                    AppText(
+                        (if (settings.numberAnnotationBlocks) "${blockNumber++}. " else "") + block.text,
+                        color = tc.tx,
+                        fontSize = 13.sp,
+                        maxLines = Int.MAX_VALUE,
+                        overflow = TextOverflow.Clip,
+                    )
+                }
+
+                is AnnBlock.LogRef -> {
+                    val rows = block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }
+                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (block.caption.isNotBlank() || settings.numberAnnotationBlocks) {
+                            AppText(
+                                (if (settings.numberAnnotationBlocks) "${blockNumber++}. " else "") + block.caption,
+                                color = tc.tx,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = Int.MAX_VALUE,
+                                overflow = TextOverflow.Clip,
+                            )
+                        }
+                        if (block.sourceFilename != null) {
+                            AppText("$label ${block.sourceFilename}", color = tc.td, fontSize = 11.sp, fontFamily = mono)
+                        }
+                        Column(
+                            Modifier.fillMaxWidth()
+                                .background(tc.bg, CORNER_SM)
+                                .border(1.dp, tc.br, CORNER_SM)
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            rows.forEach { row ->
+                                AppText(
+                                    "${row.ts}  ${row.level.key}/${row.tag}  ${row.msg}",
+                                    color = tc.ts,
+                                    fontSize = 12.sp,
+                                    fontFamily = mono,
+                                    maxLines = Int.MAX_VALUE,
+                                    overflow = TextOverflow.Clip,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (tab.annotations.suffix.isNotBlank()) {
+            Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+            AppText(tab.annotations.suffix, color = tc.tx, fontSize = 13.sp, maxLines = Int.MAX_VALUE, overflow = TextOverflow.Clip)
         }
     }
 }

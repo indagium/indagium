@@ -1,5 +1,6 @@
 package com.openlog.ui
 
+import androidx.compose.foundation.ScrollbarStyle
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
@@ -37,6 +38,15 @@ fun themeColors(preset: ThemePreset) = when (preset) {
     ThemePreset.DRACULA        -> DRACULA
     ThemePreset.SOLARIZED_DARK -> SOLARIZED_DK
 }
+
+fun appScrollbarStyle(tc: ThemeColors) = ScrollbarStyle(
+    minimalHeight = 24.dp,
+    thickness = 10.dp,
+    shape = CORNER_SM,
+    hoverDurationMillis = 120,
+    unhoverColor = tc.ac.copy(alpha = 0.42f),
+    hoverColor = tc.ac.copy(alpha = 0.82f),
+)
 
 val LocalTheme     = staticCompositionLocalOf { LIGHT_THEME }
 val LocalFontBase  = staticCompositionLocalOf { 12 }
