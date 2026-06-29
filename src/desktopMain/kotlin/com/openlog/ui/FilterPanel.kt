@@ -310,7 +310,8 @@ fun FilterPanel(
                         if (filter.pkgPrefixes.isNotEmpty())
                             AppText("${filter.pkgPrefixes.size} pkg", color = pkgColor, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
                         if (filter.excludePkgPrefixes.isNotEmpty())
-                            AppText("${filter.excludePkgPrefixes.size} pkg−", color = exNeg, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                            AppText("${filter.excludePkgPrefixes.size} pkg−",
+                                color = exNeg, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
                         if (filter.activeTags.isNotEmpty())
                             AppText("${filter.activeTags.size}+", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
                         if (filter.excludeTags.isNotEmpty())
@@ -421,11 +422,16 @@ fun FilterPanel(
                                     val incKbd = isRowSelected && tagSelectedAction == 0
                                     Box(
                                         Modifier.size(20.dp)
-                                            .background(if (isIncluded) pkgColor.copy(.2f) else if (incKbd) pkgColor.copy(.1f) else Color.Transparent, CORNER_SM)
+                                            .background(
+                                                if (isIncluded) pkgColor.copy(.2f) else if (incKbd) pkgColor.copy(.1f)
+                                                else Color.Transparent, CORNER_SM)
                                             .border(1.dp, if (isIncluded || incKbd) pkgColor else tc.br, CORNER_SM)
                                             .clickable { onAddPkgPrefix(value); tagInput = ""; tagSelectedIdx = -1 },
                                         contentAlignment = Alignment.Center,
-                                    ) { AppText("+", color = if (isIncluded || incKbd) pkgColor else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+                                    ) {
+                                        AppText("+", color = if (isIncluded || incKbd) pkgColor else tc.ts,
+                                            fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                    }
                                     val exKbd = isRowSelected && tagSelectedAction == 1
                                     Box(
                                         Modifier.size(20.dp)
@@ -464,11 +470,13 @@ fun FilterPanel(
                                                 isIncluded -> tc.tx
                                                 isExcluded -> exNeg.copy(.8f)
                                                 else -> tc.ts
-                                            }, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.fillMaxWidth(), overflow = TextOverflow.Ellipsis, maxLines = 1,
+                                            }, fontSize = 11.sp, fontFamily = MONO,
+                                                modifier = Modifier.fillMaxWidth(), overflow = TextOverflow.Ellipsis, maxLines = 1,
                                                 onTextLayout = onTextLayout)
                                         }
                                         if (packageLabel != null)
-                                            AppText(packageLabel, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis, maxLines = 1)
+                                            AppText(packageLabel, color = tc.td, fontSize = 9.sp,
+                                                fontFamily = MONO, overflow = TextOverflow.Ellipsis, maxLines = 1)
                                     }
                                     AppText((tagCounts[tag] ?: 0).toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO,
                                         modifier = Modifier.width(26.dp), overflow = TextOverflow.Clip)
@@ -578,7 +586,11 @@ fun FilterPanel(
                 }
             }
         }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             InlineField(
                 msgRuleInput,
                 { msgRuleInput = it; msgRuleSelectedIdx = -1 },
@@ -725,7 +737,8 @@ fun FilterPanel(
                                     .clickable { colorPickerHlId = if (colorPickerHlId == hl.id) null else hl.id },
                             )
                             AppText((if (hl.regex) "/" else "") + hl.pattern + (if (hl.regex) "/i" else ""),
-                                color = if (hl.on) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                                color = if (hl.on) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO,
+                                modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
                             AppText(if (hl.on) "●" else "○", color = if (hl.on) hl.color else tc.td,
                                 fontSize = 11.sp, modifier = Modifier.clickable { onToggleHl(hl.id) })
                             AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onRemoveHl(hl.id) })
@@ -997,7 +1010,8 @@ fun FilterPanel(
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 AppText(if (active) "●" else "○", color = if (active) tc.ac else tc.td, fontSize = 12.sp)
-                                AppText(sf.name, color = if (active) tc.tx else tc.ts, fontSize = 11.sp, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                                AppText(sf.name, color = if (active) tc.tx else tc.ts, fontSize = 11.sp,
+                                    modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
                                 AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onDeleteSF(sf.id) })
                             }
                         }

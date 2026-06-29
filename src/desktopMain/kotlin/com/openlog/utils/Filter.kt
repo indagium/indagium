@@ -9,48 +9,48 @@ import com.openlog.ui.SEQ_COLORS
 // The tag/keyword filter only applies when NO positive rules are set.
 // Negative rules and exclusions always apply regardless.
 fun passesFilter(entry: LogEntry, filter: Filter): Boolean {
-    // ── Mandatory exclusions ─────────────────────────────────────────
-    if (entry.level !in filter.levels) return false
-    if (entry.tag in filter.excludeTags) return false
-    if (filter.excludePkgPrefixes.any { pfx -> tagMatchesPrefix(entry.tag, pfx) }) return false
-    if (filter.excludeKw.isNotBlank()) {
-        val hay = "${entry.tag} ${entry.msg}"
-        val excl = containsPattern(hay, filter.excludeKw, filter.excludeKwRegex)
-        if (excl) return false
-    }
     val enabledRules = filter.messageRules.filter { it.enabled && it.pattern.isNotBlank() }
-    for (rule in enabledRules.filter { !it.include }) {
-        if (ruleScopeMatches(entry, rule) && matchesRule(entry, rule)) return false
-    }
-
-    // ── Positive rules override tag filter ───────────────────────────
+    if (!passesExclusions(entry, filter, enabledRules.filter { !it.include })) return false
     val posRules = enabledRules.filter { it.include }
     val hasKwInTag = filter.kwInTag.isNotBlank()
     val hasPosPidTid = filter.pidTidFilter.isNotBlank()
     if (posRules.isNotEmpty() || hasKwInTag || hasPosPidTid) {
-        val scopedRules = posRules.filter { it.tag != null || it.packagePrefix != null }
-        val unscopedRules = posRules - scopedRules.toSet()
-        if (unscopedRules.any { rule -> matchesRule(entry, rule) }) return true
-        val scopedEntryRules = scopedRules.filter { rule -> ruleScopeMatches(entry, rule) }
-        if (scopedEntryRules.any { rule -> matchesRule(entry, rule) }) return true
-        if (hasKwInTag) {
-            if (containsPattern(entry.msg, filter.kwInTag, filter.kwInTagRegex)) return true
-        }
-        if (hasPosPidTid) {
-            val tokens = filter.pidTidFilter.split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
-            if (tokens.any { it == entry.pid.toString() || it == entry.tid.toString() }) return true
-        }
-        // No unscoped positive selectors apply to this entry — fall back to tag/keyword filter
-        val entryOutOfScopeOfAllPositiveRules =
-            unscopedRules.isEmpty() && !hasKwInTag && !hasPosPidTid && scopedEntryRules.isEmpty()
-        if (entryOutOfScopeOfAllPositiveRules) {
-            return passesTagOrKeywordFilter(entry, filter)
-        }
-        return false
+        return matchesPositiveSelectors(entry, posRules, hasKwInTag, hasPosPidTid, filter)
     }
-
-    // ── No positive rules: apply tag / keyword filter ────────────────
     return passesTagOrKeywordFilter(entry, filter)
+}
+
+private fun passesExclusions(entry: LogEntry, filter: Filter, negativeRules: List<MessageRule>): Boolean {
+    if (entry.level !in filter.levels) return false
+    if (entry.tag in filter.excludeTags) return false
+    if (filter.excludePkgPrefixes.any { pfx -> tagMatchesPrefix(entry.tag, pfx) }) return false
+    if (filter.excludeKw.isNotBlank() &&
+        containsPattern("${entry.tag} ${entry.msg}", filter.excludeKw, filter.excludeKwRegex)) return false
+    return negativeRules.none { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule) }
+}
+
+private fun matchesPositiveSelectors(
+    entry: LogEntry,
+    posRules: List<MessageRule>,
+    hasKwInTag: Boolean,
+    hasPosPidTid: Boolean,
+    filter: Filter,
+): Boolean {
+    val scopedRules = posRules.filter { it.tag != null || it.packagePrefix != null }
+    val unscopedRules = posRules - scopedRules.toSet()
+    if (unscopedRules.any { rule -> matchesRule(entry, rule) }) return true
+    val scopedEntryRules = scopedRules.filter { rule -> ruleScopeMatches(entry, rule) }
+    if (scopedEntryRules.any { rule -> matchesRule(entry, rule) }) return true
+    if (hasKwInTag && containsPattern(entry.msg, filter.kwInTag, filter.kwInTagRegex)) return true
+    if (hasPosPidTid && matchesPidTidFilter(entry, filter.pidTidFilter)) return true
+    val entryOutOfScopeOfAllPositiveRules =
+        unscopedRules.isEmpty() && !hasKwInTag && !hasPosPidTid && scopedEntryRules.isEmpty()
+    return if (entryOutOfScopeOfAllPositiveRules) passesTagOrKeywordFilter(entry, filter) else false
+}
+
+private fun matchesPidTidFilter(entry: LogEntry, pidTidFilter: String): Boolean {
+    val tokens = pidTidFilter.split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
+    return tokens.any { it == entry.pid.toString() || it == entry.tid.toString() }
 }
 
 private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter): Boolean =
@@ -97,6 +97,9 @@ private fun ruleScopeMatches(entry: LogEntry, rule: MessageRule): Boolean {
 private fun rulePatternMatches(entry: LogEntry, rule: MessageRule): Boolean =
     containsPattern(entry.msg, rule.pattern, rule.regex)
 
+// Complexity is inherent: sequence detection, manual-collapse interleaving, and segment
+// iteration are all coupled — splitting them would require passing shared mutable state.
+@Suppress("CyclomaticComplexMethod")
 fun computeItems(tab: LogTab, sequences: List<SequenceDef>, applyFilter: Boolean): List<LogItem> {
     // Filter first, then detect sequences in filtered data only
     val data = if (applyFilter) tab.logData.filter { passesFilter(it, tab.filter) } else tab.logData

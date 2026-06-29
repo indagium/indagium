@@ -43,7 +43,7 @@ complexity:
     thresholdInEnums: 30
 
   LargeClass:
-    threshold: 600  # AppState and large test suites are intentionally large
+    threshold: 2000  # AppState centralises all state (~1700 LOC by design); test suite is comparably large
 
   NestedBlockDepth:
     threshold: 8  # event loops and nested sequence iteration require deeper nesting

@@ -1152,37 +1152,41 @@ class AppState(
         runCatching {
             val lines = autosaveFile.readLines()
             if (lines.firstOrNull() != "openLog2-cache-v1") return
-            val tabLines = mutableListOf<String>()
-            var inTabs = false
-            lines.drop(1).forEach { line ->
-                if (line == "tabs") {
-                    inTabs = true
-                    return@forEach
-                }
-                if (inTabs) {
-                    tabLines += line
-                    return@forEach
-                }
+            val (keyLines, tabLines) = splitAutosaveLines(lines.drop(1))
+            keyLines.forEach { line ->
                 val key = line.substringBefore('\t')
                 val value = line.substringAfter('\t', "")
-                when (key) {
-                    "settings" -> settingsFromToken(value.unb64())?.let { settings = it }
-                    "active" -> activeTabId = value.unb64()
-                    "compare" -> restoreCompareState(value.unb64())
-                    "sequences" -> sequences = value.tokenList().mapNotNull { it.sequenceFromToken() }
-                    "saved" -> importFilters(value.unb64())
-                    "activeFilters" -> activeSavedFilterIds = activeFilterMapFromToken(value.unb64())
-                    "recent" -> recentFiles = value.pathTokenList()
-                    "recentNotes" -> recentNotes = value.pathTokenList()
-                    "filterPanel" -> fpState.restoreFilterPanelToken(value.unb64())
-                }
+                restoreAutosaveKey(key, value)
             }
-            tabs = tabLines.mapNotNull { it.removePrefix("tab\t").tabFromToken() }
-            if (tabs.none { it.id == activeTabId }) activeTabId = tabs.firstOrNull()?.id ?: ""
-            if (tabs.none { it.id == compareTabId }) compareTabId =
-                tabs.getOrNull(1)?.id ?: tabs.firstOrNull()?.id ?: ""
-            tabCounter = (tabs.mapNotNull { it.id.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1
+            restoreTabsFromAutosave(tabLines)
         }
+    }
+
+    private fun splitAutosaveLines(lines: List<String>): Pair<List<String>, List<String>> {
+        val idx = lines.indexOf("tabs")
+        return if (idx == -1) Pair(lines, emptyList()) else Pair(lines.take(idx), lines.drop(idx + 1))
+    }
+
+    private fun restoreAutosaveKey(key: String, value: String) {
+        when (key) {
+            "settings" -> settingsFromToken(value.unb64())?.let { settings = it }
+            "active" -> activeTabId = value.unb64()
+            "compare" -> restoreCompareState(value.unb64())
+            "sequences" -> sequences = value.tokenList().mapNotNull { it.sequenceFromToken() }
+            "saved" -> importFilters(value.unb64())
+            "activeFilters" -> activeSavedFilterIds = activeFilterMapFromToken(value.unb64())
+            "recent" -> recentFiles = value.pathTokenList()
+            "recentNotes" -> recentNotes = value.pathTokenList()
+            "filterPanel" -> fpState.restoreFilterPanelToken(value.unb64())
+        }
+    }
+
+    private fun restoreTabsFromAutosave(tabLines: List<String>) {
+        tabs = tabLines.mapNotNull { it.removePrefix("tab\t").tabFromToken() }
+        if (tabs.none { it.id == activeTabId }) activeTabId = tabs.firstOrNull()?.id ?: ""
+        if (tabs.none { it.id == compareTabId }) compareTabId =
+            tabs.getOrNull(1)?.id ?: tabs.firstOrNull()?.id ?: ""
+        tabCounter = (tabs.mapNotNull { it.id.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1
     }
 
     private fun serializeAutosave(): String = buildString {
