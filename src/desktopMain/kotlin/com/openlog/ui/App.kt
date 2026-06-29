@@ -923,7 +923,7 @@ private fun TabBar(state: AppState) {
     val standaloneShape = RoundedCornerShape(7.dp)
     val hasRecentFiles = state.recentFiles.isNotEmpty()
     Row(
-        Modifier.fillMaxWidth().height(36.dp).background(tc.p2).border(BorderStroke(1.dp, tc.br)),
+        Modifier.fillMaxWidth().height(36.dp).background(tc.p2).border(BorderStroke(1.dp, tc.br)).padding(vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TabOverflowRow(state = state, modifier = Modifier.weight(1f).fillMaxHeight())
