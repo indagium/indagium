@@ -171,6 +171,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             + (if (ctx.selText.isNotBlank()) 152 else 0)
                             + (if (state.pendingSequenceStart != null) 32 else 0)
                             + (if (selCount > 1) 32 else 0)).dp
+                        val menuScroll = rememberScrollState()
                         val x = ctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
                         val y = ctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
                         // Position is already in dp (converted from px in LogRow)
@@ -180,7 +181,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                 .shadow(8.dp, RoundedCornerShape(7.dp))
                                 .background(tc.p, RoundedCornerShape(7.dp))
                                 .border(1.dp, tc.br, RoundedCornerShape(7.dp))
-                                .width(menuWidth),
+                                .width(menuWidth)
+                                .heightIn(max = (maxHeight - y - 8.dp).coerceAtLeast(160.dp))
+                                .verticalScroll(menuScroll),
                         ) {
                             Column {
                                 Box(
