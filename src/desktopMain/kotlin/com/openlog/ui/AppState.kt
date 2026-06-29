@@ -19,7 +19,7 @@ private fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = data.associateBy 
 
 fun mkTab(id: String, filename: String, logData: List<LogEntry>) = LogTab(
     id = id, filename = filename, logData = logData, rmap = mkRmap(logData),
-    annotations = Annotations(prefix = "## $filename"),
+    annotations = Annotations(prefix = "From $filename"),
 )
 
 fun emptyWorkspaceTab() = LogTab(
@@ -39,6 +39,7 @@ internal const val ANNOTATION_PANEL_MIN_WIDTH = 360f
 
 data class PendingSequenceStart(val text: String, val tag: String)
 data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val currentFilterId: String?)
+data class PendingDuplicateFilterSave(val tabId: String, val existingId: String, val existingName: String, val requestedName: String)
 
 class AppState(
     private val autosaveFile: File = defaultAutosaveFile(),
@@ -89,6 +90,8 @@ class AppState(
     var recentNotesMenuOpen by mutableStateOf(false)
     var pendingSequenceStart by mutableStateOf<PendingSequenceStart?>(null)
     var pendingFilterLoad by mutableStateOf<PendingFilterLoad?>(null)
+    var pendingDuplicateFilterSave by mutableStateOf<PendingDuplicateFilterSave?>(null)
+    var pendingDeleteFilterId by mutableStateOf<String?>(null)
     var pendingClearFilterTabId by mutableStateOf<String?>(null)
     var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
 
@@ -237,10 +240,22 @@ class AppState(
     fun setKwInTag(tabId: String, v: String) = upFlt(tabId) { it.copy(kwInTag = v) }
     fun toggleKwInTagRx(tabId: String) = upFlt(tabId) { it.copy(kwInTagRegex = !it.kwInTagRegex) }
     fun addPkgPrefix(tabId: String, v: String) {
-        if (v.isNotBlank()) upFlt(tabId) { it.copy(pkgPrefixes = it.pkgPrefixes + v.trim()) }
+        if (v.isNotBlank()) upFlt(tabId) {
+            val prefix = v.trim()
+            it.copy(pkgPrefixes = it.pkgPrefixes + prefix, excludePkgPrefixes = it.excludePkgPrefixes - prefix)
+        }
     }
 
     fun removePkgPrefix(tabId: String, v: String) = upFlt(tabId) { it.copy(pkgPrefixes = it.pkgPrefixes - v) }
+    fun addExcludePkgPrefix(tabId: String, v: String) {
+        if (v.isNotBlank()) upFlt(tabId) {
+            val prefix = v.trim()
+            it.copy(excludePkgPrefixes = it.excludePkgPrefixes + prefix, pkgPrefixes = it.pkgPrefixes - prefix)
+        }
+    }
+
+    fun removeExcludePkgPrefix(tabId: String, v: String) =
+        upFlt(tabId) { it.copy(excludePkgPrefixes = it.excludePkgPrefixes - v) }
     fun setPidTidFilter(tabId: String, v: String) = upFlt(tabId) { it.copy(pidTidFilter = v) }
     fun addMessageRule(
         tabId: String,
@@ -410,11 +425,33 @@ class AppState(
 
     // ── Saved filters ────────────────────────────────────────────────
     fun saveFilter(tabId: String, name: String) {
-        val sf = snapshotFilter(tabId, "sf${System.nanoTime()}_${savedFilters.size}", name) ?: return
+        val cleanName = name.trim()
+        if (cleanName.isBlank()) return
+        val existing = savedFilters.find { it.name.trim().equals(cleanName, ignoreCase = true) }
+        if (existing != null) {
+            pendingDuplicateFilterSave = PendingDuplicateFilterSave(tabId, existing.id, existing.name, cleanName)
+            return
+        }
+        val sf = snapshotFilter(tabId, "sf${System.nanoTime()}_${savedFilters.size}", cleanName) ?: return
         savedFilters = savedFilters + sf
         activeSavedFilterIds = activeSavedFilterIds + (tabId to sf.id)
         sfDialog = false; sfName = ""
         loadPendingFilterAfterSaving(tabId)
+    }
+
+    fun confirmReplaceDuplicateFilter() {
+        val pending = pendingDuplicateFilterSave ?: return
+        val updated = snapshotFilter(pending.tabId, pending.existingId, pending.requestedName) ?: return
+        savedFilters = savedFilters.map { if (it.id == pending.existingId) updated else it }
+        activeSavedFilterIds = activeSavedFilterIds + (pending.tabId to pending.existingId)
+        pendingDuplicateFilterSave = null
+        sfDialog = false
+        sfName = ""
+        loadPendingFilterAfterSaving(pending.tabId)
+    }
+
+    fun cancelDuplicateFilterSave() {
+        pendingDuplicateFilterSave = null
     }
 
     fun requestLoadFilter(tabId: String, sf: SavedFilter) {
@@ -464,6 +501,7 @@ class AppState(
             id, name, f.levels, f.activeTags, f.kwText, f.kwRegex,
             f.mode, f.excludeTags, f.excludeKw, f.excludeKwRegex, f.highlighters, f.seqOn,
             f.kwInTag, f.kwInTagRegex, f.pkgPrefixes, f.pidTidFilter, sequences, f.messageRules,
+            f.excludePkgPrefixes,
         )
     }
 
@@ -473,12 +511,8 @@ class AppState(
     }
 
     private fun currentFilterIsEmpty(tabId: String): Boolean {
-        val current = snapshotFilter(tabId, "", "") ?: return true
-        val empty = SavedFilter(
-            "", "", LogLevel.entries.toSet(), emptySet(), "", false, FilterMode.TAGS,
-            emptySet(), "", false, emptyList(), true, "", false, emptySet(), "", emptyList(), emptyList()
-        )
-        return current == empty
+        val t = tab(tabId) ?: return true
+        return t.filter == Filter()
     }
 
     private fun loadPendingFilterAfterSaving(tabId: String) {
@@ -512,6 +546,7 @@ class AppState(
                 kwInTag = sf.kwInTag,
                 kwInTagRegex = sf.kwInTagRegex,
                 pkgPrefixes = sf.pkgPrefixes,
+                excludePkgPrefixes = sf.excludePkgPrefixes,
                 pidTidFilter = sf.pidTidFilter,
                 messageRules = sf.messageRules,
             )
@@ -520,8 +555,23 @@ class AppState(
     }
 
     fun activeSavedFilterId(tabId: String): String? = activeSavedFilterIds[tabId]
-    fun deleteSF(id: String) {
+    fun requestDeleteSF(id: String) {
+        if (savedFilters.any { it.id == id }) pendingDeleteFilterId = id
+    }
+
+    fun cancelDeleteSF() {
+        pendingDeleteFilterId = null
+    }
+
+    fun confirmDeleteSF() {
+        val id = pendingDeleteFilterId ?: return
+        deleteSF(id)
+        pendingDeleteFilterId = null
+    }
+
+    private fun deleteSF(id: String) {
         savedFilters = savedFilters.filter { it.id != id }
+        activeSavedFilterIds = activeSavedFilterIds.filterValues { it != id }
     }
 
     fun exportFilters(): String = buildString {
@@ -549,6 +599,7 @@ class AppState(
             appendLine("    \"kwInTag\": ${sf.kwInTag.jsonStr()},")
             appendLine("    \"kwInTagRegex\": ${sf.kwInTagRegex},")
             appendLine("    \"pkgPrefixes\": [${sf.pkgPrefixes.joinToString(",") { it.jsonStr() }}],")
+            appendLine("    \"excludePkgPrefixes\": [${sf.excludePkgPrefixes.joinToString(",") { it.jsonStr() }}],")
             appendLine("    \"pidTidFilter\": ${sf.pidTidFilter.jsonStr()},")
             appendLine("    \"sequences\": [${sf.sequences.joinToString(",") { it.sequenceToken().jsonStr() }}],")
             appendLine(
@@ -584,6 +635,7 @@ class AppState(
             val kwInTag = obj.stringField("kwInTag") ?: ""
             val kwInTagRegex = obj.booleanField("kwInTagRegex")
             val pkgPrefixes = obj.stringArrayField("pkgPrefixes").toSet()
+            val excludePkgPrefixes = obj.stringArrayField("excludePkgPrefixes").toSet()
             val pidTidFilter = obj.stringField("pidTidFilter") ?: ""
             val sequences = obj.stringArrayField("sequences").mapNotNull { it.sequenceFromToken() }
             val messageRules = obj.stringArrayField("messageRules").mapNotNull { it.messageRuleFromToken() }
@@ -592,6 +644,7 @@ class AppState(
                 levels.ifEmpty { LogLevel.entries.toSet() }, activeTags, kwText, kwRegex, mode,
                 excludeTags, excludeKw, excludeKwRegex, highlighters, seqOn,
                 kwInTag, kwInTagRegex, pkgPrefixes, pidTidFilter, sequences, messageRules,
+                excludePkgPrefixes,
             )
         }
         savedFilters = savedFilters + imported
@@ -932,7 +985,9 @@ class AppState(
             try {
                 val logData = runCatching { parser(file) }.getOrElse { emptyList() }
                 ensureActive()
-                val t = mkTab("t$n", file.name, logData).copy(sourcePath = path)
+                val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
+                val t = mkTab("t$n", file.name, logData)
+                    .copy(sourcePath = path, annotations = Annotations(prefix = "$prefixLabel ${file.name}"))
                 synchronized(stateLock) {
                     ensureActive()
                     tabs = tabs + t
@@ -950,7 +1005,7 @@ class AppState(
     }
 
     fun copyAnn(tabId: String) {
-        tab(tabId)?.let { copyToClipboard(buildMd(it)) }
+        tab(tabId)?.let { copyToClipboard(buildMd(it, settings)) }
     }
 
     fun saveAnalysis(tabId: String) {
@@ -966,7 +1021,7 @@ class AppState(
         val saved = File(dir, path)
         ioScope.launch {
             runCatching {
-                saved.writeText(buildMd(t))
+                saved.writeText(buildMd(t, settings))
                 File(saved.parent, saved.nameWithoutExtension + ".ann").writeText(t.annotations.annotationsToken())
                 rememberRecentNote(saved)
             }
@@ -1023,7 +1078,7 @@ class AppState(
             runCatching {
                 notesDir.mkdirs()
                 val mdFile = autoExportedNoteFile(tab.filename)
-                mdFile.writeText(buildMd(tab))
+                mdFile.writeText(buildMd(tab, settings))
                 // Sidecar stores full block state for restoration
                 File(notesDir, "${mdFile.nameWithoutExtension}.ann").writeText(tab.annotations.annotationsToken())
                 rememberRecentNote(mdFile)
@@ -1401,6 +1456,9 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     mostUsedTagLimit.toString(),
     visibleTabLimit.toString(),
     autoExportNotes.toString(),
+    annotationLogBlockStyle.name,
+    numberAnnotationBlocks.toString(),
+    annotationPrefixLabel,
 )
 
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
@@ -1414,6 +1472,11 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         mostUsedTagLimit = p[4].toIntOrNull() ?: 5,
         visibleTabLimit = p.getOrNull(5)?.toIntOrNull()?.coerceIn(2, 20) ?: 8,
         autoExportNotes = p.getOrNull(6)?.toBooleanStrictOrNull() ?: true,
+        annotationLogBlockStyle = p.getOrNull(7)
+            ?.let { runCatching { AnnotationLogBlockStyle.valueOf(it) }.getOrNull() }
+            ?: AnnotationLogBlockStyle.INDENTED,
+        numberAnnotationBlocks = p.getOrNull(8)?.toBooleanStrictOrNull() ?: false,
+        annotationPrefixLabel = p.getOrNull(9)?.takeIf { it.isNotBlank() } ?: "From",
     )
 }.getOrNull()
 
@@ -1512,6 +1575,7 @@ private fun SavedFilter.savedFilterToken(): String = tokenFields(
     pidTidFilter,
     sequences.joinToString(",") { it.sequenceToken().b64() },
     messageRules.joinToString(",") { it.messageRuleToken().b64() },
+    excludePkgPrefixes.joinToString(",") { it.b64() },
 )
 
 private fun String.savedFilterFromToken(): SavedFilter? = runCatching {
@@ -1537,6 +1601,7 @@ private fun String.savedFilterFromToken(): SavedFilter? = runCatching {
         pidTidFilter = p[15],
         sequences = p[16].encodedList().mapNotNull { it.sequenceFromToken() },
         messageRules = p[17].encodedList().mapNotNull { it.messageRuleFromToken() },
+        excludePkgPrefixes = p.getOrNull(18)?.encodedSet() ?: emptySet(),
     )
 }.getOrNull()
 
@@ -1555,6 +1620,7 @@ private fun SavedFilter.toFilter(): Filter = Filter(
     kwInTag = kwInTag,
     kwInTagRegex = kwInTagRegex,
     pkgPrefixes = pkgPrefixes,
+    excludePkgPrefixes = excludePkgPrefixes,
     pidTidFilter = pidTidFilter,
 )
 
@@ -1652,7 +1718,8 @@ private fun LogTab.tabToken(): String {
     val filter = SavedFilter(
         "tab", "tab", filter.levels, filter.activeTags, filter.kwText, filter.kwRegex,
         filter.mode, filter.excludeTags, filter.excludeKw, filter.excludeKwRegex, filter.highlighters, filter.seqOn,
-        filter.kwInTag, filter.kwInTagRegex, filter.pkgPrefixes, filter.pidTidFilter, emptyList(), filter.messageRules
+        filter.kwInTag, filter.kwInTagRegex, filter.pkgPrefixes, filter.pidTidFilter, emptyList(), filter.messageRules,
+        filter.excludePkgPrefixes,
     )
     return tokenFields(
         id,

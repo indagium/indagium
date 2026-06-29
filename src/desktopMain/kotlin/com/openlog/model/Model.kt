@@ -77,6 +77,7 @@ data class Filter(
     val kwInTag: String = "",           // message text filter applied within tag result set
     val kwInTagRegex: Boolean = false,
     val pkgPrefixes: Set<String> = emptySet(), // tag prefixes — each matches com.foo.* tags
+    val excludePkgPrefixes: Set<String> = emptySet(), // excluded tag prefixes — each matches com.foo.* tags
     // PID / TID
     val pidTidFilter: String = "",      // comma-separated PIDs/TIDs to include
 )
@@ -148,9 +149,12 @@ data class SavedFilter(
     val pkgPrefixes: Set<String> = emptySet(), val pidTidFilter: String = "",
     val sequences: List<SequenceDef> = emptyList(),
     val messageRules: List<MessageRule> = emptyList(),
+    val excludePkgPrefixes: Set<String> = emptySet(),
 )
 
 // ── Settings ───────────────────────────────────────────────────────
+enum class AnnotationLogBlockStyle { INDENTED, JIRA_JAVA }
+
 data class AppSettings(
     val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
@@ -159,6 +163,9 @@ data class AppSettings(
     val mostUsedTagLimit: Int = 5,
     val visibleTabLimit: Int = 8,
     val autoExportNotes: Boolean = true,
+    val annotationLogBlockStyle: AnnotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED,
+    val numberAnnotationBlocks: Boolean = false,
+    val annotationPrefixLabel: String = "From",
 )
 
 enum class ThemePreset(val label: String) {

@@ -95,7 +95,7 @@ class SequenceGroupingTest {
             filename = "test.log",
             logData = logs,
             rmap = logs.associateBy { it.id },
-            expanded = setOf("sg_outer_0", "sg_inner_1"),
+            expanded = setOf("sg_outer_1", "sg_inner_2"),
         )
 
         val items = computeItems(tab, listOf(outer, inner), applyFilter = true)
@@ -190,7 +190,7 @@ class SequenceGroupingTest {
             logData = logs,
             rmap = logs.associateBy { it.id },
             filter = Filter(),
-            expanded = setOf(block.id, "sg_flow_0"),
+            expanded = setOf(block.id, "sg_flow_1"),
             manualBlocks = listOf(block),
         )
 
@@ -217,7 +217,7 @@ class SequenceGroupingTest {
             logData = logs,
             rmap = logs.associateBy { it.id },
             filter = Filter(),
-            expanded = setOf(block.id, "sg_flow_1"),
+            expanded = setOf(block.id, "sg_flow_2"),
             manualBlocks = listOf(block),
         )
 

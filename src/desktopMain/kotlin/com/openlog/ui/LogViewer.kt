@@ -202,6 +202,10 @@ fun LogViewer(
             if (listItems.isEmpty()) { EmptyState(tc, totalCnt, onClearFilter); return }
             val lazyState = listState ?: scrollStates.lazyState(panelKey)
             val hScroll   = scrollStates.horizontalState(panelKey)
+            val scrollbarStyle = appScrollbarStyle(tc)
+            val density = LocalDensity.current
+            val verticalScrollbarGutterPx = with(density) { 16.dp.toPx() }
+            val horizontalScrollbarGutterPx = with(density) { 18.dp.toPx() }
             val visibleIds = remember(listItems) {
                 listItems.map { item ->
                     when (item) {
@@ -231,12 +235,23 @@ fun LogViewer(
                                     PointerEventType.Press -> if (ev.buttons.isPrimaryPressed) {
                                         startPos = ch.position
                                         dragSelecting = false
+                                        if (
+                                            ch.position.x > size.width - verticalScrollbarGutterPx ||
+                                            ch.position.y > size.height - horizontalScrollbarGutterPx
+                                        ) {
+                                            startId = null
+                                            lastId = null
+                                            continue
+                                        }
                                         val absY = posY[0] + ch.position.y
                                         startId = boundsMap.entries.firstOrNull { (_, b) -> absY >= b.first && absY < b.second }?.key
                                         lastId  = startId
                                     }
                                     PointerEventType.Move -> if (ev.buttons.isPrimaryPressed && startId != null) {
-                                        if (!dragSelecting && (ch.position - startPos).getDistance() > 4f) dragSelecting = true
+                                        val delta = ch.position - startPos
+                                        if (!dragSelecting && kotlin.math.abs(delta.y) > 4f && kotlin.math.abs(delta.y) > kotlin.math.abs(delta.x)) {
+                                            dragSelecting = true
+                                        }
                                         if (dragSelecting) ch.consume()
                                         val absY = posY[0] + ch.position.y
                                         val id   = boundsMap.entries.firstOrNull { (_, b) -> absY >= b.first && absY < b.second }?.key
@@ -283,11 +298,13 @@ fun LogViewer(
                         VerticalScrollbar(
                             adapter = rememberScrollbarAdapter(lazyState),
                             modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+                            style = scrollbarStyle,
                         )
                     }
                     HorizontalScrollbar(
                         adapter = rememberScrollbarAdapter(hScroll),
                         modifier = Modifier.fillMaxWidth().padding(end = 8.dp),
+                        style = scrollbarStyle,
                     )
                 }
             }
@@ -309,6 +326,38 @@ fun LogViewer(
             // Hoisted lazy state for the Original panel so the Filtered panel can scroll it.
             val allLazyState = scrollStates.lazyState("${tab.id}:original")
             val syncScope    = rememberCoroutineScope()
+            fun originalExpansionAndIndexFor(entryId: Int): Pair<Set<String>, Int>? {
+                var expanded = tab.expanded
+                repeat(24) {
+                    val candidateItems = computeItems(tab.copy(expanded = expanded), sequences, false)
+                    val visibleIdx = candidateItems.indexOfFirst { item ->
+                        when (item) {
+                            is LogItem.Row -> item.entry.id == entryId
+                            is LogItem.SeqHeader -> item.entry.id == entryId
+                            is LogItem.ManualHeader -> item.entry.id == entryId
+                        }
+                    }
+                    if (visibleIdx >= 0) return expanded to visibleIdx
+                    val collapsedHeaders = candidateItems.mapNotNull { item ->
+                        when (item) {
+                            is LogItem.SeqHeader -> item.gid.takeIf { !item.expanded }
+                            is LogItem.ManualHeader -> item.gid.takeIf { !item.expanded }
+                            is LogItem.Row -> null
+                        }
+                    }
+                    val groupToOpen = collapsedHeaders.firstOrNull { gid ->
+                        computeItems(tab.copy(expanded = expanded + gid), sequences, false).any { item ->
+                            when (item) {
+                                is LogItem.Row -> item.entry.id == entryId
+                                is LogItem.SeqHeader -> item.entry.id == entryId
+                                is LogItem.ManualHeader -> item.entry.id == entryId
+                            }
+                        }
+                    } ?: collapsedHeaders.firstOrNull() ?: return null
+                    expanded = expanded + groupToOpen
+                }
+                return null
+            }
 
             // Independent selection for the "Original" panel so clicks there don't
             // highlight rows in the "Filtered" panel and vice-versa.
@@ -377,14 +426,11 @@ fun LogViewer(
                                 localAllSelected = nextOriginalSelectionAfterFilteredSelection(
                                     filteredSelection = setOf(id),
                                 )
-                                val idx = allItems.indexOfFirst { item ->
-                                    when (item) {
-                                        is LogItem.Row -> item.entry.id == id
-                                        is LogItem.SeqHeader -> item.entry.id == id
-                                        is LogItem.ManualHeader -> item.entry.id == id
-                                    }
-                                }
-                                if (idx >= 0) syncScope.launch {
+                                val target = originalExpansionAndIndexFor(id)
+                                if (target != null) syncScope.launch {
+                                    val (expanded, idx) = target
+                                    (expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
+                                    if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
                                     allLazyState.animateScrollToItem(maxOf(0, idx - 2))
                                 }
                             }
@@ -448,26 +494,51 @@ private fun LogRow(
             // Keys include tab.id so coroutines restart when the same entry ID appears in a different tab
             .pointerInput("rc", tab.id, entry.id) {
                 awaitPointerEventScope {
+                    var pressPos: Offset? = null
+                    var pressShift = false
+                    var pressMulti = false
+                    var pressDragged = false
                     while (true) {
                         val ev = awaitPointerEvent(PointerEventPass.Initial)
-                        if (ev.type == PointerEventType.Press) {
-                            val mods = ev.keyboardModifiers
-                            if (ev.buttons.isSecondaryPressed) {
-                                ev.changes.forEach { it.consume() }
-                                val selText = if (!sel.collapsed)
-                                    runCatching { annoLine.text.substring(sel.min, sel.max) }.getOrElse { "" }
-                                else ""
-                                val ch = ev.changes.firstOrNull() ?: continue
-                                onCtxMenu(
-                                    entry.id,
-                                    (rowRoot.x + ch.position.x) / density,
-                                    (rowRoot.y + ch.position.y) / density,
-                                    selText,
-                                )
-                            } else if (ev.buttons.isPrimaryPressed && (mods.isShiftPressed || mods.isCtrlPressed)) {
-                                ev.changes.forEach { it.consume() }
-                                onSelRow(entry.id, mods.isShiftPressed, mods.isCtrlPressed)
+                        when (ev.type) {
+                            PointerEventType.Press -> {
+                                val mods = ev.keyboardModifiers
+                                if (ev.buttons.isSecondaryPressed) {
+                                    ev.changes.forEach { it.consume() }
+                                    val selText = if (!sel.collapsed)
+                                        runCatching { annoLine.text.substring(sel.min, sel.max) }.getOrElse { "" }
+                                    else ""
+                                    val ch = ev.changes.firstOrNull() ?: continue
+                                    onCtxMenu(
+                                        entry.id,
+                                        (rowRoot.x + ch.position.x) / density,
+                                        (rowRoot.y + ch.position.y) / density,
+                                        selText,
+                                    )
+                                } else if (ev.buttons.isPrimaryPressed) {
+                                    pressPos = ev.changes.firstOrNull()?.position
+                                    pressShift = mods.isShiftPressed
+                                    pressMulti = mods.isCtrlPressed || mods.isMetaPressed
+                                    pressDragged = false
+                                }
                             }
+                            PointerEventType.Move -> {
+                                val start = pressPos
+                                val current = ev.changes.firstOrNull()?.position
+                                if (start != null && current != null && (current - start).getDistance() > 4f) {
+                                    pressDragged = true
+                                }
+                            }
+                            PointerEventType.Release -> {
+                                if (!pressDragged && pressPos != null) {
+                                    onSelRow(entry.id, pressMulti, pressShift)
+                                }
+                                pressPos = null
+                                pressShift = false
+                                pressMulti = false
+                                pressDragged = false
+                            }
+                            else -> {}
                         }
                     }
                 }
@@ -475,11 +546,10 @@ private fun LogRow(
             .pointerInput("hd", tab.id, entry.id) {
                 awaitPointerEventScope {
                     while (true) {
-                        val ev = awaitPointerEvent()
+                        val ev = awaitPointerEvent(PointerEventPass.Final)
                         when (ev.type) {
                             PointerEventType.Enter -> hov = true
                             PointerEventType.Exit  -> hov = false
-                            PointerEventType.Press -> if (ev.buttons.isPrimaryPressed) onSelRow(entry.id, false, false)
                             else -> {}
                         }
                     }
@@ -568,9 +638,9 @@ private fun SeqHeaderRow(
                                             "",
                                         )
                                     }
-                                    ev.buttons.isPrimaryPressed && (mods.isShiftPressed || mods.isCtrlPressed) -> {
+                                    ev.buttons.isPrimaryPressed && (mods.isShiftPressed || mods.isCtrlPressed || mods.isMetaPressed) -> {
                                         ev.changes.forEach { it.consume() }
-                                        onSelRow(item.entry.id, mods.isShiftPressed, mods.isCtrlPressed)
+                                        onSelRow(item.entry.id, mods.isCtrlPressed || mods.isMetaPressed, mods.isShiftPressed)
                                     }
                                     ev.buttons.isPrimaryPressed -> {
                                         val now = System.currentTimeMillis()
@@ -656,9 +726,9 @@ private fun ManualHeaderRow(
                                         val ch = ev.changes.firstOrNull() ?: continue
                                         onCtxMenu(item.entry.id, (rowRoot.x + ch.position.x) / density, (rowRoot.y + ch.position.y) / density, "")
                                     }
-                                    ev.buttons.isPrimaryPressed && (mods.isShiftPressed || mods.isCtrlPressed) -> {
+                                    ev.buttons.isPrimaryPressed && (mods.isShiftPressed || mods.isCtrlPressed || mods.isMetaPressed) -> {
                                         ev.changes.forEach { it.consume() }
-                                        onSelRow(item.entry.id, mods.isShiftPressed, mods.isCtrlPressed)
+                                        onSelRow(item.entry.id, mods.isCtrlPressed || mods.isMetaPressed, mods.isShiftPressed)
                                     }
                                     ev.buttons.isPrimaryPressed -> {
                                         val now = System.currentTimeMillis()

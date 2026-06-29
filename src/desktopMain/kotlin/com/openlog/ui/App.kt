@@ -357,6 +357,30 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                 }
             }
 
+            state.pendingDuplicateFilterSave?.let { pending ->
+                Dialog(onDismissRequest = { state.cancelDuplicateFilterSave() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(380.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Replace saved filter?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "\"${pending.existingName}\" already exists. Replace it with the current filter settings, or cancel and save with another name.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 3,
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            DialogActionButton("Replace", active = true, danger = true) { state.confirmReplaceDuplicateFilter() }
+                            DialogActionButton("Cancel", active = false) { state.cancelDuplicateFilterSave() }
+                        }
+                    }
+                }
+            }
+
             state.pendingFilterLoad?.takeIf { !state.sfDialog }?.let { pending ->
                 val current = pending.currentFilterId?.let { id -> state.savedFilters.find { it.id == id } }
                 val target = state.savedFilters.find { it.id == pending.targetFilterId }
@@ -435,6 +459,26 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                 danger = true
                             ) { state.confirmClearFilter() }
                             DialogActionButton("Cancel", active = false) { state.cancelClearFilter() }
+                        }
+                    }
+                }
+            }
+
+            state.pendingDeleteFilterId?.let { filterId ->
+                val filterName = state.savedFilters.find { it.id == filterId }?.name ?: "this filter"
+                Dialog(onDismissRequest = { state.cancelDeleteSF() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(360.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Delete saved filter?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText("Delete \"$filterName\" from saved filters.", color = tc2.td, fontSize = 11.sp, maxLines = 2)
+                        Spacer(Modifier.height(14.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            DialogActionButton("Delete", active = true, danger = true) { state.confirmDeleteSF() }
+                            DialogActionButton("Cancel", active = false) { state.cancelDeleteSF() }
                         }
                     }
                 }
@@ -678,12 +722,14 @@ private fun BoundFilterPanel(state: AppState, tab: LogTab) {
         onSetNewHlRx = { state.newHlRx = it },
         onSetNewHlColor = { state.newHlColor = it },
         onLoadFilter = { state.requestLoadFilter(tab.id, it) },
-        onDeleteSF = { state.deleteSF(it) },
+        onDeleteSF = { state.requestDeleteSF(it) },
         onOpenSFDialog = { state.sfDialog = true; state.sfTabId = tab.id; state.sfName = "" },
         onSetKwInTag = { state.setKwInTag(tab.id, it) },
         onToggleKwInTagRx = { state.toggleKwInTagRx(tab.id) },
         onAddPkgPrefix = { state.addPkgPrefix(tab.id, it) },
         onRemovePkgPrefix = { state.removePkgPrefix(tab.id, it) },
+        onAddExcludePkgPrefix = { state.addExcludePkgPrefix(tab.id, it) },
+        onRemoveExcludePkgPrefix = { state.removeExcludePkgPrefix(tab.id, it) },
         onExportFilters = { state.exportFiltersToFile() },
         onImportFilters = { state.importFiltersFromFile() },
         onImportFiltersFromFiles = { files -> files.forEach { state.importFiltersFromFileAsync(it) } },
@@ -718,6 +764,7 @@ private fun FileView(state: AppState, tab: LogTab) {
             }
             AnnotationPanel(
                 tab = tab,
+                settings = state.settings,
                 recentNotes = state.recentNotes,
                 recentNotesMenuOpen = state.recentNotesMenuOpen,
                 onToggleMd = { state.toggleMd(tab.id) },
@@ -837,6 +884,7 @@ private fun CompareView(state: AppState) {
                         }
                         AnnotationPanel(
                             tab = leftTab,
+                            settings = state.settings,
                             headerNote = leftTab.filename,
                             recentNotes = state.recentNotes,
                             recentNotesMenuOpen = state.recentNotesMenuOpen,
@@ -1181,8 +1229,9 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
 @Composable
 private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
     val tc = tc()
+    val scroll = rememberScrollState()
     Column(
-        Modifier.width(420.dp).background(tc.p, RoundedCornerShape(8.dp))
+        Modifier.width(420.dp).heightIn(max = 760.dp).verticalScroll(scroll).background(tc.p, RoundedCornerShape(8.dp))
             .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
@@ -1295,6 +1344,51 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 options = listOf("On", "Off"),
                 selectedIndices = setOf(if (state.settings.autoExportNotes) 0 else 1),
                 onToggle = { idx -> state.updateSettings { it.copy(autoExportNotes = idx == 0) } },
+            )
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppText(
+                "Annotation log blocks",
+                color = tc.td,
+                fontSize = 10.sp,
+                fontFamily = UI,
+                fontWeight = FontWeight.SemiBold
+            )
+            val styles = AnnotationLogBlockStyle.entries
+            SegmentedControl(
+                options = listOf("Indented", "{code:java}"),
+                selectedIndices = setOf(styles.indexOf(state.settings.annotationLogBlockStyle)),
+                onToggle = { idx -> state.updateSettings { it.copy(annotationLogBlockStyle = styles[idx]) } },
+            )
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppText(
+                "Annotation file prefix",
+                color = tc.td,
+                fontSize = 10.sp,
+                fontFamily = UI,
+                fontWeight = FontWeight.SemiBold
+            )
+            InlineField(
+                state.settings.annotationPrefixLabel,
+                { value -> state.updateSettings { it.copy(annotationPrefixLabel = value) } },
+                "From",
+                Modifier.fillMaxWidth(),
+                fontSize = 12.sp,
+            )
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppText(
+                "Number annotation blocks",
+                color = tc.td,
+                fontSize = 10.sp,
+                fontFamily = UI,
+                fontWeight = FontWeight.SemiBold
+            )
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.numberAnnotationBlocks) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(numberAnnotationBlocks = idx == 0) } },
             )
         }
         Row(
