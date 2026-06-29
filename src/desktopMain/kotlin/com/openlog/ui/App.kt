@@ -159,13 +159,20 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                 ) {
                     if (entry != null) {
                         val menuWidth = 270.dp
-                        val x = ctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
-                        val y = ctx.y.dp.coerceIn(8.dp, (maxHeight - 200.dp).coerceAtLeast(8.dp))
-                        val menuScroll = rememberScrollState()
                         // panelSelectedIds is non-empty when the right-click came from a panel
                         // with its own local selection (e.g. the "Original" unfiltered panel).
                         val selectedIds = ctx.panelSelectedIds.ifEmpty { ctxTab.selected }
                         val selCount = selectedIds.size
+                        // Estimate full menu height from items that will actually render:
+                        //   header(37) + divider(9) + preview(63) + 5 items(160) + divider(9)
+                        //   + 3 items(96) + divider(9) + 2 items(64) = 447
+                        // Selection text adds preview extension(15) + 4 items(128) + divider(9) = 152
+                        val estimatedMenuHeight = (447
+                            + (if (ctx.selText.isNotBlank()) 152 else 0)
+                            + (if (state.pendingSequenceStart != null) 32 else 0)
+                            + (if (selCount > 1) 32 else 0)).dp
+                        val x = ctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
+                        val y = ctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
                         // Position is already in dp (converted from px in LogRow)
                         Box(
                             Modifier
@@ -173,9 +180,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                 .shadow(8.dp, RoundedCornerShape(7.dp))
                                 .background(tc.p, RoundedCornerShape(7.dp))
                                 .border(1.dp, tc.br, RoundedCornerShape(7.dp))
-                                .width(menuWidth)
-                                .heightIn(max = (maxHeight - y - 8.dp).coerceAtLeast(160.dp))
-                                .verticalScroll(menuScroll),
+                                .width(menuWidth),
                         ) {
                             Column {
                                 Box(
