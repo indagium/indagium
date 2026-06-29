@@ -17,7 +17,7 @@ fun parseLogcat(file: File): List<LogEntry> {
     var id = 1
     return file.readLines().mapNotNull { raw ->
         val line = raw.trim()
-        if (line.isEmpty() || line.startsWith("-----") || line.length > 8192) return@mapNotNull null
+        if (line.isEmpty() || line.startsWith("-----")) return@mapNotNull null
 
         RE_THREADTIME.matchEntire(line)?.let { m ->
             return@mapNotNull LogEntry(

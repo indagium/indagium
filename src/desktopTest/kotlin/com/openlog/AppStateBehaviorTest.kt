@@ -10,11 +10,14 @@ import com.openlog.model.SequenceDef
 import com.openlog.model.ThemePreset
 import com.openlog.ui.AppState
 import com.openlog.model.CtxMenuState
+import com.openlog.ui.DesktopStorage
 import androidx.compose.ui.graphics.Color
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.mkTab
 import com.openlog.utils.computeItems
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -327,11 +330,53 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun exportedFiltersRoundTripSpecialCharacters() {
+        val source = AppState()
+        source.addTab()
+        val tabId = source.tabs.single().id
+        source.setKw(tabId, "hello, \"quoted\"\nnext")
+        source.addHl(tabId, "warn,\"quoted\"", false, Color.Yellow)
+        source.addPkgPrefix(tabId, "com.example,odd")
+        source.addMessageRule(
+            tabId,
+            include = true,
+            pattern = "value=(\"a,b\")\\s+next",
+            regex = true,
+            tag = "Tag,With,Comma",
+            packagePrefix = "",
+        )
+        source.saveFilter(tabId, "special, \"filter\"\nname")
+
+        val target = AppState()
+        target.importFilters(source.exportFilters())
+        target.addTab()
+        target.loadFilter(target.tabs.single().id, target.savedFilters.single())
+
+        val saved = target.savedFilters.single()
+        val filter = target.tabs.single().filter
+        assertEquals("special, \"filter\"\nname", saved.name)
+        assertEquals("hello, \"quoted\"\nnext", filter.kwText)
+        assertEquals(setOf("com.example,odd"), filter.pkgPrefixes)
+        assertEquals("warn,\"quoted\"", filter.highlighters.single().pattern)
+        val rule = filter.messageRules.single()
+        assertEquals("value=(\"a,b\")\\s+next", rule.pattern)
+        assertEquals("Tag,With,Comma", rule.tag)
+        assertTrue(rule.regex)
+    }
+
+    @Test
     fun savedFiltersRoundTripMessageRules() {
         val state = AppState()
         state.addTab()
         val tabId = state.tabs.single().id
-        state.addMessageRule(tabId, include = false, pattern = "heartbeat", regex = false, tag = "com.app.Network", packagePrefix = "")
+        state.addMessageRule(
+            tabId,
+            include = false,
+            pattern = "heartbeat",
+            regex = false,
+            tag = "com.app.Network",
+            packagePrefix = ""
+        )
 
         state.saveFilter(tabId, "message rules")
         state.clearFilter(tabId)
@@ -574,6 +619,58 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun layoutPaneStatePersistsImmediatelyAfterUiChanges() {
+        val dir = createTempDirectory("openlog-layout").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+
+        state.updateFilterVisible(false)
+        state.updateAnnotationVisible(false)
+        state.updateCompareMode(true)
+        state.updateCompareFilterRight(false)
+        state.updateFilterPanelWidth(333f)
+        state.updateAnnotationPanelWidth(444f)
+        state.updateCompareSplit(0.72f)
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals(false, restored.filterVisible)
+        assertEquals(false, restored.annotationVisible)
+        assertEquals(true, restored.compareMode)
+        assertEquals(false, restored.compareFilterRight)
+        assertEquals(333f, restored.filterPanelWidth)
+        assertEquals(444f, restored.annotationPanelWidth)
+        assertEquals(0.72f, restored.compareSplit)
+    }
+
+    @Test
+    fun filterPanelSectionCollapseStatePersistsImmediatelyAfterUiChanges() {
+        val dir = createTempDirectory("openlog-filter-panel").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+
+        state.updateFilterPanelUiState {
+            hlListExpanded = false
+            lvlExpanded = false
+            seqExpanded = false
+            sfExpanded = false
+            incPillsExpanded = false
+            incMsgPillsExpanded = false
+            excMsgPillsExpanded = true
+        }
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals(false, restored.fpState.hlListExpanded)
+        assertEquals(false, restored.fpState.lvlExpanded)
+        assertEquals(false, restored.fpState.seqExpanded)
+        assertEquals(false, restored.fpState.sfExpanded)
+        assertEquals(false, restored.fpState.incPillsExpanded)
+        assertEquals(false, restored.fpState.incMsgPillsExpanded)
+        assertEquals(true, restored.fpState.excMsgPillsExpanded)
+    }
+
+    @Test
     fun openFilePersistsRecentFilesAndExistingAutoExportedNote() {
         val originalHome = System.getProperty("user.home")
         val home = createTempDirectory("openlog-home").toFile()
@@ -602,9 +699,95 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun autoExportCanBeDisabledForPrivateLogs() {
+        val dir = createTempDirectory("openlog-private").toFile()
+        val notesDir = File(dir, "notes")
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.settings = state.settings.copy(autoExportNotes = false)
+        state.tabs =
+            listOf(mkTab("log", "private.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "secret"))))
+
+        state.confirmAddAnn("log", "log", listOf(1), "keep local only", null)
+        Thread.sleep(100)
+
+        assertTrue(!notesDir.exists() || notesDir.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun desktopStorageUsesOsSpecificAppDataLocations() {
+        val mac = DesktopStorage.appDataDir("Mac OS X", "/Users/me") { null }
+        val windows = DesktopStorage.appDataDir("Windows 11", "C:/Users/me") { key ->
+            if (key == "APPDATA") "C:/Users/me/AppData/Roaming" else null
+        }
+        val linux = DesktopStorage.appDataDir("Linux", "/home/me") { key ->
+            if (key == "XDG_STATE_HOME") "/home/me/.local/state" else null
+        }
+
+        assertEquals(File("/Users/me/Library/Application Support/openLog2"), mac)
+        assertEquals(File("C:/Users/me/AppData/Roaming", "openLog2"), windows)
+        assertEquals(File("/home/me/.local/state", "openLog2"), linux)
+    }
+
+    @Test
+    fun concurrentOpenFileKeepsEveryLoadedTabUntilAllLoadsFinish() {
+        val dir = createTempDirectory("openlog-concurrent").toFile()
+        val first = File(dir, "first.log").apply { writeText("first") }
+        val second = File(dir, "second.log").apply { writeText("second") }
+        val release = CountDownLatch(1)
+        val started = CountDownLatch(2)
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            parser = { file ->
+                started.countDown()
+                release.await(2, TimeUnit.SECONDS)
+                listOf(LogEntry(1, "", LogLevel.I, file.nameWithoutExtension, file.name))
+            },
+        )
+
+        state.openFile(first)
+        state.openFile(second)
+        assertTrue(started.await(2, TimeUnit.SECONDS))
+        assertTrue(state.isLoading)
+        release.countDown()
+
+        waitUntil { state.tabs.size == 2 && !state.isLoading }
+        assertEquals(setOf("first.log", "second.log"), state.tabs.map { it.filename }.toSet())
+    }
+
+    @Test
+    fun closeCancelsPendingFileLoadBeforeItMutatesTabs() {
+        val dir = createTempDirectory("openlog-cancel").toFile()
+        val file = File(dir, "slow.log").apply { writeText("slow") }
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            parser = {
+                started.countDown()
+                release.await(2, TimeUnit.SECONDS)
+                listOf(LogEntry(1, "", LogLevel.I, "Slow", "done"))
+            },
+        )
+
+        state.openFile(file)
+        assertTrue(started.await(2, TimeUnit.SECONDS))
+        state.close()
+        release.countDown()
+
+        waitUntil { !state.isLoading }
+        assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
     fun contextMenuCanAddHideAndShowOnlyMessageRules() {
         val state = AppState()
-        state.tabs = listOf(mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "heartbeat"))))
+        state.tabs = listOf(
+            mkTab(
+                "log",
+                "test.log",
+                listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "heartbeat"))
+            )
+        )
         state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
 
         state.hideMessagesLikeCtx()
@@ -678,5 +861,14 @@ class AppStateBehaviorTest {
         val sequence = state.sequences.single()
         assertEquals("flow done", sequence.endMatchText)
         assertEquals("com.app.End", sequence.endTag)
+    }
+
+    private fun waitUntil(timeoutMs: Long = 2_000, condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        while (System.nanoTime() < deadline) {
+            if (condition()) return
+            Thread.sleep(10)
+        }
+        assertTrue(condition())
     }
 }

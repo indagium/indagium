@@ -250,11 +250,15 @@ private fun MdPreviewDialog(tab: LogTab, mono: FontFamily, onCopy: () -> Unit, o
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 AppText("Markdown Preview", color = tc.ts, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                PillBtn(if (copied) "Copied!" else "Copy", active = copied) {
-                    onCopy()
-                    copied = true
-                }
-                AppText("×", color = tc.td, fontSize = 16.sp, modifier = Modifier.clickable(onClick = onDismiss))
+                AppButton(
+                    if (copied) "Copied!" else "Copy",
+                    onClick = {
+                        onCopy()
+                        copied = true
+                    },
+                    modifier = Modifier.height(28.dp),
+                )
+                CloseButton(onClick = onDismiss)
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
             val scroll = rememberScrollState()

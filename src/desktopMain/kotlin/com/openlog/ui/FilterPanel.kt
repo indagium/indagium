@@ -118,6 +118,7 @@ fun FilterPanel(
     onImportFilters: () -> Unit,
     onImportFiltersFromFiles: (List<File>) -> Unit,
     onClearFilter: () -> Unit,
+    onUiStateChanged: () -> Unit = {},
     mostUsedTagLimit: Int,
     width: Float,
 ) {
@@ -290,7 +291,10 @@ fun FilterPanel(
                 "Tags",
                 trailing = if (totalActive > 0) ({
                     Row(
-                        Modifier.clickable { fpState.incPillsExpanded = !fpState.incPillsExpanded }
+                        Modifier.clickable {
+                            fpState.incPillsExpanded = !fpState.incPillsExpanded
+                            onUiStateChanged()
+                        }
                             .padding(horizontal = 4.dp, vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(3.dp),
@@ -475,6 +479,7 @@ fun FilterPanel(
                         Modifier.clickable {
                             fpState.incMsgPillsExpanded = !fpState.incMsgPillsExpanded
                             if (fpState.incMsgPillsExpanded) fpState.excMsgPillsExpanded = false
+                            onUiStateChanged()
                         }.padding(horizontal = 4.dp, vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(3.dp),
@@ -488,6 +493,7 @@ fun FilterPanel(
                         Modifier.clickable {
                             fpState.excMsgPillsExpanded = !fpState.excMsgPillsExpanded
                             if (fpState.excMsgPillsExpanded) fpState.incMsgPillsExpanded = false
+                            onUiStateChanged()
                         }.padding(horizontal = 4.dp, vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(3.dp),
@@ -636,7 +642,10 @@ fun FilterPanel(
             "Highlighters",
             trailing = if (filter.highlighters.isNotEmpty()) ({
                 Row(
-                    Modifier.clickable { fpState.hlListExpanded = !fpState.hlListExpanded }
+                    Modifier.clickable {
+                        fpState.hlListExpanded = !fpState.hlListExpanded
+                        onUiStateChanged()
+                    }
                         .padding(horizontal = 4.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(3.dp),
@@ -731,7 +740,10 @@ fun FilterPanel(
         Divider()
 
         // ── Log Level ─────────────────────────────────────────────
-        SectionHeader("Log level", expanded = fpState.lvlExpanded, onToggle = { fpState.lvlExpanded = !fpState.lvlExpanded })
+        SectionHeader("Log level", expanded = fpState.lvlExpanded, onToggle = {
+            fpState.lvlExpanded = !fpState.lvlExpanded
+            onUiStateChanged()
+        })
         if (fpState.lvlExpanded) {
             val levels = LogLevel.entries
             SegmentedControl(
@@ -746,7 +758,10 @@ fun FilterPanel(
         Divider()
 
         // ── Sequences ─────────────────────────────────────────────
-        SectionHeader("Sequences", expanded = fpState.seqExpanded, onToggle = { fpState.seqExpanded = !fpState.seqExpanded })
+        SectionHeader("Sequences", expanded = fpState.seqExpanded, onToggle = {
+            fpState.seqExpanded = !fpState.seqExpanded
+            onUiStateChanged()
+        })
         if (fpState.seqExpanded) {
             CheckRow(filter.seqOn, { onToggleSeq() }) {
                 AppText("Group sequences", color = tc.ts, fontSize = 12.sp, modifier = Modifier.weight(1f))
@@ -916,7 +931,10 @@ fun FilterPanel(
         Divider()
 
         // ── Saved Filters ─────────────────────────────────────────
-        SectionHeader("Saved filters", expanded = fpState.sfExpanded, onToggle = { fpState.sfExpanded = !fpState.sfExpanded })
+        SectionHeader("Saved filters", expanded = fpState.sfExpanded, onToggle = {
+            fpState.sfExpanded = !fpState.sfExpanded
+            onUiStateChanged()
+        })
         if (fpState.sfExpanded) {
             if (savedFilters.isNotEmpty()) {
                 ScrollableItems(savedFilters.size) {

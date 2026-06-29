@@ -40,6 +40,8 @@ compose.desktop {
             packageName = "openLog"
             packageVersion = "1.0.0"
             description = "Android logcat analysis tool"
+            vendor = "Roman Arnaut"
+            copyright = "Copyright (C) 2026 Roman Arnaut"
             macOS {
                 bundleID = "com.romanarnaut.openlog"
                 iconFile.set(project.file("icons/openlog.icns"))

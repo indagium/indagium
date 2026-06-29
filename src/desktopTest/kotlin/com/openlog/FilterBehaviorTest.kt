@@ -2,6 +2,7 @@ package com.openlog
 
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.Filter
+import com.openlog.model.FilterMode
 import com.openlog.model.Highlighter
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
@@ -79,5 +80,13 @@ class FilterBehaviorTest {
                 span.start <= start && span.end >= end && span.item.background == Color.Yellow.copy(alpha = 0.6f)
             },
         )
+    }
+
+    @Test
+    fun invalidRegexFilterDoesNotThrowOrMatch() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "request complete")
+        val filter = Filter(mode = FilterMode.KEYWORD, kwText = "[", kwRegex = true)
+
+        assertFalse(passesFilter(entry, filter))
     }
 }

@@ -11,8 +11,7 @@ fun computeSeqGroups(logData: List<LogEntry>, defs: List<SequenceDef>): List<Seq
     fun matchesText(entry: LogEntry, text: String, isRegex: Boolean, tag: String?): Boolean {
         if (tag != null && entry.tag != tag) return false
         val haystack = "${entry.tag} ${entry.msg}"
-        return if (isRegex) runCatching { Regex(text, RegexOption.IGNORE_CASE).containsMatchIn(haystack) }.getOrElse { false }
-        else haystack.contains(text, ignoreCase = true)
+        return containsPattern(haystack, text, isRegex)
     }
 
     fun matchesStart(entry: LogEntry, def: SequenceDef) =

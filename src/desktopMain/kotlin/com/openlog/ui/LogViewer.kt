@@ -31,11 +31,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openlog.model.*
 import com.openlog.utils.computeItems
+import com.openlog.utils.regexRanges
 
 private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
     if (hl.regex) {
-        runCatching { Regex(hl.pattern, RegexOption.IGNORE_CASE).findAll(msg) }.getOrNull()
-            ?.map { it.range.first to it.range.last + 1 }?.toList() ?: emptyList()
+        regexRanges(msg, hl.pattern)
     } else buildList {
         var i = 0
         while (true) {

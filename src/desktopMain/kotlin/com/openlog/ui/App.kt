@@ -69,9 +69,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
     val theme = themeColors(state.settings.theme)
 
     CompositionLocalProvider(
-        LocalTheme    provides theme,
+        LocalTheme provides theme,
         LocalFontBase provides state.settings.fontSize,
-        LocalUseMono  provides state.settings.fontMono,
+        LocalUseMono provides state.settings.fontMono,
     ) {
         val tc = tc()
         LaunchedEffect(
@@ -113,7 +113,12 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     },
                     target = dropTarget,
                 )
-                .then(if (dc != null) Modifier.pointerHoverIcon(PointerIcon(dc!!), overrideDescendants = true) else Modifier)
+                .then(
+                    if (dc != null) Modifier.pointerHoverIcon(
+                        PointerIcon(dc!!),
+                        overrideDescendants = true
+                    ) else Modifier
+                )
         ) {
             Column(Modifier.fillMaxSize()) {
                 TabBar(state)
@@ -123,8 +128,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             AppText("No files open — click Open to add a log", color = tc.ts, fontSize = 14.sp)
                         }
+
                     state.compareMode -> CompareView(state)
-                    activeTab != null  -> key(activeTab.id) { FileView(state, activeTab) }
+                    activeTab != null -> key(activeTab.id) { FileView(state, activeTab) }
                 }
             }
 
@@ -141,7 +147,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
             // ── Context menu ──────────────────────────────────────────
             state.ctx?.let { ctx ->
                 val ctxTab = state.tab(ctx.tabId)
-                val entry  = ctxTab?.rmap?.get(ctx.entryId)
+                val entry = ctxTab?.rmap?.get(ctx.entryId)
                 // Transparent backdrop — no indication (shadow) added
                 BoxWithConstraints(
                     Modifier.fillMaxSize().clickable(
@@ -175,7 +181,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                 Box(
                                     Modifier.fillMaxWidth().background(tc.p2)
                                         .clickable {
-                                            val ids = if (selCount > 1) selectedIds.toSortedSet().toList() else listOf(ctx.entryId)
+                                            val ids = if (selCount > 1) selectedIds.toSortedSet().toList() else listOf(
+                                                ctx.entryId
+                                            )
                                             state.requestAddAnn(ctx.tabId, ids)
                                         }
                                         .padding(horizontal = 14.dp, vertical = 10.dp),
@@ -196,13 +204,24 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                         .border(BorderStroke(0.5.dp, tc.br.copy(alpha = 0.5f)), CORNER_MD)
                                         .padding(horizontal = 12.dp, vertical = 8.dp),
                                 ) {
-                                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
                                         LevelBadge(entry.level)
-                                        AppText(entry.tag, color = tc.td, fontSize = 10.sp, fontFamily = MONO,
-                                            modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                                        AppText(
+                                            entry.tag, color = tc.td, fontSize = 10.sp, fontFamily = MONO,
+                                            modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis
+                                        )
                                     }
                                     Spacer(Modifier.height(2.dp))
-                                    AppText(entry.msg, color = tc.ts, fontSize = 10.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                                    AppText(
+                                        entry.msg,
+                                        color = tc.ts,
+                                        fontSize = 10.sp,
+                                        fontFamily = MONO,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                     if (ctx.selText.isNotBlank()) {
                                         Spacer(Modifier.height(2.dp))
                                         AppText("Selected: \"${ctx.selText}\"", color = tc.ac, fontSize = 9.sp)
@@ -210,25 +229,49 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                 }
                                 // Selected text actions
                                 if (ctx.selText.isNotBlank()) {
-                                    CtxItem(Icons.Outlined.Bookmark,              "Highlight selection") { state.addHlFromCtx() }
-                                    CtxItem(Icons.Outlined.Layers,                "Add as sequence")     { state.addSeqFromCtx() }
-                                    CtxItem(Icons.Outlined.Search,                "Filter by keyword")   { state.addKwFilterFromCtx() }
-                                    CtxItem(Icons.Outlined.Block,                 "Exclude keyword")     { state.addNegKwFromCtx() }
+                                    CtxItem(Icons.Outlined.Bookmark, "Highlight selection") { state.addHlFromCtx() }
+                                    CtxItem(Icons.Outlined.Layers, "Add as sequence") { state.addSeqFromCtx() }
+                                    CtxItem(Icons.Outlined.Search, "Filter by keyword") { state.addKwFilterFromCtx() }
+                                    CtxItem(Icons.Outlined.Block, "Exclude keyword") { state.addNegKwFromCtx() }
                                     CtxDivider()
                                 }
                                 if (state.pendingSequenceStart != null) {
-                                    CtxItem(Icons.Outlined.Flag,            "Complete sequence end")  { state.completeSequenceEndFromCtx() }
+                                    CtxItem(
+                                        Icons.Outlined.Flag,
+                                        "Complete sequence end"
+                                    ) { state.completeSequenceEndFromCtx() }
                                 }
-                                CtxItem(Icons.Outlined.PlayArrow,           "Set sequence start")     { state.setSequenceStartFromCtx() }
-                                CtxItem(Icons.Outlined.ArrowUpward,         "Collapse to file start") { state.collapseToStartFromCtx() }
-                                CtxItem(Icons.Outlined.ArrowDownward,       "Collapse to file end")   { state.collapseToEndFromCtx() }
-                                CtxItem(Icons.Outlined.VisibilityOff,       "Hide messages like this") { state.hideMessagesLikeCtx() }
-                                CtxItem(Icons.Outlined.Visibility,          "Show messages like this") { state.showOnlyMessagesLikeCtx() }
+                                CtxItem(
+                                    Icons.Outlined.PlayArrow,
+                                    "Set sequence start"
+                                ) { state.setSequenceStartFromCtx() }
+                                CtxItem(
+                                    Icons.Outlined.ArrowUpward,
+                                    "Collapse to file start"
+                                ) { state.collapseToStartFromCtx() }
+                                CtxItem(
+                                    Icons.Outlined.ArrowDownward,
+                                    "Collapse to file end"
+                                ) { state.collapseToEndFromCtx() }
+                                CtxItem(
+                                    Icons.Outlined.VisibilityOff,
+                                    "Hide messages like this"
+                                ) { state.hideMessagesLikeCtx() }
+                                CtxItem(
+                                    Icons.Outlined.Visibility,
+                                    "Show messages like this"
+                                ) { state.showOnlyMessagesLikeCtx() }
                                 CtxDivider()
                                 // Tag actions
-                                CtxItem(Icons.AutoMirrored.Outlined.Label,               "Include tag")  { state.addTagFilterFromCtx() }
-                                CtxItem(Icons.Outlined.Bookmark,            "Highlight tag") { state.addHlTagFromCtx() }
-                                CtxItem(Icons.AutoMirrored.Outlined.LabelOff,            "Exclude tag")  { state.addExcludeTagFromCtx() }
+                                CtxItem(
+                                    Icons.AutoMirrored.Outlined.Label,
+                                    "Include tag"
+                                ) { state.addTagFilterFromCtx() }
+                                CtxItem(Icons.Outlined.Bookmark, "Highlight tag") { state.addHlTagFromCtx() }
+                                CtxItem(
+                                    Icons.AutoMirrored.Outlined.LabelOff,
+                                    "Exclude tag"
+                                ) { state.addExcludeTagFromCtx() }
                                 CtxDivider()
                                 if (selCount > 1) {
                                     CtxItem(Icons.Outlined.ContentCopy, "Copy $selCount selected lines") {
@@ -236,7 +279,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                     }
                                 }
                                 CtxItem(Icons.Outlined.ContentCopy, "Copy line") {
-                                    val pid = if (entry.pid > 0) "  ${entry.pid.toString().padStart(5)} ${entry.tid.toString().padStart(5)}" else ""
+                                    val pid = if (entry.pid > 0) "  ${entry.pid.toString().padStart(5)} ${
+                                        entry.tid.toString().padStart(5)
+                                    }" else ""
                                     state.copyToClipboard("${entry.ts}$pid  ${entry.level.key}  ${entry.tag}: ${entry.msg}")
                                     state.ctx = null
                                 }
@@ -258,7 +303,13 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         rows = rows,
                         sourceFilename = req.sourceFilename,
                         onConfirm = { caption ->
-                            state.confirmAddAnn(req.targetTabId, req.sourceTabId, req.logIds, caption, req.sourceFilename)
+                            state.confirmAddAnn(
+                                req.targetTabId,
+                                req.sourceTabId,
+                                req.logIds,
+                                caption,
+                                req.sourceFilename
+                            )
                         },
                         onDismiss = { state.addAnnRequest = null },
                     )
@@ -273,16 +324,31 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         Modifier.width(340.dp).background(tc2.p, RoundedCornerShape(8.dp))
                             .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
                     ) {
-                        AppText("Save filter preset", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        AppText(
+                            "Save filter preset",
+                            color = tc2.tx,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
                         Spacer(Modifier.height(5.dp))
-                        AppText("Saves: levels · tags · keyword · highlighters · sequences",
-                            color = tc2.td, fontSize = 11.sp, maxLines = 2)
+                        AppText(
+                            "Saves: levels · tags · keyword · highlighters · sequences",
+                            color = tc2.td, fontSize = 11.sp, maxLines = 2
+                        )
                         Spacer(Modifier.height(14.dp))
-                        InlineField(state.sfName, { state.sfName = it }, "Preset name…", Modifier.fillMaxWidth(), fontSize = 13.sp)
+                        InlineField(
+                            state.sfName,
+                            { state.sfName = it },
+                            "Preset name…",
+                            Modifier.fillMaxWidth(),
+                            fontSize = 13.sp
+                        )
                         Spacer(Modifier.height(12.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             DialogActionButton("Save", active = state.sfName.isNotBlank()) {
-                                if (state.sfName.isNotBlank()) state.saveFilter(state.sfTabId ?: return@DialogActionButton, state.sfName)
+                                if (state.sfName.isNotBlank()) state.saveFilter(
+                                    state.sfTabId ?: return@DialogActionButton, state.sfName
+                                )
                             }
                             DialogActionButton("Cancel", active = false) { state.sfDialog = false }
                         }
@@ -299,7 +365,12 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         Modifier.width(380.dp).background(tc2.p, RoundedCornerShape(8.dp))
                             .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
                     ) {
-                        AppText("Save current filter changes?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        AppText(
+                            "Save current filter changes?",
+                            color = tc2.tx,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
                         Spacer(Modifier.height(6.dp))
                         AppText(
                             "Before loading \"${target?.name ?: "another filter"}\", save the changes to \"${current?.name ?: "current filter"}\".",
@@ -309,12 +380,26 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         )
                         Spacer(Modifier.height(14.dp))
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 DialogActionButton("Save as new", active = true) { state.beginSavePendingFilterAsNew() }
-                                DialogActionButton("Update existing", active = current != null, enabled = current != null) { state.updateCurrentPresetAndLoadPending() }
+                                DialogActionButton(
+                                    "Update existing",
+                                    active = current != null,
+                                    enabled = current != null
+                                ) { state.updateCurrentPresetAndLoadPending() }
                             }
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                DialogActionButton("Do not save", active = true, danger = true) { state.discardPendingFilterChangesAndLoad() }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                DialogActionButton(
+                                    "Do not save",
+                                    active = true,
+                                    danger = true
+                                ) { state.discardPendingFilterChangesAndLoad() }
                                 DialogActionButton("Cancel", active = false) { state.cancelPendingFilterLoad() }
                             }
                         }
@@ -339,8 +424,15 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             maxLines = 3,
                         )
                         Spacer(Modifier.height(14.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            DialogActionButton("Clear filters", active = true, danger = true) { state.confirmClearFilter() }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            DialogActionButton(
+                                "Clear filters",
+                                active = true,
+                                danger = true
+                            ) { state.confirmClearFilter() }
                             DialogActionButton("Cancel", active = false) { state.cancelClearFilter() }
                         }
                     }
@@ -370,7 +462,12 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                 Modifier.fillMaxWidth().background(tc.p2)
                                     .padding(horizontal = 14.dp, vertical = 8.dp),
                             ) {
-                                AppText("Recent Files (${state.recentFiles.size})", color = tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                AppText(
+                                    "Recent Files (${state.recentFiles.size})",
+                                    color = tc.ts,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
                             }
                             Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
                             // Show 10 items, scrollable; list stores up to 30
@@ -463,12 +560,19 @@ private fun AddAnnDialog(
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             rows.take(5).forEach { r ->
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     LevelBadge(r.level)
-                    AppText(r.tag, color = tc.td, fontSize = 10.sp, fontFamily = mono,
-                        modifier = Modifier.width(80.dp), overflow = TextOverflow.Ellipsis)
-                    AppText(r.msg, color = tc.ts, fontSize = 10.sp, fontFamily = mono,
-                        modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                    AppText(
+                        r.tag, color = tc.td, fontSize = 10.sp, fontFamily = mono,
+                        modifier = Modifier.width(80.dp), overflow = TextOverflow.Ellipsis
+                    )
+                    AppText(
+                        r.msg, color = tc.ts, fontSize = 10.sp, fontFamily = mono,
+                        modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
             if (rows.size > 5) AppText("… and ${rows.size - 5} more lines", color = tc.td, fontSize = 10.sp)
@@ -520,106 +624,113 @@ private fun DialogActionButton(
     }
 }
 
+@Composable
+private fun BoundFilterPanel(state: AppState, tab: LogTab) {
+    if (!state.filterVisible) return
+    FilterPanel(
+        tab = tab, sequences = state.sequences, savedFilters = state.savedFilters,
+        activeSavedFilterId = state.activeSavedFilterId(tab.id),
+        tagUsage = state.tagUsage, fpState = state.fpState,
+        newHlPat = state.newHlPat, newHlRx = state.newHlRx, newHlColor = state.newHlColor,
+        newSeqText = state.newSeqText, newSeqRegex = state.newSeqRegex,
+        newSeqEndText = state.newSeqEndText, newSeqEndRegex = state.newSeqEndRegex,
+        newSeqStartTag = state.newSeqTag, newSeqEndTag = state.newSeqEndTag,
+        newSeqColor = state.newSeqColor,
+        onToggleLevel = { state.toggleLevel(tab.id, it) },
+        onSetFilterMode = { state.setFilterMode(tab.id, it) },
+        onToggleTag = { state.toggleTag(tab.id, it) },
+        onClearTags = { state.clearTags(tab.id) },
+        onToggleExcludeTag = { state.toggleExcludeTag(tab.id, it) },
+        onSetKw = { state.setKw(tab.id, it) },
+        onToggleKwRx = { state.toggleKwRx(tab.id) },
+        onSetExcludeKw = { state.setExcludeKw(tab.id, it) },
+        onToggleExcludeKwRx = { state.toggleExcludeKwRx(tab.id) },
+        onToggleSeq = { state.toggleSeq(tab.id) },
+        onAddSeq = { t, r, c, st, et, er, eg -> state.addSequence(t, r, c, st, et, er, eg) },
+        onRemoveSeq = { state.removeSequence(it) },
+        onToggleSeqEnabled = { state.toggleSequence(it) },
+        onSetSeqColor = { id, c -> state.setSequenceColor(id, c) },
+        onUpdateSeq = { id, text, rx, tag, endText, endRx, endTag ->
+            state.updateSequence(id, text, rx, tag, endText, endRx, endTag)
+        },
+        onToggleManualCollapse = { state.toggleManualCollapse(tab.id, it) },
+        onRemoveManualCollapse = { state.removeManualCollapse(tab.id, it) },
+        onAddMessageRule = { include, pattern, regex, tag, prefix, target ->
+            state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
+        },
+        onToggleMessageRule = { state.toggleMessageRule(tab.id, it) },
+        onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
+        onMoveSeqUp = { state.moveSequenceUp(it) },
+        onMoveSeqDown = { state.moveSequenceDown(it) },
+        onSetNewSeqText = { state.newSeqText = it },
+        onSetNewSeqRx = { state.newSeqRegex = it },
+        onSetNewSeqEndText = { state.newSeqEndText = it },
+        onSetNewSeqEndRx = { state.newSeqEndRegex = it },
+        onSetNewSeqStartTag = { state.newSeqTag = it },
+        onSetNewSeqEndTag = { state.newSeqEndTag = it },
+        onSetNewSeqColor = { state.newSeqColor = it },
+        onAddHl = { p, r, c -> state.addHl(tab.id, p, r, c) },
+        onRemoveHl = { state.removeHl(tab.id, it) },
+        onToggleHl = { state.toggleHl(tab.id, it) },
+        onSetHlColor = { id, c -> state.setHighlighterColor(tab.id, id, c) },
+        onSetNewHlPat = { state.newHlPat = it },
+        onSetNewHlRx = { state.newHlRx = it },
+        onSetNewHlColor = { state.newHlColor = it },
+        onLoadFilter = { state.requestLoadFilter(tab.id, it) },
+        onDeleteSF = { state.deleteSF(it) },
+        onOpenSFDialog = { state.sfDialog = true; state.sfTabId = tab.id; state.sfName = "" },
+        onSetKwInTag = { state.setKwInTag(tab.id, it) },
+        onToggleKwInTagRx = { state.toggleKwInTagRx(tab.id) },
+        onAddPkgPrefix = { state.addPkgPrefix(tab.id, it) },
+        onRemovePkgPrefix = { state.removePkgPrefix(tab.id, it) },
+        onExportFilters = { state.exportFiltersToFile() },
+        onImportFilters = { state.importFiltersFromFile() },
+        onImportFiltersFromFiles = { files -> files.forEach { state.importFiltersFromFileAsync(it) } },
+        onClearFilter = { state.requestClearFilter(tab.id) },
+        onUiStateChanged = { state.autosaveNow() },
+        mostUsedTagLimit = state.settings.mostUsedTagLimit,
+        width = state.filterPanelWidth,
+    )
+    HDivider { delta -> state.updateFilterPanelWidth(state.filterPanelWidth + delta) }
+}
+
 // ── FileView ──────────────────────────────────────────────────────────
 @Composable
 private fun FileView(state: AppState, tab: LogTab) {
     Row(Modifier.fillMaxSize()) {
-        if (state.filterVisible) {
-            FilterPanel(
-                tab = tab, sequences = state.sequences, savedFilters = state.savedFilters,
-                activeSavedFilterId = state.activeSavedFilterId(tab.id),
-                tagUsage = state.tagUsage, fpState = state.fpState,
-                newHlPat = state.newHlPat, newHlRx = state.newHlRx, newHlColor = state.newHlColor,
-                newSeqText = state.newSeqText, newSeqRegex = state.newSeqRegex,
-                newSeqEndText = state.newSeqEndText, newSeqEndRegex = state.newSeqEndRegex,
-                newSeqStartTag = state.newSeqTag, newSeqEndTag = state.newSeqEndTag,
-                newSeqColor = state.newSeqColor,
-                onToggleLevel       = { state.toggleLevel(tab.id, it) },
-                onSetFilterMode     = { state.setFilterMode(tab.id, it) },
-                onToggleTag         = { state.toggleTag(tab.id, it) },
-                onClearTags         = { state.clearTags(tab.id) },
-                onToggleExcludeTag  = { state.toggleExcludeTag(tab.id, it) },
-                onSetKw             = { state.setKw(tab.id, it) },
-                onToggleKwRx        = { state.toggleKwRx(tab.id) },
-                onSetExcludeKw      = { state.setExcludeKw(tab.id, it) },
-                onToggleExcludeKwRx = { state.toggleExcludeKwRx(tab.id) },
-                onToggleSeq         = { state.toggleSeq(tab.id) },
-                onAddSeq            = { t, r, c, st, et, er, eg -> state.addSequence(t, r, c, st, et, er, eg) },
-                onRemoveSeq         = { state.removeSequence(it) },
-                onToggleSeqEnabled  = { state.toggleSequence(it) },
-                onSetSeqColor       = { id, c -> state.setSequenceColor(id, c) },
-                onUpdateSeq         = { id, text, rx, tag, endText, endRx, endTag ->
-                    state.updateSequence(id, text, rx, tag, endText, endRx, endTag)
-                },
-                onToggleManualCollapse = { state.toggleManualCollapse(tab.id, it) },
-                onRemoveManualCollapse = { state.removeManualCollapse(tab.id, it) },
-                onAddMessageRule    = { include, pattern, regex, tag, prefix, target ->
-                    state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
-                },
-                onToggleMessageRule = { state.toggleMessageRule(tab.id, it) },
-                onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
-                onMoveSeqUp         = { state.moveSequenceUp(it) },
-                onMoveSeqDown       = { state.moveSequenceDown(it) },
-                onSetNewSeqText     = { state.newSeqText = it },
-                onSetNewSeqRx       = { state.newSeqRegex = it },
-                onSetNewSeqEndText  = { state.newSeqEndText = it },
-                onSetNewSeqEndRx    = { state.newSeqEndRegex = it },
-                onSetNewSeqStartTag = { state.newSeqTag = it },
-                onSetNewSeqEndTag   = { state.newSeqEndTag = it },
-                onSetNewSeqColor    = { state.newSeqColor = it },
-                onAddHl             = { p, r, c -> state.addHl(tab.id, p, r, c) },
-                onRemoveHl          = { state.removeHl(tab.id, it) },
-                onToggleHl          = { state.toggleHl(tab.id, it) },
-                onSetHlColor        = { id, c -> state.setHighlighterColor(tab.id, id, c) },
-                onSetNewHlPat       = { state.newHlPat = it },
-                onSetNewHlRx        = { state.newHlRx = it },
-                onSetNewHlColor     = { state.newHlColor = it },
-                onLoadFilter        = { state.requestLoadFilter(tab.id, it) },
-                onDeleteSF          = { state.deleteSF(it) },
-                onOpenSFDialog      = { state.sfDialog = true; state.sfTabId = tab.id; state.sfName = "" },
-                onSetKwInTag        = { state.setKwInTag(tab.id, it) },
-                onToggleKwInTagRx   = { state.toggleKwInTagRx(tab.id) },
-                onAddPkgPrefix      = { state.addPkgPrefix(tab.id, it) },
-                onRemovePkgPrefix   = { state.removePkgPrefix(tab.id, it) },
-                onExportFilters     = { state.exportFiltersToFile() },
-                onImportFilters     = { state.importFiltersFromFile() },
-                onImportFiltersFromFiles = { files -> files.forEach { state.importFiltersFromFile(it) } },
-                onClearFilter       = { state.requestClearFilter(tab.id) },
-                mostUsedTagLimit    = state.settings.mostUsedTagLimit,
-                width               = state.filterPanelWidth,
-            )
-            HDivider { delta -> state.filterPanelWidth = (state.filterPanelWidth + delta).coerceIn(140f, 420f) }
-        }
+        BoundFilterPanel(state, tab)
         LogViewer(
             tab = tab, sequences = state.sequences, modifier = Modifier.weight(1f),
-            onSelRow        = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
-            onSelRowRange   = { ids -> state.setSelectedRows(tab.id, ids) },
-            onCtxMenu       = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(tab.id, id, x, y, sel, panelSel) },
-            onToggleGroup   = { state.toggleGroup(tab.id, it) },
-            onClearFilter   = { state.requestClearFilter(tab.id) },
-            onExpandAll     = { state.expandAll(tab.id) },
-            onCollapseAll   = { state.collapseAll(tab.id) },
+            onSelRow = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
+            onSelRowRange = { ids -> state.setSelectedRows(tab.id, ids) },
+            onCtxMenu = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(tab.id, id, x, y, sel, panelSel) },
+            onToggleGroup = { state.toggleGroup(tab.id, it) },
+            onClearFilter = { state.requestClearFilter(tab.id) },
+            onExpandAll = { state.expandAll(tab.id) },
+            onCollapseAll = { state.collapseAll(tab.id) },
             onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
             scrollStateStore = state.logViewerScrollStateStore,
         )
         if (state.annotationVisible) {
-            HDivider { delta -> state.annotationPanelWidth = (state.annotationPanelWidth - delta).coerceIn(ANNOTATION_PANEL_MIN_WIDTH, 500f) }
+            HDivider { delta ->
+                state.updateAnnotationPanelWidth(state.annotationPanelWidth - delta)
+            }
             AnnotationPanel(
-                tab                 = tab,
-                recentNotes         = state.recentNotes,
+                tab = tab,
+                recentNotes = state.recentNotes,
                 recentNotesMenuOpen = state.recentNotesMenuOpen,
-                onToggleMd          = { state.toggleMd(tab.id) },
-                onCopy              = { state.copyAnn(tab.id) },
-                onSave              = { state.saveAnalysis(tab.id) },
+                onToggleMd = { state.toggleMd(tab.id) },
+                onCopy = { state.copyAnn(tab.id) },
+                onSave = { state.saveAnalysis(tab.id) },
                 onToggleRecentNotes = { state.recentNotesMenuOpen = !state.recentNotesMenuOpen },
-                onOpenNote          = { state.openNoteFile(tab.id, it) },
-                onUpdatePrefix      = { state.setPrefix(tab.id, it) },
-                onUpdateSuffix      = { state.setSuffix(tab.id, it) },
-                onUpdateBlock       = { blockId, text -> state.updateBlock(tab.id, blockId, text) },
-                onRemoveBlock       = { state.removeBlock(tab.id, it) },
-                onMoveBlock         = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
-                onAddNoteAfter      = { state.addNoteBlock(tab.id, it) },
-                width               = state.annotationPanelWidth,
+                onOpenNote = { state.openNoteFileAsync(tab.id, it) },
+                onUpdatePrefix = { state.setPrefix(tab.id, it) },
+                onUpdateSuffix = { state.setSuffix(tab.id, it) },
+                onUpdateBlock = { blockId, text -> state.updateBlock(tab.id, blockId, text) },
+                onRemoveBlock = { state.removeBlock(tab.id, it) },
+                onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
+                onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
+                width = state.annotationPanelWidth,
             )
         }
     }
@@ -628,7 +739,7 @@ private fun FileView(state: AppState, tab: LogTab) {
 // ── CompareView ───────────────────────────────────────────────────────
 @Composable
 private fun CompareView(state: AppState) {
-    val leftTab  = state.tab(state.activeTabId) ?: state.tabs.firstOrNull() ?: return
+    val leftTab = state.tab(state.activeTabId) ?: state.tabs.firstOrNull() ?: return
     val rightTab = state.tab(state.compareTabId) ?: state.tabs.getOrNull(1) ?: state.tabs.first()
     val tc = tc()
 
@@ -637,75 +748,6 @@ private fun CompareView(state: AppState) {
         rightTab.copy(filter = leftTab.filter)
     else
         rightTab.copy(filter = Filter())
-
-    @Composable
-    fun filterPanelFor(tab: LogTab) {
-        if (!state.filterVisible) return
-        FilterPanel(
-            tab = tab, sequences = state.sequences, savedFilters = state.savedFilters,
-            activeSavedFilterId = state.activeSavedFilterId(tab.id), tagUsage = state.tagUsage,
-            fpState = state.fpState,
-            newHlPat = state.newHlPat, newHlRx = state.newHlRx, newHlColor = state.newHlColor,
-            newSeqText = state.newSeqText, newSeqRegex = state.newSeqRegex,
-            newSeqEndText = state.newSeqEndText, newSeqEndRegex = state.newSeqEndRegex,
-            newSeqStartTag = state.newSeqTag, newSeqEndTag = state.newSeqEndTag,
-            newSeqColor = state.newSeqColor,
-            onToggleLevel       = { state.toggleLevel(tab.id, it) },
-            onSetFilterMode     = { state.setFilterMode(tab.id, it) },
-            onToggleTag         = { state.toggleTag(tab.id, it) },
-            onClearTags         = { state.clearTags(tab.id) },
-            onToggleExcludeTag  = { state.toggleExcludeTag(tab.id, it) },
-            onSetKw             = { state.setKw(tab.id, it) },
-            onToggleKwRx        = { state.toggleKwRx(tab.id) },
-            onSetExcludeKw      = { state.setExcludeKw(tab.id, it) },
-            onToggleExcludeKwRx = { state.toggleExcludeKwRx(tab.id) },
-            onToggleSeq         = { state.toggleSeq(tab.id) },
-            onAddSeq            = { t, r, c, st, et, er, eg -> state.addSequence(t, r, c, st, et, er, eg) },
-            onRemoveSeq         = { state.removeSequence(it) },
-            onToggleSeqEnabled  = { state.toggleSequence(it) },
-            onSetSeqColor       = { id, c -> state.setSequenceColor(id, c) },
-            onUpdateSeq         = { id, text, rx, tag, endText, endRx, endTag ->
-                state.updateSequence(id, text, rx, tag, endText, endRx, endTag)
-            },
-            onToggleManualCollapse = { state.toggleManualCollapse(tab.id, it) },
-            onRemoveManualCollapse = { state.removeManualCollapse(tab.id, it) },
-            onAddMessageRule    = { include, pattern, regex, tag, prefix, target ->
-                state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
-            },
-            onToggleMessageRule = { state.toggleMessageRule(tab.id, it) },
-            onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
-            onMoveSeqUp         = { state.moveSequenceUp(it) },
-            onMoveSeqDown       = { state.moveSequenceDown(it) },
-            onSetNewSeqText     = { state.newSeqText = it },
-            onSetNewSeqRx       = { state.newSeqRegex = it },
-            onSetNewSeqEndText  = { state.newSeqEndText = it },
-            onSetNewSeqEndRx    = { state.newSeqEndRegex = it },
-            onSetNewSeqStartTag = { state.newSeqTag = it },
-            onSetNewSeqEndTag   = { state.newSeqEndTag = it },
-            onSetNewSeqColor    = { state.newSeqColor = it },
-            onAddHl             = { p, r, c -> state.addHl(tab.id, p, r, c) },
-            onRemoveHl          = { state.removeHl(tab.id, it) },
-            onToggleHl          = { state.toggleHl(tab.id, it) },
-            onSetHlColor        = { id, c -> state.setHighlighterColor(tab.id, id, c) },
-            onSetNewHlPat       = { state.newHlPat = it },
-            onSetNewHlRx        = { state.newHlRx = it },
-            onSetNewHlColor     = { state.newHlColor = it },
-            onLoadFilter        = { state.requestLoadFilter(tab.id, it) },
-            onDeleteSF          = { state.deleteSF(it) },
-            onOpenSFDialog      = { state.sfDialog = true; state.sfTabId = tab.id; state.sfName = "" },
-            onSetKwInTag        = { state.setKwInTag(tab.id, it) },
-            onToggleKwInTagRx   = { state.toggleKwInTagRx(tab.id) },
-            onAddPkgPrefix      = { state.addPkgPrefix(tab.id, it) },
-            onRemovePkgPrefix   = { state.removePkgPrefix(tab.id, it) },
-            onExportFilters     = { state.exportFiltersToFile() },
-            onImportFilters     = { state.importFiltersFromFile() },
-            onImportFiltersFromFiles = { files -> files.forEach { state.importFiltersFromFile(it) } },
-            onClearFilter       = { state.requestClearFilter(tab.id) },
-            mostUsedTagLimit    = state.settings.mostUsedTagLimit,
-            width               = state.filterPanelWidth,
-        )
-        HDivider { d -> state.filterPanelWidth = (state.filterPanelWidth + d).coerceIn(140f, 420f) }
-    }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val totalWidthDp = maxWidth.value
@@ -722,19 +764,26 @@ private fun CompareView(state: AppState) {
                     Modifier.fillMaxWidth().background(tc.p2).padding(4.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    state.tabs.forEach { t -> PillBtn(t.filename, active = t.id == leftTab.id) { state.activateTab(t.id) } }
+                    state.tabs.forEach { t ->
+                        PillBtn(
+                            t.filename,
+                            active = t.id == leftTab.id
+                        ) { state.activateTab(t.id) }
+                    }
                 }
                 Row(Modifier.weight(1f).fillMaxWidth()) {
-                    filterPanelFor(leftTab)
+                    BoundFilterPanel(state, leftTab)
                     LogViewer(
                         tab = leftTab, sequences = state.sequences, modifier = Modifier.weight(1f),
-                        onSelRow          = { id, m, r -> state.selRow(leftTab.id, id, m, r) },
-                        onSelRowRange     = { ids -> state.setSelectedRows(leftTab.id, ids) },
-                        onCtxMenu         = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(leftTab.id, id, x, y, sel, panelSel) },
-                        onToggleGroup     = { state.toggleGroup(leftTab.id, it) },
-                        onClearFilter     = { state.requestClearFilter(leftTab.id) },
-                        onExpandAll       = { state.expandAll(leftTab.id) },
-                        onCollapseAll     = { state.collapseAll(leftTab.id) },
+                        onSelRow = { id, m, r -> state.selRow(leftTab.id, id, m, r) },
+                        onSelRowRange = { ids -> state.setSelectedRows(leftTab.id, ids) },
+                        onCtxMenu = { id, x, y, sel, panelSel ->
+                            state.ctx = CtxMenuState(leftTab.id, id, x, y, sel, panelSel)
+                        },
+                        onToggleGroup = { state.toggleGroup(leftTab.id, it) },
+                        onClearFilter = { state.requestClearFilter(leftTab.id) },
+                        onExpandAll = { state.expandAll(leftTab.id) },
+                        onCollapseAll = { state.collapseAll(leftTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(leftTab.id) },
                         scrollStateStore = state.logViewerScrollStateStore,
                     )
@@ -744,7 +793,7 @@ private fun CompareView(state: AppState) {
             // ── Split divider ────────────────────────────────────────
             HDivider { delta ->
                 val newFrac = (state.compareSplit * totalWidthDp + delta) / totalWidthDp
-                state.compareSplit = newFrac.coerceIn(0.2f, 0.8f)
+                state.updateCompareSplit(newFrac)
             }
 
             // ── Right panel ──────────────────────────────────────────
@@ -754,46 +803,54 @@ private fun CompareView(state: AppState) {
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    state.tabs.forEach { t -> PillBtn(t.filename, active = t.id == rightTab.id) { state.compareTabId = t.id } }
+                    state.tabs.forEach { t ->
+                        PillBtn(t.filename, active = t.id == rightTab.id) {
+                            state.compareTabId = t.id
+                        }
+                    }
                     Spacer(Modifier.weight(1f))
                     PillBtn(
-                        label  = if (state.compareFilterRight) "⊟ Filter" else "⊞ Filter",
+                        label = if (state.compareFilterRight) "⊟ Filter" else "⊞ Filter",
                         active = state.compareFilterRight,
-                        onClick = { state.compareFilterRight = !state.compareFilterRight },
+                        onClick = { state.updateCompareFilterRight(!state.compareFilterRight) },
                     )
                 }
                 Row(Modifier.weight(1f).fillMaxWidth()) {
                     LogViewer(
                         tab = effectiveRightTab, sequences = state.sequences, modifier = Modifier.weight(1f),
-                        onSelRow          = { id, m, r -> state.selRow(rightTab.id, id, m, r) },
-                        onSelRowRange     = { ids -> state.setSelectedRows(rightTab.id, ids) },
-                        onCtxMenu         = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(rightTab.id, id, x, y, sel, panelSel) },
-                        onToggleGroup     = { state.toggleGroup(rightTab.id, it) },
-                        onClearFilter     = { state.requestClearFilter(rightTab.id) },
-                        onExpandAll       = { state.expandAll(rightTab.id) },
-                        onCollapseAll     = { state.collapseAll(rightTab.id) },
+                        onSelRow = { id, m, r -> state.selRow(rightTab.id, id, m, r) },
+                        onSelRowRange = { ids -> state.setSelectedRows(rightTab.id, ids) },
+                        onCtxMenu = { id, x, y, sel, panelSel ->
+                            state.ctx = CtxMenuState(rightTab.id, id, x, y, sel, panelSel)
+                        },
+                        onToggleGroup = { state.toggleGroup(rightTab.id, it) },
+                        onClearFilter = { state.requestClearFilter(rightTab.id) },
+                        onExpandAll = { state.expandAll(rightTab.id) },
+                        onCollapseAll = { state.collapseAll(rightTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(rightTab.id) },
                         scrollStateStore = state.logViewerScrollStateStore,
                     )
                     if (state.annotationVisible) {
-                        HDivider { d -> state.annotationPanelWidth = (state.annotationPanelWidth - d).coerceIn(ANNOTATION_PANEL_MIN_WIDTH, 500f) }
+                        HDivider { d ->
+                            state.updateAnnotationPanelWidth(state.annotationPanelWidth - d)
+                        }
                         AnnotationPanel(
-                            tab                 = leftTab,
-                            headerNote          = leftTab.filename,
-                            recentNotes         = state.recentNotes,
+                            tab = leftTab,
+                            headerNote = leftTab.filename,
+                            recentNotes = state.recentNotes,
                             recentNotesMenuOpen = state.recentNotesMenuOpen,
-                            onToggleMd          = { state.toggleMd(leftTab.id) },
-                            onCopy              = { state.copyAnn(leftTab.id) },
-                            onSave              = { state.saveAnalysis(leftTab.id) },
+                            onToggleMd = { state.toggleMd(leftTab.id) },
+                            onCopy = { state.copyAnn(leftTab.id) },
+                            onSave = { state.saveAnalysis(leftTab.id) },
                             onToggleRecentNotes = { state.recentNotesMenuOpen = !state.recentNotesMenuOpen },
-                            onOpenNote          = { state.openNoteFile(leftTab.id, it) },
-                            onUpdatePrefix      = { state.setPrefix(leftTab.id, it) },
-                            onUpdateSuffix      = { state.setSuffix(leftTab.id, it) },
-                            onUpdateBlock       = { bid, t -> state.updateBlock(leftTab.id, bid, t) },
-                            onRemoveBlock       = { state.removeBlock(leftTab.id, it) },
-                            onMoveBlock         = { bid, d -> state.moveBlock(leftTab.id, bid, d) },
-                            onAddNoteAfter      = { state.addNoteBlock(leftTab.id, it) },
-                            width               = state.annotationPanelWidth,
+                            onOpenNote = { state.openNoteFileAsync(leftTab.id, it) },
+                            onUpdatePrefix = { state.setPrefix(leftTab.id, it) },
+                            onUpdateSuffix = { state.setSuffix(leftTab.id, it) },
+                            onUpdateBlock = { bid, t -> state.updateBlock(leftTab.id, bid, t) },
+                            onRemoveBlock = { state.removeBlock(leftTab.id, it) },
+                            onMoveBlock = { bid, d -> state.moveBlock(leftTab.id, bid, d) },
+                            onAddNoteAfter = { state.addNoteBlock(leftTab.id, it) },
+                            width = state.annotationPanelWidth,
                         )
                     }
                 }
@@ -823,19 +880,19 @@ private fun TabBar(state: AppState) {
             active = state.filterVisible,
             modifier = Modifier.fillMaxHeight(),
             shape = leftShape,
-        ) { state.filterVisible = !state.filterVisible }
+        ) { state.updateFilterVisible(!state.filterVisible) }
         ToolbarBtn(
             if (state.annotationVisible) "⊟ Notes" else "⊞ Notes",
             active = state.annotationVisible,
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
-        ) { state.annotationVisible = !state.annotationVisible }
+        ) { state.updateAnnotationVisible(!state.annotationVisible) }
         ToolbarBtn(
             if (state.compareMode) "⊟ Compare" else "⊠ Compare",
             active = state.compareMode,
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
-        ) { state.compareMode = !state.compareMode }
+        ) { state.updateCompareMode(!state.compareMode) }
         ToolbarBtn(
             "Open",
             modifier = Modifier.fillMaxHeight(),
@@ -856,7 +913,11 @@ private fun TabBar(state: AppState) {
             ) { state.recentMenuOpen = !state.recentMenuOpen }
         }
         Spacer(Modifier.width(toolbarGap))
-        ToolbarBtn("⚙", modifier = Modifier.fillMaxHeight().width(36.dp), shape = standaloneShape) { state.settingsOpen = true }
+        ToolbarBtn(
+            "⚙",
+            modifier = Modifier.fillMaxHeight().width(36.dp),
+            shape = standaloneShape
+        ) { state.settingsOpen = true }
         Spacer(Modifier.width(toolbarGap))
     }
 }
@@ -919,19 +980,19 @@ internal fun tabOrderAfterVisibleReorder(
 
 @Composable
 private fun TabOverflowRow(state: AppState, modifier: Modifier) {
-    val tc           = tc()
-    val density      = LocalDensity.current.density
-    var containerPx  by remember { mutableStateOf(0) }
-    var tabAreaPx    by remember { mutableStateOf(0) }
-    var dragTabId    by remember { mutableStateOf<String?>(null) }
+    val tc = tc()
+    val density = LocalDensity.current.density
+    var containerPx by remember { mutableStateOf(0) }
+    var tabAreaPx by remember { mutableStateOf(0) }
+    var dragTabId by remember { mutableStateOf<String?>(null) }
     var dragStartIndex by remember { mutableStateOf(-1) }
-    var dragOffsetX  by remember { mutableStateOf(0f) }
+    var dragOffsetX by remember { mutableStateOf(0f) }
     var justReleasedTabId by remember { mutableStateOf<String?>(null) }
     var liveVisualTabIds by remember { mutableStateOf(emptyList<String>()) }
     var overflowOpen by remember { mutableStateOf(false) }
 
     val minTabPx = (80 * density).toInt()
-    val ovBtnPx  = (40 * density).toInt()
+    val ovBtnPx = (40 * density).toInt()
 
     val visibleTabLimit = state.settings.visibleTabLimit
     val (visibleTabs, overflowTabs) = remember(state.tabs, state.activeTabId, containerPx, visibleTabLimit) {
@@ -955,8 +1016,11 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
             justReleasedTabId = null
         }
     }
-    val tabWidthPx = if (visibleTabs.isNotEmpty() && tabAreaPx > 0) tabAreaPx.toFloat() / visibleTabs.size else minTabPx.toFloat()
-    val visualOrderIds = liveVisualTabIds.takeIf { it.toSet() == visibleTabIds.toSet() && it.size == visibleTabIds.size } ?: visibleTabIds
+    val tabWidthPx =
+        if (visibleTabs.isNotEmpty() && tabAreaPx > 0) tabAreaPx.toFloat() / visibleTabs.size else minTabPx.toFloat()
+    val visualOrderIds =
+        liveVisualTabIds.takeIf { it.toSet() == visibleTabIds.toSet() && it.size == visibleTabIds.size }
+            ?: visibleTabIds
     val currentVisualOrderIds by rememberUpdatedState(visualOrderIds)
     val currentOverflowTabIds by rememberUpdatedState(overflowTabIds)
 
@@ -969,59 +1033,63 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
             Modifier.weight(1f).fillMaxHeight()
                 .onSizeChanged { tabAreaPx = it.width }
                 .pointerInput(visibleTabIds, tabWidthPx) {
-                var downPos  = Offset.Zero
-                var downId: String? = null
-                var dragging = false
-                awaitPointerEventScope {
-                    while (true) {
-                        val ev = awaitPointerEvent(PointerEventPass.Initial)
-                        val ch = ev.changes.firstOrNull() ?: continue
-                        when (ev.type) {
-                            PointerEventType.Press -> {
-                                downPos = ch.position; dragging = false
-                                val idx = (ch.position.x / tabWidthPx).toInt().coerceIn(0, visibleTabIds.lastIndex.coerceAtLeast(0))
-                                downId = visibleTabIds.getOrNull(idx)
-                            }
-                            PointerEventType.Move -> {
-                                if (downId != null && !dragging && (ch.position - downPos).getDistance() > 8f) {
-                                    dragging = true
-                                    dragTabId = downId
-                                    justReleasedTabId = null
-                                    dragStartIndex = visibleTabIds.indexOf(downId)
+                    var downPos = Offset.Zero
+                    var downId: String? = null
+                    var dragging = false
+                    awaitPointerEventScope {
+                        while (true) {
+                            val ev = awaitPointerEvent(PointerEventPass.Initial)
+                            val ch = ev.changes.firstOrNull() ?: continue
+                            when (ev.type) {
+                                PointerEventType.Press -> {
+                                    downPos = ch.position; dragging = false
+                                    val idx = (ch.position.x / tabWidthPx).toInt()
+                                        .coerceIn(0, visibleTabIds.lastIndex.coerceAtLeast(0))
+                                    downId = visibleTabIds.getOrNull(idx)
+                                }
+
+                                PointerEventType.Move -> {
+                                    if (downId != null && !dragging && (ch.position - downPos).getDistance() > 8f) {
+                                        dragging = true
+                                        dragTabId = downId
+                                        justReleasedTabId = null
+                                        dragStartIndex = visibleTabIds.indexOf(downId)
+                                        dragOffsetX = 0f
+                                    }
+                                    if (dragging && dragTabId != null) {
+                                        ch.consume()
+                                        dragOffsetX = ch.position.x - downPos.x
+                                        liveVisualTabIds = browserTabOrderDuringDrag(
+                                            visibleIds = visibleTabIds,
+                                            draggedId = dragTabId,
+                                            dragStartIndex = dragStartIndex,
+                                            dragOffsetX = dragOffsetX,
+                                            tabWidth = tabWidthPx,
+                                        )
+                                    }
+                                }
+
+                                PointerEventType.Release -> {
+                                    if (dragging && dragTabId != null) {
+                                        justReleasedTabId = dragTabId
+                                        val newOrder = tabOrderAfterVisibleReorder(
+                                            visibleIds = currentVisualOrderIds,
+                                            overflowIds = currentOverflowTabIds,
+                                        )
+                                        state.tabs = newOrder.mapNotNull { id -> state.tabs.find { it.id == id } }
+                                    }
+                                    dragTabId = null
+                                    dragStartIndex = -1
                                     dragOffsetX = 0f
+                                    downId = null
+                                    dragging = false
                                 }
-                                if (dragging && dragTabId != null) {
-                                    ch.consume()
-                                    dragOffsetX = ch.position.x - downPos.x
-                                    liveVisualTabIds = browserTabOrderDuringDrag(
-                                        visibleIds = visibleTabIds,
-                                        draggedId = dragTabId,
-                                        dragStartIndex = dragStartIndex,
-                                        dragOffsetX = dragOffsetX,
-                                        tabWidth = tabWidthPx,
-                                    )
-                                }
+
+                                else -> {}
                             }
-                            PointerEventType.Release -> {
-                                if (dragging && dragTabId != null) {
-                                    justReleasedTabId = dragTabId
-                                    val newOrder = tabOrderAfterVisibleReorder(
-                                        visibleIds = currentVisualOrderIds,
-                                        overflowIds = currentOverflowTabIds,
-                                    )
-                                    state.tabs = newOrder.mapNotNull { id -> state.tabs.find { it.id == id } }
-                                }
-                                dragTabId = null
-                                dragStartIndex = -1
-                                dragOffsetX = 0f
-                                downId = null
-                                dragging = false
-                            }
-                            else -> {}
                         }
                     }
-                }
-            },
+                },
         ) {
             visibleTabs.forEach { tab ->
                 key(tab.id) {
@@ -1124,11 +1192,15 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
             SegmentedControl(
                 options = themeOptions.map { it.label },
                 selectedIndices = setOf(themeOptions.indexOf(state.settings.theme)),
-                onToggle = { idx -> state.settings = state.settings.copy(theme = themeOptions[idx]) },
+                onToggle = { idx -> state.updateSettings { it.copy(theme = themeOptions[idx]) } },
             )
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 AppText("Font size", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
                 AppText("${state.settings.fontSize}sp", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
             }
@@ -1136,7 +1208,7 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
             SegmentedControl(
                 options = fontSizes.map { it.toString() },
                 selectedIndices = setOf(fontSizes.indexOf(state.settings.fontSize)),
-                onToggle = { idx -> state.settings = state.settings.copy(fontSize = fontSizes[idx]) },
+                onToggle = { idx -> state.updateSettings { it.copy(fontSize = fontSizes[idx]) } },
             )
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1144,41 +1216,85 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
             SegmentedControl(
                 options = listOf("Monospace", "Proportional"),
                 selectedIndices = setOf(if (state.settings.fontMono) 0 else 1),
-                onToggle = { idx -> state.settings = state.settings.copy(fontMono = idx == 0) },
+                onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
             )
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                AppText("Most-used tags", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AppText(
+                    "Most-used tags",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    fontFamily = UI,
+                    fontWeight = FontWeight.SemiBold
+                )
                 AppText("${state.settings.mostUsedTagLimit}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
             }
             val tagLimits = listOf(0, 3, 5, 10, 20)
             SegmentedControl(
                 options = tagLimits.map { it.toString() },
                 selectedIndices = setOf(tagLimits.indexOf(state.settings.mostUsedTagLimit)),
-                onToggle = { idx -> state.settings = state.settings.copy(mostUsedTagLimit = tagLimits[idx]) },
+                onToggle = { idx -> state.updateSettings { it.copy(mostUsedTagLimit = tagLimits[idx]) } },
             )
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                AppText("Visible tabs", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AppText(
+                    "Visible tabs",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    fontFamily = UI,
+                    fontWeight = FontWeight.SemiBold
+                )
                 AppText("${state.settings.visibleTabLimit}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
             }
             val tabLimits = listOf(4, 6, 8, 10, 12, 16)
             SegmentedControl(
                 options = tabLimits.map { it.toString() },
                 selectedIndices = setOf(tabLimits.indexOf(state.settings.visibleTabLimit)),
-                onToggle = { idx -> state.settings = state.settings.copy(visibleTabLimit = tabLimits[idx]) },
+                onToggle = { idx -> state.updateSettings { it.copy(visibleTabLimit = tabLimits[idx]) } },
             )
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AppText("Default save folder", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+            AppText(
+                "Default save folder",
+                color = tc.td,
+                fontSize = 10.sp,
+                fontFamily = UI,
+                fontWeight = FontWeight.SemiBold
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                AppText(state.settings.defaultSaveDir ?: "(not set)", color = tc.ts, fontSize = 11.sp, fontFamily = MONO,
-                    modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                AppText(
+                    state.settings.defaultSaveDir ?: "(not set)", color = tc.ts, fontSize = 11.sp, fontFamily = MONO,
+                    modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis
+                )
                 AppButton("Browse", onClick = { state.pickSaveFolder() })
-                if (state.settings.defaultSaveDir != null) AppButton("Clear", onClick = { state.settings = state.settings.copy(defaultSaveDir = null) })
+                if (state.settings.defaultSaveDir != null) AppButton(
+                    "Clear",
+                    onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } })
             }
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppText(
+                "Auto-export notes",
+                color = tc.td,
+                fontSize = 10.sp,
+                fontFamily = UI,
+                fontWeight = FontWeight.SemiBold
+            )
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.autoExportNotes) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(autoExportNotes = idx == 0) } },
+            )
         }
         Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
             AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
@@ -1210,7 +1326,7 @@ private fun TabItem(
                 }
             }
             .onPointerEvent(PointerEventType.Enter) { hov = true }
-            .onPointerEvent(PointerEventType.Exit)  { hov = false }
+            .onPointerEvent(PointerEventType.Exit) { hov = false }
             .clickable(onClick = onClick).padding(start = 12.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(7.dp),
@@ -1225,12 +1341,7 @@ private fun TabItem(
             maxLines = 1,
         )
         if (showClose) {
-            Box(
-                Modifier.size(24.dp).clickable(onClick = onClose),
-                contentAlignment = Alignment.Center,
-            ) {
-                AppText("×", color = tc.td, fontSize = 16.sp)
-            }
+            CloseButton(onClick = onClose)
         }
     }
 }

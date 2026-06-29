@@ -1,0 +1,210 @@
+{
+  "finalRecommendation": "BLOCK",
+  "findings": [
+    {
+      "id": "OL2-001",
+      "severity": "blocker",
+      "area": "Tests and filter behavior",
+      "filePath": "src/desktopMain/kotlin/com/openlog/utils/Filter.kt",
+      "symbol": "passesFilter",
+      "problem": "Build/check/desktopTest fail because a scoped include message rule hides unrelated tags. The failing test is FilterBehaviorTest.scopedIncludeMessageRuleNarrowsOnlyMatchingTag at FilterBehaviorTest.kt:44.",
+      "whyItMatters": "The repository cannot pass the requested verification commands, and the behavior is likely user-visible when users add scoped include rules from the context menu.",
+      "suggestedFix": "Codify scoped include-rule semantics. Based on the existing test, apply a scoped include rule only within its scope and let entries outside that scope fall back to the normal filter behavior.",
+      "suggestedTest": "Keep the existing failing test and add package-prefix scoped include/exclude combinations.",
+      "confidence": "high"
+    },
+    {
+      "id": "OL2-002",
+      "severity": "high",
+      "area": "Coroutines and shared mutable state",
+      "filePath": "src/desktopMain/kotlin/com/openlog/ui/AppState.kt",
+      "symbol": "openFile",
+      "problem": "Each openFile call launches an IO coroutine that mutates tabs, activeTabId, and isLoading. Concurrent loads perform non-atomic tabs = tabs + t updates and share one loading boolean.",
+      "whyItMatters": "Dropping/opening multiple files can lose tabs, activate an unexpected tab, or hide loading while other files are still parsing.",
+      "suggestedFix": "Serialize file-load completion through one state owner or a mutex/reducer, and track pending loads with a count or set instead of one boolean.",
+      "suggestedTest": "Use a fake delayed loader to open multiple files concurrently and assert all tabs are retained and loading stays true until the final completion.",
+      "confidence": "high"
+    },
+    {
+      "id": "OL2-003",
+      "severity": "medium",
+      "area": "Architecture and state ownership",
+      "filePath": "src/desktopMain/kotlin/com/openlog/ui/AppState.kt",
+      "symbol": "AppState",
+      "problem": "AppState owns UI state, parsing orchestration, file dialogs, clipboard, autosave, note export, saved-filter import/export, and serialization.",
+      "whyItMatters": "Unclear ownership makes behavior brittle and hard to test with fake services.",
+      "suggestedFix": "Extract injected collaborators for log loading, autosave, saved filters, notes, dialogs, and clipboard.",
+      "suggestedTest": "Add state-transition tests using fake stores/loaders without real FileDialog, clipboard, or user-home paths.",
+      "confidence": "high"
+    },
+    {
+      "id": "OL2-004",
+      "severity": "medium",
+      "area": "Compose Desktop performance and state",
+      "filePath": "src/desktopMain/kotlin/com/openlog/ui/LogViewer.kt",
+      "symbol": "LogViewer",
+      "problem": "Filtering, sequence computation, suggestion building, and regex matching are run synchronously during composition or UI state updates.",
+      "whyItMatters": "Large logs or regex-heavy filters can block the UI thread and cause jank/freezes.",
+      "suggestedFix": "Move expensive work to a debounced background pipeline and cache/precompile regexes per filter/rule/sequence.",
+      "suggestedTest": "Add large synthetic log performance/regression tests for filtering and sequence computation.",
+      "confidence": "high"
+    },
+    {
+      "id": "OL2-005",
+      "severity": "medium",
+      "area": "File parsing and data preservation",
+      "filePath": "src/desktopMain/kotlin/com/openlog/utils/LogParser.kt",
+      "symbol": "parseLogcat",
+      "problem": "Lines longer than 8192 characters are silently skipped before RAW fallback handling.",
+      "whyItMatters": "Long JSON payloads, stack frames, or encoded values can disappear from the viewer.",
+      "suggestedFix": "Preserve long lines as RAW entries, optionally truncated with a visible marker and original length.",
+      "suggestedTest": "Parse a file with a non-empty line longer than 8192 characters and assert a RAW entry remains.",
+      "confidence": "high"
+    },
+    {
+      "id": "OL2-006",
+      "severity": "medium",
+      "area": "Desktop portability and app data locations",
+      "filePath": "src/desktopMain/kotlin/com/openlog/ui/AppState.kt",
+      "symbol": "defaultAutosaveFile, notesDir",
+      "problem": "Autosave and note files are stored under hardcoded ~/.openlog2 paths.",
+      "whyItMatters": "This ignores Windows, macOS, and Linux app-data conventions and complicates cleanup/backup expectations.",
+      "suggestedFix": "Introduce an app-directories provider for OS-specific config/cache/data paths and inject it.",
+      "suggestedTest": "Unit-test path selection across fake platform inputs.",
+      "confidence": "high"
+    },
+    {
+      "id": "OL2-007",
+      "severity": "medium",
+      "area": "Privacy and local data retention",
+      "filePath": "src/desktopMain/kotlin/com/openlog/ui/AppState.kt",
+      "symbol": "serializeAutosave, autoExportAnnotations, tabToken",
+      "problem": "Autosave and note auto-export persist recent file paths, source paths, filters, and log-derived annotations without an in-app retention/privacy control.",
+      "whyItMatters": "Logs often contain sensitive data, and users may not expect excerpts and absolute paths to remain in local app files after closing the app.",
+      "suggestedFix": "Add controls to disable autosave/auto-export, clear recent history/cache, and document local retention.",
+      "suggestedTest": "Verify disabling persistence prevents writes and clearing history removes paths from serialized state.",
+      "confidence": "high"
+    },
+    {
+      "id": "OL2-008",
+      "severity": "medium",
+      "area": "Unsafe ad hoc serialization",
+      "filePath": "src/desktopMain/kotlin/com/openlog/ui/AppState.kt",
+      "symbol": "exportFilters, importFilters, jsonStr, jsonField, jsonArrayStr",
+      "problem": "Saved-filter JSON is hand-built and parsed with regex/comma splitting, which breaks on commas, quotes, escapes, newlines, and control characters.",
+      "whyItMatters": "Saved analysis filters can be corrupted or lost during export/import.",
+      "suggestedFix": "Use kotlinx.serialization or a real JSON parser, or export the existing token format without labeling it general JSON.",
+      "suggestedTest": "Round-trip filters containing commas, quotes, backslashes, newlines, regex metacharacters, message rules, and sequences.",
+      "confidence": "high"
+    },
+    {
+      "id": "OL2-009",
+      "severity": "medium",
+      "area": "Compose Desktop UI responsiveness",
+      "filePath": "src/desktopMain/kotlin/com/openlog/ui/AppState.kt",
+      "symbol": "saveAnalysis, openNoteFile, exportFiltersToFile, importFiltersFromFile",
+      "problem": "Post-dialog file reads/writes run synchronously from UI callbacks.",
+      "whyItMatters": "Large files or slow folders can freeze the UI thread.",
+      "suggestedFix": "Move file IO to an IO coroutine and publish completion/error state back to the UI.",
+      "suggestedTest": "Inject a suspending fake file store and assert loading/error state without blocking the caller.",
+      "confidence": "medium"
+    },
+    {
+      "id": "OL2-010",
+      "severity": "medium",
+      "area": "Coroutine lifecycle",
+      "filePath": "src/desktopMain/kotlin/com/openlog/ui/AppState.kt",
+      "symbol": "ioScope",
+      "problem": "The internal IO CoroutineScope has no cancellation/disposal path.",
+      "whyItMatters": "Future window recreation, tests, or multi-window support can leave background work running against stale state.",
+      "suggestedFix": "Make AppState closeable or inject an externally owned scope and cancel it from Compose lifecycle.",
+      "suggestedTest": "Inject a test scope, dispose state, and assert pending jobs are cancelled.",
+      "confidence": "medium"
+    },
+    {
+      "id": "OL2-011",
+      "severity": "low",
+      "area": "Cross-platform path handling",
+      "filePath": "src/desktopMain/kotlin/com/openlog/ui/AppState.kt",
+      "symbol": "saveAnalysis, exportFiltersToFile, importFiltersFromFile",
+      "problem": "Some FileDialog directory/file values are joined with File(dir + path) instead of File(dir, path).",
+      "whyItMatters": "String path joining is fragile across platforms and relies on FileDialog returning a trailing separator.",
+      "suggestedFix": "Use File(dir, path) consistently.",
+      "suggestedTest": "Add a helper test for joining directory/file values with and without trailing separators.",
+      "confidence": "medium"
+    },
+    {
+      "id": "OL2-012",
+      "severity": "low",
+      "area": "Packaging and release readiness",
+      "filePath": "build.gradle.kts",
+      "symbol": "compose.desktop.application.nativeDistributions",
+      "problem": "Native packaging is configured, but signing/notarization/vendor/license/upgrade readiness is not configured or documented.",
+      "whyItMatters": "Public release on macOS/Windows/Linux can hit trust prompts, installer metadata gaps, or upgrade uncertainty.",
+      "suggestedFix": "Add release metadata, document per-OS release commands, configure signing/notarization for public distribution, and test installer upgrade behavior.",
+      "suggestedTest": "Run current-OS package smoke tests and maintain an OS-specific release checklist.",
+      "confidence": "medium"
+    },
+    {
+      "id": "OL2-013",
+      "severity": "low",
+      "area": "Architecture and duplicated wiring",
+      "filePath": "src/desktopMain/kotlin/com/openlog/ui/App.kt",
+      "symbol": "FileView, CompareView, filterPanelFor",
+      "problem": "FilterPanel and LogViewer callback wiring is duplicated between file and compare views.",
+      "whyItMatters": "Future UI actions can be added to one mode and missed in the other.",
+      "suggestedFix": "Extract shared binding adapters for FilterPanel and LogViewer.",
+      "suggestedTest": "Add regression coverage for shared filter actions in compare mode.",
+      "confidence": "medium"
+    },
+    {
+      "id": "OL2-014",
+      "severity": "low",
+      "area": "Test coverage gaps",
+      "filePath": "src/desktopTest/kotlin/com/openlog",
+      "symbol": "test suite",
+      "problem": "Tests cover many domain/state helpers but not concurrent file opens, IO-scope cancellation, large-file parsing, special-character serialization, OS-specific app-data path selection, or privacy/clear-history behavior.",
+      "whyItMatters": "The highest-risk desktop boundaries are the least covered.",
+      "suggestedFix": "Add fake service boundaries and deterministic tests around file/lifecycle/persistence behavior.",
+      "suggestedTest": "Prioritize tests for OL2-001, OL2-002, OL2-008, and OL2-007.",
+      "confidence": "high"
+    }
+  ],
+  "commandsRun": [
+    {
+      "command": "rg --files",
+      "result": "success"
+    },
+    {
+      "command": "./gradlew tasks --all",
+      "result": "success; no detekt or lint tasks configured"
+    },
+    {
+      "command": "./gradlew build",
+      "result": "failed; 71 tests completed, 1 failed: FilterBehaviorTest.scopedIncludeMessageRuleNarrowsOnlyMatchingTag at FilterBehaviorTest.kt:44"
+    },
+    {
+      "command": "./gradlew test",
+      "result": "failed; task test not found in root project openLog"
+    },
+    {
+      "command": "./gradlew check",
+      "result": "failed; same desktop test failure as build"
+    },
+    {
+      "command": "./gradlew desktopTest",
+      "result": "failed; same desktop test failure as build"
+    },
+    {
+      "command": "IDEA MCP get_file_problems on key files",
+      "result": "no compile errors; warnings mostly unused code, duplication, and minor Kotlin cleanups"
+    }
+  ],
+  "notReviewedOrNotVerifiable": [
+    "Interactive desktop UI behavior was not run manually.",
+    "Native packages/installers were not built or installed.",
+    "macOS signing/notarization and Windows/Linux installer behavior were not verified.",
+    "Dependency advisory/vulnerability tooling was not run.",
+    "detekt and lint were not run because they are not configured."
+  ]
+}

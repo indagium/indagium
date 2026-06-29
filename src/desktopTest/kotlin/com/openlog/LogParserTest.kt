@@ -45,4 +45,17 @@ class LogParserTest {
         assertEquals("RAW", entries[1].tag)
         assertEquals("    at com.example.Crash.method(Crash.kt:12)", entries[1].msg)
     }
+
+    @Test
+    fun preservesLongRawLinesInsteadOfDroppingThem() {
+        val longLine = "payload=" + "x".repeat(9000)
+        val file = createTempFile(prefix = "openlog-long", suffix = ".txt")
+        file.writeText(longLine)
+
+        val entries = parseLogcat(file.toFile())
+
+        assertEquals(1, entries.size)
+        assertEquals("RAW", entries.single().tag)
+        assertEquals(longLine, entries.single().msg)
+    }
 }

@@ -4,15 +4,26 @@ import androidx.compose.ui.graphics.Color
 
 enum class LogLevel(val key: Char, val label: String, val defaultColor: Color) {
     V('V', "Verbose", Color(0xFF6e7681)),
-    D('D', "Debug",   Color(0xFF79c0ff)),
-    I('I', "Info",    Color(0xFF3fb950)),
-    W('W', "Warn",    Color(0xFFd29922)),
-    E('E', "Error",   Color(0xFFf85149)),
-    A('A', "Assert",  Color(0xFFff7b72));
-    companion object { fun from(c: Char) = entries.find { it.key == c } ?: V }
+    D('D', "Debug", Color(0xFF79c0ff)),
+    I('I', "Info", Color(0xFF3fb950)),
+    W('W', "Warn", Color(0xFFd29922)),
+    E('E', "Error", Color(0xFFf85149)),
+    A('A', "Assert", Color(0xFFff7b72));
+
+    companion object {
+        fun from(c: Char) = entries.find { it.key == c } ?: V
+    }
 }
 
-data class LogEntry(val id: Int, val ts: String, val level: LogLevel, val tag: String, val msg: String, val pid: Int = 0, val tid: Int = 0)
+data class LogEntry(
+    val id: Int,
+    val ts: String,
+    val level: LogLevel,
+    val tag: String,
+    val msg: String,
+    val pid: Int = 0,
+    val tid: Int = 0
+)
 
 // ── Sequences ──────────────────────────────────────────────────────
 data class SequenceDef(
@@ -29,7 +40,13 @@ data class SequenceDef(
 )
 
 data class NestedSeqGroup(val gid: String, val rid: Int, val ch: List<Int>, val defId: String = "")
-data class SeqGroup(val gid: String, val rid: Int, val plain: List<Int>, val nested: List<NestedSeqGroup>, val defId: String)
+data class SeqGroup(
+    val gid: String,
+    val rid: Int,
+    val plain: List<Int>,
+    val nested: List<NestedSeqGroup>,
+    val defId: String
+)
 
 enum class ManualCollapseDirection { TO_START, TO_END }
 
@@ -82,8 +99,10 @@ data class MessageRule(
 // ── Annotations (block model) ──────────────────────────────────────
 sealed class AnnBlock {
     abstract val id: String
+
     /** Pure text / commentary block */
     data class Note(override val id: String, val text: String) : AnnBlock()
+
     /** One or more log lines with an optional caption.
      *  sourceTabId / sourceFilename are set when the lines come from a different tab (compare mode).
      *  sourceEntries caches the actual rows so the annotation survives tab switches. */
@@ -139,6 +158,7 @@ data class AppSettings(
     val defaultSaveDir: String? = null,
     val mostUsedTagLimit: Int = 5,
     val visibleTabLimit: Int = 8,
+    val autoExportNotes: Boolean = true,
 )
 
 enum class ThemePreset(val label: String) {
@@ -170,6 +190,21 @@ data class AddAnnRequest(
 
 sealed class LogItem {
     data class Row(val entry: LogEntry, val indent: Int, val groupColor: Color? = null) : LogItem()
-    data class SeqHeader(val entry: LogEntry, val gid: String, val indent: Int, val expanded: Boolean, val count: Int, val color: Color) : LogItem()
-    data class ManualHeader(val entry: LogEntry, val gid: String, val direction: ManualCollapseDirection, val expanded: Boolean, val count: Int, val color: Color) : LogItem()
+    data class SeqHeader(
+        val entry: LogEntry,
+        val gid: String,
+        val indent: Int,
+        val expanded: Boolean,
+        val count: Int,
+        val color: Color
+    ) : LogItem()
+
+    data class ManualHeader(
+        val entry: LogEntry,
+        val gid: String,
+        val direction: ManualCollapseDirection,
+        val expanded: Boolean,
+        val count: Int,
+        val color: Color
+    ) : LogItem()
 }

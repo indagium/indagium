@@ -245,6 +245,27 @@ fun ToolbarBtn(
 }
 
 @Composable
+fun CloseButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    Box(
+        modifier
+            .size(24.dp)
+            .background(if (hovered) tc.hv else Color.Transparent, CORNER_MD)
+            .clip(CORNER_MD)
+            .clickable(onClick = onClick)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
+        contentAlignment = Alignment.Center,
+    ) {
+        AppText("×", color = tc.td, fontSize = 16.sp)
+    }
+}
+
+@Composable
 fun InlineField(
     value: String, onValue: (String) -> Unit,
     placeholder: String = "", modifier: Modifier = Modifier,
