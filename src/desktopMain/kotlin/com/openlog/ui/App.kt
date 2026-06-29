@@ -743,6 +743,7 @@ private fun BoundFilterPanel(state: AppState, tab: LogTab) {
         onClearFilter = { state.requestClearFilter(tab.id) },
         onUiStateChanged = { state.autosaveNow() },
         mostUsedTagLimit = state.settings.mostUsedTagLimit,
+        filterListRows = state.settings.filterListRows,
         width = state.filterPanelWidth,
     )
     HDivider { delta -> state.updateFilterPanelWidth(state.filterPanelWidth + delta) }
@@ -1296,6 +1297,28 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 options = tagLimits.map { it.toString() },
                 selectedIndices = setOf(tagLimits.indexOf(state.settings.mostUsedTagLimit)),
                 onToggle = { idx -> state.updateSettings { it.copy(mostUsedTagLimit = tagLimits[idx]) } },
+            )
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AppText(
+                    "Filter list rows",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    fontFamily = UI,
+                    fontWeight = FontWeight.SemiBold
+                )
+                AppText("${state.settings.filterListRows}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+            }
+            val rowLimits = listOf(3, 5, 8, 10, 15)
+            SegmentedControl(
+                options = rowLimits.map { it.toString() },
+                selectedIndices = setOf(rowLimits.indexOf(state.settings.filterListRows)),
+                onToggle = { idx -> state.updateSettings { it.copy(filterListRows = rowLimits[idx]) } },
             )
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {

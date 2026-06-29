@@ -161,6 +161,7 @@ data class AppSettings(
     val fontMono: Boolean = true,
     val defaultSaveDir: String? = null,
     val mostUsedTagLimit: Int = 5,
+    val filterListRows: Int = 5,
     val visibleTabLimit: Int = 8,
     val autoExportNotes: Boolean = true,
     val annotationLogBlockStyle: AnnotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED,

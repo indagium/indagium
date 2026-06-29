@@ -1455,6 +1455,7 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     fontMono.toString(),
     defaultSaveDir.orEmpty(),
     mostUsedTagLimit.toString(),
+    filterListRows.toString(),
     visibleTabLimit.toString(),
     autoExportNotes.toString(),
     annotationLogBlockStyle.name,
@@ -1471,13 +1472,14 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         fontMono = p[2].toBoolean(),
         defaultSaveDir = p[3].takeIf { it.isNotBlank() },
         mostUsedTagLimit = p[4].toIntOrNull() ?: 5,
-        visibleTabLimit = p.getOrNull(5)?.toIntOrNull()?.coerceIn(2, 20) ?: 8,
-        autoExportNotes = p.getOrNull(6)?.toBooleanStrictOrNull() ?: true,
-        annotationLogBlockStyle = p.getOrNull(7)
+        filterListRows = p.getOrNull(5)?.toIntOrNull()?.coerceIn(1, 20) ?: 5,
+        visibleTabLimit = p.getOrNull(6)?.toIntOrNull()?.coerceIn(2, 20) ?: 8,
+        autoExportNotes = p.getOrNull(7)?.toBooleanStrictOrNull() ?: true,
+        annotationLogBlockStyle = p.getOrNull(8)
             ?.let { runCatching { AnnotationLogBlockStyle.valueOf(it) }.getOrNull() }
             ?: AnnotationLogBlockStyle.INDENTED,
-        numberAnnotationBlocks = p.getOrNull(8)?.toBooleanStrictOrNull() ?: false,
-        annotationPrefixLabel = p.getOrNull(9)?.takeIf { it.isNotBlank() } ?: "From",
+        numberAnnotationBlocks = p.getOrNull(9)?.toBooleanStrictOrNull() ?: false,
+        annotationPrefixLabel = p.getOrNull(10)?.takeIf { it.isNotBlank() } ?: "From",
     )
 }.getOrNull()
 

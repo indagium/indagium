@@ -125,6 +125,7 @@ fun FilterPanel(
     onClearFilter: () -> Unit,
     onUiStateChanged: () -> Unit = {},
     mostUsedTagLimit: Int,
+    filterListRows: Int,
     width: Float,
 ) {
     val tc = tc()
@@ -325,18 +326,20 @@ fun FilterPanel(
             )
             // Combined pills for pkg prefixes + included/excluded tags
             if (totalActive > 0 && fpState.incPillsExpanded) {
-                FlowRow(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    filter.pkgPrefixes.forEach { pfx -> TagPill(pfx, pkgColor) { onRemovePkgPrefix(pfx) } }
-                    filter.excludePkgPrefixes.forEach { pfx -> TagPill(pfx, exNeg) { onRemoveExcludePkgPrefix(pfx) } }
-                    filter.activeTags.forEach { tag ->
-                        TagPill(displayTagForPrefix(tag, filter.pkgPrefixes).first, tc.ac) { onToggleTag(tag) }
-                    }
-                    filter.excludeTags.forEach { tag ->
-                        TagPill(displayTagForPrefix(tag, filter.pkgPrefixes).first, exNeg) { onToggleExcludeTag(tag) }
+                BoundedScrollBox(minOf(totalActive, filterListRows)) {
+                    FlowRow(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        filter.pkgPrefixes.forEach { pfx -> TagPill(pfx, pkgColor) { onRemovePkgPrefix(pfx) } }
+                        filter.excludePkgPrefixes.forEach { pfx -> TagPill(pfx, exNeg) { onRemoveExcludePkgPrefix(pfx) } }
+                        filter.activeTags.forEach { tag ->
+                            TagPill(displayTagForPrefix(tag, filter.pkgPrefixes).first, tc.ac) { onToggleTag(tag) }
+                        }
+                        filter.excludeTags.forEach { tag ->
+                            TagPill(displayTagForPrefix(tag, filter.pkgPrefixes).first, exNeg) { onToggleExcludeTag(tag) }
+                        }
                     }
                 }
             }
@@ -551,28 +554,32 @@ fun FilterPanel(
             }) else null,
         )
         if (msgInc.isNotEmpty() && fpState.incMsgPillsExpanded) {
-            FlowRow(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                msgInc.forEach { rule ->
-                    val label = if (rule.target == RuleTarget.PID_TID) "pid:${rule.pattern}"
-                                else if (rule.regex) "/${rule.pattern}/" else rule.pattern
-                    TagPill(label, tc.ac) { onRemoveMessageRule(rule.id) }
+            BoundedScrollBox(minOf(msgInc.size, filterListRows)) {
+                FlowRow(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    msgInc.forEach { rule ->
+                        val label = if (rule.target == RuleTarget.PID_TID) "pid:${rule.pattern}"
+                                    else if (rule.regex) "/${rule.pattern}/" else rule.pattern
+                        TagPill(label, tc.ac) { onRemoveMessageRule(rule.id) }
+                    }
                 }
             }
         }
         if (msgExc.isNotEmpty() && fpState.excMsgPillsExpanded) {
-            FlowRow(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                msgExc.forEach { rule ->
-                    val label = if (rule.target == RuleTarget.PID_TID) "pid:${rule.pattern}"
-                                else if (rule.regex) "/${rule.pattern}/" else rule.pattern
-                    TagPill(label, msgExNeg) { onRemoveMessageRule(rule.id) }
+            BoundedScrollBox(minOf(msgExc.size, filterListRows)) {
+                FlowRow(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    msgExc.forEach { rule ->
+                        val label = if (rule.target == RuleTarget.PID_TID) "pid:${rule.pattern}"
+                                    else if (rule.regex) "/${rule.pattern}/" else rule.pattern
+                        TagPill(label, msgExNeg) { onRemoveMessageRule(rule.id) }
+                    }
                 }
             }
         }
@@ -710,7 +717,7 @@ fun FilterPanel(
             }) else null,
         )
         if (filter.highlighters.isNotEmpty() && fpState.hlListExpanded) {
-            Column(Modifier.fillMaxWidth()) {
+            BoundedScrollBox(minOf(filter.highlighters.size, filterListRows), rowDp = 30) {
                 filter.highlighters.forEach { hl ->
                     Column {
                         Row(
@@ -1043,6 +1050,25 @@ private fun ScrollableItems(
             }
         }
     }
+    Box(modifier.fillMaxWidth().height(h)) {
+        Column(Modifier.fillMaxSize().verticalScroll(scrollState), content = content)
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scrollState),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+            style = appScrollbarStyle(tc()),
+        )
+    }
+}
+
+@Composable
+private fun BoundedScrollBox(
+    rowLimit: Int,
+    rowDp: Int = 28,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val h = (rowLimit * rowDp).dp
+    val scrollState = rememberScrollState()
     Box(modifier.fillMaxWidth().height(h)) {
         Column(Modifier.fillMaxSize().verticalScroll(scrollState), content = content)
         VerticalScrollbar(
