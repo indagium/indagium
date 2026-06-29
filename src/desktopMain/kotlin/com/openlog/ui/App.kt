@@ -1239,7 +1239,7 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
     val tc = tc()
     val scroll = rememberScrollState()
     Column(
-        Modifier.width(420.dp).heightIn(max = 760.dp).verticalScroll(scroll).background(tc.p, RoundedCornerShape(8.dp))
+        Modifier.width(480.dp).verticalScroll(scroll).background(tc.p, RoundedCornerShape(8.dp))
             .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {

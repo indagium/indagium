@@ -266,8 +266,15 @@ private fun MdPreviewDialog(tab: LogTab, settings: AppSettings, mono: FontFamily
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
             val scroll = rememberScrollState()
-            Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp)) {
-                RenderedMarkdownPreview(tab, settings, mono, tc)
+            Box(Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp)) {
+                    RenderedMarkdownPreview(tab, settings, mono, tc)
+                }
+                VerticalScrollbar(
+                    adapter = rememberScrollbarAdapter(scroll),
+                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp).width(6.dp),
+                    style = appScrollbarStyle(tc),
+                )
             }
         }
     }
