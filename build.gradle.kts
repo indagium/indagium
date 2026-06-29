@@ -8,6 +8,27 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose") version "2.1.0"
 }
 
+val appVersion: String = providers.gradleProperty("app.version").get()
+val generatedBuildInfoDir = layout.buildDirectory.dir("generated/openlogBuildInfo/desktopMain/kotlin")
+
+val generateBuildInfo by tasks.registering {
+    inputs.property("appVersion", appVersion)
+    outputs.dir(generatedBuildInfoDir)
+    doLast {
+        val outputFile = generatedBuildInfoDir.get().file("com/openlog/generated/BuildInfo.kt").asFile
+        outputFile.parentFile.mkdirs()
+        outputFile.writeText(
+            """
+            package com.openlog.generated
+
+            object BuildInfo {
+                const val APP_VERSION: String = "$appVersion"
+            }
+            """.trimIndent() + "\n"
+        )
+    }
+}
+
 kotlin {
     jvm("desktop") {
         mainRun {
@@ -17,6 +38,7 @@ kotlin {
 
     sourceSets {
         val desktopMain by getting {
+            kotlin.srcDir(generatedBuildInfoDir)
             dependencies {
                 implementation(compose.desktop.currentOs)
                 implementation(compose.material3)
@@ -38,7 +60,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "openLog"
-            packageVersion = "1.0.0"
+            packageVersion = appVersion
             description = "Android logcat analysis tool"
             vendor = "Roman Arnaut"
             copyright = "Copyright (C) 2026 Roman Arnaut"
@@ -54,4 +76,8 @@ compose.desktop {
             }
         }
     }
+}
+
+tasks.named("compileKotlinDesktop") {
+    dependsOn(generateBuildInfo)
 }
