@@ -538,10 +538,15 @@ fun LogViewer(
 // Keeps `margin` rows of context visible around the cursor (like vim's scrolloff): the
 // highlight moves freely within that window with no scrolling, and only once it would land
 // within `margin` rows of the top/bottom edge does the viewport scroll to restore the margin.
+// Uses an immediate (non-animated) scrollToItem: animateScrollToItem takes several frames to
+// settle, but the selection highlight switches to the new row instantly, so the multi-frame
+// animation produced a visible gap where the old row had already lost its highlight but the
+// new row hadn't scrolled into view yet. An immediate jump keeps the highlight continuously
+// visible across the scroll.
 private fun scrollForCursor(lazyState: LazyListState, scope: CoroutineScope, targetItemsIdx: Int, margin: Int) {
     val visible = lazyState.layoutInfo.visibleItemsInfo
     if (visible.isEmpty()) {
-        scope.launch { lazyState.animateScrollToItem(maxOf(0, targetItemsIdx - margin)) }
+        scope.launch { lazyState.scrollToItem(maxOf(0, targetItemsIdx - margin)) }
         return
     }
     val firstVisible = visible.first().index
@@ -552,7 +557,7 @@ private fun scrollForCursor(lazyState: LazyListState, scope: CoroutineScope, tar
         else -> return
     }
     if (target == firstVisible) return
-    scope.launch { lazyState.animateScrollToItem(target) }
+    scope.launch { lazyState.scrollToItem(target) }
 }
 
 private fun handleNavKey(

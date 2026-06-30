@@ -1328,29 +1328,26 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                         onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } })
                 }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    AppText("Font size", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                    AppText("${state.settings.fontSize}sp", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                CompactSetting("Font size", Modifier.weight(1f)) {
+                    val fontSizes = listOf(10, 11, 12, 13, 14, 15, 16)
+                    SegmentedControl(
+                        options = fontSizes.map { it.toString() },
+                        selectedIndices = setOf(fontSizes.indexOf(state.settings.fontSize)),
+                        onToggle = { idx -> state.updateSettings { it.copy(fontSize = fontSizes[idx]) } },
+                    )
                 }
-                val fontSizes = listOf(10, 11, 12, 13, 14, 15, 16)
-                SegmentedControl(
-                    options = fontSizes.map { it.toString() },
-                    selectedIndices = setOf(fontSizes.indexOf(state.settings.fontSize)),
-                    onToggle = { idx -> state.updateSettings { it.copy(fontSize = fontSizes[idx]) } },
-                )
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                AppText("Font family", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                SegmentedControl(
-                    options = listOf("Monospace", "Proportional"),
-                    selectedIndices = setOf(if (state.settings.fontMono) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
-                )
+                CompactSetting("Font family", Modifier.weight(1f)) {
+                    SegmentedControl(
+                        options = listOf("Monospace", "Proportional"),
+                        selectedIndices = setOf(if (state.settings.fontMono) 0 else 1),
+                        onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
+                    )
+                }
             }
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(
@@ -1537,8 +1534,8 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
 
     Box(
         Modifier
-            .width(560.dp)
-            .heightIn(max = 700.dp)
+            .width(580.dp)
+            .heightIn(max = 900.dp)
             .clip(shape)
             .background(tc.p)
             .border(1.dp, tc.br, shape),
