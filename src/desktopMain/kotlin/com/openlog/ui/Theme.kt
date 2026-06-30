@@ -75,6 +75,38 @@ val INK_PAPER = theme(
     0xFF8b7c6a, 0xFF334155, 0xFF7c3aed, 0xFFb45309,
     hv = Color.Black.copy(ALPHA_HOVER),
 )
+val CATPPUCCIN_LATTE = theme(
+    0xFFeff1f5, 0xFFffffff, 0xFFe6e9ef, 0xFFccd0da, 0xFF4c4f69, 0xFF6c6f85,
+    0xFF9ca0b0, 0xFF1e66f5, 0xFF8839ef, 0xFFfe640b,
+    hv = Color.Black.copy(ALPHA_HOVER),
+)
+val AQUARIUM_MIST = theme(
+    0xFFeefbfb, 0xFFfbffff, 0xFFd8f2f2, 0xFFb7dede, 0xFF1c3438, 0xFF4d6a70,
+    0xFF7e9ba0, 0xFF0e8f9a, 0xFF67b7dc, 0xFFf08a7d,
+    hv = Color.Black.copy(ALPHA_HOVER),
+)
+val TIDEPOOL_LIGHT = theme(
+    0xFFedf6f4, 0xFFf8fffc, 0xFFdcece8, 0xFFb9d1cc, 0xFF203134, 0xFF53686b,
+    0xFF82979a, 0xFF0f766e, 0xFF2563eb, 0xFFd97706,
+    hv = Color.Black.copy(ALPHA_HOVER),
+)
+val WAVE_FOAM = theme(
+    0xFFf4fbff, 0xFFffffff, 0xFFe0f2fe, 0xFFbad7e8, 0xFF163044, 0xFF52697a,
+    0xFF8497a6, 0xFF0284c7, 0xFF22d3ee, 0xFFf97316,
+    hv = Color.Black.copy(ALPHA_HOVER),
+)
+val TOKYO_NIGHT = theme(
+    0xFF1a1b26, 0xFF24283b, 0xFF1f2335, 0xFF3b4261, 0xFFc0caf5, 0xFF9aa5ce,
+    0xFF6f7aa2, 0xFF7aa2f7, 0xFFbb9af7, 0xFFff9e64,
+)
+val GRUVBOX = theme(
+    0xFF282828, 0xFF32302f, 0xFF3c3836, 0xFF504945, 0xFFebdbb2, 0xFFd5c4a1,
+    0xFF928374, 0xFF83a598, 0xFFb16286, 0xFFd65d0e,
+)
+val DEEP_CURRENT = theme(
+    0xFF061923, 0xFF0b2430, 0xFF102f3d, 0xFF1e4b5c, 0xFFd8f3f8, 0xFF9ac4cc,
+    0xFF6e929a, 0xFF2dd4bf, 0xFF38bdf8, 0xFFfb7185,
+)
 val DRACULA = theme(
     0xFF282a36, 0xFF21222c, 0xFF191a21, 0xFF44475a, 0xFFf8f8f2, 0xFF6272a4,
     0xFF4d5566, 0xFF8be9fd, 0xFFbd93f9, 0xFFffb86c,
@@ -92,21 +124,30 @@ val TERMINAL_DARK = theme(
     0xFF71806d, 0xFF22c55e, 0xFF38bdf8, 0xFFf59e0b,
 )
 
-fun themeColors(preset: ThemePreset) = when (preset) {
-    ThemePreset.LIGHT          -> LIGHT_THEME
-    ThemePreset.LIGHT_PRO      -> LIGHT_PRO
-    ThemePreset.LIGHT_CONTRAST -> LIGHT_CONTRAST
-    ThemePreset.NORD_LIGHT     -> NORD_LIGHT
-    ThemePreset.WARM_PAPER     -> WARM_PAPER
-    ThemePreset.SAGE_PAPER     -> SAGE_PAPER
-    ThemePreset.ROSE_PAPER     -> ROSE_PAPER
-    ThemePreset.INK_PAPER      -> INK_PAPER
-    ThemePreset.DARK_GITHUB    -> DARK_GITHUB
-    ThemePreset.DRACULA        -> DRACULA
-    ThemePreset.SOLARIZED_DARK -> SOLARIZED_DK
-    ThemePreset.GRAPHITE_DIM   -> GRAPHITE_DIM
-    ThemePreset.TERMINAL_DARK  -> TERMINAL_DARK
-}
+private val THEME_PALETTES = mapOf(
+    ThemePreset.LIGHT to LIGHT_THEME,
+    ThemePreset.LIGHT_PRO to LIGHT_PRO,
+    ThemePreset.LIGHT_CONTRAST to LIGHT_CONTRAST,
+    ThemePreset.NORD_LIGHT to NORD_LIGHT,
+    ThemePreset.WARM_PAPER to WARM_PAPER,
+    ThemePreset.SAGE_PAPER to SAGE_PAPER,
+    ThemePreset.ROSE_PAPER to ROSE_PAPER,
+    ThemePreset.INK_PAPER to INK_PAPER,
+    ThemePreset.CATPPUCCIN_LATTE to CATPPUCCIN_LATTE,
+    ThemePreset.AQUARIUM_MIST to AQUARIUM_MIST,
+    ThemePreset.TIDEPOOL_LIGHT to TIDEPOOL_LIGHT,
+    ThemePreset.WAVE_FOAM to WAVE_FOAM,
+    ThemePreset.TOKYO_NIGHT to TOKYO_NIGHT,
+    ThemePreset.GRUVBOX to GRUVBOX,
+    ThemePreset.DEEP_CURRENT to DEEP_CURRENT,
+    ThemePreset.DARK_GITHUB to DARK_GITHUB,
+    ThemePreset.DRACULA to DRACULA,
+    ThemePreset.SOLARIZED_DARK to SOLARIZED_DK,
+    ThemePreset.GRAPHITE_DIM to GRAPHITE_DIM,
+    ThemePreset.TERMINAL_DARK to TERMINAL_DARK,
+)
+
+fun themeColors(preset: ThemePreset) = THEME_PALETTES.getValue(preset)
 
 fun appScrollbarStyle(tc: ThemeColors) = ScrollbarStyle(
     minimalHeight = 24.dp,

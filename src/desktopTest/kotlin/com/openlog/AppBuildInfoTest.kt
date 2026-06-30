@@ -7,6 +7,6 @@ import kotlin.test.assertEquals
 class AppBuildInfoTest {
     @Test
     fun exposesPackagedAppVersionToRuntime() {
-        assertEquals("1.0.2", BuildInfo.APP_VERSION)
+        assertEquals("1.0.3", BuildInfo.APP_VERSION)
     }
 }
