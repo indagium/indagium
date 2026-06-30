@@ -1535,14 +1535,14 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
     Box(
         Modifier
             .width(580.dp)
-            .heightIn(max = 900.dp)
+            .heightIn(max = 760.dp)
             .clip(shape)
             .background(tc.p)
             .border(1.dp, tc.br, shape),
     ) {
         Column(
-            Modifier.verticalScroll(scroll).padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp),
+            Modifier.verticalScroll(scroll).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Row(
                 Modifier.fillMaxWidth(),
@@ -1553,7 +1553,7 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
                 CloseButton(onClick = onDismiss)
             }
             groups.forEach { group ->
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     AppText(
                         group.title,
                         color = tc.td,
@@ -1563,7 +1563,7 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
                     )
                     group.rows.forEach { row ->
                         Row(
-                            Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            Modifier.fillMaxWidth().padding(vertical = 1.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -1572,7 +1572,7 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
                                     .widthIn(min = 200.dp)
                                     .background(tc.p2, RoundedCornerShape(4.dp))
                                     .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                                    .padding(horizontal = 8.dp, vertical = 2.dp),
                                 contentAlignment = Alignment.CenterStart,
                             ) {
                                 AppText(row.label, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
