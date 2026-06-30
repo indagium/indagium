@@ -1523,6 +1523,7 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     annotationLogBlockStyle.name,
     numberAnnotationBlocks.toString(),
     annotationPrefixLabel,
+    navScrollMargin.toString(),
 )
 
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
@@ -1542,6 +1543,7 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
             ?: AnnotationLogBlockStyle.INDENTED,
         numberAnnotationBlocks = p.getOrNull(9)?.toBooleanStrictOrNull() ?: false,
         annotationPrefixLabel = p.getOrNull(10)?.takeIf { it.isNotBlank() } ?: "From",
+        navScrollMargin = p.getOrNull(11)?.toIntOrNull()?.coerceIn(0, 30) ?: 5,
     )
 }.getOrNull()
 

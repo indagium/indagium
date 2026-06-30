@@ -39,6 +39,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.awt.Cursor as AwtCursor
 
+private const val PAGE_JUMP_ROWS = 15
+
 private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
     if (hl.regex) {
         regexRanges(msg, hl.pattern)
@@ -177,6 +179,7 @@ fun LogViewer(
     onSelectAll: (() -> Unit)? = null,
     onClearSelection: (() -> Unit)? = null,
     onCopySelection: (() -> Unit)? = null,
+    navScrollMargin: Int = 5,
 ) {
     val tc        = tc()
     val mono      = monoFont()
@@ -310,13 +313,13 @@ fun LogViewer(
                     .focusRequester(fr)
                     .focusable()
                     .onPreviewKeyEvent { ev ->
-                        if (handleNavKey(ev, listItems, effectiveTab, lazyState, navScope,
+                        if (handleNavKey(ev, listItems, effectiveTab, lazyState, navScope, navScrollMargin,
                                 onSelectRow = { id -> itemOnSelRowRange(listOf(id)) },
                                 onAnchorReset = { anchorId = null })) return@onPreviewKeyEvent true
-                        handleSelKey(ev, listItems, effectiveTab, lazyState, navScope,
-                            itemOnSelRow, itemOnSelRowRange,
+                        handleSelKey(ev, listItems, effectiveTab, lazyState, navScope, navScrollMargin,
+                            itemOnSelRowRange,
                             anchorId, onAnchorChange = { anchorId = it },
-                            onSelectAll, onClearSelection, onCopySelection)
+                            actions = SelKeyActions(onSelectAll, onClearSelection, onCopySelection))
                     }
                     .border(1.dp, if (isFocused) tc.ac else Color.Transparent)
             ) {
@@ -532,10 +535,24 @@ fun LogViewer(
     }
 }
 
-private fun scrollIntoViewIfNeeded(lazyState: LazyListState, scope: CoroutineScope, targetItemsIdx: Int) {
+// Keeps `margin` rows of context visible around the cursor (like vim's scrolloff): the
+// highlight moves freely within that window with no scrolling, and only once it would land
+// within `margin` rows of the top/bottom edge does the viewport scroll to restore the margin.
+private fun scrollForCursor(lazyState: LazyListState, scope: CoroutineScope, targetItemsIdx: Int, margin: Int) {
     val visible = lazyState.layoutInfo.visibleItemsInfo
-    if (visible.any { it.index == targetItemsIdx }) return
-    scope.launch { lazyState.animateScrollToItem(maxOf(0, targetItemsIdx - 2)) }
+    if (visible.isEmpty()) {
+        scope.launch { lazyState.animateScrollToItem(maxOf(0, targetItemsIdx - margin)) }
+        return
+    }
+    val firstVisible = visible.first().index
+    val lastVisible = visible.last().index
+    val target = when {
+        targetItemsIdx < firstVisible + margin -> (targetItemsIdx - margin).coerceAtLeast(0)
+        targetItemsIdx > lastVisible - margin -> (targetItemsIdx + margin - visible.size + 1).coerceAtLeast(0)
+        else -> return
+    }
+    if (target == firstVisible) return
+    scope.launch { lazyState.animateScrollToItem(target) }
 }
 
 private fun handleNavKey(
@@ -544,6 +561,7 @@ private fun handleNavKey(
     tab: LogTab,
     lazyState: LazyListState,
     scope: CoroutineScope,
+    scrollMargin: Int,
     onSelectRow: (Int) -> Unit,
     onAnchorReset: () -> Unit = {},
 ): Boolean {
@@ -567,10 +585,9 @@ private fun handleNavKey(
         // Always replace the selection outright (never toggle): keyboard nav must stay
         // idempotent even if the same target row is selected again by a duplicate key event.
         onSelectRow(rows[i].entry.id)
-        scrollIntoViewIfNeeded(lazyState, scope, items.indexOf(rows[i]))
+        scrollForCursor(lazyState, scope, items.indexOf(rows[i]), scrollMargin)
     }
 
-    val page = 15
     return when {
         (ev.isMetaPressed || ev.isCtrlPressed) && ev.key == Key.DirectionUp   -> { moveTo(0); true }
         (ev.isMetaPressed || ev.isCtrlPressed) && ev.key == Key.DirectionDown -> { moveTo(rows.lastIndex); true }
@@ -578,11 +595,17 @@ private fun handleNavKey(
         ev.key == Key.MoveEnd    -> { moveTo(rows.lastIndex); true }
         ev.key == Key.DirectionUp   && !ev.isShiftPressed -> { moveTo(cursorIdx() - 1); true }
         ev.key == Key.DirectionDown && !ev.isShiftPressed -> { moveTo(cursorIdx() + 1); true }
-        ev.key == Key.PageUp     && !ev.isShiftPressed -> { moveTo(cursorIdx() - page); true }
-        ev.key == Key.PageDown   && !ev.isShiftPressed -> { moveTo(cursorIdx() + page); true }
+        ev.key == Key.PageUp     && !ev.isShiftPressed -> { moveTo(cursorIdx() - PAGE_JUMP_ROWS); true }
+        ev.key == Key.PageDown   && !ev.isShiftPressed -> { moveTo(cursorIdx() + PAGE_JUMP_ROWS); true }
         else -> false
     }
 }
+
+private data class SelKeyActions(
+    val onSelectAll: (() -> Unit)?,
+    val onClearSelection: (() -> Unit)?,
+    val onCopySelection: (() -> Unit)?,
+)
 
 private fun handleSelKey(
     ev: KeyEvent,
@@ -590,18 +613,15 @@ private fun handleSelKey(
     tab: LogTab,
     lazyState: LazyListState,
     scope: CoroutineScope,
-    onSelRow: (Int, Boolean, Boolean) -> Unit,
+    scrollMargin: Int,
     onSelRowRange: (List<Int>) -> Unit,
     anchorId: Int?,
     onAnchorChange: (Int?) -> Unit,
-    onSelectAll: (() -> Unit)?,
-    onClearSelection: (() -> Unit)?,
-    onCopySelection: (() -> Unit)?,
+    actions: SelKeyActions,
 ): Boolean {
     if (ev.type != KeyEventType.KeyDown) return false
     val rows = items.filterIsInstance<LogItem.Row>()
     val isAction = if (isMacOs) ev.isMetaPressed else ev.isCtrlPressed
-    val page = 15
 
     fun cursorIdx(): Int {
         val lastSel = tab.selected.maxOrNull()
@@ -623,17 +643,17 @@ private fun handleSelKey(
         val lo = minOf(anchorIdx, clamped)
         val hi = maxOf(anchorIdx, clamped)
         onSelRowRange(rows.subList(lo, hi + 1).map { it.entry.id })
-        scrollIntoViewIfNeeded(lazyState, scope, items.indexOf(rows[clamped]))
+        scrollForCursor(lazyState, scope, items.indexOf(rows[clamped]), scrollMargin)
     }
 
     return when {
         ev.isShiftPressed && ev.key == Key.DirectionUp   -> { extendTo(cursorIdx() - 1); true }
         ev.isShiftPressed && ev.key == Key.DirectionDown -> { extendTo(cursorIdx() + 1); true }
-        ev.isShiftPressed && ev.key == Key.PageUp        -> { extendTo(cursorIdx() - page); true }
-        ev.isShiftPressed && ev.key == Key.PageDown      -> { extendTo(cursorIdx() + page); true }
-        isAction && ev.key == Key.A -> { onAnchorChange(null); onSelectAll?.invoke(); true }
-        isAction && ev.key == Key.C -> { onCopySelection?.invoke(); true }
-        ev.key == Key.Escape        -> { onAnchorChange(null); onClearSelection?.invoke(); true }
+        ev.isShiftPressed && ev.key == Key.PageUp        -> { extendTo(cursorIdx() - PAGE_JUMP_ROWS); true }
+        ev.isShiftPressed && ev.key == Key.PageDown      -> { extendTo(cursorIdx() + PAGE_JUMP_ROWS); true }
+        isAction && ev.key == Key.A -> { onAnchorChange(null); actions.onSelectAll?.invoke(); true }
+        isAction && ev.key == Key.C -> { actions.onCopySelection?.invoke(); true }
+        ev.key == Key.Escape        -> { onAnchorChange(null); actions.onClearSelection?.invoke(); true }
         else -> false
     }
 }

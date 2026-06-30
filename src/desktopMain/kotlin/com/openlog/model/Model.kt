@@ -175,6 +175,7 @@ data class AppSettings(
     val annotationLogBlockStyle: AnnotationLogBlockStyle = AnnotationLogBlockStyle.JIRA_JAVA,
     val numberAnnotationBlocks: Boolean = false,
     val annotationPrefixLabel: String = "From",
+    val navScrollMargin: Int = 5,
 )
 
 enum class ThemePreset(val label: String) {

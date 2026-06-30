@@ -798,6 +798,7 @@ private fun FileView(state: AppState, tab: LogTab) {
             onSelectAll = { state.selectAll(tab.id) },
             onClearSelection = { state.clearSelection(tab.id) },
             onCopySelection = { state.copySelectedLines(tab.id) },
+            navScrollMargin = state.settings.navScrollMargin,
         )
         if (state.annotationVisible) {
             HDivider { delta ->
@@ -881,6 +882,7 @@ private fun CompareView(state: AppState) {
                         onSelectAll = { state.selectAll(leftTab.id) },
                         onClearSelection = { state.clearSelection(leftTab.id) },
                         onCopySelection = { state.copySelectedLines(leftTab.id) },
+                        navScrollMargin = state.settings.navScrollMargin,
                     )
                 }
             }
@@ -929,6 +931,7 @@ private fun CompareView(state: AppState) {
                         onSelectAll = { state.selectAll(rightTab.id) },
                         onClearSelection = { state.clearSelection(rightTab.id) },
                         onCopySelection = { state.copySelectedLines(rightTab.id) },
+                        navScrollMargin = state.settings.navScrollMargin,
                     )
                     if (state.annotationVisible) {
                         HDivider { d ->
@@ -1430,6 +1433,28 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                     "From",
                     Modifier.fillMaxWidth(),
                     fontSize = 12.sp,
+                )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AppText(
+                        "Keyboard scroll margin",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        fontFamily = UI,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    AppText("${state.settings.navScrollMargin}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                }
+                val scrollMargins = listOf(0, 2, 3, 5, 8, 12)
+                SegmentedControl(
+                    options = scrollMargins.map { it.toString() },
+                    selectedIndices = setOf(scrollMargins.indexOf(state.settings.navScrollMargin)),
+                    onToggle = { idx -> state.updateSettings { it.copy(navScrollMargin = scrollMargins[idx]) } },
                 )
             }
             Row(
