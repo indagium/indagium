@@ -16,10 +16,11 @@ jobs:
             artifact_path: build/compose/binaries/main/deb
             artifact_name: openLog-linux-x64
 
-          - os: windows-latest
-            task: packageMsi
-            artifact_path: build/compose/binaries/main/msi
-            artifact_name: openLog-windows-x64
+          # Windows disabled for now — re-add when needed:
+          # - os: windows-latest
+          #   task: packageMsi
+          #   artifact_path: build/compose/binaries/main/msi
+          #   artifact_name: openLog-windows-x64
 
     runs-on: ${{ matrix.os }}
 
@@ -43,11 +44,9 @@ jobs:
             ${{ runner.os }}-gradle-
 
       - name: Make gradlew executable
-        if: runner.os == 'Linux'
         run: chmod +x gradlew
 
       - name: Package distribution
-        shell: bash
         run: ./gradlew ${{ matrix.task }}
 
       - name: Upload artifact
