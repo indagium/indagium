@@ -20,18 +20,20 @@ import kotlin.test.assertTrue
 
 class FilterBehaviorTest {
     @Test
-    fun activeTagNarrowsWithinPackagePrefix() {
-        val selected = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.auth.Login", "shown")
-        val sibling = LogEntry(2, "10:00:00.001", LogLevel.I, "com.app.net.Http", "hidden")
-        val otherPackage = LogEntry(3, "10:00:00.002", LogLevel.I, "com.other.auth.Login", "hidden")
+    fun activeTagsRefineMatchingPackagePrefixAndAddExternalTags() {
+        val selectedInsidePackage = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.design.Example", "shown")
+        val siblingInsidePackage = LogEntry(2, "10:00:00.001", LogLevel.I, "com.app.net.Http", "hidden")
+        val selectedExternalTag = LogEntry(3, "10:00:00.002", LogLevel.I, "com.other.auth.Login", "shown")
+        val unrelated = LogEntry(4, "10:00:00.003", LogLevel.I, "org.other.Network", "hidden")
         val filter = Filter(
             pkgPrefixes = setOf("com.app"),
-            activeTags = setOf("com.app.auth.Login"),
+            activeTags = setOf("com.app.design.Example", "com.other.auth.Login"),
         )
 
-        assertTrue(passesFilter(selected, filter))
-        assertFalse(passesFilter(sibling, filter))
-        assertFalse(passesFilter(otherPackage, filter))
+        assertTrue(passesFilter(selectedInsidePackage, filter))
+        assertFalse(passesFilter(siblingInsidePackage, filter))
+        assertTrue(passesFilter(selectedExternalTag, filter))
+        assertFalse(passesFilter(unrelated, filter))
     }
 
     @Test

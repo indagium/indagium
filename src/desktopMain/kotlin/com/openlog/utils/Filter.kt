@@ -59,10 +59,17 @@ private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter): Boolean =
             if (filter.activeTags.isEmpty() && filter.pkgPrefixes.isEmpty()) {
                 true
             } else {
-                val prefixPass = filter.pkgPrefixes.isEmpty() ||
-                    filter.pkgPrefixes.any { pfx -> tagMatchesPrefix(entry.tag, pfx) }
-                val activeTagPass = filter.activeTags.isEmpty() || entry.tag in filter.activeTags
-                prefixPass && activeTagPass
+                val selectedExactTagPass = entry.tag in filter.activeTags
+                if (selectedExactTagPass) {
+                    true
+                } else {
+                    filter.pkgPrefixes
+                        .filter { pfx -> tagMatchesPrefix(entry.tag, pfx) }
+                        .any { pfx ->
+                            val scopedActiveTags = filter.activeTags.filter { tag -> tagMatchesPrefix(tag, pfx) }
+                            scopedActiveTags.isEmpty()
+                        }
+                }
             }
         }
 
