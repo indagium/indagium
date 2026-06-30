@@ -1684,11 +1684,6 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
                 AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
             }
         }
-        VerticalScrollbar(
-            adapter = rememberScrollbarAdapter(scroll),
-            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-            style = appScrollbarStyle(tc),
-        )
     }
 }
 
