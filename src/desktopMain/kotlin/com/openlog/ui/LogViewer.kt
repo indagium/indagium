@@ -13,10 +13,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -31,6 +35,7 @@ import androidx.compose.ui.unit.sp
 import com.openlog.model.*
 import com.openlog.utils.computeItems
 import com.openlog.utils.regexRanges
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.awt.Cursor as AwtCursor
 
@@ -239,6 +244,9 @@ fun LogViewer(
             SideEffect {
                 boundsMap.keys.retainAll(visibleIds.toSet())
             }
+            val fr = remember { FocusRequester() }
+            var isFocused by remember { mutableStateOf(false) }
+            val navScope = rememberCoroutineScope()
             Box(
                 Modifier.fillMaxSize()
                     .onGloballyPositioned { posY[0] = it.positionInRoot().y }
@@ -255,6 +263,7 @@ fun LogViewer(
                                     PointerEventType.Press -> if (ev.buttons.isPrimaryPressed) {
                                         startPos = ch.position
                                         dragSelecting = false
+                                        fr.requestFocus()
                                         if (
                                             ch.position.x > size.width - verticalScrollbarGutterPx ||
                                             ch.position.y > size.height - horizontalScrollbarGutterPx
@@ -293,6 +302,11 @@ fun LogViewer(
                             }
                         }
                     }
+                    .onFocusChanged { isFocused = it.isFocused }
+                    .focusRequester(fr)
+                    .focusable()
+                    .onKeyEvent { ev -> handleNavKey(ev, listItems, effectiveTab, lazyState, navScope, itemOnSelRow) }
+                    .border(1.dp, if (isFocused) tc.ac else Color.Transparent)
             ) {
                 Column(Modifier.fillMaxSize()) {
                     // Content area: horizontal scroll wraps LazyColumn
@@ -503,6 +517,50 @@ fun LogViewer(
             ColHeader(hasPidTid)
             ItemList(items, rowBoundsAbs, boxPosY, panelKey = "${tab.id}:main", listState = mainLazyState)
         }
+    }
+}
+
+private fun handleNavKey(
+    ev: KeyEvent,
+    items: List<LogItem>,
+    tab: LogTab,
+    lazyState: LazyListState,
+    scope: CoroutineScope,
+    onSelRow: (Int, Boolean, Boolean) -> Unit,
+    onAnchorReset: () -> Unit = {},
+): Boolean {
+    if (ev.type != KeyEventType.KeyDown) return false
+    val rows = items.filterIsInstance<LogItem.Row>()
+    if (rows.isEmpty()) return false
+
+    fun cursorIdx(): Int {
+        val lastSel = tab.selected.maxOrNull()
+        return if (lastSel != null) {
+            rows.indexOfFirst { it.entry.id == lastSel }.coerceAtLeast(0)
+        } else {
+            val vis = lazyState.firstVisibleItemIndex
+            rows.indexOfFirst { r -> items.indexOf(r) >= vis }.coerceAtLeast(0)
+        }
+    }
+
+    fun moveTo(rowIdx: Int) {
+        val i = rowIdx.coerceIn(0, rows.lastIndex)
+        onAnchorReset()
+        onSelRow(rows[i].entry.id, false, false)
+        scope.launch { lazyState.animateScrollToItem(maxOf(0, items.indexOf(rows[i]) - 2)) }
+    }
+
+    val page = 15
+    return when {
+        (ev.isMetaPressed || ev.isCtrlPressed) && ev.key == Key.DirectionUp   -> { moveTo(0); true }
+        (ev.isMetaPressed || ev.isCtrlPressed) && ev.key == Key.DirectionDown -> { moveTo(rows.lastIndex); true }
+        ev.key == Key.MoveHome   -> { moveTo(0); true }
+        ev.key == Key.MoveEnd    -> { moveTo(rows.lastIndex); true }
+        ev.key == Key.DirectionUp   && !ev.isShiftPressed -> { moveTo(cursorIdx() - 1); true }
+        ev.key == Key.DirectionDown && !ev.isShiftPressed -> { moveTo(cursorIdx() + 1); true }
+        ev.key == Key.PageUp     && !ev.isShiftPressed -> { moveTo(cursorIdx() - page); true }
+        ev.key == Key.PageDown   && !ev.isShiftPressed -> { moveTo(cursorIdx() + page); true }
+        else -> false
     }
 }
 
