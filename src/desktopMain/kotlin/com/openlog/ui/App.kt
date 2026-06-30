@@ -45,6 +45,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -123,6 +124,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         overrideDescendants = true
                     ) else Modifier
                 )
+                .onPreviewKeyEvent { ev -> handleGlobalKey(ev, state) }
         ) {
             Column(Modifier.fillMaxSize()) {
                 TabBar(state)
@@ -575,8 +577,37 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     SettingsDialog(state) { state.settingsOpen = false }
                 }
             }
+
+            // ── Keyboard shortcuts dialog ─────────────────────────────
+            if (state.shortcutsOpen) {
+                Dialog(onDismissRequest = { state.shortcutsOpen = false }) {
+                    KeyboardShortcutsDialog { state.shortcutsOpen = false }
+                }
+            }
         }
     }
+}
+
+private fun handleGlobalKey(ev: KeyEvent, state: AppState): Boolean {
+    if (ev.type != KeyEventType.KeyDown) return false
+    if (!ev.isActionKey) return false
+    return when {
+        ev.isShiftPressed && ev.key == Key.F -> { state.updateFilterVisible(!state.filterVisible); true }
+        ev.isShiftPressed && ev.key == Key.A -> { state.updateAnnotationVisible(!state.annotationVisible); true }
+        ev.isShiftPressed && ev.key == Key.D -> { state.updateCompareMode(!state.compareMode); true }
+        ev.key == Key.RightBracket           -> { navigateTab(state, +1); true }
+        ev.key == Key.LeftBracket            -> { navigateTab(state, -1); true }
+        ev.key == Key.W                      -> { state.activeTab()?.id?.let(state::closeTab); true }
+        ev.key == Key.Slash                  -> { state.shortcutsOpen = true; true }
+        else -> false
+    }
+}
+
+private fun navigateTab(state: AppState, delta: Int) {
+    val ids = state.tabs.map { it.id }
+    val cur = ids.indexOf(state.activeTabId)
+    if (cur < 0 || ids.size < 2) return
+    state.activateTab(ids[(cur + delta).mod(ids.size)])
 }
 
 // ── Add annotation dialog ─────────────────────────────────────────────
@@ -1397,6 +1428,14 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                AppText("Keyboard shortcuts", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                AppButton("Show shortcuts…", onClick = { onDismiss(); state.shortcutsOpen = true }, variant = ButtonVariant.Secondary)
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 AppText("Version", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
                 AppText(BuildInfo.APP_VERSION, color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
             }
@@ -1404,6 +1443,123 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
             }
         }
+    }
+}
+
+@Composable
+private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
+    val tc = tc()
+    val scroll = rememberScrollState()
+    val shape = RoundedCornerShape(8.dp)
+    val mac = isMacOs
+
+    data class ShortcutRow(val label: String, val description: String)
+
+    data class ShortcutGroup(val title: String, val rows: List<ShortcutRow>)
+
+    val groups = listOf(
+        ShortcutGroup(
+            "Panels",
+            listOf(
+                ShortcutRow(if (mac) "⌘ ⇧ F" else "Ctrl Shift F", "Toggle filter panel"),
+                ShortcutRow(if (mac) "⌘ ⇧ A" else "Ctrl Shift A", "Toggle annotation panel"),
+                ShortcutRow(if (mac) "⌘ ⇧ D" else "Ctrl Shift D", "Toggle compare mode"),
+            ),
+        ),
+        ShortcutGroup(
+            "Tabs",
+            listOf(
+                ShortcutRow(if (mac) "⌘ ]" else "Ctrl ]", "Next tab"),
+                ShortcutRow(if (mac) "⌘ [" else "Ctrl [", "Previous tab"),
+                ShortcutRow(if (mac) "⌘ W" else "Ctrl W", "Close current tab"),
+            ),
+        ),
+        ShortcutGroup(
+            "Navigation  (log view — click to focus)",
+            listOf(
+                ShortcutRow("↑ / ↓", "Move selection up / down"),
+                ShortcutRow("Page Up / Page Down", "Scroll ~15 rows"),
+                ShortcutRow("Home / End", "Jump to first / last row"),
+                ShortcutRow(if (mac) "⌘ ↑  /  ⌘ ↓" else "Ctrl ↑  /  Ctrl ↓", "Jump to first / last row"),
+            ),
+        ),
+        ShortcutGroup(
+            "Selection  (log view — click to focus)",
+            listOf(
+                ShortcutRow("⇧ ↑  /  ⇧ ↓", "Extend selection up / down"),
+                ShortcutRow("⇧ Page Up  /  ⇧ Page Down", "Extend selection by page"),
+                ShortcutRow(if (mac) "⌘ A" else "Ctrl A", "Select all visible rows"),
+                ShortcutRow(if (mac) "⌘ C" else "Ctrl C", "Copy selected rows"),
+                ShortcutRow("Escape", "Clear selection"),
+            ),
+        ),
+        ShortcutGroup(
+            "Other",
+            listOf(
+                ShortcutRow(if (mac) "⌘ /" else "Ctrl /", "Show keyboard shortcuts"),
+            ),
+        ),
+    )
+
+    Box(
+        Modifier
+            .width(560.dp)
+            .heightIn(max = 700.dp)
+            .clip(shape)
+            .background(tc.p)
+            .border(1.dp, tc.br, shape),
+    ) {
+        Column(
+            Modifier.verticalScroll(scroll).padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppText("Keyboard Shortcuts", color = tc.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                CloseButton(onClick = onDismiss)
+            }
+            groups.forEach { group ->
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    AppText(
+                        group.title,
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        fontFamily = UI,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    group.rows.forEach { row ->
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(
+                                Modifier
+                                    .widthIn(min = 200.dp)
+                                    .background(tc.p2, RoundedCornerShape(4.dp))
+                                    .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 8.dp, vertical = 3.dp),
+                                contentAlignment = Alignment.CenterStart,
+                            ) {
+                                AppText(row.label, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                            }
+                            AppText(row.description, color = tc.ts, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
+            }
+        }
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scroll),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+            style = appScrollbarStyle(tc),
+        )
     }
 }
 

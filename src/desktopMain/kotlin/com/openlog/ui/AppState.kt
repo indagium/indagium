@@ -95,6 +95,7 @@ class AppState(
     var savedFilters by mutableStateOf<List<SavedFilter>>(emptyList())
     var tagUsage by mutableStateOf<Map<String, Int>>(emptyMap())
     var settingsOpen by mutableStateOf(false)
+    var shortcutsOpen by mutableStateOf(false)
     var recentFiles by mutableStateOf<List<String>>(emptyList())
     var recentMenuOpen by mutableStateOf(false)
     var recentNotes by mutableStateOf<List<String>>(emptyList())
