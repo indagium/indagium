@@ -1599,6 +1599,31 @@ class AppStateBehaviorTest {
         assertTrue(restored.tabs.any { it.id == "t8" })
     }
 
+    @Test
+    fun selectAllSelectsAllVisibleRows() {
+        val entries = (1..5).map { i -> LogEntry(i, "10:00:0$i.000", LogLevel.I, "Tag", "msg$i") }
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", entries))
+        state.activeTabId = "t1"
+        state.selectAll("t1")
+        assertEquals(5, state.activeTab()!!.selected.size)
+    }
+
+    @Test
+    fun selectAllRespectsActiveFilter() {
+        val entries = listOf(
+            LogEntry(1, "10:00:01.000", LogLevel.D, "Tag", "msg1"),
+            LogEntry(2, "10:00:02.000", LogLevel.E, "Tag", "msg2"),
+            LogEntry(3, "10:00:03.000", LogLevel.D, "Tag", "msg3"),
+        )
+        val state = AppState()
+        val tab = mkTab("t1", "test.log", entries)
+        state.tabs = listOf(tab.copy(filter = tab.filter.copy(levels = setOf(LogLevel.E))))
+        state.activeTabId = "t1"
+        state.selectAll("t1")
+        assertEquals(setOf(2), state.activeTab()!!.selected)
+    }
+
     private fun waitUntil(timeoutMs: Long = 2_000, condition: () -> Boolean) {
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
         while (System.nanoTime() < deadline) {

@@ -795,6 +795,9 @@ private fun FileView(state: AppState, tab: LogTab) {
             scrollStateStore = state.logViewerScrollStateStore,
             annotationNavigationRequest = state.pendingAnnotationNavigation,
             onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
+            onSelectAll = { state.selectAll(tab.id) },
+            onClearSelection = { state.clearSelection(tab.id) },
+            onCopySelection = { state.copySelectedLines(tab.id) },
         )
         if (state.annotationVisible) {
             HDivider { delta ->
@@ -875,6 +878,9 @@ private fun CompareView(state: AppState) {
                         scrollStateStore = state.logViewerScrollStateStore,
                         annotationNavigationRequest = state.pendingAnnotationNavigation,
                         onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
+                        onSelectAll = { state.selectAll(leftTab.id) },
+                        onClearSelection = { state.clearSelection(leftTab.id) },
+                        onCopySelection = { state.copySelectedLines(leftTab.id) },
                     )
                 }
             }
@@ -920,6 +926,9 @@ private fun CompareView(state: AppState) {
                         scrollStateStore = state.logViewerScrollStateStore,
                         annotationNavigationRequest = state.pendingAnnotationNavigation,
                         onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
+                        onSelectAll = { state.selectAll(rightTab.id) },
+                        onClearSelection = { state.clearSelection(rightTab.id) },
+                        onCopySelection = { state.copySelectedLines(rightTab.id) },
                     )
                     if (state.annotationVisible) {
                         HDivider { d ->

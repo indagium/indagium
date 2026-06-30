@@ -718,6 +718,12 @@ class AppState(
 
     fun clearSelection(tabId: String) = upTab(tabId) { it.copy(selected = emptySet()) }
 
+    fun selectAll(tabId: String) {
+        val t = tab(tabId) ?: return
+        val ids = computeItems(t, true).filterIsInstance<LogItem.Row>().map { it.entry.id }
+        setSelectedRows(tabId, ids)
+    }
+
     fun requestAnnotationNavigation(ownerTabId: String, block: AnnBlock.LogRef) {
         val targetTabId = block.sourceTabId ?: ownerTabId
         if (block.logIds.isEmpty() || tab(targetTabId) == null) return

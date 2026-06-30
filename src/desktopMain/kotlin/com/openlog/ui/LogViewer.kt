@@ -174,6 +174,9 @@ fun LogViewer(
     scrollStateStore: LogViewerScrollStateStore? = null,
     annotationNavigationRequest: AnnotationNavigationRequest? = null,
     onConsumeAnnotationNavigation: (Long) -> Unit = {},
+    onSelectAll: (() -> Unit)? = null,
+    onClearSelection: (() -> Unit)? = null,
+    onCopySelection: (() -> Unit)? = null,
 ) {
     val tc        = tc()
     val mono      = monoFont()
@@ -247,6 +250,7 @@ fun LogViewer(
             val fr = remember { FocusRequester() }
             var isFocused by remember { mutableStateOf(false) }
             val navScope = rememberCoroutineScope()
+            var anchorId by remember(effectiveTab.id) { mutableStateOf<Int?>(null) }
             Box(
                 Modifier.fillMaxSize()
                     .onGloballyPositioned { posY[0] = it.positionInRoot().y }
@@ -305,7 +309,14 @@ fun LogViewer(
                     .onFocusChanged { isFocused = it.isFocused }
                     .focusRequester(fr)
                     .focusable()
-                    .onKeyEvent { ev -> handleNavKey(ev, listItems, effectiveTab, lazyState, navScope, itemOnSelRow) }
+                    .onKeyEvent { ev ->
+                        if (handleNavKey(ev, listItems, effectiveTab, lazyState, navScope, itemOnSelRow,
+                                onAnchorReset = { anchorId = null })) return@onKeyEvent true
+                        handleSelKey(ev, listItems, effectiveTab, lazyState, navScope,
+                            itemOnSelRow, itemOnSelRowRange,
+                            anchorId, onAnchorChange = { anchorId = it },
+                            onSelectAll, onClearSelection, onCopySelection)
+                    }
                     .border(1.dp, if (isFocused) tc.ac else Color.Transparent)
             ) {
                 Column(Modifier.fillMaxSize()) {
@@ -560,6 +571,60 @@ private fun handleNavKey(
         ev.key == Key.DirectionDown && !ev.isShiftPressed -> { moveTo(cursorIdx() + 1); true }
         ev.key == Key.PageUp     && !ev.isShiftPressed -> { moveTo(cursorIdx() - page); true }
         ev.key == Key.PageDown   && !ev.isShiftPressed -> { moveTo(cursorIdx() + page); true }
+        else -> false
+    }
+}
+
+private fun handleSelKey(
+    ev: KeyEvent,
+    items: List<LogItem>,
+    tab: LogTab,
+    lazyState: LazyListState,
+    scope: CoroutineScope,
+    onSelRow: (Int, Boolean, Boolean) -> Unit,
+    onSelRowRange: (List<Int>) -> Unit,
+    anchorId: Int?,
+    onAnchorChange: (Int?) -> Unit,
+    onSelectAll: (() -> Unit)?,
+    onClearSelection: (() -> Unit)?,
+    onCopySelection: (() -> Unit)?,
+): Boolean {
+    if (ev.type != KeyEventType.KeyDown) return false
+    val rows = items.filterIsInstance<LogItem.Row>()
+    val isAction = if (isMacOs) ev.isMetaPressed else ev.isCtrlPressed
+    val page = 15
+
+    fun cursorIdx(): Int {
+        val lastSel = tab.selected.maxOrNull()
+        return if (lastSel != null) {
+            rows.indexOfFirst { it.entry.id == lastSel }.coerceAtLeast(0)
+        } else {
+            val vis = lazyState.firstVisibleItemIndex
+            rows.indexOfFirst { r -> items.indexOf(r) >= vis }.coerceAtLeast(0)
+        }
+    }
+
+    fun extendTo(newRowIdx: Int) {
+        if (rows.isEmpty()) return
+        val clamped = newRowIdx.coerceIn(0, rows.lastIndex)
+        val target = rows[clamped].entry.id
+        val anchor = anchorId ?: tab.selected.minOrNull() ?: target
+        onAnchorChange(anchor)
+        val anchorIdx = rows.indexOfFirst { it.entry.id == anchor }.coerceAtLeast(0)
+        val lo = minOf(anchorIdx, clamped)
+        val hi = maxOf(anchorIdx, clamped)
+        onSelRowRange(rows.subList(lo, hi + 1).map { it.entry.id })
+        scope.launch { lazyState.animateScrollToItem(maxOf(0, items.indexOf(rows[clamped]) - 2)) }
+    }
+
+    return when {
+        ev.isShiftPressed && ev.key == Key.DirectionUp   -> { extendTo(cursorIdx() - 1); true }
+        ev.isShiftPressed && ev.key == Key.DirectionDown -> { extendTo(cursorIdx() + 1); true }
+        ev.isShiftPressed && ev.key == Key.PageUp        -> { extendTo(cursorIdx() - page); true }
+        ev.isShiftPressed && ev.key == Key.PageDown      -> { extendTo(cursorIdx() + page); true }
+        isAction && ev.key == Key.A -> { onAnchorChange(null); onSelectAll?.invoke(); true }
+        isAction && ev.key == Key.C -> { onCopySelection?.invoke(); true }
+        ev.key == Key.Escape        -> { onAnchorChange(null); onClearSelection?.invoke(); true }
         else -> false
     }
 }
