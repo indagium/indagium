@@ -20,8 +20,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Build (compile + test)
 ./gradlew build
 
-# Package distributable (macOS .dmg)
-./gradlew packageDmg
+# Package distributable
+./gradlew packageDmg        # macOS .dmg (local)
+./gradlew packageDeb        # Linux .deb (run on Linux)
+./gradlew packageMsi        # Windows .msi (run on Windows)
+
+# Release (triggers GitHub Actions → builds Linux + Windows → creates GitHub Release)
+git tag v1.0.4 && git push --tags
 ```
 
 Source sets are `desktopMain` and `desktopTest` (Kotlin Multiplatform with a single `jvm("desktop")` target).
