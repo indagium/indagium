@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Git rules
+
+- **Never `git push` without asking the user first.**
+- Exception: after a branch has been merged into main, you may ask the user if they want to push main.
+
 ## Commands
 
 ```bash
