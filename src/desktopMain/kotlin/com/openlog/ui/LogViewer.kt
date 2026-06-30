@@ -254,6 +254,7 @@ fun LogViewer(
             var isFocused by remember { mutableStateOf(false) }
             val navScope = rememberCoroutineScope()
             var anchorId by remember(effectiveTab.id) { mutableStateOf<Int?>(null) }
+            var cursorId by remember(effectiveTab.id) { mutableStateOf<Int?>(null) }
             Box(
                 Modifier.fillMaxSize()
                     .onGloballyPositioned { posY[0] = it.positionInRoot().y }
@@ -313,12 +314,16 @@ fun LogViewer(
                     .focusRequester(fr)
                     .focusable()
                     .onPreviewKeyEvent { ev ->
+                        val selCursor = SelectionCursor(
+                            anchorId, cursorId,
+                            onAnchorChange = { anchorId = it },
+                            onCursorChange = { cursorId = it },
+                        )
                         if (handleNavKey(ev, listItems, effectiveTab, lazyState, navScope, navScrollMargin,
-                                onSelectRow = { id -> itemOnSelRowRange(listOf(id)) },
-                                onAnchorReset = { anchorId = null })) return@onPreviewKeyEvent true
+                                selCursor, onSelectRow = { id -> itemOnSelRowRange(listOf(id)) }))
+                            return@onPreviewKeyEvent true
                         handleSelKey(ev, listItems, effectiveTab, lazyState, navScope, navScrollMargin,
-                            itemOnSelRowRange,
-                            anchorId, onAnchorChange = { anchorId = it },
+                            itemOnSelRowRange, selCursor,
                             actions = SelKeyActions(onSelectAll, onClearSelection, onCopySelection))
                     }
                     .border(1.dp, if (isFocused) tc.ac else Color.Transparent)
@@ -560,6 +565,28 @@ private fun scrollForCursor(lazyState: LazyListState, scope: CoroutineScope, tar
     scope.launch { lazyState.scrollToItem(target) }
 }
 
+// Bundles the keyboard selection's anchor (fixed end of a shift-extend range) and cursor
+// (moving end). The cursor is tracked explicitly rather than re-derived from the selection set
+// on every keystroke: tab.selected.maxOrNull() only identifies the moving end while extending
+// downward — extend upward (past the anchor) and it locks onto the anchor instead, which gets
+// the selection stuck or makes it jump when the direction reverses. The explicit cursorId is
+// trusted as long as it's still part of the current selection; otherwise (a plain mouse click,
+// a tab switch, Select All, ...) it falls back to the largest selected id.
+private class SelectionCursor(
+    val anchorId: Int?,
+    val cursorId: Int?,
+    val onAnchorChange: (Int?) -> Unit,
+    val onCursorChange: (Int?) -> Unit,
+) {
+    fun effectiveCursorId(tab: LogTab): Int? =
+        cursorId?.takeIf { it in tab.selected } ?: tab.selected.maxOrNull()
+
+    fun reset() {
+        onAnchorChange(null)
+        onCursorChange(null)
+    }
+}
+
 private fun handleNavKey(
     ev: KeyEvent,
     items: List<LogItem>,
@@ -567,17 +594,17 @@ private fun handleNavKey(
     lazyState: LazyListState,
     scope: CoroutineScope,
     scrollMargin: Int,
+    cursor: SelectionCursor,
     onSelectRow: (Int) -> Unit,
-    onAnchorReset: () -> Unit = {},
 ): Boolean {
     if (ev.type != KeyEventType.KeyDown) return false
     val rows = items.filterIsInstance<LogItem.Row>()
     if (rows.isEmpty()) return false
 
     fun cursorIdx(): Int {
-        val lastSel = tab.selected.maxOrNull()
-        return if (lastSel != null) {
-            rows.indexOfFirst { it.entry.id == lastSel }.coerceAtLeast(0)
+        val cur = cursor.effectiveCursorId(tab)
+        return if (cur != null) {
+            rows.indexOfFirst { it.entry.id == cur }.coerceAtLeast(0)
         } else {
             val vis = lazyState.firstVisibleItemIndex
             rows.indexOfFirst { r -> items.indexOf(r) >= vis }.coerceAtLeast(0)
@@ -586,10 +613,11 @@ private fun handleNavKey(
 
     fun moveTo(rowIdx: Int) {
         val i = rowIdx.coerceIn(0, rows.lastIndex)
-        onAnchorReset()
+        cursor.onAnchorChange(null)
         // Always replace the selection outright (never toggle): keyboard nav must stay
         // idempotent even if the same target row is selected again by a duplicate key event.
         onSelectRow(rows[i].entry.id)
+        cursor.onCursorChange(rows[i].entry.id)
         scrollForCursor(lazyState, scope, items.indexOf(rows[i]), scrollMargin)
     }
 
@@ -620,8 +648,7 @@ private fun handleSelKey(
     scope: CoroutineScope,
     scrollMargin: Int,
     onSelRowRange: (List<Int>) -> Unit,
-    anchorId: Int?,
-    onAnchorChange: (Int?) -> Unit,
+    cursor: SelectionCursor,
     actions: SelKeyActions,
 ): Boolean {
     if (ev.type != KeyEventType.KeyDown) return false
@@ -629,9 +656,9 @@ private fun handleSelKey(
     val isAction = if (isMacOs) ev.isMetaPressed else ev.isCtrlPressed
 
     fun cursorIdx(): Int {
-        val lastSel = tab.selected.maxOrNull()
-        return if (lastSel != null) {
-            rows.indexOfFirst { it.entry.id == lastSel }.coerceAtLeast(0)
+        val cur = cursor.effectiveCursorId(tab)
+        return if (cur != null) {
+            rows.indexOfFirst { it.entry.id == cur }.coerceAtLeast(0)
         } else {
             val vis = lazyState.firstVisibleItemIndex
             rows.indexOfFirst { r -> items.indexOf(r) >= vis }.coerceAtLeast(0)
@@ -642,8 +669,9 @@ private fun handleSelKey(
         if (rows.isEmpty()) return
         val clamped = newRowIdx.coerceIn(0, rows.lastIndex)
         val target = rows[clamped].entry.id
-        val anchor = anchorId ?: tab.selected.minOrNull() ?: target
-        onAnchorChange(anchor)
+        val anchor = cursor.anchorId ?: tab.selected.minOrNull() ?: target
+        cursor.onAnchorChange(anchor)
+        cursor.onCursorChange(target)
         val anchorIdx = rows.indexOfFirst { it.entry.id == anchor }.coerceAtLeast(0)
         val lo = minOf(anchorIdx, clamped)
         val hi = maxOf(anchorIdx, clamped)
@@ -656,9 +684,9 @@ private fun handleSelKey(
         ev.isShiftPressed && ev.key == Key.DirectionDown -> { extendTo(cursorIdx() + 1); true }
         ev.isShiftPressed && ev.key == Key.PageUp        -> { extendTo(cursorIdx() - PAGE_JUMP_ROWS); true }
         ev.isShiftPressed && ev.key == Key.PageDown      -> { extendTo(cursorIdx() + PAGE_JUMP_ROWS); true }
-        isAction && ev.key == Key.A -> { onAnchorChange(null); actions.onSelectAll?.invoke(); true }
+        isAction && ev.key == Key.A -> { cursor.reset(); actions.onSelectAll?.invoke(); true }
         isAction && ev.key == Key.C -> { actions.onCopySelection?.invoke(); true }
-        ev.key == Key.Escape        -> { onAnchorChange(null); actions.onClearSelection?.invoke(); true }
+        ev.key == Key.Escape        -> { cursor.reset(); actions.onClearSelection?.invoke(); true }
         else -> false
     }
 }
