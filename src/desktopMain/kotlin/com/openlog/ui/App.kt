@@ -1613,10 +1613,52 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
         ),
     )
 
+    // Split the groups across two "pages" so the dialog reads like an open book — keeps the
+    // height short even as the shortcut list grows, instead of one long scrolling column.
+    val splitAt = (groups.size + 1) / 2
+    val leftPage = groups.subList(0, splitAt)
+    val rightPage = groups.subList(splitAt, groups.size)
+
+    @Composable
+    fun PageColumn(page: List<ShortcutGroup>, modifier: Modifier) {
+        Column(modifier, verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            page.forEach { group ->
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    AppText(
+                        group.title,
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        fontFamily = UI,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    group.rows.forEach { row ->
+                        Row(
+                            Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(
+                                Modifier
+                                    .widthIn(min = 150.dp)
+                                    .background(tc.p2, RoundedCornerShape(4.dp))
+                                    .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                                contentAlignment = Alignment.CenterStart,
+                            ) {
+                                AppText(row.label, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                            }
+                            AppText(row.description, color = tc.ts, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Box(
         Modifier
-            .width(580.dp)
-            .heightIn(max = 900.dp)
+            .width(900.dp)
+            .heightIn(max = 560.dp)
             .clip(shape)
             .background(tc.p)
             .border(1.dp, tc.br, shape),
@@ -1633,35 +1675,10 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
                 AppText("Keyboard Shortcuts", color = tc.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 CloseButton(onClick = onDismiss)
             }
-            groups.forEach { group ->
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    AppText(
-                        group.title,
-                        color = tc.td,
-                        fontSize = 10.sp,
-                        fontFamily = UI,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    group.rows.forEach { row ->
-                        Row(
-                            Modifier.fillMaxWidth().padding(vertical = 1.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Box(
-                                Modifier
-                                    .widthIn(min = 200.dp)
-                                    .background(tc.p2, RoundedCornerShape(4.dp))
-                                    .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                                contentAlignment = Alignment.CenterStart,
-                            ) {
-                                AppText(row.label, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
-                            }
-                            AppText(row.description, color = tc.ts, fontSize = 12.sp, modifier = Modifier.weight(1f))
-                        }
-                    }
-                }
+            Row(Modifier.fillMaxWidth()) {
+                PageColumn(leftPage, Modifier.weight(1f).padding(end = 20.dp))
+                Box(Modifier.width(1.dp).fillMaxHeight().background(tc.br))
+                PageColumn(rightPage, Modifier.weight(1f).padding(start = 20.dp))
             }
             Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
                 AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
