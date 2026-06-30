@@ -762,6 +762,8 @@ private fun FileView(state: AppState, tab: LogTab) {
             onCollapseAll = { state.collapseAll(tab.id) },
             onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
             scrollStateStore = state.logViewerScrollStateStore,
+            annotationNavigationRequest = state.pendingAnnotationNavigation,
+            onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
         )
         if (state.annotationVisible) {
             HDivider { delta ->
@@ -783,6 +785,7 @@ private fun FileView(state: AppState, tab: LogTab) {
                 onRemoveBlock = { state.removeBlock(tab.id, it) },
                 onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
                 onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
+                onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
                 width = state.annotationPanelWidth,
             )
         }
@@ -839,6 +842,8 @@ private fun CompareView(state: AppState) {
                         onCollapseAll = { state.collapseAll(leftTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(leftTab.id) },
                         scrollStateStore = state.logViewerScrollStateStore,
+                        annotationNavigationRequest = state.pendingAnnotationNavigation,
+                        onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
                     )
                 }
             }
@@ -882,6 +887,8 @@ private fun CompareView(state: AppState) {
                         onCollapseAll = { state.collapseAll(rightTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(rightTab.id) },
                         scrollStateStore = state.logViewerScrollStateStore,
+                        annotationNavigationRequest = state.pendingAnnotationNavigation,
+                        onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
                     )
                     if (state.annotationVisible) {
                         HDivider { d ->
@@ -904,6 +911,7 @@ private fun CompareView(state: AppState) {
                             onRemoveBlock = { state.removeBlock(leftTab.id, it) },
                             onMoveBlock = { bid, d -> state.moveBlock(leftTab.id, bid, d) },
                             onAddNoteAfter = { state.addNoteBlock(leftTab.id, it) },
+                            onNavigateLogRef = { state.requestAnnotationNavigation(leftTab.id, it) },
                             width = state.annotationPanelWidth,
                         )
                     }
@@ -1259,6 +1267,25 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 ThemeGallery(state)
             }
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                AppText(
+                    "Default save folder",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    fontFamily = UI,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AppText(
+                        state.settings.defaultSaveDir ?: "(not set)", color = tc.ts, fontSize = 11.sp, fontFamily = MONO,
+                        modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis
+                    )
+                    AppButton("Browse", onClick = { state.pickSaveFolder() })
+                    if (state.settings.defaultSaveDir != null) AppButton(
+                        "Clear",
+                        onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } })
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1347,25 +1374,6 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                     selectedIndices = setOf(tabLimits.indexOf(state.settings.visibleTabLimit)),
                     onToggle = { idx -> state.updateSettings { it.copy(visibleTabLimit = tabLimits[idx]) } },
                 )
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                AppText(
-                    "Default save folder",
-                    color = tc.td,
-                    fontSize = 10.sp,
-                    fontFamily = UI,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    AppText(
-                        state.settings.defaultSaveDir ?: "(not set)", color = tc.ts, fontSize = 11.sp, fontFamily = MONO,
-                        modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis
-                    )
-                    AppButton("Browse", onClick = { state.pickSaveFolder() })
-                    if (state.settings.defaultSaveDir != null) AppButton(
-                        "Clear",
-                        onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } })
-                }
             }
             AnnotationSettingsRow(state)
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {

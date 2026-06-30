@@ -50,10 +50,32 @@ private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
 
 internal fun nextOriginalSelectionAfterFilteredSelection(filteredSelection: Set<Int>): Set<Int> = filteredSelection
 
+internal data class AnnotationNavigationTarget(
+    val filteredEntryId: Int?,
+    val originalEntryId: Int?,
+)
+
+internal fun annotationNavigationTarget(
+    referencedIds: List<Int>,
+    filteredVisibleIds: List<Int>,
+    originalOpen: Boolean,
+): AnnotationNavigationTarget? {
+    val filteredId = referencedIds.firstOrNull { it in filteredVisibleIds }
+    val originalId = referencedIds.firstOrNull()?.takeIf { originalOpen }
+    if (filteredId == null && originalId == null) return null
+    return AnnotationNavigationTarget(filteredEntryId = filteredId, originalEntryId = originalId)
+}
+
 internal fun visibleRowRangeIds(fromId: Int, toId: Int, visibleIds: List<Int>): List<Int> {
     val a = visibleIds.indexOf(fromId)
     val b = visibleIds.indexOf(toId)
     return if (a >= 0 && b >= 0) visibleIds.subList(minOf(a, b), maxOf(a, b) + 1) else emptyList()
+}
+
+internal fun logItemEntryId(item: LogItem): Int = when (item) {
+    is LogItem.Row -> item.entry.id
+    is LogItem.SeqHeader -> item.entry.id
+    is LogItem.ManualHeader -> item.entry.id
 }
 
 internal fun logItemStableKey(tabId: String, item: LogItem): String = when (item) {
@@ -145,6 +167,8 @@ fun LogViewer(
     onCollapseAll: () -> Unit,
     onToggleUnfiltered: () -> Unit,
     scrollStateStore: LogViewerScrollStateStore? = null,
+    annotationNavigationRequest: AnnotationNavigationRequest? = null,
+    onConsumeAnnotationNavigation: (Long) -> Unit = {},
 ) {
     val tc        = tc()
     val mono      = monoFont()
@@ -209,13 +233,7 @@ fun LogViewer(
             val verticalScrollbarGutterPx = with(density) { 16.dp.toPx() }
             val horizontalScrollbarGutterPx = with(density) { 18.dp.toPx() }
             val visibleIds = remember(listItems) {
-                listItems.map { item ->
-                    when (item) {
-                        is LogItem.Row -> item.entry.id
-                        is LogItem.SeqHeader -> item.entry.id
-                        is LogItem.ManualHeader -> item.entry.id
-                    }
-                }
+                listItems.map(::logItemEntryId)
             }
             val currentOnSelRowRange by rememberUpdatedState(itemOnSelRowRange)
             SideEffect {
@@ -329,6 +347,7 @@ fun LogViewer(
 
             // Hoisted lazy state for the Original panel so the Filtered panel can scroll it.
             val allLazyState = scrollStates.lazyState("${tab.id}:original")
+            val filteredLazyState = scrollStates.lazyState("${tab.id}:filtered")
             val syncScope    = rememberCoroutineScope()
 
             fun originalExpansionAndIndexFor(entryId: Int): Pair<Set<String>, Int>? {
@@ -368,13 +387,7 @@ fun LogViewer(
             // highlight rows in the "Filtered" panel and vice-versa.
             var localAllSelected by remember(tab.id) { mutableStateOf(emptySet<Int>()) }
             val allOnSelRow: (Int, Boolean, Boolean) -> Unit = { id, multi, range ->
-                val visIds = allItems.map { item ->
-                    when (item) {
-                        is LogItem.Row        -> item.entry.id
-                        is LogItem.SeqHeader  -> item.entry.id
-                        is LogItem.ManualHeader -> item.entry.id
-                    }
-                }
+                val visIds = allItems.map(::logItemEntryId)
                 localAllSelected = when {
                     multi -> if (id in localAllSelected) localAllSelected - id else localAllSelected + id
                     range -> {
@@ -392,6 +405,28 @@ fun LogViewer(
                 }
             }
             val allOnSelRowRange: (List<Int>) -> Unit = { ids -> localAllSelected = ids.toSet() }
+
+            LaunchedEffect(annotationNavigationRequest?.id, items, allItems, tab.expanded) {
+                val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
+                val target = annotationNavigationTarget(request.logIds, items.map(::logItemEntryId), originalOpen = true)
+                if (target != null) {
+                    localAllSelected = request.logIds.toSet()
+                    target.filteredEntryId?.let { filteredEntryId ->
+                        val idx = items.indexOfFirst { logItemEntryId(it) == filteredEntryId }
+                        if (idx >= 0) filteredLazyState.animateScrollToItem(maxOf(0, idx - 2))
+                    }
+                    target.originalEntryId?.let { originalEntryId ->
+                        val originalTarget = originalExpansionAndIndexFor(originalEntryId)
+                        if (originalTarget != null) {
+                            val (expanded, idx) = originalTarget
+                            (expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
+                            if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
+                            allLazyState.animateScrollToItem(maxOf(0, idx - 2))
+                        }
+                    }
+                }
+                onConsumeAnnotationNavigation(request.id)
+            }
 
             Column(
                 Modifier.fillMaxWidth().weight(1f)
@@ -448,11 +483,25 @@ fun LogViewer(
                             )
                         },
                         panelKey = "${tab.id}:filtered",
+                        listState = filteredLazyState,
                     )
                 }
             }
         } else {
-            ColHeader(hasPidTid); ItemList(items, rowBoundsAbs, boxPosY, panelKey = "${tab.id}:main")
+            val mainLazyState = scrollStates.lazyState("${tab.id}:main")
+            LaunchedEffect(annotationNavigationRequest?.id, items) {
+                val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
+                val target = annotationNavigationTarget(request.logIds, items.map(::logItemEntryId), originalOpen = false)
+                if (target != null) {
+                    target.filteredEntryId?.let { filteredEntryId ->
+                        val idx = items.indexOfFirst { logItemEntryId(it) == filteredEntryId }
+                        if (idx >= 0) mainLazyState.animateScrollToItem(maxOf(0, idx - 2))
+                    }
+                }
+                onConsumeAnnotationNavigation(request.id)
+            }
+            ColHeader(hasPidTid)
+            ItemList(items, rowBoundsAbs, boxPosY, panelKey = "${tab.id}:main", listState = mainLazyState)
         }
     }
 }

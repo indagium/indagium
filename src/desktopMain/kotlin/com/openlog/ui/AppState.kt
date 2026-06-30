@@ -48,6 +48,8 @@ data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val 
 
 data class PendingDuplicateFilterSave(val tabId: String, val existingId: String, val existingName: String, val requestedName: String)
 
+data class AnnotationNavigationRequest(val id: Long, val tabId: String, val logIds: List<Int>)
+
 class AppState(
     private val autosaveFile: File = defaultAutosaveFile(),
     restoreOnCreate: Boolean = false,
@@ -103,6 +105,8 @@ class AppState(
     var pendingDeleteFilterId by mutableStateOf<String?>(null)
     var pendingClearFilterTabId by mutableStateOf<String?>(null)
     var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
+    var pendingAnnotationNavigation by mutableStateOf<AnnotationNavigationRequest?>(null)
+        private set
 
     val fpState = FilterPanelUiState()
 
@@ -117,6 +121,7 @@ class AppState(
     var newSeqTag by mutableStateOf("")
     var newSeqEndTag by mutableStateOf("")
     var newSeqColor by mutableStateOf(SEQ_COLORS[0])
+    private var annotationNavigationCounter = 0L
 
     init {
         if (restoreOnCreate) restoreAutosave()
@@ -711,6 +716,23 @@ class AppState(
     }
 
     fun clearSelection(tabId: String) = upTab(tabId) { it.copy(selected = emptySet()) }
+
+    fun requestAnnotationNavigation(ownerTabId: String, block: AnnBlock.LogRef) {
+        val targetTabId = block.sourceTabId ?: ownerTabId
+        if (block.logIds.isEmpty() || tab(targetTabId) == null) return
+        if (compareMode && targetTabId != activeTabId) {
+            compareTabId = targetTabId
+        } else {
+            activateTab(targetTabId)
+        }
+        setSelectedRows(targetTabId, block.logIds)
+        annotationNavigationCounter += 1
+        pendingAnnotationNavigation = AnnotationNavigationRequest(annotationNavigationCounter, targetTabId, block.logIds)
+    }
+
+    fun consumeAnnotationNavigation(id: Long) {
+        if (pendingAnnotationNavigation?.id == id) pendingAnnotationNavigation = null
+    }
 
     // ── Sequence expand/collapse ─────────────────────────────────────
     fun toggleGroup(tabId: String, gid: String) = upTab(tabId) { t ->

@@ -3,8 +3,10 @@ package com.openlog
 import com.openlog.model.LogEntry
 import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
+import com.openlog.ui.AnnotationNavigationTarget
 import com.openlog.ui.AppState
 import com.openlog.ui.LogViewerScrollStateStore
+import com.openlog.ui.annotationNavigationTarget
 import com.openlog.ui.browserTabOrderDuringDrag
 import com.openlog.ui.logItemStableKey
 import com.openlog.ui.mkTab
@@ -58,6 +60,50 @@ class SplitViewAndTabRegressionTest {
         )
 
         assertEquals(setOf(4), next)
+    }
+
+    @Test
+    fun annotationNavigationPrefersFilteredPanelWhenReferencedLineIsVisible() {
+        val target = annotationNavigationTarget(
+            referencedIds = listOf(4, 9),
+            filteredVisibleIds = listOf(1, 4, 7),
+            originalOpen = false,
+        )
+
+        assertEquals(AnnotationNavigationTarget(filteredEntryId = 4, originalEntryId = null), target)
+    }
+
+    @Test
+    fun annotationNavigationTargetsOriginalOnlyWhenOriginalIsOpen() {
+        val target = annotationNavigationTarget(
+            referencedIds = listOf(4, 9),
+            filteredVisibleIds = listOf(1, 4, 7),
+            originalOpen = true,
+        )
+
+        assertEquals(AnnotationNavigationTarget(filteredEntryId = 4, originalEntryId = 4), target)
+    }
+
+    @Test
+    fun annotationNavigationDoesNotAutoOpenOriginalWhenFiltersHideReferencedLines() {
+        val target = annotationNavigationTarget(
+            referencedIds = listOf(4, 9),
+            filteredVisibleIds = listOf(1, 2, 3),
+            originalOpen = false,
+        )
+
+        assertEquals(null, target)
+    }
+
+    @Test
+    fun annotationNavigationUsesAlreadyOpenOriginalWhenFiltersHideReferencedLines() {
+        val target = annotationNavigationTarget(
+            referencedIds = listOf(4, 9),
+            filteredVisibleIds = listOf(1, 2, 3),
+            originalOpen = true,
+        )
+
+        assertEquals(AnnotationNavigationTarget(filteredEntryId = null, originalEntryId = 4), target)
     }
 
     @Test

@@ -11,10 +11,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -30,6 +33,7 @@ import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
 import kotlin.math.roundToInt
+import java.awt.Cursor as AwtCursor
 
 @Composable
 fun AnnotationPanel(
@@ -49,6 +53,7 @@ fun AnnotationPanel(
     onRemoveBlock: (String) -> Unit,
     onMoveBlock: (String, Int) -> Unit,
     onAddNoteAfter: (String?) -> Unit,
+    onNavigateLogRef: (AnnBlock.LogRef) -> Unit,
     width: Float,
 ) {
     val tc = tc()
@@ -159,6 +164,7 @@ fun AnnotationPanel(
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
                             onAddBelow = { onAddNoteAfter(block.id) },
+                            onNavigate = { onNavigateLogRef(block) },
                         )
                     }
                 }
@@ -361,7 +367,7 @@ private fun NoteBlock(
             .border(BorderStroke(2.dp, tc.ac.copy(.35f)))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        BlockControls(tc, "T", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow)
+        BlockControls(tc, "text", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow)
         Spacer(Modifier.height(5.dp))
         BasicTextField(
             value = block.text,
@@ -392,6 +398,7 @@ private fun LogRefBlock(
     onRemove: () -> Unit,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onAddBelow: () -> Unit,
+    onNavigate: () -> Unit,
 ) {
     val rows = block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }
     val borderColor = rows.firstOrNull()?.level?.defaultColor ?: tc.ac
@@ -401,7 +408,7 @@ private fun LogRefBlock(
             .border(BorderStroke(2.dp, borderColor))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        BlockControls(tc, "◆", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow)
+        BlockControls(tc, "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate)
         if (block.sourceFilename != null) {
             Spacer(Modifier.height(3.dp))
             Box(
@@ -462,17 +469,51 @@ private fun BlockControls(
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onRemove: () -> Unit,
     onAddBelow: () -> Unit,
+    onNavigate: (() -> Unit)? = null,
 ) {
+    val badgeShape = CORNER_SM
+    val isNavigationBadge = onNavigate != null
+    val badgeModifier = Modifier.height(18.dp)
+        .defaultMinSize(minWidth = if (isNavigationBadge) 48.dp else 34.dp)
+        .background(typeColor.copy(if (onNavigate != null) .24f else .14f), badgeShape)
+        .border(1.dp, typeColor.copy(if (onNavigate != null) .9f else .35f), badgeShape)
+        .then(
+            if (onNavigate != null) {
+                Modifier
+                    .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)))
+                    .clickable(onClick = onNavigate)
+            } else {
+                Modifier
+            },
+        )
+        .padding(horizontal = 6.dp)
     Row(
         Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Box(
-            Modifier.size(16.dp).background(typeColor.copy(.2f), CORNER_SM)
-                .border(1.dp, typeColor.copy(.4f), CORNER_SM),
+            badgeModifier,
             contentAlignment = Alignment.Center,
-        ) { AppText(typeLabel, color = typeColor, fontSize = 9.sp) }
+        ) {
+            if (isNavigationBadge) {
+                androidx.compose.material3.Text(
+                    "$typeLabel ↗",
+                    color = typeColor,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    textDecoration = TextDecoration.Underline,
+                    maxLines = 1,
+                )
+            } else {
+                AppText(
+                    typeLabel,
+                    color = typeColor,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
 
         Spacer(Modifier.weight(1f))
 
