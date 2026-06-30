@@ -532,6 +532,12 @@ fun LogViewer(
     }
 }
 
+private fun scrollIntoViewIfNeeded(lazyState: LazyListState, scope: CoroutineScope, targetItemsIdx: Int) {
+    val visible = lazyState.layoutInfo.visibleItemsInfo
+    if (visible.any { it.index == targetItemsIdx }) return
+    scope.launch { lazyState.animateScrollToItem(maxOf(0, targetItemsIdx - 2)) }
+}
+
 private fun handleNavKey(
     ev: KeyEvent,
     items: List<LogItem>,
@@ -561,7 +567,7 @@ private fun handleNavKey(
         // Always replace the selection outright (never toggle): keyboard nav must stay
         // idempotent even if the same target row is selected again by a duplicate key event.
         onSelectRow(rows[i].entry.id)
-        scope.launch { lazyState.animateScrollToItem(maxOf(0, items.indexOf(rows[i]) - 2)) }
+        scrollIntoViewIfNeeded(lazyState, scope, items.indexOf(rows[i]))
     }
 
     val page = 15
@@ -617,7 +623,7 @@ private fun handleSelKey(
         val lo = minOf(anchorIdx, clamped)
         val hi = maxOf(anchorIdx, clamped)
         onSelRowRange(rows.subList(lo, hi + 1).map { it.entry.id })
-        scope.launch { lazyState.animateScrollToItem(maxOf(0, items.indexOf(rows[clamped]) - 2)) }
+        scrollIntoViewIfNeeded(lazyState, scope, items.indexOf(rows[clamped]))
     }
 
     return when {
