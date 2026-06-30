@@ -309,9 +309,9 @@ fun LogViewer(
                     .onFocusChanged { isFocused = it.isFocused }
                     .focusRequester(fr)
                     .focusable()
-                    .onKeyEvent { ev ->
+                    .onPreviewKeyEvent { ev ->
                         if (handleNavKey(ev, listItems, effectiveTab, lazyState, navScope, itemOnSelRow,
-                                onAnchorReset = { anchorId = null })) return@onKeyEvent true
+                                onAnchorReset = { anchorId = null })) return@onPreviewKeyEvent true
                         handleSelKey(ev, listItems, effectiveTab, lazyState, navScope,
                             itemOnSelRow, itemOnSelRowRange,
                             anchorId, onAnchorChange = { anchorId = it },
