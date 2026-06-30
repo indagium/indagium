@@ -740,7 +740,12 @@ private fun DialogActionButton(
 }
 
 @Composable
-private fun BoundFilterPanel(state: AppState, tab: LogTab) {
+private fun BoundFilterPanel(
+    state: AppState,
+    tab: LogTab,
+    focusRequester: FocusRequester? = null,
+    onPanelFocusChanged: (Boolean) -> Unit = {},
+) {
     if (!state.filterVisible) return
     FilterPanel(
         tab = tab, savedFilters = state.savedFilters,
@@ -803,6 +808,8 @@ private fun BoundFilterPanel(state: AppState, tab: LogTab) {
         mostUsedTagLimit = state.settings.mostUsedTagLimit,
         filterListRows = state.settings.filterListRows,
         width = state.filterPanelWidth,
+        focusRequester = focusRequester,
+        onPanelFocusChanged = onPanelFocusChanged,
     )
     HDivider { delta -> state.updateFilterPanelWidth(state.filterPanelWidth + delta) }
 }
@@ -810,8 +817,37 @@ private fun BoundFilterPanel(state: AppState, tab: LogTab) {
 // ── FileView ──────────────────────────────────────────────────────────
 @Composable
 private fun FileView(state: AppState, tab: LogTab) {
-    Row(Modifier.fillMaxSize()) {
-        BoundFilterPanel(state, tab)
+    val filterFr = remember { FocusRequester() }
+    val logViewerFr = remember { FocusRequester() }
+    val annotationFr = remember { FocusRequester() }
+    var focusedPanelIdx by remember { mutableStateOf(0) }
+
+    fun visiblePanelFrs(): List<FocusRequester> = buildList {
+        if (state.filterVisible) add(filterFr)
+        add(logViewerFr)
+        if (state.annotationVisible) add(annotationFr)
+    }
+
+    Row(
+        Modifier.fillMaxSize().onPreviewKeyEvent { ev ->
+            if (ev.type == KeyEventType.KeyDown && ev.key == Key.F6) {
+                val frs = visiblePanelFrs()
+                if (frs.isNotEmpty()) {
+                    val delta = if (ev.isShiftPressed) -1 else 1
+                    val next = (focusedPanelIdx + delta).mod(frs.size)
+                    runCatching { frs[next].requestFocus() }
+                }
+                true
+            } else {
+                false
+            }
+        },
+    ) {
+        BoundFilterPanel(
+            state, tab,
+            focusRequester = filterFr,
+            onPanelFocusChanged = { focused -> if (focused) focusedPanelIdx = visiblePanelFrs().indexOf(filterFr) },
+        )
         LogViewer(
             tab = tab, modifier = Modifier.weight(1f),
             onSelRow = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
@@ -829,6 +865,8 @@ private fun FileView(state: AppState, tab: LogTab) {
             onClearSelection = { state.clearSelection(tab.id) },
             onCopySelection = { state.copySelectedLines(tab.id) },
             navScrollMargin = state.settings.navScrollMargin,
+            focusRequester = logViewerFr,
+            onPanelFocusChanged = { focused -> if (focused) focusedPanelIdx = visiblePanelFrs().indexOf(logViewerFr) },
         )
         if (state.annotationVisible) {
             HDivider { delta ->
@@ -852,6 +890,8 @@ private fun FileView(state: AppState, tab: LogTab) {
                 onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
                 onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
                 width = state.annotationPanelWidth,
+                focusRequester = annotationFr,
+                onPanelFocusChanged = { focused -> if (focused) focusedPanelIdx = visiblePanelFrs().indexOf(annotationFr) },
             )
         }
     }
@@ -1525,6 +1565,8 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
                 ShortcutRow(if (mac) "⌘ ⇧ F" else "Ctrl Shift F", "Toggle filter panel"),
                 ShortcutRow(if (mac) "⌘ ⇧ A" else "Ctrl Shift A", "Toggle annotation panel"),
                 ShortcutRow(if (mac) "⌘ ⇧ D" else "Ctrl Shift D", "Toggle compare mode"),
+                ShortcutRow("F6", "Move focus to next panel"),
+                ShortcutRow("⇧ F6", "Move focus to previous panel"),
             ),
         ),
         ShortcutGroup(
@@ -1555,6 +1597,15 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
             ),
         ),
         ShortcutGroup(
+            "Context menu  (log view — click to focus)",
+            listOf(
+                ShortcutRow("⇧ F10", "Open context menu for selected row"),
+                ShortcutRow("↑ / ↓", "Move highlight"),
+                ShortcutRow("Enter", "Activate highlighted item"),
+                ShortcutRow("Escape", "Close menu"),
+            ),
+        ),
+        ShortcutGroup(
             "Other",
             listOf(
                 ShortcutRow(if (mac) "⌘ /" else "Ctrl /", "Show keyboard shortcuts"),
@@ -1565,7 +1616,7 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
     Box(
         Modifier
             .width(580.dp)
-            .heightIn(max = 760.dp)
+            .heightIn(max = 900.dp)
             .clip(shape)
             .background(tc.p)
             .border(1.dp, tc.br, shape),

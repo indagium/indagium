@@ -181,6 +181,8 @@ fun LogViewer(
     onClearSelection: (() -> Unit)? = null,
     onCopySelection: (() -> Unit)? = null,
     navScrollMargin: Int = 5,
+    focusRequester: FocusRequester? = null,
+    onPanelFocusChanged: (Boolean) -> Unit = {},
 ) {
     val tc        = tc()
     val mono      = monoFont()
@@ -236,6 +238,8 @@ fun LogViewer(
             itemOnCtxMenu: (Int, Float, Float, String) -> Unit = { id, x, y, sel -> onCtxMenu(id, x, y, sel, emptySet()) },
             panelKey: String = effectiveTab.id,
             listState: LazyListState? = null,
+            externalFr: FocusRequester? = null,
+            onFocusChangedExternal: (Boolean) -> Unit = {},
         ) {
             if (listItems.isEmpty()) { EmptyState(tc, totalCnt, onClearFilter); return }
             val lazyState = listState ?: scrollStates.lazyState(panelKey)
@@ -251,7 +255,7 @@ fun LogViewer(
             SideEffect {
                 boundsMap.keys.retainAll(visibleIds.toSet())
             }
-            val fr = remember { FocusRequester() }
+            val fr = externalFr ?: remember { FocusRequester() }
             var isFocused by remember { mutableStateOf(false) }
             val navScope = rememberCoroutineScope()
             var anchorId by remember(effectiveTab.id) { mutableStateOf<Int?>(null) }
@@ -311,7 +315,7 @@ fun LogViewer(
                             }
                         }
                     }
-                    .onFocusChanged { isFocused = it.isFocused }
+                    .onFocusChanged { isFocused = it.isFocused; onFocusChangedExternal(it.isFocused) }
                     .focusRequester(fr)
                     .focusable()
                     .onPreviewKeyEvent { ev ->
@@ -545,7 +549,10 @@ fun LogViewer(
                 onConsumeAnnotationNavigation(request.id)
             }
             ColHeader(hasPidTid)
-            ItemList(items, rowBoundsAbs, boxPosY, panelKey = "${tab.id}:main", listState = mainLazyState)
+            ItemList(
+                items, rowBoundsAbs, boxPosY, panelKey = "${tab.id}:main", listState = mainLazyState,
+                externalFr = focusRequester, onFocusChangedExternal = onPanelFocusChanged,
+            )
         }
     }
 }

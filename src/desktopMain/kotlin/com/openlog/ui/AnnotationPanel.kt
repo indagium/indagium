@@ -9,6 +9,9 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerIcon
@@ -55,6 +58,8 @@ fun AnnotationPanel(
     onAddNoteAfter: (String?) -> Unit,
     onNavigateLogRef: (AnnBlock.LogRef) -> Unit,
     width: Float,
+    focusRequester: FocusRequester? = null,
+    onPanelFocusChanged: (Boolean) -> Unit = {},
 ) {
     val tc = tc()
     val mono = monoFont()
@@ -62,8 +67,15 @@ fun AnnotationPanel(
     val hasAnnotationBlocks = ann.blocks.isNotEmpty()
     val hasRecentNotes = recentNotes.isNotEmpty()
     val headerButtonModifier = Modifier.height(28.dp)
+    var panelFocused by remember { mutableStateOf(false) }
 
-    Column(Modifier.width(width.dp).fillMaxHeight().background(tc.p).border(BorderStroke(1.dp, tc.br))) {
+    Column(
+        Modifier.width(width.dp).fillMaxHeight().background(tc.p)
+            .border(BorderStroke(1.dp, if (panelFocused) tc.ac else tc.br))
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .focusGroup()
+            .onFocusChanged { panelFocused = it.hasFocus; onPanelFocusChanged(it.hasFocus) },
+    ) {
         // Header row 1: title + action buttons
         Box(
             Modifier.fillMaxWidth().height(if (headerNote != null) 46.dp else 36.dp).background(tc.p2)

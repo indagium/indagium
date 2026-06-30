@@ -121,9 +121,12 @@ fun FilterPanel(
     mostUsedTagLimit: Int,
     filterListRows: Int,
     width: Float,
+    focusRequester: FocusRequester? = null,
+    onPanelFocusChanged: (Boolean) -> Unit = {},
 ) {
     val tc = tc()
     val filter = tab.filter
+    var panelFocused by remember { mutableStateOf(false) }
 
     // Tags sorted by frequency in log data; default suggestions come from user tag usage.
     val tagCounts  = remember(tab.id) { tab.logData.groupBy { it.tag }.mapValues { it.value.size } }
@@ -259,13 +262,16 @@ fun FilterPanel(
     }
     Column(
         Modifier.width(width.dp).fillMaxHeight().background(tc.p)
-            .border(BorderStroke(1.dp, tc.br))
+            .border(BorderStroke(1.dp, if (panelFocused) tc.ac else tc.br))
             .dragAndDropTarget(
                 shouldStartDragAndDrop = { event ->
                     runCatching { event.dragData() is DragData.FilesList }.getOrElse { false }
                 },
                 target = filterDropTarget,
             )
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .focusGroup()
+            .onFocusChanged { panelFocused = it.hasFocus; onPanelFocusChanged(it.hasFocus) }
             .verticalScroll(scroll),
     ) {
         // ── Filter mode tabs ──────────────────────────────────────
