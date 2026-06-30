@@ -310,7 +310,8 @@ fun LogViewer(
                     .focusRequester(fr)
                     .focusable()
                     .onPreviewKeyEvent { ev ->
-                        if (handleNavKey(ev, listItems, effectiveTab, lazyState, navScope, itemOnSelRow,
+                        if (handleNavKey(ev, listItems, effectiveTab, lazyState, navScope,
+                                onSelectRow = { id -> itemOnSelRowRange(listOf(id)) },
                                 onAnchorReset = { anchorId = null })) return@onPreviewKeyEvent true
                         handleSelKey(ev, listItems, effectiveTab, lazyState, navScope,
                             itemOnSelRow, itemOnSelRowRange,
@@ -537,7 +538,7 @@ private fun handleNavKey(
     tab: LogTab,
     lazyState: LazyListState,
     scope: CoroutineScope,
-    onSelRow: (Int, Boolean, Boolean) -> Unit,
+    onSelectRow: (Int) -> Unit,
     onAnchorReset: () -> Unit = {},
 ): Boolean {
     if (ev.type != KeyEventType.KeyDown) return false
@@ -557,7 +558,9 @@ private fun handleNavKey(
     fun moveTo(rowIdx: Int) {
         val i = rowIdx.coerceIn(0, rows.lastIndex)
         onAnchorReset()
-        onSelRow(rows[i].entry.id, false, false)
+        // Always replace the selection outright (never toggle): keyboard nav must stay
+        // idempotent even if the same target row is selected again by a duplicate key event.
+        onSelectRow(rows[i].entry.id)
         scope.launch { lazyState.animateScrollToItem(maxOf(0, items.indexOf(rows[i]) - 2)) }
     }
 
