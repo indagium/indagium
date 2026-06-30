@@ -41,13 +41,14 @@ fun HoverBox(
     modifier: Modifier = Modifier,
     baseBg: Color = Color.Transparent,
     hoverBg: Color = LocalTheme.current.hv,
+    forceHover: Boolean = false,
     onClick: (() -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     var hovered by remember { mutableStateOf(false) }
     Box(
         modifier = modifier
-            .background(if (hovered) hoverBg else baseBg)
+            .background(if (hovered || forceHover) hoverBg else baseBg)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),

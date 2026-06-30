@@ -40,6 +40,8 @@ import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -179,6 +181,69 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         val menuScroll = rememberScrollState()
                         val x = ctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
                         val y = ctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
+
+                        val menuEntries = buildList {
+                            add(
+                                CtxMenuEntry.ActionHeader(
+                                    if (selCount > 1) "Add annotation for $selCount lines" else "Add annotation",
+                                ) {
+                                    val ids = if (selCount > 1) selectedIds.toSortedSet().toList() else listOf(ctx.entryId)
+                                    state.requestAddAnn(ctx.tabId, ids)
+                                },
+                            )
+                            add(CtxMenuEntry.Divider)
+                            add(CtxMenuEntry.Preview)
+                            if (ctx.selText.isNotBlank()) {
+                                add(CtxMenuEntry.Action(Icons.Outlined.Bookmark, "Highlight selection") { state.addHlFromCtx() })
+                                add(CtxMenuEntry.Action(Icons.Outlined.Layers, "Add as sequence") { state.addSeqFromCtx() })
+                                add(CtxMenuEntry.Action(Icons.Outlined.Search, "Filter by keyword") { state.addKwFilterFromCtx() })
+                                add(CtxMenuEntry.Action(Icons.Outlined.Block, "Exclude keyword") { state.addNegKwFromCtx() })
+                                add(CtxMenuEntry.Divider)
+                            }
+                            if (state.pendingSequenceStart != null) {
+                                add(CtxMenuEntry.Action(Icons.Outlined.Flag, "Complete sequence end") { state.completeSequenceEndFromCtx() })
+                            }
+                            add(CtxMenuEntry.Action(Icons.Outlined.PlayArrow, "Set sequence start") { state.setSequenceStartFromCtx() })
+                            add(CtxMenuEntry.Action(Icons.Outlined.ArrowUpward, "Collapse to file start") { state.collapseToStartFromCtx() })
+                            add(CtxMenuEntry.Action(Icons.Outlined.ArrowDownward, "Collapse to file end") { state.collapseToEndFromCtx() })
+                            add(CtxMenuEntry.Action(Icons.Outlined.VisibilityOff, "Hide messages like this") { state.hideMessagesLikeCtx() })
+                            add(CtxMenuEntry.Action(Icons.Outlined.Visibility, "Show messages like this") { state.showOnlyMessagesLikeCtx() })
+                            add(CtxMenuEntry.Divider)
+                            add(CtxMenuEntry.Action(Icons.AutoMirrored.Outlined.Label, "Include tag") { state.addTagFilterFromCtx() })
+                            add(CtxMenuEntry.Action(Icons.Outlined.Bookmark, "Highlight tag") { state.addHlTagFromCtx() })
+                            add(CtxMenuEntry.Action(Icons.AutoMirrored.Outlined.LabelOff, "Exclude tag") { state.addExcludeTagFromCtx() })
+                            add(CtxMenuEntry.Divider)
+                            if (selCount > 1) {
+                                add(
+                                    CtxMenuEntry.Action(Icons.Outlined.ContentCopy, "Copy $selCount selected lines") {
+                                        state.copySelectedLines(ctx.tabId); state.ctx = null
+                                    },
+                                )
+                            }
+                            add(
+                                CtxMenuEntry.Action(Icons.Outlined.ContentCopy, "Copy line") {
+                                    val pid = if (entry.pid > 0) "  ${entry.pid.toString().padStart(5)} ${
+                                        entry.tid.toString().padStart(5)
+                                    }" else ""
+                                    state.copyToClipboard("${entry.ts}$pid  ${entry.level.key}  ${entry.tag}: ${entry.msg}")
+                                    state.ctx = null
+                                },
+                            )
+                            add(
+                                CtxMenuEntry.Action(Icons.Outlined.Code, "Copy as Markdown") {
+                                    state.copyToClipboard("**[${entry.ts}] `${entry.level.key}/${entry.tag}`:** ${entry.msg}")
+                                    state.ctx = null
+                                },
+                            )
+                        }
+                        val selectableEntries = menuEntries.filter {
+                            it is CtxMenuEntry.ActionHeader || it is CtxMenuEntry.Action
+                        }
+                        var selectedIdx by remember(ctx) { mutableStateOf(0) }
+                        val selectedEntry = selectableEntries.getOrNull(selectedIdx)
+                        val menuFr = remember(ctx) { FocusRequester() }
+                        LaunchedEffect(ctx) { runCatching { menuFr.requestFocus() } }
+
                         // Position is already in dp (converted from px in LogRow)
                         Box(
                             Modifier
@@ -188,119 +253,84 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                 .border(1.dp, tc.br, RoundedCornerShape(7.dp))
                                 .width(menuWidth)
                                 .heightIn(max = (maxHeight - y - 8.dp).coerceAtLeast(160.dp))
-                                .verticalScroll(menuScroll),
+                                .verticalScroll(menuScroll)
+                                .focusRequester(menuFr)
+                                .focusable()
+                                .onPreviewKeyEvent { ev ->
+                                    if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                    when (ev.key) {
+                                        Key.DirectionDown -> {
+                                            selectedIdx = (selectedIdx + 1).mod(selectableEntries.size.coerceAtLeast(1))
+                                            true
+                                        }
+                                        Key.DirectionUp -> {
+                                            selectedIdx = (selectedIdx - 1).mod(selectableEntries.size.coerceAtLeast(1))
+                                            true
+                                        }
+                                        Key.Enter, Key.NumPadEnter -> {
+                                            selectedEntry?.let {
+                                                when (it) {
+                                                    is CtxMenuEntry.ActionHeader -> it.onClick()
+                                                    is CtxMenuEntry.Action -> it.onClick()
+                                                    else -> {}
+                                                }
+                                            }
+                                            true
+                                        }
+                                        Key.Escape -> { state.ctx = null; true }
+                                        else -> false
+                                    }
+                                },
                         ) {
                             Column {
-                                Box(
-                                    Modifier.fillMaxWidth().background(tc.p2)
-                                        .clickable {
-                                            val ids = if (selCount > 1) selectedIds.toSortedSet().toList() else listOf(
-                                                ctx.entryId
-                                            )
-                                            state.requestAddAnn(ctx.tabId, ids)
+                                menuEntries.forEach { e ->
+                                    when (e) {
+                                        is CtxMenuEntry.ActionHeader -> {
+                                            HoverBox(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                baseBg = tc.p2,
+                                                forceHover = e === selectedEntry,
+                                                onClick = e.onClick,
+                                            ) {
+                                                Box(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                                                    AppText(e.label, color = tc.ac, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                                }
+                                            }
                                         }
-                                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                                ) {
-                                    AppText(
-                                        if (selCount > 1) "Add annotation for $selCount lines" else "Add annotation",
-                                        color = tc.ac,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                    )
-                                }
-                                CtxDivider()
-                                // Preview row
-                                Column(
-                                    Modifier.fillMaxWidth()
-                                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                                        .background(tc.p2, CORNER_MD)
-                                        .border(BorderStroke(0.5.dp, tc.br.copy(alpha = 0.5f)), CORNER_MD)
-                                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                                ) {
-                                    Row(
-                                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        LevelBadge(entry.level)
-                                        AppText(
-                                            entry.tag, color = tc.td, fontSize = 10.sp, fontFamily = MONO,
-                                            modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis
-                                        )
+                                        is CtxMenuEntry.Action ->
+                                            CtxItem(e.icon, e.label, highlighted = e === selectedEntry, onClick = e.onClick)
+                                        CtxMenuEntry.Divider -> CtxDivider()
+                                        CtxMenuEntry.Preview -> Column(
+                                            Modifier.fillMaxWidth()
+                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                .background(tc.p2, CORNER_MD)
+                                                .border(BorderStroke(0.5.dp, tc.br.copy(alpha = 0.5f)), CORNER_MD)
+                                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                        ) {
+                                            Row(
+                                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                LevelBadge(entry.level)
+                                                AppText(
+                                                    entry.tag, color = tc.td, fontSize = 10.sp, fontFamily = MONO,
+                                                    modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                            Spacer(Modifier.height(2.dp))
+                                            AppText(
+                                                entry.msg,
+                                                color = tc.ts,
+                                                fontSize = 10.sp,
+                                                fontFamily = MONO,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            if (ctx.selText.isNotBlank()) {
+                                                Spacer(Modifier.height(2.dp))
+                                                AppText("Selected: \"${ctx.selText}\"", color = tc.ac, fontSize = 9.sp)
+                                            }
+                                        }
                                     }
-                                    Spacer(Modifier.height(2.dp))
-                                    AppText(
-                                        entry.msg,
-                                        color = tc.ts,
-                                        fontSize = 10.sp,
-                                        fontFamily = MONO,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    if (ctx.selText.isNotBlank()) {
-                                        Spacer(Modifier.height(2.dp))
-                                        AppText("Selected: \"${ctx.selText}\"", color = tc.ac, fontSize = 9.sp)
-                                    }
-                                }
-                                // Selected text actions
-                                if (ctx.selText.isNotBlank()) {
-                                    CtxItem(Icons.Outlined.Bookmark, "Highlight selection") { state.addHlFromCtx() }
-                                    CtxItem(Icons.Outlined.Layers, "Add as sequence") { state.addSeqFromCtx() }
-                                    CtxItem(Icons.Outlined.Search, "Filter by keyword") { state.addKwFilterFromCtx() }
-                                    CtxItem(Icons.Outlined.Block, "Exclude keyword") { state.addNegKwFromCtx() }
-                                    CtxDivider()
-                                }
-                                if (state.pendingSequenceStart != null) {
-                                    CtxItem(
-                                        Icons.Outlined.Flag,
-                                        "Complete sequence end"
-                                    ) { state.completeSequenceEndFromCtx() }
-                                }
-                                CtxItem(
-                                    Icons.Outlined.PlayArrow,
-                                    "Set sequence start"
-                                ) { state.setSequenceStartFromCtx() }
-                                CtxItem(
-                                    Icons.Outlined.ArrowUpward,
-                                    "Collapse to file start"
-                                ) { state.collapseToStartFromCtx() }
-                                CtxItem(
-                                    Icons.Outlined.ArrowDownward,
-                                    "Collapse to file end"
-                                ) { state.collapseToEndFromCtx() }
-                                CtxItem(
-                                    Icons.Outlined.VisibilityOff,
-                                    "Hide messages like this"
-                                ) { state.hideMessagesLikeCtx() }
-                                CtxItem(
-                                    Icons.Outlined.Visibility,
-                                    "Show messages like this"
-                                ) { state.showOnlyMessagesLikeCtx() }
-                                CtxDivider()
-                                // Tag actions
-                                CtxItem(
-                                    Icons.AutoMirrored.Outlined.Label,
-                                    "Include tag"
-                                ) { state.addTagFilterFromCtx() }
-                                CtxItem(Icons.Outlined.Bookmark, "Highlight tag") { state.addHlTagFromCtx() }
-                                CtxItem(
-                                    Icons.AutoMirrored.Outlined.LabelOff,
-                                    "Exclude tag"
-                                ) { state.addExcludeTagFromCtx() }
-                                CtxDivider()
-                                if (selCount > 1) {
-                                    CtxItem(Icons.Outlined.ContentCopy, "Copy $selCount selected lines") {
-                                        state.copySelectedLines(ctx.tabId); state.ctx = null
-                                    }
-                                }
-                                CtxItem(Icons.Outlined.ContentCopy, "Copy line") {
-                                    val pid = if (entry.pid > 0) "  ${entry.pid.toString().padStart(5)} ${
-                                        entry.tid.toString().padStart(5)
-                                    }" else ""
-                                    state.copyToClipboard("${entry.ts}$pid  ${entry.level.key}  ${entry.tag}: ${entry.msg}")
-                                    state.ctx = null
-                                }
-                                CtxItem(Icons.Outlined.Code, "Copy as Markdown") {
-                                    state.copyToClipboard("**[${entry.ts}] `${entry.level.key}/${entry.tag}`:** ${entry.msg}")
-                                    state.ctx = null
                                 }
                             }
                         }
@@ -1756,10 +1786,22 @@ private fun TabItem(
     }
 }
 
+// Data-driven context menu entries so keyboard nav (arrow keys) can walk the selectable ones
+// without duplicating the conditional logic that decides which items render.
+private sealed class CtxMenuEntry {
+    data class ActionHeader(val label: String, val onClick: () -> Unit) : CtxMenuEntry()
+
+    data class Action(val icon: ImageVector, val label: String, val onClick: () -> Unit) : CtxMenuEntry()
+
+    object Divider : CtxMenuEntry()
+
+    object Preview : CtxMenuEntry()
+}
+
 @Composable
-private fun CtxItem(icon: ImageVector, label: String, onClick: () -> Unit) {
+private fun CtxItem(icon: ImageVector, label: String, highlighted: Boolean = false, onClick: () -> Unit) {
     val tc = tc()
-    HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onClick) {
+    HoverBox(modifier = Modifier.fillMaxWidth(), forceHover = highlighted, onClick = onClick) {
         Row(
             Modifier.fillMaxWidth().height(32.dp).padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,

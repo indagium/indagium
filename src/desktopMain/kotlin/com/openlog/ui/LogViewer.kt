@@ -40,6 +40,7 @@ import kotlinx.coroutines.launch
 import java.awt.Cursor as AwtCursor
 
 private const val PAGE_JUMP_ROWS = 15
+private const val CTX_MENU_KEYBOARD_X_DP = 60f
 
 private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
     if (hl.regex) {
@@ -319,6 +320,15 @@ fun LogViewer(
                             onAnchorChange = { anchorId = it },
                             onCursorChange = { cursorId = it },
                         )
+                        if (ev.type == KeyEventType.KeyDown && ev.isShiftPressed && ev.key == Key.F10) {
+                            val id = selCursor.effectiveCursorId(effectiveTab)
+                            val bounds = id?.let { boundsMap[it] }
+                            if (id != null && bounds != null) {
+                                val yDp = with(density) { bounds.first.toDp() }
+                                itemOnCtxMenu(id, CTX_MENU_KEYBOARD_X_DP, yDp.value, "")
+                            }
+                            return@onPreviewKeyEvent true
+                        }
                         if (handleNavKey(ev, listItems, effectiveTab, lazyState, navScope, navScrollMargin,
                                 selCursor, onSelectRow = { id -> itemOnSelRowRange(listOf(id)) }))
                             return@onPreviewKeyEvent true
