@@ -31,17 +31,81 @@ private fun theme(
     seq1 = Color(seq1), seq2 = Color(seq2),
 )
 
-val DARK_GITHUB  = theme(0xFF0d1117, 0xFF161b22, 0xFF1c2128, 0xFF21262d, 0xFFc9d1d9, 0xFF8b949e, 0xFF6e7681, 0xFF388bfd, 0xFF8957e5, 0xFFf0883e)
-val LIGHT_THEME  = theme(0xFFf6f8fa, 0xFFffffff, 0xFFf0f2f5, 0xFFd0d7de, 0xFF1f2328, 0xFF636c76, 0xFF9198a1, 0xFF0969da, 0xFF8250df, 0xFFbc4c00,
-    hv = Color.Black.copy(ALPHA_HOVER))
-val DRACULA      = theme(0xFF282a36, 0xFF21222c, 0xFF191a21, 0xFF44475a, 0xFFf8f8f2, 0xFF6272a4, 0xFF4d5566, 0xFF8be9fd, 0xFFbd93f9, 0xFFffb86c)
-val SOLARIZED_DK = theme(0xFF002b36, 0xFF073642, 0xFF00212b, 0xFF094252, 0xFF839496, 0xFF657b83, 0xFF586e75, 0xFF268bd2, 0xFF6c71c4, 0xFFcb4b16)
+val DARK_GITHUB = theme(
+    0xFF0d1117, 0xFF161b22, 0xFF1c2128, 0xFF21262d, 0xFFc9d1d9, 0xFF8b949e,
+    0xFF6e7681, 0xFF388bfd, 0xFF8957e5, 0xFFf0883e,
+)
+val LIGHT_THEME = theme(
+    0xFFf6f8fa, 0xFFffffff, 0xFFf0f2f5, 0xFFd0d7de, 0xFF1f2328, 0xFF636c76,
+    0xFF9198a1, 0xFF0969da, 0xFF8250df, 0xFFbc4c00,
+    hv = Color.Black.copy(ALPHA_HOVER),
+)
+val LIGHT_PRO = theme(
+    0xFFeff6ff, 0xFFf8fbff, 0xFFdbeafe, 0xFFb7c7df, 0xFF172033, 0xFF4b5f7a,
+    0xFF7a8aa3, 0xFF1d4ed8, 0xFF7c3aed, 0xFFd97706,
+    hv = Color.Black.copy(ALPHA_HOVER),
+)
+val LIGHT_CONTRAST = theme(
+    0xFFffffff, 0xFFf3f6fa, 0xFFe8edf5, 0xFFc8d1df, 0xFF0b1220, 0xFF475569,
+    0xFF64748b, 0xFF005fcc, 0xFF6d28d9, 0xFFb45309,
+    hv = Color.Black.copy(ALPHA_HOVER),
+)
+val NORD_LIGHT = theme(
+    0xFFeceff4, 0xFFf8fafc, 0xFFe5e9f0, 0xFFd8dee9, 0xFF2e3440, 0xFF4c566a,
+    0xFF718096, 0xFF5e81ac, 0xFFb48ead, 0xFFd08770,
+    hv = Color.Black.copy(ALPHA_HOVER),
+)
+val WARM_PAPER = theme(
+    0xFFfaf8f3, 0xFFfffdf8, 0xFFf1eadf, 0xFFded4c6, 0xFF2a241d, 0xFF62584d,
+    0xFF918579, 0xFF0f766e, 0xFF7c3aed, 0xFFc2410c,
+    hv = Color.Black.copy(ALPHA_HOVER),
+)
+val SAGE_PAPER = theme(
+    0xFFf4f7f1, 0xFFfcfff8, 0xFFe8efe2, 0xFFcdd8c4, 0xFF243024, 0xFF566252,
+    0xFF84907d, 0xFF3f7d58, 0xFF8b5cf6, 0xFFb7791f,
+    hv = Color.Black.copy(ALPHA_HOVER),
+)
+val ROSE_PAPER = theme(
+    0xFFfbf5f6, 0xFFfffafb, 0xFFf4e6e8, 0xFFdfc7cd, 0xFF332426, 0xFF6b565a,
+    0xFF947e84, 0xFFbe5f73, 0xFF7c3aed, 0xFF0f766e,
+    hv = Color.Black.copy(ALPHA_HOVER),
+)
+val INK_PAPER = theme(
+    0xFFf7f1e7, 0xFFfffaf0, 0xFFede3d2, 0xFFd7c6ad, 0xFF241f1a, 0xFF5d5145,
+    0xFF8b7c6a, 0xFF334155, 0xFF7c3aed, 0xFFb45309,
+    hv = Color.Black.copy(ALPHA_HOVER),
+)
+val DRACULA = theme(
+    0xFF282a36, 0xFF21222c, 0xFF191a21, 0xFF44475a, 0xFFf8f8f2, 0xFF6272a4,
+    0xFF4d5566, 0xFF8be9fd, 0xFFbd93f9, 0xFFffb86c,
+)
+val SOLARIZED_DK = theme(
+    0xFF002b36, 0xFF073642, 0xFF00212b, 0xFF094252, 0xFF839496, 0xFF657b83,
+    0xFF586e75, 0xFF268bd2, 0xFF6c71c4, 0xFFcb4b16,
+)
+val GRAPHITE_DIM = theme(
+    0xFF20252b, 0xFF2a3038, 0xFF252b32, 0xFF3b4652, 0xFFe5e7eb, 0xFFaab3bf,
+    0xFF7f8a99, 0xFF38bdf8, 0xFFa78bfa, 0xFFfb923c,
+)
+val TERMINAL_DARK = theme(
+    0xFF10140f, 0xFF171d15, 0xFF11180f, 0xFF2c3828, 0xFFdce8d4, 0xFF9fb39a,
+    0xFF71806d, 0xFF22c55e, 0xFF38bdf8, 0xFFf59e0b,
+)
 
 fun themeColors(preset: ThemePreset) = when (preset) {
-    ThemePreset.DARK_GITHUB    -> DARK_GITHUB
     ThemePreset.LIGHT          -> LIGHT_THEME
+    ThemePreset.LIGHT_PRO      -> LIGHT_PRO
+    ThemePreset.LIGHT_CONTRAST -> LIGHT_CONTRAST
+    ThemePreset.NORD_LIGHT     -> NORD_LIGHT
+    ThemePreset.WARM_PAPER     -> WARM_PAPER
+    ThemePreset.SAGE_PAPER     -> SAGE_PAPER
+    ThemePreset.ROSE_PAPER     -> ROSE_PAPER
+    ThemePreset.INK_PAPER      -> INK_PAPER
+    ThemePreset.DARK_GITHUB    -> DARK_GITHUB
     ThemePreset.DRACULA        -> DRACULA
     ThemePreset.SOLARIZED_DARK -> SOLARIZED_DK
+    ThemePreset.GRAPHITE_DIM   -> GRAPHITE_DIM
+    ThemePreset.TERMINAL_DARK  -> TERMINAL_DARK
 }
 
 fun appScrollbarStyle(tc: ThemeColors) = ScrollbarStyle(

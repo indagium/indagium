@@ -119,6 +119,10 @@ ktlint {
     }
 }
 
+tasks.matching { it.name == "runKtlintCheckOverDesktopMainSourceSet" }.configureEach {
+    dependsOn(generateBuildInfo)
+}
+
 // ── Kover ───────────────────────────────────────────────────────────
 // Run: ./gradlew koverHtmlReport
 koverReport {

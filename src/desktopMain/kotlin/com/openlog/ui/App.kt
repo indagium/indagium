@@ -1,6 +1,7 @@
 @file:OptIn(
     androidx.compose.ui.ExperimentalComposeUiApi::class,
     androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
 )
 
 package com.openlog.ui
@@ -36,6 +37,7 @@ import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.DragData
 import androidx.compose.ui.draganddrop.dragData
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -1233,152 +1235,262 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
 private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
     val tc = tc()
     val scroll = rememberScrollState()
-    Column(
-        Modifier.width(480.dp).verticalScroll(scroll).background(tc.p, RoundedCornerShape(8.dp))
-            .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+    val shape = RoundedCornerShape(8.dp)
+    Box(
+        Modifier.width(580.dp).heightIn(max = 860.dp)
+            .clip(shape)
+            .background(tc.p)
+            .border(1.dp, tc.br, shape),
     ) {
-        AppText("Settings", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-            val themeOptions = ThemePreset.entries
-            SegmentedControl(
-                options = themeOptions.map { it.label },
-                selectedIndices = setOf(themeOptions.indexOf(state.settings.theme)),
-                onToggle = { idx -> state.updateSettings { it.copy(theme = themeOptions[idx]) } },
-            )
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(
+            Modifier.verticalScroll(scroll).padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                AppText("Font size", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                AppText("${state.settings.fontSize}sp", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                AppText("Settings", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                CloseButton(onClick = onDismiss)
             }
-            val fontSizes = listOf(10, 11, 12, 13, 14, 15, 16)
-            SegmentedControl(
-                options = fontSizes.map { it.toString() },
-                selectedIndices = setOf(fontSizes.indexOf(state.settings.fontSize)),
-                onToggle = { idx -> state.updateSettings { it.copy(fontSize = fontSizes[idx]) } },
-            )
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AppText("Font family", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-            SegmentedControl(
-                options = listOf("Monospace", "Proportional"),
-                selectedIndices = setOf(if (state.settings.fontMono) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
-            )
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                ThemeGallery(state)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AppText("Font size", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                    AppText("${state.settings.fontSize}sp", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                }
+                val fontSizes = listOf(10, 11, 12, 13, 14, 15, 16)
+                SegmentedControl(
+                    options = fontSizes.map { it.toString() },
+                    selectedIndices = setOf(fontSizes.indexOf(state.settings.fontSize)),
+                    onToggle = { idx -> state.updateSettings { it.copy(fontSize = fontSizes[idx]) } },
+                )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                AppText("Font family", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                SegmentedControl(
+                    options = listOf("Monospace", "Proportional"),
+                    selectedIndices = setOf(if (state.settings.fontMono) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
+                )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AppText(
+                        "Most-used tags",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        fontFamily = UI,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    AppText("${state.settings.mostUsedTagLimit}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                }
+                val tagLimits = listOf(0, 3, 5, 10, 20)
+                SegmentedControl(
+                    options = tagLimits.map { it.toString() },
+                    selectedIndices = setOf(tagLimits.indexOf(state.settings.mostUsedTagLimit)),
+                    onToggle = { idx -> state.updateSettings { it.copy(mostUsedTagLimit = tagLimits[idx]) } },
+                )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AppText(
+                        "Filter list rows",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        fontFamily = UI,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    AppText("${state.settings.filterListRows}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                }
+                val rowLimits = listOf(3, 5, 8, 10, 15)
+                SegmentedControl(
+                    options = rowLimits.map { it.toString() },
+                    selectedIndices = setOf(rowLimits.indexOf(state.settings.filterListRows)),
+                    onToggle = { idx -> state.updateSettings { it.copy(filterListRows = rowLimits[idx]) } },
+                )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AppText(
+                        "Visible tabs",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        fontFamily = UI,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    AppText("${state.settings.visibleTabLimit}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                }
+                val tabLimits = listOf(4, 6, 8, 10, 12, 16)
+                SegmentedControl(
+                    options = tabLimits.map { it.toString() },
+                    selectedIndices = setOf(tabLimits.indexOf(state.settings.visibleTabLimit)),
+                    onToggle = { idx -> state.updateSettings { it.copy(visibleTabLimit = tabLimits[idx]) } },
+                )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 AppText(
-                    "Most-used tags",
+                    "Default save folder",
                     color = tc.td,
                     fontSize = 10.sp,
                     fontFamily = UI,
                     fontWeight = FontWeight.SemiBold
                 )
-                AppText("${state.settings.mostUsedTagLimit}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AppText(
+                        state.settings.defaultSaveDir ?: "(not set)", color = tc.ts, fontSize = 11.sp, fontFamily = MONO,
+                        modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis
+                    )
+                    AppButton("Browse", onClick = { state.pickSaveFolder() })
+                    if (state.settings.defaultSaveDir != null) AppButton(
+                        "Clear",
+                        onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } })
+                }
             }
-            val tagLimits = listOf(0, 3, 5, 10, 20)
-            SegmentedControl(
-                options = tagLimits.map { it.toString() },
-                selectedIndices = setOf(tagLimits.indexOf(state.settings.mostUsedTagLimit)),
-                onToggle = { idx -> state.updateSettings { it.copy(mostUsedTagLimit = tagLimits[idx]) } },
-            )
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            AnnotationSettingsRow(state)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 AppText(
-                    "Filter list rows",
+                    "Annotation file prefix",
                     color = tc.td,
                     fontSize = 10.sp,
                     fontFamily = UI,
                     fontWeight = FontWeight.SemiBold
                 )
-                AppText("${state.settings.filterListRows}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                InlineField(
+                    state.settings.annotationPrefixLabel,
+                    { value -> state.updateSettings { it.copy(annotationPrefixLabel = value) } },
+                    "From",
+                    Modifier.fillMaxWidth(),
+                    fontSize = 12.sp,
+                )
             }
-            val rowLimits = listOf(3, 5, 8, 10, 15)
-            SegmentedControl(
-                options = rowLimits.map { it.toString() },
-                selectedIndices = setOf(rowLimits.indexOf(state.settings.filterListRows)),
-                onToggle = { idx -> state.updateSettings { it.copy(filterListRows = rowLimits[idx]) } },
-            )
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                AppText(
-                    "Visible tabs",
-                    color = tc.td,
-                    fontSize = 10.sp,
-                    fontFamily = UI,
-                    fontWeight = FontWeight.SemiBold
-                )
-                AppText("${state.settings.visibleTabLimit}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                AppText("Version", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                AppText(BuildInfo.APP_VERSION, color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
             }
-            val tabLimits = listOf(4, 6, 8, 10, 12, 16)
-            SegmentedControl(
-                options = tabLimits.map { it.toString() },
-                selectedIndices = setOf(tabLimits.indexOf(state.settings.visibleTabLimit)),
-                onToggle = { idx -> state.updateSettings { it.copy(visibleTabLimit = tabLimits[idx]) } },
-            )
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AppText(
-                "Default save folder",
-                color = tc.td,
-                fontSize = 10.sp,
-                fontFamily = UI,
-                fontWeight = FontWeight.SemiBold
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                AppText(
-                    state.settings.defaultSaveDir ?: "(not set)", color = tc.ts, fontSize = 11.sp, fontFamily = MONO,
-                    modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis
-                )
-                AppButton("Browse", onClick = { state.pickSaveFolder() })
-                if (state.settings.defaultSaveDir != null) AppButton(
-                    "Clear",
-                    onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } })
+            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
             }
         }
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AppText(
-                "Auto-export notes",
-                color = tc.td,
-                fontSize = 10.sp,
-                fontFamily = UI,
-                fontWeight = FontWeight.SemiBold
+    }
+}
+
+@Composable
+private fun ThemeGallery(state: AppState) {
+    val tc = tc()
+    val themeScroll = rememberScrollState()
+    Box(Modifier.fillMaxWidth().height(148.dp)) {
+        FlowRow(
+            Modifier.fillMaxWidth().verticalScroll(themeScroll).padding(end = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            ThemePreset.entries.forEach { preset ->
+                ThemeWindowCard(
+                    label = preset.label,
+                    colors = themeColors(preset),
+                    selected = preset == state.settings.theme,
+                    onClick = { state.updateSettings { it.copy(theme = preset) } },
+                )
+            }
+        }
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(themeScroll),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+            style = appScrollbarStyle(tc),
+        )
+    }
+}
+
+@Composable
+private fun ThemeWindowCard(label: String, colors: ThemeColors, selected: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    val shape = RoundedCornerShape(8.dp)
+    var hovered by remember { mutableStateOf(false) }
+    Column(
+        Modifier.width(118.dp).height(66.dp)
+            .clip(shape)
+            .background(if (hovered && !selected) colors.ac.copy(.08f) else colors.bg)
+            .border(1.dp, if (selected || hovered) colors.ac else tc.br, shape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
             )
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(5.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().height(14.dp).background(colors.p, RoundedCornerShape(5.dp)).padding(horizontal = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            listOf(colors.ac, colors.seq1, colors.seq2).forEach { color ->
+                Box(Modifier.size(4.dp).background(color, RoundedCornerShape(50)))
+            }
+        }
+        Box(Modifier.fillMaxWidth().weight(1f).background(colors.p2, RoundedCornerShape(4.dp))) {
+            Box(Modifier.align(Alignment.CenterStart).fillMaxHeight().width(4.dp).background(colors.ac, CORNER_SM))
+            Row(
+                Modifier.align(Alignment.BottomEnd).padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Box(Modifier.size(8.dp).background(colors.seq1, CORNER_SM))
+                Box(Modifier.size(8.dp).background(colors.seq2, CORNER_SM))
+            }
+        }
+        AppText(
+            text = label,
+            color = if (selected) colors.ac else tc.ts,
+            fontSize = 9.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            overflow = TextOverflow.Ellipsis,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun AnnotationSettingsRow(state: AppState) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        CompactSetting("Auto-export", Modifier.weight(1f)) {
             SegmentedControl(
                 options = listOf("On", "Off"),
                 selectedIndices = setOf(if (state.settings.autoExportNotes) 0 else 1),
                 onToggle = { idx -> state.updateSettings { it.copy(autoExportNotes = idx == 0) } },
             )
         }
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AppText(
-                "Annotation log blocks",
-                color = tc.td,
-                fontSize = 10.sp,
-                fontFamily = UI,
-                fontWeight = FontWeight.SemiBold
-            )
+        CompactSetting("Log blocks", Modifier.weight(1.45f)) {
             val styles = AnnotationLogBlockStyle.entries
             SegmentedControl(
                 options = listOf("Indented", "{code:java}"),
@@ -1386,47 +1498,22 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 onToggle = { idx -> state.updateSettings { it.copy(annotationLogBlockStyle = styles[idx]) } },
             )
         }
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AppText(
-                "Annotation file prefix",
-                color = tc.td,
-                fontSize = 10.sp,
-                fontFamily = UI,
-                fontWeight = FontWeight.SemiBold
-            )
-            InlineField(
-                state.settings.annotationPrefixLabel,
-                { value -> state.updateSettings { it.copy(annotationPrefixLabel = value) } },
-                "From",
-                Modifier.fillMaxWidth(),
-                fontSize = 12.sp,
-            )
-        }
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            AppText(
-                "Number annotation blocks",
-                color = tc.td,
-                fontSize = 10.sp,
-                fontFamily = UI,
-                fontWeight = FontWeight.SemiBold
-            )
+        CompactSetting("Number blocks", Modifier.weight(1f)) {
             SegmentedControl(
                 options = listOf("On", "Off"),
                 selectedIndices = setOf(if (state.settings.numberAnnotationBlocks) 0 else 1),
                 onToggle = { idx -> state.updateSettings { it.copy(numberAnnotationBlocks = idx == 0) } },
             )
         }
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AppText("Version", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-            AppText(BuildInfo.APP_VERSION, color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
-        }
-        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-            AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
-        }
+    }
+}
+
+@Composable
+private fun CompactSetting(label: String, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    val tc = tc()
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppText(label, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        content()
     }
 }
 

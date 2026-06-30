@@ -178,10 +178,19 @@ data class AppSettings(
 )
 
 enum class ThemePreset(val label: String) {
-    DARK_GITHUB("Dark (GitHub)"),
     LIGHT("Light"),
+    LIGHT_PRO("Light Pro"),
+    LIGHT_CONTRAST("Light Contrast"),
+    NORD_LIGHT("Nord Light"),
+    WARM_PAPER("Warm Paper"),
+    SAGE_PAPER("Sage Paper"),
+    ROSE_PAPER("Rose Paper"),
+    INK_PAPER("Ink Paper"),
+    DARK_GITHUB("Dark (GitHub)"),
     DRACULA("Dracula"),
     SOLARIZED_DARK("Solarized Dark"),
+    GRAPHITE_DIM("Graphite Dim"),
+    TERMINAL_DARK("Terminal Dark"),
 }
 
 // ── Misc ───────────────────────────────────────────────────────────
