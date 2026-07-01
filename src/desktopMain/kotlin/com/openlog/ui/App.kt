@@ -982,6 +982,8 @@ private fun FileView(
                 onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
                 onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
                 onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
+                onExportTxt = { state.exportFilteredTxt(tab.id) },
+                onExportCsv = { state.exportFilteredCsv(tab.id) },
                 width = state.annotationPanelWidth,
                 focusRequester = annotationFr,
                 onPanelFocusChanged = { focused ->
@@ -1183,6 +1185,8 @@ private fun CompareView(
                             onMoveBlock = { bid, d -> state.moveBlock(leftTab.id, bid, d) },
                             onAddNoteAfter = { state.addNoteBlock(leftTab.id, it) },
                             onNavigateLogRef = { state.requestAnnotationNavigation(leftTab.id, it) },
+                            onExportTxt = { state.exportFilteredTxt(leftTab.id) },
+                            onExportCsv = { state.exportFilteredCsv(leftTab.id) },
                             width = state.annotationPanelWidth,
                             focusRequester = annotationFr,
                             onPanelFocusChanged = { focused ->

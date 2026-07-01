@@ -108,13 +108,18 @@ private fun ruleScopeMatches(entry: LogEntry, rule: MessageRule): Boolean {
 private fun rulePatternMatches(entry: LogEntry, rule: MessageRule): Boolean =
     containsPattern(entry.msg, rule.pattern, rule.regex)
 
+// Single source of truth for "what counts as currently visible" — used by both computeItems()
+// (applyFilter = true, the normal rendering path) and log export, so a filtered export always
+// matches exactly what computeItems() would show before any collapse/expand folding.
+fun visibleEntries(tab: LogTab, applyFilter: Boolean = true): List<LogEntry> =
+    if (applyFilter) tab.logData.filter { passesFilter(it, tab.filter) } else tab.logData
+
 // Complexity is inherent: sequence detection, manual-collapse interleaving, and segment
 // iteration are all coupled — splitting them would require passing shared mutable state.
 @Suppress("CyclomaticComplexMethod")
 fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
     val sequences = tab.filter.sequences
-    // Filter first, then detect sequences in filtered data only
-    val data = if (applyFilter) tab.logData.filter { passesFilter(it, tab.filter) } else tab.logData
+    val data = visibleEntries(tab, applyFilter)
 
     fun sequenceItems(segment: List<LogEntry>): List<LogItem> {
         val seqGroups = if (tab.filter.seqOn && sequences.any { it.enabled })

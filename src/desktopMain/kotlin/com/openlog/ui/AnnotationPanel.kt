@@ -65,6 +65,8 @@ fun AnnotationPanel(
     onMoveBlock: (String, Int) -> Unit,
     onAddNoteAfter: (String?) -> Unit,
     onNavigateLogRef: (AnnBlock.LogRef) -> Unit,
+    onExportTxt: () -> Unit,
+    onExportCsv: () -> Unit,
     width: Float,
     focusRequester: FocusRequester? = null,
     onPanelFocusChanged: (Boolean) -> Unit = {},
@@ -211,6 +213,18 @@ fun AnnotationPanel(
                 AppButton("Save", onClick = onSave, modifier = headerButtonModifier)
                 AppButton("Open Note", onClick = { openNotePicker() }, modifier = headerButtonModifier)
                 Box {
+                    var exportMenuOpen by remember { mutableStateOf(false) }
+                    AppButton("Export ▾", onClick = { exportMenuOpen = true }, modifier = headerButtonModifier)
+                    if (exportMenuOpen) {
+                        ExportMenuPopup(
+                            onExportTxt = { exportMenuOpen = false; onExportTxt() },
+                            onExportCsv = { exportMenuOpen = false; onExportCsv() },
+                            onDismiss = { exportMenuOpen = false },
+                            tc = tc,
+                        )
+                    }
+                }
+                Box {
                     AppButton(
                         "▾ ${recentNotes.size}",
                         enabled = hasRecentNotes,
@@ -330,6 +344,42 @@ fun AnnotationPanel(
                 modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
                 style = appScrollbarStyle(tc),
             )
+        }
+    }
+}
+
+@Composable
+private fun ExportMenuPopup(
+    onExportTxt: () -> Unit,
+    onExportCsv: () -> Unit,
+    onDismiss: () -> Unit,
+    tc: ThemeColors,
+) {
+    val density = LocalDensity.current.density
+    Popup(
+        alignment = Alignment.TopStart,
+        offset = IntOffset(0, (34 * density).roundToInt()),
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        Column(
+            Modifier.width(160.dp)
+                .background(tc.p, RoundedCornerShape(7.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                .padding(vertical = 4.dp),
+        ) {
+            HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onExportTxt) {
+                AppText(
+                    "Filtered log as .txt", color = tc.tx, fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
+            HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onExportCsv) {
+                AppText(
+                    "Filtered log as .csv", color = tc.tx, fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
         }
     }
 }

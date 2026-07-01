@@ -3,6 +3,8 @@ package com.openlog.ui
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.*
+import com.openlog.utils.buildFilteredCsv
+import com.openlog.utils.buildFilteredTxt
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
 import com.openlog.utils.parseLogcat
@@ -1128,6 +1130,34 @@ class AppState(
                 rememberRecentNote(saved)
             }
         }
+    }
+
+    fun exportFilteredTxt(tabId: String) {
+        val t = tab(tabId) ?: return
+        val dlg = FileDialog(null as Frame?, "Export Filtered Log", FileDialog.SAVE).apply {
+            file = t.filename.substringBeforeLast('.') + "_filtered.txt"
+            settings.defaultSaveDir?.let { directory = it }
+            isVisible = true
+        }
+        val path = dlg.file ?: return
+        val dir = dlg.directory ?: return
+        settings = settings.copy(defaultSaveDir = dir)
+        val saved = File(dir, path)
+        ioScope.launch { runCatching { saved.writeText(buildFilteredTxt(t)) } }
+    }
+
+    fun exportFilteredCsv(tabId: String) {
+        val t = tab(tabId) ?: return
+        val dlg = FileDialog(null as Frame?, "Export Filtered Log", FileDialog.SAVE).apply {
+            file = t.filename.substringBeforeLast('.') + "_filtered.csv"
+            settings.defaultSaveDir?.let { directory = it }
+            isVisible = true
+        }
+        val path = dlg.file ?: return
+        val dir = dlg.directory ?: return
+        settings = settings.copy(defaultSaveDir = dir)
+        val saved = File(dir, path)
+        ioScope.launch { runCatching { saved.writeText(buildFilteredCsv(t)) } }
     }
 
     fun openNoteFile(tabId: String, file: File) {
