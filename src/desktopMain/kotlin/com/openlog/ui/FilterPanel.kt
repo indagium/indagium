@@ -128,6 +128,7 @@ fun FilterPanel(
     focusRequester: FocusRequester? = null,
     focusSearchRequest: Int = 0,
     onPanelFocusChanged: (Boolean) -> Unit = {},
+    keyboardFocusVisible: Boolean = false,
 ) {
     val tc = tc()
     val filter = tab.filter
@@ -374,7 +375,7 @@ fun FilterPanel(
     }
     Column(
         Modifier.width(width.dp).fillMaxHeight().background(tc.p)
-            .border(BorderStroke(1.dp, if (panelFocused) tc.ac else tc.br))
+            .border(BorderStroke(1.dp, if (panelFocused && keyboardFocusVisible) tc.ac else tc.br))
             .dragAndDropTarget(
                 shouldStartDragAndDrop = { event ->
                     runCatching { event.dragData() is DragData.FilesList }.getOrElse { false }

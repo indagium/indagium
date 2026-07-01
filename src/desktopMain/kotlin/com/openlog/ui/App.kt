@@ -135,12 +135,19 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                 )
                 .focusRequester(rootFocusRequester)
                 .focusable()
+                // Any mouse click anywhere hides the keyboard focus-visible outline; panel
+                // focus shortcuts below turn it back on. Runs on the Initial pass so it fires
+                // before the click's own focus side effects.
+                .onPointerEvent(PointerEventType.Press, PointerEventPass.Initial) {
+                    state.keyboardFocusVisible = false
+                }
                 .onPreviewKeyEvent { ev ->
                     handleGlobalKey(
                         ev = ev,
                         state = state,
-                        onFocusPanel = { panel -> pendingPanelFocus = panel },
+                        onFocusPanel = { panel -> state.keyboardFocusVisible = true; pendingPanelFocus = panel },
                         onFocusFilterSearch = {
+                            state.keyboardFocusVisible = true
                             state.updateFilterVisible(true)
                             pendingPanelFocus = KeyboardPanel.FILTERS
                             filterSearchFocusRequest += 1
@@ -865,6 +872,7 @@ private fun BoundFilterPanel(
         focusRequester = focusRequester,
         focusSearchRequest = focusSearchRequest,
         onPanelFocusChanged = onPanelFocusChanged,
+        keyboardFocusVisible = state.keyboardFocusVisible,
     )
     HDivider { delta -> state.updateFilterPanelWidth(state.filterPanelWidth + delta) }
 }
@@ -903,6 +911,7 @@ private fun FileView(
                 if (frs.isNotEmpty()) {
                     val delta = if (ev.isShiftPressed) -1 else 1
                     val next = (focusedPanelIdx + delta).mod(frs.size)
+                    state.keyboardFocusVisible = true
                     runCatching { frs[next].second.requestFocus() }
                 }
                 true
@@ -940,6 +949,7 @@ private fun FileView(
             onPanelFocusChanged = { focused ->
                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == logViewerFr }
             },
+            keyboardFocusVisible = state.keyboardFocusVisible,
         )
         if (state.annotationVisible) {
             HDivider { delta ->
@@ -967,6 +977,7 @@ private fun FileView(
                 onPanelFocusChanged = { focused ->
                     if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
                 },
+                keyboardFocusVisible = state.keyboardFocusVisible,
             )
         }
     }
@@ -981,7 +992,15 @@ private fun CompareView(
     onPanelFocusConsumed: () -> Unit = {},
 ) {
     val leftTab = state.tab(state.activeTabId) ?: state.tabs.firstOrNull() ?: return
-    val rightTab = state.tab(state.compareTabId) ?: state.tabs.getOrNull(1) ?: state.tabs.first()
+    val rawRightTab = state.tab(state.compareTabId) ?: state.tabs.getOrNull(1) ?: state.tabs.first()
+    // Left and right must never resolve to the same tab: both LogViewers key their scroll
+    // state by tab id alone, so two panes on the same tab would share one LazyListState and
+    // silently fight over scroll ownership (see LogViewerScrollStateStore).
+    val rightTab = if (rawRightTab.id == leftTab.id) {
+        state.tabs.firstOrNull { it.id != leftTab.id } ?: rawRightTab
+    } else {
+        rawRightTab
+    }
     val tc = tc()
     val filterFr = remember { FocusRequester() }
     val leftLogFr = remember { FocusRequester() }
@@ -1019,6 +1038,7 @@ private fun CompareView(
                     if (frs.isNotEmpty()) {
                         val delta = if (ev.isShiftPressed) -1 else 1
                         val next = (focusedPanelIdx + delta).mod(frs.size)
+                        state.keyboardFocusVisible = true
                         runCatching { frs[next].second.requestFocus() }
                     }
                     true
@@ -1028,23 +1048,17 @@ private fun CompareView(
             },
         ) {
             // ── Left panel ──────────────────────────────────────────
+            // No local tab picker here — the top TabBar already controls activeTabId (the tab
+            // shown on the left), so a second picker for the same state would be redundant.
             Column(
                 Modifier
                     .width((totalWidthDp * state.compareSplit).dp)
                     .fillMaxHeight()
                     .border(BorderStroke(1.dp, tc.br.copy(.53f)))
             ) {
-                Row(
-                    Modifier.fillMaxWidth().background(tc.p2).padding(4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    state.tabs.forEach { t ->
-                        PillBtn(
-                            t.filename,
-                            active = t.id == leftTab.id
-                        ) { state.activateTab(t.id) }
-                    }
-                }
+                // Empty bar matching the right panel's header height, so both LogViewers start
+                // at the same vertical offset — this is a side-by-side diff view.
+                Box(Modifier.fillMaxWidth().height(36.dp).background(tc.p2))
                 Row(Modifier.weight(1f).fillMaxWidth()) {
                     BoundFilterPanel(
                         state = state,
@@ -1078,6 +1092,7 @@ private fun CompareView(
                         onPanelFocusChanged = { focused ->
                             if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == leftLogFr }
                         },
+                        keyboardFocusVisible = state.keyboardFocusVisible,
                     )
                 }
             }
@@ -1091,12 +1106,15 @@ private fun CompareView(
             // ── Right panel ──────────────────────────────────────────
             Column(Modifier.weight(1f).fillMaxHeight()) {
                 Row(
-                    Modifier.fillMaxWidth().background(tc.p2).padding(4.dp),
+                    Modifier.fillMaxWidth().height(36.dp).background(tc.p2).padding(horizontal = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     state.tabs.forEach { t ->
                         PillBtn(t.filename, active = t.id == rightTab.id) {
+                            // Picking the tab already shown on the left swaps sides instead of
+                            // colliding both panes on the same tab (see LogViewerScrollStateStore).
+                            if (t.id == leftTab.id) state.activateTab(rightTab.id)
                             state.compareTabId = t.id
                         }
                     }
@@ -1131,6 +1149,7 @@ private fun CompareView(
                         onPanelFocusChanged = { focused ->
                             if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == rightLogFr }
                         },
+                        keyboardFocusVisible = state.keyboardFocusVisible,
                     )
                     if (state.annotationVisible) {
                         HDivider { d ->
@@ -1159,6 +1178,7 @@ private fun CompareView(
                             onPanelFocusChanged = { focused ->
                                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
                             },
+                            keyboardFocusVisible = state.keyboardFocusVisible,
                         )
                     }
                 }

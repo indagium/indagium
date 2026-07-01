@@ -87,6 +87,10 @@ class AppState(
     var compareTabId by mutableStateOf("")
 
     // ── Transient UI ─────────────────────────────────────────────────
+    // True right after a keyboard-driven panel focus change (F6/Shift+F6, Cmd+1/2/3/F); set
+    // false on any pointer press. Panels only draw their accent focus border while this is
+    // true — mirrors the CSS :focus-visible pattern so mouse clicks don't outline the panel.
+    var keyboardFocusVisible by mutableStateOf(false)
     var ctx by mutableStateOf<CtxMenuState?>(null)
     var addAnnRequest by mutableStateOf<AddAnnRequest?>(null)   // dialog to add annotation
     var sfDialog by mutableStateOf(false)
@@ -162,6 +166,11 @@ class AppState(
     fun updateCompareMode(enabled: Boolean) {
         if (compareMode == enabled) return
         compareMode = enabled
+        if (enabled && compareTabId == activeTabId) {
+            // Left and right panes must never show the same tab — they'd share one
+            // LazyListState (keyed by tab id) and silently fight over scroll ownership.
+            compareTabId = tabs.firstOrNull { it.id != activeTabId }?.id ?: ""
+        }
         autosaveNow()
     }
 

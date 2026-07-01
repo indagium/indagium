@@ -68,6 +68,7 @@ fun AnnotationPanel(
     width: Float,
     focusRequester: FocusRequester? = null,
     onPanelFocusChanged: (Boolean) -> Unit = {},
+    keyboardFocusVisible: Boolean = false,
 ) {
     val tc = tc()
     val mono = monoFont()
@@ -149,7 +150,7 @@ fun AnnotationPanel(
 
     Column(
         Modifier.width(width.dp).fillMaxHeight().background(tc.p)
-            .border(BorderStroke(1.dp, if (panelFocused) tc.ac else tc.br))
+            .border(BorderStroke(1.dp, if (panelFocused && keyboardFocusVisible) tc.ac else tc.br))
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .focusGroup()
             .focusable()
