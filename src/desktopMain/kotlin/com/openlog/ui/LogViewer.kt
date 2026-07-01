@@ -183,6 +183,7 @@ fun LogViewer(
     navScrollMargin: Int = 5,
     focusRequester: FocusRequester? = null,
     onPanelFocusChanged: (Boolean) -> Unit = {},
+    keyboardFocusVisible: Boolean = false,
 ) {
     val tc        = tc()
     val mono      = monoFont()
@@ -420,7 +421,7 @@ fun LogViewer(
                             itemOnSelRowRange, selCursor,
                             actions = SelKeyActions(onSelectAll, onClearSelection, onCopySelection))
                     }
-                    .border(1.dp, if (isFocused) tc.ac else Color.Transparent)
+                    .border(1.dp, if (isFocused && keyboardFocusVisible) tc.ac else Color.Transparent)
             ) {
                 Column(Modifier.fillMaxSize()) {
                     // Content area: horizontal scroll wraps LazyColumn

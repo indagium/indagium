@@ -16,13 +16,25 @@ jobs:
             artifact_path: build/compose/binaries/main/deb
             artifact_name: openLog-linux-x64
 
-          # Windows disabled for now — re-add when needed:
-          # - os: windows-latest
-          #   task: packageMsi
-          #   artifact_path: build/compose/binaries/main/msi
-          #   artifact_name: openLog-windows-x64
+          - os: windows-latest
+            task: packageMsi
+            artifact_path: build/compose/binaries/main/msi
+            artifact_name: openLog-windows-x64
+
+          # macOS runner is Apple Silicon (arm64); unsigned (no Apple Developer cert in CI), so
+          # Gatekeeper will show an "unidentified developer" warning on first launch — same as
+          # a local unsigned build.
+          - os: macos-latest
+            task: packageDmg
+            artifact_path: build/compose/binaries/main/dmg
+            artifact_name: openLog-macos-arm64
 
     runs-on: ${{ matrix.os }}
+    # windows-latest defaults `run:` steps to PowerShell, where `chmod`/`./gradlew` don't work.
+    # GitHub-hosted Windows runners ship Git Bash, so force bash uniformly across all three OSes.
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - uses: actions/checkout@v4

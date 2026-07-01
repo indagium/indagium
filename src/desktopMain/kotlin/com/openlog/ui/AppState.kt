@@ -87,6 +87,10 @@ class AppState(
     var compareTabId by mutableStateOf("")
 
     // ── Transient UI ─────────────────────────────────────────────────
+    // True right after a keyboard-driven panel focus change (F6/Shift+F6, Cmd+1/2/3/F); set
+    // false on any pointer press. Panels only draw their accent focus border while this is
+    // true — mirrors the CSS :focus-visible pattern so mouse clicks don't outline the panel.
+    var keyboardFocusVisible by mutableStateOf(false)
     var ctx by mutableStateOf<CtxMenuState?>(null)
     var addAnnRequest by mutableStateOf<AddAnnRequest?>(null)   // dialog to add annotation
     var sfDialog by mutableStateOf(false)
@@ -162,6 +166,11 @@ class AppState(
     fun updateCompareMode(enabled: Boolean) {
         if (compareMode == enabled) return
         compareMode = enabled
+        if (enabled && compareTabId == activeTabId) {
+            // Left and right panes must never show the same tab — they'd share one
+            // LazyListState (keyed by tab id) and silently fight over scroll ownership.
+            compareTabId = tabs.firstOrNull { it.id != activeTabId }?.id ?: ""
+        }
         autosaveNow()
     }
 
@@ -967,7 +976,12 @@ class AppState(
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
         val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
-        addMessageRule(c.tabId, include = true, pattern = text, regex = false, tag = entry.tag, packagePrefix = null)
+        // Unscoped, matching the manual "+" message-rule flow exactly: a tag-scoped positive
+        // rule only narrows within its own tag and lets every other tag fall through to the
+        // base tag/keyword filter (by design — see scopedIncludeMessageRuleNarrowsOnlyMatchingTag),
+        // which looks like "no filter at all" when no base tag filter is active — not what
+        // "show only messages like this" implies.
+        addMessageRule(c.tabId, include = true, pattern = text, regex = false, tag = null, packagePrefix = null)
         ctx = null
     }
 
