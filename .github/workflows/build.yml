@@ -53,7 +53,8 @@ jobs:
       # hook for it either), so docks/taskbars can't match the running window (WM_CLASS set to
       # "openLog" via sun.java.command in Main.kt) back to this launcher entry — falls back to
       # a generic icon and the raw class name. Patch it in post-build since the .deb is just an
-      # archive.
+      # archive. The .desktop file ships at opt/<packageName>/lib/, not usr/share/applications —
+      # postinst runs `xdg-desktop-menu install` on it at install time to put it there.
       - name: Add StartupWMClass to Linux .desktop file
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -61,7 +62,7 @@ jobs:
           deb=$(find build/compose/binaries/main/deb -name '*.deb')
           workdir=$(mktemp -d)
           dpkg-deb -R "$deb" "$workdir"
-          desktop_file=$(find "$workdir/usr/share/applications" -name '*.desktop')
+          desktop_file=$(find "$workdir/opt" -name '*.desktop')
           if ! grep -q '^StartupWMClass=' "$desktop_file"; then
             echo "StartupWMClass=openLog" >> "$desktop_file"
           fi
