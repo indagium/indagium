@@ -65,6 +65,9 @@ class FilterBehaviorTest {
     fun scopedIncludeMessageRuleNarrowsOnlyMatchingTag() {
         val desired = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "request complete")
         val spam = LogEntry(2, "10:00:00.001", LogLevel.I, "com.app.Network", "heartbeat")
+        // No base tag/package filter is configured, so a scoped rule is the sole positive
+        // selector — an entry outside its scope must NOT vacuously pass just because the base
+        // filter happens to be empty (that would make "show only X" show everything instead).
         val otherTag = LogEntry(3, "10:00:00.002", LogLevel.I, "com.app.Auth", "login complete")
         val filter = Filter(
             messageRules = listOf(
@@ -74,7 +77,28 @@ class FilterBehaviorTest {
 
         assertTrue(passesFilter(desired, filter))
         assertFalse(passesFilter(spam, filter))
-        assertTrue(passesFilter(otherTag, filter))
+        assertFalse(passesFilter(otherTag, filter))
+    }
+
+    @Test
+    fun positiveRuleAddsToActiveBaseFilterInsteadOfReplacingIt() {
+        // Regression test: adding an unscoped message rule unrelated to an already-active
+        // package filter must show BOTH the package filter's own matches AND the rule's
+        // matches (union) — not replace the package filter's results with the rule's alone.
+        val packageMatch = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Ui", "render frame")
+        val ruleMatch = LogEntry(2, "10:00:00.001", LogLevel.I, "system.Binder",
+            "ArrayIndexOutOfBoundsException: length=16; index=17")
+        val neither = LogEntry(3, "10:00:00.002", LogLevel.I, "system.Other", "unrelated noise")
+        val filter = Filter(
+            pkgPrefixes = setOf("com.app"),
+            messageRules = listOf(
+                MessageRule(id = "r1", include = true, pattern = "ArrayIndexOutOfBoundsException"),
+            ),
+        )
+
+        assertTrue(passesFilter(packageMatch, filter))
+        assertTrue(passesFilter(ruleMatch, filter))
+        assertFalse(passesFilter(neither, filter))
     }
 
     @Test
@@ -177,17 +201,20 @@ class FilterBehaviorTest {
     }
 
     @Test
-    fun unscopedPositiveRuleOverridesTagFilter() {
+    fun unscopedPositiveRuleAddsMatchesFromAnyTagToActiveTagFilter() {
         val matchesRule = LogEntry(1, "10:00:00.000", LogLevel.I, "com.other.Network", "ERROR logged")
-        val noMatch = LogEntry(2, "10:00:00.001", LogLevel.I, "com.other.Network", "normal debug")
-        // activeTags restricts to Auth, but unscoped positive rule for ERROR overrides that
+        val matchesActiveTagOnly = LogEntry(2, "10:00:00.001", LogLevel.I, "com.app.Auth", "normal debug")
+        val matchesNeither = LogEntry(3, "10:00:00.002", LogLevel.I, "com.other.Network", "normal debug")
+        // activeTags restricts to Auth; an unscoped positive rule for ERROR adds matches from
+        // any tag on top of that — it doesn't replace the tag filter's own results.
         val filter = Filter(
             activeTags = setOf("com.app.Auth"),
             messageRules = listOf(MessageRule(id = "r1", include = true, pattern = "ERROR")),
         )
 
         assertTrue(passesFilter(matchesRule, filter))
-        assertFalse(passesFilter(noMatch, filter))
+        assertTrue(passesFilter(matchesActiveTagOnly, filter))
+        assertFalse(passesFilter(matchesNeither, filter))
     }
 
     @Test

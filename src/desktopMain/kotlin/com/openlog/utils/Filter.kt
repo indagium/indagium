@@ -4,9 +4,11 @@ import androidx.compose.ui.graphics.Color
 import com.openlog.model.*
 import com.openlog.ui.SEQ_COLORS
 
-// When positive message/PID rules (or the kwInTag live-search) are active they act as the
-// sole positive filter — every matching entry is shown from any tag, overriding the tag filter.
-// The tag/keyword filter only applies when NO positive rules are set.
+// Positive message/PID rules and the kwInTag live-search ADD matches on top of the base
+// tag/keyword filter rather than replacing it — an entry passes if it satisfies a positive
+// selector OR the base tag/keyword filter. The base filter only contributes when it's actually
+// configured (non-empty); an unconfigured base filter would otherwise vacuously pass every
+// entry, defeating whatever positive selectors are active.
 // Negative rules and exclusions always apply regardless.
 fun passesFilter(entry: LogEntry, filter: Filter): Boolean {
     val enabledRules = filter.messageRules.filter { it.enabled && it.pattern.isNotBlank() }
@@ -36,16 +38,16 @@ private fun matchesPositiveSelectors(
     hasPosPidTid: Boolean,
     filter: Filter,
 ): Boolean {
-    val scopedRules = posRules.filter { it.tag != null || it.packagePrefix != null }
-    val unscopedRules = posRules - scopedRules.toSet()
-    if (unscopedRules.any { rule -> matchesRule(entry, rule) }) return true
-    val scopedEntryRules = scopedRules.filter { rule -> ruleScopeMatches(entry, rule) }
-    if (scopedEntryRules.any { rule -> matchesRule(entry, rule) }) return true
+    // ruleScopeMatches is a no-op (always true) for unscoped rules, so this covers both.
+    if (posRules.any { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule) }) return true
     if (hasKwInTag && containsPattern(entry.msg, filter.kwInTag, filter.kwInTagRegex)) return true
     if (hasPosPidTid && matchesPidTidFilter(entry, filter.pidTidFilter)) return true
-    val entryOutOfScopeOfAllPositiveRules =
-        unscopedRules.isEmpty() && !hasKwInTag && !hasPosPidTid && scopedEntryRules.isEmpty()
-    return if (entryOutOfScopeOfAllPositiveRules) passesTagOrKeywordFilter(entry, filter) else false
+    return hasActiveBaseFilter(filter) && passesTagOrKeywordFilter(entry, filter)
+}
+
+private fun hasActiveBaseFilter(filter: Filter): Boolean = when (filter.mode) {
+    FilterMode.TAGS -> filter.activeTags.isNotEmpty() || filter.pkgPrefixes.isNotEmpty()
+    FilterMode.KEYWORD -> filter.kwText.isNotBlank()
 }
 
 private fun matchesPidTidFilter(entry: LogEntry, pidTidFilter: String): Boolean {

@@ -976,7 +976,12 @@ class AppState(
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
         val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
-        addMessageRule(c.tabId, include = true, pattern = text, regex = false, tag = entry.tag, packagePrefix = null)
+        // Unscoped, matching the manual "+" message-rule flow exactly: a tag-scoped positive
+        // rule only narrows within its own tag and lets every other tag fall through to the
+        // base tag/keyword filter (by design — see scopedIncludeMessageRuleNarrowsOnlyMatchingTag),
+        // which looks like "no filter at all" when no base tag filter is active — not what
+        // "show only messages like this" implies.
+        addMessageRule(c.tabId, include = true, pattern = text, regex = false, tag = null, packagePrefix = null)
         ctx = null
     }
 

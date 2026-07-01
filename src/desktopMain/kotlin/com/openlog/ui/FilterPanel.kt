@@ -44,6 +44,11 @@ import java.io.File
 import java.net.URI
 import kotlin.math.roundToInt
 
+// A message-rule search suggestion. inScope marks whether it's within the currently active
+// tag/package filter — out-of-scope candidates are shown after in-scope ones and dimmed, so
+// matches unrelated to the active filter are still discoverable instead of vanishing.
+private data class MsgCandidate(val pattern: String, val target: RuleTarget, val inScope: Boolean)
+
 // Collapse/expand state for the filter panel. Held outside the composable so it survives
 // the panel being hidden and re-shown (FilterPanel is removed from the tree when invisible).
 class FilterPanelUiState {
@@ -321,42 +326,58 @@ fun FilterPanel(
     }
 
     // Unified candidates: PIDs when field is blank, message stems + matching PIDs when not blank.
-    // Each candidate carries its RuleTarget so the correct rule type is added on click.
+    // In-scope results (within the active tag/package filter) come first, then out-of-scope
+    // ones (still respecting level/exclude filters, just not the tag/package restriction) —
+    // so a search unrelated to the active filter still surfaces results instead of showing
+    // nothing, making it easy to spot and then relax the filter if that's what's wanted.
     val unifiedCandidates = remember(tab.id, filter, msgRuleSearch) {
         if (msgRuleSearch.isBlank()) {
             emptyList()
         } else {
             val baseFilter = filter.copy(kwInTag = "", messageRules = emptyList(), pidTidFilter = "")
+            val relaxedFilter = baseFilter.copy(activeTags = emptySet(), pkgPrefixes = emptySet())
             // PIDs only when the search looks like a number
             val pidCandidates = if (msgRuleSearch.any { it.isDigit() })
                 tab.logData
-                    .filter { entry -> passesFilter(entry, baseFilter) && entry.pid != 0 }
+                    .filter { entry -> passesFilter(entry, relaxedFilter) && entry.pid != 0 }
                     .map { it.pid.toString() }.distinct()
                     .filter { it.contains(msgRuleSearch) }
                     .take(3)
-                    .map { Pair(it, RuleTarget.PID_TID) }
+                    .map { MsgCandidate(it, RuleTarget.PID_TID, inScope = true) }
             else emptyList()
-            // Message stem/full candidates
-            val matchingMsgs = tab.logData
-                .filter { entry ->
-                    passesFilter(entry, baseFilter) &&
-                        containsPattern(entry.msg, msgRuleSearch, regex = filter.kwInTagRegex)
-                }
+
+            fun matchingMsgsOf(entries: List<LogEntry>) = entries
+                .filter { containsPattern(it.msg, msgRuleSearch, regex = filter.kwInTagRegex) }
                 .map { it.msg }
+
+            val inScopeMsgs = matchingMsgsOf(tab.logData.filter { passesFilter(it, baseFilter) })
+            val outOfScopeMsgs = matchingMsgsOf(
+                tab.logData.filter { !passesFilter(it, baseFilter) && passesFilter(it, relaxedFilter) },
+            )
+
             // In regex mode, lead with what the pattern actually matched (e.g. "avc.*denied"
             // against "avc: denied : word 1 word 2" proposes "avc: denied" first) instead of
             // the plain-text stem heuristic, which only makes sense for non-regex prefix search.
-            val leads = if (filter.kwInTagRegex) {
-                matchingMsgs.mapNotNull { msg -> firstRegexMatch(msg, msgRuleSearch)?.take(80) }.distinct()
-            } else {
-                matchingMsgs.map { msg ->
-                    val sepIdx = msg.indexOfFirst { it == ':' || it == '(' }
-                    if (sepIdx > 0) msg.substring(0, sepIdx).trim().takeIf { it.isNotBlank() } ?: msg.take(80)
-                    else msg.take(80)
-                }.distinct()
+            fun stemsAndFulls(msgs: List<String>): List<String> {
+                val leads = if (filter.kwInTagRegex) {
+                    msgs.mapNotNull { msg -> firstRegexMatch(msg, msgRuleSearch)?.take(80) }.distinct()
+                } else {
+                    msgs.map { msg ->
+                        val sepIdx = msg.indexOfFirst { it == ':' || it == '(' }
+                        if (sepIdx > 0) msg.substring(0, sepIdx).trim().takeIf { it.isNotBlank() } ?: msg.take(80)
+                        else msg.take(80)
+                    }.distinct()
+                }
+                val fulls = msgs.map { it.take(80) }.distinct().filter { it !in leads }
+                return leads + fulls
             }
-            val fulls = matchingMsgs.map { it.take(80) }.distinct().filter { it !in leads }
-            val msgCandidates = (leads + fulls).take(8 - pidCandidates.size).map { Pair(it, RuleTarget.MESSAGE) }
+
+            val inScopeCandidates = stemsAndFulls(inScopeMsgs).map { MsgCandidate(it, RuleTarget.MESSAGE, inScope = true) }
+            val inScopePatterns = inScopeCandidates.map { it.pattern }.toSet()
+            val outOfScopeCandidates = stemsAndFulls(outOfScopeMsgs)
+                .filter { it !in inScopePatterns }
+                .map { MsgCandidate(it, RuleTarget.MESSAGE, inScope = false) }
+            val msgCandidates = (inScopeCandidates + outOfScopeCandidates).take(8 - pidCandidates.size)
             pidCandidates + msgCandidates
         }
     }
@@ -780,7 +801,7 @@ fun FilterPanel(
                                 Key.Enter -> {
                                     val c = unifiedCandidates.getOrNull(msgRuleSelectedIdx)
                                     if (c != null) {
-                                        onAddMessageRule(msgRuleSelectedAction == 0, c.first, false, null, null, c.second)
+                                        onAddMessageRule(msgRuleSelectedAction == 0, c.pattern, false, null, null, c.target)
                                     } else if (msgRuleInput.isNotBlank()) {
                                         // No candidate selected — add typed text directly.
                                         // All-digit input → PID/TID rule; anything else → message rule.
@@ -812,7 +833,8 @@ fun FilterPanel(
                         .onPointerEvent(PointerEventType.Enter) { msgCandidatesHovered = true }
                         .onPointerEvent(PointerEventType.Exit)  { msgCandidatesHovered = false }
                 ) {
-                    unifiedCandidates.forEachIndexed { idx, (pattern, target) ->
+                    unifiedCandidates.forEachIndexed { idx, cand ->
+                        val (pattern, target, inScope) = cand
                         val isPid = target == RuleTarget.PID_TID
                         val isIncluded = if (isPid) msgInc.any { it.target == RuleTarget.PID_TID && it.pattern == pattern }
                         else msgInc.any { it.target == RuleTarget.MESSAGE && it.pattern == pattern && !it.regex }
@@ -838,12 +860,17 @@ fun FilterPanel(
                                     AppText("pid", color = tc.td.copy(.7f), fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
                                         modifier = Modifier.padding(end = 2.dp))
                                 }
+                                if (!inScope) {
+                                    AppText("other", color = tc.td.copy(.7f), fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(end = 2.dp))
+                                }
                                 FullTextHint(pattern, modifier = Modifier.weight(1f), forceShow = isRowSelected) { onTextLayout ->
                                     AppText(
                                         pattern,
                                         color = when {
                                             isIncluded -> tc.tx
                                             isExcluded -> msgExNeg.copy(.8f)
+                                            !inScope -> tc.td
                                             else -> tc.ts
                                         },
                                         fontSize = 11.sp,
