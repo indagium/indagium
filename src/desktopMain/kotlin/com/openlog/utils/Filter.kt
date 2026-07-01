@@ -121,45 +121,74 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
             computeSeqGroups(segment, sequences)
         else emptyList()
 
-        if (seqGroups.isEmpty()) return segment.map { LogItem.Row(it, 0) }
-
-        val defMap = sequences.associateBy { it.id }
-        val skipIds = buildSet<Int> {
+        // Every id a sequence group claims — its own header line plus all children (plain + nested).
+        // Used to keep stack-trace folding from re-claiming a line a sequence already owns.
+        val seqClaimedIds = buildSet<Int> {
             seqGroups.forEach { g ->
+                add(g.rid)
                 addAll(g.plain)
                 g.nested.forEach { ng -> add(ng.rid); addAll(ng.ch) }
             }
         }
 
+        // Stack-trace folding is always-on, independent of user-defined sequences. Sequence groups
+        // take priority on overlap: drop a stack-trace group entirely if any of its lines are
+        // already claimed by a sequence, rather than trying to partially split it.
+        val stackGroups = computeStackTraceGroups(segment)
+            .filter { g -> (g.memberIds + g.rid).none { it in seqClaimedIds } }
+
+        if (seqGroups.isEmpty() && stackGroups.isEmpty()) return segment.map { LogItem.Row(it, 0) }
+
+        val defMap = sequences.associateBy { it.id }
+        val seqChildIds = buildSet<Int> {
+            seqGroups.forEach { g ->
+                addAll(g.plain)
+                g.nested.forEach { ng -> add(ng.rid); addAll(ng.ch) }
+            }
+        }
+        val stackChildIds = buildSet<Int> { stackGroups.forEach { addAll(it.memberIds) } }
+        val skipIds = seqChildIds + stackChildIds
+
         val items = mutableListOf<LogItem>()
         for (entry in segment) {
             val sg = seqGroups.find { it.rid == entry.id }
-            if (sg != null) {
-                val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
-                val exp = sg.gid in tab.expanded
-                val outerColor = defMap[sg.defId]?.color ?: SEQ_COLORS.first()
-                items += LogItem.SeqHeader(entry, sg.gid, 0, exp, totalCh, outerColor)
-                if (exp) {
-                    val plainIds = sg.plain.toSet()
-                    val nestedByRoot = sg.nested.associateBy { it.rid }
-                    for (inner in segment) {
-                        if (inner.id in plainIds) {
-                            items += LogItem.Row(inner, 1, outerColor)
-                            continue
-                        }
-                        val ng = nestedByRoot[inner.id] ?: continue
-                        val nestedColor = defMap[ng.defId]?.color ?: outerColor
-                        val nexp = ng.gid in tab.expanded
-                        items += LogItem.SeqHeader(inner, ng.gid, 1, nexp, ng.ch.size, nestedColor)
-                        if (nexp) {
-                            ng.ch.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 2, nestedColor) } }
+            val stg = if (sg == null) stackGroups.find { it.rid == entry.id } else null
+            when {
+                sg != null -> {
+                    val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
+                    val exp = sg.gid in tab.expanded
+                    val outerColor = defMap[sg.defId]?.color ?: SEQ_COLORS.first()
+                    items += LogItem.SeqHeader(entry, sg.gid, 0, exp, totalCh, outerColor)
+                    if (exp) {
+                        val plainIds = sg.plain.toSet()
+                        val nestedByRoot = sg.nested.associateBy { it.rid }
+                        for (inner in segment) {
+                            if (inner.id in plainIds) {
+                                items += LogItem.Row(inner, 1, outerColor)
+                                continue
+                            }
+                            val ng = nestedByRoot[inner.id] ?: continue
+                            val nestedColor = defMap[ng.defId]?.color ?: outerColor
+                            val nexp = ng.gid in tab.expanded
+                            items += LogItem.SeqHeader(inner, ng.gid, 1, nexp, ng.ch.size, nestedColor)
+                            if (nexp) {
+                                ng.ch.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 2, nestedColor) } }
+                            }
                         }
                     }
                 }
-                continue
+
+                stg != null -> {
+                    val exp = stg.gid in tab.expanded
+                    items += LogItem.StackTraceHeader(entry, stg.gid, 0, exp, stg.memberIds.size)
+                    if (exp) {
+                        stg.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 1) } }
+                    }
+                }
+
+                entry.id in skipIds -> Unit
+                else -> items += LogItem.Row(entry, 0)
             }
-            if (entry.id in skipIds) continue
-            items += LogItem.Row(entry, 0)
         }
         return items
     }
@@ -199,6 +228,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
                 )
 
                 is LogItem.SeqHeader -> item.copy(indent = item.indent + 1)
+                is LogItem.StackTraceHeader -> item.copy(indent = item.indent + 1)
                 is LogItem.ManualHeader -> item
             }
         }

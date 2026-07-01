@@ -696,6 +696,7 @@ class AppState(
                         is LogItem.Row -> item.entry.id
                         is LogItem.SeqHeader -> item.entry.id
                         is LogItem.ManualHeader -> item.entry.id
+                        is LogItem.StackTraceHeader -> item.entry.id
                     }
                 }
                 val last = t.selected.lastOrNull { it in visIds.toSet() } ?: t.selected.maxOrNull()
@@ -764,6 +765,7 @@ class AppState(
                         when (item) {
                             is LogItem.SeqHeader -> item.gid
                             is LogItem.ManualHeader -> item.gid
+                            is LogItem.StackTraceHeader -> item.gid
                             is LogItem.Row -> null
                         }
                     }

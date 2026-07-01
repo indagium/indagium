@@ -178,9 +178,8 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         "pkgPrefixes" to f.pkgPrefixes.toList(),
     )
 
-    // LogItem is a sealed class with exactly these 3 variants today — deliberately no `else`
-    // branch, so adding a new variant (e.g. StackTraceHeader) is a compile error here, not a
-    // silently-missing DTO field.
+    // Deliberately no `else` branch, so adding a new LogItem variant is a compile error here,
+    // not a silently-missing DTO field.
     private fun logItemToMap(item: LogItem): Map<String, Any?> = when (item) {
         is LogItem.Row -> mapOf(
             "type" to "Row", "id" to item.entry.id, "ts" to item.entry.ts,
@@ -199,6 +198,12 @@ class ControlServer(private val appState: AppState, private val port: Int) {
             "ts" to item.entry.ts, "level" to item.entry.level.key.toString(),
             "tag" to item.entry.tag, "msg" to item.entry.msg,
             "expanded" to item.expanded, "count" to item.count,
+        )
+        is LogItem.StackTraceHeader -> mapOf(
+            "type" to "StackTraceHeader", "id" to item.entry.id, "gid" to item.gid,
+            "ts" to item.entry.ts, "level" to item.entry.level.key.toString(),
+            "tag" to item.entry.tag, "msg" to item.entry.msg,
+            "indent" to item.indent, "expanded" to item.expanded, "count" to item.count,
         )
     }
 

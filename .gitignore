@@ -11,3 +11,6 @@ local.properties
 # mcp-server (Node/TypeScript)
 mcp-server/node_modules/
 mcp-server/dist/
+
+# MCP-driven verification fixtures — see plan's "Verification example"
+temp_visuals_not_for_git/

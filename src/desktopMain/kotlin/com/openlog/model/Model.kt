@@ -51,6 +51,8 @@ data class SeqGroup(
     val defId: String
 )
 
+data class StackTraceGroup(val gid: String, val rid: Int, val memberIds: List<Int>)
+
 enum class ManualCollapseDirection { TO_START, TO_END }
 
 data class ManualCollapseBlock(
@@ -240,5 +242,15 @@ sealed class LogItem {
         val expanded: Boolean,
         val count: Int,
         val color: Color
+    ) : LogItem()
+
+    /** Auto-folded exception/stack-trace run (see utils/StackTraceComputer.kt) — always-on,
+     *  not user-configured, so unlike SeqHeader there's no backing def/color to look up. */
+    data class StackTraceHeader(
+        val entry: LogEntry,
+        val gid: String,
+        val indent: Int,
+        val expanded: Boolean,
+        val count: Int,
     ) : LogItem()
 }
