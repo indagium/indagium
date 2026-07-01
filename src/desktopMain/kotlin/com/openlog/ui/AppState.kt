@@ -3,10 +3,13 @@ package com.openlog.ui
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.*
+import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.buildFilteredCsv
 import com.openlog.utils.buildFilteredTxt
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
+import com.openlog.utils.extractCandidate
+import com.openlog.utils.listLogcatCandidates
 import com.openlog.utils.parseLogcat
 import com.openlog.utils.passesFilter
 import kotlinx.coroutines.*
@@ -53,6 +56,8 @@ data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val 
 data class PendingDuplicateFilterSave(val tabId: String, val existingId: String, val existingName: String, val requestedName: String)
 
 data class AnnotationNavigationRequest(val id: Long, val tabId: String, val logIds: List<Int>)
+
+data class PendingZipPicker(val zipFile: File, val candidates: List<ZipLogCandidate>)
 
 class AppState(
     private val autosaveFile: File = defaultAutosaveFile(),
@@ -118,6 +123,7 @@ class AppState(
     var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
     var pendingAnnotationNavigation by mutableStateOf<AnnotationNavigationRequest?>(null)
         private set
+    var pendingZipPicker by mutableStateOf<PendingZipPicker?>(null)
 
     val fpState = FilterPanelUiState()
 
@@ -1092,6 +1098,55 @@ class AppState(
                 val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
                 val t = mkTab("t$n", file.name, logData)
                     .copy(sourcePath = path, annotations = Annotations(prefix = "$prefixLabel ${file.name}"))
+                synchronized(stateLock) {
+                    ensureActive()
+                    tabs = tabs + t
+                    activeTabId = t.id
+                }
+            } finally {
+                finishLoading()
+            }
+        }
+    }
+
+    // A single candidate auto-opens (the common case — most bug reports bundle one logcat
+    // buffer). 2+ candidates show a picker rather than guessing: Android 11+ bug reports often
+    // bundle multiple buffers (main/system/crash/events), and silently picking one wrong is worse
+    // than one extra click. 0 candidates is a silent no-op — the zip just isn't a bug report.
+    fun openZipFile(file: File) {
+        val candidates = listLogcatCandidates(file)
+        when {
+            candidates.size == 1 -> openZipEntry(file, candidates.first())
+            candidates.size > 1 -> pendingZipPicker = PendingZipPicker(file, candidates)
+        }
+    }
+
+    fun openZipEntries(zipFile: File, selected: List<ZipLogCandidate>) {
+        selected.forEach { openZipEntry(zipFile, it) }
+        pendingZipPicker = null
+    }
+
+    fun cancelZipPicker() {
+        pendingZipPicker = null
+    }
+
+    // Jar-URL-style "!" separator for the source path — for display/dedup only (a zip-extracted
+    // tab can't be re-opened from this path directly), matching openFile()'s sourcePath dedup.
+    private fun openZipEntry(zipFile: File, candidate: ZipLogCandidate) {
+        val path = "${zipFile.absolutePath}!${candidate.entryPath}"
+        val existing = tabs.find { it.sourcePath == path }
+        if (existing != null) {
+            activateTab(existing.id); return
+        }
+        val n = tabCounter++
+        beginLoading()
+        ioScope.launch {
+            try {
+                val logData = runCatching { extractCandidate(zipFile, candidate) }.getOrElse { emptyList() }
+                ensureActive()
+                val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
+                val t = mkTab("t$n", candidate.displayName, logData)
+                    .copy(sourcePath = path, annotations = Annotations(prefix = "$prefixLabel ${candidate.displayName}"))
                 synchronized(stateLock) {
                     ensureActive()
                     tabs = tabs + t

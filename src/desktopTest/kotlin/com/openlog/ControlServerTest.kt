@@ -189,4 +189,51 @@ class ControlServerTest {
         post("/close", """{"tabId":"t1"}""")
         assertTrue(state.tabs.isEmpty())
     }
+
+    private fun buildZipFixture(entries: Map<String, String>): File {
+        val file = File.createTempFile("openlog-control-server-fixture", ".zip")
+        java.util.zip.ZipOutputStream(file.outputStream()).use { zos ->
+            entries.forEach { (path, content) ->
+                zos.putNextEntry(java.util.zip.ZipEntry(path))
+                zos.write(content.toByteArray())
+                zos.closeEntry()
+            }
+        }
+        return file
+    }
+
+    @Test
+    fun openLogFileAutoOpensASingleCandidateZip() {
+        val zip = buildZipFixture(mapOf("main_log.txt" to "07-01 10:00:00.000  1234  1234 I MyTag: hello"))
+
+        val body = post("/open", """{"path":"${zip.absolutePath.replace("\\", "\\\\")}"}""")
+
+        assertTrue(body.contains("\"entryCount\":1"))
+        assertTrue(body.contains("\"filename\":\"main_log.txt\""))
+        zip.delete()
+    }
+
+    @Test
+    fun openLogFileReturnsCandidatesForAMultiCandidateZipUntilEntryPathIsGiven() {
+        val zip = buildZipFixture(
+            mapOf(
+                "main_log.txt" to "07-01 10:00:00.000  1234  1234 I MyTag: hello",
+                "system_log.txt" to "07-01 10:00:00.000  5678  5678 I MyTag: world",
+            ),
+        )
+
+        val listBody = post("/open", """{"path":"${zip.absolutePath.replace("\\", "\\\\")}"}""")
+        assertTrue(listBody.contains("\"needsSelection\":true"))
+        assertTrue(listBody.contains("\"entryPath\":\"main_log.txt\""))
+        assertTrue(listBody.contains("\"entryPath\":\"system_log.txt\""))
+        assertTrue(state.tabs.isEmpty())
+
+        val pickedBody = post(
+            "/open",
+            """{"path":"${zip.absolutePath.replace("\\", "\\\\")}","entryPath":"system_log.txt"}""",
+        )
+        assertTrue(pickedBody.contains("\"filename\":\"system_log.txt\""))
+        assertEquals(1, state.tabs.size)
+        zip.delete()
+    }
 }

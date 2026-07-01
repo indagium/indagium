@@ -21,7 +21,8 @@ async function request(method: string, path: string, body?: unknown): Promise<un
 export const openlogClient = {
   listTabs: () => request("GET", "/tabs"),
 
-  openLogFile: (path: string) => request("POST", "/open", { path }),
+  openLogFile: (path: string, entryPath?: string) =>
+    request("POST", "/open", entryPath !== undefined ? { path, entryPath } : { path }),
 
   closeTab: (tabId: string) => request("POST", "/close", { tabId }),
 

@@ -33,10 +33,13 @@ server.registerTool(
   {
     title: "Open a log file",
     description:
-      "Open a logcat file at the given absolute path in the running openLog app. Blocks until parsing completes and returns the new tab's id.",
-    inputSchema: { path: z.string().describe("Absolute path to the log file") },
+      "Open a plain logcat file, or a bug-report .zip, at the given absolute path. For a plain file, blocks until parsing completes and returns the new tab's id. For a .zip: if it contains exactly one candidate log, that one opens automatically; if it contains none, returns an error; if it contains several, returns { needsSelection: true, candidates: [...] } without opening anything — call again with the same path plus entryPath set to one candidate's entryPath to open that one.",
+    inputSchema: {
+      path: z.string().describe("Absolute path to the log file or .zip"),
+      entryPath: z.string().optional().describe("For a multi-candidate .zip: the entryPath of the candidate to open"),
+    },
   },
-  async ({ path }) => jsonResult(await openlogClient.openLogFile(path)),
+  async ({ path, entryPath }) => jsonResult(await openlogClient.openLogFile(path, entryPath)),
 );
 
 server.registerTool(

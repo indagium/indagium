@@ -32,7 +32,7 @@ npm start
 | Tool | Purpose |
 |---|---|
 | `list_tabs` | List every open tab |
-| `open_log_file` | Open a file by absolute path, blocks until parsed |
+| `open_log_file` | Open a file (or bug-report .zip) by absolute path, blocks until parsed |
 | `close_tab` | Close a tab |
 | `get_filter` / `set_filter` | Read/partially-update a tab's filter |
 | `get_visible_lines` | Read the currently rendered log items (post-filter, post-fold) |

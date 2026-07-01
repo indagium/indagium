@@ -6,9 +6,12 @@ import com.openlog.model.FilterMode
 import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
 import com.openlog.ui.AppState
+import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeStackTraceGroups
+import com.openlog.utils.isZipFile
+import com.openlog.utils.listLogcatCandidates
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpHandler
 import com.sun.net.httpserver.HttpServer
@@ -42,7 +45,7 @@ class ControlServer(private val appState: AppState, private val port: Int) {
     fun start() {
         val s = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
         s.createContext("/tabs", handler(GET) { _, _ -> listTabs() })
-        s.createContext("/open", handler(POST) { _, body -> openLogFile(body.str("path") ?: "") })
+        s.createContext("/open", handler(POST) { _, body -> openLogFile(body.str("path") ?: "", body.str("entryPath")) })
         s.createContext("/close", handler(POST) { _, body -> closeTab(body.str("tabId") ?: "") })
         s.createContext("/filter", handler(GET, POST) { ex, body ->
             if (ex.requestMethod == "GET") getFilter(queryParams(ex)["tabId"] ?: "")
@@ -99,20 +102,46 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         )
     }
 
-    private fun openLogFile(path: String): Map<String, Any?> {
+    private fun openLogFile(path: String, entryPath: String?): Map<String, Any?> {
         if (path.isBlank()) return mapOf("error" to "missing path")
         val file = File(path)
         if (!file.exists()) return mapOf("error" to "file not found: $path")
+        if (isZipFile(file)) return openZipRoute(file, entryPath)
         val absPath = file.absolutePath
         appState.openFile(file)
-        // openFile is async (launches on ioScope); block this request thread until it settles.
-        // If the file was already open, openFile returns synchronously and isLoading never
-        // toggles true, so this loop exits immediately.
-        val deadline = System.currentTimeMillis() + OPEN_FILE_TIMEOUT_MS
-        while (appState.isLoading && System.currentTimeMillis() < deadline) Thread.sleep(OPEN_FILE_POLL_INTERVAL_MS)
+        awaitLoad()
         val tab = appState.tabs.find { it.sourcePath == absPath }
             ?: return mapOf("error" to "file did not load: $path")
         return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size)
+    }
+
+    // Mirrors the UI's single/multi-candidate split (AppState.openZipFile): a lone candidate
+    // auto-opens like a plain file; 2+ candidates need a pick. Since a caller here isn't clicking
+    // a picker dialog, it echoes the candidate list so a follow-up call can pass entryPath to
+    // pick one directly — same round trip the UI's picker dialog does through openZipEntries().
+    private fun openZipRoute(file: File, entryPath: String?): Map<String, Any?> {
+        val candidates = listLogcatCandidates(file)
+        if (candidates.isEmpty()) return mapOf("error" to "no candidate log files found in zip: ${file.path}")
+        val target = when {
+            entryPath != null -> candidates.find { it.entryPath == entryPath }
+                ?: return mapOf("error" to "no such entry in zip: $entryPath")
+            candidates.size == 1 -> candidates.first()
+            else -> return mapOf("needsSelection" to true, "candidates" to candidates.map { zipCandidateToMap(it) })
+        }
+        val sourcePath = "${file.absolutePath}!${target.entryPath}"
+        appState.openZipEntries(file, listOf(target))
+        awaitLoad()
+        val tab = appState.tabs.find { it.sourcePath == sourcePath }
+            ?: return mapOf("error" to "entry did not load: ${target.entryPath}")
+        return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size)
+    }
+
+    // openFile/openZipEntries are async (launched on ioScope); block this request thread until
+    // isLoading settles back to false. If the target was already open, the call returns
+    // synchronously and isLoading never toggles true, so this loop exits immediately.
+    private fun awaitLoad() {
+        val deadline = System.currentTimeMillis() + OPEN_FILE_TIMEOUT_MS
+        while (appState.isLoading && System.currentTimeMillis() < deadline) Thread.sleep(OPEN_FILE_POLL_INTERVAL_MS)
     }
 
     private fun closeTab(tabId: String): Map<String, Any?> {
@@ -223,6 +252,10 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         "id" to site.id, "kind" to site.kind.name, "groupGid" to site.groupGid,
         "logId" to site.entry.id, "ts" to site.entry.ts, "level" to site.entry.level.key.toString(),
         "tag" to site.entry.tag, "msg" to site.entry.msg,
+    )
+
+    private fun zipCandidateToMap(candidate: ZipLogCandidate): Map<String, Any?> = mapOf(
+        "entryPath" to candidate.entryPath, "displayName" to candidate.displayName, "sizeBytes" to candidate.sizeBytes,
     )
 
     private fun queryParams(exchange: HttpExchange): Map<String, String> =

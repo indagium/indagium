@@ -109,8 +109,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     files.forEach { uri ->
                         runCatching {
                             val file = File(URI.create(uri))
-                            if (file.exists() && com.openlog.utils.isLikelyTextFile(file)) {
-                                state.openFile(file)
+                            when {
+                                !file.exists() -> {}
+                                com.openlog.utils.isZipFile(file) -> state.openZipFile(file)
+                                com.openlog.utils.isLikelyTextFile(file) -> state.openFile(file)
                             }
                         }
                     }
@@ -561,6 +563,56 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             DialogActionButton("Delete", active = true, danger = true) { state.confirmDeleteSF() }
                             DialogActionButton("Cancel", active = false) { state.cancelDeleteSF() }
+                        }
+                    }
+                }
+            }
+
+            state.pendingZipPicker?.let { pending ->
+                var selected by remember(pending.zipFile) { mutableStateOf(emptySet<String>()) }
+                Dialog(onDismissRequest = { state.cancelZipPicker() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(420.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Multiple log files found", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "\"${pending.zipFile.name}\" contains ${pending.candidates.size} candidate log files. " +
+                                "Choose which to open — each opens as its own tab.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 3,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                            pending.candidates.forEach { candidate ->
+                                CheckRow(
+                                    checked = candidate.entryPath in selected,
+                                    onToggle = {
+                                        selected = if (candidate.entryPath in selected) {
+                                            selected - candidate.entryPath
+                                        } else {
+                                            selected + candidate.entryPath
+                                        }
+                                    },
+                                ) {
+                                    AppText(candidate.entryPath, color = tc2.tx, fontSize = 11.sp, fontFamily = MONO,
+                                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            DialogActionButton(
+                                "Open selected",
+                                active = selected.isNotEmpty(),
+                                enabled = selected.isNotEmpty(),
+                            ) {
+                                state.openZipEntries(pending.zipFile, pending.candidates.filter { it.entryPath in selected })
+                            }
+                            DialogActionButton("Cancel", active = false) { state.cancelZipPicker() }
                         }
                     }
                 }
@@ -1249,10 +1301,13 @@ private fun TabBar(state: AppState) {
             val fd = FileDialog(null as Frame?, "Open Log File", FileDialog.LOAD)
             fd.setFilenameFilter { dir, name ->
                 val f = File(dir, name)
-                f.isDirectory || com.openlog.utils.isLikelyTextFile(f)
+                f.isDirectory || com.openlog.utils.isLikelyTextFile(f) || com.openlog.utils.isZipFile(f)
             }
             fd.isVisible = true
-            fd.file?.let { state.openFile(File(fd.directory, it)) }
+            fd.file?.let {
+                val f = File(fd.directory, it)
+                if (com.openlog.utils.isZipFile(f)) state.openZipFile(f) else state.openFile(f)
+            }
         }
         if (hasRecentFiles) {
             ToolbarBtn(
