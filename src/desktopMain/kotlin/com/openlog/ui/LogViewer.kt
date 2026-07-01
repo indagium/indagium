@@ -84,12 +84,14 @@ internal fun logItemEntryId(item: LogItem): Int = when (item) {
     is LogItem.Row -> item.entry.id
     is LogItem.SeqHeader -> item.entry.id
     is LogItem.ManualHeader -> item.entry.id
+    is LogItem.StackTraceHeader -> item.entry.id
 }
 
 internal fun logItemStableKey(tabId: String, item: LogItem): String = when (item) {
     is LogItem.Row -> "$tabId:r${item.entry.id}"
     is LogItem.SeqHeader -> "$tabId:h${item.gid}"
     is LogItem.ManualHeader -> "$tabId:m${item.gid}"
+    is LogItem.StackTraceHeader -> "$tabId:st${item.gid}"
 }
 
 class LogViewerScrollStateStore {
@@ -197,6 +199,7 @@ fun LogViewer(
             when (item) {
                 is LogItem.SeqHeader -> item.expanded
                 is LogItem.ManualHeader -> item.expanded
+                is LogItem.StackTraceHeader -> item.expanded
                 is LogItem.Row -> null
             }
         }
@@ -440,6 +443,8 @@ fun LogViewer(
                                         SeqHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
                                     is LogItem.ManualHeader ->
                                         ManualHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
+                                    is LogItem.StackTraceHeader ->
+                                        StackTraceHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
                                 }
                             }
                             item(key = "tail-space") {
@@ -488,6 +493,7 @@ fun LogViewer(
                             is LogItem.Row -> item.entry.id == entryId
                             is LogItem.SeqHeader -> item.entry.id == entryId
                             is LogItem.ManualHeader -> item.entry.id == entryId
+                            is LogItem.StackTraceHeader -> item.entry.id == entryId
                         }
                     }
                     if (visibleIdx >= 0) return expanded to visibleIdx
@@ -495,6 +501,7 @@ fun LogViewer(
                         when (item) {
                             is LogItem.SeqHeader -> item.gid.takeIf { !item.expanded }
                             is LogItem.ManualHeader -> item.gid.takeIf { !item.expanded }
+                            is LogItem.StackTraceHeader -> item.gid.takeIf { !item.expanded }
                             is LogItem.Row -> null
                         }
                     }
@@ -504,6 +511,7 @@ fun LogViewer(
                                 is LogItem.Row -> item.entry.id == entryId
                                 is LogItem.SeqHeader -> item.entry.id == entryId
                                 is LogItem.ManualHeader -> item.entry.id == entryId
+                                is LogItem.StackTraceHeader -> item.entry.id == entryId
                             }
                         }
                     } ?: collapsedHeaders.firstOrNull() ?: return null
@@ -905,6 +913,16 @@ private fun LogRow(
             .padding(start = ROW_START_PAD + INDENT_STEP * item.indent, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Only merged tabs (utils/LogMerge.kt) ever set sourceTag — a small pinned (non-scrolling)
+        // badge naming which original file a row came from, since a merged tab otherwise gives no
+        // visual way to tell which buffer (main/system/crash/...) a given line was in.
+        entry.sourceTag?.let { tag ->
+            AppText(
+                tag, color = tc.td, fontSize = 9.sp, fontFamily = mono, maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 70.dp).padding(end = 4.dp),
+            )
+        }
         Box(Modifier.fillMaxWidth().horizontalScroll(hScroll)) {
             BasicTextField(
                 value         = TextFieldValue(annotatedString = annoLine, selection = sel),
@@ -1102,6 +1120,104 @@ private fun ManualHeaderRow(
         AppText(item.entry.msg, color = sc, fontSize = 12.sp, fontFamily = mono, fontWeight = FontWeight.Medium,
             modifier = Modifier.weight(1f), overflow = TextOverflow.Clip)
         if (!item.expanded) AppText("${item.count} entries", color = sc.copy(.6f), fontSize = 11.sp)
+    }
+}
+
+// Mirrors SeqHeaderRow — always-on, no backing SequenceDef/color to look up, so sc is fixed to
+// DANGER_RED (crash/exception semantics) rather than read from the item.
+@Composable
+private fun StackTraceHeaderRow(
+    item: LogItem.StackTraceHeader,
+    tab: LogTab,
+    mono: FontFamily,
+    tc: ThemeColors,
+    hScroll: ScrollState,
+    onSelRow: (Int, Boolean, Boolean) -> Unit,
+    onCtxMenu: (Int, Float, Float, String) -> Unit,
+    onToggleGroup: (String) -> Unit,
+    rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
+) {
+    val density = LocalDensity.current.density
+    val sc = DANGER_RED
+    val isSel = item.entry.id in tab.selected
+    var hov by remember { mutableStateOf(false) }
+    var rowRoot by remember { mutableStateOf(Offset.Zero) }
+    var lastClickMs by remember { mutableStateOf(0L) }
+    DisposableEffect(item.entry.id, rowBoundsAbs) {
+        onDispose { rowBoundsAbs.remove(item.entry.id) }
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(when {
+                isSel -> tc.sl
+                hov -> sc.copy(.15f)
+                else -> sc.copy(.07f)
+            })
+            .drawBehind {
+                val guideX = item.indent * INDENT_STEP.toPx()
+                drawRect(sc, topLeft = Offset(guideX, 0f), size = Size(4f, size.height))
+            }
+            .onGloballyPositioned { coords ->
+                val pos = coords.positionInRoot()
+                rowBoundsAbs[item.entry.id] = pos.y to (pos.y + coords.size.height)
+                rowRoot = pos
+            }
+            .pointerInput("st", tab.id, item.gid) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val ev = awaitPointerEvent(PointerEventPass.Initial)
+                        when (ev.type) {
+                            PointerEventType.Enter -> hov = true
+                            PointerEventType.Exit -> hov = false
+                            PointerEventType.Press -> {
+                                val mods = ev.keyboardModifiers
+                                when {
+                                    ev.buttons.isSecondaryPressed -> {
+                                        ev.changes.forEach { it.consume() }
+                                        val ch = ev.changes.firstOrNull() ?: continue
+                                        onCtxMenu(
+                                            item.entry.id,
+                                            (rowRoot.x + ch.position.x) / density,
+                                            (rowRoot.y + ch.position.y) / density,
+                                            "",
+                                        )
+                                    }
+                                    ev.buttons.isPrimaryPressed && (mods.isShiftPressed || mods.isCtrlPressed || mods.isMetaPressed) -> {
+                                        ev.changes.forEach { it.consume() }
+                                        onSelRow(item.entry.id, mods.isCtrlPressed || mods.isMetaPressed, mods.isShiftPressed)
+                                    }
+                                    ev.buttons.isPrimaryPressed -> {
+                                        val now = System.currentTimeMillis()
+                                        if (now - lastClickMs < 350) onToggleGroup(item.gid)
+                                        else onSelRow(item.entry.id, false, false)
+                                        lastClickMs = now
+                                    }
+                                }
+                            }
+                            else -> {}
+                        }
+                    }
+                }
+            }
+            .horizontalScroll(hScroll)
+            .widthIn(min = 2000.dp)
+            .padding(start = ROW_START_PAD + INDENT_STEP * item.indent, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            Modifier.size(24.dp).clickable { onToggleGroup(item.gid) },
+            contentAlignment = Alignment.Center,
+        ) {
+            AppText(if (item.expanded) "▼" else "▶", color = sc, fontSize = 14.sp, fontFamily = mono)
+        }
+        AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
+        AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
+            modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
+        AppText(item.entry.msg, color = sc, fontSize = 12.sp, fontFamily = mono, fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f), overflow = TextOverflow.Clip)
+        if (!item.expanded) AppText("${item.count} frames", color = sc.copy(.6f), fontSize = 11.sp)
     }
 }
 

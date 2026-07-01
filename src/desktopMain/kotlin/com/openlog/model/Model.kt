@@ -24,7 +24,12 @@ data class LogEntry(
     val tag: String,
     val msg: String,
     val pid: Int = 0,
-    val tid: Int = 0
+    val tid: Int = 0,
+    // Set only by mergeLogs() (utils/LogMerge.kt) to badge which source file a merged-tab row
+    // came from. null everywhere else, including LogParser.parseLogcat's own output — appended
+    // last (not inserted earlier) so every existing positional LogEntry(...) construction across
+    // the test suite keeps compiling unchanged.
+    val sourceTag: String? = null,
 )
 
 // ── Sequences ──────────────────────────────────────────────────────
@@ -50,6 +55,12 @@ data class SeqGroup(
     val nested: List<NestedSeqGroup>,
     val defId: String
 )
+
+data class StackTraceGroup(val gid: String, val rid: Int, val memberIds: List<Int>)
+
+enum class CrashKind { EXCEPTION, ANR }
+
+data class CrashSite(val id: String, val entry: LogEntry, val kind: CrashKind, val groupGid: String?)
 
 enum class ManualCollapseDirection { TO_START, TO_END }
 
@@ -145,6 +156,10 @@ data class LogTab(
     val showAnnMd: Boolean = false,
     val manualBlocks: List<ManualCollapseBlock> = emptyList(),
     val sourcePath: String? = null,
+    // Live tailing (utils/FileTailer.kt) is a session-only feature — never persisted to autosave,
+    // always resets to false on relaunch. The actual FileTailer/Job lives in a private map on
+    // AppState (not here — not data-class-friendly), this field only drives the UI indicator.
+    val tailing: Boolean = false,
 )
 
 data class SavedFilter(
@@ -240,5 +255,15 @@ sealed class LogItem {
         val expanded: Boolean,
         val count: Int,
         val color: Color
+    ) : LogItem()
+
+    /** Auto-folded exception/stack-trace run (see utils/StackTraceComputer.kt) — always-on,
+     *  not user-configured, so unlike SeqHeader there's no backing def/color to look up. */
+    data class StackTraceHeader(
+        val entry: LogEntry,
+        val gid: String,
+        val indent: Int,
+        val expanded: Boolean,
+        val count: Int,
     ) : LogItem()
 }

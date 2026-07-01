@@ -3,9 +3,18 @@ package com.openlog.ui
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.*
+import com.openlog.utils.FileTailer
+import com.openlog.utils.MergeSourceFile
+import com.openlog.utils.ZipLogCandidate
+import com.openlog.utils.buildFilteredCsv
+import com.openlog.utils.buildFilteredTxt
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
+import com.openlog.utils.extractCandidate
+import com.openlog.utils.listLogcatCandidates
+import com.openlog.utils.mergeLogs
 import com.openlog.utils.parseLogcat
+import com.openlog.utils.parseLogcatLines
 import com.openlog.utils.passesFilter
 import kotlinx.coroutines.*
 import java.awt.FileDialog
@@ -39,6 +48,8 @@ internal const val ANNOTATION_PANEL_MIN_WIDTH = 360f
 internal const val ANNOTATION_PANEL_MAX_WIDTH = 500f
 internal const val FILTER_PANEL_MIN_WIDTH = 140f
 internal const val FILTER_PANEL_MAX_WIDTH = 420f
+internal const val CRASH_PANEL_MIN_WIDTH = 280f
+internal const val CRASH_PANEL_MAX_WIDTH = 420f
 internal const val COMPARE_SPLIT_MIN = 0.2f
 internal const val COMPARE_SPLIT_MAX = 0.8f
 
@@ -49,6 +60,8 @@ data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val 
 data class PendingDuplicateFilterSave(val tabId: String, val existingId: String, val existingName: String, val requestedName: String)
 
 data class AnnotationNavigationRequest(val id: Long, val tabId: String, val logIds: List<Int>)
+
+data class PendingZipPicker(val zipFile: File, val candidates: List<ZipLogCandidate>)
 
 class AppState(
     private val autosaveFile: File = defaultAutosaveFile(),
@@ -63,8 +76,10 @@ class AppState(
     // ── Layout ──────────────────────────────────────────────────────
     var filterVisible by mutableStateOf(true)
     var annotationVisible by mutableStateOf(true)
+    var crashPanelVisible by mutableStateOf(false)
     var filterPanelWidth by mutableStateOf(220f)
     var annotationPanelWidth by mutableStateOf(ANNOTATION_PANEL_MIN_WIDTH)
+    var crashPanelWidth by mutableStateOf(CRASH_PANEL_MIN_WIDTH)
     var compareSplit by mutableStateOf(0.5f)
     var compareFilterRight by mutableStateOf(true)
     var isLoading by mutableStateOf(false)
@@ -74,6 +89,13 @@ class AppState(
     private val ioScope = CoroutineScope(ioJob + Dispatchers.IO)
     private val stateLock = Any()
     private var pendingLoads = 0
+
+    // Live tailing (utils/FileTailer.kt) — keyed by tabId. Lives here, not on LogTab, since a
+    // running FileTailer/Job isn't data-class-friendly. ioJob.cancel() in close() already cancels
+    // every tailer's Job for free, since each is started on ioScope.
+    private data class ActiveTail(val tailer: FileTailer, val job: Job)
+
+    private val activeTails = mutableMapOf<String, ActiveTail>()
 
     // ── Sequences (per-tab, stored in Filter) ────────────────────────
     var sequences: List<SequenceDef>
@@ -112,6 +134,8 @@ class AppState(
     var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
     var pendingAnnotationNavigation by mutableStateOf<AnnotationNavigationRequest?>(null)
         private set
+    var pendingZipPicker by mutableStateOf<PendingZipPicker?>(null)
+    var mergeTabsDialogOpen by mutableStateOf(false)
 
     val fpState = FilterPanelUiState()
 
@@ -134,7 +158,8 @@ class AppState(
 
     // ── Helpers ─────────────────────────────────────────────────────
     fun close() {
-        ioJob.cancel()
+        ioJob.cancel() // also cancels every active FileTailer's Job — each is started on ioScope
+        activeTails.clear()
         synchronized(stateLock) {
             pendingLoads = 0
             isLoading = false
@@ -160,6 +185,12 @@ class AppState(
     fun updateAnnotationVisible(visible: Boolean) {
         if (annotationVisible == visible) return
         annotationVisible = visible
+        autosaveNow()
+    }
+
+    fun updateCrashPanelVisible(visible: Boolean) {
+        if (crashPanelVisible == visible) return
+        crashPanelVisible = visible
         autosaveNow()
     }
 
@@ -191,6 +222,13 @@ class AppState(
         val next = width.coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
         if (annotationPanelWidth == next) return
         annotationPanelWidth = next
+        autosaveNow()
+    }
+
+    fun updateCrashPanelWidth(width: Float) {
+        val next = width.coerceIn(CRASH_PANEL_MIN_WIDTH, CRASH_PANEL_MAX_WIDTH)
+        if (crashPanelWidth == next) return
+        crashPanelWidth = next
         autosaveNow()
     }
 
@@ -696,6 +734,7 @@ class AppState(
                         is LogItem.Row -> item.entry.id
                         is LogItem.SeqHeader -> item.entry.id
                         is LogItem.ManualHeader -> item.entry.id
+                        is LogItem.StackTraceHeader -> item.entry.id
                     }
                 }
                 val last = t.selected.lastOrNull { it in visIds.toSet() } ?: t.selected.maxOrNull()
@@ -750,6 +789,21 @@ class AppState(
         if (pendingAnnotationNavigation?.id == id) pendingAnnotationNavigation = null
     }
 
+    // Reuses the same jump-to-log-lines mechanism as annotation navigation — a crash-panel entry
+    // is just "select and scroll to a log id", the exact thing pendingAnnotationNavigation already
+    // does (including auto-expanding whatever collapsed header, sequence or stack-trace, owns it).
+    fun requestCrashNavigation(tabId: String, logId: Int) {
+        if (tab(tabId) == null) return
+        if (compareMode && tabId != activeTabId) {
+            compareTabId = tabId
+        } else {
+            activateTab(tabId)
+        }
+        setSelectedRows(tabId, listOf(logId))
+        annotationNavigationCounter += 1
+        pendingAnnotationNavigation = AnnotationNavigationRequest(annotationNavigationCounter, tabId, listOf(logId))
+    }
+
     // ── Sequence expand/collapse ─────────────────────────────────────
     fun toggleGroup(tabId: String, gid: String) = upTab(tabId) { t ->
         t.copy(expanded = if (gid in t.expanded) t.expanded - gid else t.expanded + gid)
@@ -764,6 +818,7 @@ class AppState(
                         when (item) {
                             is LogItem.SeqHeader -> item.gid
                             is LogItem.ManualHeader -> item.gid
+                            is LogItem.StackTraceHeader -> item.gid
                             is LogItem.Row -> null
                         }
                     }
@@ -1028,12 +1083,80 @@ class AppState(
     }
 
     fun closeTab(tabId: String) {
+        activeTails.remove(tabId)?.job?.cancel()
         val next = tabs.filter { it.id != tabId }
         if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
         if (compareTabId == tabId) compareTabId = next.firstOrNull()?.id ?: ""
         if (next.isEmpty()) compareMode = false
         logViewerScrollStateStore.removeTab(tabId)
         tabs = next
+    }
+
+    // Ships "merge already-open tabs" (v1) — data's already in memory, no re-parsing needed.
+    // Runs on ioScope for consistency with the rest of the codebase's bias toward backgrounding
+    // anything touching logData, even though mergeLogs() itself is a pure in-memory sort.
+    fun mergeTabs(tabIds: List<String>, newTabName: String = "Merged") {
+        val sources = tabIds.mapNotNull { id -> tab(id)?.let { MergeSourceFile(it.filename, it.logData) } }
+        if (sources.size < 2) return
+        val n = tabCounter++
+        beginLoading()
+        ioScope.launch {
+            try {
+                val merged = mergeLogs(sources)
+                ensureActive()
+                val t = mkTab("t$n", newTabName, merged)
+                synchronized(stateLock) {
+                    ensureActive()
+                    tabs = tabs + t
+                    activeTabId = t.id
+                }
+            } finally {
+                finishLoading()
+            }
+        }
+    }
+
+    // Session-only (confirmed): tailing state never persists across a restart — tab.tailing
+    // simply isn't written to the autosave token, so it always comes back false. Only tabs backed
+    // by a real, currently-existing file path can be tailed (not a zip-extracted or merged tab).
+    fun startTailing(tabId: String) {
+        if (activeTails.containsKey(tabId)) return
+        val t = tab(tabId) ?: return
+        val path = t.sourcePath ?: return
+        val file = File(path)
+        if (!file.isFile) return
+        val tailer = FileTailer(file, onNewLines = { newLines -> appendTailedLines(tabId, newLines) })
+        val job = tailer.start(ioScope)
+        activeTails[tabId] = ActiveTail(tailer, job)
+        upTab(tabId) { it.copy(tailing = true) }
+    }
+
+    fun stopTailing(tabId: String) {
+        activeTails.remove(tabId)?.job?.cancel()
+        upTab(tabId) { it.copy(tailing = false) }
+        // Content-triggered autosave is suppressed while any tab is actively tailing (see the
+        // LaunchedEffect in App.kt) to avoid rewriting a fast-growing logData every ~400ms —
+        // explicitly save now that this tab has settled.
+        autosaveNow()
+    }
+
+    // Runs on whichever thread FileTailer's coroutine flushes from (ioScope / Dispatchers.IO),
+    // unlike most upTab callers which are UI-thread-only — wrapped in stateLock so a tailing
+    // flush can't race and lose an update against another concurrent background mutation
+    // (another tab's tailing flush, or an in-flight openFile/mergeTabs). This does NOT protect
+    // against racing a same-instant UI-thread mutation (toggleGroup, selRow, ...) — those already
+    // aren't stateLock-guarded anywhere in this class; tailing only closes the background-vs-
+    // background gap, matching the existing openFile/mergeTabs precedent.
+    private fun appendTailedLines(tabId: String, newRawLines: List<String>) {
+        if (newRawLines.isEmpty()) return
+        synchronized(stateLock) {
+            val t = tab(tabId) ?: return
+            val nextId = (t.logData.maxOfOrNull { it.id } ?: 0) + 1
+            val newEntries = parseLogcatLines(newRawLines.asSequence(), startId = nextId)
+            tabs = tabs.map { cur ->
+                if (cur.id == tabId) cur.copy(logData = cur.logData + newEntries, rmap = cur.rmap + mkRmap(newEntries)) else cur
+            }
+        }
     }
 
     fun openFile(file: File) {
@@ -1056,6 +1179,55 @@ class AppState(
                 val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
                 val t = mkTab("t$n", file.name, logData)
                     .copy(sourcePath = path, annotations = Annotations(prefix = "$prefixLabel ${file.name}"))
+                synchronized(stateLock) {
+                    ensureActive()
+                    tabs = tabs + t
+                    activeTabId = t.id
+                }
+            } finally {
+                finishLoading()
+            }
+        }
+    }
+
+    // A single candidate auto-opens (the common case — most bug reports bundle one logcat
+    // buffer). 2+ candidates show a picker rather than guessing: Android 11+ bug reports often
+    // bundle multiple buffers (main/system/crash/events), and silently picking one wrong is worse
+    // than one extra click. 0 candidates is a silent no-op — the zip just isn't a bug report.
+    fun openZipFile(file: File) {
+        val candidates = listLogcatCandidates(file)
+        when {
+            candidates.size == 1 -> openZipEntry(file, candidates.first())
+            candidates.size > 1 -> pendingZipPicker = PendingZipPicker(file, candidates)
+        }
+    }
+
+    fun openZipEntries(zipFile: File, selected: List<ZipLogCandidate>) {
+        selected.forEach { openZipEntry(zipFile, it) }
+        pendingZipPicker = null
+    }
+
+    fun cancelZipPicker() {
+        pendingZipPicker = null
+    }
+
+    // Jar-URL-style "!" separator for the source path — for display/dedup only (a zip-extracted
+    // tab can't be re-opened from this path directly), matching openFile()'s sourcePath dedup.
+    private fun openZipEntry(zipFile: File, candidate: ZipLogCandidate) {
+        val path = "${zipFile.absolutePath}!${candidate.entryPath}"
+        val existing = tabs.find { it.sourcePath == path }
+        if (existing != null) {
+            activateTab(existing.id); return
+        }
+        val n = tabCounter++
+        beginLoading()
+        ioScope.launch {
+            try {
+                val logData = runCatching { extractCandidate(zipFile, candidate) }.getOrElse { emptyList() }
+                ensureActive()
+                val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
+                val t = mkTab("t$n", candidate.displayName, logData)
+                    .copy(sourcePath = path, annotations = Annotations(prefix = "$prefixLabel ${candidate.displayName}"))
                 synchronized(stateLock) {
                     ensureActive()
                     tabs = tabs + t
@@ -1094,6 +1266,34 @@ class AppState(
                 rememberRecentNote(saved)
             }
         }
+    }
+
+    fun exportFilteredTxt(tabId: String) {
+        val t = tab(tabId) ?: return
+        val dlg = FileDialog(null as Frame?, "Export Filtered Log", FileDialog.SAVE).apply {
+            file = t.filename.substringBeforeLast('.') + "_filtered.txt"
+            settings.defaultSaveDir?.let { directory = it }
+            isVisible = true
+        }
+        val path = dlg.file ?: return
+        val dir = dlg.directory ?: return
+        settings = settings.copy(defaultSaveDir = dir)
+        val saved = File(dir, path)
+        ioScope.launch { runCatching { saved.writeText(buildFilteredTxt(t)) } }
+    }
+
+    fun exportFilteredCsv(tabId: String) {
+        val t = tab(tabId) ?: return
+        val dlg = FileDialog(null as Frame?, "Export Filtered Log", FileDialog.SAVE).apply {
+            file = t.filename.substringBeforeLast('.') + "_filtered.csv"
+            settings.defaultSaveDir?.let { directory = it }
+            isVisible = true
+        }
+        val path = dlg.file ?: return
+        val dir = dlg.directory ?: return
+        settings = settings.copy(defaultSaveDir = dir)
+        val saved = File(dir, path)
+        ioScope.launch { runCatching { saved.writeText(buildFilteredCsv(t)) } }
     }
 
     fun openNoteFile(tabId: String, file: File) {
@@ -1570,6 +1770,8 @@ private fun AppState.compareStateToken(): String = tokenFields(
     filterPanelWidth.toString(),
     annotationPanelWidth.toString(),
     compareSplit.toString(),
+    crashPanelVisible.toString(),
+    crashPanelWidth.toString(),
 )
 
 private fun AppState.restoreCompareState(token: String) {
@@ -1583,6 +1785,8 @@ private fun AppState.restoreCompareState(token: String) {
     filterPanelWidth = p[5].toFloatOrNull() ?: filterPanelWidth
     annotationPanelWidth = (p[6].toFloatOrNull() ?: annotationPanelWidth).coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
     compareSplit = p[7].toFloatOrNull() ?: compareSplit
+    crashPanelVisible = p.getOrNull(8)?.toBooleanStrictOrNull() ?: crashPanelVisible
+    crashPanelWidth = (p.getOrNull(9)?.toFloatOrNull() ?: crashPanelWidth).coerceIn(CRASH_PANEL_MIN_WIDTH, CRASH_PANEL_MAX_WIDTH)
 }
 
 private fun FilterPanelUiState.filterPanelToken(): String = tokenFields(

@@ -6,8 +6,13 @@
 
 package com.openlog.ui
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -95,7 +100,11 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
             state.recentNotes,
         ) {
             kotlinx.coroutines.delay(400)
-            state.autosaveNow()
+            // Suppressed while any tab is actively tailing — a fast-growing logData would
+            // otherwise keep rewriting the whole autosave.cache every ~400ms for the tailing
+            // session's entire duration. stopTailing() explicitly autosaveNow()s once the tab
+            // settles, so nothing is lost, just deferred.
+            if (state.tabs.none { it.tailing }) state.autosaveNow()
         }
         LaunchedEffect(Unit) {
             runCatching { rootFocusRequester.requestFocus() }
@@ -109,8 +118,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     files.forEach { uri ->
                         runCatching {
                             val file = File(URI.create(uri))
-                            if (file.exists() && com.openlog.utils.isLikelyTextFile(file)) {
-                                state.openFile(file)
+                            when {
+                                !file.exists() -> {}
+                                com.openlog.utils.isZipFile(file) -> state.openZipFile(file)
+                                com.openlog.utils.isLikelyTextFile(file) -> state.openFile(file)
                             }
                         }
                     }
@@ -577,6 +588,114 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                 }
             }
 
+            state.pendingZipPicker?.let { pending ->
+                var selected by remember(pending.zipFile) { mutableStateOf(emptySet<String>()) }
+                Dialog(onDismissRequest = { state.cancelZipPicker() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(420.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Multiple log files found", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "\"${pending.zipFile.name}\" contains ${pending.candidates.size} candidate log files. " +
+                                "Choose which to open — each opens as its own tab.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 3,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                            pending.candidates.forEach { candidate ->
+                                CheckRow(
+                                    checked = candidate.entryPath in selected,
+                                    onToggle = {
+                                        selected = if (candidate.entryPath in selected) {
+                                            selected - candidate.entryPath
+                                        } else {
+                                            selected + candidate.entryPath
+                                        }
+                                    },
+                                ) {
+                                    AppText(candidate.entryPath, color = tc2.tx, fontSize = 11.sp, fontFamily = MONO,
+                                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            DialogActionButton(
+                                "Open selected",
+                                active = selected.isNotEmpty(),
+                                enabled = selected.isNotEmpty(),
+                            ) {
+                                state.openZipEntries(pending.zipFile, pending.candidates.filter { it.entryPath in selected })
+                            }
+                            DialogActionButton("Cancel", active = false) { state.cancelZipPicker() }
+                        }
+                    }
+                }
+            }
+
+            if (state.mergeTabsDialogOpen) {
+                var selected by remember { mutableStateOf(emptySet<String>()) }
+                var mergedName by remember { mutableStateOf("Merged") }
+
+                fun close() {
+                    state.mergeTabsDialogOpen = false
+                    selected = emptySet()
+                }
+                Dialog(onDismissRequest = { close() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(420.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Merge tabs", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "Pick 2 or more open tabs to merge into one, interleaved by time-of-day.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 2,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                            state.tabs.forEach { candidateTab ->
+                                CheckRow(
+                                    checked = candidateTab.id in selected,
+                                    onToggle = {
+                                        selected = if (candidateTab.id in selected) {
+                                            selected - candidateTab.id
+                                        } else {
+                                            selected + candidateTab.id
+                                        }
+                                    },
+                                ) {
+                                    AppText(candidateTab.filename, color = tc2.tx, fontSize = 11.sp, fontFamily = MONO,
+                                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        InlineField(mergedName, { mergedName = it }, "Merged tab name…", Modifier.fillMaxWidth(), fontSize = 13.sp)
+                        Spacer(Modifier.height(14.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            DialogActionButton(
+                                "Merge",
+                                active = selected.size >= 2,
+                                enabled = selected.size >= 2,
+                            ) {
+                                state.mergeTabs(selected.toList(), mergedName.ifBlank { "Merged" })
+                                close()
+                            }
+                            DialogActionButton("Cancel", active = false) { close() }
+                        }
+                    }
+                }
+            }
+
             // ── Recent files popup ────────────────────────────────────
             if (state.recentMenuOpen && state.recentFiles.isNotEmpty()) {
                 BoxWithConstraints(
@@ -968,6 +1087,16 @@ private fun FileView(
             },
             keyboardFocusVisible = state.keyboardFocusVisible,
         )
+        if (state.crashPanelVisible) {
+            HDivider { delta ->
+                state.updateCrashPanelWidth(state.crashPanelWidth - delta)
+            }
+            CrashPanel(
+                tab = tab,
+                width = state.crashPanelWidth,
+                onNavigate = { site -> state.requestCrashNavigation(tab.id, site.entry.id) },
+            )
+        }
         if (state.annotationVisible) {
             HDivider { delta ->
                 state.updateAnnotationPanelWidth(state.annotationPanelWidth - delta)
@@ -989,6 +1118,8 @@ private fun FileView(
                 onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
                 onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
                 onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
+                onExportTxt = { state.exportFilteredTxt(tab.id) },
+                onExportCsv = { state.exportFilteredCsv(tab.id) },
                 width = state.annotationPanelWidth,
                 focusRequester = annotationFr,
                 onPanelFocusChanged = { focused ->
@@ -1190,6 +1321,8 @@ private fun CompareView(
                             onMoveBlock = { bid, d -> state.moveBlock(leftTab.id, bid, d) },
                             onAddNoteAfter = { state.addNoteBlock(leftTab.id, it) },
                             onNavigateLogRef = { state.requestAnnotationNavigation(leftTab.id, it) },
+                            onExportTxt = { state.exportFilteredTxt(leftTab.id) },
+                            onExportCsv = { state.exportFilteredCsv(leftTab.id) },
                             width = state.annotationPanelWidth,
                             focusRequester = annotationFr,
                             onPanelFocusChanged = { focused ->
@@ -1233,11 +1366,23 @@ private fun TabBar(state: AppState) {
             shape = middleShape,
         ) { state.updateAnnotationVisible(!state.annotationVisible) }
         ToolbarBtn(
+            if (state.crashPanelVisible) "⊟ Crashes" else "⊞ Crashes",
+            active = state.crashPanelVisible,
+            modifier = Modifier.fillMaxHeight(),
+            shape = middleShape,
+        ) { state.updateCrashPanelVisible(!state.crashPanelVisible) }
+        ToolbarBtn(
             if (state.compareMode) "⊟ Compare" else "⊠ Compare",
             active = state.compareMode,
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
         ) { state.updateCompareMode(!state.compareMode) }
+        ToolbarBtn(
+            "Merge",
+            enabled = state.tabs.size >= 2,
+            modifier = Modifier.fillMaxHeight(),
+            shape = middleShape,
+        ) { state.mergeTabsDialogOpen = true }
         ToolbarBtn(
             "Open",
             modifier = Modifier.fillMaxHeight(),
@@ -1246,10 +1391,13 @@ private fun TabBar(state: AppState) {
             val fd = FileDialog(null as Frame?, "Open Log File", FileDialog.LOAD)
             fd.setFilenameFilter { dir, name ->
                 val f = File(dir, name)
-                f.isDirectory || com.openlog.utils.isLikelyTextFile(f)
+                f.isDirectory || com.openlog.utils.isLikelyTextFile(f) || com.openlog.utils.isZipFile(f)
             }
             fd.isVisible = true
-            fd.file?.let { state.openFile(File(fd.directory, it)) }
+            fd.file?.let {
+                val f = File(fd.directory, it)
+                if (com.openlog.utils.isZipFile(f)) state.openZipFile(f) else state.openFile(f)
+            }
         }
         if (hasRecentFiles) {
             ToolbarBtn(
@@ -1477,6 +1625,9 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
                             dragging = isDragging,
                             onClick = { if (dragTabId == null) state.activateTab(tab.id) },
                             onClose = { state.closeTab(tab.id) },
+                            onToggleTail = {
+                                if (tab.tailing) state.stopTailing(tab.id) else state.startTailing(tab.id)
+                            },
                         )
                     }
                 }
@@ -1982,10 +2133,18 @@ private fun CompactSetting(
 private fun TabItem(
     tab: LogTab, isActive: Boolean, showClose: Boolean,
     dragging: Boolean = false, onClick: () -> Unit, onClose: () -> Unit,
+    onToggleTail: (() -> Unit)? = null,
 ) {
     val tc = tc()
     var hov by remember { mutableStateOf(false) }
     val accent = tc.ac
+    // Only a tab backed by a real, currently-existing file can be tailed — not a zip-extracted
+    // tab (sourcePath is a "zip!entry" pseudo-path, no real file to watch) or a merged tab
+    // (sourcePath is null, its content came from other tabs, not a single growing file).
+    val canTail = remember(tab.sourcePath) {
+        val p = tab.sourcePath
+        p != null && '!' !in p && File(p).isFile
+    }
     Row(
         Modifier.fillMaxWidth().height(36.dp)
             .background(if (isActive) tc.bg else if (hov || dragging) tc.p else tc.p2)
@@ -2015,9 +2174,36 @@ private fun TabItem(
             overflow = TextOverflow.Ellipsis,
             maxLines = 1,
         )
+        if (canTail && onToggleTail != null) {
+            TailToggle(tailing = tab.tailing, onClick = onToggleTail)
+        }
         if (showClose) {
             CloseButton(onClick = onClose)
         }
+    }
+}
+
+// Pulsing red dot while tailing (unmistakable "this is live" signal); a static dim dot otherwise,
+// so the toggle affordance is discoverable even before it's ever been used.
+@Composable
+private fun TailToggle(tailing: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    val transition = rememberInfiniteTransition(label = "tail-pulse")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(animation = tween(700), repeatMode = RepeatMode.Reverse),
+        label = "tail-pulse-alpha",
+    )
+    Box(
+        Modifier.size(20.dp).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        AppText(
+            "●",
+            color = if (tailing) DANGER_RED.copy(alpha = alpha) else tc.td.copy(.4f),
+            fontSize = 10.sp,
+        )
     }
 }
 

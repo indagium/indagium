@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "openlog-control": {
+      "command": "npx",
+      "args": ["tsx", "mcp-server/src/index.ts"]
+    }
+  }
+}

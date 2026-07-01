@@ -105,6 +105,7 @@ class SequenceGroupingTest {
                 is LogItem.Row -> it.entry.id
                 is LogItem.SeqHeader -> it.entry.id
                 is LogItem.ManualHeader -> it.entry.id
+                is LogItem.StackTraceHeader -> it.entry.id
             }
         }
 
