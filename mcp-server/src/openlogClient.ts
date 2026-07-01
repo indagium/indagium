@@ -1,0 +1,43 @@
+// Thin fetch() wrapper around ControlServer.kt's HTTP endpoints. This file is the only place
+// that knows the wire format — it never touches the Kotlin/JVM process directly, so any MCP
+// client (or plain curl) against the same base URL works identically.
+
+const BASE_URL = process.env.OPENLOG_CONTROL_URL ?? "http://127.0.0.1:8991";
+
+async function request(method: string, path: string, body?: unknown): Promise<unknown> {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method,
+    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: `non-JSON response (status ${res.status}): ${text}` };
+  }
+}
+
+export const openlogClient = {
+  listTabs: () => request("GET", "/tabs"),
+
+  openLogFile: (path: string) => request("POST", "/open", { path }),
+
+  closeTab: (tabId: string) => request("POST", "/close", { tabId }),
+
+  getFilter: (tabId: string) => request("GET", `/filter?tabId=${encodeURIComponent(tabId)}`),
+
+  setFilter: (tabId: string, filter: Record<string, unknown>) =>
+    request("POST", "/filter", { tabId, ...filter }),
+
+  getVisibleLines: (tabId: string, limit?: number, offset?: number) => {
+    const params = new URLSearchParams({ tabId });
+    if (limit !== undefined) params.set("limit", String(limit));
+    if (offset !== undefined) params.set("offset", String(offset));
+    return request("GET", `/visible?${params.toString()}`);
+  },
+
+  toggleGroup: (tabId: string, gid: string) => request("POST", "/toggle", { tabId, gid }),
+
+  getTags: (tabId: string) => request("GET", `/tags?tabId=${encodeURIComponent(tabId)}`),
+};
