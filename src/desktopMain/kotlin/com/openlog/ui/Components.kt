@@ -211,6 +211,7 @@ fun PillBtn(label: String, active: Boolean, onClick: () -> Unit) {
         Modifier
             .border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
             .background(if (active) tc.ac.copy(.15f) else if (hovered) tc.hv else Color.Transparent, CORNER_MD)
+            .clip(CORNER_MD)
             .clickable(onClick = onClick)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
@@ -332,6 +333,7 @@ fun ColorSwatch(color: Color, selected: Boolean, onClick: () -> Unit) {
         Modifier.size(14.dp)
             .background(color, CORNER_SM)
             .border(2.dp, if (selected) tc.tx else Color.Transparent, CORNER_SM)
+            .clip(CORNER_SM)
             .clickable(onClick = onClick),
     )
 }

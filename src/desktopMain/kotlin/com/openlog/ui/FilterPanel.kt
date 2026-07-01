@@ -14,6 +14,7 @@ import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.DragData
 import androidx.compose.ui.draganddrop.dragData
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -1417,6 +1418,7 @@ private fun TagPill(tag: String, color: Color, onRemove: () -> Unit) {
     Box(
         Modifier.background(color.copy(.13f), CORNER_SM)
             .border(1.dp, color.copy(.27f), CORNER_SM)
+            .clip(CORNER_SM)
             .clickable(onClick = onRemove)
             .padding(start = 7.dp, end = 4.dp, top = 1.dp, bottom = 1.dp),
     ) {

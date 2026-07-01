@@ -9,6 +9,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -664,6 +665,7 @@ private fun BlockControls(
         .defaultMinSize(minWidth = if (isNavigationBadge) 48.dp else 34.dp)
         .background(typeColor.copy(if (onNavigate != null) .24f else .14f), badgeShape)
         .border(1.dp, typeColor.copy(if (onNavigate != null) .9f else .35f), badgeShape)
+        .clip(badgeShape)
         .then(
             if (onNavigate != null) {
                 Modifier

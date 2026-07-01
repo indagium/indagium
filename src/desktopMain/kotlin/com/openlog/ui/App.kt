@@ -427,7 +427,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             fontSize = 13.sp
                         )
                         Spacer(Modifier.height(12.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
                             DialogActionButton("Save", active = state.sfName.isNotBlank()) {
                                 if (state.sfName.isNotBlank()) state.saveFilter(
                                     state.sfTabId ?: return@DialogActionButton, state.sfName
@@ -455,7 +455,11 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             maxLines = 3,
                         )
                         Spacer(Modifier.height(14.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             DialogActionButton("Replace", active = true, danger = true) { state.confirmReplaceDuplicateFilter() }
                             DialogActionButton("Cancel", active = false) { state.cancelDuplicateFilterSave() }
                         }
@@ -486,9 +490,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             maxLines = 3,
                         )
                         Spacer(Modifier.height(14.dp))
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 DialogActionButton("Save as new", active = true) { state.beginSavePendingFilterAsNew() }
@@ -499,7 +504,8 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                 ) { state.updateCurrentPresetAndLoadPending() }
                             }
                             Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 DialogActionButton(
@@ -532,7 +538,8 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         )
                         Spacer(Modifier.height(14.dp))
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             DialogActionButton(
@@ -558,7 +565,11 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         Spacer(Modifier.height(6.dp))
                         AppText("Delete \"$filterName\" from saved filters.", color = tc2.td, fontSize = 11.sp, maxLines = 2)
                         Spacer(Modifier.height(14.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             DialogActionButton("Delete", active = true, danger = true) { state.confirmDeleteSF() }
                             DialogActionButton("Cancel", active = false) { state.cancelDeleteSF() }
                         }
@@ -768,7 +779,11 @@ private fun AddAnnDialog(
             },
         )
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             DialogActionButton("Add annotation", active = true) { onConfirm(caption) }
             DialogActionButton("Cancel", active = false, onClick = onDismiss)
         }
@@ -785,12 +800,14 @@ private fun DialogActionButton(
 ) {
     val tc = tc()
     val accent = if (danger) DANGER_RED else tc.ac
+    val shape = RoundedCornerShape(5.dp)
     Box(
         Modifier
             .width(132.dp)
             .height(38.dp)
-            .border(1.dp, if (active) accent else tc.br, RoundedCornerShape(5.dp))
-            .background(if (active) accent.copy(.18f) else Color.Transparent, RoundedCornerShape(5.dp))
+            .border(1.dp, if (active) accent else tc.br, shape)
+            .background(if (active) accent.copy(.18f) else Color.Transparent, shape)
+            .clip(shape)
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
