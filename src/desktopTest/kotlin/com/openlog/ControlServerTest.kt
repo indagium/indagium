@@ -190,6 +190,32 @@ class ControlServerTest {
         assertTrue(state.tabs.isEmpty())
     }
 
+    @Test
+    fun mergeTabsCombinesTwoTabsIntoANewOne() {
+        state.tabs = listOf(
+            mkTab("t1", "main.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "first"))),
+            mkTab("t2", "system.log", listOf(LogEntry(1, "10:00:01.000", LogLevel.I, "Sys", "second"))),
+        )
+
+        val body = post("/merge", """{"tabIds":["t1","t2"],"newTabName":"Combined"}""")
+
+        assertTrue(body.contains("\"filename\":\"Combined\""))
+        assertTrue(body.contains("\"entryCount\":2"))
+        assertEquals(3, state.tabs.size)
+    }
+
+    @Test
+    fun mergeTabsErrorsForFewerThanTwoIds() {
+        state.tabs = listOf(mkTab("t1", "main.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        assertTrue(post("/merge", """{"tabIds":["t1"]}""").contains("\"error\""))
+    }
+
+    @Test
+    fun mergeTabsErrorsForUnknownTabId() {
+        state.tabs = listOf(mkTab("t1", "main.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        assertTrue(post("/merge", """{"tabIds":["t1","nope"]}""").contains("\"error\""))
+    }
+
     private fun buildZipFixture(entries: Map<String, String>): File {
         val file = File.createTempFile("openlog-control-server-fixture", ".zip")
         java.util.zip.ZipOutputStream(file.outputStream()).use { zos ->

@@ -128,5 +128,19 @@ server.registerTool(
   async ({ tabId }) => jsonResult(await openlogClient.getCrashSites(tabId)),
 );
 
+server.registerTool(
+  "merge_tabs",
+  {
+    title: "Merge tabs",
+    description:
+      "Merge 2 or more already-open tabs into one new tab, interleaved by time-of-day (not calendar-aware — entries are compared purely by HH:mm:ss.SSS, so this is only correct when the sources span a single day). Each merged row is tagged with which source tab's filename it came from.",
+    inputSchema: {
+      tabIds: z.array(z.string()).min(2).describe("ids of the tabs to merge (from list_tabs)"),
+      newTabName: z.string().optional().describe('Name for the new merged tab (default "Merged")'),
+    },
+  },
+  async ({ tabIds, newTabName }) => jsonResult(await openlogClient.mergeTabs(tabIds, newTabName)),
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

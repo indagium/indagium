@@ -913,6 +913,16 @@ private fun LogRow(
             .padding(start = ROW_START_PAD + INDENT_STEP * item.indent, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Only merged tabs (utils/LogMerge.kt) ever set sourceTag — a small pinned (non-scrolling)
+        // badge naming which original file a row came from, since a merged tab otherwise gives no
+        // visual way to tell which buffer (main/system/crash/...) a given line was in.
+        entry.sourceTag?.let { tag ->
+            AppText(
+                tag, color = tc.td, fontSize = 9.sp, fontFamily = mono, maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 70.dp).padding(end = 4.dp),
+            )
+        }
         Box(Modifier.fillMaxWidth().horizontalScroll(hScroll)) {
             BasicTextField(
                 value         = TextFieldValue(annotatedString = annoLine, selection = sel),

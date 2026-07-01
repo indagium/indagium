@@ -43,4 +43,7 @@ export const openlogClient = {
   getTags: (tabId: string) => request("GET", `/tags?tabId=${encodeURIComponent(tabId)}`),
 
   getCrashSites: (tabId: string) => request("GET", `/crashes?tabId=${encodeURIComponent(tabId)}`),
+
+  mergeTabs: (tabIds: string[], newTabName?: string) =>
+    request("POST", "/merge", newTabName !== undefined ? { tabIds, newTabName } : { tabIds }),
 };

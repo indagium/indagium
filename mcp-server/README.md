@@ -39,5 +39,6 @@ npm start
 | `toggle_group` | Expand/collapse a sequence or manual-collapse group |
 | `get_tags` | List every distinct tag in a tab's full file |
 | `get_crash_sites` | List detected exceptions and ANRs in a tab's full file, with jump-to log ids |
+| `merge_tabs` | Merge 2+ already-open tabs into one new tab, interleaved by time-of-day |
 
 Registered for Claude Code via `.mcp.json` at the repo root.

@@ -618,6 +618,64 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                 }
             }
 
+            if (state.mergeTabsDialogOpen) {
+                var selected by remember { mutableStateOf(emptySet<String>()) }
+                var mergedName by remember { mutableStateOf("Merged") }
+
+                fun close() {
+                    state.mergeTabsDialogOpen = false
+                    selected = emptySet()
+                }
+                Dialog(onDismissRequest = { close() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(420.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Merge tabs", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "Pick 2 or more open tabs to merge into one, interleaved by time-of-day.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 2,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                            state.tabs.forEach { candidateTab ->
+                                CheckRow(
+                                    checked = candidateTab.id in selected,
+                                    onToggle = {
+                                        selected = if (candidateTab.id in selected) {
+                                            selected - candidateTab.id
+                                        } else {
+                                            selected + candidateTab.id
+                                        }
+                                    },
+                                ) {
+                                    AppText(candidateTab.filename, color = tc2.tx, fontSize = 11.sp, fontFamily = MONO,
+                                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        InlineField(mergedName, { mergedName = it }, "Merged tab name…", Modifier.fillMaxWidth(), fontSize = 13.sp)
+                        Spacer(Modifier.height(14.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            DialogActionButton(
+                                "Merge",
+                                active = selected.size >= 2,
+                                enabled = selected.size >= 2,
+                            ) {
+                                state.mergeTabs(selected.toList(), mergedName.ifBlank { "Merged" })
+                                close()
+                            }
+                            DialogActionButton("Cancel", active = false) { close() }
+                        }
+                    }
+                }
+            }
+
             // ── Recent files popup ────────────────────────────────────
             if (state.recentMenuOpen && state.recentFiles.isNotEmpty()) {
                 BoxWithConstraints(
@@ -1293,6 +1351,12 @@ private fun TabBar(state: AppState) {
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
         ) { state.updateCompareMode(!state.compareMode) }
+        ToolbarBtn(
+            "Merge",
+            enabled = state.tabs.size >= 2,
+            modifier = Modifier.fillMaxHeight(),
+            shape = middleShape,
+        ) { state.mergeTabsDialogOpen = true }
         ToolbarBtn(
             "Open",
             modifier = Modifier.fillMaxHeight(),

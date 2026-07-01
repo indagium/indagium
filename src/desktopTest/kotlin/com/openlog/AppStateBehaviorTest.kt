@@ -977,6 +977,43 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun mergeTabsCreatesANewTabInterleavedByTimeAndTaggedBySource() {
+        val dir = createTempDirectory("openlog-merge").toFile()
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.tabs = listOf(
+            mkTab(
+                "t1", "main.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "main first"),
+                    LogEntry(2, "10:00:02.000", LogLevel.I, "App", "main second"),
+                ),
+            ),
+            mkTab("t2", "system.log", listOf(LogEntry(1, "10:00:01.000", LogLevel.I, "Sys", "system first"))),
+        )
+
+        state.mergeTabs(listOf("t1", "t2"), "Merged Session")
+
+        waitUntil { state.tabs.size == 3 }
+        val merged = state.tabs.last()
+        assertEquals("Merged Session", merged.filename)
+        assertEquals(listOf("main first", "system first", "main second"), merged.logData.map { it.msg })
+        assertEquals(listOf(1, 2, 3), merged.logData.map { it.id })
+        assertEquals(listOf("main.log", "system.log", "main.log"), merged.logData.map { it.sourceTag })
+        assertEquals(state.activeTabId, merged.id)
+    }
+
+    @Test
+    fun mergeTabsWithFewerThanTwoValidTabIdsIsANoOp() {
+        val dir = createTempDirectory("openlog-merge").toFile()
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.tabs = listOf(mkTab("t1", "main.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+
+        state.mergeTabs(listOf("t1"), "Merged")
+
+        assertEquals(1, state.tabs.size)
+    }
+
+    @Test
     fun contextMenuCanAddHideAndShowOnlyMessageRules() {
         val state = AppState()
         state.tabs = listOf(

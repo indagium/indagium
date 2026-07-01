@@ -24,7 +24,12 @@ data class LogEntry(
     val tag: String,
     val msg: String,
     val pid: Int = 0,
-    val tid: Int = 0
+    val tid: Int = 0,
+    // Set only by mergeLogs() (utils/LogMerge.kt) to badge which source file a merged-tab row
+    // came from. null everywhere else, including LogParser.parseLogcat's own output — appended
+    // last (not inserted earlier) so every existing positional LogEntry(...) construction across
+    // the test suite keeps compiling unchanged.
+    val sourceTag: String? = null,
 )
 
 // ── Sequences ──────────────────────────────────────────────────────

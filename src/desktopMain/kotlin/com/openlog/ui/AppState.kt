@@ -3,6 +3,7 @@ package com.openlog.ui
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.*
+import com.openlog.utils.MergeSourceFile
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.buildFilteredCsv
 import com.openlog.utils.buildFilteredTxt
@@ -10,6 +11,7 @@ import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
 import com.openlog.utils.extractCandidate
 import com.openlog.utils.listLogcatCandidates
+import com.openlog.utils.mergeLogs
 import com.openlog.utils.parseLogcat
 import com.openlog.utils.passesFilter
 import kotlinx.coroutines.*
@@ -124,6 +126,7 @@ class AppState(
     var pendingAnnotationNavigation by mutableStateOf<AnnotationNavigationRequest?>(null)
         private set
     var pendingZipPicker by mutableStateOf<PendingZipPicker?>(null)
+    var mergeTabsDialogOpen by mutableStateOf(false)
 
     val fpState = FilterPanelUiState()
 
@@ -1076,6 +1079,30 @@ class AppState(
         if (next.isEmpty()) compareMode = false
         logViewerScrollStateStore.removeTab(tabId)
         tabs = next
+    }
+
+    // Ships "merge already-open tabs" (v1) — data's already in memory, no re-parsing needed.
+    // Runs on ioScope for consistency with the rest of the codebase's bias toward backgrounding
+    // anything touching logData, even though mergeLogs() itself is a pure in-memory sort.
+    fun mergeTabs(tabIds: List<String>, newTabName: String = "Merged") {
+        val sources = tabIds.mapNotNull { id -> tab(id)?.let { MergeSourceFile(it.filename, it.logData) } }
+        if (sources.size < 2) return
+        val n = tabCounter++
+        beginLoading()
+        ioScope.launch {
+            try {
+                val merged = mergeLogs(sources)
+                ensureActive()
+                val t = mkTab("t$n", newTabName, merged)
+                synchronized(stateLock) {
+                    ensureActive()
+                    tabs = tabs + t
+                    activeTabId = t.id
+                }
+            } finally {
+                finishLoading()
+            }
+        }
     }
 
     fun openFile(file: File) {

@@ -58,6 +58,9 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         s.createContext("/toggle", handler(POST) { _, body -> toggleGroupRoute(body.str("tabId") ?: "", body.str("gid") ?: "") })
         s.createContext("/tags", handler(GET) { ex, _ -> getTags(queryParams(ex)["tabId"] ?: "") })
         s.createContext("/crashes", handler(GET) { ex, _ -> getCrashSites(queryParams(ex)["tabId"] ?: "") })
+        s.createContext("/merge", handler(POST) { _, body ->
+            mergeTabsRoute(body.strList("tabIds") ?: emptyList(), body.str("newTabName") ?: "Merged")
+        })
         // No executor set: HttpServer's default runs requests sequentially on the thread that
         // called start() — fine for a low-throughput, single-client dev tool, and means no
         // extra synchronization is needed around AppState access from this server.
@@ -142,6 +145,18 @@ class ControlServer(private val appState: AppState, private val port: Int) {
     private fun awaitLoad() {
         val deadline = System.currentTimeMillis() + OPEN_FILE_TIMEOUT_MS
         while (appState.isLoading && System.currentTimeMillis() < deadline) Thread.sleep(OPEN_FILE_POLL_INTERVAL_MS)
+    }
+
+    private fun mergeTabsRoute(tabIds: List<String>, newTabName: String): Map<String, Any?> {
+        if (tabIds.size < 2) return mapOf("error" to "need at least 2 tabIds to merge")
+        val missing = tabIds.filter { appState.tab(it) == null }
+        if (missing.isNotEmpty()) return mapOf("error" to "no such tab(s): ${missing.joinToString(", ")}")
+        val beforeCount = appState.tabs.size
+        appState.mergeTabs(tabIds, newTabName)
+        awaitLoad()
+        if (appState.tabs.size <= beforeCount) return mapOf("error" to "merge did not produce a new tab")
+        val tab = appState.tabs.last()
+        return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size)
     }
 
     private fun closeTab(tabId: String): Map<String, Any?> {
