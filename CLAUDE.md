@@ -7,6 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Never `git push` without asking the user first.**
 - Exception: after a branch has been merged into main, you may ask the user if they want to push main.
 
+## Versioning
+
+The single source of truth for the app version is `app.version` in `gradle.properties`. Whenever that value changes, update in the same commit:
+- The version badge at the top of `README.md`.
+- The example `git tag vX.Y.Z` command in both `README.md` (Releasing section) and this file's Commands section — bump it to the next version.
+
+Skipping this leaves the README showing a stale version after a release ships, which is confusing to anyone landing on the repo page.
+
 ## Commands
 
 ```bash
@@ -30,8 +38,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./gradlew packageDeb        # Linux .deb (run on Linux)
 ./gradlew packageMsi        # Windows .msi (run on Windows)
 
-# Release (triggers GitHub Actions → builds Linux + Windows → creates GitHub Release)
-git tag v1.0.4 && git push --tags
+# Release (triggers GitHub Actions → builds Linux + Windows + macOS → creates GitHub Release)
+git tag v1.0.6 && git push --tags
 ```
 
 Source sets are `desktopMain` and `desktopTest` (Kotlin Multiplatform with a single `jvm("desktop")` target).

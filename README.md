@@ -2,7 +2,7 @@
 
 A desktop log viewer for Android logcat files, built with Kotlin and Compose Multiplatform.
 
-![Version](https://img.shields.io/badge/version-1.0.3-blue)
+![Version](https://img.shields.io/badge/version-1.0.5-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
 ## Features
@@ -52,13 +52,13 @@ Download the latest release for your platform from the [Releases](../../releases
 
 ## Releasing
 
-Push a version tag to trigger the GitHub Actions build, which produces Linux and Windows packages and creates a GitHub Release automatically:
+Push a version tag to trigger the GitHub Actions build, which produces Linux, Windows, and macOS packages and creates a GitHub Release automatically:
 
 ```bash
-git tag v1.0.4 && git push --tags
+git tag v1.0.6 && git push --tags
 ```
 
-macOS packages are built locally and attached to the release manually.
+The macOS build is unsigned (no Apple Developer certificate in CI), so Gatekeeper shows an "unidentified developer" warning on first launch.
 
 ## License
 
