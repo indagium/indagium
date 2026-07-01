@@ -33,6 +33,15 @@ Download the latest release for your platform from the [Releases](../../releases
 | Windows | `openLog-x.y.z.msi` |
 | macOS | `openLog-x.y.z.dmg` |
 
+### macOS: "could not verify... free of malware"
+
+The macOS build isn't signed with an Apple Developer ID or notarized, so Gatekeeper blocks it
+once the `.dmg` has been downloaded through a browser (locally built copies aren't affected —
+they never get the quarantine flag a browser download adds). To open it anyway, either:
+
+- Terminal: `xattr -cr /Applications/openLog.app`, or
+- System Settings → Privacy & Security → scroll to the "openLog was blocked" notice → **Open Anyway**
+
 ## Building from source
 
 **Requirements:** JDK 17+
@@ -58,7 +67,7 @@ Push a version tag to trigger the GitHub Actions build, which produces Linux, Wi
 git tag v1.0.6 && git push --tags
 ```
 
-The macOS build is unsigned (no Apple Developer certificate in CI), so Gatekeeper shows an "unidentified developer" warning on first launch.
+The macOS build is unsigned (no Apple Developer certificate in CI) — see the Installation section above for the Gatekeeper workaround.
 
 ## License
 
