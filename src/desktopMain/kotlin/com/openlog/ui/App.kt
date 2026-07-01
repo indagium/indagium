@@ -108,7 +108,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     files.forEach { uri ->
                         runCatching {
                             val file = File(URI.create(uri))
-                            if (file.exists() && file.extension.lowercase() in listOf("log", "txt")) {
+                            if (file.exists() && com.openlog.utils.isLikelyTextFile(file)) {
                                 state.openFile(file)
                             }
                         }
@@ -1200,7 +1200,10 @@ private fun TabBar(state: AppState) {
             shape = if (hasRecentFiles) middleShape else rightShape,
         ) {
             val fd = FileDialog(null as Frame?, "Open Log File", FileDialog.LOAD)
-            fd.setFilenameFilter { _, name -> name.endsWith(".log") || name.endsWith(".txt") }
+            fd.setFilenameFilter { dir, name ->
+                val f = File(dir, name)
+                f.isDirectory || com.openlog.utils.isLikelyTextFile(f)
+            }
             fd.isVisible = true
             fd.file?.let { state.openFile(File(fd.directory, it)) }
         }
