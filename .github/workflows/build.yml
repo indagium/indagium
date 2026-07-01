@@ -62,7 +62,7 @@ jobs:
           deb=$(find build/compose/binaries/main/deb -name '*.deb')
           workdir=$(mktemp -d)
           dpkg-deb -R "$deb" "$workdir"
-          desktop_file=$(find "$workdir/opt" -name '*.desktop')
+          desktop_file=$(find "$workdir/opt" -maxdepth 3 -type f -name '*.desktop')
           if ! grep -q '^StartupWMClass=' "$desktop_file"; then
             echo "StartupWMClass=openLog" >> "$desktop_file"
           fi
