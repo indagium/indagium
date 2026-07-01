@@ -38,6 +38,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.*
 import com.openlog.utils.containsPattern
+import com.openlog.utils.firstRegexMatch
 import com.openlog.utils.passesFilter
 import java.io.File
 import java.net.URI
@@ -341,13 +342,20 @@ fun FilterPanel(
                         containsPattern(entry.msg, msgRuleSearch, regex = filter.kwInTagRegex)
                 }
                 .map { it.msg }
-            val stems = matchingMsgs.map { msg ->
-                val sepIdx = msg.indexOfFirst { it == ':' || it == '(' }
-                if (sepIdx > 0) msg.substring(0, sepIdx).trim().takeIf { it.isNotBlank() } ?: msg.take(80)
-                else msg.take(80)
-            }.distinct()
-            val fulls = matchingMsgs.map { it.take(80) }.distinct().filter { it !in stems }
-            val msgCandidates = (stems + fulls).take(8 - pidCandidates.size).map { Pair(it, RuleTarget.MESSAGE) }
+            // In regex mode, lead with what the pattern actually matched (e.g. "avc.*denied"
+            // against "avc: denied : word 1 word 2" proposes "avc: denied" first) instead of
+            // the plain-text stem heuristic, which only makes sense for non-regex prefix search.
+            val leads = if (filter.kwInTagRegex) {
+                matchingMsgs.mapNotNull { msg -> firstRegexMatch(msg, msgRuleSearch)?.take(80) }.distinct()
+            } else {
+                matchingMsgs.map { msg ->
+                    val sepIdx = msg.indexOfFirst { it == ':' || it == '(' }
+                    if (sepIdx > 0) msg.substring(0, sepIdx).trim().takeIf { it.isNotBlank() } ?: msg.take(80)
+                    else msg.take(80)
+                }.distinct()
+            }
+            val fulls = matchingMsgs.map { it.take(80) }.distinct().filter { it !in leads }
+            val msgCandidates = (leads + fulls).take(8 - pidCandidates.size).map { Pair(it, RuleTarget.MESSAGE) }
             pidCandidates + msgCandidates
         }
     }
