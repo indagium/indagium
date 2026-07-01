@@ -951,6 +951,16 @@ private fun FileView(
             },
             keyboardFocusVisible = state.keyboardFocusVisible,
         )
+        if (state.crashPanelVisible) {
+            HDivider { delta ->
+                state.updateCrashPanelWidth(state.crashPanelWidth - delta)
+            }
+            CrashPanel(
+                tab = tab,
+                width = state.crashPanelWidth,
+                onNavigate = { site -> state.requestCrashNavigation(tab.id, site.entry.id) },
+            )
+        }
         if (state.annotationVisible) {
             HDivider { delta ->
                 state.updateAnnotationPanelWidth(state.annotationPanelWidth - delta)
@@ -1215,6 +1225,12 @@ private fun TabBar(state: AppState) {
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
         ) { state.updateAnnotationVisible(!state.annotationVisible) }
+        ToolbarBtn(
+            if (state.crashPanelVisible) "⊟ Crashes" else "⊞ Crashes",
+            active = state.crashPanelVisible,
+            modifier = Modifier.fillMaxHeight(),
+            shape = middleShape,
+        ) { state.updateCrashPanelVisible(!state.crashPanelVisible) }
         ToolbarBtn(
             if (state.compareMode) "⊟ Compare" else "⊠ Compare",
             active = state.compareMode,

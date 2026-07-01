@@ -1,5 +1,7 @@
 package com.openlog.utils
 
+import com.openlog.model.CrashKind
+import com.openlog.model.CrashSite
 import com.openlog.model.LogEntry
 import com.openlog.model.StackTraceGroup
 
@@ -8,6 +10,8 @@ private val AT_FRAME_RE = Regex("""^\s*at\s+\S+""")
 private val CAUSED_BY_RE = Regex("""^Caused by:""")
 private val MORE_FRAMES_RE = Regex("""^\s*\.\.\.\s+\d+\s+more$""")
 private val PROCESS_LINE_RE = Regex("""^Process:\s+\S+,\s*PID:\s*\d+""")
+private val ANR_MSG_RE = Regex("""ANR in\s+\S+""")
+private const val ANR_TAG = "ActivityManager"
 
 private fun isTrigger(msg: String): Boolean {
     val trimmed = msg.trim()
@@ -80,4 +84,21 @@ fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
     // Flush order follows whichever pid's trace closed first, not document order once multiple
     // pids interleave — restore document order (entry id increases monotonically per tab).
     return groups.sortedBy { it.rid }
+}
+
+// EXCEPTION sites are derived 1:1 from computeStackTraceGroups()'s output — the header line an
+// exception already collapses onto is exactly what a crash panel needs to jump to.
+// ANR sites are a separate single-line scan on "ActivityManager: ANR in ..." lines — real ANR
+// dumps continue with Reason:/Load:/CPU usage lines, but v1 only needs the anchor line to jump
+// to, not a folded group. Tag/pattern coverage is deliberately narrow (see plan's flagged risk:
+// format varies across Android versions/OEMs) — broaden only once validated against real samples.
+fun computeCrashSites(logData: List<LogEntry>, stackGroups: List<StackTraceGroup>): List<CrashSite> {
+    val byId = logData.associateBy { it.id }
+    val exceptionSites = stackGroups.mapNotNull { g ->
+        byId[g.rid]?.let { entry -> CrashSite(id = "crash_${g.rid}", entry = entry, kind = CrashKind.EXCEPTION, groupGid = g.gid) }
+    }
+    val anrSites = logData
+        .filter { it.tag == ANR_TAG && ANR_MSG_RE.containsMatchIn(it.msg) }
+        .map { CrashSite(id = "crash_${it.id}", entry = it, kind = CrashKind.ANR, groupGid = null) }
+    return (exceptionSites + anrSites).sortedBy { it.entry.id }
 }

@@ -40,4 +40,6 @@ export const openlogClient = {
   toggleGroup: (tabId: string, gid: string) => request("POST", "/toggle", { tabId, gid }),
 
   getTags: (tabId: string) => request("GET", `/tags?tabId=${encodeURIComponent(tabId)}`),
+
+  getCrashSites: (tabId: string) => request("GET", `/crashes?tabId=${encodeURIComponent(tabId)}`),
 };

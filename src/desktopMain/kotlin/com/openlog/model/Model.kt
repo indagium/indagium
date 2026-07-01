@@ -53,6 +53,10 @@ data class SeqGroup(
 
 data class StackTraceGroup(val gid: String, val rid: Int, val memberIds: List<Int>)
 
+enum class CrashKind { EXCEPTION, ANR }
+
+data class CrashSite(val id: String, val entry: LogEntry, val kind: CrashKind, val groupGid: String?)
+
 enum class ManualCollapseDirection { TO_START, TO_END }
 
 data class ManualCollapseBlock(

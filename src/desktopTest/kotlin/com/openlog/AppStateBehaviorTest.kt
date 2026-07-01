@@ -825,6 +825,8 @@ class AppStateBehaviorTest {
         state.updateFilterPanelWidth(333f)
         state.updateAnnotationPanelWidth(444f)
         state.updateCompareSplit(0.72f)
+        state.updateCrashPanelVisible(true)
+        state.updateCrashPanelWidth(300f)
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
 
@@ -835,6 +837,8 @@ class AppStateBehaviorTest {
         assertEquals(333f, restored.filterPanelWidth)
         assertEquals(444f, restored.annotationPanelWidth)
         assertEquals(0.72f, restored.compareSplit)
+        assertEquals(true, restored.crashPanelVisible)
+        assertEquals(300f, restored.crashPanelWidth)
     }
 
     @Test

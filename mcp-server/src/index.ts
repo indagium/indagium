@@ -84,7 +84,7 @@ server.registerTool(
   {
     title: "Get visible lines",
     description:
-      "Read the currently rendered log items for a tab — after filtering and sequence/manual-collapse folding, i.e. what a user would actually see. Each item has a `type` (Row, SeqHeader, or ManualHeader).",
+      "Read the currently rendered log items for a tab — after filtering and sequence/manual-collapse/stack-trace folding, i.e. what a user would actually see. Each item has a `type` (Row, SeqHeader, ManualHeader, or StackTraceHeader).",
     inputSchema: {
       tabId: z.string(),
       limit: z.number().int().optional(),
@@ -112,6 +112,17 @@ server.registerTool(
     inputSchema: { tabId: z.string() },
   },
   async ({ tabId }) => jsonResult(await openlogClient.getTags(tabId)),
+);
+
+server.registerTool(
+  "get_crash_sites",
+  {
+    title: "Get crash and ANR sites",
+    description:
+      "List every detected exception (FATAL EXCEPTION / bare exception header) and ANR in a tab's full log file, each with the log id to jump to. Detected on the whole file regardless of the active filter.",
+    inputSchema: { tabId: z.string() },
+  },
+  async ({ tabId }) => jsonResult(await openlogClient.getCrashSites(tabId)),
 );
 
 const transport = new StdioServerTransport();

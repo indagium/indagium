@@ -39,6 +39,8 @@ internal const val ANNOTATION_PANEL_MIN_WIDTH = 360f
 internal const val ANNOTATION_PANEL_MAX_WIDTH = 500f
 internal const val FILTER_PANEL_MIN_WIDTH = 140f
 internal const val FILTER_PANEL_MAX_WIDTH = 420f
+internal const val CRASH_PANEL_MIN_WIDTH = 280f
+internal const val CRASH_PANEL_MAX_WIDTH = 420f
 internal const val COMPARE_SPLIT_MIN = 0.2f
 internal const val COMPARE_SPLIT_MAX = 0.8f
 
@@ -63,8 +65,10 @@ class AppState(
     // ── Layout ──────────────────────────────────────────────────────
     var filterVisible by mutableStateOf(true)
     var annotationVisible by mutableStateOf(true)
+    var crashPanelVisible by mutableStateOf(false)
     var filterPanelWidth by mutableStateOf(220f)
     var annotationPanelWidth by mutableStateOf(ANNOTATION_PANEL_MIN_WIDTH)
+    var crashPanelWidth by mutableStateOf(CRASH_PANEL_MIN_WIDTH)
     var compareSplit by mutableStateOf(0.5f)
     var compareFilterRight by mutableStateOf(true)
     var isLoading by mutableStateOf(false)
@@ -163,6 +167,12 @@ class AppState(
         autosaveNow()
     }
 
+    fun updateCrashPanelVisible(visible: Boolean) {
+        if (crashPanelVisible == visible) return
+        crashPanelVisible = visible
+        autosaveNow()
+    }
+
     fun updateCompareMode(enabled: Boolean) {
         if (compareMode == enabled) return
         compareMode = enabled
@@ -191,6 +201,13 @@ class AppState(
         val next = width.coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
         if (annotationPanelWidth == next) return
         annotationPanelWidth = next
+        autosaveNow()
+    }
+
+    fun updateCrashPanelWidth(width: Float) {
+        val next = width.coerceIn(CRASH_PANEL_MIN_WIDTH, CRASH_PANEL_MAX_WIDTH)
+        if (crashPanelWidth == next) return
+        crashPanelWidth = next
         autosaveNow()
     }
 
@@ -749,6 +766,21 @@ class AppState(
 
     fun consumeAnnotationNavigation(id: Long) {
         if (pendingAnnotationNavigation?.id == id) pendingAnnotationNavigation = null
+    }
+
+    // Reuses the same jump-to-log-lines mechanism as annotation navigation — a crash-panel entry
+    // is just "select and scroll to a log id", the exact thing pendingAnnotationNavigation already
+    // does (including auto-expanding whatever collapsed header, sequence or stack-trace, owns it).
+    fun requestCrashNavigation(tabId: String, logId: Int) {
+        if (tab(tabId) == null) return
+        if (compareMode && tabId != activeTabId) {
+            compareTabId = tabId
+        } else {
+            activateTab(tabId)
+        }
+        setSelectedRows(tabId, listOf(logId))
+        annotationNavigationCounter += 1
+        pendingAnnotationNavigation = AnnotationNavigationRequest(annotationNavigationCounter, tabId, listOf(logId))
     }
 
     // ── Sequence expand/collapse ─────────────────────────────────────
@@ -1572,6 +1604,8 @@ private fun AppState.compareStateToken(): String = tokenFields(
     filterPanelWidth.toString(),
     annotationPanelWidth.toString(),
     compareSplit.toString(),
+    crashPanelVisible.toString(),
+    crashPanelWidth.toString(),
 )
 
 private fun AppState.restoreCompareState(token: String) {
@@ -1585,6 +1619,8 @@ private fun AppState.restoreCompareState(token: String) {
     filterPanelWidth = p[5].toFloatOrNull() ?: filterPanelWidth
     annotationPanelWidth = (p[6].toFloatOrNull() ?: annotationPanelWidth).coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
     compareSplit = p[7].toFloatOrNull() ?: compareSplit
+    crashPanelVisible = p.getOrNull(8)?.toBooleanStrictOrNull() ?: crashPanelVisible
+    crashPanelWidth = (p.getOrNull(9)?.toFloatOrNull() ?: crashPanelWidth).coerceIn(CRASH_PANEL_MIN_WIDTH, CRASH_PANEL_MAX_WIDTH)
 }
 
 private fun FilterPanelUiState.filterPanelToken(): String = tokenFields(

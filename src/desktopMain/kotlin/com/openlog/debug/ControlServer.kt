@@ -1,11 +1,14 @@
 package com.openlog.debug
 
+import com.openlog.model.CrashSite
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
 import com.openlog.ui.AppState
+import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
+import com.openlog.utils.computeStackTraceGroups
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpHandler
 import com.sun.net.httpserver.HttpServer
@@ -51,6 +54,7 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         })
         s.createContext("/toggle", handler(POST) { _, body -> toggleGroupRoute(body.str("tabId") ?: "", body.str("gid") ?: "") })
         s.createContext("/tags", handler(GET) { ex, _ -> getTags(queryParams(ex)["tabId"] ?: "") })
+        s.createContext("/crashes", handler(GET) { ex, _ -> getCrashSites(queryParams(ex)["tabId"] ?: "") })
         // No executor set: HttpServer's default runs requests sequentially on the thread that
         // called start() — fine for a low-throughput, single-client dev tool, and means no
         // extra synchronization is needed around AppState access from this server.
@@ -166,6 +170,14 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         return mapOf("tags" to tab.logData.map { it.tag }.distinct().sorted())
     }
 
+    // Detected on the whole (unfiltered) file, matching CrashPanel's own "complete inventory"
+    // behavior — see ui/CrashPanel.kt.
+    private fun getCrashSites(tabId: String): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val sites = computeCrashSites(tab.logData, computeStackTraceGroups(tab.logData))
+        return mapOf("sites" to sites.map { crashSiteToMap(it) })
+    }
+
     // ── DTO helpers ───────────────────────────────────────────────────
 
     private fun filterToMap(f: Filter): Map<String, Any?> = mapOf(
@@ -206,6 +218,12 @@ class ControlServer(private val appState: AppState, private val port: Int) {
             "indent" to item.indent, "expanded" to item.expanded, "count" to item.count,
         )
     }
+
+    private fun crashSiteToMap(site: CrashSite): Map<String, Any?> = mapOf(
+        "id" to site.id, "kind" to site.kind.name, "groupGid" to site.groupGid,
+        "logId" to site.entry.id, "ts" to site.entry.ts, "level" to site.entry.level.key.toString(),
+        "tag" to site.entry.tag, "msg" to site.entry.msg,
+    )
 
     private fun queryParams(exchange: HttpExchange): Map<String, String> =
         (exchange.requestURI.query ?: "").split("&").filter { it.isNotBlank() }.associate { pair ->

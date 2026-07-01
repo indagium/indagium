@@ -136,10 +136,30 @@ class ControlServerTest {
     }
 
     @Test
+    fun getCrashSitesReturnsStackTraceAndAnrSites() {
+        state.tabs = listOf(
+            mkTab(
+                "t1", "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 100),
+                    LogEntry(2, "10:00:00.001", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 100),
+                    LogEntry(3, "10:00:01.000", LogLevel.E, "ActivityManager", "ANR in com.example.app", pid = 200),
+                ),
+            ),
+        )
+        val body = get("/crashes?tabId=t1")
+        assertTrue(body.contains("\"kind\":\"EXCEPTION\""))
+        assertTrue(body.contains("\"kind\":\"ANR\""))
+        assertTrue(body.contains("\"logId\":1"))
+        assertTrue(body.contains("\"logId\":3"))
+    }
+
+    @Test
     fun getRoutesReturnErrorForUnknownTab() {
         assertTrue(get("/filter?tabId=nope").contains("\"error\""))
         assertTrue(get("/visible?tabId=nope").contains("\"error\""))
         assertTrue(get("/tags?tabId=nope").contains("\"error\""))
+        assertTrue(get("/crashes?tabId=nope").contains("\"error\""))
     }
 
     @Test
