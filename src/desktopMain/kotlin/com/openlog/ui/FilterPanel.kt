@@ -20,6 +20,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -36,6 +37,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.*
+import com.openlog.utils.containsPattern
+import com.openlog.utils.firstRegexMatch
 import com.openlog.utils.passesFilter
 import java.io.File
 import java.net.URI
@@ -89,6 +92,7 @@ fun FilterPanel(
     onRemoveManualCollapse: (String) -> Unit,
     onAddMessageRule: (Boolean, String, Boolean, String?, String?, RuleTarget) -> Unit,
     onRemoveMessageRule: (String) -> Unit,
+    onToggleMessageRuleRegex: () -> Unit,
     onMoveSeqUp: (String) -> Unit,
     onMoveSeqDown: (String) -> Unit,
     onSetNewSeqText: (String) -> Unit,
@@ -122,6 +126,7 @@ fun FilterPanel(
     filterListRows: Int,
     width: Float,
     focusRequester: FocusRequester? = null,
+    focusSearchRequest: Int = 0,
     onPanelFocusChanged: (Boolean) -> Unit = {},
 ) {
     val tc = tc()
@@ -133,6 +138,7 @@ fun FilterPanel(
     val sortedTags = remember(tab.id, tagCounts) { tagCounts.entries.sortedByDescending { it.value }.map { it.key } }
 
     val tagFr = remember { FocusRequester() }
+    val kwFr = remember { FocusRequester() }
     val msgRuleFr = remember { FocusRequester() }
     val hlFr = remember { FocusRequester() }
 
@@ -183,6 +189,7 @@ fun FilterPanel(
     // kwLastSent tracks the last value we pushed so we don't sync our own debounce back as an external change.
     var kwDisplay by remember(tab.id) { mutableStateOf(filter.kwText) }
     var kwLastSent by remember(tab.id) { mutableStateOf(filter.kwText) }
+    var kwFieldFocused by remember { mutableStateOf(false) }
     LaunchedEffect(kwDisplay) {
         val snap = kwDisplay
         kotlinx.coroutines.delay(150)
@@ -214,8 +221,103 @@ fun FilterPanel(
         } else { kotlinx.coroutines.delay(100); if (!msgRuleFieldFocused && !msgCandidatesHovered) showMsgRuleCandidates = false }
     }
     var hlColorPickerOpen   by remember { mutableStateOf(false) }
+    var hlFieldFocused by remember { mutableStateOf(false) }
     var seqAddOpen          by remember { mutableStateOf(false) }
     var seqColorPickerOpen  by remember { mutableStateOf(false) }
+    var navIndex by remember(tab.id) { mutableStateOf(0) }
+
+    val navTargets = remember(
+        tab.filter,
+        tab.manualBlocks,
+        savedFilters,
+    ) {
+        filterKeyboardTargets(
+            levelCount = LogLevel.entries.size,
+            sequenceIds = tab.filter.sequences.map { it.id },
+            manualCollapseIds = tab.manualBlocks.map { it.id },
+            savedFilterIds = savedFilters.map { it.id },
+        )
+    }
+
+    fun moveFilterFocus(delta: Int) {
+        navIndex = rovingMove(navTargets.map { it.asRovingItem() }, navIndex, delta)
+    }
+
+    fun focusCurrentTarget() {
+        when (navTargets.getOrNull(navIndex)?.kind) {
+            KeyboardTargetKind.FilterTagInput -> runCatching { tagFr.requestFocus() }
+            KeyboardTargetKind.FilterMessageInput -> runCatching { msgRuleFr.requestFocus() }
+            KeyboardTargetKind.FilterHighlighterInput -> runCatching { hlFr.requestFocus() }
+            else -> runCatching { focusRequester?.requestFocus() }
+        }
+    }
+
+    fun activateFilterTarget(spaceActivation: Boolean = false) {
+        val target = navTargets.getOrNull(navIndex) ?: return
+        when (target.kind) {
+            KeyboardTargetKind.FilterModeTags -> onSetFilterMode(FilterMode.TAGS)
+            KeyboardTargetKind.FilterModeRegex -> {
+                onSetFilterMode(FilterMode.KEYWORD)
+                if (!filter.kwRegex) onToggleKwRx()
+                runCatching { kwFr.requestFocus() }
+            }
+            KeyboardTargetKind.FilterTagInput -> runCatching { tagFr.requestFocus() }
+            KeyboardTargetKind.FilterMessageInput -> runCatching { msgRuleFr.requestFocus() }
+            KeyboardTargetKind.FilterHighlighterInput -> runCatching { hlFr.requestFocus() }
+            KeyboardTargetKind.FilterSection -> when (target.id) {
+                "filter-section-levels" -> { fpState.lvlExpanded = !fpState.lvlExpanded; onUiStateChanged() }
+                "filter-section-sequences" -> { fpState.seqExpanded = !fpState.seqExpanded; onUiStateChanged() }
+                "filter-section-saved" -> { fpState.sfExpanded = !fpState.sfExpanded; onUiStateChanged() }
+            }
+            KeyboardTargetKind.FilterLogLevel -> target.id.removePrefix("level-").toIntOrNull()
+                ?.let { idx -> LogLevel.entries.getOrNull(idx)?.let(onToggleLevel) }
+            KeyboardTargetKind.FilterSequence -> {
+                val id = target.id.removePrefix("sequence:")
+                if (spaceActivation) onToggleSeqEnabled(id) else editingSeqId = if (editingSeqId == id) null else id
+            }
+            KeyboardTargetKind.FilterManualCollapse -> onToggleManualCollapse(target.id.removePrefix("manual:"))
+            KeyboardTargetKind.FilterNewSequence -> seqAddOpen = !seqAddOpen
+            KeyboardTargetKind.FilterSavedFilter -> savedFilters
+                .firstOrNull { it.id == target.id.removePrefix("saved:") }
+                ?.let(onLoadFilter)
+            KeyboardTargetKind.FilterSaveCurrent -> onOpenSFDialog()
+            KeyboardTargetKind.FilterClearFilters -> onClearFilter()
+            KeyboardTargetKind.FilterExportFilters -> onExportFilters()
+            KeyboardTargetKind.FilterImportFilters -> onImportFilters()
+            else -> {}
+        }
+    }
+
+    fun deleteFilterTarget(): Boolean {
+        val target = navTargets.getOrNull(navIndex) ?: return false
+        return when (target.kind) {
+            KeyboardTargetKind.FilterSequence -> {
+                onRemoveSeq(target.id.removePrefix("sequence:")); true
+            }
+            KeyboardTargetKind.FilterManualCollapse -> {
+                onRemoveManualCollapse(target.id.removePrefix("manual:")); true
+            }
+            KeyboardTargetKind.FilterSavedFilter -> {
+                onDeleteSF(target.id.removePrefix("saved:")); true
+            }
+            else -> false
+        }
+    }
+
+    fun moveSequenceTarget(delta: Int): Boolean {
+        val target = navTargets.getOrNull(navIndex) ?: return false
+        if (target.kind != KeyboardTargetKind.FilterSequence) return false
+        val id = target.id.removePrefix("sequence:")
+        if (delta < 0) onMoveSeqUp(id) else onMoveSeqDown(id)
+        return true
+    }
+
+    LaunchedEffect(focusSearchRequest) {
+        if (focusSearchRequest > 0) {
+            if (filter.mode == FilterMode.KEYWORD) runCatching { kwFr.requestFocus() }
+            else runCatching { tagFr.requestFocus() }
+        }
+    }
 
     // Unified candidates: PIDs when field is blank, message stems + matching PIDs when not blank.
     // Each candidate carries its RuleTarget so the correct rule type is added on click.
@@ -235,15 +337,25 @@ fun FilterPanel(
             else emptyList()
             // Message stem/full candidates
             val matchingMsgs = tab.logData
-                .filter { entry -> passesFilter(entry, baseFilter) && entry.msg.contains(msgRuleSearch, ignoreCase = true) }
+                .filter { entry ->
+                    passesFilter(entry, baseFilter) &&
+                        containsPattern(entry.msg, msgRuleSearch, regex = filter.kwInTagRegex)
+                }
                 .map { it.msg }
-            val stems = matchingMsgs.map { msg ->
-                val sepIdx = msg.indexOfFirst { it == ':' || it == '(' }
-                if (sepIdx > 0) msg.substring(0, sepIdx).trim().takeIf { it.isNotBlank() } ?: msg.take(80)
-                else msg.take(80)
-            }.distinct()
-            val fulls = matchingMsgs.map { it.take(80) }.distinct().filter { it !in stems }
-            val msgCandidates = (stems + fulls).take(8 - pidCandidates.size).map { Pair(it, RuleTarget.MESSAGE) }
+            // In regex mode, lead with what the pattern actually matched (e.g. "avc.*denied"
+            // against "avc: denied : word 1 word 2" proposes "avc: denied" first) instead of
+            // the plain-text stem heuristic, which only makes sense for non-regex prefix search.
+            val leads = if (filter.kwInTagRegex) {
+                matchingMsgs.mapNotNull { msg -> firstRegexMatch(msg, msgRuleSearch)?.take(80) }.distinct()
+            } else {
+                matchingMsgs.map { msg ->
+                    val sepIdx = msg.indexOfFirst { it == ':' || it == '(' }
+                    if (sepIdx > 0) msg.substring(0, sepIdx).trim().takeIf { it.isNotBlank() } ?: msg.take(80)
+                    else msg.take(80)
+                }.distinct()
+            }
+            val fulls = matchingMsgs.map { it.take(80) }.distinct().filter { it !in leads }
+            val msgCandidates = (leads + fulls).take(8 - pidCandidates.size).map { Pair(it, RuleTarget.MESSAGE) }
             pidCandidates + msgCandidates
         }
     }
@@ -271,7 +383,41 @@ fun FilterPanel(
             )
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .focusGroup()
+            .focusable()
             .onFocusChanged { panelFocused = it.hasFocus; onPanelFocusChanged(it.hasFocus) }
+            .onPreviewKeyEvent { ev ->
+                if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                val fieldFocused = tagFieldFocused || msgRuleFieldFocused || hlFieldFocused || kwFieldFocused
+                if (fieldFocused) {
+                    if (ev.key == Key.Escape) {
+                        runCatching { focusRequester?.requestFocus() }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    when {
+                        ev.isAltPressed && ev.key == Key.DirectionUp -> moveSequenceTarget(-1)
+                        ev.isAltPressed && ev.key == Key.DirectionDown -> moveSequenceTarget(+1)
+                        ev.key == Key.DirectionUp -> { moveFilterFocus(-1); true }
+                        ev.key == Key.DirectionDown -> { moveFilterFocus(+1); true }
+                        ev.key == Key.DirectionLeft -> { moveFilterFocus(-1); true }
+                        ev.key == Key.DirectionRight -> { moveFilterFocus(+1); true }
+                        ev.key == Key.Enter || ev.key == Key.NumPadEnter -> { activateFilterTarget(); true }
+                        ev.key == Key.Spacebar -> { activateFilterTarget(spaceActivation = true); true }
+                        ev.key == Key.Delete || ev.key == Key.Backspace -> deleteFilterTarget()
+                        ev.key == Key.Escape -> {
+                            colorPickerSeqId = null
+                            colorPickerHlId = null
+                            hlColorPickerOpen = false
+                            seqColorPickerOpen = false
+                            editingSeqId = null
+                            true
+                        }
+                        else -> false
+                    }
+                }
+            }
             .verticalScroll(scroll),
     ) {
         // ── Filter mode tabs ──────────────────────────────────────
@@ -528,7 +674,14 @@ fun FilterPanel(
         if (filter.mode == FilterMode.KEYWORD) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                InlineField(kwDisplay, { kwDisplay = it }, "tag or message regex…", Modifier.weight(1f))
+                InlineField(
+                    kwDisplay,
+                    { kwDisplay = it },
+                    "tag or message regex…",
+                    Modifier.weight(1f)
+                        .focusRequester(kwFr)
+                        .onFocusChanged { kwFieldFocused = it.isFocused },
+                )
                 if (kwDisplay.isNotBlank())
                     AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { kwDisplay = ""; onSetKw("") })
             }
@@ -630,8 +783,15 @@ fun FilterPanel(
                                     } else if (msgRuleInput.isNotBlank()) {
                                         // No candidate selected — add typed text directly.
                                         // All-digit input → PID/TID rule; anything else → message rule.
-                                        val target = if (msgRuleInput.all { it.isDigit() }) RuleTarget.PID_TID else RuleTarget.MESSAGE
-                                        onAddMessageRule(msgRuleSelectedAction == 0, msgRuleInput, false, null, null, target)
+                                        val spec = messageRuleInputSpec(msgRuleInput, regexMode = filter.kwInTagRegex)
+                                        onAddMessageRule(
+                                            msgRuleSelectedAction == 0,
+                                            spec.pattern,
+                                            spec.regex,
+                                            null,
+                                            null,
+                                            spec.target,
+                                        )
                                     } else {
                                         return@onPreviewKeyEvent false
                                     }
@@ -643,6 +803,7 @@ fun FilterPanel(
                         },
                     onClear = { msgRuleInput = ""; onSetKwInTag("") },
                 )
+                PillBtn(".*", active = filter.kwInTagRegex, onClick = onToggleMessageRuleRegex)
             }
             if (showMsgRuleCandidates && unifiedCandidates.isNotEmpty()) {
                 ScrollableItems(unifiedCandidates.size, maxDp = 220, scrollToIndex = msgRuleSelectedIdx,
@@ -796,14 +957,17 @@ fun FilterPanel(
                 )
                 InlineField(
                     newHlPat, onSetNewHlPat, "text or /regex/…",
-                    Modifier.weight(1f).focusRequester(hlFr).onPreviewKeyEvent { ev ->
-                        if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                        when (ev.key) {
-                            Key.Enter -> { doAddHl(); true }
-                            Key.Tab -> { runCatching { tagFr.requestFocus() }; true }
-                            else -> false
-                        }
-                    },
+                    Modifier.weight(1f)
+                        .focusRequester(hlFr)
+                        .onFocusChanged { hlFieldFocused = it.isFocused }
+                        .onPreviewKeyEvent { ev ->
+                            if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                            when (ev.key) {
+                                Key.Enter -> { doAddHl(); true }
+                                Key.Tab -> { runCatching { tagFr.requestFocus() }; true }
+                                else -> false
+                            }
+                        },
                     onClear = { onSetNewHlPat("") },
                 )
                 PillBtn(".*", active = newHlRx, onClick = { onSetNewHlRx(!newHlRx) })
@@ -1192,6 +1356,32 @@ private fun sequenceLabel(def: SequenceDef): String {
 private fun scopedSequencePart(tag: String?, text: String, isRegex: Boolean): String {
     val pattern = if (isRegex) "/$text/" else text
     return (tag?.let { "$it: " } ?: "") + pattern
+}
+
+data class MessageRuleInputSpec(
+    val pattern: String,
+    val regex: Boolean,
+    val target: RuleTarget,
+)
+
+fun messageRuleInputSpec(input: String, regexMode: Boolean): MessageRuleInputSpec {
+    val trimmed = input.trim()
+    if (trimmed.isNotEmpty() && trimmed.all { it.isDigit() }) {
+        return MessageRuleInputSpec(trimmed, regex = false, target = RuleTarget.PID_TID)
+    }
+    slashWrappedRegex(trimmed)?.let { pattern ->
+        return MessageRuleInputSpec(pattern, regex = true, target = RuleTarget.MESSAGE)
+    }
+    return MessageRuleInputSpec(trimmed, regex = regexMode, target = RuleTarget.MESSAGE)
+}
+
+private fun slashWrappedRegex(input: String): String? {
+    if (!input.startsWith("/") || input.length < 2) return null
+    val end = input.lastIndexOf('/')
+    if (end <= 0) return null
+    val suffix = input.substring(end + 1)
+    if (suffix.isNotEmpty() && suffix != "i") return null
+    return input.substring(1, end).takeIf { it.isNotBlank() }
 }
 
 @Composable

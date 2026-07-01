@@ -14,6 +14,14 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.platform.LocalDensity
@@ -68,13 +76,114 @@ fun AnnotationPanel(
     val hasRecentNotes = recentNotes.isNotEmpty()
     val headerButtonModifier = Modifier.height(28.dp)
     var panelFocused by remember { mutableStateOf(false) }
+    var prefixFocused by remember { mutableStateOf(false) }
+    var suffixFocused by remember { mutableStateOf(false) }
+    var blockFieldFocused by remember { mutableStateOf(false) }
+    var navIndex by remember(tab.id) { mutableStateOf(0) }
+    val prefixFr = remember { FocusRequester() }
+    val suffixFr = remember { FocusRequester() }
+    val blockFieldRequesters = remember(ann.blocks.map { it.id }) {
+        ann.blocks.associate { it.id to FocusRequester() }
+    }
+    val noteTargets = remember(ann.blocks, hasRecentNotes, hasAnnotationBlocks) {
+        annotationKeyboardTargets(
+            blockIds = ann.blocks.map { it.id },
+            hasRecentNotes = hasRecentNotes,
+            hasBlocks = hasAnnotationBlocks,
+        )
+    }
+
+    fun openNotePicker() {
+        val fd = FileDialog(null as Frame?, "Open Note File", FileDialog.LOAD)
+        fd.setFilenameFilter { _, n -> n.endsWith(".md") || n.endsWith(".txt") }
+        fd.isVisible = true
+        fd.file?.let { onOpenNote(File(fd.directory, it)) }
+    }
+
+    fun moveNoteFocus(delta: Int) {
+        navIndex = rovingMove(noteTargets.map { it.asRovingItem() }, navIndex, delta)
+    }
+
+    fun focusedBlockId(): String? = noteTargets.getOrNull(navIndex)
+        ?.takeIf { it.kind == KeyboardTargetKind.NoteBlock }
+        ?.id
+        ?.removePrefix("block:")
+
+    fun activateNoteTarget() {
+        val target = noteTargets.getOrNull(navIndex) ?: return
+        when (target.kind) {
+            KeyboardTargetKind.NotePreview -> if (hasAnnotationBlocks) onToggleMd()
+            KeyboardTargetKind.NoteCopy -> onCopy()
+            KeyboardTargetKind.NoteSave -> onSave()
+            KeyboardTargetKind.NoteOpen -> openNotePicker()
+            KeyboardTargetKind.NoteRecentNotes -> if (hasRecentNotes) onToggleRecentNotes()
+            KeyboardTargetKind.NotePrefix -> runCatching { prefixFr.requestFocus() }
+            KeyboardTargetKind.NoteSuffix -> runCatching { suffixFr.requestFocus() }
+            KeyboardTargetKind.NoteAddTextBlock -> {
+                val after = if (target.id == "add-at-start") null else ann.blocks.lastOrNull()?.id
+                onAddNoteAfter(after)
+            }
+            KeyboardTargetKind.NoteBlock -> {
+                val blockId = target.id.removePrefix("block:")
+                val block = ann.blocks.firstOrNull { it.id == blockId }
+                if (block is AnnBlock.LogRef) onNavigateLogRef(block)
+                else runCatching { blockFieldRequesters[blockId]?.requestFocus() }
+            }
+            else -> {}
+        }
+    }
+
+    fun handleBlockShortcut(ev: androidx.compose.ui.input.key.KeyEvent): Boolean {
+        val blockId = focusedBlockId() ?: return false
+        val idx = ann.blocks.indexOfFirst { it.id == blockId }
+        if (idx < 0) return false
+        return when {
+            ev.isAltPressed && ev.key == Key.DirectionUp -> { onMoveBlock(blockId, -1); true }
+            ev.isAltPressed && ev.key == Key.DirectionDown -> { onMoveBlock(blockId, +1); true }
+            ev.isCtrlPressed && ev.key == Key.Enter -> { onAddNoteAfter(blockId); true }
+            ev.isMetaPressed && ev.key == Key.Enter -> { onAddNoteAfter(blockId); true }
+            ev.key == Key.Delete || ev.key == Key.Backspace -> { onRemoveBlock(blockId); true }
+            else -> false
+        }
+    }
 
     Column(
         Modifier.width(width.dp).fillMaxHeight().background(tc.p)
             .border(BorderStroke(1.dp, if (panelFocused) tc.ac else tc.br))
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .focusGroup()
-            .onFocusChanged { panelFocused = it.hasFocus; onPanelFocusChanged(it.hasFocus) },
+            .focusable()
+            .onFocusChanged { panelFocused = it.hasFocus; onPanelFocusChanged(it.hasFocus) }
+            .onPreviewKeyEvent { ev ->
+                if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                val actionPressed = if (isMacOs) ev.isMetaPressed else ev.isCtrlPressed
+                when {
+                    actionPressed && ev.key == Key.S -> { onSave(); true }
+                    actionPressed && ev.key == Key.C -> { onCopy(); true }
+                    actionPressed && ev.key == Key.O -> { openNotePicker(); true }
+                    prefixFocused || suffixFocused || blockFieldFocused -> {
+                        if (ev.key == Key.Escape) {
+                            runCatching { focusRequester?.requestFocus() }
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    handleBlockShortcut(ev) -> true
+                    ev.key == Key.DirectionUp -> { moveNoteFocus(-1); true }
+                    ev.key == Key.DirectionDown -> { moveNoteFocus(+1); true }
+                    ev.key == Key.DirectionLeft -> { moveNoteFocus(-1); true }
+                    ev.key == Key.DirectionRight -> { moveNoteFocus(+1); true }
+                    ev.key == Key.Enter || ev.key == Key.NumPadEnter || ev.key == Key.Spacebar -> {
+                        activateNoteTarget(); true
+                    }
+                    ev.key == Key.Escape -> {
+                        if (recentNotesMenuOpen) onToggleRecentNotes()
+                        true
+                    }
+                    else -> false
+                }
+            },
     ) {
         // Header row 1: title + action buttons
         Box(
@@ -99,12 +208,7 @@ fun AnnotationPanel(
                 AppButton("Preview", onClick = onToggleMd, enabled = hasAnnotationBlocks, modifier = headerButtonModifier)
                 AppButton("Copy", onClick = onCopy, modifier = headerButtonModifier)
                 AppButton("Save", onClick = onSave, modifier = headerButtonModifier)
-                AppButton("Open Note", onClick = {
-                    val fd = FileDialog(null as Frame?, "Open Note File", FileDialog.LOAD)
-                    fd.setFilenameFilter { _, n -> n.endsWith(".md") || n.endsWith(".txt") }
-                    fd.isVisible = true
-                    fd.file?.let { onOpenNote(File(fd.directory, it)) }
-                }, modifier = headerButtonModifier)
+                AppButton("Open Note", onClick = { openNotePicker() }, modifier = headerButtonModifier)
                 Box {
                     AppButton(
                         "▾ ${recentNotes.size}",
@@ -135,7 +239,15 @@ fun AnnotationPanel(
                 AnnSection(tc) {
                     AppText("Prefix", color = tc.td, fontSize = 10.sp, fontFamily = UI)
                     Spacer(Modifier.height(3.dp))
-                    InlineField(ann.prefix, onUpdatePrefix, "Heading, context…", Modifier.fillMaxWidth(), fontSize = 12.sp)
+                    InlineField(
+                        ann.prefix,
+                        onUpdatePrefix,
+                        "Heading, context…",
+                        Modifier.fillMaxWidth()
+                            .focusRequester(prefixFr)
+                            .onFocusChanged { prefixFocused = it.isFocused },
+                        fontSize = 12.sp,
+                    )
                 }
 
                 if (ann.blocks.isEmpty()) {
@@ -162,6 +274,9 @@ fun AnnotationPanel(
                     when (block) {
                         is AnnBlock.Note -> NoteBlock(
                             block = block, tc = tc, isFirst = isFirst, isLast = isLast,
+                            focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}",
+                            fieldFocusRequester = blockFieldRequesters[block.id],
+                            onFieldFocusChanged = { blockFieldFocused = it },
                             onUpdate = { onUpdateBlock(block.id, it) },
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
@@ -171,6 +286,9 @@ fun AnnotationPanel(
                         is AnnBlock.LogRef -> LogRefBlock(
                             block = block, tab = tab, mono = mono, tc = tc,
                             isFirst = isFirst, isLast = isLast,
+                            focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}",
+                            fieldFocusRequester = blockFieldRequesters[block.id],
+                            onFieldFocusChanged = { blockFieldFocused = it },
                             onUpdateCaption = { onUpdateBlock(block.id, it) },
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
@@ -194,7 +312,15 @@ fun AnnotationPanel(
                     AnnSection(tc) {
                         AppText("Next steps", color = tc.td, fontSize = 10.sp, fontFamily = UI)
                         Spacer(Modifier.height(3.dp))
-                        InlineField(ann.suffix, onUpdateSuffix, "Add follow-up notes…", Modifier.fillMaxWidth(), fontSize = 11.sp)
+                        InlineField(
+                            ann.suffix,
+                            onUpdateSuffix,
+                            "Add follow-up notes…",
+                            Modifier.fillMaxWidth()
+                                .focusRequester(suffixFr)
+                                .onFocusChanged { suffixFocused = it.isFocused },
+                            fontSize = 11.sp,
+                        )
                     }
                 }
             }
@@ -222,19 +348,57 @@ private fun RecentNotesPopup(
         properties = PopupProperties(focusable = true),
     ) {
         val displayNotes = recentNotes.take(10)
+        val popupFr = remember { FocusRequester() }
+        var selectedIdx by remember(displayNotes) { mutableStateOf(displayNotes.indexOfFirst { File(it).exists() }.coerceAtLeast(0)) }
+        LaunchedEffect(Unit) { runCatching { popupFr.requestFocus() } }
         Box(
             Modifier.width(300.dp)
                 .background(tc.p, RoundedCornerShape(7.dp))
-                .border(1.dp, tc.br, RoundedCornerShape(7.dp)),
+                .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                .focusRequester(popupFr)
+                .focusable()
+                .onPreviewKeyEvent { ev ->
+                    if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    when (ev.key) {
+                        Key.DirectionDown -> {
+                            selectedIdx = rovingMove(
+                                displayNotes.map { RovingItem(it, File(it).exists()) },
+                                selectedIdx,
+                                +1,
+                                wrap = true,
+                            )
+                            true
+                        }
+                        Key.DirectionUp -> {
+                            selectedIdx = rovingMove(
+                                displayNotes.map { RovingItem(it, File(it).exists()) },
+                                selectedIdx,
+                                -1,
+                                wrap = true,
+                            )
+                            true
+                        }
+                        Key.Enter, Key.NumPadEnter -> {
+                            displayNotes.getOrNull(selectedIdx)
+                                ?.let(::File)
+                                ?.takeIf { it.exists() }
+                                ?.let(onOpenNote)
+                            true
+                        }
+                        Key.Escape -> { onDismiss(); true }
+                        else -> false
+                    }
+                },
         ) {
             val popupScroll = rememberScrollState()
             Box(Modifier.heightIn(max = 260.dp)) {
                 Column(Modifier.fillMaxWidth().verticalScroll(popupScroll).padding(vertical = 4.dp)) {
-                    displayNotes.forEach { path ->
+                    displayNotes.forEachIndexed { idx, path ->
                         val file = File(path)
                         val exists = file.exists()
                         HoverBox(
                             modifier = Modifier.fillMaxWidth(),
+                            forceHover = idx == selectedIdx,
                             onClick = if (exists) ({ onOpenNote(file) }) else null,
                         ) {
                             Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
@@ -369,6 +533,9 @@ private fun NoteBlock(
     block: AnnBlock.Note,
     tc: ThemeColors,
     isFirst: Boolean, isLast: Boolean,
+    focused: Boolean,
+    fieldFocusRequester: FocusRequester?,
+    onFieldFocusChanged: (Boolean) -> Unit,
     onUpdate: (String) -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
@@ -376,7 +543,7 @@ private fun NoteBlock(
 ) {
     Column(
         Modifier.fillMaxWidth()
-            .border(BorderStroke(2.dp, tc.ac.copy(.35f)))
+            .border(BorderStroke(2.dp, if (focused) tc.ac else tc.ac.copy(.35f)))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         BlockControls(tc, "text", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow)
@@ -389,6 +556,8 @@ private fun NoteBlock(
             modifier = Modifier.fillMaxWidth()
                 .background(tc.bg, CORNER_SM)
                 .border(1.dp, tc.br, CORNER_SM)
+                .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
+                .onFocusChanged { onFieldFocusChanged(it.isFocused) }
                 .padding(8.dp).defaultMinSize(minHeight = 60.dp),
             decorationBox = { inner ->
                 if (block.text.isEmpty()) AppText("Write your note here…", color = tc.td, fontSize = 12.sp)
@@ -406,6 +575,9 @@ private fun LogRefBlock(
     mono: FontFamily,
     tc: ThemeColors,
     isFirst: Boolean, isLast: Boolean,
+    focused: Boolean,
+    fieldFocusRequester: FocusRequester?,
+    onFieldFocusChanged: (Boolean) -> Unit,
     onUpdateCaption: (String) -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
@@ -417,7 +589,7 @@ private fun LogRefBlock(
 
     Column(
         Modifier.fillMaxWidth()
-            .border(BorderStroke(2.dp, borderColor))
+            .border(BorderStroke(2.dp, if (focused) tc.ac else borderColor))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         BlockControls(tc, "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate)
@@ -438,6 +610,8 @@ private fun LogRefBlock(
             modifier = Modifier.fillMaxWidth()
                 .background(tc.bg, CORNER_SM)
                 .border(1.dp, tc.br, CORNER_SM)
+                .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
+                .onFocusChanged { onFieldFocusChanged(it.isFocused) }
                 .padding(8.dp).defaultMinSize(minHeight = 52.dp),
             decorationBox = { inner ->
                 if (block.caption.isEmpty()) AppText("Add a note or analysis…", color = tc.td, fontSize = 12.sp)

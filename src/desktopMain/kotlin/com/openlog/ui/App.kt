@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
@@ -75,6 +76,9 @@ private const val TAB_DRAG_SNAP_BIAS = 0.25f
 @Composable
 fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
     val theme = themeColors(state.settings.theme)
+    val rootFocusRequester = remember { FocusRequester() }
+    var pendingPanelFocus by remember { mutableStateOf<KeyboardPanel?>(null) }
+    var filterSearchFocusRequest by remember { mutableStateOf(0) }
 
     CompositionLocalProvider(
         LocalTheme provides theme,
@@ -93,6 +97,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
             kotlinx.coroutines.delay(400)
             state.autosaveNow()
         }
+        LaunchedEffect(Unit) {
+            runCatching { rootFocusRequester.requestFocus() }
+        }
         val dropTarget = remember {
             object : DragAndDropTarget {
                 override fun onDrop(event: DragAndDropEvent): Boolean {
@@ -102,7 +109,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     files.forEach { uri ->
                         runCatching {
                             val file = File(URI.create(uri))
-                            if (file.exists() && file.extension.lowercase() in listOf("log", "txt")) {
+                            if (file.exists() && com.openlog.utils.isLikelyTextFile(file)) {
                                 state.openFile(file)
                             }
                         }
@@ -126,7 +133,20 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         overrideDescendants = true
                     ) else Modifier
                 )
-                .onPreviewKeyEvent { ev -> handleGlobalKey(ev, state) }
+                .focusRequester(rootFocusRequester)
+                .focusable()
+                .onPreviewKeyEvent { ev ->
+                    handleGlobalKey(
+                        ev = ev,
+                        state = state,
+                        onFocusPanel = { panel -> pendingPanelFocus = panel },
+                        onFocusFilterSearch = {
+                            state.updateFilterVisible(true)
+                            pendingPanelFocus = KeyboardPanel.FILTERS
+                            filterSearchFocusRequest += 1
+                        },
+                    )
+                }
         ) {
             Column(Modifier.fillMaxSize()) {
                 TabBar(state)
@@ -137,8 +157,21 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             AppText("No files open — click Open to add a log", color = tc.ts, fontSize = 14.sp)
                         }
 
-                    state.compareMode -> CompareView(state)
-                    activeTab != null -> key(activeTab.id) { FileView(state, activeTab) }
+                    state.compareMode -> CompareView(
+                        state = state,
+                        requestedPanelFocus = pendingPanelFocus,
+                        filterSearchFocusRequest = filterSearchFocusRequest,
+                        onPanelFocusConsumed = { pendingPanelFocus = null },
+                    )
+                    activeTab != null -> key(activeTab.id) {
+                        FileView(
+                            state = state,
+                            tab = activeTab,
+                            requestedPanelFocus = pendingPanelFocus,
+                            filterSearchFocusRequest = filterSearchFocusRequest,
+                            onPanelFocusConsumed = { pendingPanelFocus = null },
+                        )
+                    }
                 }
             }
 
@@ -610,7 +643,13 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
 
             // ── Keyboard shortcuts dialog ─────────────────────────────
             if (state.shortcutsOpen) {
-                Dialog(onDismissRequest = { state.shortcutsOpen = false }) {
+                // usePlatformDefaultWidth defaults to true and silently caps dialog content to
+                // ~580dp regardless of any width modifier inside — must disable it for the
+                // 3-column layout to actually get the width it asks for.
+                Dialog(
+                    onDismissRequest = { state.shortcutsOpen = false },
+                    properties = DialogProperties(usePlatformDefaultWidth = false),
+                ) {
                     KeyboardShortcutsDialog { state.shortcutsOpen = false }
                 }
             }
@@ -618,13 +657,26 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
     }
 }
 
-private fun handleGlobalKey(ev: KeyEvent, state: AppState): Boolean {
+private fun handleGlobalKey(
+    ev: KeyEvent,
+    state: AppState,
+    onFocusPanel: (KeyboardPanel) -> Unit,
+    onFocusFilterSearch: () -> Unit,
+): Boolean {
     if (ev.type != KeyEventType.KeyDown) return false
+    if (ev.isCtrlPressed && ev.key == Key.Tab) {
+        navigateTab(state, if (ev.isShiftPressed) -1 else +1)
+        return true
+    }
     if (!ev.isActionKey) return false
     return when {
         ev.isShiftPressed && ev.key == Key.F -> { state.updateFilterVisible(!state.filterVisible); true }
         ev.isShiftPressed && ev.key == Key.A -> { state.updateAnnotationVisible(!state.annotationVisible); true }
         ev.isShiftPressed && ev.key == Key.D -> { state.updateCompareMode(!state.compareMode); true }
+        ev.key == Key.F                      -> { onFocusFilterSearch(); true }
+        ev.key == Key.One                    -> { state.updateFilterVisible(true); onFocusPanel(KeyboardPanel.FILTERS); true }
+        ev.key == Key.Two                    -> { onFocusPanel(KeyboardPanel.LOG_VIEW); true }
+        ev.key == Key.Three                  -> { state.updateAnnotationVisible(true); onFocusPanel(KeyboardPanel.NOTES); true }
         ev.key == Key.RightBracket           -> { navigateTab(state, +1); true }
         ev.key == Key.LeftBracket            -> { navigateTab(state, -1); true }
         ev.key == Key.W                      -> { state.activeTab()?.id?.let(state::closeTab); true }
@@ -744,6 +796,7 @@ private fun BoundFilterPanel(
     state: AppState,
     tab: LogTab,
     focusRequester: FocusRequester? = null,
+    focusSearchRequest: Int = 0,
     onPanelFocusChanged: (Boolean) -> Unit = {},
 ) {
     if (!state.filterVisible) return
@@ -776,6 +829,7 @@ private fun BoundFilterPanel(
             state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
         },
         onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
+        onToggleMessageRuleRegex = { state.toggleKwInTagRx(tab.id) },
         onMoveSeqUp = { state.moveSequenceUp(it) },
         onMoveSeqDown = { state.moveSequenceDown(it) },
         onSetNewSeqText = { state.newSeqText = it },
@@ -809,6 +863,7 @@ private fun BoundFilterPanel(
         filterListRows = state.settings.filterListRows,
         width = state.filterPanelWidth,
         focusRequester = focusRequester,
+        focusSearchRequest = focusSearchRequest,
         onPanelFocusChanged = onPanelFocusChanged,
     )
     HDivider { delta -> state.updateFilterPanelWidth(state.filterPanelWidth + delta) }
@@ -816,16 +871,29 @@ private fun BoundFilterPanel(
 
 // ── FileView ──────────────────────────────────────────────────────────
 @Composable
-private fun FileView(state: AppState, tab: LogTab) {
+private fun FileView(
+    state: AppState,
+    tab: LogTab,
+    requestedPanelFocus: KeyboardPanel? = null,
+    filterSearchFocusRequest: Int = 0,
+    onPanelFocusConsumed: () -> Unit = {},
+) {
     val filterFr = remember { FocusRequester() }
     val logViewerFr = remember { FocusRequester() }
     val annotationFr = remember { FocusRequester() }
     var focusedPanelIdx by remember { mutableStateOf(0) }
 
-    fun visiblePanelFrs(): List<FocusRequester> = buildList {
-        if (state.filterVisible) add(filterFr)
-        add(logViewerFr)
-        if (state.annotationVisible) add(annotationFr)
+    fun visiblePanelFrs(): List<Pair<KeyboardPanel, FocusRequester>> = buildList {
+        if (state.filterVisible) add(KeyboardPanel.FILTERS to filterFr)
+        add(KeyboardPanel.LOG_VIEW to logViewerFr)
+        if (state.annotationVisible) add(KeyboardPanel.NOTES to annotationFr)
+    }
+
+    LaunchedEffect(requestedPanelFocus, state.filterVisible, state.annotationVisible, tab.id) {
+        val panel = requestedPanelFocus ?: return@LaunchedEffect
+        val fr = visiblePanelFrs().firstOrNull { it.first == panel }?.second ?: return@LaunchedEffect
+        runCatching { fr.requestFocus() }
+        onPanelFocusConsumed()
     }
 
     Row(
@@ -835,7 +903,7 @@ private fun FileView(state: AppState, tab: LogTab) {
                 if (frs.isNotEmpty()) {
                     val delta = if (ev.isShiftPressed) -1 else 1
                     val next = (focusedPanelIdx + delta).mod(frs.size)
-                    runCatching { frs[next].requestFocus() }
+                    runCatching { frs[next].second.requestFocus() }
                 }
                 true
             } else {
@@ -846,7 +914,10 @@ private fun FileView(state: AppState, tab: LogTab) {
         BoundFilterPanel(
             state, tab,
             focusRequester = filterFr,
-            onPanelFocusChanged = { focused -> if (focused) focusedPanelIdx = visiblePanelFrs().indexOf(filterFr) },
+            focusSearchRequest = filterSearchFocusRequest,
+            onPanelFocusChanged = { focused ->
+                if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
+            },
         )
         LogViewer(
             tab = tab, modifier = Modifier.weight(1f),
@@ -866,7 +937,9 @@ private fun FileView(state: AppState, tab: LogTab) {
             onCopySelection = { state.copySelectedLines(tab.id) },
             navScrollMargin = state.settings.navScrollMargin,
             focusRequester = logViewerFr,
-            onPanelFocusChanged = { focused -> if (focused) focusedPanelIdx = visiblePanelFrs().indexOf(logViewerFr) },
+            onPanelFocusChanged = { focused ->
+                if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == logViewerFr }
+            },
         )
         if (state.annotationVisible) {
             HDivider { delta ->
@@ -891,7 +964,9 @@ private fun FileView(state: AppState, tab: LogTab) {
                 onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
                 width = state.annotationPanelWidth,
                 focusRequester = annotationFr,
-                onPanelFocusChanged = { focused -> if (focused) focusedPanelIdx = visiblePanelFrs().indexOf(annotationFr) },
+                onPanelFocusChanged = { focused ->
+                    if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
+                },
             )
         }
     }
@@ -899,10 +974,34 @@ private fun FileView(state: AppState, tab: LogTab) {
 
 // ── CompareView ───────────────────────────────────────────────────────
 @Composable
-private fun CompareView(state: AppState) {
+private fun CompareView(
+    state: AppState,
+    requestedPanelFocus: KeyboardPanel? = null,
+    filterSearchFocusRequest: Int = 0,
+    onPanelFocusConsumed: () -> Unit = {},
+) {
     val leftTab = state.tab(state.activeTabId) ?: state.tabs.firstOrNull() ?: return
     val rightTab = state.tab(state.compareTabId) ?: state.tabs.getOrNull(1) ?: state.tabs.first()
     val tc = tc()
+    val filterFr = remember { FocusRequester() }
+    val leftLogFr = remember { FocusRequester() }
+    val rightLogFr = remember { FocusRequester() }
+    val annotationFr = remember { FocusRequester() }
+    var focusedPanelIdx by remember { mutableStateOf(0) }
+
+    fun visiblePanelFrs(): List<Pair<KeyboardPanel, FocusRequester>> = buildList {
+        if (state.filterVisible) add(KeyboardPanel.FILTERS to filterFr)
+        add(KeyboardPanel.LOG_VIEW to leftLogFr)
+        add(KeyboardPanel.LOG_VIEW to rightLogFr)
+        if (state.annotationVisible) add(KeyboardPanel.NOTES to annotationFr)
+    }
+
+    LaunchedEffect(requestedPanelFocus, state.filterVisible, state.annotationVisible, leftTab.id, rightTab.id) {
+        val panel = requestedPanelFocus ?: return@LaunchedEffect
+        val fr = visiblePanelFrs().firstOrNull { it.first == panel }?.second ?: return@LaunchedEffect
+        runCatching { fr.requestFocus() }
+        onPanelFocusConsumed()
+    }
 
     // Right side shows all entries when filter is off; mirrors left filter when on.
     val effectiveRightTab = if (state.compareFilterRight)
@@ -913,7 +1012,21 @@ private fun CompareView(state: AppState) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val totalWidthDp = maxWidth.value
 
-        Row(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxSize().onPreviewKeyEvent { ev ->
+                if (ev.type == KeyEventType.KeyDown && ev.key == Key.F6) {
+                    val frs = visiblePanelFrs()
+                    if (frs.isNotEmpty()) {
+                        val delta = if (ev.isShiftPressed) -1 else 1
+                        val next = (focusedPanelIdx + delta).mod(frs.size)
+                        runCatching { frs[next].second.requestFocus() }
+                    }
+                    true
+                } else {
+                    false
+                }
+            },
+        ) {
             // ── Left panel ──────────────────────────────────────────
             Column(
                 Modifier
@@ -933,7 +1046,15 @@ private fun CompareView(state: AppState) {
                     }
                 }
                 Row(Modifier.weight(1f).fillMaxWidth()) {
-                    BoundFilterPanel(state, leftTab)
+                    BoundFilterPanel(
+                        state = state,
+                        tab = leftTab,
+                        focusRequester = filterFr,
+                        focusSearchRequest = filterSearchFocusRequest,
+                        onPanelFocusChanged = { focused ->
+                            if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
+                        },
+                    )
                     LogViewer(
                         tab = leftTab, modifier = Modifier.weight(1f),
                         onSelRow = { id, m, r -> state.selRow(leftTab.id, id, m, r) },
@@ -953,6 +1074,10 @@ private fun CompareView(state: AppState) {
                         onClearSelection = { state.clearSelection(leftTab.id) },
                         onCopySelection = { state.copySelectedLines(leftTab.id) },
                         navScrollMargin = state.settings.navScrollMargin,
+                        focusRequester = leftLogFr,
+                        onPanelFocusChanged = { focused ->
+                            if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == leftLogFr }
+                        },
                     )
                 }
             }
@@ -1002,6 +1127,10 @@ private fun CompareView(state: AppState) {
                         onClearSelection = { state.clearSelection(rightTab.id) },
                         onCopySelection = { state.copySelectedLines(rightTab.id) },
                         navScrollMargin = state.settings.navScrollMargin,
+                        focusRequester = rightLogFr,
+                        onPanelFocusChanged = { focused ->
+                            if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == rightLogFr }
+                        },
                     )
                     if (state.annotationVisible) {
                         HDivider { d ->
@@ -1026,6 +1155,10 @@ private fun CompareView(state: AppState) {
                             onAddNoteAfter = { state.addNoteBlock(leftTab.id, it) },
                             onNavigateLogRef = { state.requestAnnotationNavigation(leftTab.id, it) },
                             width = state.annotationPanelWidth,
+                            focusRequester = annotationFr,
+                            onPanelFocusChanged = { focused ->
+                                if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
+                            },
                         )
                     }
                 }
@@ -1074,7 +1207,10 @@ private fun TabBar(state: AppState) {
             shape = if (hasRecentFiles) middleShape else rightShape,
         ) {
             val fd = FileDialog(null as Frame?, "Open Log File", FileDialog.LOAD)
-            fd.setFilenameFilter { _, name -> name.endsWith(".log") || name.endsWith(".txt") }
+            fd.setFilenameFilter { dir, name ->
+                val f = File(dir, name)
+                f.isDirectory || com.openlog.utils.isLikelyTextFile(f)
+            }
             fd.isVisible = true
             fd.file?.let { state.openFile(File(fd.directory, it)) }
         }
@@ -1375,6 +1511,8 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 AppText("Settings", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 CloseButton(onClick = onDismiss)
             }
+
+            SettingsSectionHeader("Appearance")
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
                 ThemeGallery(state)
@@ -1388,12 +1526,32 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                     fontWeight = FontWeight.SemiBold
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    AppText(
-                        state.settings.defaultSaveDir ?: "(not set)", color = tc.ts, fontSize = 11.sp, fontFamily = MONO,
-                        modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis
-                    )
+                    val fullPath = state.settings.defaultSaveDir
+                    val pathText: @Composable () -> Unit = {
+                        AppText(
+                            fullPath?.let { truncatePathForDisplay(it) } ?: "(not set)",
+                            color = tc.ts, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (fullPath != null) {
+                        TooltipArea(
+                            tooltip = {
+                                Box(
+                                    Modifier
+                                        .background(tc.p2, RoundedCornerShape(4.dp))
+                                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                ) {
+                                    AppText(fullPath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) { pathText() }
+                    } else {
+                        Box(Modifier.weight(1f)) { pathText() }
+                    }
                     AppButton("Browse", onClick = { state.pickSaveFolder() })
-                    if (state.settings.defaultSaveDir != null) AppButton(
+                    if (fullPath != null) AppButton(
                         "Clear",
                         onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } })
                 }
@@ -1403,14 +1561,6 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.Top,
             ) {
-                CompactSetting("Font size", Modifier.weight(1f)) {
-                    val fontSizes = listOf(10, 11, 12, 13, 14, 15, 16)
-                    SegmentedControl(
-                        options = fontSizes.map { it.toString() },
-                        selectedIndices = setOf(fontSizes.indexOf(state.settings.fontSize)),
-                        onToggle = { idx -> state.updateSettings { it.copy(fontSize = fontSizes[idx]) } },
-                    )
-                }
                 CompactSetting("Font family", Modifier.weight(1f)) {
                     SegmentedControl(
                         options = listOf("Monospace", "Proportional"),
@@ -1418,73 +1568,52 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                         onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
                     )
                 }
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    AppText(
-                        "Most-used tags",
-                        color = tc.td,
-                        fontSize = 10.sp,
-                        fontFamily = UI,
-                        fontWeight = FontWeight.SemiBold
+                CompactSetting("Font size", Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+                    ListStepper(
+                        options = (10..16).toList(),
+                        value = state.settings.fontSize,
+                        onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
                     )
-                    AppText("${state.settings.mostUsedTagLimit}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
                 }
-                val tagLimits = listOf(0, 3, 5, 10, 20)
-                SegmentedControl(
-                    options = tagLimits.map { it.toString() },
-                    selectedIndices = setOf(tagLimits.indexOf(state.settings.mostUsedTagLimit)),
-                    onToggle = { idx -> state.updateSettings { it.copy(mostUsedTagLimit = tagLimits[idx]) } },
-                )
             }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    AppText(
-                        "Filter list rows",
-                        color = tc.td,
-                        fontSize = 10.sp,
-                        fontFamily = UI,
-                        fontWeight = FontWeight.SemiBold
+
+            SettingsSectionHeader("Editor behavior")
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                CompactSetting("Visible tabs") {
+                    val tabLimits = listOf(4, 6, 8, 10, 12, 16)
+                    ListStepper(
+                        options = tabLimits,
+                        value = state.settings.visibleTabLimit,
+                        onChange = { v -> state.updateSettings { it.copy(visibleTabLimit = v) } },
                     )
-                    AppText("${state.settings.filterListRows}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
                 }
-                val rowLimits = listOf(3, 5, 8, 10, 15)
-                SegmentedControl(
-                    options = rowLimits.map { it.toString() },
-                    selectedIndices = setOf(rowLimits.indexOf(state.settings.filterListRows)),
-                    onToggle = { idx -> state.updateSettings { it.copy(filterListRows = rowLimits[idx]) } },
-                )
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    AppText(
-                        "Visible tabs",
-                        color = tc.td,
-                        fontSize = 10.sp,
-                        fontFamily = UI,
-                        fontWeight = FontWeight.SemiBold
+                CompactSetting("Keyboard scroll margin") {
+                    val scrollMargins = listOf(0, 2, 3, 5, 8, 12)
+                    ListStepper(
+                        options = scrollMargins,
+                        value = state.settings.navScrollMargin,
+                        onChange = { v -> state.updateSettings { it.copy(navScrollMargin = v) } },
                     )
-                    AppText("${state.settings.visibleTabLimit}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
                 }
-                val tabLimits = listOf(4, 6, 8, 10, 12, 16)
-                SegmentedControl(
-                    options = tabLimits.map { it.toString() },
-                    selectedIndices = setOf(tabLimits.indexOf(state.settings.visibleTabLimit)),
-                    onToggle = { idx -> state.updateSettings { it.copy(visibleTabLimit = tabLimits[idx]) } },
-                )
+                CompactSetting("Most-used tags") {
+                    val tagLimits = listOf(0, 3, 5, 10, 20)
+                    ListStepper(
+                        options = tagLimits,
+                        value = state.settings.mostUsedTagLimit,
+                        onChange = { v -> state.updateSettings { it.copy(mostUsedTagLimit = v) } },
+                    )
+                }
+                CompactSetting("Filter list rows") {
+                    val rowLimits = listOf(3, 5, 8, 10, 15)
+                    ListStepper(
+                        options = rowLimits,
+                        value = state.settings.filterListRows,
+                        onChange = { v -> state.updateSettings { it.copy(filterListRows = v) } },
+                    )
+                }
             }
+
+            SettingsSectionHeader("Export & annotations")
             AnnotationSettingsRow(state)
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 AppText(
@@ -1501,29 +1630,11 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                     Modifier.fillMaxWidth(),
                     fontSize = 12.sp,
                 )
+                val previewLabel = state.settings.annotationPrefixLabel.trim().ifBlank { "From" }
+                AppText("Preview: $previewLabel app.log", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
             }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    AppText(
-                        "Keyboard scroll margin",
-                        color = tc.td,
-                        fontSize = 10.sp,
-                        fontFamily = UI,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    AppText("${state.settings.navScrollMargin}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
-                }
-                val scrollMargins = listOf(0, 2, 3, 5, 8, 12)
-                SegmentedControl(
-                    options = scrollMargins.map { it.toString() },
-                    selectedIndices = setOf(scrollMargins.indexOf(state.settings.navScrollMargin)),
-                    onToggle = { idx -> state.updateSettings { it.copy(navScrollMargin = scrollMargins[idx]) } },
-                )
-            }
+
+            SettingsSectionHeader("About")
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1540,6 +1651,14 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 AppText("Version", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
                 AppText(BuildInfo.APP_VERSION, color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
             }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppText("Author", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                AppText(BuildInfo.APP_AUTHOR, color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
+            }
             Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
                 AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
             }
@@ -1548,79 +1667,78 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
 }
 
 @Composable
+private fun SettingsSectionHeader(title: String) {
+    val tc = tc()
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppText(title, color = tc.ts, fontSize = 11.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        Divider()
+    }
+}
+
+// Keeps the most meaningful (rightmost) path segments and collapses the rest into a leading
+// "…/" so long save-folder paths don't overflow or wrap — full path is still shown on hover.
+private fun truncatePathForDisplay(path: String, maxChars: Int = 42): String {
+    if (path.length <= maxChars) return path
+    val segments = path.trimEnd('/').split('/').filter { it.isNotEmpty() }
+    var best = ""
+    for (i in segments.indices.reversed()) {
+        val candidate = segments.subList(i, segments.size).joinToString("/", prefix = "…/")
+        if (candidate.length > maxChars) break
+        best = candidate
+    }
+    return best.ifEmpty { "…" + path.takeLast(maxChars - 1) }
+}
+
+@Composable
+private fun ListStepper(options: List<Int>, value: Int, onChange: (Int) -> Unit, modifier: Modifier = Modifier) {
+    val tc = tc()
+    val index = options.indexOf(value).coerceAtLeast(0)
+    Row(
+        modifier
+            .border(0.5.dp, tc.br, RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(6.dp)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        StepperButton("−", enabled = index > 0, onClick = { onChange(options[(index - 1).coerceAtLeast(0)]) })
+        Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
+        Box(Modifier.width(44.dp).height(28.dp), contentAlignment = Alignment.Center) {
+            AppText("$value", color = tc.tx, fontSize = 12.sp, fontFamily = MONO, fontWeight = FontWeight.Medium)
+        }
+        Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
+        StepperButton("+", enabled = index < options.lastIndex, onClick = { onChange(options[(index + 1).coerceAtMost(options.lastIndex)]) })
+    }
+}
+
+@Composable
+private fun StepperButton(symbol: String, enabled: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    Box(
+        Modifier
+            .width(28.dp).height(28.dp)
+            .background(if (hovered && enabled) tc.hv else Color.Transparent)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
+        contentAlignment = Alignment.Center,
+    ) {
+        AppText(symbol, color = if (enabled) tc.tx else tc.td.copy(alpha = .4f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
 private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
     val tc = tc()
     val scroll = rememberScrollState()
     val shape = RoundedCornerShape(8.dp)
-    val mac = isMacOs
+    val groups = keyboardShortcutHelpGroups()
 
-    data class ShortcutRow(val label: String, val description: String)
-
-    data class ShortcutGroup(val title: String, val rows: List<ShortcutRow>)
-
-    val groups = listOf(
-        ShortcutGroup(
-            "Panels",
-            listOf(
-                ShortcutRow(if (mac) "⌘ ⇧ F" else "Ctrl Shift F", "Toggle filter panel"),
-                ShortcutRow(if (mac) "⌘ ⇧ A" else "Ctrl Shift A", "Toggle annotation panel"),
-                ShortcutRow(if (mac) "⌘ ⇧ D" else "Ctrl Shift D", "Toggle compare mode"),
-                ShortcutRow("F6", "Move focus to next panel"),
-                ShortcutRow("⇧ F6", "Move focus to previous panel"),
-            ),
-        ),
-        ShortcutGroup(
-            "Tabs",
-            listOf(
-                ShortcutRow(if (mac) "⌘ ]" else "Ctrl ]", "Next tab"),
-                ShortcutRow(if (mac) "⌘ [" else "Ctrl [", "Previous tab"),
-                ShortcutRow(if (mac) "⌘ W" else "Ctrl W", "Close current tab"),
-            ),
-        ),
-        ShortcutGroup(
-            "Navigation  (log view — click to focus)",
-            listOf(
-                ShortcutRow("↑ / ↓", "Move selection up / down"),
-                ShortcutRow("Page Up / Page Down", "Scroll ~15 rows"),
-                ShortcutRow("Home / End", "Jump to first / last row"),
-                ShortcutRow(if (mac) "⌘ ↑  /  ⌘ ↓" else "Ctrl ↑  /  Ctrl ↓", "Jump to first / last row"),
-            ),
-        ),
-        ShortcutGroup(
-            "Selection  (log view — click to focus)",
-            listOf(
-                ShortcutRow("⇧ ↑  /  ⇧ ↓", "Extend selection up / down"),
-                ShortcutRow("⇧ Page Up  /  ⇧ Page Down", "Extend selection by page"),
-                ShortcutRow(if (mac) "⌘ A" else "Ctrl A", "Select all visible rows"),
-                ShortcutRow(if (mac) "⌘ C" else "Ctrl C", "Copy selected rows"),
-                ShortcutRow("Escape", "Clear selection"),
-            ),
-        ),
-        ShortcutGroup(
-            "Context menu  (log view — click to focus)",
-            listOf(
-                ShortcutRow("⇧ F10", "Open context menu for selected row"),
-                ShortcutRow("↑ / ↓", "Move highlight"),
-                ShortcutRow("Enter", "Activate highlighted item"),
-                ShortcutRow("Escape", "Close menu"),
-            ),
-        ),
-        ShortcutGroup(
-            "Other",
-            listOf(
-                ShortcutRow(if (mac) "⌘ /" else "Ctrl /", "Show keyboard shortcuts"),
-            ),
-        ),
-    )
-
-    // Split the groups across two "pages" so the dialog reads like an open book — keeps the
-    // height short even as the shortcut list grows, instead of one long scrolling column.
-    val splitAt = (groups.size + 1) / 2
-    val leftPage = groups.subList(0, splitAt)
-    val rightPage = groups.subList(splitAt, groups.size)
+    // Split the groups across 3 columns, balanced by row count, so every shortcut is visible
+    // without scrolling instead of relying on an invisible overflow scrollbar.
+    val columns = splitShortcutGroupsIntoColumns(groups, 3).filter { it.isNotEmpty() }
 
     @Composable
-    fun PageColumn(page: List<ShortcutGroup>, modifier: Modifier) {
+    fun PageColumn(page: List<ShortcutHelpGroup>, modifier: Modifier) {
         Column(modifier, verticalArrangement = Arrangement.spacedBy(14.dp)) {
             page.forEach { group ->
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1639,7 +1757,7 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
                         ) {
                             Box(
                                 Modifier
-                                    .widthIn(min = 150.dp)
+                                    .widthIn(min = 130.dp)
                                     .background(tc.p2, RoundedCornerShape(4.dp))
                                     .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
                                     .padding(horizontal = 8.dp, vertical = 2.dp),
@@ -1647,7 +1765,14 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
                             ) {
                                 AppText(row.label, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
                             }
-                            AppText(row.description, color = tc.ts, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                            AppText(
+                                row.description,
+                                color = tc.ts,
+                                fontSize = 11.sp,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
                 }
@@ -1657,8 +1782,8 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
 
     Box(
         Modifier
-            .width(900.dp)
-            .heightIn(max = 560.dp)
+            .width(1150.dp)
+            .heightIn(max = 640.dp)
             .clip(shape)
             .background(tc.p)
             .border(1.dp, tc.br, shape),
@@ -1676,9 +1801,18 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
                 CloseButton(onClick = onDismiss)
             }
             Row(Modifier.fillMaxWidth()) {
-                PageColumn(leftPage, Modifier.weight(1f).padding(end = 20.dp))
-                Box(Modifier.width(1.dp).fillMaxHeight().background(tc.br))
-                PageColumn(rightPage, Modifier.weight(1f).padding(start = 20.dp))
+                columns.forEachIndexed { idx, page ->
+                    PageColumn(
+                        page,
+                        Modifier.weight(1f).padding(
+                            start = if (idx == 0) 0.dp else 20.dp,
+                            end = if (idx == columns.lastIndex) 0.dp else 20.dp,
+                        ),
+                    )
+                    if (idx != columns.lastIndex) {
+                        Box(Modifier.width(1.dp).fillMaxHeight().background(tc.br))
+                    }
+                }
             }
             Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
                 AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
@@ -1766,19 +1900,22 @@ private fun ThemeWindowCard(label: String, colors: ThemeColors, selected: Boolea
 
 @Composable
 private fun AnnotationSettingsRow(state: AppState) {
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        CompactSetting("Auto-export", Modifier.weight(1f)) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        CompactSetting("Auto-export") {
             SegmentedControl(
                 options = listOf("On", "Off"),
                 selectedIndices = setOf(if (state.settings.autoExportNotes) 0 else 1),
                 onToggle = { idx -> state.updateSettings { it.copy(autoExportNotes = idx == 0) } },
             )
         }
-        CompactSetting("Log blocks", Modifier.weight(1.45f)) {
+        CompactSetting("Number blocks") {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.numberAnnotationBlocks) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(numberAnnotationBlocks = idx == 0) } },
+            )
+        }
+        CompactSetting("Log blocks") {
             val styles = AnnotationLogBlockStyle.entries
             SegmentedControl(
                 options = listOf("Indented", "{code:java}"),
@@ -1786,20 +1923,18 @@ private fun AnnotationSettingsRow(state: AppState) {
                 onToggle = { idx -> state.updateSettings { it.copy(annotationLogBlockStyle = styles[idx]) } },
             )
         }
-        CompactSetting("Number blocks", Modifier.weight(1f)) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.numberAnnotationBlocks) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(numberAnnotationBlocks = idx == 0) } },
-            )
-        }
     }
 }
 
 @Composable
-private fun CompactSetting(label: String, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+private fun CompactSetting(
+    label: String,
+    modifier: Modifier = Modifier,
+    horizontalAlignment: Alignment.Horizontal = Alignment.Start,
+    content: @Composable () -> Unit,
+) {
     val tc = tc()
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp), horizontalAlignment = horizontalAlignment) {
         AppText(label, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         content()
     }

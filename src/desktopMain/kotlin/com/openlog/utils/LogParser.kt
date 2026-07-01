@@ -16,6 +16,15 @@ private val RE_BRIEF      = Regex("""^([VDIWEA])/([^(]+)\(\s*(\d+)\):\s*(.*)$"""
 // Bare time:   HH:MM:SS.mmm Level/Tag: message
 private val RE_BARE       = Regex("""^(\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEA])/([^:]+):\s*(.*)$""")
 
+// Sniffs the first few KB for NUL bytes (the same heuristic git/most editors use to
+// distinguish text from binary) so files can be opened by content, not just by extension.
+fun isLikelyTextFile(file: File): Boolean {
+    if (!file.isFile) return false
+    return runCatching {
+        file.inputStream().use { it.readNBytes(8000) }.none { it == 0.toByte() }
+    }.getOrDefault(false)
+}
+
 fun parseLogcat(file: File): List<LogEntry> {
     var id = 1
     return file.readLines().mapNotNull { raw ->
