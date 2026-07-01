@@ -12,10 +12,12 @@ plugins {
 }
 
 val appVersion: String = providers.gradleProperty("app.version").get()
+val appAuthor = "Roman Arnaut"
 val generatedBuildInfoDir = layout.buildDirectory.dir("generated/openlogBuildInfo/desktopMain/kotlin")
 
 val generateBuildInfo by tasks.registering {
     inputs.property("appVersion", appVersion)
+    inputs.property("appAuthor", appAuthor)
     outputs.dir(generatedBuildInfoDir)
     doLast {
         val outputFile = generatedBuildInfoDir.get().file("com/openlog/generated/BuildInfo.kt").asFile
@@ -26,6 +28,7 @@ val generateBuildInfo by tasks.registering {
 
             object BuildInfo {
                 const val APP_VERSION: String = "$appVersion"
+                const val APP_AUTHOR: String = "$appAuthor"
             }
             """.trimIndent() + "\n"
         )
@@ -65,8 +68,8 @@ compose.desktop {
             packageName = "openLog"
             packageVersion = appVersion
             description = "Android logcat analysis tool"
-            vendor = "Roman Arnaut"
-            copyright = "Copyright (C) 2026 Roman Arnaut"
+            vendor = appAuthor
+            copyright = "Copyright (C) 2026 $appAuthor"
             macOS {
                 bundleID = "com.romanarnaut.openlog"
                 iconFile.set(project.file("icons/openlog.icns"))
