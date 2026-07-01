@@ -49,6 +49,25 @@ jobs:
       - name: Package distribution
         run: ./gradlew ${{ matrix.task }}
 
+      # jpackage doesn't emit StartupWMClass in the .desktop file it generates (no Gradle DSL
+      # hook for it either), so docks/taskbars can't match the running window (WM_CLASS set to
+      # "openLog" via sun.java.command in Main.kt) back to this launcher entry — falls back to
+      # a generic icon and the raw class name. Patch it in post-build since the .deb is just an
+      # archive.
+      - name: Add StartupWMClass to Linux .desktop file
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          deb=$(find build/compose/binaries/main/deb -name '*.deb')
+          workdir=$(mktemp -d)
+          dpkg-deb -R "$deb" "$workdir"
+          desktop_file=$(find "$workdir/usr/share/applications" -name '*.desktop')
+          if ! grep -q '^StartupWMClass=' "$desktop_file"; then
+            echo "StartupWMClass=openLog" >> "$desktop_file"
+          fi
+          dpkg-deb -b "$workdir" "$deb"
+          rm -rf "$workdir"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
