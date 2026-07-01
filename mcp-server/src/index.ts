@@ -142,5 +142,26 @@ server.registerTool(
   async ({ tabIds, newTabName }) => jsonResult(await openlogClient.mergeTabs(tabIds, newTabName)),
 );
 
+server.registerTool(
+  "start_tailing",
+  {
+    title: "Start live-tailing a tab",
+    description:
+      "Start watching a tab's backing file for external growth (e.g. `adb logcat > out.log` run outside the app) and appending new lines as they arrive. Only works for a tab backed by a real, currently-existing file (not a zip-extracted or merged tab). Session-only: resets to off on app relaunch. Poll list_tabs or get_visible_lines afterward to observe growth.",
+    inputSchema: { tabId: z.string() },
+  },
+  async ({ tabId }) => jsonResult(await openlogClient.startTailing(tabId)),
+);
+
+server.registerTool(
+  "stop_tailing",
+  {
+    title: "Stop live-tailing a tab",
+    description: "Stop watching a tab's backing file for growth.",
+    inputSchema: { tabId: z.string() },
+  },
+  async ({ tabId }) => jsonResult(await openlogClient.stopTailing(tabId)),
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

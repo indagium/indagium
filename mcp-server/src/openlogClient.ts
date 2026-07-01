@@ -46,4 +46,8 @@ export const openlogClient = {
 
   mergeTabs: (tabIds: string[], newTabName?: string) =>
     request("POST", "/merge", newTabName !== undefined ? { tabIds, newTabName } : { tabIds }),
+
+  startTailing: (tabId: string) => request("POST", "/tail/start", { tabId }),
+
+  stopTailing: (tabId: string) => request("POST", "/tail/stop", { tabId }),
 };

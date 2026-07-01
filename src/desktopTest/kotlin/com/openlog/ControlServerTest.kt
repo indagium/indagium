@@ -35,6 +35,7 @@ class ControlServerTest {
     @AfterTest
     fun tearDown() {
         server.stop()
+        state.close() // also cancels any FileTailer left running by a tail test
     }
 
     private fun base() = "http://127.0.0.1:${server.boundPort}"
@@ -214,6 +215,29 @@ class ControlServerTest {
     fun mergeTabsErrorsForUnknownTabId() {
         state.tabs = listOf(mkTab("t1", "main.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
         assertTrue(post("/merge", """{"tabIds":["t1","nope"]}""").contains("\"error\""))
+    }
+
+    @Test
+    fun tailStartAndStopToggleTabTailingState() {
+        val file = File.createTempFile("openlog-control-server-tail", ".log")
+        file.writeText("10:00:00.000  100  100 I App: first\n")
+        val openBody = post("/open", """{"path":"${file.absolutePath.replace("\\", "\\\\")}"}""")
+        val tabId = (Json.decode(openBody) as Map<*, *>)["tabId"] as String
+
+        val startBody = post("/tail/start", """{"tabId":"$tabId"}""")
+        assertTrue(startBody.contains("\"tailing\":true"))
+        assertTrue(state.tab(tabId)!!.tailing)
+
+        val stopBody = post("/tail/stop", """{"tabId":"$tabId"}""")
+        assertTrue(stopBody.contains("\"tailing\":false"))
+        assertTrue(!state.tab(tabId)!!.tailing)
+
+        file.delete()
+    }
+
+    @Test
+    fun tailStartErrorsForUnknownTab() {
+        assertTrue(post("/tail/start", """{"tabId":"nope"}""").contains("\"error\""))
     }
 
     private fun buildZipFixture(entries: Map<String, String>): File {

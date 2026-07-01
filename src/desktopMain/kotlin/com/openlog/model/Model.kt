@@ -156,6 +156,10 @@ data class LogTab(
     val showAnnMd: Boolean = false,
     val manualBlocks: List<ManualCollapseBlock> = emptyList(),
     val sourcePath: String? = null,
+    // Live tailing (utils/FileTailer.kt) is a session-only feature — never persisted to autosave,
+    // always resets to false on relaunch. The actual FileTailer/Job lives in a private map on
+    // AppState (not here — not data-class-friendly), this field only drives the UI indicator.
+    val tailing: Boolean = false,
 )
 
 data class SavedFilter(

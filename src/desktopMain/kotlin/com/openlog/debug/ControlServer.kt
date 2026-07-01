@@ -61,6 +61,8 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         s.createContext("/merge", handler(POST) { _, body ->
             mergeTabsRoute(body.strList("tabIds") ?: emptyList(), body.str("newTabName") ?: "Merged")
         })
+        s.createContext("/tail/start", handler(POST) { _, body -> startTailingRoute(body.str("tabId") ?: "") })
+        s.createContext("/tail/stop", handler(POST) { _, body -> stopTailingRoute(body.str("tabId") ?: "") })
         // No executor set: HttpServer's default runs requests sequentially on the thread that
         // called start() — fine for a low-throughput, single-client dev tool, and means no
         // extra synchronization is needed around AppState access from this server.
@@ -102,6 +104,7 @@ class ControlServer(private val appState: AppState, private val port: Int) {
             "sourcePath" to t.sourcePath,
             "activeTags" to t.filter.activeTags.toList(),
             "levels" to t.filter.levels.map { it.key.toString() },
+            "tailing" to t.tailing,
         )
     }
 
@@ -157,6 +160,22 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         if (appState.tabs.size <= beforeCount) return mapOf("error" to "merge did not produce a new tab")
         val tab = appState.tabs.last()
         return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size)
+    }
+
+    // Starting/stopping tailing is a synchronous state update (unlike open/merge, there's no
+    // one-shot load to await isLoading for) — the actual line detection happens asynchronously
+    // over time on FileTailer's own coroutine. Poll GET /tabs or /visible afterward to observe
+    // growth.
+    private fun startTailingRoute(tabId: String): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        appState.startTailing(tabId)
+        return mapOf("tabId" to tabId, "tailing" to (appState.tab(tabId)?.tailing ?: tab.tailing))
+    }
+
+    private fun stopTailingRoute(tabId: String): Map<String, Any?> {
+        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        appState.stopTailing(tabId)
+        return mapOf("tabId" to tabId, "tailing" to (appState.tab(tabId)?.tailing ?: false))
     }
 
     private fun closeTab(tabId: String): Map<String, Any?> {

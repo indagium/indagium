@@ -1014,6 +1014,44 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun startTailingAppendsNewLinesContinuingIdNumberingWithoutDuplicates() {
+        val dir = createTempDirectory("openlog-tailing").toFile()
+        val file = File(dir, "tail.log").apply { writeText("06-26 10:00:00.000  100  100 I App: first\n") }
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.openFile(file)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        val tabId = state.tabs.single().id
+        assertEquals(1, state.tab(tabId)!!.logData.size)
+
+        state.startTailing(tabId)
+        assertTrue(state.tab(tabId)!!.tailing)
+
+        file.appendText("06-26 10:00:01.000  100  100 I App: second\n")
+        waitUntil { state.tab(tabId)!!.logData.size == 2 }
+        file.appendText("06-26 10:00:02.000  100  100 I App: third\n")
+        waitUntil { state.tab(tabId)!!.logData.size == 3 }
+
+        val entries = state.tab(tabId)!!.logData
+        assertEquals(listOf(1, 2, 3), entries.map { it.id })
+        assertEquals(listOf("first", "second", "third"), entries.map { it.msg })
+        assertEquals(3, entries.map { it.id }.toSet().size)
+
+        state.stopTailing(tabId)
+        assertFalse(state.tab(tabId)!!.tailing)
+    }
+
+    @Test
+    fun startTailingIsANoOpForATabWithNoBackingFile() {
+        val dir = createTempDirectory("openlog-tailing").toFile()
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.tabs = listOf(mkTab("t1", "merged", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+
+        state.startTailing("t1")
+
+        assertFalse(state.tab("t1")!!.tailing)
+    }
+
+    @Test
     fun contextMenuCanAddHideAndShowOnlyMessageRules() {
         val state = AppState()
         state.tabs = listOf(

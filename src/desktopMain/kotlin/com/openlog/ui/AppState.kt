@@ -3,6 +3,7 @@ package com.openlog.ui
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.*
+import com.openlog.utils.FileTailer
 import com.openlog.utils.MergeSourceFile
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.buildFilteredCsv
@@ -13,6 +14,7 @@ import com.openlog.utils.extractCandidate
 import com.openlog.utils.listLogcatCandidates
 import com.openlog.utils.mergeLogs
 import com.openlog.utils.parseLogcat
+import com.openlog.utils.parseLogcatLines
 import com.openlog.utils.passesFilter
 import kotlinx.coroutines.*
 import java.awt.FileDialog
@@ -88,6 +90,13 @@ class AppState(
     private val stateLock = Any()
     private var pendingLoads = 0
 
+    // Live tailing (utils/FileTailer.kt) — keyed by tabId. Lives here, not on LogTab, since a
+    // running FileTailer/Job isn't data-class-friendly. ioJob.cancel() in close() already cancels
+    // every tailer's Job for free, since each is started on ioScope.
+    private data class ActiveTail(val tailer: FileTailer, val job: Job)
+
+    private val activeTails = mutableMapOf<String, ActiveTail>()
+
     // ── Sequences (per-tab, stored in Filter) ────────────────────────
     var sequences: List<SequenceDef>
         get() = activeTab()?.filter?.sequences ?: emptyList()
@@ -149,7 +158,8 @@ class AppState(
 
     // ── Helpers ─────────────────────────────────────────────────────
     fun close() {
-        ioJob.cancel()
+        ioJob.cancel() // also cancels every active FileTailer's Job — each is started on ioScope
+        activeTails.clear()
         synchronized(stateLock) {
             pendingLoads = 0
             isLoading = false
@@ -1073,6 +1083,7 @@ class AppState(
     }
 
     fun closeTab(tabId: String) {
+        activeTails.remove(tabId)?.job?.cancel()
         val next = tabs.filter { it.id != tabId }
         if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
         if (compareTabId == tabId) compareTabId = next.firstOrNull()?.id ?: ""
@@ -1101,6 +1112,49 @@ class AppState(
                 }
             } finally {
                 finishLoading()
+            }
+        }
+    }
+
+    // Session-only (confirmed): tailing state never persists across a restart — tab.tailing
+    // simply isn't written to the autosave token, so it always comes back false. Only tabs backed
+    // by a real, currently-existing file path can be tailed (not a zip-extracted or merged tab).
+    fun startTailing(tabId: String) {
+        if (activeTails.containsKey(tabId)) return
+        val t = tab(tabId) ?: return
+        val path = t.sourcePath ?: return
+        val file = File(path)
+        if (!file.isFile) return
+        val tailer = FileTailer(file, onNewLines = { newLines -> appendTailedLines(tabId, newLines) })
+        val job = tailer.start(ioScope)
+        activeTails[tabId] = ActiveTail(tailer, job)
+        upTab(tabId) { it.copy(tailing = true) }
+    }
+
+    fun stopTailing(tabId: String) {
+        activeTails.remove(tabId)?.job?.cancel()
+        upTab(tabId) { it.copy(tailing = false) }
+        // Content-triggered autosave is suppressed while any tab is actively tailing (see the
+        // LaunchedEffect in App.kt) to avoid rewriting a fast-growing logData every ~400ms —
+        // explicitly save now that this tab has settled.
+        autosaveNow()
+    }
+
+    // Runs on whichever thread FileTailer's coroutine flushes from (ioScope / Dispatchers.IO),
+    // unlike most upTab callers which are UI-thread-only — wrapped in stateLock so a tailing
+    // flush can't race and lose an update against another concurrent background mutation
+    // (another tab's tailing flush, or an in-flight openFile/mergeTabs). This does NOT protect
+    // against racing a same-instant UI-thread mutation (toggleGroup, selRow, ...) — those already
+    // aren't stateLock-guarded anywhere in this class; tailing only closes the background-vs-
+    // background gap, matching the existing openFile/mergeTabs precedent.
+    private fun appendTailedLines(tabId: String, newRawLines: List<String>) {
+        if (newRawLines.isEmpty()) return
+        synchronized(stateLock) {
+            val t = tab(tabId) ?: return
+            val nextId = (t.logData.maxOfOrNull { it.id } ?: 0) + 1
+            val newEntries = parseLogcatLines(newRawLines.asSequence(), startId = nextId)
+            tabs = tabs.map { cur ->
+                if (cur.id == tabId) cur.copy(logData = cur.logData + newEntries, rmap = cur.rmap + mkRmap(newEntries)) else cur
             }
         }
     }
