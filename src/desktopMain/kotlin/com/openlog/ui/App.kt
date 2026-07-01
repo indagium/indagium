@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
@@ -642,7 +643,13 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
 
             // ── Keyboard shortcuts dialog ─────────────────────────────
             if (state.shortcutsOpen) {
-                Dialog(onDismissRequest = { state.shortcutsOpen = false }) {
+                // usePlatformDefaultWidth defaults to true and silently caps dialog content to
+                // ~580dp regardless of any width modifier inside — must disable it for the
+                // 3-column layout to actually get the width it asks for.
+                Dialog(
+                    onDismissRequest = { state.shortcutsOpen = false },
+                    properties = DialogProperties(usePlatformDefaultWidth = false),
+                ) {
                     KeyboardShortcutsDialog { state.shortcutsOpen = false }
                 }
             }
@@ -1683,11 +1690,9 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
     val shape = RoundedCornerShape(8.dp)
     val groups = keyboardShortcutHelpGroups()
 
-    // Split the groups across two "pages" so the dialog reads like an open book — keeps the
-    // height short even as the shortcut list grows, instead of one long scrolling column.
-    val splitAt = (groups.size + 1) / 2
-    val leftPage = groups.subList(0, splitAt)
-    val rightPage = groups.subList(splitAt, groups.size)
+    // Split the groups across 3 columns, balanced by row count, so every shortcut is visible
+    // without scrolling instead of relying on an invisible overflow scrollbar.
+    val columns = splitShortcutGroupsIntoColumns(groups, 3).filter { it.isNotEmpty() }
 
     @Composable
     fun PageColumn(page: List<ShortcutHelpGroup>, modifier: Modifier) {
@@ -1709,7 +1714,7 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
                         ) {
                             Box(
                                 Modifier
-                                    .widthIn(min = 150.dp)
+                                    .widthIn(min = 130.dp)
                                     .background(tc.p2, RoundedCornerShape(4.dp))
                                     .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
                                     .padding(horizontal = 8.dp, vertical = 2.dp),
@@ -1717,7 +1722,14 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
                             ) {
                                 AppText(row.label, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
                             }
-                            AppText(row.description, color = tc.ts, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                            AppText(
+                                row.description,
+                                color = tc.ts,
+                                fontSize = 11.sp,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
                 }
@@ -1727,8 +1739,8 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
 
     Box(
         Modifier
-            .width(900.dp)
-            .heightIn(max = 560.dp)
+            .width(1150.dp)
+            .heightIn(max = 640.dp)
             .clip(shape)
             .background(tc.p)
             .border(1.dp, tc.br, shape),
@@ -1746,9 +1758,18 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
                 CloseButton(onClick = onDismiss)
             }
             Row(Modifier.fillMaxWidth()) {
-                PageColumn(leftPage, Modifier.weight(1f).padding(end = 20.dp))
-                Box(Modifier.width(1.dp).fillMaxHeight().background(tc.br))
-                PageColumn(rightPage, Modifier.weight(1f).padding(start = 20.dp))
+                columns.forEachIndexed { idx, page ->
+                    PageColumn(
+                        page,
+                        Modifier.weight(1f).padding(
+                            start = if (idx == 0) 0.dp else 20.dp,
+                            end = if (idx == columns.lastIndex) 0.dp else 20.dp,
+                        ),
+                    )
+                    if (idx != columns.lastIndex) {
+                        Box(Modifier.width(1.dp).fillMaxHeight().background(tc.br))
+                    }
+                }
             }
             Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
                 AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)

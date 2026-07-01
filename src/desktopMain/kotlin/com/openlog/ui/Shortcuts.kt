@@ -157,6 +157,52 @@ fun keyboardShortcutHelpGroups(mac: Boolean = isMacOs): List<ShortcutHelpGroup> 
     }
 }
 
+// Splits groups into up to [columns] contiguous columns, minimizing the tallest column's row
+// count (binary search on the max-column-weight, like the classic "split array, minimize the
+// largest sum" problem) so no single column runs much longer than the others. Pads with empty
+// columns if there are fewer natural splits than [columns].
+fun splitShortcutGroupsIntoColumns(groups: List<ShortcutHelpGroup>, columns: Int): List<List<ShortcutHelpGroup>> {
+    if (groups.isEmpty() || columns <= 1) return listOf(groups)
+    val weights = groups.map { it.rows.size + 1 }
+
+    fun columnsNeeded(maxWeight: Int): Int {
+        var count = 1
+        var current = 0
+        for (w in weights) {
+            if (current != 0 && current + w > maxWeight) {
+                count++
+                current = 0
+            }
+            current += w
+        }
+        return count
+    }
+
+    var lo = weights.max()
+    var hi = weights.sum()
+    while (lo < hi) {
+        val mid = (lo + hi) / 2
+        if (columnsNeeded(mid) <= columns) hi = mid else lo = mid + 1
+    }
+
+    val result = mutableListOf<MutableList<ShortcutHelpGroup>>()
+    var current = mutableListOf<ShortcutHelpGroup>()
+    var currentWeight = 0
+    groups.forEachIndexed { i, group ->
+        val w = weights[i]
+        if (currentWeight != 0 && currentWeight + w > lo) {
+            result.add(current)
+            current = mutableListOf()
+            currentWeight = 0
+        }
+        current.add(group)
+        currentWeight += w
+    }
+    result.add(current)
+    while (result.size < columns) result.add(mutableListOf())
+    return result
+}
+
 private fun shortcutSpecs(): List<ShortcutSpec> = listOf(
     ShortcutSpec("⌘ ⇧ F", "Ctrl Shift F", "Toggle filter panel", KeyboardPanel.GLOBAL),
     ShortcutSpec("⌘ ⇧ A", "Ctrl Shift A", "Toggle notes panel", KeyboardPanel.GLOBAL),
