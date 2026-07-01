@@ -75,6 +75,9 @@ private const val TAB_DRAG_SNAP_BIAS = 0.25f
 @Composable
 fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
     val theme = themeColors(state.settings.theme)
+    val rootFocusRequester = remember { FocusRequester() }
+    var pendingPanelFocus by remember { mutableStateOf<KeyboardPanel?>(null) }
+    var filterSearchFocusRequest by remember { mutableStateOf(0) }
 
     CompositionLocalProvider(
         LocalTheme provides theme,
@@ -92,6 +95,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
         ) {
             kotlinx.coroutines.delay(400)
             state.autosaveNow()
+        }
+        LaunchedEffect(Unit) {
+            runCatching { rootFocusRequester.requestFocus() }
         }
         val dropTarget = remember {
             object : DragAndDropTarget {
@@ -126,7 +132,20 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         overrideDescendants = true
                     ) else Modifier
                 )
-                .onPreviewKeyEvent { ev -> handleGlobalKey(ev, state) }
+                .focusRequester(rootFocusRequester)
+                .focusable()
+                .onPreviewKeyEvent { ev ->
+                    handleGlobalKey(
+                        ev = ev,
+                        state = state,
+                        onFocusPanel = { panel -> pendingPanelFocus = panel },
+                        onFocusFilterSearch = {
+                            state.updateFilterVisible(true)
+                            pendingPanelFocus = KeyboardPanel.FILTERS
+                            filterSearchFocusRequest += 1
+                        },
+                    )
+                }
         ) {
             Column(Modifier.fillMaxSize()) {
                 TabBar(state)
@@ -137,8 +156,21 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             AppText("No files open — click Open to add a log", color = tc.ts, fontSize = 14.sp)
                         }
 
-                    state.compareMode -> CompareView(state)
-                    activeTab != null -> key(activeTab.id) { FileView(state, activeTab) }
+                    state.compareMode -> CompareView(
+                        state = state,
+                        requestedPanelFocus = pendingPanelFocus,
+                        filterSearchFocusRequest = filterSearchFocusRequest,
+                        onPanelFocusConsumed = { pendingPanelFocus = null },
+                    )
+                    activeTab != null -> key(activeTab.id) {
+                        FileView(
+                            state = state,
+                            tab = activeTab,
+                            requestedPanelFocus = pendingPanelFocus,
+                            filterSearchFocusRequest = filterSearchFocusRequest,
+                            onPanelFocusConsumed = { pendingPanelFocus = null },
+                        )
+                    }
                 }
             }
 
@@ -618,13 +650,26 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
     }
 }
 
-private fun handleGlobalKey(ev: KeyEvent, state: AppState): Boolean {
+private fun handleGlobalKey(
+    ev: KeyEvent,
+    state: AppState,
+    onFocusPanel: (KeyboardPanel) -> Unit,
+    onFocusFilterSearch: () -> Unit,
+): Boolean {
     if (ev.type != KeyEventType.KeyDown) return false
+    if (ev.isCtrlPressed && ev.key == Key.Tab) {
+        navigateTab(state, if (ev.isShiftPressed) -1 else +1)
+        return true
+    }
     if (!ev.isActionKey) return false
     return when {
         ev.isShiftPressed && ev.key == Key.F -> { state.updateFilterVisible(!state.filterVisible); true }
         ev.isShiftPressed && ev.key == Key.A -> { state.updateAnnotationVisible(!state.annotationVisible); true }
         ev.isShiftPressed && ev.key == Key.D -> { state.updateCompareMode(!state.compareMode); true }
+        ev.key == Key.F                      -> { onFocusFilterSearch(); true }
+        ev.key == Key.One                    -> { state.updateFilterVisible(true); onFocusPanel(KeyboardPanel.FILTERS); true }
+        ev.key == Key.Two                    -> { onFocusPanel(KeyboardPanel.LOG_VIEW); true }
+        ev.key == Key.Three                  -> { state.updateAnnotationVisible(true); onFocusPanel(KeyboardPanel.NOTES); true }
         ev.key == Key.RightBracket           -> { navigateTab(state, +1); true }
         ev.key == Key.LeftBracket            -> { navigateTab(state, -1); true }
         ev.key == Key.W                      -> { state.activeTab()?.id?.let(state::closeTab); true }
@@ -744,6 +789,7 @@ private fun BoundFilterPanel(
     state: AppState,
     tab: LogTab,
     focusRequester: FocusRequester? = null,
+    focusSearchRequest: Int = 0,
     onPanelFocusChanged: (Boolean) -> Unit = {},
 ) {
     if (!state.filterVisible) return
@@ -776,6 +822,7 @@ private fun BoundFilterPanel(
             state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
         },
         onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
+        onToggleMessageRuleRegex = { state.toggleKwInTagRx(tab.id) },
         onMoveSeqUp = { state.moveSequenceUp(it) },
         onMoveSeqDown = { state.moveSequenceDown(it) },
         onSetNewSeqText = { state.newSeqText = it },
@@ -809,6 +856,7 @@ private fun BoundFilterPanel(
         filterListRows = state.settings.filterListRows,
         width = state.filterPanelWidth,
         focusRequester = focusRequester,
+        focusSearchRequest = focusSearchRequest,
         onPanelFocusChanged = onPanelFocusChanged,
     )
     HDivider { delta -> state.updateFilterPanelWidth(state.filterPanelWidth + delta) }
@@ -816,16 +864,29 @@ private fun BoundFilterPanel(
 
 // ── FileView ──────────────────────────────────────────────────────────
 @Composable
-private fun FileView(state: AppState, tab: LogTab) {
+private fun FileView(
+    state: AppState,
+    tab: LogTab,
+    requestedPanelFocus: KeyboardPanel? = null,
+    filterSearchFocusRequest: Int = 0,
+    onPanelFocusConsumed: () -> Unit = {},
+) {
     val filterFr = remember { FocusRequester() }
     val logViewerFr = remember { FocusRequester() }
     val annotationFr = remember { FocusRequester() }
     var focusedPanelIdx by remember { mutableStateOf(0) }
 
-    fun visiblePanelFrs(): List<FocusRequester> = buildList {
-        if (state.filterVisible) add(filterFr)
-        add(logViewerFr)
-        if (state.annotationVisible) add(annotationFr)
+    fun visiblePanelFrs(): List<Pair<KeyboardPanel, FocusRequester>> = buildList {
+        if (state.filterVisible) add(KeyboardPanel.FILTERS to filterFr)
+        add(KeyboardPanel.LOG_VIEW to logViewerFr)
+        if (state.annotationVisible) add(KeyboardPanel.NOTES to annotationFr)
+    }
+
+    LaunchedEffect(requestedPanelFocus, state.filterVisible, state.annotationVisible, tab.id) {
+        val panel = requestedPanelFocus ?: return@LaunchedEffect
+        val fr = visiblePanelFrs().firstOrNull { it.first == panel }?.second ?: return@LaunchedEffect
+        runCatching { fr.requestFocus() }
+        onPanelFocusConsumed()
     }
 
     Row(
@@ -835,7 +896,7 @@ private fun FileView(state: AppState, tab: LogTab) {
                 if (frs.isNotEmpty()) {
                     val delta = if (ev.isShiftPressed) -1 else 1
                     val next = (focusedPanelIdx + delta).mod(frs.size)
-                    runCatching { frs[next].requestFocus() }
+                    runCatching { frs[next].second.requestFocus() }
                 }
                 true
             } else {
@@ -846,7 +907,10 @@ private fun FileView(state: AppState, tab: LogTab) {
         BoundFilterPanel(
             state, tab,
             focusRequester = filterFr,
-            onPanelFocusChanged = { focused -> if (focused) focusedPanelIdx = visiblePanelFrs().indexOf(filterFr) },
+            focusSearchRequest = filterSearchFocusRequest,
+            onPanelFocusChanged = { focused ->
+                if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
+            },
         )
         LogViewer(
             tab = tab, modifier = Modifier.weight(1f),
@@ -866,7 +930,9 @@ private fun FileView(state: AppState, tab: LogTab) {
             onCopySelection = { state.copySelectedLines(tab.id) },
             navScrollMargin = state.settings.navScrollMargin,
             focusRequester = logViewerFr,
-            onPanelFocusChanged = { focused -> if (focused) focusedPanelIdx = visiblePanelFrs().indexOf(logViewerFr) },
+            onPanelFocusChanged = { focused ->
+                if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == logViewerFr }
+            },
         )
         if (state.annotationVisible) {
             HDivider { delta ->
@@ -891,7 +957,9 @@ private fun FileView(state: AppState, tab: LogTab) {
                 onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
                 width = state.annotationPanelWidth,
                 focusRequester = annotationFr,
-                onPanelFocusChanged = { focused -> if (focused) focusedPanelIdx = visiblePanelFrs().indexOf(annotationFr) },
+                onPanelFocusChanged = { focused ->
+                    if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
+                },
             )
         }
     }
@@ -899,10 +967,34 @@ private fun FileView(state: AppState, tab: LogTab) {
 
 // ── CompareView ───────────────────────────────────────────────────────
 @Composable
-private fun CompareView(state: AppState) {
+private fun CompareView(
+    state: AppState,
+    requestedPanelFocus: KeyboardPanel? = null,
+    filterSearchFocusRequest: Int = 0,
+    onPanelFocusConsumed: () -> Unit = {},
+) {
     val leftTab = state.tab(state.activeTabId) ?: state.tabs.firstOrNull() ?: return
     val rightTab = state.tab(state.compareTabId) ?: state.tabs.getOrNull(1) ?: state.tabs.first()
     val tc = tc()
+    val filterFr = remember { FocusRequester() }
+    val leftLogFr = remember { FocusRequester() }
+    val rightLogFr = remember { FocusRequester() }
+    val annotationFr = remember { FocusRequester() }
+    var focusedPanelIdx by remember { mutableStateOf(0) }
+
+    fun visiblePanelFrs(): List<Pair<KeyboardPanel, FocusRequester>> = buildList {
+        if (state.filterVisible) add(KeyboardPanel.FILTERS to filterFr)
+        add(KeyboardPanel.LOG_VIEW to leftLogFr)
+        add(KeyboardPanel.LOG_VIEW to rightLogFr)
+        if (state.annotationVisible) add(KeyboardPanel.NOTES to annotationFr)
+    }
+
+    LaunchedEffect(requestedPanelFocus, state.filterVisible, state.annotationVisible, leftTab.id, rightTab.id) {
+        val panel = requestedPanelFocus ?: return@LaunchedEffect
+        val fr = visiblePanelFrs().firstOrNull { it.first == panel }?.second ?: return@LaunchedEffect
+        runCatching { fr.requestFocus() }
+        onPanelFocusConsumed()
+    }
 
     // Right side shows all entries when filter is off; mirrors left filter when on.
     val effectiveRightTab = if (state.compareFilterRight)
@@ -913,7 +1005,21 @@ private fun CompareView(state: AppState) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val totalWidthDp = maxWidth.value
 
-        Row(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxSize().onPreviewKeyEvent { ev ->
+                if (ev.type == KeyEventType.KeyDown && ev.key == Key.F6) {
+                    val frs = visiblePanelFrs()
+                    if (frs.isNotEmpty()) {
+                        val delta = if (ev.isShiftPressed) -1 else 1
+                        val next = (focusedPanelIdx + delta).mod(frs.size)
+                        runCatching { frs[next].second.requestFocus() }
+                    }
+                    true
+                } else {
+                    false
+                }
+            },
+        ) {
             // ── Left panel ──────────────────────────────────────────
             Column(
                 Modifier
@@ -933,7 +1039,15 @@ private fun CompareView(state: AppState) {
                     }
                 }
                 Row(Modifier.weight(1f).fillMaxWidth()) {
-                    BoundFilterPanel(state, leftTab)
+                    BoundFilterPanel(
+                        state = state,
+                        tab = leftTab,
+                        focusRequester = filterFr,
+                        focusSearchRequest = filterSearchFocusRequest,
+                        onPanelFocusChanged = { focused ->
+                            if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
+                        },
+                    )
                     LogViewer(
                         tab = leftTab, modifier = Modifier.weight(1f),
                         onSelRow = { id, m, r -> state.selRow(leftTab.id, id, m, r) },
@@ -953,6 +1067,10 @@ private fun CompareView(state: AppState) {
                         onClearSelection = { state.clearSelection(leftTab.id) },
                         onCopySelection = { state.copySelectedLines(leftTab.id) },
                         navScrollMargin = state.settings.navScrollMargin,
+                        focusRequester = leftLogFr,
+                        onPanelFocusChanged = { focused ->
+                            if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == leftLogFr }
+                        },
                     )
                 }
             }
@@ -1002,6 +1120,10 @@ private fun CompareView(state: AppState) {
                         onClearSelection = { state.clearSelection(rightTab.id) },
                         onCopySelection = { state.copySelectedLines(rightTab.id) },
                         navScrollMargin = state.settings.navScrollMargin,
+                        focusRequester = rightLogFr,
+                        onPanelFocusChanged = { focused ->
+                            if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == rightLogFr }
+                        },
                     )
                     if (state.annotationVisible) {
                         HDivider { d ->
@@ -1026,6 +1148,10 @@ private fun CompareView(state: AppState) {
                             onAddNoteAfter = { state.addNoteBlock(leftTab.id, it) },
                             onNavigateLogRef = { state.requestAnnotationNavigation(leftTab.id, it) },
                             width = state.annotationPanelWidth,
+                            focusRequester = annotationFr,
+                            onPanelFocusChanged = { focused ->
+                                if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
+                            },
                         )
                     }
                 }
@@ -1552,66 +1678,7 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
     val tc = tc()
     val scroll = rememberScrollState()
     val shape = RoundedCornerShape(8.dp)
-    val mac = isMacOs
-
-    data class ShortcutRow(val label: String, val description: String)
-
-    data class ShortcutGroup(val title: String, val rows: List<ShortcutRow>)
-
-    val groups = listOf(
-        ShortcutGroup(
-            "Panels",
-            listOf(
-                ShortcutRow(if (mac) "⌘ ⇧ F" else "Ctrl Shift F", "Toggle filter panel"),
-                ShortcutRow(if (mac) "⌘ ⇧ A" else "Ctrl Shift A", "Toggle annotation panel"),
-                ShortcutRow(if (mac) "⌘ ⇧ D" else "Ctrl Shift D", "Toggle compare mode"),
-                ShortcutRow("F6", "Move focus to next panel"),
-                ShortcutRow("⇧ F6", "Move focus to previous panel"),
-            ),
-        ),
-        ShortcutGroup(
-            "Tabs",
-            listOf(
-                ShortcutRow(if (mac) "⌘ ]" else "Ctrl ]", "Next tab"),
-                ShortcutRow(if (mac) "⌘ [" else "Ctrl [", "Previous tab"),
-                ShortcutRow(if (mac) "⌘ W" else "Ctrl W", "Close current tab"),
-            ),
-        ),
-        ShortcutGroup(
-            "Navigation  (log view — click to focus)",
-            listOf(
-                ShortcutRow("↑ / ↓", "Move selection up / down"),
-                ShortcutRow("Page Up / Page Down", "Scroll ~15 rows"),
-                ShortcutRow("Home / End", "Jump to first / last row"),
-                ShortcutRow(if (mac) "⌘ ↑  /  ⌘ ↓" else "Ctrl ↑  /  Ctrl ↓", "Jump to first / last row"),
-            ),
-        ),
-        ShortcutGroup(
-            "Selection  (log view — click to focus)",
-            listOf(
-                ShortcutRow("⇧ ↑  /  ⇧ ↓", "Extend selection up / down"),
-                ShortcutRow("⇧ Page Up  /  ⇧ Page Down", "Extend selection by page"),
-                ShortcutRow(if (mac) "⌘ A" else "Ctrl A", "Select all visible rows"),
-                ShortcutRow(if (mac) "⌘ C" else "Ctrl C", "Copy selected rows"),
-                ShortcutRow("Escape", "Clear selection"),
-            ),
-        ),
-        ShortcutGroup(
-            "Context menu  (log view — click to focus)",
-            listOf(
-                ShortcutRow("⇧ F10", "Open context menu for selected row"),
-                ShortcutRow("↑ / ↓", "Move highlight"),
-                ShortcutRow("Enter", "Activate highlighted item"),
-                ShortcutRow("Escape", "Close menu"),
-            ),
-        ),
-        ShortcutGroup(
-            "Other",
-            listOf(
-                ShortcutRow(if (mac) "⌘ /" else "Ctrl /", "Show keyboard shortcuts"),
-            ),
-        ),
-    )
+    val groups = keyboardShortcutHelpGroups()
 
     // Split the groups across two "pages" so the dialog reads like an open book — keeps the
     // height short even as the shortcut list grows, instead of one long scrolling column.
@@ -1620,7 +1687,7 @@ private fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
     val rightPage = groups.subList(splitAt, groups.size)
 
     @Composable
-    fun PageColumn(page: List<ShortcutGroup>, modifier: Modifier) {
+    fun PageColumn(page: List<ShortcutHelpGroup>, modifier: Modifier) {
         Column(modifier, verticalArrangement = Arrangement.spacedBy(14.dp)) {
             page.forEach { group ->
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {

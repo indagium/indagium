@@ -202,6 +202,7 @@ fun LogViewer(
     }
     val canExpandAll = visibleGroupStates.any { !it }
     val canCollapseAll = visibleGroupStates.any { it }
+    var toolbarIndex by remember(tab.id) { mutableStateOf<Int?>(null) }
 
     // Row bounds for global drag-select (plain HashMap avoids recomposition on scroll updates)
     val rowBoundsAbs = remember { HashMap<Int, Pair<Float, Float>>() }
@@ -210,6 +211,15 @@ fun LogViewer(
     // Clear stale bounds from previous tab so drag-select uses correct positions
     LaunchedEffect(tab.id) { rowBoundsAbs.clear() }
 
+    fun toolbarActions(): List<Pair<Boolean, () -> Unit>> = listOf(
+        canExpandAll to onExpandAll,
+        canCollapseAll to onCollapseAll,
+        true to onToggleUnfiltered,
+    )
+
+    fun toolbarRovingItems(): List<RovingItem> =
+        toolbarActions().mapIndexed { idx, action -> RovingItem(idx.toString(), action.first) }
+
     Column(modifier.fillMaxSize().background(tc.bg)) {
         Row(
             Modifier.fillMaxWidth().height(34.dp).background(tc.p).border(BorderStroke(1.dp, tc.br)),
@@ -217,11 +227,25 @@ fun LogViewer(
         ) {
             Spacer(Modifier.width(12.dp))
             AppText("$visCnt / $totalCnt entries", color = tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
-            AppButton("Expand all",   onClick = onExpandAll,   enabled = canExpandAll)
+            AppButton(
+                "Expand all",
+                onClick = onExpandAll,
+                enabled = canExpandAll,
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 0) tc.ac else Color.Transparent, CORNER_MD),
+            )
             Spacer(Modifier.width(4.dp))
-            AppButton("Collapse all", onClick = onCollapseAll, enabled = canCollapseAll)
+            AppButton(
+                "Collapse all",
+                onClick = onCollapseAll,
+                enabled = canCollapseAll,
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 1) tc.ac else Color.Transparent, CORNER_MD),
+            )
             Spacer(Modifier.width(4.dp))
-            AppButton(if (tab.showUnfiltered) "Hide original" else "Unfiltered", onClick = onToggleUnfiltered)
+            AppButton(
+                if (tab.showUnfiltered) "Hide original" else "Unfiltered",
+                onClick = onToggleUnfiltered,
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 2) tc.ac else Color.Transparent, CORNER_MD),
+            )
             Spacer(Modifier.width(8.dp))
         }
 
@@ -324,6 +348,46 @@ fun LogViewer(
                             onAnchorChange = { anchorId = it },
                             onCursorChange = { cursorId = it },
                         )
+                        if (ev.type == KeyEventType.KeyDown && toolbarIndex != null) {
+                            val actions = toolbarActions()
+                            when (ev.key) {
+                                Key.DirectionLeft -> {
+                                    toolbarIndex = rovingMove(
+                                        toolbarRovingItems(),
+                                        toolbarIndex ?: 0,
+                                        -1,
+                                        wrap = true,
+                                    )
+                                    return@onPreviewKeyEvent true
+                                }
+                                Key.DirectionRight -> {
+                                    toolbarIndex = rovingMove(
+                                        toolbarRovingItems(),
+                                        toolbarIndex ?: 0,
+                                        +1,
+                                        wrap = true,
+                                    )
+                                    return@onPreviewKeyEvent true
+                                }
+                                Key.DirectionDown, Key.Escape -> {
+                                    toolbarIndex = null
+                                    return@onPreviewKeyEvent true
+                                }
+                                Key.Enter, Key.NumPadEnter, Key.Spacebar -> {
+                                    val idx = toolbarIndex ?: 0
+                                    actions.getOrNull(idx)?.takeIf { it.first }?.second?.invoke()
+                                    return@onPreviewKeyEvent true
+                                }
+                            }
+                        }
+                        if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionUp && !ev.isShiftPressed) {
+                            val firstRow = listItems.filterIsInstance<LogItem.Row>().firstOrNull()?.entry?.id
+                            val current = selCursor.effectiveCursorId(effectiveTab)
+                            if (firstRow != null && current == firstRow) {
+                                toolbarIndex = rovingMove(toolbarRovingItems(), 0, +1, wrap = true)
+                                return@onPreviewKeyEvent true
+                            }
+                        }
                         if (ev.type == KeyEventType.KeyDown && ev.isShiftPressed && ev.key == Key.F10) {
                             val id = selCursor.effectiveCursorId(effectiveTab)
                             val bounds = id?.let { boundsMap[it] }
@@ -332,6 +396,22 @@ fun LogViewer(
                                 itemOnCtxMenu(id, CTX_MENU_KEYBOARD_X_DP, yDp.value, "")
                             }
                             return@onPreviewKeyEvent true
+                        }
+                        if (ev.type == KeyEventType.KeyDown && (ev.key == Key.Enter || ev.key == Key.NumPadEnter)) {
+                            val id = selCursor.effectiveCursorId(effectiveTab)
+                            val bounds = id?.let { boundsMap[it] }
+                            if (id != null && bounds != null) {
+                                val yDp = with(density) { bounds.first.toDp() }
+                                itemOnCtxMenu(id, CTX_MENU_KEYBOARD_X_DP, yDp.value, "")
+                                return@onPreviewKeyEvent true
+                            }
+                        }
+                        if (ev.type == KeyEventType.KeyDown && ev.key == Key.Spacebar) {
+                            val id = selCursor.effectiveCursorId(effectiveTab)
+                            if (id != null) {
+                                itemOnSelRow(id, true, false)
+                                return@onPreviewKeyEvent true
+                            }
                         }
                         if (handleNavKey(ev, listItems, effectiveTab, lazyState, navScope, navScrollMargin,
                                 selCursor, onSelectRow = { id -> itemOnSelRowRange(listOf(id)) }))

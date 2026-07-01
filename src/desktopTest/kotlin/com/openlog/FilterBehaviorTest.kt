@@ -191,6 +191,18 @@ class FilterBehaviorTest {
     }
 
     @Test
+    fun messageRuleRegexMatchesMessagePattern() {
+        val matchesRule = LogEntry(1, "10:00:00.000", LogLevel.I, "App", "timeout after 42 ms")
+        val noMatch = LogEntry(2, "10:00:00.001", LogLevel.I, "App", "timeout soon")
+        val filter = Filter(
+            messageRules = listOf(MessageRule(id = "r1", include = true, pattern = """timeout\s+\w+\s+\d+""", regex = true)),
+        )
+
+        assertTrue(passesFilter(matchesRule, filter))
+        assertFalse(passesFilter(noMatch, filter))
+    }
+
+    @Test
     fun scopedPositiveRuleMatchesOnlyItsTagAndPattern() {
         val hit = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "ERROR occurred")
         val wrongPattern = LogEntry(2, "10:00:00.001", LogLevel.I, "com.app.Network", "request ok")
