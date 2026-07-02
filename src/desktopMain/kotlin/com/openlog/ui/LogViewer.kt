@@ -506,7 +506,12 @@ fun LogViewer(
 
             // Hoisted lazy state for the Original panel so the Filtered panel can scroll it.
             val allLazyState = scrollStates.lazyState("${tab.id}:original")
-            val filteredLazyState = scrollStates.lazyState("${tab.id}:filtered")
+            // Same key as the single-view panel below (":main") — both render the exact same
+            // `items` list, just in different layouts, so they must share one scroll state.
+            // Using a distinct ":filtered" key here used to reset to the top every time
+            // Unfiltered was toggled on, and lose whatever was scrolled in split view when
+            // toggled back off.
+            val filteredLazyState = scrollStates.lazyState("${tab.id}:main")
             val syncScope    = rememberCoroutineScope()
 
             fun originalExpansionAndIndexFor(entryId: Int): Pair<Set<String>, Int>? {
@@ -644,7 +649,7 @@ fun LogViewer(
                                 filteredSelection = ids.toSet(),
                             )
                         },
-                        panelKey = "${tab.id}:filtered",
+                        panelKey = "${tab.id}:main",
                         listState = filteredLazyState,
                     )
                 }
