@@ -54,6 +54,35 @@ class StackTraceComputerTest {
     }
 
     @Test
+    fun exceptionPreludeBecomesGroupRootWhenFollowedByExceptionHeader() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.W, "Binder", "heartbeat before", pid = 100),
+            LogEntry(2, "10:00:00.100", LogLevel.W, "Binder", "Caught a RuntimeException from the binder stub implementation.", pid = 100),
+            LogEntry(3, "10:00:00.200", LogLevel.W, "Binder", "java.lang.ArrayIndexOutOfBoundsException: length=2; index=3", pid = 100),
+            LogEntry(4, "10:00:00.300", LogLevel.W, "Binder", "    at com.android.server.BinderStub.call(BinderStub.java:10)", pid = 100),
+        )
+
+        val groups = computeStackTraceGroups(logs)
+
+        assertEquals(listOf(2), groups.map { it.rid })
+        assertEquals(listOf(3, 4), groups.single().memberIds)
+    }
+
+    @Test
+    fun unrelatedWarningBeforeExceptionIsNotPromoted() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.W, "Binder", "slow binder transaction", pid = 100),
+            LogEntry(2, "10:00:00.100", LogLevel.W, "Binder", "java.lang.IllegalStateException: boom", pid = 100),
+            LogEntry(3, "10:00:00.200", LogLevel.W, "Binder", "    at com.android.server.BinderStub.call(BinderStub.java:10)", pid = 100),
+        )
+
+        val groups = computeStackTraceGroups(logs)
+
+        assertEquals(listOf(2), groups.map { it.rid })
+        assertEquals(listOf(3), groups.single().memberIds)
+    }
+
+    @Test
     fun fatalExceptionMatchIsCaseInsensitive() {
         val logs = listOf(
             LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "fatal exception: main", pid = 100),

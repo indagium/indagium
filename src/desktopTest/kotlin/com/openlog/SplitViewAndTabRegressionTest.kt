@@ -11,6 +11,7 @@ import com.openlog.ui.browserTabOrderDuringDrag
 import com.openlog.ui.logItemStableKey
 import com.openlog.ui.mkTab
 import com.openlog.ui.nextOriginalSelectionAfterFilteredSelection
+import com.openlog.ui.panelCopySelectionIds
 import com.openlog.ui.splitTabsForVisibility
 import com.openlog.ui.tabOrderAfterVisibleReorder
 import com.openlog.ui.tabRenderX
@@ -60,6 +61,21 @@ class SplitViewAndTabRegressionTest {
         )
 
         assertEquals(setOf(4), next)
+    }
+
+    @Test
+    fun keyboardCopyUsesEffectivePanelSelection() {
+        val tab = mkTab(
+            "log",
+            "test.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "RAW", "first"),
+                LogEntry(2, "10:00:00.001", LogLevel.I, "RAW", "second"),
+                LogEntry(3, "10:00:00.002", LogLevel.I, "RAW", "third"),
+            ),
+        )
+
+        assertEquals(setOf(1, 2), panelCopySelectionIds(tab.copy(selected = setOf(1, 2))))
     }
 
     @Test
@@ -124,6 +140,30 @@ class SplitViewAndTabRegressionTest {
         state.setSelectedRows("log", listOf(1, 2, 3))
 
         assertEquals(setOf(1, 2, 3), state.tabs.single().selected)
+    }
+
+    @Test
+    fun selectedLineTextCanUsePanelLocalSelection() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "log",
+                "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "filtered"),
+                    LogEntry(2, "10:00:00.100", LogLevel.W, "Binder", "original one", pid = 42, tid = 7),
+                    LogEntry(3, "10:00:00.200", LogLevel.E, "Binder", "original two", pid = 42, tid = 7),
+                ),
+            ).copy(selected = setOf(1)),
+        )
+
+        val text = state.selectedLinesText("log", explicitIds = setOf(2, 3))
+
+        assertEquals(
+            "10:00:00.100     42     7  W  Binder: original one\n" +
+                "10:00:00.200     42     7  E  Binder: original two",
+            text,
+        )
     }
 
     @Test

@@ -152,4 +152,19 @@ fun Map<String, Any?>.str(key: String): String? = this[key] as? String
 @Suppress("UNCHECKED_CAST")
 fun Map<String, Any?>.strList(key: String): List<String>? = (this[key] as? List<Any?>)?.map { it.toString() }
 
+@Suppress("UNCHECKED_CAST")
+fun Map<String, Any?>.intList(key: String): List<Int>? = (this[key] as? List<Any?>)?.mapNotNull {
+    when (it) {
+        is Int -> it
+        is Double -> it.toInt()
+        else -> it.toString().toIntOrNull()
+    }
+}
+
 fun Map<String, Any?>.bool(key: String): Boolean? = this[key] as? Boolean
+
+fun Map<String, Any?>.int(key: String): Int? = when (val value = this[key]) {
+    is Int -> value
+    is Double -> value.toInt()
+    else -> value?.toString()?.toIntOrNull()
+}

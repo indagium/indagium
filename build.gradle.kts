@@ -78,6 +78,9 @@ compose.desktop {
                 iconFile.set(project.file("icons/openlog.ico"))
             }
             linux {
+                shortcut = true
+                appCategory = "Development"
+                menuGroup = "Development"
                 iconFile.set(project.file("icons/openlog.png"))
             }
         }

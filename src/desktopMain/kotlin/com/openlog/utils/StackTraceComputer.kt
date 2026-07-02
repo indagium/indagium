@@ -10,6 +10,7 @@ private val AT_FRAME_RE = Regex("""^\s*at\s+\S+""")
 private val CAUSED_BY_RE = Regex("""^Caused by:""")
 private val MORE_FRAMES_RE = Regex("""^\s*\.\.\.\s+\d+\s+more$""")
 private val PROCESS_LINE_RE = Regex("""^Process:\s+\S+,\s*PID:\s*\d+""")
+private val EXCEPTION_PRELUDE_RE = Regex("""\b(caught|uncaught|throwing|threw)\b.*(exception|error|throwable)""", RegexOption.IGNORE_CASE)
 private val ANR_MSG_RE = Regex("""ANR in\s+\S+""")
 private const val ANR_TAG = "ActivityManager"
 
@@ -26,6 +27,9 @@ private fun isUnconditionalContinuation(msg: String): Boolean {
         MORE_FRAMES_RE.matches(trimmed) ||
         PROCESS_LINE_RE.containsMatchIn(trimmed)
 }
+
+private fun isExceptionPrelude(msg: String): Boolean =
+    EXCEPTION_PRELUDE_RE.containsMatchIn(msg.trim())
 
 // Always-on (no user configuration), unlike computeSeqGroups()'s user-defined SequenceDefs —
 // auto-folds Java/Kotlin exception dumps (FATAL EXCEPTION / <Class>Exception headers, "at ...”
@@ -47,6 +51,7 @@ fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
     }
 
     val openByPid = HashMap<Int, OpenTrace>()
+    val pendingPreludeByPid = HashMap<Int, Int>()
     val groups = mutableListOf<StackTraceGroup>()
 
     fun flush(pid: Int) {
@@ -76,7 +81,16 @@ fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
             flush(entry.pid)
         }
         if (isTrigger(entry.msg)) {
-            openByPid[entry.pid] = OpenTrace(i)
+            val preludeIdx = pendingPreludeByPid[entry.pid]
+                ?.takeIf { it == i - 1 && logData[it].tag == entry.tag }
+            openByPid[entry.pid] = OpenTrace(preludeIdx ?: i).also { trace ->
+                if (preludeIdx != null) trace.memberIds += entry.id
+            }
+            pendingPreludeByPid.remove(entry.pid)
+        } else if (isExceptionPrelude(entry.msg)) {
+            pendingPreludeByPid[entry.pid] = i
+        } else {
+            pendingPreludeByPid.remove(entry.pid)
         }
     }
     openByPid.keys.toList().forEach { flush(it) }

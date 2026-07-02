@@ -20,6 +20,7 @@ fun main() {
     // name and a generic icon instead of "openLog" and its icon. Must be set before AWT/Toolkit
     // initializes, so this runs first.
     System.setProperty("sun.java.command", "openLog")
+    System.setProperty("sun.awt.X11.XWMClass", "openLog")
 
     // Set the macOS Dock icon when running unpackaged (IDE / gradlew desktopRun).
     // The packaged .app uses the .icns via nativeDistributions; this covers dev runs.

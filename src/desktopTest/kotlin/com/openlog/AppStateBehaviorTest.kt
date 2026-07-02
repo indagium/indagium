@@ -1006,6 +1006,29 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun fileLoadingStatusStaysGeneric() {
+        val dir = createTempDirectory("openlog-loading-label").toFile()
+        val file = File(dir, "slow.log").apply { writeText("slow") }
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            parser = {
+                started.countDown()
+                release.await(2, TimeUnit.SECONDS)
+                listOf(LogEntry(1, "", LogLevel.I, "Slow", "done"))
+            },
+        )
+
+        state.openFile(file)
+        assertTrue(started.await(2, TimeUnit.SECONDS))
+        assertEquals("Loading file...", state.loadingStatus)
+        assertFalse(state.loadingStatus.orEmpty().contains("large", ignoreCase = true))
+        release.countDown()
+        waitUntil { !state.isLoading }
+    }
+
+    @Test
     fun mergeTabsCreatesANewTabInterleavedByTimeAndTaggedBySource() {
         val dir = createTempDirectory("openlog-merge").toFile()
         val state = AppState(autosaveFile = File(dir, "state.cache"))
@@ -1657,6 +1680,48 @@ class AppStateBehaviorTest {
 
         assertEquals(1, state.tabs.size)
         assertTrue(state.tabs.single().logData.isEmpty())
+    }
+
+    @Test
+    fun closingTabDuringOpenCancelsPendingLoad() {
+        val dir = createTempDirectory("openlog-cancel-load").toFile()
+        val logFile = File(dir, "slow.log").apply { writeText("06-26 10:00:00.000  1  1 I App: hello\n") }
+        val parserStarted = CountDownLatch(1)
+        val releaseParser = CountDownLatch(1)
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            parser = {
+                parserStarted.countDown()
+                releaseParser.await(2, TimeUnit.SECONDS)
+                listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))
+            },
+        )
+
+        val pendingTabId = state.openFile(logFile)!!
+        assertTrue(parserStarted.await(2, TimeUnit.SECONDS))
+        state.closeTab(pendingTabId)
+        releaseParser.countDown()
+        waitUntil { !state.isLoading }
+
+        assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
+    fun mkTabCachesAnalysisNeededByLargeFileUi() {
+        val tab = mkTab(
+            "t1",
+            "large.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.W, "Binder", "Caught a RuntimeException from the binder stub implementation.", pid = 7),
+                LogEntry(2, "10:00:00.001", LogLevel.W, "Binder", "java.lang.ArrayIndexOutOfBoundsException:", pid = 7),
+                LogEntry(3, "10:00:00.002", LogLevel.W, "Binder", "    at android.os.Binder.execTransact(Binder.java:1)", pid = 7),
+                LogEntry(4, "10:00:00.003", LogLevel.I, "ActivityManager", "ANR in com.example", pid = 8),
+            ),
+        )
+
+        assertEquals(mapOf("Binder" to 3, "ActivityManager" to 1), tab.analysis.tagCounts)
+        assertEquals(listOf(1), tab.analysis.stackTraceGroups.map { it.rid })
+        assertEquals(listOf(1, 4), tab.analysis.crashSites.map { it.entry.id })
     }
 
     @Test

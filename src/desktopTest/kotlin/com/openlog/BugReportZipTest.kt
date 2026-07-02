@@ -1,6 +1,7 @@
 package com.openlog
 
 import com.openlog.model.LogLevel
+import com.openlog.utils.ZipLogCandidateKind
 import com.openlog.utils.extractCandidate
 import com.openlog.utils.isZipFile
 import com.openlog.utils.listLogcatCandidates
@@ -42,13 +43,15 @@ class BugReportZipTest {
     }
 
     @Test
-    fun listLogcatCandidatesFindsLogNamedTextEntriesOnly() {
+    fun listLogcatCandidatesFindsLogcatAndAnrTextEntriesOnly() {
         val dir = createTempDirectory("openlog-zip").toFile()
         val binaryHeapDump = byteArrayOf(0, 1, 2, 3, 0x89.toByte(), 'H'.code.toByte(), 'E'.code.toByte(), 'A'.code.toByte(), 'P'.code.toByte())
         val zip = buildZip(
             dir, "bugreport.zip",
             mapOf(
                 "FS/data/anr/main_log.txt" to "06-26 10:00:00.000  100  100 I App: hi".toByteArray(),
+                "FS/data/anr/anr_2026-07-02-20-59-33" to "----- pid 123 at 2026-07-02 -----\nCmd line: com.example\n".toByteArray(),
+                "FS/data/anr/traces.txt" to "DALVIK THREADS (42):\n\"main\" prio=5\n".toByteArray(),
                 "FS/data/system/dropbox_log.log" to "06-26 10:00:01.000  100  100 I App: bye".toByteArray(),
                 "FS/data/misc/heap_dump.log" to binaryHeapDump,
                 "FS/data/photos/vacation.png" to "not a log at all".toByteArray(),
@@ -58,7 +61,23 @@ class BugReportZipTest {
 
         val candidates = listLogcatCandidates(zip)
 
-        assertEquals(setOf("FS/data/anr/main_log.txt", "FS/data/system/dropbox_log.log"), candidates.map { it.entryPath }.toSet())
+        assertEquals(
+            setOf(
+                "FS/data/anr/main_log.txt",
+                "FS/data/anr/anr_2026-07-02-20-59-33",
+                "FS/data/anr/traces.txt",
+                "FS/data/system/dropbox_log.log",
+            ),
+            candidates.map { it.entryPath }.toSet(),
+        )
+        assertEquals(
+            ZipLogCandidateKind.ANR_TEXT,
+            candidates.single { it.entryPath == "FS/data/anr/anr_2026-07-02-20-59-33" }.kind,
+        )
+        assertEquals(
+            ZipLogCandidateKind.LOGCAT,
+            candidates.single { it.entryPath == "FS/data/anr/main_log.txt" }.kind,
+        )
     }
 
     @Test

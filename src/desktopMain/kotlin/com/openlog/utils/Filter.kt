@@ -121,6 +121,21 @@ fun visibleEntries(tab: LogTab, applyFilter: Boolean = true): List<LogEntry> =
 fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
     val sequences = tab.filter.sequences
     val data = visibleEntries(tab, applyFilter)
+    val dataIds = data.asSequence().map { it.id }.toHashSet()
+
+    fun cachedStackGroupsFor(segment: List<LogEntry>): List<StackTraceGroup> {
+        val cached = tab.analysis.stackTraceGroups
+        if (cached.isEmpty()) return computeStackTraceGroups(segment)
+        val segmentIds = if (segment.size == data.size) dataIds else segment.asSequence().map { it.id }.toHashSet()
+        return cached.mapNotNull { group ->
+            if (group.rid !in segmentIds) {
+                null
+            } else {
+                val visibleMembers = group.memberIds.filter { it in segmentIds }
+                group.copy(memberIds = visibleMembers).takeIf { visibleMembers.isNotEmpty() }
+            }
+        }
+    }
 
     fun sequenceItems(segment: List<LogEntry>): List<LogItem> {
         val seqGroups = if (tab.filter.seqOn && sequences.any { it.enabled })
@@ -137,7 +152,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
         // list without needing to expand anything new to reveal it — crash navigation never has
         // to search for or blindly expand a group, which is what made it slow (and occasionally
         // expand the wrong one) on a real log.
-        val allStackGroups = computeStackTraceGroups(segment)
+        val allStackGroups = cachedStackGroupsFor(segment)
         val seqOwnerGidBySwallowedId = buildMap<Int, String> {
             seqGroups.forEach { sg -> sg.plain.forEach { id -> put(id, sg.gid) } }
         }

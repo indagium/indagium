@@ -50,11 +50,46 @@ export const openlogClient = {
     return request("GET", `/visible?${params.toString()}`);
   },
 
+  getSelection: (tabId: string) => request("GET", `/selection?tabId=${encodeURIComponent(tabId)}`),
+
+  selectLines: (tabId: string, lineIds: number[]) => request("POST", "/selection", { tabId, lineIds }),
+
   toggleGroup: (tabId: string, gid: string) => request("POST", "/toggle", { tabId, gid }),
+
+  expandAll: (tabId: string) => request("POST", "/expand-all", { tabId }),
+
+  collapseAll: (tabId: string) => request("POST", "/collapse-all", { tabId }),
 
   getTags: (tabId: string) => request("GET", `/tags?tabId=${encodeURIComponent(tabId)}`),
 
   getCrashSites: (tabId: string) => request("GET", `/crashes?tabId=${encodeURIComponent(tabId)}`),
+
+  addTextNote: (tabId: string, text: string, afterId?: string) =>
+    request("POST", "/annotations/note", afterId !== undefined ? { tabId, text, afterId } : { tabId, text }),
+
+  addLogNote: (tabId: string, lineIds: number[], caption?: string) =>
+    request("POST", "/annotations/log", caption !== undefined ? { tabId, lineIds, caption } : { tabId, lineIds }),
+
+  updateNoteBlock: (tabId: string, blockId: string, text: string) =>
+    request("POST", "/annotations/update", { tabId, blockId, text }),
+
+  moveNoteBlock: (tabId: string, blockId: string, delta: number) =>
+    request("POST", "/annotations/move", { tabId, blockId, delta }),
+
+  deleteNoteBlock: (tabId: string, blockId: string) => request("POST", "/annotations/delete", { tabId, blockId }),
+
+  saveAnnotations: (tabId: string, path: string) => request("POST", "/annotations/save", { tabId, path }),
+
+  loadAnnotations: (tabId: string, path: string) => request("POST", "/annotations/load", { tabId, path }),
+
+  exportAnalysis: (tabId: string, path: string) => request("POST", "/export/analysis", { tabId, path }),
+
+  exportFilteredLog: (tabId: string, path: string, format: "txt" | "csv") =>
+    request("POST", "/export/filtered", { tabId, path, format }),
+
+  listFilterPresets: () => request("GET", "/filter/presets"),
+
+  applyFilterPreset: (tabId: string, presetId: string) => request("POST", "/filter/apply-preset", { tabId, presetId }),
 
   mergeTabs: (tabIds: string[], newTabName?: string) =>
     request("POST", "/merge", newTabName !== undefined ? { tabIds, newTabName } : { tabIds }),

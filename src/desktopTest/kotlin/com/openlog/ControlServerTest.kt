@@ -2,6 +2,7 @@ package com.openlog
 
 import com.openlog.debug.ControlServer
 import com.openlog.debug.Json
+import com.openlog.model.AnnBlock
 import com.openlog.model.FilterMode
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
@@ -16,6 +17,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class ControlServerTest {
@@ -131,6 +133,73 @@ class ControlServerTest {
     }
 
     @Test
+    fun selectionRoutesSetAndReturnSelectedRows() {
+        state.tabs = listOf(
+            mkTab(
+                "t1",
+                "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "first"),
+                    LogEntry(2, "10:00:00.001", LogLevel.I, "App", "second"),
+                ),
+            ),
+        )
+
+        val setBody = post("/selection", """{"tabId":"t1","lineIds":[2,1]}""")
+        val getBody = get("/selection?tabId=t1")
+
+        assertTrue(setBody.contains("\"selected\":[1,2]"))
+        assertTrue(getBody.contains("\"selected\":[1,2]"))
+        assertEquals(setOf(1, 2), state.tab("t1")!!.selected)
+    }
+
+    @Test
+    fun annotationRoutesCreateEditMoveDeleteAndExport() {
+        state.tabs = listOf(
+            mkTab(
+                "t1",
+                "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "first"),
+                    LogEntry(2, "10:00:00.001", LogLevel.E, "App", "second"),
+                ),
+            ),
+        )
+        val noteBody = post("/annotations/note", """{"tabId":"t1","text":"Initial note"}""")
+        val noteId = (Json.decode(noteBody) as Map<*, *>)["blockId"] as String
+        val logBody = post("/annotations/log", """{"tabId":"t1","lineIds":[2],"caption":"Failure line"}""")
+        val logId = (Json.decode(logBody) as Map<*, *>)["blockId"] as String
+
+        post("/annotations/update", """{"tabId":"t1","blockId":"$noteId","text":"Updated note"}""")
+        post("/annotations/move", """{"tabId":"t1","blockId":"$logId","delta":-1}""")
+        val blocks = state.tab("t1")!!.annotations.blocks
+        assertEquals(logId, blocks.first().id)
+        assertEquals("Updated note", assertIs<AnnBlock.Note>(blocks[1]).text)
+
+        val exportFile = File.createTempFile("openlog-control-export", ".md")
+        post("/export/analysis", """{"tabId":"t1","path":"${exportFile.absolutePath.replace("\\", "\\\\")}"}""")
+        assertTrue(exportFile.readText().contains("Failure line"))
+
+        post("/annotations/delete", """{"tabId":"t1","blockId":"$noteId"}""")
+        assertEquals(listOf(logId), state.tab("t1")!!.annotations.blocks.map { it.id })
+        exportFile.delete()
+    }
+
+    @Test
+    fun annotationSidecarRoutesSaveAndLoadAnnotations() {
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "first"))))
+        val sidecar = File.createTempFile("openlog-control-ann", ".ann")
+        post("/annotations/note", """{"tabId":"t1","text":"Saved note"}""")
+
+        post("/annotations/save", """{"tabId":"t1","path":"${sidecar.absolutePath.replace("\\", "\\\\")}"}""")
+        state.tabs = listOf(state.tab("t1")!!.copy(annotations = com.openlog.model.Annotations()))
+        post("/annotations/load", """{"tabId":"t1","path":"${sidecar.absolutePath.replace("\\", "\\\\")}"}""")
+
+        assertEquals("Saved note", assertIs<AnnBlock.Note>(state.tab("t1")!!.annotations.blocks.single()).text)
+        sidecar.delete()
+    }
+
+    @Test
     fun getTagsReturnsDistinctSortedTags() {
         state.tabs = listOf(
             mkTab(
@@ -198,6 +267,46 @@ class ControlServerTest {
         state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
         post("/close", """{"tabId":"t1"}""")
         assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
+    fun filteredExportRouteWritesRequestedFormat() {
+        state.tabs = listOf(
+            mkTab(
+                "t1",
+                "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "keep"),
+                    LogEntry(2, "10:00:00.001", LogLevel.E, "App", "drop"),
+                ),
+            ),
+        )
+        state.upFlt("t1") { it.copy(levels = setOf(LogLevel.I)) }
+        val file = File.createTempFile("openlog-filtered", ".txt")
+
+        post("/export/filtered", """{"tabId":"t1","path":"${file.absolutePath.replace("\\", "\\\\")}","format":"txt"}""")
+
+        assertTrue(file.readText().contains("keep"))
+        assertTrue(!file.readText().contains("drop"))
+        file.delete()
+    }
+
+    @Test
+    fun expandCollapseAllAndFilterPresetRoutesDriveAppState() {
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        state.upFlt("t1") { it.copy(levels = setOf(LogLevel.I)) }
+        state.saveFilter("t1", "Info only")
+        state.upFlt("t1") { it.copy(levels = setOf(LogLevel.E)) }
+
+        val presetsBody = get("/filter/presets")
+        val presetId = state.savedFilters.single().id
+        assertTrue(presetsBody.contains("\"name\":\"Info only\""))
+
+        post("/filter/apply-preset", """{"tabId":"t1","presetId":"$presetId"}""")
+        assertEquals(setOf(LogLevel.I), state.tab("t1")!!.filter.levels)
+
+        post("/expand-all", """{"tabId":"t1"}""")
+        assertTrue(post("/collapse-all", """{"tabId":"t1"}""").contains("\"ok\":true"))
     }
 
     @Test

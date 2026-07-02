@@ -40,8 +40,10 @@ import com.openlog.model.*
 import com.openlog.utils.computeItems
 import com.openlog.utils.regexRanges
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
@@ -63,6 +65,36 @@ private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
     }
 
 internal fun nextOriginalSelectionAfterFilteredSelection(filteredSelection: Set<Int>): Set<Int> = filteredSelection
+
+private data class ComputedLogItems(val items: List<LogItem>, val loading: Boolean)
+
+@Composable
+private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): ComputedLogItems {
+    val dataSize = tab.logData.size
+    val lastId = tab.logData.lastOrNull()?.id
+    val filter = tab.filter
+    val expanded = tab.expanded
+    val manualBlocks = tab.manualBlocks
+    if (!tab.largeFileMode) {
+        val items = remember(tab.id, dataSize, lastId, filter, expanded, manualBlocks, applyFilter) {
+            computeItems(tab, applyFilter)
+        }
+        return ComputedLogItems(items, loading = false)
+    }
+
+    var items by remember(tab.id, applyFilter) { mutableStateOf(emptyList<LogItem>()) }
+    var loading by remember(tab.id, applyFilter) { mutableStateOf(true) }
+    LaunchedEffect(tab.id, dataSize, lastId, filter, expanded, manualBlocks, applyFilter) {
+        loading = true
+        val snapshot = tab.copy(selected = emptySet())
+        val computed = withContext(Dispatchers.Default) {
+            computeItems(snapshot, applyFilter)
+        }
+        items = computed
+        loading = false
+    }
+    return ComputedLogItems(items, loading)
+}
 
 internal data class AnnotationNavigationTarget(
     val filteredEntryId: Int?,
@@ -189,7 +221,7 @@ fun LogViewer(
     onConsumeAnnotationNavigation: (Long) -> Unit = {},
     onSelectAll: (() -> Unit)? = null,
     onClearSelection: (() -> Unit)? = null,
-    onCopySelection: (() -> Unit)? = null,
+    onCopySelection: ((Set<Int>?) -> Unit)? = null,
     navScrollMargin: Int = 5,
     focusRequester: FocusRequester? = null,
     onPanelFocusChanged: (Boolean) -> Unit = {},
@@ -198,11 +230,13 @@ fun LogViewer(
     val tc        = tc()
     val mono      = monoFont()
     val scrollStates = scrollStateStore ?: remember { LogViewerScrollStateStore() }
-    val items     = remember(tab.id, tab.filter, tab.expanded, tab.manualBlocks) { computeItems(tab, true) }
-    val visCnt    = items.count { it is LogItem.Row }
+    val computedItems = rememberComputedLogItems(tab, true)
+    val items = computedItems.items
+    val itemsVersion = items.size to items.lastOrNull()?.let(::logItemEntryId)
+    val visCnt = remember(itemsVersion) { items.count { it is LogItem.Row } }
     val totalCnt  = tab.logData.size
     val hasPidTid = remember(tab.id) { tab.logData.any { it.pid > 0 } }
-    val visibleGroupStates = remember(items) {
+    val visibleGroupStates = remember(itemsVersion) {
         items.mapNotNull { item ->
             when (item) {
                 is LogItem.SeqHeader -> item.expanded
@@ -256,7 +290,8 @@ fun LogViewer(
                 }
             }
             Spacer(Modifier.width(8.dp))
-            AppText("$visCnt / $totalCnt entries", color = tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
+            val countLabel = if (tab.largeFileMode) "$visCnt / $totalCnt entries - large file mode" else "$visCnt / $totalCnt entries"
+            AppText(countLabel, color = tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
             AppButton(
                 "Expand all",
                 onClick = onExpandAll,
@@ -288,6 +323,10 @@ fun LogViewer(
             effectiveTab: LogTab = tab,
             itemOnSelRow: (Int, Boolean, Boolean) -> Unit = onSelRow,
             itemOnSelRowRange: (List<Int>) -> Unit = onSelRowRange,
+            itemOnSelectAll: (() -> Unit)? = onSelectAll,
+            itemOnClearSelection: (() -> Unit)? = onClearSelection,
+            itemOnCopySelection: ((Set<Int>?) -> Unit)? = onCopySelection,
+            itemsLoading: Boolean = computedItems.loading,
             // Wraps the outer 5-arg onCtxMenu; callers may inject a different selectedIds set.
             itemOnCtxMenu: (Int, Float, Float, String) -> Unit = { id, x, y, sel -> onCtxMenu(id, x, y, sel, emptySet()) },
             panelKey: String = effectiveTab.id,
@@ -295,7 +334,16 @@ fun LogViewer(
             externalFr: FocusRequester? = null,
             onFocusChangedExternal: (Boolean) -> Unit = {},
         ) {
-            if (listItems.isEmpty()) { EmptyState(tc, totalCnt, onClearFilter); return }
+            if (listItems.isEmpty()) {
+                if (itemsLoading) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        IndeterminateLoadingLine(Modifier.width(180.dp))
+                    }
+                } else {
+                    EmptyState(tc, totalCnt, onClearFilter)
+                }
+                return
+            }
             val lazyState = listState ?: scrollStates.lazyState(panelKey)
             val hScroll   = scrollStates.horizontalState(panelKey)
             val scrollbarStyle = appScrollbarStyle(tc)
@@ -448,7 +496,11 @@ fun LogViewer(
                             return@onPreviewKeyEvent true
                         handleSelKey(ev, listItems, effectiveTab, lazyState, navScope, navScrollMargin,
                             itemOnSelRowRange, selCursor,
-                            actions = SelKeyActions(onSelectAll, onClearSelection, onCopySelection))
+                            actions = SelKeyActions(
+                                itemOnSelectAll,
+                                itemOnClearSelection,
+                                itemOnCopySelection,
+                            ))
                     }
                     .border(1.dp, if (isFocused && keyboardFocusVisible) tc.ac else Color.Transparent)
             ) {
@@ -488,12 +540,17 @@ fun LogViewer(
                         modifier = Modifier.fillMaxWidth().padding(end = 8.dp),
                         style = scrollbarStyle,
                     )
+                    Box(Modifier.fillMaxWidth().height(3.dp)) {
+                        if (itemsLoading) IndeterminateLoadingLine(Modifier.fillMaxWidth())
+                    }
                 }
             }
         }
 
         if (tab.showUnfiltered) {
-            val allItems = remember(tab.id, tab.expanded, tab.manualBlocks, tab.filter.sequences) { computeItems(tab, false) }
+            val computedAllItems = rememberComputedLogItems(tab, false)
+            val allItems = computedAllItems.items
+            val allItemsVersion = allItems.size to allItems.lastOrNull()?.let(::logItemEntryId)
             // Each panel needs its own bounds map so row IDs from "Original" and "Filtered"
             // panels don't overwrite each other (both show some of the same entries).
             val allBoundsAbs = remember(tab.id) { HashMap<Int, Pair<Float, Float>>() }
@@ -516,6 +573,9 @@ fun LogViewer(
             val syncScope    = rememberCoroutineScope()
 
             fun originalExpansionAndIndexFor(entryId: Int): Pair<Set<String>, Int>? {
+                val currentIdx = allItems.indexOfFirst { item -> logItemEntryId(item) == entryId }
+                if (currentIdx >= 0) return tab.expanded to currentIdx
+                if (tab.largeFileMode) return null
                 var expanded = tab.expanded
                 repeat(24) {
                     val candidateItems = computeItems(tab.copy(expanded = expanded), false)
@@ -574,8 +634,10 @@ fun LogViewer(
                 }
             }
             val allOnSelRowRange: (List<Int>) -> Unit = { ids -> localAllSelected = ids.toSet() }
+            val allOnSelectAll: () -> Unit = { localAllSelected = allItems.map(::logItemEntryId).toSet() }
+            val allOnClearSelection: () -> Unit = { localAllSelected = emptySet() }
 
-            LaunchedEffect(annotationNavigationRequest?.id, items, allItems, tab.expanded) {
+            LaunchedEffect(annotationNavigationRequest?.id, itemsVersion, allItemsVersion, tab.expanded) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
                 val target = annotationNavigationTarget(request.logIds, items.map(::logItemEntryId), originalOpen = true)
                 if (target != null) {
@@ -637,6 +699,10 @@ fun LogViewer(
                         effectiveTab = tab.copy(selected = localAllSelected),
                         itemOnSelRow = allOnSelRow,
                         itemOnSelRowRange = allOnSelRowRange,
+                        itemOnSelectAll = allOnSelectAll,
+                        itemOnClearSelection = allOnClearSelection,
+                        itemOnCopySelection = { selectedIds -> onCopySelection?.invoke(selectedIds) },
+                        itemsLoading = computedAllItems.loading,
                         itemOnCtxMenu = { id, x, y, sel -> onCtxMenu(id, x, y, sel, localAllSelected) },
                         panelKey = "${tab.id}:original",
                         listState = allLazyState,
@@ -683,7 +749,7 @@ fun LogViewer(
             }
         } else {
             val mainLazyState = scrollStates.lazyState("${tab.id}:main")
-            LaunchedEffect(annotationNavigationRequest?.id, items) {
+            LaunchedEffect(annotationNavigationRequest?.id, itemsVersion) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
                 val target = annotationNavigationTarget(request.logIds, items.map(::logItemEntryId), originalOpen = false)
                 if (target != null) {
@@ -842,8 +908,10 @@ private fun handleNavKey(
 private data class SelKeyActions(
     val onSelectAll: (() -> Unit)?,
     val onClearSelection: (() -> Unit)?,
-    val onCopySelection: (() -> Unit)?,
+    val onCopySelection: ((Set<Int>?) -> Unit)?,
 )
+
+internal fun panelCopySelectionIds(tab: LogTab): Set<Int> = tab.selected
 
 private fun handleSelKey(
     ev: KeyEvent,
@@ -890,7 +958,7 @@ private fun handleSelKey(
         ev.isShiftPressed && ev.key == Key.PageUp        -> { extendTo(cursorIdx() - PAGE_JUMP_ROWS); true }
         ev.isShiftPressed && ev.key == Key.PageDown      -> { extendTo(cursorIdx() + PAGE_JUMP_ROWS); true }
         isAction && ev.key == Key.A -> { cursor.reset(); actions.onSelectAll?.invoke(); true }
-        isAction && ev.key == Key.C -> { actions.onCopySelection?.invoke(); true }
+        isAction && ev.key == Key.C -> { actions.onCopySelection?.invoke(panelCopySelectionIds(tab)); true }
         ev.key == Key.Escape        -> { cursor.reset(); actions.onClearSelection?.invoke(); true }
         else -> false
     }

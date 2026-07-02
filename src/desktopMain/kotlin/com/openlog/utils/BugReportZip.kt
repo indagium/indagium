@@ -5,9 +5,17 @@ import java.io.File
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
-data class ZipLogCandidate(val entryPath: String, val displayName: String, val sizeBytes: Long)
+enum class ZipLogCandidateKind { LOGCAT, ANR_TEXT }
+
+data class ZipLogCandidate(
+    val entryPath: String,
+    val displayName: String,
+    val sizeBytes: Long,
+    val kind: ZipLogCandidateKind = ZipLogCandidateKind.LOGCAT,
+)
 
 private val LOG_EXTENSIONS = setOf("txt", "log")
+private val ANR_EXTENSIONS = setOf("", "txt", "trace", "traces")
 
 // Content-sniffed, not extension-gated — same "open by content" philosophy as isLikelyTextFile:
 // attempt to open as a zip archive and see if it succeeds, rather than trusting the .zip suffix.
@@ -23,18 +31,33 @@ fun isZipFile(file: File): Boolean {
 fun listLogcatCandidates(zipFile: File): List<ZipLogCandidate> = runCatching {
     ZipFile(zipFile).use { zf ->
         zf.entries().asSequence()
-            .filter { entry -> !entry.isDirectory && isCandidateEntry(entry, zf) }
-            .map { entry -> ZipLogCandidate(entry.name, entry.name.substringAfterLast('/'), entry.size) }
+            .filter { entry -> !entry.isDirectory }
+            .mapNotNull { entry -> candidateKind(entry, zf)?.let { kind -> ZipLogCandidate(entry.name, entry.name.substringAfterLast('/'), entry.size, kind) } }
             .toList()
     }
 }.getOrDefault(emptyList())
 
-private fun isCandidateEntry(entry: ZipEntry, zf: ZipFile): Boolean {
+private fun candidateKind(entry: ZipEntry, zf: ZipFile): ZipLogCandidateKind? {
     val name = entry.name.substringAfterLast('/')
-    if (!name.contains("log", ignoreCase = true)) return false
+    val lowerPath = entry.name.lowercase()
+    val lowerName = name.lowercase()
     val ext = name.substringAfterLast('.', missingDelimiterValue = "")
-    if (ext.isNotEmpty() && ext.lowercase() !in LOG_EXTENSIONS) return false
-    return runCatching { zf.getInputStream(entry).use { isLikelyTextStream(it) } }.getOrDefault(false)
+    val isText = runCatching { zf.getInputStream(entry).use { isLikelyTextStream(it) } }.getOrDefault(false)
+    if (!isText) return null
+
+    if (name.contains("log", ignoreCase = true) && (ext.isEmpty() || ext.lowercase() in LOG_EXTENSIONS)) {
+        return ZipLogCandidateKind.LOGCAT
+    }
+
+    val inAnrDir = lowerPath.contains("/anr/") || lowerPath.startsWith("anr/")
+    val looksLikeAnrTrace = lowerName.startsWith("anr_") ||
+        lowerName.startsWith("traces") ||
+        lowerName.contains("anr") && (ext.isEmpty() || ext.lowercase() in ANR_EXTENSIONS)
+    return if ((inAnrDir || looksLikeAnrTrace) && (ext.isEmpty() || ext.lowercase() in ANR_EXTENSIONS)) {
+        ZipLogCandidateKind.ANR_TEXT
+    } else {
+        null
+    }
 }
 
 // Parses in-memory, straight from the zip entry's stream — never extracts to a temp dir.

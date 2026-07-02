@@ -2,6 +2,12 @@
 
 package com.openlog.ui
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
@@ -15,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
@@ -22,6 +29,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -34,6 +42,44 @@ import java.awt.Cursor as AwtCursor
 @Composable fun monoFont() = if (LocalUseMono.current) FontFamily.Monospace else FontFamily.Default
 
 @Composable fun baseSp() = LocalFontBase.current.sp
+
+@Composable
+fun IndeterminateLoadingLine(
+    modifier: Modifier = Modifier,
+    segmentWidth: Dp = 44.dp,
+    durationMillis: Int = 900,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    val transition = rememberInfiniteTransition(label = "loading-line")
+    val progress by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = durationMillis, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "loading-line-progress",
+    )
+    BoxWithConstraints(
+        modifier
+            .height(3.dp)
+            .clip(RoundedCornerShape(2.dp))
+            .background(tc.br.copy(alpha = 0.35f)),
+    ) {
+        val travel = (maxWidth - segmentWidth).coerceAtLeast(0.dp)
+        Box(
+            Modifier
+                .width(segmentWidth)
+                .fillMaxHeight()
+                .graphicsLayer {
+                    translationX = with(density) { (travel * progress).toPx() }
+                }
+                .clip(RoundedCornerShape(2.dp))
+                .background(tc.ac.copy(alpha = 0.42f)),
+        )
+    }
+}
 
 // ── Hover ────────────────────────────────────────────────────────────
 @Composable

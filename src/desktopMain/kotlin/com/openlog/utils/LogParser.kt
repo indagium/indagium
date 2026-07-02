@@ -31,7 +31,8 @@ fun isLikelyTextFile(file: File): Boolean {
 fun isLikelyTextStream(stream: InputStream): Boolean =
     runCatching { stream.readNBytes(TEXT_SNIFF_BYTES).none { it == 0.toByte() } }.getOrDefault(false)
 
-fun parseLogcat(file: File): List<LogEntry> = parseLogcatLines(file.readLines().asSequence())
+fun parseLogcat(file: File): List<LogEntry> =
+    file.bufferedReader().useLines { lines -> parseLogcatLines(lines) }
 
 // Reusable core: parseLogcat(file) is the common case, but a bug-report zip entry (BugReportZip.kt)
 // or a live-tailed file (future work) needs to parse a Sequence<String> without a backing File,

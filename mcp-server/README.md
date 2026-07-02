@@ -36,9 +36,16 @@ npm start
 | `close_tab` | Close a tab |
 | `get_filter` / `set_filter` | Read/partially-update a tab's filter |
 | `get_visible_lines` | Read the currently rendered log items (post-filter, post-fold) |
+| `select_lines` / `get_selection` | Set or read selected log line ids |
 | `toggle_group` | Expand/collapse a sequence or manual-collapse group |
+| `expand_all` / `collapse_all` | Expand or collapse all visible collapsible groups |
 | `get_tags` | List every distinct tag in a tab's full file |
 | `get_crash_sites` | List detected exceptions and ANRs in a tab's full file, with jump-to log ids |
+| `add_text_note` / `add_log_note` | Create analysis note blocks |
+| `update_note_block` / `move_note_block` / `delete_note_block` | Edit, reorder, or remove note blocks |
+| `export_analysis` / `export_filtered_log` | Export Markdown analysis or filtered log output |
+| `save_annotations` / `load_annotations` | Save or restore `.ann` sidecar annotation data |
+| `list_filter_presets` / `apply_filter_preset` | Read and apply saved filter presets |
 | `merge_tabs` | Merge 2+ already-open tabs into one new tab, interleaved by time-of-day |
 | `start_tailing` / `stop_tailing` | Watch/stop watching a tab's backing file for external growth |
 

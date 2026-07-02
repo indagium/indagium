@@ -52,6 +52,8 @@ import kotlin.math.roundToInt
 // matches unrelated to the active filter are still discoverable instead of vanishing.
 private data class MsgCandidate(val pattern: String, val target: RuleTarget, val inScope: Boolean)
 
+private const val LARGE_FILE_CANDIDATE_SCAN_LIMIT = 50_000
+
 // Collapse/expand state for the filter panel. Held outside the composable so it survives
 // the panel being hidden and re-shown (FilterPanel is removed from the tree when invisible).
 class FilterPanelUiState {
@@ -144,15 +146,17 @@ fun FilterPanel(
     val filter = tab.filter
     var panelFocused by remember { mutableStateOf(false) }
 
-    // Detected fresh from the whole (unfiltered) file every time it changes — this section is
-    // meant to be a complete inventory regardless of the active filter, matching computeItems()'s
-    // own "derive, don't cache" pattern.
-    val crashSites = remember(tab.logData) {
-        computeCrashSites(tab.logData, computeStackTraceGroups(tab.logData))
+    val crashSites = remember(tab.id, tab.analysis.crashSites, tab.logData) {
+        tab.analysis.crashSites.ifEmpty {
+            val stackGroups = computeStackTraceGroups(tab.logData)
+            computeCrashSites(tab.logData, stackGroups)
+        }
     }
 
     // Tags sorted by frequency in log data; default suggestions come from user tag usage.
-    val tagCounts  = remember(tab.id) { tab.logData.groupBy { it.tag }.mapValues { it.value.size } }
+    val tagCounts = remember(tab.id, tab.analysis.tagCounts, tab.logData) {
+        tab.analysis.tagCounts.ifEmpty { tab.logData.groupingBy { it.tag }.eachCount() }
+    }
     val sortedTags = remember(tab.id, tagCounts) { tagCounts.entries.sortedByDescending { it.value }.map { it.key } }
 
     val tagFr = remember { FocusRequester() }
@@ -210,7 +214,7 @@ fun FilterPanel(
     var kwFieldFocused by remember { mutableStateOf(false) }
     LaunchedEffect(kwDisplay) {
         val snap = kwDisplay
-        kotlinx.coroutines.delay(150)
+        kotlinx.coroutines.delay(if (tab.largeFileMode) 350 else 150)
         if (snap == kwDisplay) { kwLastSent = kwDisplay; onSetKw(kwDisplay) }
     }
     LaunchedEffect(filter.kwText) { if (filter.kwText != kwLastSent) kwDisplay = filter.kwText }
@@ -225,7 +229,7 @@ fun FilterPanel(
     var msgRuleSelectedAction by remember { mutableStateOf(0) } // 0 = include, 1 = exclude
     LaunchedEffect(msgRuleInput) {
         val snap = msgRuleInput
-        kotlinx.coroutines.delay(120)
+        kotlinx.coroutines.delay(if (tab.largeFileMode) 350 else 120)
         if (snap == msgRuleInput) {
             msgRuleSearch = msgRuleInput
             msgRuleLastSent = msgRuleInput
@@ -342,15 +346,20 @@ fun FilterPanel(
     // ones (still respecting level/exclude filters, just not the tag/package restriction) —
     // so a search unrelated to the active filter still surfaces results instead of showing
     // nothing, making it easy to spot and then relax the filter if that's what's wanted.
-    val unifiedCandidates = remember(tab.id, filter, msgRuleSearch) {
+    val unifiedCandidates = remember(tab.id, tab.largeFileMode, filter, msgRuleSearch) {
         if (msgRuleSearch.isBlank()) {
             emptyList()
         } else {
+            val candidateEntries = if (tab.largeFileMode) {
+                tab.logData.asSequence().take(LARGE_FILE_CANDIDATE_SCAN_LIMIT).toList()
+            } else {
+                tab.logData
+            }
             val baseFilter = filter.copy(kwInTag = "", messageRules = emptyList(), pidTidFilter = "")
             val relaxedFilter = baseFilter.copy(activeTags = emptySet(), pkgPrefixes = emptySet())
             // PIDs only when the search looks like a number
             val pidCandidates = if (msgRuleSearch.any { it.isDigit() })
-                tab.logData
+                candidateEntries
                     .filter { entry -> passesFilter(entry, relaxedFilter) && entry.pid != 0 }
                     .map { it.pid.toString() }.distinct()
                     .filter { it.contains(msgRuleSearch) }
@@ -362,9 +371,9 @@ fun FilterPanel(
                 .filter { containsPattern(it.msg, msgRuleSearch, regex = filter.kwInTagRegex) }
                 .map { it.msg }
 
-            val inScopeMsgs = matchingMsgsOf(tab.logData.filter { passesFilter(it, baseFilter) })
+            val inScopeMsgs = matchingMsgsOf(candidateEntries.filter { passesFilter(it, baseFilter) })
             val outOfScopeMsgs = matchingMsgsOf(
-                tab.logData.filter { !passesFilter(it, baseFilter) && passesFilter(it, relaxedFilter) },
+                candidateEntries.filter { !passesFilter(it, baseFilter) && passesFilter(it, relaxedFilter) },
             )
 
             // In regex mode, lead with what the pattern actually matched (e.g. "avc.*denied"

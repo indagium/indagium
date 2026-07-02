@@ -5,6 +5,7 @@ import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
+import com.openlog.model.SavedFilter
 import com.openlog.ui.AppState
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.computeCrashSites
@@ -91,9 +92,44 @@ class ControlServer(private val appState: AppState, private val port: Int) {
             val q = queryParams(ex)
             getVisibleLines(q["tabId"] ?: "", q["limit"]?.toIntOrNull() ?: DEFAULT_VISIBLE_LIMIT, q["offset"]?.toIntOrNull() ?: 0)
         })
+        s.createContext("/selection", handler(GET, POST) { ex, body ->
+            if (ex.requestMethod == "GET") getSelection(queryParams(ex)["tabId"] ?: "")
+            else setSelection(body.str("tabId") ?: "", body.intList("lineIds") ?: emptyList())
+        })
         s.createContext("/toggle", handler(POST) { _, body -> toggleGroupRoute(body.str("tabId") ?: "", body.str("gid") ?: "") })
+        s.createContext("/expand-all", handler(POST) { _, body -> expandAllRoute(body.str("tabId") ?: "") })
+        s.createContext("/collapse-all", handler(POST) { _, body -> collapseAllRoute(body.str("tabId") ?: "") })
         s.createContext("/tags", handler(GET) { ex, _ -> getTags(queryParams(ex)["tabId"] ?: "") })
         s.createContext("/crashes", handler(GET) { ex, _ -> getCrashSites(queryParams(ex)["tabId"] ?: "") })
+        s.createContext("/annotations/note", handler(POST) { _, body ->
+            addTextNoteRoute(body.str("tabId") ?: "", body.str("text") ?: "", body.str("afterId"))
+        })
+        s.createContext("/annotations/log", handler(POST) { _, body ->
+            addLogNoteRoute(body.str("tabId") ?: "", body.intList("lineIds") ?: emptyList(), body.str("caption") ?: "")
+        })
+        s.createContext("/annotations/update", handler(POST) { _, body ->
+            updateAnnotationRoute(body.str("tabId") ?: "", body.str("blockId") ?: "", body.str("text") ?: "")
+        })
+        s.createContext("/annotations/move", handler(POST) { _, body ->
+            moveAnnotationRoute(body.str("tabId") ?: "", body.str("blockId") ?: "", body.int("delta") ?: 0)
+        })
+        s.createContext("/annotations/delete", handler(POST) { _, body ->
+            deleteAnnotationRoute(body.str("tabId") ?: "", body.str("blockId") ?: "")
+        })
+        s.createContext("/annotations/save", handler(POST) { _, body ->
+            saveAnnotationsRoute(body.str("tabId") ?: "", body.str("path") ?: "")
+        })
+        s.createContext("/annotations/load", handler(POST) { _, body ->
+            loadAnnotationsRoute(body.str("tabId") ?: "", body.str("path") ?: "")
+        })
+        s.createContext("/export/analysis", handler(POST) { _, body -> exportAnalysisRoute(body.str("tabId") ?: "", body.str("path") ?: "") })
+        s.createContext("/export/filtered", handler(POST) { _, body ->
+            exportFilteredRoute(body.str("tabId") ?: "", body.str("path") ?: "", body.str("format") ?: "txt")
+        })
+        s.createContext("/filter/presets", handler(GET) { _, _ -> listFilterPresets() })
+        s.createContext("/filter/apply-preset", handler(POST) { _, body ->
+            applyFilterPresetRoute(body.str("tabId") ?: "", body.str("presetId") ?: "")
+        })
         s.createContext("/merge", handler(POST) { _, body ->
             mergeTabsRoute(body.strList("tabIds") ?: emptyList(), body.str("newTabName") ?: "Merged")
         })
@@ -247,11 +283,38 @@ class ControlServer(private val appState: AppState, private val port: Int) {
             if (body.containsKey("activeTags")) {
                 body.strList("activeTags")?.let { result = result.copy(activeTags = it.toSet()) }
             }
+            if (body.containsKey("excludeTags")) {
+                body.strList("excludeTags")?.let { result = result.copy(excludeTags = it.toSet()) }
+            }
+            if (body.containsKey("pkgPrefixes")) {
+                body.strList("pkgPrefixes")?.let { result = result.copy(pkgPrefixes = it.toSet()) }
+            }
+            if (body.containsKey("excludePkgPrefixes")) {
+                body.strList("excludePkgPrefixes")?.let { result = result.copy(excludePkgPrefixes = it.toSet()) }
+            }
             if (body.containsKey("kwText")) {
                 body.str("kwText")?.let { result = result.copy(kwText = it) }
             }
             if (body.containsKey("kwRegex")) {
                 body.bool("kwRegex")?.let { result = result.copy(kwRegex = it) }
+            }
+            if (body.containsKey("excludeKw")) {
+                body.str("excludeKw")?.let { result = result.copy(excludeKw = it) }
+            }
+            if (body.containsKey("excludeKwRegex")) {
+                body.bool("excludeKwRegex")?.let { result = result.copy(excludeKwRegex = it) }
+            }
+            if (body.containsKey("kwInTag")) {
+                body.str("kwInTag")?.let { result = result.copy(kwInTag = it) }
+            }
+            if (body.containsKey("kwInTagRegex")) {
+                body.bool("kwInTagRegex")?.let { result = result.copy(kwInTagRegex = it) }
+            }
+            if (body.containsKey("pidTidFilter")) {
+                body.str("pidTidFilter")?.let { result = result.copy(pidTidFilter = it) }
+            }
+            if (body.containsKey("seqOn")) {
+                body.bool("seqOn")?.let { result = result.copy(seqOn = it) }
             }
             if (body.containsKey("mode")) {
                 body.str("mode")?.let { m -> runCatching { FilterMode.valueOf(m) }.getOrNull()?.let { result = result.copy(mode = it) } }
@@ -267,10 +330,99 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         return mapOf("totalCount" to items.size, "items" to items.drop(offset).take(limit).map { logItemToMap(it) })
     }
 
+    private fun getSelection(tabId: String): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        return mapOf("tabId" to tabId, "selected" to tab.selected.sorted())
+    }
+
+    private fun setSelection(tabId: String, lineIds: List<Int>): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val validIds = lineIds.distinct().filter { it in tab.rmap }.sorted()
+        appState.setSelectedRows(tabId, validIds)
+        return mapOf("ok" to true, "tabId" to tabId, "selected" to validIds)
+    }
+
     private fun toggleGroupRoute(tabId: String, gid: String): Map<String, Any?> {
         if (tabId.isBlank() || gid.isBlank()) return mapOf("error" to "missing tabId or gid")
         appState.toggleGroup(tabId, gid)
         return mapOf("ok" to true, "expanded" to (appState.tab(tabId)?.expanded?.contains(gid) ?: false))
+    }
+
+    private fun expandAllRoute(tabId: String): Map<String, Any?> {
+        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        appState.expandAll(tabId)
+        return mapOf("ok" to true, "expanded" to (appState.tab(tabId)?.expanded?.toList()?.sorted() ?: emptyList<String>()))
+    }
+
+    private fun collapseAllRoute(tabId: String): Map<String, Any?> {
+        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        appState.collapseAll(tabId)
+        return mapOf("ok" to true)
+    }
+
+    private fun addTextNoteRoute(tabId: String, text: String, afterId: String?): Map<String, Any?> {
+        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        val id = appState.addNoteBlock(tabId, text, afterId) ?: return mapOf("error" to "note was not created")
+        return mapOf("ok" to true, "blockId" to id)
+    }
+
+    private fun addLogNoteRoute(tabId: String, lineIds: List<Int>, caption: String): Map<String, Any?> {
+        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        val id = appState.addLogRefBlock(tabId, lineIds, caption) ?: return mapOf("error" to "log note was not created")
+        return mapOf("ok" to true, "blockId" to id)
+    }
+
+    private fun updateAnnotationRoute(tabId: String, blockId: String, text: String): Map<String, Any?> {
+        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        appState.updateBlock(tabId, blockId, text)
+        return mapOf("ok" to true)
+    }
+
+    private fun moveAnnotationRoute(tabId: String, blockId: String, delta: Int): Map<String, Any?> {
+        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        appState.moveBlock(tabId, blockId, delta)
+        return mapOf("ok" to true)
+    }
+
+    private fun deleteAnnotationRoute(tabId: String, blockId: String): Map<String, Any?> {
+        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        appState.removeBlock(tabId, blockId)
+        return mapOf("ok" to true)
+    }
+
+    private fun saveAnnotationsRoute(tabId: String, path: String): Map<String, Any?> {
+        if (path.isBlank()) return mapOf("error" to "missing path")
+        val ok = appState.saveAnnotationsTo(tabId, File(path))
+        return if (ok) mapOf("ok" to true, "path" to path) else mapOf("error" to "annotations were not saved")
+    }
+
+    private fun loadAnnotationsRoute(tabId: String, path: String): Map<String, Any?> {
+        if (path.isBlank()) return mapOf("error" to "missing path")
+        val ok = appState.loadAnnotationsFrom(tabId, File(path))
+        return if (ok) mapOf("ok" to true, "path" to path) else mapOf("error" to "annotations were not loaded")
+    }
+
+    private fun exportAnalysisRoute(tabId: String, path: String): Map<String, Any?> {
+        if (path.isBlank()) return mapOf("error" to "missing path")
+        val ok = appState.exportAnalysisTo(tabId, File(path))
+        return if (ok) mapOf("ok" to true, "path" to path) else mapOf("error" to "analysis was not exported")
+    }
+
+    private fun exportFilteredRoute(tabId: String, path: String, format: String): Map<String, Any?> {
+        if (path.isBlank()) return mapOf("error" to "missing path")
+        val csv = format.equals("csv", ignoreCase = true)
+        val ok = appState.exportFilteredTo(tabId, File(path), csv)
+        return if (ok) mapOf("ok" to true, "path" to path, "format" to if (csv) "csv" else "txt")
+        else mapOf("error" to "filtered log was not exported")
+    }
+
+    private fun listFilterPresets(): Map<String, Any?> =
+        mapOf("presets" to appState.savedFilters.map { filterPresetToMap(it) })
+
+    private fun applyFilterPresetRoute(tabId: String, presetId: String): Map<String, Any?> {
+        if (tabId.isBlank() || presetId.isBlank()) return mapOf("error" to "missing tabId or presetId")
+        return if (appState.loadFilterById(tabId, presetId)) mapOf("ok" to true)
+        else mapOf("error" to "no such tab or preset")
     }
 
     private fun getTags(tabId: String): Map<String, Any?> {
@@ -291,11 +443,18 @@ class ControlServer(private val appState: AppState, private val port: Int) {
     private fun filterToMap(f: Filter): Map<String, Any?> = mapOf(
         "levels" to f.levels.map { it.key.toString() },
         "activeTags" to f.activeTags.toList(),
-        "kwText" to f.kwText,
-        "kwRegex" to f.kwRegex,
-        "mode" to f.mode.name,
         "excludeTags" to f.excludeTags.toList(),
         "pkgPrefixes" to f.pkgPrefixes.toList(),
+        "excludePkgPrefixes" to f.excludePkgPrefixes.toList(),
+        "kwText" to f.kwText,
+        "kwRegex" to f.kwRegex,
+        "excludeKw" to f.excludeKw,
+        "excludeKwRegex" to f.excludeKwRegex,
+        "kwInTag" to f.kwInTag,
+        "kwInTagRegex" to f.kwInTagRegex,
+        "pidTidFilter" to f.pidTidFilter,
+        "seqOn" to f.seqOn,
+        "mode" to f.mode.name,
     )
 
     // Deliberately no `else` branch, so adding a new LogItem variant is a compile error here,
@@ -334,7 +493,19 @@ class ControlServer(private val appState: AppState, private val port: Int) {
     )
 
     private fun zipCandidateToMap(candidate: ZipLogCandidate): Map<String, Any?> = mapOf(
-        "entryPath" to candidate.entryPath, "displayName" to candidate.displayName, "sizeBytes" to candidate.sizeBytes,
+        "entryPath" to candidate.entryPath,
+        "displayName" to candidate.displayName,
+        "sizeBytes" to candidate.sizeBytes,
+        "kind" to candidate.kind.name,
+    )
+
+    private fun filterPresetToMap(preset: SavedFilter): Map<String, Any?> = mapOf(
+        "id" to preset.id,
+        "name" to preset.name,
+        "levels" to preset.levels.map { it.key.toString() },
+        "mode" to preset.mode.name,
+        "activeTags" to preset.activeTags.toList(),
+        "excludeTags" to preset.excludeTags.toList(),
     )
 
     private fun queryParams(exchange: HttpExchange): Map<String, String> =

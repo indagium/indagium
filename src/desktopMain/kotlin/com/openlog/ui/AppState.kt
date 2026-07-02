@@ -10,7 +10,9 @@ import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.buildFilteredCsv
 import com.openlog.utils.buildFilteredTxt
 import com.openlog.utils.buildMd
+import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
+import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.extractCandidate
 import com.openlog.utils.listLogcatCandidates
 import com.openlog.utils.mergeLogs
@@ -24,12 +26,23 @@ import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.io.File
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 
 private fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = data.associateBy { it.id }
+
+private fun buildLogAnalysis(data: List<LogEntry>): LogAnalysis {
+    val stackGroups = computeStackTraceGroups(data)
+    return LogAnalysis(
+        tagCounts = data.groupingBy { it.tag }.eachCount(),
+        stackTraceGroups = stackGroups,
+        crashSites = computeCrashSites(data, stackGroups),
+    )
+}
 
 fun mkTab(id: String, filename: String, logData: List<LogEntry>) = LogTab(
     id = id, filename = filename, logData = logData, rmap = mkRmap(logData),
     annotations = Annotations(prefix = "From $filename"),
+    analysis = buildLogAnalysis(logData),
 )
 
 fun emptyWorkspaceTab() = LogTab(
@@ -54,6 +67,7 @@ internal const val COMPARE_SPLIT_MAX = 0.8f
 internal const val MIN_PORT = 1
 internal const val MAX_PORT = 65535
 internal const val DEFAULT_MCP_PORT = 8991
+private const val LARGE_FILE_MODE_BYTES = 512L * 1024L * 1024L
 
 data class PendingSequenceStart(val text: String, val tag: String)
 
@@ -96,6 +110,7 @@ class AppState(
     private data class ActiveTail(val tailer: FileTailer, val job: Job)
 
     private val activeTails = mutableMapOf<String, ActiveTail>()
+    private val activeLoads = ConcurrentHashMap<String, Job>()
 
     // MCP/debug control server (see debug/ControlServer.kt) — same "private resource handle,
     // guarded start, idempotent stop" shape as activeTails above.
@@ -111,6 +126,7 @@ class AppState(
     var activeTabId by mutableStateOf("")
     var compareMode by mutableStateOf(false)
     var compareTabId by mutableStateOf("")
+    var loadingStatus by mutableStateOf<String?>(null)
 
     // ── Transient UI ─────────────────────────────────────────────────
     // True right after a keyboard-driven panel focus change (F6/Shift+F6, Cmd+1/2/3/F); set
@@ -170,6 +186,7 @@ class AppState(
     fun close() {
         ioJob.cancel() // also cancels every active FileTailer's Job — each is started on ioScope
         activeTails.clear()
+        activeLoads.clear()
         applyControlServerState(enabled = false, port = 0)
         synchronized(stateLock) {
             pendingLoads = 0
@@ -221,14 +238,16 @@ class AppState(
 
     fun unblockMcpClient(id: String) = controlServer?.unblockClient(id)
 
-    private fun beginLoading() = synchronized(stateLock) {
+    private fun beginLoading(status: String = "Loading file...") = synchronized(stateLock) {
         pendingLoads += 1
         isLoading = true
+        loadingStatus = status
     }
 
     private fun finishLoading() = synchronized(stateLock) {
         if (pendingLoads > 0) pendingLoads -= 1
         isLoading = pendingLoads > 0
+        if (!isLoading) loadingStatus = null
     }
 
     fun updateFilterVisible(visible: Boolean) {
@@ -667,6 +686,13 @@ class AppState(
         activeSavedFilterIds = activeSavedFilterIds + (tabId to sf.id)
     }
 
+    fun loadFilterById(tabId: String, presetId: String): Boolean {
+        val sf = savedFilters.find { it.id == presetId } ?: return false
+        if (tab(tabId) == null) return false
+        loadFilter(tabId, sf)
+        return true
+    }
+
     fun activeSavedFilterId(tabId: String): String? = activeSavedFilterIds[tabId]
 
     fun requestDeleteSF(id: String) {
@@ -923,14 +949,32 @@ class AppState(
     }
 
     fun addNoteBlock(tabId: String, afterId: String? = null) {
+        addNoteBlock(tabId, "", afterId)
+    }
+
+    fun addNoteBlock(tabId: String, text: String, afterId: String? = null): String? {
+        val id = "n${System.nanoTime()}"
         upAnn(tabId) { t ->
-            val note = AnnBlock.Note("n${System.currentTimeMillis()}", "")
+            val note = AnnBlock.Note(id, text)
             val blocks = t.annotations.blocks.toMutableList()
             val idx =
                 if (afterId != null) (blocks.indexOfFirst { it.id == afterId } + 1).coerceAtLeast(0) else blocks.size
             blocks.add(idx, note)
             t.copy(annotations = t.annotations.copy(blocks = blocks))
         }
+        return id.takeIf { tab(tabId)?.annotations?.blocks?.any { block -> block.id == id } == true }
+    }
+
+    fun addLogRefBlock(tabId: String, logIds: List<Int>, caption: String = ""): String? {
+        val t = tab(tabId) ?: return null
+        val cleanIds = logIds.distinct().sorted().filter { it in t.rmap }
+        if (cleanIds.isEmpty()) return null
+        val id = "r${System.nanoTime()}"
+        upAnn(tabId) { tab ->
+            val block = AnnBlock.LogRef(id = id, logIds = cleanIds, caption = caption)
+            tab.copy(annotations = tab.annotations.copy(blocks = tab.annotations.blocks + block))
+        }
+        return id
     }
 
     fun updateBlock(tabId: String, blockId: String, newText: String) = upAnn(tabId) { t ->
@@ -1092,12 +1136,20 @@ class AppState(
     }
 
     fun copySelectedLines(tabId: String) {
-        val t = tab(tabId) ?: return
-        val text = t.selected.sorted().mapNotNull { id -> t.rmap[id] }.joinToString("\n") { e ->
+        copySelectedLines(tabId, null)
+    }
+
+    fun copySelectedLines(tabId: String, explicitIds: Set<Int>?) {
+        copyToClipboard(selectedLinesText(tabId, explicitIds))
+    }
+
+    fun selectedLinesText(tabId: String, explicitIds: Set<Int>? = null): String {
+        val t = tab(tabId) ?: return ""
+        val ids = explicitIds ?: t.selected
+        return ids.sorted().mapNotNull { id -> t.rmap[id] }.joinToString("\n") { e ->
             val pid = if (e.pid > 0) "  ${e.pid.toString().padStart(5)} ${e.tid.toString().padStart(5)}" else ""
             "${e.ts}$pid  ${e.level.key}  ${e.tag}: ${e.msg}"
         }
-        copyToClipboard(text)
     }
 
     // ── Tab management ───────────────────────────────────────────────
@@ -1125,6 +1177,7 @@ class AppState(
     }
 
     fun closeTab(tabId: String) {
+        activeLoads.remove(tabId)?.cancel()
         activeTails.remove(tabId)?.job?.cancel()
         val next = tabs.filter { it.id != tabId }
         if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
@@ -1141,7 +1194,7 @@ class AppState(
         val sources = tabIds.mapNotNull { id -> tab(id)?.let { MergeSourceFile(it.filename, it.logData) } }
         if (sources.size < 2) return
         val n = tabCounter++
-        beginLoading()
+        beginLoading("Merging logs...")
         ioScope.launch {
             try {
                 val merged = mergeLogs(sources)
@@ -1196,12 +1249,21 @@ class AppState(
             val nextId = (t.logData.maxOfOrNull { it.id } ?: 0) + 1
             val newEntries = parseLogcatLines(newRawLines.asSequence(), startId = nextId)
             tabs = tabs.map { cur ->
-                if (cur.id == tabId) cur.copy(logData = cur.logData + newEntries, rmap = cur.rmap + mkRmap(newEntries)) else cur
+                if (cur.id == tabId) {
+                    val nextData = cur.logData + newEntries
+                    cur.copy(
+                        logData = nextData,
+                        rmap = cur.rmap + mkRmap(newEntries),
+                        analysis = buildLogAnalysis(nextData),
+                    )
+                } else {
+                    cur
+                }
             }
         }
     }
 
-    fun openFile(file: File) {
+    fun openFile(file: File): String? {
         val path = file.absolutePath
         recentFiles = (listOf(path) + recentFiles.filter { it != path }).take(30)
         recentMenuOpen = false
@@ -1210,26 +1272,36 @@ class AppState(
         // Switch to existing tab if this file is already open
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) {
-            activeTabId = existing.id; return
+            activeTabId = existing.id; return existing.id
         }
         val n = tabCounter++  // capture on calling thread before launching
+        val tabId = "t$n"
+        val largeFile = file.length() >= LARGE_FILE_MODE_BYTES
         beginLoading()
-        ioScope.launch {
+        val job = ioScope.launch(start = CoroutineStart.LAZY) {
             try {
                 val logData = runCatching { parser(file) }.getOrElse { emptyList() }
                 ensureActive()
                 val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
-                val t = mkTab("t$n", file.name, logData)
-                    .copy(sourcePath = path, annotations = Annotations(prefix = "$prefixLabel ${file.name}"))
+                val t = mkTab(tabId, file.name, logData)
+                    .copy(
+                        sourcePath = path,
+                        annotations = Annotations(prefix = "$prefixLabel ${file.name}"),
+                        largeFileMode = largeFile,
+                    )
                 synchronized(stateLock) {
                     ensureActive()
                     tabs = tabs + t
                     activeTabId = t.id
                 }
             } finally {
+                activeLoads.remove(tabId)
                 finishLoading()
             }
         }
+        activeLoads[tabId] = job
+        job.start()
+        return tabId
     }
 
     // A single candidate auto-opens (the common case — most bug reports bundle one logcat
@@ -1262,23 +1334,32 @@ class AppState(
             activateTab(existing.id); return
         }
         val n = tabCounter++
+        val tabId = "t$n"
+        val largeFile = candidate.sizeBytes >= LARGE_FILE_MODE_BYTES
         beginLoading()
-        ioScope.launch {
+        val job = ioScope.launch(start = CoroutineStart.LAZY) {
             try {
                 val logData = runCatching { extractCandidate(zipFile, candidate) }.getOrElse { emptyList() }
                 ensureActive()
                 val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
-                val t = mkTab("t$n", candidate.displayName, logData)
-                    .copy(sourcePath = path, annotations = Annotations(prefix = "$prefixLabel ${candidate.displayName}"))
+                val t = mkTab(tabId, candidate.displayName, logData)
+                    .copy(
+                        sourcePath = path,
+                        annotations = Annotations(prefix = "$prefixLabel ${candidate.displayName}"),
+                        largeFileMode = largeFile,
+                    )
                 synchronized(stateLock) {
                     ensureActive()
                     tabs = tabs + t
                     activeTabId = t.id
                 }
             } finally {
+                activeLoads.remove(tabId)
                 finishLoading()
             }
         }
+        activeLoads[tabId] = job
+        job.start()
     }
 
     // ── Copy / Save ──────────────────────────────────────────────────
@@ -1288,6 +1369,36 @@ class AppState(
 
     fun copyAnn(tabId: String) {
         tab(tabId)?.let { copyToClipboard(buildMd(it, settings)) }
+    }
+
+    fun exportAnalysisTo(tabId: String, file: File): Boolean {
+        val t = tab(tabId) ?: return false
+        return runCatching {
+            file.parentFile?.mkdirs()
+            file.writeText(buildMd(t, settings))
+        }.isSuccess
+    }
+
+    fun exportFilteredTo(tabId: String, file: File, csv: Boolean): Boolean {
+        val t = tab(tabId) ?: return false
+        return runCatching {
+            file.parentFile?.mkdirs()
+            file.writeText(if (csv) buildFilteredCsv(t) else buildFilteredTxt(t))
+        }.isSuccess
+    }
+
+    fun saveAnnotationsTo(tabId: String, file: File): Boolean {
+        val t = tab(tabId) ?: return false
+        return runCatching {
+            file.parentFile?.mkdirs()
+            file.writeText(t.annotations.annotationsToken())
+        }.isSuccess
+    }
+
+    fun loadAnnotationsFrom(tabId: String, file: File): Boolean {
+        val annotations = runCatching { file.readText().annotationsFromToken() }.getOrNull() ?: return false
+        upAnn(tabId) { t -> t.copy(annotations = annotations) }
+        return tab(tabId)?.annotations == annotations
     }
 
     fun saveAnalysis(tabId: String) {
@@ -2082,6 +2193,8 @@ private fun String.tabFromToken(): LogTab? = runCatching {
         showAnnMd = p[5].toBoolean(),
         manualBlocks = p[8].encodedList().mapNotNull { it.manualBlockFromToken() },
         sourcePath = sourcePath,
+        largeFileMode = sourceFile.length() >= LARGE_FILE_MODE_BYTES,
+        analysis = buildLogAnalysis(data),
     )
 }.getOrNull()
 

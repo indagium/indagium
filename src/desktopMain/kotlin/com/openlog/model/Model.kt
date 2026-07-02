@@ -62,6 +62,12 @@ enum class CrashKind { EXCEPTION, ANR }
 
 data class CrashSite(val id: String, val entry: LogEntry, val kind: CrashKind, val groupGid: String?)
 
+data class LogAnalysis(
+    val tagCounts: Map<String, Int> = emptyMap(),
+    val stackTraceGroups: List<StackTraceGroup> = emptyList(),
+    val crashSites: List<CrashSite> = emptyList(),
+)
+
 enum class ManualCollapseDirection { TO_START, TO_END }
 
 data class ManualCollapseBlock(
@@ -156,6 +162,8 @@ data class LogTab(
     val showAnnMd: Boolean = false,
     val manualBlocks: List<ManualCollapseBlock> = emptyList(),
     val sourcePath: String? = null,
+    val largeFileMode: Boolean = false,
+    val analysis: LogAnalysis = LogAnalysis(),
     // Live tailing (utils/FileTailer.kt) is a session-only feature — never persisted to autosave,
     // always resets to false on relaunch. The actual FileTailer/Job lives in a private map on
     // AppState (not here — not data-class-friendly), this field only drives the UI indicator.

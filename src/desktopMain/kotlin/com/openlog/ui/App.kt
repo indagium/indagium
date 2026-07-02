@@ -198,7 +198,11 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     Modifier.fillMaxSize().background(tc.bg.copy(alpha = 0.75f)),
                     contentAlignment = Alignment.Center,
                 ) {
-                    AppText("Loading file…", color = tc.ts, fontSize = 14.sp)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        AppText("Loading file…", color = tc.ts, fontSize = 14.sp)
+                        Spacer(Modifier.height(12.dp))
+                        IndeterminateLoadingLine(Modifier.width(180.dp))
+                    }
                 }
             }
 
@@ -266,7 +270,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             if (selCount > 1) {
                                 add(
                                     CtxMenuEntry.Action(Icons.Outlined.ContentCopy, "Copy $selCount selected lines") {
-                                        state.copySelectedLines(ctx.tabId); state.ctx = null
+                                        state.copySelectedLines(ctx.tabId, selectedIds); state.ctx = null
                                     },
                                 )
                             }
@@ -1161,7 +1165,7 @@ private fun FileView(
             onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
             onSelectAll = { state.selectAll(tab.id) },
             onClearSelection = { state.clearSelection(tab.id) },
-            onCopySelection = { state.copySelectedLines(tab.id) },
+            onCopySelection = { selectedIds -> state.copySelectedLines(tab.id, selectedIds) },
             navScrollMargin = state.settings.navScrollMargin,
             focusRequester = logViewerFr,
             onPanelFocusChanged = { focused ->
@@ -1306,7 +1310,7 @@ private fun CompareView(
                         onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
                         onSelectAll = { state.selectAll(leftTab.id) },
                         onClearSelection = { state.clearSelection(leftTab.id) },
-                        onCopySelection = { state.copySelectedLines(leftTab.id) },
+                        onCopySelection = { selectedIds -> state.copySelectedLines(leftTab.id, selectedIds) },
                         navScrollMargin = state.settings.navScrollMargin,
                         focusRequester = leftLogFr,
                         onPanelFocusChanged = { focused ->
@@ -1365,7 +1369,7 @@ private fun CompareView(
                         onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
                         onSelectAll = { state.selectAll(rightTab.id) },
                         onClearSelection = { state.clearSelection(rightTab.id) },
-                        onCopySelection = { state.copySelectedLines(rightTab.id) },
+                        onCopySelection = { selectedIds -> state.copySelectedLines(rightTab.id, selectedIds) },
                         navScrollMargin = state.settings.navScrollMargin,
                         focusRequester = rightLogFr,
                         onPanelFocusChanged = { focused ->

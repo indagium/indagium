@@ -108,6 +108,46 @@ server.registerTool(
 );
 
 server.registerTool(
+  "expand_all",
+  {
+    title: "Expand all collapsible groups",
+    description: "Expand every currently visible collapsible sequence/manual/stack-trace group in a tab.",
+    inputSchema: { tabId: z.string() },
+  },
+  async ({ tabId }) => jsonResult(await openlogClient.expandAll(tabId)),
+);
+
+server.registerTool(
+  "collapse_all",
+  {
+    title: "Collapse all groups",
+    description: "Collapse every expanded sequence/manual/stack-trace group in a tab.",
+    inputSchema: { tabId: z.string() },
+  },
+  async ({ tabId }) => jsonResult(await openlogClient.collapseAll(tabId)),
+);
+
+server.registerTool(
+  "select_lines",
+  {
+    title: "Select log lines",
+    description: "Replace a tab's current selected log line ids.",
+    inputSchema: { tabId: z.string(), lineIds: z.array(z.number().int()) },
+  },
+  async ({ tabId, lineIds }) => jsonResult(await openlogClient.selectLines(tabId, lineIds)),
+);
+
+server.registerTool(
+  "get_selection",
+  {
+    title: "Get selected lines",
+    description: "Return the selected log line ids for a tab.",
+    inputSchema: { tabId: z.string() },
+  },
+  async ({ tabId }) => jsonResult(await openlogClient.getSelection(tabId)),
+);
+
+server.registerTool(
   "get_tags",
   {
     title: "Get all tags",
@@ -126,6 +166,116 @@ server.registerTool(
     inputSchema: { tabId: z.string() },
   },
   async ({ tabId }) => jsonResult(await openlogClient.getCrashSites(tabId)),
+);
+
+server.registerTool(
+  "add_text_note",
+  {
+    title: "Add text note",
+    description: "Append a plain text analysis note block, optionally after an existing block id.",
+    inputSchema: { tabId: z.string(), text: z.string(), afterId: z.string().optional() },
+  },
+  async ({ tabId, text, afterId }) => jsonResult(await openlogClient.addTextNote(tabId, text, afterId)),
+);
+
+server.registerTool(
+  "add_log_note",
+  {
+    title: "Add log note",
+    description: "Append an annotation block referencing one or more log line ids.",
+    inputSchema: { tabId: z.string(), lineIds: z.array(z.number().int()).min(1), caption: z.string().optional() },
+  },
+  async ({ tabId, lineIds, caption }) => jsonResult(await openlogClient.addLogNote(tabId, lineIds, caption)),
+);
+
+server.registerTool(
+  "update_note_block",
+  {
+    title: "Update note block",
+    description: "Update a text note's text or a log note's caption.",
+    inputSchema: { tabId: z.string(), blockId: z.string(), text: z.string() },
+  },
+  async ({ tabId, blockId, text }) => jsonResult(await openlogClient.updateNoteBlock(tabId, blockId, text)),
+);
+
+server.registerTool(
+  "move_note_block",
+  {
+    title: "Move note block",
+    description: "Move an annotation block up or down by delta positions.",
+    inputSchema: { tabId: z.string(), blockId: z.string(), delta: z.number().int() },
+  },
+  async ({ tabId, blockId, delta }) => jsonResult(await openlogClient.moveNoteBlock(tabId, blockId, delta)),
+);
+
+server.registerTool(
+  "delete_note_block",
+  {
+    title: "Delete note block",
+    description: "Delete an annotation block by id.",
+    inputSchema: { tabId: z.string(), blockId: z.string() },
+  },
+  async ({ tabId, blockId }) => jsonResult(await openlogClient.deleteNoteBlock(tabId, blockId)),
+);
+
+server.registerTool(
+  "export_analysis",
+  {
+    title: "Export analysis",
+    description: "Write the tab's Markdown analysis to an absolute path.",
+    inputSchema: { tabId: z.string(), path: z.string() },
+  },
+  async ({ tabId, path }) => jsonResult(await openlogClient.exportAnalysis(tabId, path)),
+);
+
+server.registerTool(
+  "export_filtered_log",
+  {
+    title: "Export filtered log",
+    description: "Write the tab's current filtered log to an absolute path as txt or csv.",
+    inputSchema: { tabId: z.string(), path: z.string(), format: z.enum(["txt", "csv"]).default("txt") },
+  },
+  async ({ tabId, path, format }) => jsonResult(await openlogClient.exportFilteredLog(tabId, path, format)),
+);
+
+server.registerTool(
+  "save_annotations",
+  {
+    title: "Save annotations",
+    description: "Write the tab's .ann sidecar data to an absolute path.",
+    inputSchema: { tabId: z.string(), path: z.string() },
+  },
+  async ({ tabId, path }) => jsonResult(await openlogClient.saveAnnotations(tabId, path)),
+);
+
+server.registerTool(
+  "load_annotations",
+  {
+    title: "Load annotations",
+    description: "Load .ann sidecar data from an absolute path into a tab.",
+    inputSchema: { tabId: z.string(), path: z.string() },
+  },
+  async ({ tabId, path }) => jsonResult(await openlogClient.loadAnnotations(tabId, path)),
+);
+
+server.registerTool(
+  "list_filter_presets",
+  {
+    title: "List filter presets",
+    description: "List saved filter presets available in the running app.",
+    inputSchema: {},
+  },
+  async () => jsonResult(await openlogClient.listFilterPresets()),
+);
+
+server.registerTool(
+  "apply_filter_preset",
+  {
+    title: "Apply filter preset",
+    description: "Apply a saved filter preset to a tab by preset id.",
+    inputSchema: { tabId: z.string(), presetId: z.string() },
+  },
+  async ({ tabId, presetId }) => jsonResult(await openlogClient.applyFilterPreset(tabId, presetId)),
 );
 
 server.registerTool(
