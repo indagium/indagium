@@ -3,6 +3,7 @@
 package com.openlog.ui
 
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -580,7 +581,7 @@ fun LogViewer(
                     localAllSelected = request.logIds.toSet()
                     target.filteredEntryId?.let { filteredEntryId ->
                         val idx = items.indexOfFirst { logItemEntryId(it) == filteredEntryId }
-                        if (idx >= 0) filteredLazyState.animateScrollToItem(maxOf(0, idx - 2))
+                        if (idx >= 0) filteredLazyState.centerOnItem(idx)
                     }
                     target.originalEntryId?.let { originalEntryId ->
                         val originalTarget = originalExpansionAndIndexFor(originalEntryId)
@@ -588,11 +589,29 @@ fun LogViewer(
                             val (expanded, idx) = originalTarget
                             (expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
                             if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
-                            allLazyState.animateScrollToItem(maxOf(0, idx - 2))
+                            allLazyState.centerOnItem(idx)
                         }
                     }
                 }
                 onConsumeAnnotationNavigation(request.id)
+            }
+
+            // Fires once each time the split view is freshly opened (Compose disposes/recreates
+            // this whole branch on every showUnfiltered toggle, so LaunchedEffect(Unit) re-runs
+            // on every open) — centers both panels on whatever was already selected before
+            // Unfiltered was pressed, instead of leaving the selection wherever it happened to
+            // land in the preserved scroll position.
+            LaunchedEffect(Unit) {
+                val targetId = tab.selected.minOrNull() ?: return@LaunchedEffect
+                val filteredIdx = items.indexOfFirst { logItemEntryId(it) == targetId }
+                if (filteredIdx >= 0) filteredLazyState.centerOnItem(filteredIdx, animate = false)
+                val originalTarget = originalExpansionAndIndexFor(targetId)
+                if (originalTarget != null) {
+                    val (expanded, idx) = originalTarget
+                    (expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
+                    if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
+                    allLazyState.centerOnItem(idx, animate = false)
+                }
             }
 
             Column(
@@ -639,7 +658,7 @@ fun LogViewer(
                                     val (expanded, idx) = target
                                     (expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
                                     if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
-                                    allLazyState.animateScrollToItem(maxOf(0, idx - 2))
+                                    allLazyState.centerOnItem(idx)
                                 }
                             }
                         },
@@ -662,7 +681,7 @@ fun LogViewer(
                 if (target != null) {
                     target.filteredEntryId?.let { filteredEntryId ->
                         val idx = items.indexOfFirst { logItemEntryId(it) == filteredEntryId }
-                        if (idx >= 0) mainLazyState.animateScrollToItem(maxOf(0, idx - 2))
+                        if (idx >= 0) mainLazyState.centerOnItem(idx)
                     }
                 }
                 onConsumeAnnotationNavigation(request.id)
@@ -684,6 +703,20 @@ fun LogViewer(
 // animation produced a visible gap where the old row had already lost its highlight but the
 // new row hadn't scrolled into view yet. An immediate jump keeps the highlight continuously
 // visible across the scroll.
+// Centers `index` in the viewport instead of just scrolling it into view. Scrolling to a fixed
+// "-N rows" margin above the target (the old approach at every call site below) only approximates
+// centering and drifts whenever rows have different heights (a SeqHeader vs. a plain Row) or the
+// viewport is resized. Scrolling to the item first, then reading its actual measured
+// offset/size from layoutInfo and correcting with scrollBy, keeps it centered regardless.
+private suspend fun LazyListState.centerOnItem(index: Int, animate: Boolean = true) {
+    if (animate) animateScrollToItem(index) else scrollToItem(index)
+    val info = layoutInfo
+    val item = info.visibleItemsInfo.firstOrNull { it.index == index } ?: return
+    val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
+    val delta = (item.offset + item.size / 2 - viewportHeight / 2).toFloat()
+    if (delta != 0f) scrollBy(delta)
+}
+
 private fun scrollForCursor(lazyState: LazyListState, scope: CoroutineScope, targetItemsIdx: Int, margin: Int) {
     val visible = lazyState.layoutInfo.visibleItemsInfo
     if (visible.isEmpty()) {

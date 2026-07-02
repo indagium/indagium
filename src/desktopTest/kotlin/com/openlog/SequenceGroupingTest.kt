@@ -9,6 +9,7 @@ import com.openlog.model.LogTab
 import com.openlog.model.ManualCollapseBlock
 import com.openlog.model.ManualCollapseDirection
 import com.openlog.model.SequenceDef
+import com.openlog.ui.DANGER_RED
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeSeqGroups
 import kotlin.test.Test
@@ -328,6 +329,120 @@ class SequenceGroupingTest {
         assertEquals(listOf(2, 3), groups[0].plain)
         assertEquals(4, groups[1].rid)
         assertEquals(listOf(5, 6), groups[1].plain)
+    }
+
+    // ── Stack-trace / sequence interaction ─────────────────────────────────────
+
+    @Test
+    fun topLevelStackTraceChildRowsGetDangerRedGuideColor() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 100),
+            LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 100),
+        )
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(),
+            expanded = setOf("st_1"),
+        )
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val header = items.filterIsInstance<LogItem.StackTraceHeader>().single()
+        assertEquals(1, header.entry.id)
+        val row = items.filterIsInstance<LogItem.Row>().single()
+        assertEquals(2, row.entry.id)
+        assertEquals(DANGER_RED, row.groupColor)
+    }
+
+    @Test
+    fun unboundedSequenceNestsOverlappingCrashInsteadOfDroppingIt() {
+        // "burst" has no endMatchText, so per computeSeqGroups() it swallows everything up to the
+        // next start match (there is none here) or end-of-log as its own unstructured "plain"
+        // children — including the FATAL EXCEPTION block that follows, which has nothing to do
+        // with the sequence. The crash must still fold, just nested one level inside the sequence.
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "burst start", pid = 1),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "App", "plain content", pid = 1),
+            LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 1),
+            LogEntry(4, "10:00:00.300", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 1),
+        )
+        val seq = SequenceDef("burst", "burst start", priority = 1, color = Color.Blue, tag = "App")
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = listOf(seq)),
+            // Sequence expanded, nested crash still collapsed.
+            expanded = setOf("sg_burst_1"),
+        )
+
+        val items = computeItems(tab, applyFilter = true)
+
+        assertTrue(items.filterIsInstance<LogItem.SeqHeader>().any { it.entry.id == 1 })
+        assertEquals(listOf(2), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+        val nestedHeader = items.filterIsInstance<LogItem.StackTraceHeader>().single()
+        assertEquals(3, nestedHeader.entry.id)
+        assertEquals(1, nestedHeader.indent)
+        assertTrue(!nestedHeader.expanded)
+        assertEquals(1, nestedHeader.count)
+    }
+
+    @Test
+    fun expandingNestedStackTraceGroupShowsItsMemberRowOnce() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "burst start", pid = 1),
+            LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 1),
+            LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 1),
+        )
+        val seq = SequenceDef("burst", "burst start", priority = 1, color = Color.Blue, tag = "App")
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = listOf(seq)),
+            expanded = setOf("sg_burst_1", "st_2"),
+        )
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val nestedHeader = items.filterIsInstance<LogItem.StackTraceHeader>().single()
+        assertEquals(2, nestedHeader.entry.id)
+        assertTrue(nestedHeader.expanded)
+        val memberRow = items.filterIsInstance<LogItem.Row>().single()
+        assertEquals(3, memberRow.entry.id)
+        assertEquals(2, memberRow.indent)
+        assertEquals(DANGER_RED, memberRow.groupColor)
+    }
+
+    @Test
+    fun sequencesDisabledLeavesStackTraceFoldingUnaffected() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "burst start", pid = 1),
+            LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 1),
+            LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 1),
+        )
+        val seq = SequenceDef("burst", "burst start", priority = 1, color = Color.Blue, tag = "App")
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = listOf(seq), seqOn = false),
+        )
+
+        val items = computeItems(tab, applyFilter = true)
+
+        assertTrue(items.filterIsInstance<LogItem.SeqHeader>().isEmpty())
+        val header = items.filterIsInstance<LogItem.StackTraceHeader>().single()
+        assertEquals(2, header.entry.id)
+        assertEquals(0, header.indent)
+        assertTrue(!header.expanded)
+        assertEquals(listOf(1), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
     }
 
     @Test
