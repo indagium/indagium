@@ -131,6 +131,35 @@ class SequenceGroupingTest {
     }
 
     @Test
+    fun twoOccurrencesOfAnUnresolvedEndPatternAreSiblingsNotNested() {
+        // The def has an endMatchText, but it never actually appears anywhere in this log (e.g.
+        // the log was cut before the matching event happened). Both occurrences of the start
+        // pattern independently fail to find their own end and fall back — the fallback must stop
+        // each one at the next start match (same as if no end pattern were configured at all), not
+        // literal end-of-log: falling back to end-of-log for both would give them the exact same
+        // endExclusive, and parentByChild's containment check would then treat the second
+        // occurrence as nested inside the first purely because they share that coincidental
+        // fallback boundary, not because it's actually contained within it.
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Auth", "request started"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "com.app.Auth", "inside first"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "com.app.Auth", "request started"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "com.app.Auth", "inside second"),
+        )
+        val sequence = SequenceDef(
+            "auth-start", "request started", priority = 1, color = Color.Red, tag = "com.app.Auth",
+            endMatchText = "request finished",
+        )
+
+        val groups = computeSeqGroups(logs, listOf(sequence))
+
+        assertEquals(listOf(1, 3), groups.map { it.rid })
+        assertTrue(groups.all { it.nested.isEmpty() })
+        assertEquals(listOf(2), groups[0].plain)
+        assertEquals(listOf(4), groups[1].plain)
+    }
+
+    @Test
     fun manualCollapseToEndHidesRowsAfterAnchor() {
         val logs = listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "App", "before"),

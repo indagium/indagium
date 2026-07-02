@@ -704,8 +704,9 @@ fun LogViewer(
     }
 }
 
-private const val CENTER_ON_ITEM_RETRY_DELAY_MS = 16L
-private const val CENTER_ON_ITEM_MAX_ATTEMPTS = 5
+private const val CENTER_ON_ITEM_RETRY_DELAY_MS = 24L
+private const val CENTER_ON_ITEM_MAX_ATTEMPTS = 10
+private const val CENTER_ON_ITEM_TOLERANCE_PX = 2f
 
 // Centers `index` in the viewport instead of just scrolling it into view. Scrolling to a fixed
 // "-N rows" margin above the target (the old approach at every call site below) only approximates
@@ -713,25 +714,32 @@ private const val CENTER_ON_ITEM_MAX_ATTEMPTS = 5
 // viewport is resized. Scrolling to the item first, then reading its actual measured
 // offset/size from layoutInfo and correcting with scrollBy, keeps it centered regardless.
 //
-// Defaults to a non-animated jump: an *animated* scrollToItem lands the item top-aligned first
-// (that's as far as animateScrollToItem's own API goes) and only then can the centering
-// correction below run, which reads as two distinct, visibly separate motions — a smooth scroll
-// to the top followed by a sudden jump to center. Jumping straight there in one step avoids that.
+// Non-animated: an *animated* scrollToItem lands the item top-aligned first (that's as far as
+// animateScrollToItem's own API goes) and only then can the centering correction run, which reads
+// as two distinct, visibly separate motions — a smooth scroll to the top followed by a sudden
+// jump to center. Jumping straight there in one step avoids that.
 //
-// Retries reading layoutInfo a few times before giving up: right after a panel is freshly
-// composed (e.g. the instant the Unfiltered split view opens), the very first scroll can land
-// before that LazyColumn has completed its first real layout pass, so visibleItemsInfo may not
-// contain the target item yet on the first read.
-private suspend fun LazyListState.centerOnItem(index: Int, animate: Boolean = false) {
-    if (animate) animateScrollToItem(index) else scrollToItem(index)
+// Re-scrolls and re-measures on every retry rather than just re-reading stale layoutInfo: a panel
+// that's still settling its size (e.g. the instant the Unfiltered split view opens, before its
+// container has reported a real height) can report a transient, wrong viewport for a frame or two
+// — verifying the result against a tolerance and, if it's off, redoing the whole scroll against
+// whatever the viewport now measures, self-corrects once the layout actually stabilizes instead of
+// silently locking in a one-shot correction computed against bad data.
+private suspend fun LazyListState.centerOnItem(index: Int) {
     repeat(CENTER_ON_ITEM_MAX_ATTEMPTS) { attempt ->
+        scrollToItem(index)
         val info = layoutInfo
         val item = info.visibleItemsInfo.firstOrNull { it.index == index }
         if (item != null) {
             val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
             val delta = (item.offset + item.size / 2 - viewportHeight / 2).toFloat()
-            if (delta != 0f) scrollBy(delta)
-            return
+            if (kotlin.math.abs(delta) > CENTER_ON_ITEM_TOLERANCE_PX) scrollBy(delta)
+            val settled = layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+            if (settled != null) {
+                val settledViewport = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
+                val settledDelta = settled.offset + settled.size / 2 - settledViewport / 2
+                if (kotlin.math.abs(settledDelta) <= CENTER_ON_ITEM_TOLERANCE_PX) return
+            }
         }
         if (attempt < CENTER_ON_ITEM_MAX_ATTEMPTS - 1) kotlinx.coroutines.delay(CENTER_ON_ITEM_RETRY_DELAY_MS)
     }

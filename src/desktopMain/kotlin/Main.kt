@@ -54,7 +54,12 @@ fun main() {
             onDispose { appState.stopControlServerForShutdown() }
         }
         Window(
-            onCloseRequest = ::exitApplication,
+            // Autosave is debounced 400ms behind tab/filter/settings changes (see App.kt) — a
+            // change made shortly before closing the window would otherwise never get written,
+            // since exitApplication() tears down the whole composition (and that pending
+            // LaunchedEffect delay along with it) immediately. Flushing synchronously here first
+            // guarantees the latest state — including whatever filter was just set — survives.
+            onCloseRequest = { appState.autosaveNow(); exitApplication() },
             title = "openLog",
             icon = painterResource("icons/openlog.png"),
             state = windowState,

@@ -791,6 +791,39 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun autosaveRestoresActiveTagsKeywordAndLevelFilters() {
+        val dir = createTempDirectory("openlog-cache").toFile()
+        val logFile = File(dir, "test.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I App: hello\n")
+        }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        val tab = mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+            .copy(sourcePath = logFile.absolutePath)
+        state.tabs = listOf(tab)
+        state.activeTabId = "log"
+        state.upFlt("log") { f ->
+            f.copy(
+                activeTags = setOf("App", "Network"),
+                kwText = "boom",
+                kwRegex = true,
+                mode = FilterMode.KEYWORD,
+                levels = setOf(LogLevel.W, LogLevel.E),
+            )
+        }
+
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        val restoredFilter = restored.tabs.single().filter
+        assertEquals(setOf("App", "Network"), restoredFilter.activeTags)
+        assertEquals("boom", restoredFilter.kwText)
+        assertTrue(restoredFilter.kwRegex)
+        assertEquals(FilterMode.KEYWORD, restoredFilter.mode)
+        assertEquals(setOf(LogLevel.W, LogLevel.E), restoredFilter.levels)
+    }
+
+    @Test
     fun autosaveSkipsTabsWhoseSourceFileNoLongerExists() {
         val dir = createTempDirectory("openlog-cache").toFile()
         val logFile = File(dir, "test.log").apply {
