@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.CallMerge
 import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.LabelOff
 import androidx.compose.material.icons.outlined.ArrowDownward
@@ -49,7 +50,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -63,6 +66,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
+import com.openlog.debug.ConnectedClientInfo
 import com.openlog.generated.BuildInfo
 import com.openlog.model.*
 import java.awt.FileDialog
@@ -95,7 +99,11 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
             state.recentNotes,
         ) {
             kotlinx.coroutines.delay(400)
-            state.autosaveNow()
+            // Suppressed while any tab is actively tailing — a fast-growing logData would
+            // otherwise keep rewriting the whole autosave.cache every ~400ms for the tailing
+            // session's entire duration. stopTailing() explicitly autosaveNow()s once the tab
+            // settles, so nothing is lost, just deferred.
+            if (state.tabs.none { it.tailing }) state.autosaveNow()
         }
         LaunchedEffect(Unit) {
             runCatching { rootFocusRequester.requestFocus() }
@@ -109,8 +117,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     files.forEach { uri ->
                         runCatching {
                             val file = File(URI.create(uri))
-                            if (file.exists() && com.openlog.utils.isLikelyTextFile(file)) {
-                                state.openFile(file)
+                            when {
+                                !file.exists() -> {}
+                                com.openlog.utils.isZipFile(file) -> state.openZipFile(file)
+                                com.openlog.utils.isLikelyTextFile(file) -> state.openFile(file)
                             }
                         }
                     }
@@ -378,6 +388,62 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                 }
             }
 
+            // ── Tab context menu ───────────────────────────────────────
+            state.tabCtx?.let { tctx ->
+                val ttab = state.tab(tctx.tabId)
+                if (ttab != null) {
+                    BoxWithConstraints(
+                        Modifier.fillMaxSize().clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = { state.tabCtx = null },
+                        ),
+                    ) {
+                        // Only a tab backed by a real, currently-existing file can be tailed —
+                        // not a zip-extracted tab (sourcePath is a "zip!entry" pseudo-path, no
+                        // real file to watch) or a merged tab (sourcePath is null).
+                        val canTail = remember(ttab.sourcePath) {
+                            val p = ttab.sourcePath
+                            p != null && '!' !in p && File(p).isFile
+                        }
+                        val menuWidth = 200.dp
+                        val estimatedMenuHeight = if (canTail) 88.dp else 44.dp
+                        val x = tctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
+                        val y = tctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
+                        Column(
+                            Modifier.offset(x = x, y = y).width(menuWidth)
+                                .background(tc.p, RoundedCornerShape(7.dp))
+                                .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                ) {}
+                                .padding(vertical = 4.dp),
+                        ) {
+                            if (canTail) {
+                                CtxItem(
+                                    icon = Icons.Outlined.PlayArrow,
+                                    label = if (ttab.tailing) "Stop Live Watching" else "Start Live Watching",
+                                    onClick = {
+                                        if (ttab.tailing) state.stopTailing(ttab.id) else state.startTailing(ttab.id)
+                                        state.tabCtx = null
+                                    },
+                                )
+                            }
+                            CtxItem(
+                                icon = Icons.AutoMirrored.Outlined.CallMerge,
+                                label = "Merge…",
+                                onClick = {
+                                    state.mergeTabsPreselectedId = ttab.id
+                                    state.mergeTabsDialogOpen = true
+                                    state.tabCtx = null
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+
             // ── Add annotation dialog ─────────────────────────────────
             state.addAnnRequest?.let { req ->
                 val rows = req.logIds.mapNotNull { state.tab(req.sourceTabId)?.rmap?.get(it) }
@@ -577,6 +643,131 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                 }
             }
 
+            state.pendingZipPicker?.let { pending ->
+                var selected by remember(pending.zipFile) { mutableStateOf(emptySet<String>()) }
+                Dialog(
+                    onDismissRequest = { state.cancelZipPicker() },
+                    properties = DialogProperties(dismissOnClickOutside = false),
+                ) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(420.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Multiple log files found", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "\"${pending.zipFile.name}\" contains ${pending.candidates.size} candidate log files. " +
+                                "Choose which to open — each opens as its own tab.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 3,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                            pending.candidates.forEach { candidate ->
+                                CheckRow(
+                                    checked = candidate.entryPath in selected,
+                                    onToggle = {
+                                        selected = if (candidate.entryPath in selected) {
+                                            selected - candidate.entryPath
+                                        } else {
+                                            selected + candidate.entryPath
+                                        }
+                                    },
+                                ) {
+                                    AppText(candidate.entryPath, color = tc2.tx, fontSize = 11.sp, fontFamily = MONO,
+                                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton(
+                                "Open selected",
+                                active = selected.isNotEmpty(),
+                                enabled = selected.isNotEmpty(),
+                            ) {
+                                state.openZipEntries(pending.zipFile, pending.candidates.filter { it.entryPath in selected })
+                            }
+                            DialogActionButton("Cancel", active = false) { state.cancelZipPicker() }
+                        }
+                    }
+                }
+            }
+
+            if (state.mergeTabsDialogOpen) {
+                var selected by remember {
+                    mutableStateOf(state.mergeTabsPreselectedId?.let { setOf(it) } ?: emptySet())
+                }
+                var mergedName by remember { mutableStateOf("Merged") }
+
+                fun close() {
+                    state.mergeTabsDialogOpen = false
+                    state.mergeTabsPreselectedId = null
+                    selected = emptySet()
+                }
+                Dialog(
+                    onDismissRequest = { close() },
+                    properties = DialogProperties(dismissOnClickOutside = false),
+                ) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(420.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Merge tabs", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "Pick 2 or more open tabs to merge into one, interleaved by time-of-day.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 2,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                            state.tabs.forEach { candidateTab ->
+                                CheckRow(
+                                    checked = candidateTab.id in selected,
+                                    onToggle = {
+                                        selected = if (candidateTab.id in selected) {
+                                            selected - candidateTab.id
+                                        } else {
+                                            selected + candidateTab.id
+                                        }
+                                    },
+                                ) {
+                                    AppText(candidateTab.filename, color = tc2.tx, fontSize = 11.sp, fontFamily = MONO,
+                                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        InlineField(mergedName, { mergedName = it }, "Merged tab name…", Modifier.fillMaxWidth(), fontSize = 13.sp)
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton(
+                                "Merge",
+                                active = selected.size >= 2,
+                                enabled = selected.size >= 2,
+                            ) {
+                                state.mergeTabs(selected.toList(), mergedName.ifBlank { "Merged" })
+                                close()
+                            }
+                            DialogActionButton("Cancel", active = false) { close() }
+                        }
+                    }
+                }
+            }
+
             // ── Recent files popup ────────────────────────────────────
             if (state.recentMenuOpen && state.recentFiles.isNotEmpty()) {
                 BoxWithConstraints(
@@ -669,6 +860,13 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     properties = DialogProperties(usePlatformDefaultWidth = false),
                 ) {
                     KeyboardShortcutsDialog { state.shortcutsOpen = false }
+                }
+            }
+
+            // ── MCP connection info dialog ────────────────────────────
+            if (state.mcpInfoOpen) {
+                Dialog(onDismissRequest = { state.mcpInfoOpen = false }) {
+                    McpInfoDialog(state = state, port = state.settings.mcpControlPort) { state.mcpInfoOpen = false }
                 }
             }
         }
@@ -882,6 +1080,7 @@ private fun BoundFilterPanel(
         onImportFilters = { state.importFiltersFromFile() },
         onImportFiltersFromFiles = { files -> files.forEach { state.importFiltersFromFileAsync(it) } },
         onClearFilter = { state.requestClearFilter(tab.id) },
+        onNavigateCrash = { site -> state.requestCrashNavigation(tab.id, site.entry.id) },
         onUiStateChanged = { state.autosaveNow() },
         mostUsedTagLimit = state.settings.mostUsedTagLimit,
         filterListRows = state.settings.filterListRows,
@@ -955,6 +1154,8 @@ private fun FileView(
             onExpandAll = { state.expandAll(tab.id) },
             onCollapseAll = { state.collapseAll(tab.id) },
             onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
+            onExportTxt = { state.exportFilteredTxt(tab.id) },
+            onExportCsv = { state.exportFilteredCsv(tab.id) },
             scrollStateStore = state.logViewerScrollStateStore,
             annotationNavigationRequest = state.pendingAnnotationNavigation,
             onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
@@ -1098,6 +1299,8 @@ private fun CompareView(
                         onExpandAll = { state.expandAll(leftTab.id) },
                         onCollapseAll = { state.collapseAll(leftTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(leftTab.id) },
+                        onExportTxt = { state.exportFilteredTxt(leftTab.id) },
+                        onExportCsv = { state.exportFilteredCsv(leftTab.id) },
                         scrollStateStore = state.logViewerScrollStateStore,
                         annotationNavigationRequest = state.pendingAnnotationNavigation,
                         onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
@@ -1155,6 +1358,8 @@ private fun CompareView(
                         onExpandAll = { state.expandAll(rightTab.id) },
                         onCollapseAll = { state.collapseAll(rightTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(rightTab.id) },
+                        onExportTxt = { state.exportFilteredTxt(rightTab.id) },
+                        onExportCsv = { state.exportFilteredCsv(rightTab.id) },
                         scrollStateStore = state.logViewerScrollStateStore,
                         annotationNavigationRequest = state.pendingAnnotationNavigation,
                         onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
@@ -1246,10 +1451,13 @@ private fun TabBar(state: AppState) {
             val fd = FileDialog(null as Frame?, "Open Log File", FileDialog.LOAD)
             fd.setFilenameFilter { dir, name ->
                 val f = File(dir, name)
-                f.isDirectory || com.openlog.utils.isLikelyTextFile(f)
+                f.isDirectory || com.openlog.utils.isLikelyTextFile(f) || com.openlog.utils.isZipFile(f)
             }
             fd.isVisible = true
-            fd.file?.let { state.openFile(File(fd.directory, it)) }
+            fd.file?.let {
+                val f = File(fd.directory, it)
+                if (com.openlog.utils.isZipFile(f)) state.openZipFile(f) else state.openFile(f)
+            }
         }
         if (hasRecentFiles) {
             ToolbarBtn(
@@ -1477,6 +1685,7 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
                             dragging = isDragging,
                             onClick = { if (dragTabId == null) state.activateTab(tab.id) },
                             onClose = { state.closeTab(tab.id) },
+                            onCtxMenu = { x, y -> state.tabCtx = TabCtxMenuState(tab.id, x, y) },
                         )
                     }
                 }
@@ -1537,7 +1746,7 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
             .border(1.dp, tc.br, shape),
     ) {
         Column(
-            Modifier.verticalScroll(scroll).padding(24.dp),
+            Modifier.verticalScroll(scroll).padding(24.dp).padding(end = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(
@@ -1671,6 +1880,50 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 AppText("Preview: $previewLabel app.log", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
             }
 
+            SettingsSectionHeader("Automation")
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CompactSetting("MCP control server") {
+                    SegmentedControl(
+                        options = listOf("On", "Off"),
+                        selectedIndices = setOf(if (state.settings.mcpControlEnabled) 0 else 1),
+                        onToggle = { idx -> state.setMcpControlEnabled(idx == 0, state.settings.mcpControlPort) },
+                    )
+                }
+                CompactSetting("Port", horizontalAlignment = Alignment.End) {
+                    var portText by remember(state.settings.mcpControlPort) {
+                        mutableStateOf(state.settings.mcpControlPort.toString())
+                    }
+                    InlineField(
+                        portText,
+                        { v ->
+                            val digits = v.filter { it.isDigit() }.take(5)
+                            portText = digits
+                            digits.toIntOrNull()?.coerceIn(MIN_PORT, MAX_PORT)?.let { p ->
+                                if (state.settings.mcpControlEnabled) state.setMcpControlEnabled(true, p)
+                                else state.updateSettings { it.copy(mcpControlPort = p) }
+                            }
+                        },
+                        "8991",
+                        Modifier.width(72.dp),
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppText("Connection info", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                // Deliberately doesn't close Settings first — stacks on top instead, so closing
+                // this popup returns you to Settings rather than to the main window.
+                AppButton("Connection info…", onClick = { state.mcpInfoOpen = true }, variant = ButtonVariant.Secondary)
+            }
+
             SettingsSectionHeader("About")
             Row(
                 Modifier.fillMaxWidth(),
@@ -1678,7 +1931,9 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 AppText("Keyboard shortcuts", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                AppButton("Show shortcuts…", onClick = { onDismiss(); state.shortcutsOpen = true }, variant = ButtonVariant.Secondary)
+                // Deliberately doesn't close Settings first — stacks on top instead, so closing
+                // this popup returns you to Settings rather than to the main window.
+                AppButton("Show shortcuts…", onClick = { state.shortcutsOpen = true }, variant = ButtonVariant.Secondary)
             }
             Row(
                 Modifier.fillMaxWidth(),
@@ -1700,6 +1955,11 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
             }
         }
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scroll),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+            style = appScrollbarStyle(tc),
+        )
     }
 }
 
@@ -1709,6 +1969,159 @@ private fun SettingsSectionHeader(title: String) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(title, color = tc.ts, fontSize = 11.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         Divider()
+    }
+}
+
+private fun mcpConfigSnippet(port: Int): String = """
+    {
+      "mcpServers": {
+        "openlog-control": {
+          "command": "npx",
+          "args": ["tsx", "mcp-server/src/index.ts"],
+          "env": {
+            "OPENLOG_CONTROL_URL": "http://127.0.0.1:$port",
+            "OPENLOG_CLIENT_NAME": "my-tool"
+          }
+        }
+      }
+    }
+    """.trimIndent()
+
+private const val COPIED_FEEDBACK_MS = 1500L
+private const val CLIENT_POLL_INTERVAL_MS = 1500L
+private const val AGO_JUST_NOW_MS = 2_000L
+private const val MS_PER_SECOND = 1000L
+private const val MS_PER_MINUTE = 60_000L
+
+private fun agoLabel(lastSeenMs: Long): String {
+    val delta = System.currentTimeMillis() - lastSeenMs
+    return when {
+        delta < AGO_JUST_NOW_MS -> "just now"
+        delta < MS_PER_MINUTE -> "${delta / MS_PER_SECOND}s ago"
+        else -> "${delta / MS_PER_MINUTE}m ago"
+    }
+}
+
+@Composable
+private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
+    val tc = tc()
+    var showCopied by remember { mutableStateOf(false) }
+    LaunchedEffect(showCopied) {
+        if (showCopied) {
+            kotlinx.coroutines.delay(COPIED_FEEDBACK_MS)
+            showCopied = false
+        }
+    }
+    var clients by remember { mutableStateOf<List<ConnectedClientInfo>>(state.connectedMcpClients()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            clients = state.connectedMcpClients()
+            kotlinx.coroutines.delay(CLIENT_POLL_INTERVAL_MS)
+        }
+    }
+    Column(
+        Modifier.width(440.dp).background(tc.p, RoundedCornerShape(8.dp))
+            .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(20.dp),
+    ) {
+        AppText("MCP Connection Info", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(10.dp))
+        AppText("Base URL", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(3.dp))
+        AppText("http://127.0.0.1:$port", color = tc.ts, fontSize = 12.sp, fontFamily = MONO)
+        Spacer(Modifier.height(14.dp))
+        AppText(
+            "Any MCP client (Claude Code, Codex, or your own tooling) can connect using this " +
+                "server command:",
+            color = tc.td,
+            fontSize = 11.sp,
+            maxLines = 2,
+        )
+        Spacer(Modifier.height(8.dp))
+        Box(
+            Modifier.fillMaxWidth().background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM).padding(10.dp),
+        ) {
+            AppText("npx tsx mcp-server/src/index.ts", color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AppButton(
+                "Copy config for your MCP client",
+                onClick = {
+                    state.copyToClipboard(mcpConfigSnippet(port))
+                    showCopied = true
+                },
+            )
+            if (showCopied) {
+                Spacer(Modifier.width(8.dp))
+                AppText("Copied", color = tc.ac, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        AppText(
+            "A .mcp.json at the repo root already has this registered for tools that " +
+                "auto-discover it. For others, paste the copied snippet into their own MCP " +
+                "config — set OPENLOG_CLIENT_NAME to whatever you want that tool labelled as " +
+                "below.",
+            color = tc.td,
+            fontSize = 11.sp,
+            maxLines = 4,
+        )
+        Spacer(Modifier.height(14.dp))
+        AppText(
+            "Or skip MCP entirely and hit the JSON/HTTP endpoints directly:",
+            color = tc.td,
+            fontSize = 11.sp,
+            maxLines = 1,
+        )
+        Spacer(Modifier.height(8.dp))
+        Box(
+            Modifier.fillMaxWidth().background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM).padding(10.dp),
+        ) {
+            AppText("curl http://127.0.0.1:$port/tabs", color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
+        }
+        Spacer(Modifier.height(18.dp))
+        AppText("Connected clients", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(6.dp))
+        if (clients.isEmpty()) {
+            AppText(
+                "None right now — only tools using the OPENLOG_CLIENT_NAME/id headers above " +
+                    "show up here, so plain curl calls never appear.",
+                color = tc.td,
+                fontSize = 11.sp,
+                maxLines = 3,
+            )
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                clients.forEach { c ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column {
+                            AppText(c.name, color = tc.tx, fontSize = 11.sp)
+                            AppText(agoLabel(c.lastSeenMs), color = tc.td, fontSize = 10.sp)
+                        }
+                        AppButton(
+                            if (c.blocked) "Unblock" else "Block",
+                            isDanger = !c.blocked,
+                            onClick = {
+                                if (c.blocked) state.unblockMcpClient(c.id) else state.blockMcpClient(c.id)
+                                clients = state.connectedMcpClients()
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            DialogActionButton("Close", active = true, onClick = onDismiss)
+        }
     }
 }
 
@@ -1982,9 +2395,12 @@ private fun CompactSetting(
 private fun TabItem(
     tab: LogTab, isActive: Boolean, showClose: Boolean,
     dragging: Boolean = false, onClick: () -> Unit, onClose: () -> Unit,
+    onCtxMenu: (Float, Float) -> Unit = { _, _ -> },
 ) {
     val tc = tc()
+    val density = LocalDensity.current.density
     var hov by remember { mutableStateOf(false) }
+    var rowRoot by remember { mutableStateOf(Offset.Zero) }
     val accent = tc.ac
     Row(
         Modifier.fillMaxWidth().height(36.dp)
@@ -2000,12 +2416,42 @@ private fun TabItem(
                     )
                 }
             }
+            .onGloballyPositioned { rowRoot = it.positionInRoot() }
             .onPointerEvent(PointerEventType.Enter) { hov = true }
             .onPointerEvent(PointerEventType.Exit) { hov = false }
+            .pointerInput(tab.id) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val ev = awaitPointerEvent(PointerEventPass.Initial)
+                        if (ev.type == PointerEventType.Press && ev.buttons.isSecondaryPressed) {
+                            val ch = ev.changes.firstOrNull() ?: continue
+                            ch.consume()
+                            onCtxMenu((rowRoot.x + ch.position.x) / density, (rowRoot.y + ch.position.y) / density)
+                        }
+                    }
+                }
+            }
             .clickable(onClick = onClick).padding(start = 12.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
+        // Live tailing (utils/FileTailer.kt) is toggled from the tab's right-click context menu,
+        // not a clickable button here — this is purely an indicator, plain and non-interactive.
+        if (tab.tailing) {
+            TooltipArea(
+                tooltip = {
+                    Box(
+                        Modifier.background(tc.p2, RoundedCornerShape(4.dp))
+                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        AppText("Live tailing — watching file for new lines", color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                    }
+                },
+            ) {
+                AppText("●", color = DANGER_RED, fontSize = 10.sp)
+            }
+        }
         AppText(
             tab.filename,
             color = if (isActive || dragging) tc.tx else tc.ts,

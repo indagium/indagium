@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollbarAdapter
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -30,13 +31,18 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.*
 import com.openlog.utils.computeItems
 import com.openlog.utils.regexRanges
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
 private const val PAGE_JUMP_ROWS = 15
@@ -84,12 +90,14 @@ internal fun logItemEntryId(item: LogItem): Int = when (item) {
     is LogItem.Row -> item.entry.id
     is LogItem.SeqHeader -> item.entry.id
     is LogItem.ManualHeader -> item.entry.id
+    is LogItem.StackTraceHeader -> item.entry.id
 }
 
 internal fun logItemStableKey(tabId: String, item: LogItem): String = when (item) {
     is LogItem.Row -> "$tabId:r${item.entry.id}"
     is LogItem.SeqHeader -> "$tabId:h${item.gid}"
     is LogItem.ManualHeader -> "$tabId:m${item.gid}"
+    is LogItem.StackTraceHeader -> "$tabId:st${item.gid}"
 }
 
 class LogViewerScrollStateStore {
@@ -174,6 +182,8 @@ fun LogViewer(
     onExpandAll: () -> Unit,
     onCollapseAll: () -> Unit,
     onToggleUnfiltered: () -> Unit,
+    onExportTxt: () -> Unit,
+    onExportCsv: () -> Unit,
     scrollStateStore: LogViewerScrollStateStore? = null,
     annotationNavigationRequest: AnnotationNavigationRequest? = null,
     onConsumeAnnotationNavigation: (Long) -> Unit = {},
@@ -197,6 +207,7 @@ fun LogViewer(
             when (item) {
                 is LogItem.SeqHeader -> item.expanded
                 is LogItem.ManualHeader -> item.expanded
+                is LogItem.StackTraceHeader -> item.expanded
                 is LogItem.Row -> null
             }
         }
@@ -204,6 +215,7 @@ fun LogViewer(
     val canExpandAll = visibleGroupStates.any { !it }
     val canCollapseAll = visibleGroupStates.any { it }
     var toolbarIndex by remember(tab.id) { mutableStateOf<Int?>(null) }
+    var exportMenuOpen by remember(tab.id) { mutableStateOf(false) }
 
     // Row bounds for global drag-select (plain HashMap avoids recomposition on scroll updates)
     val rowBoundsAbs = remember { HashMap<Int, Pair<Float, Float>>() }
@@ -213,6 +225,7 @@ fun LogViewer(
     LaunchedEffect(tab.id) { rowBoundsAbs.clear() }
 
     fun toolbarActions(): List<Pair<Boolean, () -> Unit>> = listOf(
+        true to { exportMenuOpen = true },
         canExpandAll to onExpandAll,
         canCollapseAll to onCollapseAll,
         true to onToggleUnfiltered,
@@ -227,25 +240,41 @@ fun LogViewer(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Spacer(Modifier.width(12.dp))
+            Box {
+                AppButton(
+                    "Export ▾",
+                    onClick = { exportMenuOpen = true },
+                    modifier = Modifier.border(1.dp, if (toolbarIndex == 0) tc.ac else Color.Transparent, CORNER_MD),
+                )
+                if (exportMenuOpen) {
+                    ExportMenuPopup(
+                        onExportTxt = { exportMenuOpen = false; onExportTxt() },
+                        onExportCsv = { exportMenuOpen = false; onExportCsv() },
+                        onDismiss = { exportMenuOpen = false },
+                        tc = tc,
+                    )
+                }
+            }
+            Spacer(Modifier.width(8.dp))
             AppText("$visCnt / $totalCnt entries", color = tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
             AppButton(
                 "Expand all",
                 onClick = onExpandAll,
                 enabled = canExpandAll,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 0) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 1) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(4.dp))
             AppButton(
                 "Collapse all",
                 onClick = onCollapseAll,
                 enabled = canCollapseAll,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 1) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 2) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(4.dp))
             AppButton(
                 if (tab.showUnfiltered) "Hide original" else "Unfiltered",
                 onClick = onToggleUnfiltered,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 2) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 3) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(8.dp))
         }
@@ -440,6 +469,8 @@ fun LogViewer(
                                         SeqHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
                                     is LogItem.ManualHeader ->
                                         ManualHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
+                                    is LogItem.StackTraceHeader ->
+                                        StackTraceHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
                                 }
                             }
                             item(key = "tail-space") {
@@ -476,7 +507,12 @@ fun LogViewer(
 
             // Hoisted lazy state for the Original panel so the Filtered panel can scroll it.
             val allLazyState = scrollStates.lazyState("${tab.id}:original")
-            val filteredLazyState = scrollStates.lazyState("${tab.id}:filtered")
+            // Same key as the single-view panel below (":main") — both render the exact same
+            // `items` list, just in different layouts, so they must share one scroll state.
+            // Using a distinct ":filtered" key here used to reset to the top every time
+            // Unfiltered was toggled on, and lose whatever was scrolled in split view when
+            // toggled back off.
+            val filteredLazyState = scrollStates.lazyState("${tab.id}:main")
             val syncScope    = rememberCoroutineScope()
 
             fun originalExpansionAndIndexFor(entryId: Int): Pair<Set<String>, Int>? {
@@ -488,25 +524,29 @@ fun LogViewer(
                             is LogItem.Row -> item.entry.id == entryId
                             is LogItem.SeqHeader -> item.entry.id == entryId
                             is LogItem.ManualHeader -> item.entry.id == entryId
+                            is LogItem.StackTraceHeader -> item.entry.id == entryId
                         }
                     }
                     if (visibleIdx >= 0) return expanded to visibleIdx
                     val collapsedHeaders = candidateItems.mapNotNull { item ->
                         when (item) {
-                            is LogItem.SeqHeader -> item.gid.takeIf { !item.expanded }
-                            is LogItem.ManualHeader -> item.gid.takeIf { !item.expanded }
+                            is LogItem.SeqHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
+                            is LogItem.ManualHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
+                            is LogItem.StackTraceHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
                             is LogItem.Row -> null
                         }
                     }
-                    val groupToOpen = collapsedHeaders.firstOrNull { gid ->
+                    val ranked = rankCollapsedHeadersByProximity(collapsedHeaders, entryId)
+                    val groupToOpen = ranked.firstOrNull { gid ->
                         computeItems(tab.copy(expanded = expanded + gid), false).any { item ->
                             when (item) {
                                 is LogItem.Row -> item.entry.id == entryId
                                 is LogItem.SeqHeader -> item.entry.id == entryId
                                 is LogItem.ManualHeader -> item.entry.id == entryId
+                                is LogItem.StackTraceHeader -> item.entry.id == entryId
                             }
                         }
-                    } ?: collapsedHeaders.firstOrNull() ?: return null
+                    } ?: ranked.firstOrNull() ?: return null
                     expanded = expanded + groupToOpen
                 }
                 return null
@@ -542,7 +582,7 @@ fun LogViewer(
                     localAllSelected = request.logIds.toSet()
                     target.filteredEntryId?.let { filteredEntryId ->
                         val idx = items.indexOfFirst { logItemEntryId(it) == filteredEntryId }
-                        if (idx >= 0) filteredLazyState.animateScrollToItem(maxOf(0, idx - 2))
+                        if (idx >= 0) filteredLazyState.centerOnItem(idx)
                     }
                     target.originalEntryId?.let { originalEntryId ->
                         val originalTarget = originalExpansionAndIndexFor(originalEntryId)
@@ -550,11 +590,36 @@ fun LogViewer(
                             val (expanded, idx) = originalTarget
                             (expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
                             if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
-                            allLazyState.animateScrollToItem(maxOf(0, idx - 2))
+                            allLazyState.centerOnItem(idx)
                         }
                     }
                 }
                 onConsumeAnnotationNavigation(request.id)
+            }
+
+            // Fires once each time the split view is freshly opened (Compose disposes/recreates
+            // this whole branch on every showUnfiltered toggle, so LaunchedEffect(Unit) re-runs
+            // on every open) — centers both panels on whatever was already selected before
+            // Unfiltered was pressed, instead of leaving the selection wherever it happened to
+            // land in the preserved scroll position.
+            LaunchedEffect(Unit) {
+                val targetId = tab.selected.minOrNull() ?: return@LaunchedEffect
+                // containerH starts at 0 and only gets its real value from the split Column's
+                // own onGloballyPositioned, one or more frames after this branch first composes.
+                // Until then, effectiveSplitDp/weight(1f) size both panels off that placeholder
+                // 0 — a centerOnItem call landing before this settles computes its correction
+                // against that transient, too-small viewport and never gets a chance to redo it
+                // once the real (larger) size arrives, so it doesn't end up actually centered.
+                snapshotFlow { containerH }.first { it > 0f }
+                val originalTarget = originalExpansionAndIndexFor(targetId)
+                if (originalTarget != null) {
+                    val (expanded, idx) = originalTarget
+                    (expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
+                    if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
+                    allLazyState.centerOnItem(idx)
+                }
+                val filteredIdx = items.indexOfFirst { logItemEntryId(it) == targetId }
+                if (filteredIdx >= 0) filteredLazyState.centerOnItem(filteredIdx)
             }
 
             Column(
@@ -601,7 +666,7 @@ fun LogViewer(
                                     val (expanded, idx) = target
                                     (expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
                                     if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
-                                    allLazyState.animateScrollToItem(maxOf(0, idx - 2))
+                                    allLazyState.centerOnItem(idx)
                                 }
                             }
                         },
@@ -611,7 +676,7 @@ fun LogViewer(
                                 filteredSelection = ids.toSet(),
                             )
                         },
-                        panelKey = "${tab.id}:filtered",
+                        panelKey = "${tab.id}:main",
                         listState = filteredLazyState,
                     )
                 }
@@ -624,7 +689,7 @@ fun LogViewer(
                 if (target != null) {
                     target.filteredEntryId?.let { filteredEntryId ->
                         val idx = items.indexOfFirst { logItemEntryId(it) == filteredEntryId }
-                        if (idx >= 0) mainLazyState.animateScrollToItem(maxOf(0, idx - 2))
+                        if (idx >= 0) mainLazyState.centerOnItem(idx)
                     }
                 }
                 onConsumeAnnotationNavigation(request.id)
@@ -636,6 +701,48 @@ fun LogViewer(
             )
         }
     }
+}
+
+// Centers `index` in the viewport instead of just scrolling it into view. Scrolling to a fixed
+// "-N rows" margin above the target only approximates centering and drifts whenever rows have
+// different heights (a SeqHeader vs. a plain Row) or the viewport is resized.
+//
+// Deliberately avoids scrollBy() for the correction: scrollToItem(index) has one unambiguous,
+// documented effect — the given index lands at the very top of the viewport — but a follow-up
+// scrollBy(delta) computed from that turned out to move in the wrong direction in practice
+// (verified against screenshots: the target consistently ended up pinned at the *bottom* edge
+// instead of centered, and got worse the more it retried). Rather than re-guess scrollBy's sign
+// convention, this only ever calls scrollToItem: first on the real target to measure an actual
+// row height from whatever's now visible, then again on an *earlier* index offset back by roughly
+// half a viewport's worth of rows — since that earlier index lands at the top, the real target
+// naturally ends up near the middle. Approximate (row heights vary) but always in the right
+// direction, which a screen-relative correction was not.
+private suspend fun LazyListState.centerOnItem(index: Int) {
+    scrollToItem(index)
+    val info = layoutInfo
+    val visible = info.visibleItemsInfo
+    if (visible.isEmpty()) return
+    val avgRowHeight = visible.sumOf { it.size } / visible.size
+    if (avgRowHeight <= 0) return
+    val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
+    val rowsToHalfViewport = (viewportHeight / 2) / avgRowHeight
+    val anchorIndex = (index - rowsToHalfViewport).coerceAtLeast(0)
+    if (anchorIndex != index) scrollToItem(anchorIndex)
+}
+
+// Ranks collapsed-header candidates (gid to the header's own log entry id) by how likely each is
+// to actually contain `entryId`, cheapest test first. Sequences, nested sub-sequences, stack-trace
+// groups, and manual TO_END blocks all cover lines *after* their own header, so the nearest
+// preceding header is the most likely match; manual TO_START blocks are the one backward-covering
+// exception, so the nearest *following* header is tried next. This is a pure ordering hint, not a
+// filter — the caller still verifies each candidate and falls through the full list if the
+// top-ranked guess is wrong. On a real bug-report log with hundreds of collapsed groups, blindly
+// testing them in arbitrary order (the original approach) could mean thousands of expensive
+// recomputes to reveal one deeply-buried target — this typically finds the right one on the first
+// or second try instead.
+internal fun rankCollapsedHeadersByProximity(headers: List<Pair<String, Int>>, entryId: Int): List<String> {
+    val (preceding, following) = headers.partition { (_, headerId) -> headerId <= entryId }
+    return preceding.sortedByDescending { it.second }.map { it.first } + following.sortedBy { it.second }.map { it.first }
 }
 
 // Keeps `margin` rows of context visible around the cursor (like vim's scrolloff): the
@@ -905,6 +1012,16 @@ private fun LogRow(
             .padding(start = ROW_START_PAD + INDENT_STEP * item.indent, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Only merged tabs (utils/LogMerge.kt) ever set sourceTag — a small pinned (non-scrolling)
+        // badge naming which original file a row came from, since a merged tab otherwise gives no
+        // visual way to tell which buffer (main/system/crash/...) a given line was in.
+        entry.sourceTag?.let { tag ->
+            AppText(
+                tag, color = tc.td, fontSize = 9.sp, fontFamily = mono, maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 70.dp).padding(end = 4.dp),
+            )
+        }
         Box(Modifier.fillMaxWidth().horizontalScroll(hScroll)) {
             BasicTextField(
                 value         = TextFieldValue(annotatedString = annoLine, selection = sel),
@@ -1105,6 +1222,104 @@ private fun ManualHeaderRow(
     }
 }
 
+// Mirrors SeqHeaderRow — always-on, no backing SequenceDef/color to look up, so sc is fixed to
+// DANGER_RED (crash/exception semantics) rather than read from the item.
+@Composable
+private fun StackTraceHeaderRow(
+    item: LogItem.StackTraceHeader,
+    tab: LogTab,
+    mono: FontFamily,
+    tc: ThemeColors,
+    hScroll: ScrollState,
+    onSelRow: (Int, Boolean, Boolean) -> Unit,
+    onCtxMenu: (Int, Float, Float, String) -> Unit,
+    onToggleGroup: (String) -> Unit,
+    rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
+) {
+    val density = LocalDensity.current.density
+    val sc = DANGER_RED
+    val isSel = item.entry.id in tab.selected
+    var hov by remember { mutableStateOf(false) }
+    var rowRoot by remember { mutableStateOf(Offset.Zero) }
+    var lastClickMs by remember { mutableStateOf(0L) }
+    DisposableEffect(item.entry.id, rowBoundsAbs) {
+        onDispose { rowBoundsAbs.remove(item.entry.id) }
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(when {
+                isSel -> tc.sl
+                hov -> sc.copy(.15f)
+                else -> sc.copy(.07f)
+            })
+            .drawBehind {
+                val guideX = item.indent * INDENT_STEP.toPx()
+                drawRect(sc, topLeft = Offset(guideX, 0f), size = Size(4f, size.height))
+            }
+            .onGloballyPositioned { coords ->
+                val pos = coords.positionInRoot()
+                rowBoundsAbs[item.entry.id] = pos.y to (pos.y + coords.size.height)
+                rowRoot = pos
+            }
+            .pointerInput("st", tab.id, item.gid) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val ev = awaitPointerEvent(PointerEventPass.Initial)
+                        when (ev.type) {
+                            PointerEventType.Enter -> hov = true
+                            PointerEventType.Exit -> hov = false
+                            PointerEventType.Press -> {
+                                val mods = ev.keyboardModifiers
+                                when {
+                                    ev.buttons.isSecondaryPressed -> {
+                                        ev.changes.forEach { it.consume() }
+                                        val ch = ev.changes.firstOrNull() ?: continue
+                                        onCtxMenu(
+                                            item.entry.id,
+                                            (rowRoot.x + ch.position.x) / density,
+                                            (rowRoot.y + ch.position.y) / density,
+                                            "",
+                                        )
+                                    }
+                                    ev.buttons.isPrimaryPressed && (mods.isShiftPressed || mods.isCtrlPressed || mods.isMetaPressed) -> {
+                                        ev.changes.forEach { it.consume() }
+                                        onSelRow(item.entry.id, mods.isCtrlPressed || mods.isMetaPressed, mods.isShiftPressed)
+                                    }
+                                    ev.buttons.isPrimaryPressed -> {
+                                        val now = System.currentTimeMillis()
+                                        if (now - lastClickMs < 350) onToggleGroup(item.gid)
+                                        else onSelRow(item.entry.id, false, false)
+                                        lastClickMs = now
+                                    }
+                                }
+                            }
+                            else -> {}
+                        }
+                    }
+                }
+            }
+            .horizontalScroll(hScroll)
+            .widthIn(min = 2000.dp)
+            .padding(start = ROW_START_PAD + INDENT_STEP * item.indent, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            Modifier.size(24.dp).clickable { onToggleGroup(item.gid) },
+            contentAlignment = Alignment.Center,
+        ) {
+            AppText(if (item.expanded) "▼" else "▶", color = sc, fontSize = 14.sp, fontFamily = mono)
+        }
+        AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
+        AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
+            modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
+        AppText(item.entry.msg, color = sc, fontSize = 12.sp, fontFamily = mono, fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f), overflow = TextOverflow.Clip)
+        if (!item.expanded) AppText("${item.count} frames", color = sc.copy(.6f), fontSize = 11.sp)
+    }
+}
+
 @Composable
 private fun SectionBanner(label: String, color: Color, tc: ThemeColors) {
     Box(Modifier.fillMaxWidth().background(color.copy(.05f)).border(BorderStroke(1.dp, tc.br)).padding(horizontal = 12.dp, vertical = 3.dp)) {
@@ -1124,6 +1339,42 @@ private fun ColumnScope.EmptyState(tc: ThemeColors, totalCount: Int, onClear: ()
             AppText("No entries match current filters", color = tc.ts, fontSize = 13.sp)
             Spacer(Modifier.height(12.dp))
             PillBtn("Clear filters", active = true, onClick = onClear)
+        }
+    }
+}
+
+@Composable
+private fun ExportMenuPopup(
+    onExportTxt: () -> Unit,
+    onExportCsv: () -> Unit,
+    onDismiss: () -> Unit,
+    tc: ThemeColors,
+) {
+    val density = LocalDensity.current.density
+    Popup(
+        alignment = Alignment.TopStart,
+        offset = IntOffset(0, (34 * density).roundToInt()),
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        Column(
+            Modifier.width(160.dp)
+                .background(tc.p, RoundedCornerShape(7.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                .padding(vertical = 4.dp),
+        ) {
+            HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onExportTxt) {
+                AppText(
+                    "Filtered log as .txt", color = tc.tx, fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
+            HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onExportCsv) {
+                AppText(
+                    "Filtered log as .csv", color = tc.tx, fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
         }
     }
 }

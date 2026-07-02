@@ -791,6 +791,39 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun autosaveRestoresActiveTagsKeywordAndLevelFilters() {
+        val dir = createTempDirectory("openlog-cache").toFile()
+        val logFile = File(dir, "test.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I App: hello\n")
+        }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        val tab = mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+            .copy(sourcePath = logFile.absolutePath)
+        state.tabs = listOf(tab)
+        state.activeTabId = "log"
+        state.upFlt("log") { f ->
+            f.copy(
+                activeTags = setOf("App", "Network"),
+                kwText = "boom",
+                kwRegex = true,
+                mode = FilterMode.KEYWORD,
+                levels = setOf(LogLevel.W, LogLevel.E),
+            )
+        }
+
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        val restoredFilter = restored.tabs.single().filter
+        assertEquals(setOf("App", "Network"), restoredFilter.activeTags)
+        assertEquals("boom", restoredFilter.kwText)
+        assertTrue(restoredFilter.kwRegex)
+        assertEquals(FilterMode.KEYWORD, restoredFilter.mode)
+        assertEquals(setOf(LogLevel.W, LogLevel.E), restoredFilter.levels)
+    }
+
+    @Test
     fun autosaveSkipsTabsWhoseSourceFileNoLongerExists() {
         val dir = createTempDirectory("openlog-cache").toFile()
         val logFile = File(dir, "test.log").apply {
@@ -970,6 +1003,81 @@ class AppStateBehaviorTest {
 
         waitUntil { !state.isLoading }
         assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
+    fun mergeTabsCreatesANewTabInterleavedByTimeAndTaggedBySource() {
+        val dir = createTempDirectory("openlog-merge").toFile()
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.tabs = listOf(
+            mkTab(
+                "t1", "main.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "main first"),
+                    LogEntry(2, "10:00:02.000", LogLevel.I, "App", "main second"),
+                ),
+            ),
+            mkTab("t2", "system.log", listOf(LogEntry(1, "10:00:01.000", LogLevel.I, "Sys", "system first"))),
+        )
+
+        state.mergeTabs(listOf("t1", "t2"), "Merged Session")
+
+        waitUntil { state.tabs.size == 3 }
+        val merged = state.tabs.last()
+        assertEquals("Merged Session", merged.filename)
+        assertEquals(listOf("main first", "system first", "main second"), merged.logData.map { it.msg })
+        assertEquals(listOf(1, 2, 3), merged.logData.map { it.id })
+        assertEquals(listOf("main.log", "system.log", "main.log"), merged.logData.map { it.sourceTag })
+        assertEquals(state.activeTabId, merged.id)
+    }
+
+    @Test
+    fun mergeTabsWithFewerThanTwoValidTabIdsIsANoOp() {
+        val dir = createTempDirectory("openlog-merge").toFile()
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.tabs = listOf(mkTab("t1", "main.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+
+        state.mergeTabs(listOf("t1"), "Merged")
+
+        assertEquals(1, state.tabs.size)
+    }
+
+    @Test
+    fun startTailingAppendsNewLinesContinuingIdNumberingWithoutDuplicates() {
+        val dir = createTempDirectory("openlog-tailing").toFile()
+        val file = File(dir, "tail.log").apply { writeText("06-26 10:00:00.000  100  100 I App: first\n") }
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.openFile(file)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        val tabId = state.tabs.single().id
+        assertEquals(1, state.tab(tabId)!!.logData.size)
+
+        state.startTailing(tabId)
+        assertTrue(state.tab(tabId)!!.tailing)
+
+        file.appendText("06-26 10:00:01.000  100  100 I App: second\n")
+        waitUntil { state.tab(tabId)!!.logData.size == 2 }
+        file.appendText("06-26 10:00:02.000  100  100 I App: third\n")
+        waitUntil { state.tab(tabId)!!.logData.size == 3 }
+
+        val entries = state.tab(tabId)!!.logData
+        assertEquals(listOf(1, 2, 3), entries.map { it.id })
+        assertEquals(listOf("first", "second", "third"), entries.map { it.msg })
+        assertEquals(3, entries.map { it.id }.toSet().size)
+
+        state.stopTailing(tabId)
+        assertFalse(state.tab(tabId)!!.tailing)
+    }
+
+    @Test
+    fun startTailingIsANoOpForATabWithNoBackingFile() {
+        val dir = createTempDirectory("openlog-tailing").toFile()
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.tabs = listOf(mkTab("t1", "merged", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+
+        state.startTailing("t1")
+
+        assertFalse(state.tab("t1")!!.tailing)
     }
 
     @Test

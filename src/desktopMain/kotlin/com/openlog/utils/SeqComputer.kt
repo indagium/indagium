@@ -24,16 +24,24 @@ fun computeSeqGroups(logData: List<LogEntry>, defs: List<SequenceDef>): List<Seq
 
     data class Candidate(val idx: Int, val endExclusive: Int, val def: SequenceDef)
 
-    fun endExclusiveFor(idx: Int, def: SequenceDef): Int =
-        if (!def.endMatchText.isNullOrBlank()) {
-            val endIdx = (idx + 1 until logData.size).firstOrNull { matchesEnd(logData[it], def) }
-                ?: logData.lastIndex
-            endIdx + 1
-        } else {
-            (idx + 1 until logData.size).firstOrNull { nextIdx ->
-                enabled.any { matchesStart(logData[nextIdx], it) }
-            } ?: logData.size
-        }
+    // Same fallback for two different situations: no end pattern configured at all, and an end
+    // pattern that's configured but never actually appears in this log (e.g. the log was cut
+    // before the matching event, or it just never happened). Both stop at the next start match of
+    // any def, not literal end-of-log — if it fell through to end-of-log instead, two unrelated
+    // occurrences of the same def (each independently failing to find their own end) would land on
+    // the exact same fallback endExclusive, and parentByChild's `<=` comparison would then treat
+    // the later one as nested inside the earlier one purely by coincidence of a shared fallback,
+    // not because it's actually contained within it.
+    fun nextStartMatchOrEnd(idx: Int): Int =
+        (idx + 1 until logData.size).firstOrNull { nextIdx ->
+            enabled.any { matchesStart(logData[nextIdx], it) }
+        } ?: logData.size
+
+    fun endExclusiveFor(idx: Int, def: SequenceDef): Int {
+        if (def.endMatchText.isNullOrBlank()) return nextStartMatchOrEnd(idx)
+        val endIdx = (idx + 1 until logData.size).firstOrNull { matchesEnd(logData[it], def) }
+        return if (endIdx != null) endIdx + 1 else nextStartMatchOrEnd(idx)
+    }
 
     val candidates = logData.indices.mapNotNull { idx ->
         val def = enabled.firstOrNull { matchesStart(logData[idx], it) } ?: return@mapNotNull null

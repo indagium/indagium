@@ -24,7 +24,12 @@ data class LogEntry(
     val tag: String,
     val msg: String,
     val pid: Int = 0,
-    val tid: Int = 0
+    val tid: Int = 0,
+    // Set only by mergeLogs() (utils/LogMerge.kt) to badge which source file a merged-tab row
+    // came from. null everywhere else, including LogParser.parseLogcat's own output — appended
+    // last (not inserted earlier) so every existing positional LogEntry(...) construction across
+    // the test suite keeps compiling unchanged.
+    val sourceTag: String? = null,
 )
 
 // ── Sequences ──────────────────────────────────────────────────────
@@ -50,6 +55,12 @@ data class SeqGroup(
     val nested: List<NestedSeqGroup>,
     val defId: String
 )
+
+data class StackTraceGroup(val gid: String, val rid: Int, val memberIds: List<Int>)
+
+enum class CrashKind { EXCEPTION, ANR }
+
+data class CrashSite(val id: String, val entry: LogEntry, val kind: CrashKind, val groupGid: String?)
 
 enum class ManualCollapseDirection { TO_START, TO_END }
 
@@ -145,6 +156,10 @@ data class LogTab(
     val showAnnMd: Boolean = false,
     val manualBlocks: List<ManualCollapseBlock> = emptyList(),
     val sourcePath: String? = null,
+    // Live tailing (utils/FileTailer.kt) is a session-only feature — never persisted to autosave,
+    // always resets to false on relaunch. The actual FileTailer/Job lives in a private map on
+    // AppState (not here — not data-class-friendly), this field only drives the UI indicator.
+    val tailing: Boolean = false,
 )
 
 data class SavedFilter(
@@ -176,6 +191,11 @@ data class AppSettings(
     val numberAnnotationBlocks: Boolean = false,
     val annotationPrefixLabel: String = "From",
     val navScrollMargin: Int = 5,
+    // MCP/debug control server (see debug/ControlServer.kt). Settings-driven on/off — separate
+    // from the ephemeral OPENLOG_DEBUG_CONTROL env var / -Dopenlog.debugControl override, which
+    // never persists into this setting (see AppState.startControlServerForThisSessionOnly).
+    val mcpControlEnabled: Boolean = false,
+    val mcpControlPort: Int = 8991,
 )
 
 enum class ThemePreset(val label: String) {
@@ -213,6 +233,10 @@ data class CtxMenuState(
     val panelSelectedIds: Set<Int> = emptySet(),
 )
 
+// Right-click on a tab (not a log row) — deliberately separate from CtxMenuState, whose
+// entryId/selText/panelSelectedIds fields don't apply here.
+data class TabCtxMenuState(val tabId: String, val x: Float, val y: Float)
+
 // Request to open the add-annotation dialog
 data class AddAnnRequest(
     val targetTabId: String,
@@ -240,5 +264,15 @@ sealed class LogItem {
         val expanded: Boolean,
         val count: Int,
         val color: Color
+    ) : LogItem()
+
+    /** Auto-folded exception/stack-trace run (see utils/StackTraceComputer.kt) — always-on,
+     *  not user-configured, so unlike SeqHeader there's no backing def/color to look up. */
+    data class StackTraceHeader(
+        val entry: LogEntry,
+        val gid: String,
+        val indent: Int,
+        val expanded: Boolean,
+        val count: Int,
     ) : LogItem()
 }

@@ -2,6 +2,7 @@ package com.openlog.utils
 
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.*
+import com.openlog.ui.DANGER_RED
 import com.openlog.ui.SEQ_COLORS
 
 // Positive message/PID rules and the kwInTag live-search ADD matches on top of the base
@@ -108,58 +109,122 @@ private fun ruleScopeMatches(entry: LogEntry, rule: MessageRule): Boolean {
 private fun rulePatternMatches(entry: LogEntry, rule: MessageRule): Boolean =
     containsPattern(entry.msg, rule.pattern, rule.regex)
 
+// Single source of truth for "what counts as currently visible" — used by both computeItems()
+// (applyFilter = true, the normal rendering path) and log export, so a filtered export always
+// matches exactly what computeItems() would show before any collapse/expand folding.
+fun visibleEntries(tab: LogTab, applyFilter: Boolean = true): List<LogEntry> =
+    if (applyFilter) tab.logData.filter { passesFilter(it, tab.filter) } else tab.logData
+
 // Complexity is inherent: sequence detection, manual-collapse interleaving, and segment
 // iteration are all coupled — splitting them would require passing shared mutable state.
 @Suppress("CyclomaticComplexMethod")
 fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
     val sequences = tab.filter.sequences
-    // Filter first, then detect sequences in filtered data only
-    val data = if (applyFilter) tab.logData.filter { passesFilter(it, tab.filter) } else tab.logData
+    val data = visibleEntries(tab, applyFilter)
 
     fun sequenceItems(segment: List<LogEntry>): List<LogItem> {
         val seqGroups = if (tab.filter.seqOn && sequences.any { it.enabled })
             computeSeqGroups(segment, sequences)
         else emptyList()
 
-        if (seqGroups.isEmpty()) return segment.map { LogItem.Row(it, 0) }
+        // Stack-trace folding is always-on, independent of user-defined sequences. A sequence with
+        // no explicit end pattern can swallow everything up to the next start match (or
+        // end-of-log) as unstructured "plain" children — including an exception/ANR block that
+        // has nothing to do with the sequence. Render it nested one level inside the sequence's
+        // plain children *only while that sequence is already expanded* (a nice "this crash
+        // happened during X" grouping); otherwise render it as its own independent, always-visible
+        // collapsible block at the top level. Either way it's always present in the current item
+        // list without needing to expand anything new to reveal it — crash navigation never has
+        // to search for or blindly expand a group, which is what made it slow (and occasionally
+        // expand the wrong one) on a real log.
+        val allStackGroups = computeStackTraceGroups(segment)
+        val seqOwnerGidBySwallowedId = buildMap<Int, String> {
+            seqGroups.forEach { sg -> sg.plain.forEach { id -> put(id, sg.gid) } }
+        }
+        val stackGroups = allStackGroups.filter { g ->
+            val ownerGid = seqOwnerGidBySwallowedId[g.rid]
+            ownerGid == null || ownerGid !in tab.expanded
+        }
+        val nestedStackGroupByRid = (allStackGroups - stackGroups.toSet()).associateBy { it.rid }
+        val stackClaimedIds = buildSet<Int> { allStackGroups.forEach { add(it.rid); addAll(it.memberIds) } }
+
+        if (seqGroups.isEmpty() && stackGroups.isEmpty()) return segment.map { LogItem.Row(it, 0) }
 
         val defMap = sequences.associateBy { it.id }
-        val skipIds = buildSet<Int> {
+        val seqChildIds = buildSet<Int> {
             seqGroups.forEach { g ->
                 addAll(g.plain)
                 g.nested.forEach { ng -> add(ng.rid); addAll(ng.ch) }
             }
         }
+        val stackChildIds = buildSet<Int> { stackGroups.forEach { addAll(it.memberIds) } }
+        val skipIds = seqChildIds + stackChildIds
 
         val items = mutableListOf<LogItem>()
+
+        // A "plain" (unstructured) child of a sequence's swallowed range: usually just a bare Row,
+        // but if it's the root of a stack-trace group nested inside this (already-expanded)
+        // sequence, fold it as a nested StackTraceHeader instead — skipping its other member
+        // lines entirely, since they render inside that header's own expansion.
+        fun appendPlainChild(inner: LogEntry, outerColor: Color) {
+            val nestedStack = nestedStackGroupByRid[inner.id]
+            if (nestedStack != null) {
+                val nsExp = nestedStack.gid in tab.expanded
+                items += LogItem.StackTraceHeader(inner, nestedStack.gid, 1, nsExp, nestedStack.memberIds.size)
+                if (nsExp) {
+                    nestedStack.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 2, DANGER_RED) } }
+                }
+            } else if (inner.id !in stackClaimedIds) {
+                items += LogItem.Row(inner, 1, outerColor)
+            }
+        }
+
+        // An explicit nested sub-sequence within an expanded outer sequence's plain range —
+        // renders its own header, plus its children if it's also expanded (skipping any that
+        // belong to a stack-trace group, which renders independently elsewhere).
+        fun appendNestedSubSequence(entry: LogEntry, ng: NestedSeqGroup, outerColor: Color) {
+            val nestedColor = defMap[ng.defId]?.color ?: outerColor
+            val nexp = ng.gid in tab.expanded
+            items += LogItem.SeqHeader(entry, ng.gid, 1, nexp, ng.ch.size, nestedColor)
+            if (nexp) {
+                ng.ch.forEach { id -> if (id !in stackClaimedIds) tab.rmap[id]?.let { items += LogItem.Row(it, 2, nestedColor) } }
+            }
+        }
+
         for (entry in segment) {
             val sg = seqGroups.find { it.rid == entry.id }
-            if (sg != null) {
-                val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
-                val exp = sg.gid in tab.expanded
-                val outerColor = defMap[sg.defId]?.color ?: SEQ_COLORS.first()
-                items += LogItem.SeqHeader(entry, sg.gid, 0, exp, totalCh, outerColor)
-                if (exp) {
-                    val plainIds = sg.plain.toSet()
-                    val nestedByRoot = sg.nested.associateBy { it.rid }
-                    for (inner in segment) {
-                        if (inner.id in plainIds) {
-                            items += LogItem.Row(inner, 1, outerColor)
-                            continue
-                        }
-                        val ng = nestedByRoot[inner.id] ?: continue
-                        val nestedColor = defMap[ng.defId]?.color ?: outerColor
-                        val nexp = ng.gid in tab.expanded
-                        items += LogItem.SeqHeader(inner, ng.gid, 1, nexp, ng.ch.size, nestedColor)
-                        if (nexp) {
-                            ng.ch.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 2, nestedColor) } }
+            val stg = if (sg == null) stackGroups.find { it.rid == entry.id } else null
+            when {
+                sg != null -> {
+                    val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
+                    val exp = sg.gid in tab.expanded
+                    val outerColor = defMap[sg.defId]?.color ?: SEQ_COLORS.first()
+                    items += LogItem.SeqHeader(entry, sg.gid, 0, exp, totalCh, outerColor)
+                    if (exp) {
+                        val plainIds = sg.plain.toSet()
+                        val nestedByRoot = sg.nested.associateBy { it.rid }
+                        for (inner in segment) {
+                            if (inner.id in plainIds) {
+                                appendPlainChild(inner, outerColor)
+                                continue
+                            }
+                            val ng = nestedByRoot[inner.id] ?: continue
+                            appendNestedSubSequence(inner, ng, outerColor)
                         }
                     }
                 }
-                continue
+
+                stg != null -> {
+                    val exp = stg.gid in tab.expanded
+                    items += LogItem.StackTraceHeader(entry, stg.gid, 0, exp, stg.memberIds.size)
+                    if (exp) {
+                        stg.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 1, DANGER_RED) } }
+                    }
+                }
+
+                entry.id in skipIds -> Unit
+                else -> items += LogItem.Row(entry, 0)
             }
-            if (entry.id in skipIds) continue
-            items += LogItem.Row(entry, 0)
         }
         return items
     }
@@ -199,6 +264,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
                 )
 
                 is LogItem.SeqHeader -> item.copy(indent = item.indent + 1)
+                is LogItem.StackTraceHeader -> item.copy(indent = item.indent + 1)
                 is LogItem.ManualHeader -> item
             }
         }

@@ -38,6 +38,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.*
+import com.openlog.utils.computeCrashSites
+import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.containsPattern
 import com.openlog.utils.firstRegexMatch
 import com.openlog.utils.passesFilter
@@ -56,6 +58,7 @@ class FilterPanelUiState {
     var hlListExpanded      by mutableStateOf(true)
     var lvlExpanded         by mutableStateOf(true)
     var seqExpanded         by mutableStateOf(true)
+    var crashExpanded       by mutableStateOf(true)
     var sfExpanded          by mutableStateOf(true)
     var incPillsExpanded    by mutableStateOf(true)
     var incMsgPillsExpanded by mutableStateOf(true)
@@ -127,6 +130,7 @@ fun FilterPanel(
     onImportFilters: () -> Unit,
     onImportFiltersFromFiles: (List<File>) -> Unit,
     onClearFilter: () -> Unit,
+    onNavigateCrash: (CrashSite) -> Unit,
     onUiStateChanged: () -> Unit = {},
     mostUsedTagLimit: Int,
     filterListRows: Int,
@@ -139,6 +143,13 @@ fun FilterPanel(
     val tc = tc()
     val filter = tab.filter
     var panelFocused by remember { mutableStateOf(false) }
+
+    // Detected fresh from the whole (unfiltered) file every time it changes — this section is
+    // meant to be a complete inventory regardless of the active filter, matching computeItems()'s
+    // own "derive, don't cache" pattern.
+    val crashSites = remember(tab.logData) {
+        computeCrashSites(tab.logData, computeStackTraceGroups(tab.logData))
+    }
 
     // Tags sorted by frequency in log data; default suggestions come from user tag usage.
     val tagCounts  = remember(tab.id) { tab.logData.groupBy { it.tag }.mapValues { it.value.size } }
@@ -1206,6 +1217,40 @@ fun FilterPanel(
         }
         Divider()
 
+        // ── Crashes & ANRs ────────────────────────────────────────
+        // Same row-limit/collapse shape as Highlighters — always-on detection, not a user-defined
+        // list, so there's nothing to add/remove here, only to browse and jump from.
+        SectionHeader(
+            "Crashes",
+            trailing = if (crashSites.isNotEmpty()) ({
+                AppText("${crashSites.size}", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            }) else null,
+            expanded = fpState.crashExpanded,
+            onToggle = {
+                fpState.crashExpanded = !fpState.crashExpanded
+                onUiStateChanged()
+            },
+        )
+        if (fpState.crashExpanded) {
+            if (crashSites.isEmpty()) {
+                Column(
+                    Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    AppText("◆", color = tc.td.copy(.33f), fontSize = 18.sp)
+                    AppText("No exceptions or ANRs found", color = tc.td, fontSize = 10.sp, maxLines = 2)
+                }
+            } else {
+                BoundedScrollBox(minOf(crashSites.size, filterListRows), rowDp = 44) {
+                    crashSites.forEach { site ->
+                        CrashSiteRow(site, tc, onClick = { onNavigateCrash(site) })
+                    }
+                }
+            }
+        }
+        Divider()
+
         // ── Saved Filters ─────────────────────────────────────────
         SectionHeader("Saved filters", expanded = fpState.sfExpanded, onToggle = {
             fpState.sfExpanded = !fpState.sfExpanded
@@ -1297,6 +1342,47 @@ private fun BoundedScrollBox(
             modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
             style = appScrollbarStyle(tc()),
         )
+    }
+}
+
+private fun CrashSite.accentColor(): Color = when (kind) {
+    CrashKind.EXCEPTION -> DANGER_RED
+    CrashKind.ANR -> LogLevel.W.defaultColor
+}
+
+private fun CrashSite.kindLabel(): String = when (kind) {
+    CrashKind.EXCEPTION -> "Exception"
+    CrashKind.ANR -> "ANR"
+}
+
+@Composable
+private fun CrashSiteRow(
+    site: CrashSite,
+    tc: ThemeColors,
+    onClick: () -> Unit,
+) {
+    val accent = site.accentColor()
+    HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onClick) {
+        Column(
+            Modifier.fillMaxWidth()
+                .border(BorderStroke(1.dp, tc.br.copy(.4f)))
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Box(
+                    Modifier.background(accent.copy(.15f), CORNER_SM).border(1.dp, accent.copy(.4f), CORNER_SM)
+                        .padding(horizontal = 6.dp, vertical = 1.dp),
+                ) { AppText(site.kindLabel(), color = accent, fontSize = 9.sp, fontWeight = FontWeight.SemiBold) }
+                AppText(site.entry.ts, color = tc.td, fontSize = 9.sp, fontFamily = MONO)
+                AppText(site.entry.tag, color = tc.td, fontSize = 9.sp, fontFamily = MONO,
+                    modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+            }
+            AppText(
+                site.entry.msg, color = tc.tx, fontSize = 11.sp, fontFamily = MONO,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 3.dp),
+            )
+        }
     }
 }
 

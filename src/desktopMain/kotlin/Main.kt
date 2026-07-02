@@ -1,5 +1,6 @@
 @file:Suppress("DEPRECATION") // painterResource(String) — Compose resources Res class not generated for single-JVM-target projects
 
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.DpSize
@@ -36,8 +37,29 @@ fun main() {
     application {
         val windowState = rememberWindowState(size = DpSize(1440.dp, 900.dp))
         val appState = remember { AppState(restoreOnCreate = true) }
+        // Localhost-only automation control server for MCP/dev use (see debug/ControlServer.kt).
+        // AppState owns the actual server instance (see setMcpControlEnabled /
+        // startControlServerForThisSessionOnly) — this effect only decides the starting state:
+        // OPENLOG_DEBUG_CONTROL / -Dopenlog.debugControl, if set, wins and force-enables for this
+        // run only, without persisting; otherwise the restored/default Settings toggle applies.
+        // Packaged builds (packageDmg/packageDeb/packageMsi) set neither and default the setting
+        // off, so end users never have this listener running unless they explicitly enable it.
+        DisposableEffect(Unit) {
+            val envPort = System.getenv("OPENLOG_DEBUG_CONTROL")?.toIntOrNull()
+                ?: System.getProperty("openlog.debugControl")?.toIntOrNull()
+            when {
+                envPort != null -> appState.startControlServerForThisSessionOnly(envPort)
+                appState.settings.mcpControlEnabled -> appState.setMcpControlEnabled(true, appState.settings.mcpControlPort)
+            }
+            onDispose { appState.stopControlServerForShutdown() }
+        }
         Window(
-            onCloseRequest = ::exitApplication,
+            // Autosave is debounced 400ms behind tab/filter/settings changes (see App.kt) — a
+            // change made shortly before closing the window would otherwise never get written,
+            // since exitApplication() tears down the whole composition (and that pending
+            // LaunchedEffect delay along with it) immediately. Flushing synchronously here first
+            // guarantees the latest state — including whatever filter was just set — survives.
+            onCloseRequest = { appState.autosaveNow(); exitApplication() },
             title = "openLog",
             icon = painterResource("icons/openlog.png"),
             state = windowState,
