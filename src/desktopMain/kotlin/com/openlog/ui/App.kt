@@ -590,7 +590,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
 
             state.pendingZipPicker?.let { pending ->
                 var selected by remember(pending.zipFile) { mutableStateOf(emptySet<String>()) }
-                Dialog(onDismissRequest = { state.cancelZipPicker() }) {
+                Dialog(
+                    onDismissRequest = { state.cancelZipPicker() },
+                    properties = DialogProperties(dismissOnClickOutside = false),
+                ) {
                     val tc2 = tc()
                     Column(
                         Modifier.width(420.dp).background(tc2.p, RoundedCornerShape(8.dp))
@@ -624,7 +627,11 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             }
                         }
                         Spacer(Modifier.height(14.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             DialogActionButton(
                                 "Open selected",
                                 active = selected.isNotEmpty(),
@@ -646,7 +653,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     state.mergeTabsDialogOpen = false
                     selected = emptySet()
                 }
-                Dialog(onDismissRequest = { close() }) {
+                Dialog(
+                    onDismissRequest = { close() },
+                    properties = DialogProperties(dismissOnClickOutside = false),
+                ) {
                     val tc2 = tc()
                     Column(
                         Modifier.width(420.dp).background(tc2.p, RoundedCornerShape(8.dp))
@@ -681,7 +691,11 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         Spacer(Modifier.height(10.dp))
                         InlineField(mergedName, { mergedName = it }, "Merged tab name…", Modifier.fillMaxWidth(), fontSize = 13.sp)
                         Spacer(Modifier.height(14.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             DialogActionButton(
                                 "Merge",
                                 active = selected.size >= 2,
@@ -1001,6 +1015,7 @@ private fun BoundFilterPanel(
         onImportFilters = { state.importFiltersFromFile() },
         onImportFiltersFromFiles = { files -> files.forEach { state.importFiltersFromFileAsync(it) } },
         onClearFilter = { state.requestClearFilter(tab.id) },
+        onNavigateCrash = { site -> state.requestCrashNavigation(tab.id, site.entry.id) },
         onUiStateChanged = { state.autosaveNow() },
         mostUsedTagLimit = state.settings.mostUsedTagLimit,
         filterListRows = state.settings.filterListRows,
@@ -1074,6 +1089,8 @@ private fun FileView(
             onExpandAll = { state.expandAll(tab.id) },
             onCollapseAll = { state.collapseAll(tab.id) },
             onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
+            onExportTxt = { state.exportFilteredTxt(tab.id) },
+            onExportCsv = { state.exportFilteredCsv(tab.id) },
             scrollStateStore = state.logViewerScrollStateStore,
             annotationNavigationRequest = state.pendingAnnotationNavigation,
             onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
@@ -1087,16 +1104,6 @@ private fun FileView(
             },
             keyboardFocusVisible = state.keyboardFocusVisible,
         )
-        if (state.crashPanelVisible) {
-            HDivider { delta ->
-                state.updateCrashPanelWidth(state.crashPanelWidth - delta)
-            }
-            CrashPanel(
-                tab = tab,
-                width = state.crashPanelWidth,
-                onNavigate = { site -> state.requestCrashNavigation(tab.id, site.entry.id) },
-            )
-        }
         if (state.annotationVisible) {
             HDivider { delta ->
                 state.updateAnnotationPanelWidth(state.annotationPanelWidth - delta)
@@ -1118,8 +1125,6 @@ private fun FileView(
                 onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
                 onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
                 onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
-                onExportTxt = { state.exportFilteredTxt(tab.id) },
-                onExportCsv = { state.exportFilteredCsv(tab.id) },
                 width = state.annotationPanelWidth,
                 focusRequester = annotationFr,
                 onPanelFocusChanged = { focused ->
@@ -1229,6 +1234,8 @@ private fun CompareView(
                         onExpandAll = { state.expandAll(leftTab.id) },
                         onCollapseAll = { state.collapseAll(leftTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(leftTab.id) },
+                        onExportTxt = { state.exportFilteredTxt(leftTab.id) },
+                        onExportCsv = { state.exportFilteredCsv(leftTab.id) },
                         scrollStateStore = state.logViewerScrollStateStore,
                         annotationNavigationRequest = state.pendingAnnotationNavigation,
                         onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
@@ -1286,6 +1293,8 @@ private fun CompareView(
                         onExpandAll = { state.expandAll(rightTab.id) },
                         onCollapseAll = { state.collapseAll(rightTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(rightTab.id) },
+                        onExportTxt = { state.exportFilteredTxt(rightTab.id) },
+                        onExportCsv = { state.exportFilteredCsv(rightTab.id) },
                         scrollStateStore = state.logViewerScrollStateStore,
                         annotationNavigationRequest = state.pendingAnnotationNavigation,
                         onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
@@ -1321,8 +1330,6 @@ private fun CompareView(
                             onMoveBlock = { bid, d -> state.moveBlock(leftTab.id, bid, d) },
                             onAddNoteAfter = { state.addNoteBlock(leftTab.id, it) },
                             onNavigateLogRef = { state.requestAnnotationNavigation(leftTab.id, it) },
-                            onExportTxt = { state.exportFilteredTxt(leftTab.id) },
-                            onExportCsv = { state.exportFilteredCsv(leftTab.id) },
                             width = state.annotationPanelWidth,
                             focusRequester = annotationFr,
                             onPanelFocusChanged = { focused ->
@@ -1365,12 +1372,6 @@ private fun TabBar(state: AppState) {
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
         ) { state.updateAnnotationVisible(!state.annotationVisible) }
-        ToolbarBtn(
-            if (state.crashPanelVisible) "⊟ Crashes" else "⊞ Crashes",
-            active = state.crashPanelVisible,
-            modifier = Modifier.fillMaxHeight(),
-            shape = middleShape,
-        ) { state.updateCrashPanelVisible(!state.crashPanelVisible) }
         ToolbarBtn(
             if (state.compareMode) "⊟ Compare" else "⊠ Compare",
             active = state.compareMode,

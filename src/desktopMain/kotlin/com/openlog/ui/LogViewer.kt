@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollbarAdapter
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -30,13 +31,17 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.*
 import com.openlog.utils.computeItems
 import com.openlog.utils.regexRanges
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
 private const val PAGE_JUMP_ROWS = 15
@@ -176,6 +181,8 @@ fun LogViewer(
     onExpandAll: () -> Unit,
     onCollapseAll: () -> Unit,
     onToggleUnfiltered: () -> Unit,
+    onExportTxt: () -> Unit,
+    onExportCsv: () -> Unit,
     scrollStateStore: LogViewerScrollStateStore? = null,
     annotationNavigationRequest: AnnotationNavigationRequest? = null,
     onConsumeAnnotationNavigation: (Long) -> Unit = {},
@@ -207,6 +214,7 @@ fun LogViewer(
     val canExpandAll = visibleGroupStates.any { !it }
     val canCollapseAll = visibleGroupStates.any { it }
     var toolbarIndex by remember(tab.id) { mutableStateOf<Int?>(null) }
+    var exportMenuOpen by remember(tab.id) { mutableStateOf(false) }
 
     // Row bounds for global drag-select (plain HashMap avoids recomposition on scroll updates)
     val rowBoundsAbs = remember { HashMap<Int, Pair<Float, Float>>() }
@@ -216,6 +224,7 @@ fun LogViewer(
     LaunchedEffect(tab.id) { rowBoundsAbs.clear() }
 
     fun toolbarActions(): List<Pair<Boolean, () -> Unit>> = listOf(
+        true to { exportMenuOpen = true },
         canExpandAll to onExpandAll,
         canCollapseAll to onCollapseAll,
         true to onToggleUnfiltered,
@@ -230,25 +239,41 @@ fun LogViewer(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Spacer(Modifier.width(12.dp))
+            Box {
+                AppButton(
+                    "Export ▾",
+                    onClick = { exportMenuOpen = true },
+                    modifier = Modifier.border(1.dp, if (toolbarIndex == 0) tc.ac else Color.Transparent, CORNER_MD),
+                )
+                if (exportMenuOpen) {
+                    ExportMenuPopup(
+                        onExportTxt = { exportMenuOpen = false; onExportTxt() },
+                        onExportCsv = { exportMenuOpen = false; onExportCsv() },
+                        onDismiss = { exportMenuOpen = false },
+                        tc = tc,
+                    )
+                }
+            }
+            Spacer(Modifier.width(8.dp))
             AppText("$visCnt / $totalCnt entries", color = tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
             AppButton(
                 "Expand all",
                 onClick = onExpandAll,
                 enabled = canExpandAll,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 0) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 1) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(4.dp))
             AppButton(
                 "Collapse all",
                 onClick = onCollapseAll,
                 enabled = canCollapseAll,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 1) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 2) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(4.dp))
             AppButton(
                 if (tab.showUnfiltered) "Hide original" else "Unfiltered",
                 onClick = onToggleUnfiltered,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 2) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 3) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(8.dp))
         }
@@ -1240,6 +1265,42 @@ private fun ColumnScope.EmptyState(tc: ThemeColors, totalCount: Int, onClear: ()
             AppText("No entries match current filters", color = tc.ts, fontSize = 13.sp)
             Spacer(Modifier.height(12.dp))
             PillBtn("Clear filters", active = true, onClick = onClear)
+        }
+    }
+}
+
+@Composable
+private fun ExportMenuPopup(
+    onExportTxt: () -> Unit,
+    onExportCsv: () -> Unit,
+    onDismiss: () -> Unit,
+    tc: ThemeColors,
+) {
+    val density = LocalDensity.current.density
+    Popup(
+        alignment = Alignment.TopStart,
+        offset = IntOffset(0, (34 * density).roundToInt()),
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        Column(
+            Modifier.width(160.dp)
+                .background(tc.p, RoundedCornerShape(7.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                .padding(vertical = 4.dp),
+        ) {
+            HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onExportTxt) {
+                AppText(
+                    "Filtered log as .txt", color = tc.tx, fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
+            HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onExportCsv) {
+                AppText(
+                    "Filtered log as .csv", color = tc.tx, fontSize = 11.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
         }
     }
 }

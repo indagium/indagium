@@ -48,8 +48,6 @@ internal const val ANNOTATION_PANEL_MIN_WIDTH = 360f
 internal const val ANNOTATION_PANEL_MAX_WIDTH = 500f
 internal const val FILTER_PANEL_MIN_WIDTH = 140f
 internal const val FILTER_PANEL_MAX_WIDTH = 420f
-internal const val CRASH_PANEL_MIN_WIDTH = 280f
-internal const val CRASH_PANEL_MAX_WIDTH = 420f
 internal const val COMPARE_SPLIT_MIN = 0.2f
 internal const val COMPARE_SPLIT_MAX = 0.8f
 
@@ -76,10 +74,8 @@ class AppState(
     // ── Layout ──────────────────────────────────────────────────────
     var filterVisible by mutableStateOf(true)
     var annotationVisible by mutableStateOf(true)
-    var crashPanelVisible by mutableStateOf(false)
     var filterPanelWidth by mutableStateOf(220f)
     var annotationPanelWidth by mutableStateOf(ANNOTATION_PANEL_MIN_WIDTH)
-    var crashPanelWidth by mutableStateOf(CRASH_PANEL_MIN_WIDTH)
     var compareSplit by mutableStateOf(0.5f)
     var compareFilterRight by mutableStateOf(true)
     var isLoading by mutableStateOf(false)
@@ -188,12 +184,6 @@ class AppState(
         autosaveNow()
     }
 
-    fun updateCrashPanelVisible(visible: Boolean) {
-        if (crashPanelVisible == visible) return
-        crashPanelVisible = visible
-        autosaveNow()
-    }
-
     fun updateCompareMode(enabled: Boolean) {
         if (compareMode == enabled) return
         compareMode = enabled
@@ -222,13 +212,6 @@ class AppState(
         val next = width.coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
         if (annotationPanelWidth == next) return
         annotationPanelWidth = next
-        autosaveNow()
-    }
-
-    fun updateCrashPanelWidth(width: Float) {
-        val next = width.coerceIn(CRASH_PANEL_MIN_WIDTH, CRASH_PANEL_MAX_WIDTH)
-        if (crashPanelWidth == next) return
-        crashPanelWidth = next
         autosaveNow()
     }
 
@@ -1770,8 +1753,6 @@ private fun AppState.compareStateToken(): String = tokenFields(
     filterPanelWidth.toString(),
     annotationPanelWidth.toString(),
     compareSplit.toString(),
-    crashPanelVisible.toString(),
-    crashPanelWidth.toString(),
 )
 
 private fun AppState.restoreCompareState(token: String) {
@@ -1785,8 +1766,6 @@ private fun AppState.restoreCompareState(token: String) {
     filterPanelWidth = p[5].toFloatOrNull() ?: filterPanelWidth
     annotationPanelWidth = (p[6].toFloatOrNull() ?: annotationPanelWidth).coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
     compareSplit = p[7].toFloatOrNull() ?: compareSplit
-    crashPanelVisible = p.getOrNull(8)?.toBooleanStrictOrNull() ?: crashPanelVisible
-    crashPanelWidth = (p.getOrNull(9)?.toFloatOrNull() ?: crashPanelWidth).coerceIn(CRASH_PANEL_MIN_WIDTH, CRASH_PANEL_MAX_WIDTH)
 }
 
 private fun FilterPanelUiState.filterPanelToken(): String = tokenFields(
@@ -1797,6 +1776,7 @@ private fun FilterPanelUiState.filterPanelToken(): String = tokenFields(
     incPillsExpanded.toString(),
     incMsgPillsExpanded.toString(),
     excMsgPillsExpanded.toString(),
+    crashExpanded.toString(),
 )
 
 private fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
@@ -1809,6 +1789,7 @@ private fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
     incPillsExpanded = p[4].toBoolean()
     incMsgPillsExpanded = p[5].toBoolean()
     excMsgPillsExpanded = p[6].toBoolean()
+    crashExpanded = p.getOrNull(7)?.toBooleanStrictOrNull() ?: crashExpanded
 }
 
 private fun AppState.activeFilterMapToken(): String =
