@@ -39,14 +39,23 @@ fun parseLogcat(file: File): List<LogEntry> =
 // optionally continuing a tab's existing id counter rather than restarting at 1.
 fun parseLogcatLines(lines: Sequence<String>, startId: Int = 1): List<LogEntry> {
     var id = startId
+    // A multi-GB logcat has millions of lines but only a handful of distinct tags — interning
+    // them collapses millions of duplicate Strings into shared references (hundreds of MB saved).
+    val tagCache = HashMap<String, String>()
+
+    fun intern(tag: String): String = tagCache.getOrPut(tag) { tag }
+
     return lines.mapNotNull { raw ->
         val line = raw.trim()
         if (line.isEmpty() || line.startsWith("-----")) return@mapNotNull null
 
+        parseThreadtimeFast(line)?.let { p ->
+            return@mapNotNull LogEntry(id++, p.ts, p.level, intern(p.tag), p.msg, pid = p.pid, tid = p.tid)
+        }
         RE_THREADTIME.matchEntire(line)?.let { m ->
             return@mapNotNull LogEntry(
                 id++, m.groupValues[1].substringAfter(' '),
-                LogLevel.from(m.groupValues[4][0]), m.groupValues[5].trim(), m.groupValues[6],
+                LogLevel.from(m.groupValues[4][0]), intern(m.groupValues[5].trim()), m.groupValues[6],
                 pid = m.groupValues[2].toIntOrNull() ?: 0,
                 tid = m.groupValues[3].toIntOrNull() ?: 0,
             )
@@ -54,20 +63,110 @@ fun parseLogcatLines(lines: Sequence<String>, startId: Int = 1): List<LogEntry> 
         RE_TIME.matchEntire(line)?.let { m ->
             return@mapNotNull LogEntry(
                 id++, m.groupValues[1].substringAfter(' '),
-                LogLevel.from(m.groupValues[2][0]), m.groupValues[3].trim(), m.groupValues[5],
+                LogLevel.from(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[5],
                 pid = m.groupValues[4].toIntOrNull() ?: 0,
             )
         }
         RE_BARE.matchEntire(line)?.let { m ->
-            return@mapNotNull LogEntry(id++, m.groupValues[1], LogLevel.from(m.groupValues[2][0]), m.groupValues[3].trim(), m.groupValues[4])
+            return@mapNotNull LogEntry(id++, m.groupValues[1], LogLevel.from(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[4])
         }
         RE_BRIEF.matchEntire(line)?.let { m ->
             return@mapNotNull LogEntry(
-                id++, "", LogLevel.from(m.groupValues[1][0]), m.groupValues[2].trim(), m.groupValues[4],
+                id++, "", LogLevel.from(m.groupValues[1][0]), intern(m.groupValues[2].trim()), m.groupValues[4],
                 pid = m.groupValues[3].toIntOrNull() ?: 0,
             )
         }
 
         LogEntry(id++, "", LogLevel.I, "RAW", raw.trimEnd())
     }.toList()
+}
+
+private class ThreadtimeParts(
+    val ts: String,
+    val level: LogLevel,
+    val tag: String,
+    val msg: String,
+    val pid: Int,
+    val tid: Int,
+)
+
+private const val LEVEL_CHARS = "VDIWEA"
+
+private fun Char.isAsciiDigit(): Boolean = this in '0'..'9'
+
+// Space or tab only — deliberately narrower than regex \s (which also matches \n\r\f\x0B, chars
+// that can't survive line splitting anyway); anything narrower just falls back to the regex.
+private fun Char.isSeparator(): Boolean = this == ' ' || this == '\t'
+
+// Hand-rolled equivalent of RE_THREADTIME for the format that realistically appears at >1GB —
+// several times faster than four sequential Regex.matchEntire attempts per line. Deliberately
+// accepts a subset of what the regex accepts and produces identical fields for those lines;
+// anything it can't parse falls back to the regex chain, so behavior can only match, never
+// diverge (e.g. digit/whitespace classes here are ASCII-only, stricter than \d/\s).
+@Suppress("ReturnCount", "CyclomaticComplexMethod")
+private fun parseThreadtimeFast(line: String): ThreadtimeParts? {
+    val n = line.length
+    var i = 0
+
+    fun digits(from: Int, count: Int): Boolean {
+        if (from + count > n) return false
+        for (k in from until from + count) if (!line[k].isAsciiDigit()) return false
+        return true
+    }
+
+    // MM-DD
+    if (n < 5 || !digits(0, 2) || line[2] != '-' || !digits(3, 2)) return null
+    i = 5
+    val dateEnd = i
+    while (i < n && line[i].isSeparator()) i++
+    if (i == dateEnd) return null
+    // HH:MM:SS.d+
+    if (i + 8 >= n || !digits(i, 2) || !digits(i + 3, 2) || !digits(i + 6, 2)) return null
+    if (line[i + 2] != ':' || line[i + 5] != ':' || line[i + 8] != '.') return null
+    i += 9
+    val fracStart = i
+    while (i < n && line[i].isAsciiDigit()) i++
+    if (i == fracStart) return null
+    // Regex path: group(1) is "MM-DD<ws>HH:MM:SS.d+", then .substringAfter(' ').
+    val ts = line.substring(0, i).substringAfter(' ')
+
+    fun spacesThenInt(start: Int): Pair<Int, Int>? {
+        var p = start
+        while (p < n && line[p].isSeparator()) p++
+        if (p == start) return null
+        val numStart = p
+        var value = 0L
+        var overflow = false
+        while (p < n && line[p].isAsciiDigit()) {
+            value = value * 10 + (line[p] - '0')
+            if (value > Int.MAX_VALUE) {
+                overflow = true
+                value = 0
+            }
+            p++
+        }
+        if (p == numStart) return null
+        // toIntOrNull-compatible: an overflowing pid/tid becomes 0, same as the regex path.
+        return (if (overflow) 0 else value.toInt()) to p
+    }
+
+    val (pid, afterPid) = spacesThenInt(i) ?: return null
+    val (tid, afterTid) = spacesThenInt(afterPid) ?: return null
+
+    var p = afterTid
+    while (p < n && line[p].isSeparator()) p++
+    if (p == afterTid || p >= n || line[p] !in LEVEL_CHARS) return null
+    val level = LogLevel.from(line[p])
+    p++
+    val beforeTag = p
+    while (p < n && line[p].isSeparator()) p++
+    if (p == beforeTag) return null
+    val tagStart = p
+    val colon = line.indexOf(':', tagStart)
+    if (colon <= tagStart) return null
+    val tag = line.substring(tagStart, colon).trim()
+    if (tag.isEmpty()) return null
+    p = colon + 1
+    while (p < n && line[p].isSeparator()) p++
+    return ThreadtimeParts(ts, level, tag, line.substring(p), pid, tid)
 }

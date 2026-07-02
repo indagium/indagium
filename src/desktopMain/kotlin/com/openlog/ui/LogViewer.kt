@@ -66,7 +66,52 @@ private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
 
 internal fun nextOriginalSelectionAfterFilteredSelection(filteredSelection: Set<Int>): Set<Int> = filteredSelection
 
-private data class ComputedLogItems(val items: List<LogItem>, val loading: Boolean)
+// Derived once per item-list computation (off the UI thread for large tabs) so recompositions
+// never pay an O(n) pass over millions of items: entry ids in display order (drag-select and
+// navigation), row-only ids (select-all), a BitSet for pruning stale row bounds, and the
+// expand/collapse counts the toolbar buttons need.
+class ItemsSummary(
+    val allIds: IntArray,
+    val rowIds: IntArray,
+    val idBits: java.util.BitSet,
+    val collapsedGroupCount: Int,
+    val expandedGroupCount: Int,
+) {
+    val rowCount: Int get() = rowIds.size
+}
+
+internal fun summarizeItems(items: List<LogItem>): ItemsSummary {
+    val allIds = IntArray(items.size)
+    val idBits = java.util.BitSet()
+    var rows = 0
+    var collapsed = 0
+    var expanded = 0
+    items.forEachIndexed { i, item ->
+        val id = logItemEntryId(item)
+        allIds[i] = id
+        idBits.set(id)
+        when (item) {
+            is LogItem.Row -> rows++
+            is LogItem.SeqHeader -> if (item.expanded) expanded++ else collapsed++
+            is LogItem.ManualHeader -> if (item.expanded) expanded++ else collapsed++
+            is LogItem.StackTraceHeader -> if (item.expanded) expanded++ else collapsed++
+        }
+    }
+    val rowIds = IntArray(rows)
+    var r = 0
+    items.forEach { item -> if (item is LogItem.Row) rowIds[r++] = item.entry.id }
+    return ItemsSummary(allIds, rowIds, idBits, collapsed, expanded)
+}
+
+// Plain class on purpose: instances serve as remember/LaunchedEffect keys, where identity
+// comparison is O(1) but a data-class equals would deep-compare millions of items.
+internal class ComputedLogItems(
+    val items: List<LogItem>,
+    val summary: ItemsSummary,
+    val loading: Boolean,
+)
+
+private val EMPTY_SUMMARY = summarizeItems(emptyList())
 
 @Composable
 private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): ComputedLogItems {
@@ -76,24 +121,24 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
     val expanded = tab.expanded
     val manualBlocks = tab.manualBlocks
     if (!tab.largeFileMode) {
-        val items = remember(tab.id, dataSize, lastId, filter, expanded, manualBlocks, applyFilter) {
-            computeItems(tab, applyFilter)
+        return remember(tab.id, dataSize, lastId, filter, expanded, manualBlocks, applyFilter) {
+            val items = computeItems(tab, applyFilter)
+            ComputedLogItems(items, summarizeItems(items), loading = false)
         }
-        return ComputedLogItems(items, loading = false)
     }
 
-    var items by remember(tab.id, applyFilter) { mutableStateOf(emptyList<LogItem>()) }
-    var loading by remember(tab.id, applyFilter) { mutableStateOf(true) }
-    LaunchedEffect(tab.id, dataSize, lastId, filter, expanded, manualBlocks, applyFilter) {
-        loading = true
-        val snapshot = tab.copy(selected = emptySet())
-        val computed = withContext(Dispatchers.Default) {
-            computeItems(snapshot, applyFilter)
-        }
-        items = computed
-        loading = false
+    var computed by remember(tab.id, applyFilter) {
+        mutableStateOf(ComputedLogItems(emptyList(), EMPTY_SUMMARY, loading = true))
     }
-    return ComputedLogItems(items, loading)
+    LaunchedEffect(tab.id, dataSize, lastId, filter, expanded, manualBlocks, applyFilter) {
+        computed = ComputedLogItems(computed.items, computed.summary, loading = true)
+        val snapshot = tab.copy(selected = emptySet())
+        computed = withContext(Dispatchers.Default) {
+            val items = computeItems(snapshot, applyFilter)
+            ComputedLogItems(items, summarizeItems(items), loading = false)
+        }
+    }
+    return computed
 }
 
 internal data class AnnotationNavigationTarget(
@@ -112,10 +157,28 @@ internal fun annotationNavigationTarget(
     return AnnotationNavigationTarget(filteredEntryId = filteredId, originalEntryId = originalId)
 }
 
+internal fun annotationNavigationTarget(
+    referencedIds: List<Int>,
+    filteredVisibleIds: IntArray,
+    originalOpen: Boolean,
+): AnnotationNavigationTarget? {
+    val filteredId = referencedIds.firstOrNull { filteredVisibleIds.contains(it) }
+    val originalId = referencedIds.firstOrNull()?.takeIf { originalOpen }
+    if (filteredId == null && originalId == null) return null
+    return AnnotationNavigationTarget(filteredEntryId = filteredId, originalEntryId = originalId)
+}
+
 internal fun visibleRowRangeIds(fromId: Int, toId: Int, visibleIds: List<Int>): List<Int> {
     val a = visibleIds.indexOf(fromId)
     val b = visibleIds.indexOf(toId)
     return if (a >= 0 && b >= 0) visibleIds.subList(minOf(a, b), maxOf(a, b) + 1) else emptyList()
+}
+
+// IntArray twin of the above for the drag-select hot path — no per-element boxing.
+internal fun visibleRowRangeIds(fromId: Int, toId: Int, visibleIds: IntArray): List<Int> {
+    val a = visibleIds.indexOf(fromId)
+    val b = visibleIds.indexOf(toId)
+    return if (a >= 0 && b >= 0) (minOf(a, b)..maxOf(a, b)).map { visibleIds[it] } else emptyList()
 }
 
 internal fun logItemEntryId(item: LogItem): Int = when (item) {
@@ -226,6 +289,9 @@ fun LogViewer(
     focusRequester: FocusRequester? = null,
     onPanelFocusChanged: (Boolean) -> Unit = {},
     keyboardFocusVisible: Boolean = false,
+    // Pushes each freshly computed filtered item summary up to AppState so selection ops
+    // (shift-click range, select-all) can reuse it instead of recomputing on the UI thread.
+    onVisibleItems: ((ItemsSummary) -> Unit)? = null,
 ) {
     val tc        = tc()
     val mono      = monoFont()
@@ -233,21 +299,14 @@ fun LogViewer(
     val computedItems = rememberComputedLogItems(tab, true)
     val items = computedItems.items
     val itemsVersion = items.size to items.lastOrNull()?.let(::logItemEntryId)
-    val visCnt = remember(itemsVersion) { items.count { it is LogItem.Row } }
+    val visCnt = computedItems.summary.rowCount
     val totalCnt  = tab.logData.size
     val hasPidTid = remember(tab.id) { tab.logData.any { it.pid > 0 } }
-    val visibleGroupStates = remember(itemsVersion) {
-        items.mapNotNull { item ->
-            when (item) {
-                is LogItem.SeqHeader -> item.expanded
-                is LogItem.ManualHeader -> item.expanded
-                is LogItem.StackTraceHeader -> item.expanded
-                is LogItem.Row -> null
-            }
-        }
+    LaunchedEffect(computedItems) {
+        if (!computedItems.loading) onVisibleItems?.invoke(computedItems.summary)
     }
-    val canExpandAll = visibleGroupStates.any { !it }
-    val canCollapseAll = visibleGroupStates.any { it }
+    val canExpandAll = computedItems.summary.collapsedGroupCount > 0
+    val canCollapseAll = computedItems.summary.expandedGroupCount > 0
     var toolbarIndex by remember(tab.id) { mutableStateOf<Int?>(null) }
     var exportMenuOpen by remember(tab.id) { mutableStateOf(false) }
 
@@ -317,6 +376,7 @@ fun LogViewer(
         @Composable
         fun ItemList(
             listItems: List<LogItem>,
+            listSummary: ItemsSummary,
             boundsMap: HashMap<Int, Pair<Float, Float>>,
             posY: FloatArray,
             // Allows each panel to own its selection/context independently when showUnfiltered is active.
@@ -350,12 +410,13 @@ fun LogViewer(
             val density = LocalDensity.current
             val verticalScrollbarGutterPx = with(density) { 16.dp.toPx() }
             val horizontalScrollbarGutterPx = with(density) { 18.dp.toPx() }
-            val visibleIds = remember(listItems) {
-                listItems.map(::logItemEntryId)
-            }
+            val visibleIds = listSummary.allIds
             val currentOnSelRowRange by rememberUpdatedState(itemOnSelRowRange)
-            SideEffect {
-                boundsMap.keys.retainAll(visibleIds.toSet())
+            // Prune bounds of rows that no longer exist — once per new item list, NOT once per
+            // recomposition: the old SideEffect built a boxed HashSet of every visible id on
+            // every recomposition, a multi-hundred-ms UI stall on multi-million-row tabs.
+            LaunchedEffect(listSummary) {
+                boundsMap.keys.removeAll { !listSummary.idBits.get(it) }
             }
             val fr = externalFr ?: remember { FocusRequester() }
             var isFocused by remember { mutableStateOf(false) }
@@ -573,7 +634,7 @@ fun LogViewer(
             val syncScope    = rememberCoroutineScope()
 
             fun originalExpansionAndIndexFor(entryId: Int): Pair<Set<String>, Int>? {
-                val currentIdx = allItems.indexOfFirst { item -> logItemEntryId(item) == entryId }
+                val currentIdx = computedAllItems.summary.allIds.indexOf(entryId)
                 if (currentIdx >= 0) return tab.expanded to currentIdx
                 if (tab.largeFileMode) return null
                 var expanded = tab.expanded
@@ -616,17 +677,17 @@ fun LogViewer(
             // highlight rows in the "Filtered" panel and vice-versa.
             var localAllSelected by remember(tab.id) { mutableStateOf(emptySet<Int>()) }
             val allOnSelRow: (Int, Boolean, Boolean) -> Unit = { id, multi, range ->
-                val visIds = allItems.map(::logItemEntryId)
+                val visIds = computedAllItems.summary.allIds
                 localAllSelected = when {
                     multi -> if (id in localAllSelected) localAllSelected - id else localAllSelected + id
                     range -> {
-                        val last = localAllSelected.lastOrNull { it in visIds.toSet() }
+                        val last = localAllSelected.lastOrNull { visIds.contains(it) }
                             ?: localAllSelected.maxOrNull()
                         if (last == null) {
                             setOf(id)
                         } else {
                             val a = visIds.indexOf(last); val b = visIds.indexOf(id)
-                            if (a >= 0 && b >= 0) visIds.subList(minOf(a, b), maxOf(a, b) + 1).toSet()
+                            if (a >= 0 && b >= 0) (minOf(a, b)..maxOf(a, b)).map { visIds[it] }.toSet()
                             else localAllSelected + id
                         }
                     }
@@ -634,16 +695,16 @@ fun LogViewer(
                 }
             }
             val allOnSelRowRange: (List<Int>) -> Unit = { ids -> localAllSelected = ids.toSet() }
-            val allOnSelectAll: () -> Unit = { localAllSelected = allItems.map(::logItemEntryId).toSet() }
+            val allOnSelectAll: () -> Unit = { localAllSelected = computedAllItems.summary.allIds.toSet() }
             val allOnClearSelection: () -> Unit = { localAllSelected = emptySet() }
 
             LaunchedEffect(annotationNavigationRequest?.id, itemsVersion, allItemsVersion, tab.expanded) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
-                val target = annotationNavigationTarget(request.logIds, items.map(::logItemEntryId), originalOpen = true)
+                val target = annotationNavigationTarget(request.logIds, computedItems.summary.allIds, originalOpen = true)
                 if (target != null) {
                     localAllSelected = request.logIds.toSet()
                     target.filteredEntryId?.let { filteredEntryId ->
-                        val idx = items.indexOfFirst { logItemEntryId(it) == filteredEntryId }
+                        val idx = computedItems.summary.allIds.indexOf(filteredEntryId)
                         if (idx >= 0) filteredLazyState.centerOnItem(idx)
                     }
                     target.originalEntryId?.let { originalEntryId ->
@@ -680,7 +741,7 @@ fun LogViewer(
                     if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
                     allLazyState.centerOnItem(idx)
                 }
-                val filteredIdx = items.indexOfFirst { logItemEntryId(it) == targetId }
+                val filteredIdx = computedItems.summary.allIds.indexOf(targetId)
                 if (filteredIdx >= 0) filteredLazyState.centerOnItem(filteredIdx)
             }
 
@@ -694,6 +755,7 @@ fun LogViewer(
                     ColHeader(hasPidTid)
                     ItemList(
                         listItems = allItems,
+                        listSummary = computedAllItems.summary,
                         boundsMap = allBoundsAbs,
                         posY = allBoxPosY,
                         effectiveTab = tab.copy(selected = localAllSelected),
@@ -719,6 +781,7 @@ fun LogViewer(
                     ColHeader(hasPidTid)
                     ItemList(
                         listItems = items,
+                        listSummary = computedItems.summary,
                         boundsMap = rowBoundsAbs,
                         posY = boxPosY,
                         itemOnSelRow = { id, multi, range ->
@@ -751,10 +814,10 @@ fun LogViewer(
             val mainLazyState = scrollStates.lazyState("${tab.id}:main")
             LaunchedEffect(annotationNavigationRequest?.id, itemsVersion) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
-                val target = annotationNavigationTarget(request.logIds, items.map(::logItemEntryId), originalOpen = false)
+                val target = annotationNavigationTarget(request.logIds, computedItems.summary.allIds, originalOpen = false)
                 if (target != null) {
                     target.filteredEntryId?.let { filteredEntryId ->
-                        val idx = items.indexOfFirst { logItemEntryId(it) == filteredEntryId }
+                        val idx = computedItems.summary.allIds.indexOf(filteredEntryId)
                         if (idx >= 0) mainLazyState.centerOnItem(idx)
                     }
                 }
@@ -762,7 +825,8 @@ fun LogViewer(
             }
             ColHeader(hasPidTid)
             ItemList(
-                items, rowBoundsAbs, boxPosY, panelKey = "${tab.id}:main", listState = mainLazyState,
+                items, computedItems.summary, rowBoundsAbs, boxPosY,
+                panelKey = "${tab.id}:main", listState = mainLazyState,
                 externalFr = focusRequester, onFocusChangedExternal = onPanelFocusChanged,
             )
         }

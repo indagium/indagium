@@ -63,6 +63,11 @@ compose.desktop {
     application {
         mainClass = "MainKt"
 
+        // Multi-GB logcat files materialize millions of parsed entries; the JVM default cap of
+        // 25% of physical RAM leaves a 1.5GB file thrashing the GC on 8-16GB machines. Percentage
+        // (not -Xmx) so small machines aren't over-committed; memory is only committed as used.
+        jvmArgs("-XX:MaxRAMPercentage=50")
+
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "openLog"
@@ -89,6 +94,29 @@ compose.desktop {
 
 tasks.named("compileKotlinDesktop") {
     dependsOn(generateBuildInfo)
+}
+
+// Same heap headroom for dev runs (./gradlew desktopRun) as for the packaged app. Also forwards
+// two optional -D properties from the Gradle command line into the app JVM (Gradle doesn't do
+// this by itself): openlog.debugControl to enable the MCP control server (see Main.kt), and
+// openlog.run.home to point user.home at a throwaway dir so automated/smoke runs don't touch
+// the real ~/.openlog2 session state.
+tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
+    jvmArgs("-XX:MaxRAMPercentage=50")
+    System.getProperty("openlog.debugControl")?.let { systemProperty("openlog.debugControl", it) }
+    System.getProperty("openlog.run.home")?.let { systemProperty("user.home", it) }
+}
+
+// Manual large-file perf harness (LargeFilePerfHarness.kt) — activated by passing
+// -Dopenlog.perf.file=<fixture path> to Gradle; needs a multi-GB heap for the ~1.5GB fixture.
+// Normal test runs are unaffected (the property is blank and the harness returns immediately).
+val perfFixture: String? = System.getProperty("openlog.perf.file")
+tasks.withType<Test>().configureEach {
+    if (perfFixture != null) {
+        maxHeapSize = "14g"
+        systemProperty("openlog.perf.file", perfFixture)
+        System.getProperty("openlog.perf.dense")?.let { systemProperty("openlog.perf.dense", it) }
+    }
 }
 
 // ── Detekt ──────────────────────────────────────────────────────────

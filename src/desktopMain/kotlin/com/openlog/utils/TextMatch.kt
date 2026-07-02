@@ -20,6 +20,38 @@ internal fun containsPattern(
     return compiled.containsMatchIn(haystack)
 }
 
+// Exactly containsPattern("$tag $msg", ...) without materializing the concatenation — a full-file
+// keyword filter pass calls this once per entry, and the throwaway concat strings alone were
+// ~2GB of GC churn per keystroke on a 10M-line file. Regex patterns still need the real string
+// (a match can't be evaluated piecewise), so only the plain-text path avoids the allocation.
+internal fun tagMsgContainsPattern(
+    tag: String,
+    msg: String,
+    pattern: String,
+    regex: Boolean,
+    ignoreCase: Boolean = true,
+): Boolean {
+    if (regex) return containsPattern("$tag $msg", pattern, regex = true, ignoreCase = ignoreCase)
+    if (pattern.isEmpty()) return true
+    val tagLen = tag.length
+    val total = tagLen + 1 + msg.length
+    val patLen = pattern.length
+    if (patLen > total) return false
+
+    fun charAt(i: Int): Char = when {
+        i < tagLen -> tag[i]
+        i == tagLen -> ' '
+        else -> msg[i - tagLen - 1]
+    }
+
+    for (start in 0..(total - patLen)) {
+        var k = 0
+        while (k < patLen && charAt(start + k).equals(pattern[k], ignoreCase = ignoreCase)) k++
+        if (k == patLen) return true
+    }
+    return false
+}
+
 // The substring the pattern actually matched, e.g. for "avc.*denied" against
 // "avc: denied : word 1 word 2" this returns "avc: denied" — the useful candidate text,
 // as opposed to the whole line or a naive prefix split.

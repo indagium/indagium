@@ -28,7 +28,7 @@ private fun passesExclusions(entry: LogEntry, filter: Filter, negativeRules: Lis
     if (entry.tag in filter.excludeTags) return false
     if (filter.excludePkgPrefixes.any { pfx -> tagMatchesPrefix(entry.tag, pfx) }) return false
     if (filter.excludeKw.isNotBlank() &&
-        containsPattern("${entry.tag} ${entry.msg}", filter.excludeKw, filter.excludeKwRegex)) return false
+        tagMsgContainsPattern(entry.tag, entry.msg, filter.excludeKw, filter.excludeKwRegex)) return false
     return negativeRules.none { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule) }
 }
 
@@ -80,8 +80,7 @@ private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter): Boolean =
             if (filter.kwText.isBlank()) {
                 true
             } else {
-                val hay = "${entry.tag} ${entry.msg}"
-                containsPattern(hay, filter.kwText, filter.kwRegex)
+                tagMsgContainsPattern(entry.tag, entry.msg, filter.kwText, filter.kwRegex)
             }
         }
     }
@@ -115,23 +114,33 @@ private fun rulePatternMatches(entry: LogEntry, rule: MessageRule): Boolean =
 fun visibleEntries(tab: LogTab, applyFilter: Boolean = true): List<LogEntry> =
     if (applyFilter) tab.logData.filter { passesFilter(it, tab.filter) } else tab.logData
 
+// Ids are strictly increasing within a tab (parser, merge, and tailing all guarantee it) and
+// dense enough that a BitSet id-set is ~1 bit/entry — the boxed HashSet<Int> equivalents these
+// replace cost ~50 bytes/entry and dominated computeItems' GC churn on multi-million-line files.
+private fun idBitSet(entries: List<LogEntry>): java.util.BitSet {
+    val bits = java.util.BitSet((entries.lastOrNull()?.id ?: 0) + 1)
+    entries.forEach { bits.set(it.id) }
+    return bits
+}
+
 // Complexity is inherent: sequence detection, manual-collapse interleaving, and segment
 // iteration are all coupled — splitting them would require passing shared mutable state.
-@Suppress("CyclomaticComplexMethod")
+@Suppress("CyclomaticComplexMethod", "LongMethod")
 fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
     val sequences = tab.filter.sequences
     val data = visibleEntries(tab, applyFilter)
-    val dataIds = data.asSequence().map { it.id }.toHashSet()
 
     fun cachedStackGroupsFor(segment: List<LogEntry>): List<StackTraceGroup> {
         val cached = tab.analysis.stackTraceGroups
         if (cached.isEmpty()) return computeStackTraceGroups(segment)
-        val segmentIds = if (segment.size == data.size) dataIds else segment.asSequence().map { it.id }.toHashSet()
+        // Nothing filtered out and the segment spans the whole tab: cached groups apply as-is.
+        if (segment.size == tab.logData.size) return cached
+        val segmentIds = idBitSet(segment)
         return cached.mapNotNull { group ->
-            if (group.rid !in segmentIds) {
+            if (!segmentIds.get(group.rid)) {
                 null
             } else {
-                val visibleMembers = group.memberIds.filter { it in segmentIds }
+                val visibleMembers = group.memberIds.filter { segmentIds.get(it) }
                 group.copy(memberIds = visibleMembers).takeIf { visibleMembers.isNotEmpty() }
             }
         }
@@ -161,21 +170,30 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
             ownerGid == null || ownerGid !in tab.expanded
         }
         val nestedStackGroupByRid = (allStackGroups - stackGroups.toSet()).associateBy { it.rid }
-        val stackClaimedIds = buildSet<Int> { allStackGroups.forEach { add(it.rid); addAll(it.memberIds) } }
+        val stackClaimedIds = java.util.BitSet().also { bits ->
+            allStackGroups.forEach { g ->
+                bits.set(g.rid)
+                g.memberIds.forEach(bits::set)
+            }
+        }
 
         if (seqGroups.isEmpty() && stackGroups.isEmpty()) return segment.map { LogItem.Row(it, 0) }
 
         val defMap = sequences.associateBy { it.id }
-        val seqChildIds = buildSet<Int> {
+        val skipIds = java.util.BitSet().also { bits ->
             seqGroups.forEach { g ->
-                addAll(g.plain)
-                g.nested.forEach { ng -> add(ng.rid); addAll(ng.ch) }
+                g.plain.forEach(bits::set)
+                g.nested.forEach { ng ->
+                    bits.set(ng.rid)
+                    ng.ch.forEach(bits::set)
+                }
             }
+            stackGroups.forEach { g -> g.memberIds.forEach(bits::set) }
         }
-        val stackChildIds = buildSet<Int> { stackGroups.forEach { addAll(it.memberIds) } }
-        val skipIds = seqChildIds + stackChildIds
+        val seqGroupByRid = seqGroups.associateBy { it.rid }
+        val stackGroupByRid = stackGroups.associateBy { it.rid }
 
-        val items = mutableListOf<LogItem>()
+        val items = ArrayList<LogItem>(segment.size)
 
         // A "plain" (unstructured) child of a sequence's swallowed range: usually just a bare Row,
         // but if it's the root of a stack-trace group nested inside this (already-expanded)
@@ -189,7 +207,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
                 if (nsExp) {
                     nestedStack.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 2, DANGER_RED) } }
                 }
-            } else if (inner.id !in stackClaimedIds) {
+            } else if (!stackClaimedIds.get(inner.id)) {
                 items += LogItem.Row(inner, 1, outerColor)
             }
         }
@@ -202,13 +220,13 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
             val nexp = ng.gid in tab.expanded
             items += LogItem.SeqHeader(entry, ng.gid, 1, nexp, ng.ch.size, nestedColor)
             if (nexp) {
-                ng.ch.forEach { id -> if (id !in stackClaimedIds) tab.rmap[id]?.let { items += LogItem.Row(it, 2, nestedColor) } }
+                ng.ch.forEach { id -> if (!stackClaimedIds.get(id)) tab.rmap[id]?.let { items += LogItem.Row(it, 2, nestedColor) } }
             }
         }
 
         for (entry in segment) {
-            val sg = seqGroups.find { it.rid == entry.id }
-            val stg = if (sg == null) stackGroups.find { it.rid == entry.id } else null
+            val sg = seqGroupByRid[entry.id]
+            val stg = if (sg == null) stackGroupByRid[entry.id] else null
             when {
                 sg != null -> {
                     val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
@@ -216,10 +234,10 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
                     val outerColor = defMap[sg.defId]?.color ?: SEQ_COLORS.first()
                     items += LogItem.SeqHeader(entry, sg.gid, 0, exp, totalCh, outerColor)
                     if (exp) {
-                        val plainIds = sg.plain.toSet()
+                        val plainIds = java.util.BitSet().also { bits -> sg.plain.forEach(bits::set) }
                         val nestedByRoot = sg.nested.associateBy { it.rid }
                         for (inner in segment) {
-                            if (inner.id in plainIds) {
+                            if (plainIds.get(inner.id)) {
                                 appendPlainChild(inner, outerColor)
                                 continue
                             }
@@ -237,7 +255,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
                     }
                 }
 
-                entry.id in skipIds -> Unit
+                skipIds.get(entry.id) -> Unit
                 else -> items += LogItem.Row(entry, 0)
             }
         }
@@ -247,12 +265,15 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
     val manualBlocks = tab.manualBlocks.filter { it.enabled }
     if (manualBlocks.isEmpty()) return sequenceItems(data)
 
-    val indexById = data.withIndex().associate { it.value.id to it.index }
+    // Ids ascend within data, so anchor lookup is a binary search instead of a boxed id->index map.
+    val dataIds = IntArray(data.size) { data[it].id }
+
+    fun indexOfId(id: Int): Int? = java.util.Arrays.binarySearch(dataIds, id).takeIf { it >= 0 }
 
     data class ManualRange(val block: ManualCollapseBlock, val range: IntRange)
 
     val ranges = manualBlocks.mapNotNull { block ->
-        val anchor = indexById[block.anchorId] ?: return@mapNotNull null
+        val anchor = indexOfId(block.anchorId) ?: return@mapNotNull null
         val range = when (block.direction) {
             ManualCollapseDirection.TO_START -> 0..anchor
             ManualCollapseDirection.TO_END -> anchor..data.lastIndex
@@ -294,7 +315,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
         }
         flushSegment()
         val block = manual.block
-        val headerEntry = data[indexById[block.anchorId] ?: manual.range.first]
+        val headerEntry = data[indexOfId(block.anchorId) ?: manual.range.first]
         val expanded = block.id in tab.expanded
         result += LogItem.ManualHeader(
             headerEntry,

@@ -7,29 +7,46 @@ import com.openlog.model.StackTraceGroup
 
 private val EXCEPTION_HEADER_RE = Regex("""^[\w.$]+(Exception|Error)(:.*)?$""")
 private val AT_FRAME_RE = Regex("""^\s*at\s+\S+""")
-private val CAUSED_BY_RE = Regex("""^Caused by:""")
+
+// "Caused by:" continuation needs no regex: on an already-trimmed line, the old
+// ^Caused by: containsMatchIn is exactly startsWith (see isUnconditionalContinuation).
 private val MORE_FRAMES_RE = Regex("""^\s*\.\.\.\s+\d+\s+more$""")
 private val PROCESS_LINE_RE = Regex("""^Process:\s+\S+,\s*PID:\s*\d+""")
 private val EXCEPTION_PRELUDE_RE = Regex("""\b(caught|uncaught|throwing|threw)\b.*(exception|error|throwable)""", RegexOption.IGNORE_CASE)
 private val ANR_MSG_RE = Regex("""ANR in\s+\S+""")
 private const val ANR_TAG = "ActivityManager"
 
+// Cheap literal pre-checks in front of each regex: this runs for every line of the file on load,
+// and regex machinery per line dominated a large file's analysis time. Each guard is a necessary
+// condition of its (anchored) regex, so the accepted set is unchanged.
 private fun isTrigger(msg: String): Boolean {
     val trimmed = msg.trim()
-    return trimmed.contains("FATAL EXCEPTION", ignoreCase = true) || EXCEPTION_HEADER_RE.matches(trimmed)
+    if (trimmed.contains("FATAL EXCEPTION", ignoreCase = true)) return true
+    if (!trimmed.contains("Exception") && !trimmed.contains("Error")) return false
+    return EXCEPTION_HEADER_RE.matches(trimmed)
 }
 
 // Continuation lines that extend an open trace no matter how many members it already has.
 private fun isUnconditionalContinuation(msg: String): Boolean {
     val trimmed = msg.trim()
-    return AT_FRAME_RE.containsMatchIn(trimmed) ||
-        CAUSED_BY_RE.containsMatchIn(trimmed) ||
-        MORE_FRAMES_RE.matches(trimmed) ||
-        PROCESS_LINE_RE.containsMatchIn(trimmed)
+    return when {
+        trimmed.startsWith("at ") || trimmed.startsWith("at\t") -> AT_FRAME_RE.containsMatchIn(trimmed)
+        trimmed.startsWith("Caused by:") -> true
+        trimmed.startsWith("...") -> MORE_FRAMES_RE.matches(trimmed)
+        trimmed.startsWith("Process:") -> PROCESS_LINE_RE.containsMatchIn(trimmed)
+        else -> false
+    }
 }
 
-private fun isExceptionPrelude(msg: String): Boolean =
-    EXCEPTION_PRELUDE_RE.containsMatchIn(msg.trim())
+private fun isExceptionPrelude(msg: String): Boolean {
+    if (!msg.contains("exception", ignoreCase = true) &&
+        !msg.contains("error", ignoreCase = true) &&
+        !msg.contains("throwable", ignoreCase = true)
+    ) {
+        return false
+    }
+    return EXCEPTION_PRELUDE_RE.containsMatchIn(msg.trim())
+}
 
 // Always-on (no user configuration), unlike computeSeqGroups()'s user-defined SequenceDefs —
 // auto-folds Java/Kotlin exception dumps (FATAL EXCEPTION / <Class>Exception headers, "at ...”
@@ -107,7 +124,8 @@ fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
 // to, not a folded group. Tag/pattern coverage is deliberately narrow (see plan's flagged risk:
 // format varies across Android versions/OEMs) — broaden only once validated against real samples.
 fun computeCrashSites(logData: List<LogEntry>, stackGroups: List<StackTraceGroup>): List<CrashSite> {
-    val byId = logData.associateBy { it.id }
+    // Binary-search view, not a HashMap copy — only a handful of rids ever get looked up.
+    val byId = EntryIdMap(logData)
     val exceptionSites = stackGroups.mapNotNull { g ->
         byId[g.rid]?.let { entry -> CrashSite(id = "crash_${g.rid}", entry = entry, kind = CrashKind.EXCEPTION, groupGid = g.gid) }
     }

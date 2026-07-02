@@ -4,6 +4,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
 import com.openlog.debug.ControlServer
 import com.openlog.model.*
+import com.openlog.utils.EntryIdMap
 import com.openlog.utils.FileTailer
 import com.openlog.utils.MergeSourceFile
 import com.openlog.utils.ZipLogCandidate
@@ -28,7 +29,7 @@ import java.io.File
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 
-private fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = data.associateBy { it.id }
+private fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = EntryIdMap(data)
 
 private fun buildLogAnalysis(data: List<LogEntry>): LogAnalysis {
     val stackGroups = computeStackTraceGroups(data)
@@ -67,7 +68,12 @@ internal const val COMPARE_SPLIT_MAX = 0.8f
 internal const val MIN_PORT = 1
 internal const val MAX_PORT = 65535
 internal const val DEFAULT_MCP_PORT = 8991
-private const val LARGE_FILE_MODE_BYTES = 512L * 1024L * 1024L
+
+// Above this size, item computation runs on a background dispatcher with a loading line instead
+// of synchronously during composition. 64MB (~500k lines) is roughly where a computeItems pass
+// starts exceeding a frame budget by orders of magnitude; the old 512MB threshold left files in
+// the 100-512MB range freezing the UI on every filter keystroke.
+private const val LARGE_FILE_MODE_BYTES = 64L * 1024L * 1024L
 
 data class PendingSequenceStart(val text: String, val tag: String)
 
@@ -111,6 +117,17 @@ class AppState(
 
     private val activeTails = mutableMapOf<String, ActiveTail>()
     private val activeLoads = ConcurrentHashMap<String, Job>()
+
+    // Latest filtered item summary per tab, pushed by LogViewer whenever its (possibly
+    // background-computed) item list lands. Selection ops reuse it instead of recomputing the
+    // full item list synchronously on the UI thread — on a multi-million-line tab that recompute
+    // took seconds per shift-click. May briefly lag the filter during a background recompute,
+    // exactly like the on-screen list it mirrors.
+    private val visibleItemsByTab = ConcurrentHashMap<String, ItemsSummary>()
+
+    fun noteVisibleItems(tabId: String, summary: ItemsSummary) {
+        visibleItemsByTab[tabId] = summary
+    }
 
     // MCP/debug control server (see debug/ControlServer.kt) — same "private resource handle,
     // guarded start, idempotent stop" shape as activeTails above.
@@ -797,21 +814,17 @@ class AppState(
             range -> {
                 // Use the actual visible items list so shift-click doesn't expand through
                 // collapsed blocks (same as drag-select which uses visibleIds from LogViewer).
-                val visIds = computeItems(t, true).map { item ->
-                    when (item) {
-                        is LogItem.Row -> item.entry.id
-                        is LogItem.SeqHeader -> item.entry.id
-                        is LogItem.ManualHeader -> item.entry.id
-                        is LogItem.StackTraceHeader -> item.entry.id
-                    }
-                }
-                val last = t.selected.lastOrNull { it in visIds.toSet() } ?: t.selected.maxOrNull()
+                // Prefer the summary LogViewer already computed; recompute only when no viewer
+                // has reported one yet (e.g. headless/control-server callers).
+                val visIds = visibleItemsByTab[tabId]?.allIds
+                    ?: computeItems(t, true).let { items -> IntArray(items.size) { logItemEntryId(items[it]) } }
+                val last = t.selected.lastOrNull { visIds.contains(it) } ?: t.selected.maxOrNull()
                 if (last == null) {
                     setOf(id)
                 } else {
                     val a = visIds.indexOf(last)
                     val b = visIds.indexOf(id)
-                    if (a >= 0 && b >= 0) visIds.subList(minOf(a, b), maxOf(a, b) + 1).toSet() else t.selected + id
+                    if (a >= 0 && b >= 0) (minOf(a, b)..maxOf(a, b)).map { visIds[it] }.toSet() else t.selected + id
                 }
             }
 
@@ -836,7 +849,8 @@ class AppState(
 
     fun selectAll(tabId: String) {
         val t = tab(tabId) ?: return
-        val ids = computeItems(t, true).filterIsInstance<LogItem.Row>().map { it.entry.id }
+        val ids = visibleItemsByTab[tabId]?.rowIds?.toList()
+            ?: computeItems(t, true).filterIsInstance<LogItem.Row>().map { it.entry.id }
         setSelectedRows(tabId, ids)
     }
 
@@ -899,8 +913,23 @@ class AppState(
         }
     }
 
-    fun expandAll(tabId: String) = upTab(tabId) { t ->
-        t.copy(expanded = visibleExpandableGroupIds(t))
+    fun expandAll(tabId: String) {
+        val t = tab(tabId) ?: return
+        if (!t.largeFileMode) {
+            upTab(tabId) { it.copy(expanded = visibleExpandableGroupIds(it)) }
+            return
+        }
+        // The iterative reveal loop runs computeItems repeatedly — seconds of work on a large
+        // tab, so it can't stay on the UI thread. Same background-apply pattern (stateLock) as
+        // appendTailedLines; if the filter changed mid-computation the result is a harmless
+        // superset of gids, exactly as if the user had expanded before filtering.
+        ioScope.launch(Dispatchers.Default) {
+            val expanded = visibleExpandableGroupIds(t)
+            ensureActive()
+            synchronized(stateLock) {
+                upTab(tabId) { it.copy(expanded = expanded) }
+            }
+        }
     }
 
     fun collapseAll(tabId: String) = upTab(tabId) { it.copy(expanded = emptySet()) }
@@ -1179,6 +1208,7 @@ class AppState(
     fun closeTab(tabId: String) {
         activeLoads.remove(tabId)?.cancel()
         activeTails.remove(tabId)?.job?.cancel()
+        visibleItemsByTab.remove(tabId)
         val next = tabs.filter { it.id != tabId }
         if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
         if (compareTabId == tabId) compareTabId = next.firstOrNull()?.id ?: ""
@@ -1253,7 +1283,7 @@ class AppState(
                     val nextData = cur.logData + newEntries
                     cur.copy(
                         logData = nextData,
-                        rmap = cur.rmap + mkRmap(newEntries),
+                        rmap = mkRmap(nextData),
                         analysis = buildLogAnalysis(nextData),
                     )
                 } else {
@@ -1597,11 +1627,38 @@ class AppState(
     }
 
     private fun restoreTabsFromAutosave(tabLines: List<String>) {
-        tabs = tabLines.mapNotNull { it.removePrefix("tab\t").tabFromToken() }
+        val shells = tabLines.mapNotNull { it.removePrefix("tab\t").tabShellFromToken() }
+        tabs = shells.map { it.tab }
         if (tabs.none { it.id == activeTabId }) activeTabId = tabs.firstOrNull()?.id ?: ""
         if (tabs.none { it.id == compareTabId }) compareTabId =
             tabs.getOrNull(1)?.id ?: tabs.firstOrNull()?.id ?: ""
         tabCounter = (tabs.mapNotNull { it.id.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1
+        // Shells restore synchronously with every user-visible piece of metadata (filter,
+        // annotations, expanded/manual blocks); file contents parse in the background. This used
+        // to call parseLogcat inline during AppState init — i.e. inside the first composition —
+        // so a large tab left open at last quit froze the app for the whole parse on every launch.
+        shells.forEach { shell -> scheduleRestoredTabLoad(shell.tab.id, shell.sourceFile) }
+    }
+
+    private fun scheduleRestoredTabLoad(tabId: String, file: File) {
+        beginLoading("Restoring session...")
+        val job = ioScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                val logData = runCatching { parser(file) }.getOrElse { emptyList() }
+                ensureActive()
+                val rmap = mkRmap(logData)
+                val analysis = buildLogAnalysis(logData)
+                synchronized(stateLock) {
+                    ensureActive()
+                    upTab(tabId) { it.copy(logData = logData, rmap = rmap, analysis = analysis) }
+                }
+            } finally {
+                activeLoads.remove(tabId)
+                finishLoading()
+            }
+        }
+        activeLoads[tabId] = job
+        job.start()
     }
 
     private fun serializeAutosave(): String = buildString {
@@ -2175,26 +2232,32 @@ private fun LogTab.tabToken(): String {
     )
 }
 
-private fun String.tabFromToken(): LogTab? = runCatching {
+// Metadata-only restore: log content is parsed afterwards on ioScope (scheduleRestoredTabLoad),
+// so this must stay cheap — it runs synchronously during AppState init. The file-exists check
+// stays here so tabs whose source vanished are dropped before they ever appear.
+private class RestoredTabShell(val tab: LogTab, val sourceFile: File)
+
+private fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
     val p = tokenFields()
     if (p.size < 9) return@runCatching null
     val sourcePath = p[2].takeIf { it.isNotBlank() }
     val sourceFile = sourcePath?.let { path -> File(path).takeIf { it.exists() } } ?: return@runCatching null
-    val data = runCatching { parseLogcat(sourceFile) }.getOrElse { emptyList() }
-    LogTab(
-        id = p[0],
-        filename = p[1],
-        logData = data,
-        rmap = mkRmap(data),
-        filter = p[3].savedFilterFromToken()?.toFilter() ?: Filter(),
-        showUnfiltered = p[6].toBoolean(),
-        expanded = p[7].encodedSet(),
-        annotations = p[4].annotationsFromToken() ?: Annotations(),
-        showAnnMd = p[5].toBoolean(),
-        manualBlocks = p[8].encodedList().mapNotNull { it.manualBlockFromToken() },
-        sourcePath = sourcePath,
-        largeFileMode = sourceFile.length() >= LARGE_FILE_MODE_BYTES,
-        analysis = buildLogAnalysis(data),
+    RestoredTabShell(
+        LogTab(
+            id = p[0],
+            filename = p[1],
+            logData = emptyList(),
+            rmap = emptyMap(),
+            filter = p[3].savedFilterFromToken()?.toFilter() ?: Filter(),
+            showUnfiltered = p[6].toBoolean(),
+            expanded = p[7].encodedSet(),
+            annotations = p[4].annotationsFromToken() ?: Annotations(),
+            showAnnMd = p[5].toBoolean(),
+            manualBlocks = p[8].encodedList().mapNotNull { it.manualBlockFromToken() },
+            sourcePath = sourcePath,
+            largeFileMode = sourceFile.length() >= LARGE_FILE_MODE_BYTES,
+        ),
+        sourceFile,
     )
 }.getOrNull()
 

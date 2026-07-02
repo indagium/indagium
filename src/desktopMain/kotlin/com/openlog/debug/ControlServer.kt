@@ -28,7 +28,10 @@ private const val STATUS_METHOD_NOT_ALLOWED = 405
 private const val STATUS_FORBIDDEN = 403
 private const val STATUS_SERVER_ERROR = 500
 private const val DEFAULT_VISIBLE_LIMIT = 200
-private const val OPEN_FILE_TIMEOUT_MS = 15_000L
+
+// Long enough for a 1.5GB logcat (~20s parse + analysis, measured); at 15s open_log_file
+// reported "file did not load" for a load that then completed successfully seconds later.
+private const val OPEN_FILE_TIMEOUT_MS = 120_000L
 private const val OPEN_FILE_POLL_INTERVAL_MS = 20L
 private const val CLIENT_STALE_MS = 5 * 60_000L
 private const val CLIENT_ID_HEADER = "X-OpenLog-Client-Id"

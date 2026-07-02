@@ -1172,6 +1172,7 @@ private fun FileView(
                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == logViewerFr }
             },
             keyboardFocusVisible = state.keyboardFocusVisible,
+            onVisibleItems = { summary -> state.noteVisibleItems(tab.id, summary) },
         )
         if (state.annotationVisible) {
             HDivider { delta ->
@@ -1317,6 +1318,7 @@ private fun CompareView(
                             if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == leftLogFr }
                         },
                         keyboardFocusVisible = state.keyboardFocusVisible,
+                        onVisibleItems = { summary -> state.noteVisibleItems(leftTab.id, summary) },
                     )
                 }
             }
@@ -1376,6 +1378,9 @@ private fun CompareView(
                             if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == rightLogFr }
                         },
                         keyboardFocusVisible = state.keyboardFocusVisible,
+                        // Keyed by rightTab (not effectiveRightTab): the summary reflects what
+                        // this pane displays, which is what selRow/selectAll on rightTab.id need.
+                        onVisibleItems = { summary -> state.noteVisibleItems(rightTab.id, summary) },
                     )
                     if (state.annotationVisible) {
                         HDivider { d ->
