@@ -41,6 +41,7 @@ import com.openlog.model.*
 import com.openlog.utils.computeItems
 import com.openlog.utils.regexRanges
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
@@ -604,8 +605,13 @@ fun LogViewer(
             // land in the preserved scroll position.
             LaunchedEffect(Unit) {
                 val targetId = tab.selected.minOrNull() ?: return@LaunchedEffect
-                val filteredIdx = items.indexOfFirst { logItemEntryId(it) == targetId }
-                if (filteredIdx >= 0) filteredLazyState.centerOnItem(filteredIdx)
+                // containerH starts at 0 and only gets its real value from the split Column's
+                // own onGloballyPositioned, one or more frames after this branch first composes.
+                // Until then, effectiveSplitDp/weight(1f) size both panels off that placeholder
+                // 0 — a centerOnItem call landing before this settles computes its correction
+                // against that transient, too-small viewport and never gets a chance to redo it
+                // once the real (larger) size arrives, so it doesn't end up actually centered.
+                snapshotFlow { containerH }.first { it > 0f }
                 val originalTarget = originalExpansionAndIndexFor(targetId)
                 if (originalTarget != null) {
                     val (expanded, idx) = originalTarget
@@ -613,6 +619,8 @@ fun LogViewer(
                     if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
                     allLazyState.centerOnItem(idx)
                 }
+                val filteredIdx = items.indexOfFirst { logItemEntryId(it) == targetId }
+                if (filteredIdx >= 0) filteredLazyState.centerOnItem(filteredIdx)
             }
 
             Column(

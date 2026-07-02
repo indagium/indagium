@@ -127,18 +127,26 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
             computeSeqGroups(segment, sequences)
         else emptyList()
 
-        // Stack-trace folding is always-on, independent of user-defined sequences, and always
-        // wins: a sequence with no explicit end pattern can swallow everything up to the next
-        // start match (or end-of-log) as unstructured "plain" children — including an
-        // exception/ANR block that has nothing to do with the sequence. Rather than folding that
-        // crash into the sequence's own collapsed content (which would only ever become visible
-        // once the *sequence* is also expanded — surprising, and expensive to auto-reveal on a
-        // large log), it always renders as its own independent, always-visible collapsible block
-        // at the top level, "escaping" whichever sequence would otherwise have swallowed it. Its
-        // ids are simply excluded wherever a sequence would otherwise have rendered them as
-        // unstructured plain/nested-child rows, so they render exactly once.
-        val stackGroups = computeStackTraceGroups(segment)
-        val stackClaimedIds = buildSet<Int> { stackGroups.forEach { add(it.rid); addAll(it.memberIds) } }
+        // Stack-trace folding is always-on, independent of user-defined sequences. A sequence with
+        // no explicit end pattern can swallow everything up to the next start match (or
+        // end-of-log) as unstructured "plain" children — including an exception/ANR block that
+        // has nothing to do with the sequence. Render it nested one level inside the sequence's
+        // plain children *only while that sequence is already expanded* (a nice "this crash
+        // happened during X" grouping); otherwise render it as its own independent, always-visible
+        // collapsible block at the top level. Either way it's always present in the current item
+        // list without needing to expand anything new to reveal it — crash navigation never has
+        // to search for or blindly expand a group, which is what made it slow (and occasionally
+        // expand the wrong one) on a real log.
+        val allStackGroups = computeStackTraceGroups(segment)
+        val seqOwnerGidBySwallowedId = buildMap<Int, String> {
+            seqGroups.forEach { sg -> sg.plain.forEach { id -> put(id, sg.gid) } }
+        }
+        val stackGroups = allStackGroups.filter { g ->
+            val ownerGid = seqOwnerGidBySwallowedId[g.rid]
+            ownerGid == null || ownerGid !in tab.expanded
+        }
+        val nestedStackGroupByRid = (allStackGroups - stackGroups.toSet()).associateBy { it.rid }
+        val stackClaimedIds = buildSet<Int> { allStackGroups.forEach { add(it.rid); addAll(it.memberIds) } }
 
         if (seqGroups.isEmpty() && stackGroups.isEmpty()) return segment.map { LogItem.Row(it, 0) }
 
@@ -154,9 +162,26 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
 
         val items = mutableListOf<LogItem>()
 
+        // A "plain" (unstructured) child of a sequence's swallowed range: usually just a bare Row,
+        // but if it's the root of a stack-trace group nested inside this (already-expanded)
+        // sequence, fold it as a nested StackTraceHeader instead — skipping its other member
+        // lines entirely, since they render inside that header's own expansion.
+        fun appendPlainChild(inner: LogEntry, outerColor: Color) {
+            val nestedStack = nestedStackGroupByRid[inner.id]
+            if (nestedStack != null) {
+                val nsExp = nestedStack.gid in tab.expanded
+                items += LogItem.StackTraceHeader(inner, nestedStack.gid, 1, nsExp, nestedStack.memberIds.size)
+                if (nsExp) {
+                    nestedStack.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 2, DANGER_RED) } }
+                }
+            } else if (inner.id !in stackClaimedIds) {
+                items += LogItem.Row(inner, 1, outerColor)
+            }
+        }
+
         // An explicit nested sub-sequence within an expanded outer sequence's plain range —
         // renders its own header, plus its children if it's also expanded (skipping any that
-        // belong to a stack-trace group, which renders independently at the top level instead).
+        // belong to a stack-trace group, which renders independently elsewhere).
         fun appendNestedSubSequence(entry: LogEntry, ng: NestedSeqGroup, outerColor: Color) {
             val nestedColor = defMap[ng.defId]?.color ?: outerColor
             val nexp = ng.gid in tab.expanded
@@ -180,7 +205,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
                         val nestedByRoot = sg.nested.associateBy { it.rid }
                         for (inner in segment) {
                             if (inner.id in plainIds) {
-                                if (inner.id !in stackClaimedIds) items += LogItem.Row(inner, 1, outerColor)
+                                appendPlainChild(inner, outerColor)
                                 continue
                             }
                             val ng = nestedByRoot[inner.id] ?: continue

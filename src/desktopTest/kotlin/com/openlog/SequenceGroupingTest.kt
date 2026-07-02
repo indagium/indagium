@@ -394,7 +394,11 @@ class SequenceGroupingTest {
     }
 
     @Test
-    fun expandingCrashInsideAnExpandedSequenceShowsItsMemberRowOnce() {
+    fun crashNestsInsideItsSequenceOnceThatSequenceIsExpanded() {
+        // Once the swallowing sequence is expanded, the crash renders nested inside it (a "this
+        // happened during X" grouping) rather than at the top level — the reverse of the
+        // collapsed case above, but still requiring no *new* expansion to reveal: both gids here
+        // were already in tab.expanded before this render, not added by it.
         val logs = listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "App", "burst start", pid = 1),
             LogEntry(2, "10:00:00.100", LogLevel.I, "App", "plain content", pid = 1),
@@ -417,9 +421,44 @@ class SequenceGroupingTest {
         assertEquals(listOf(2), rows.filter { it.groupColor != DANGER_RED }.map { it.entry.id })
         val crashHeader = items.filterIsInstance<LogItem.StackTraceHeader>().single()
         assertEquals(3, crashHeader.entry.id)
-        assertEquals(0, crashHeader.indent)
+        assertEquals(1, crashHeader.indent)
         assertTrue(crashHeader.expanded)
         val memberRow = rows.single { it.entry.id == 4 }
+        assertEquals(2, memberRow.indent)
+        assertEquals(DANGER_RED, memberRow.groupColor)
+    }
+
+    @Test
+    fun crashCollapsingBackToTopLevelWhenItsSequenceCollapses() {
+        // The reverse transition: while the sequence was expanded the crash rendered nested (see
+        // above); once the sequence collapses again, the crash must still be visible — as its own
+        // top-level block, not hidden along with the rest of the sequence's swallowed content.
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "burst start", pid = 1),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "App", "plain content", pid = 1),
+            LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 1),
+            LogEntry(4, "10:00:00.300", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 1),
+        )
+        val seq = SequenceDef("burst", "burst start", priority = 1, color = Color.Blue, tag = "App")
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = listOf(seq)),
+            // Sequence collapsed again, but the crash's own gid is still marked expanded from
+            // before — it must still show as a top-level, expanded StackTraceHeader.
+            expanded = setOf("st_3"),
+        )
+
+        val items = computeItems(tab, applyFilter = true)
+
+        assertTrue(items.filterIsInstance<LogItem.Row>().none { it.entry.id == 2 })
+        val crashHeader = items.filterIsInstance<LogItem.StackTraceHeader>().single()
+        assertEquals(3, crashHeader.entry.id)
+        assertEquals(0, crashHeader.indent)
+        assertTrue(crashHeader.expanded)
+        val memberRow = items.filterIsInstance<LogItem.Row>().single { it.entry.id == 4 }
         assertEquals(1, memberRow.indent)
         assertEquals(DANGER_RED, memberRow.groupColor)
     }
