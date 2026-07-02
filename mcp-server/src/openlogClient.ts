@@ -2,12 +2,24 @@
 // that knows the wire format — it never touches the Kotlin/JVM process directly, so any MCP
 // client (or plain curl) against the same base URL works identically.
 
+import { randomUUID } from "node:crypto";
+
 const BASE_URL = process.env.OPENLOG_CONTROL_URL ?? "http://127.0.0.1:8991";
+// One random id per process launch — lets openLog's Settings/Connection-info popup show which
+// tools are currently talking to it and block one if unwanted. OPENLOG_CLIENT_NAME is an optional
+// human-readable label the user can set in their MCP client's own config (see the "Copy config"
+// snippet in that popup); plain curl callers never send these headers and so never show up there.
+const CLIENT_ID = randomUUID();
+const CLIENT_NAME = process.env.OPENLOG_CLIENT_NAME ?? "MCP client";
 
 async function request(method: string, path: string, body?: unknown): Promise<unknown> {
   const res = await fetch(`${BASE_URL}${path}`, {
     method,
-    headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
+    headers: {
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      "X-OpenLog-Client-Id": CLIENT_ID,
+      "X-OpenLog-Client-Name": CLIENT_NAME,
+    },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();

@@ -52,6 +52,15 @@ class ControlServerTest {
         return client.send(req, HttpResponse.BodyHandlers.ofString()).body()
     }
 
+    private fun getAsClient(path: String, clientId: String, clientName: String): HttpResponse<String> {
+        val req = HttpRequest.newBuilder(URI.create(base() + path))
+            .header("X-OpenLog-Client-Id", clientId)
+            .header("X-OpenLog-Client-Name", clientName)
+            .GET()
+            .build()
+        return client.send(req, HttpResponse.BodyHandlers.ofString())
+    }
+
     @Test
     fun listTabsReturnsEmptyListWhenNoTabsOpen() {
         assertEquals("[]", get("/tabs"))
@@ -261,6 +270,38 @@ class ControlServerTest {
         assertTrue(body.contains("\"entryCount\":1"))
         assertTrue(body.contains("\"filename\":\"main_log.txt\""))
         zip.delete()
+    }
+
+    @Test
+    fun requestsWithoutClientHeadersAreNotTracked() {
+        get("/tabs")
+        assertTrue(server.connectedClients().isEmpty())
+    }
+
+    @Test
+    fun connectedClientsTracksRequestsCarryingClientHeaders() {
+        getAsClient("/tabs", "client-1", "My Tool")
+        val clients = server.connectedClients()
+        assertEquals(1, clients.size)
+        assertEquals("client-1", clients.single().id)
+        assertEquals("My Tool", clients.single().name)
+        assertTrue(!clients.single().blocked)
+    }
+
+    @Test
+    fun blockedClientIsForbiddenUntilUnblocked() {
+        getAsClient("/tabs", "client-2", "Blockable Tool")
+        server.blockClient("client-2")
+
+        val blockedResponse = getAsClient("/tabs", "client-2", "Blockable Tool")
+        assertEquals(403, blockedResponse.statusCode())
+        assertTrue(blockedResponse.body().contains("\"error\""))
+        assertTrue(server.connectedClients().single().blocked)
+
+        server.unblockClient("client-2")
+        val unblockedResponse = getAsClient("/tabs", "client-2", "Blockable Tool")
+        assertEquals(200, unblockedResponse.statusCode())
+        assertTrue(!server.connectedClients().single().blocked)
     }
 
     @Test

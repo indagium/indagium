@@ -66,6 +66,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
+import com.openlog.debug.ConnectedClientInfo
 import com.openlog.generated.BuildInfo
 import com.openlog.model.*
 import java.awt.FileDialog
@@ -865,7 +866,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
             // ── MCP connection info dialog ────────────────────────────
             if (state.mcpInfoOpen) {
                 Dialog(onDismissRequest = { state.mcpInfoOpen = false }) {
-                    McpInfoDialog(port = state.settings.mcpControlPort) { state.mcpInfoOpen = false }
+                    McpInfoDialog(state = state, port = state.settings.mcpControlPort) { state.mcpInfoOpen = false }
                 }
             }
         }
@@ -1745,7 +1746,7 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
             .border(1.dp, tc.br, shape),
     ) {
         Column(
-            Modifier.verticalScroll(scroll).padding(24.dp),
+            Modifier.verticalScroll(scroll).padding(24.dp).padding(end = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(
@@ -1918,7 +1919,9 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 AppText("Connection info", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                AppButton("Connection info…", onClick = { onDismiss(); state.mcpInfoOpen = true }, variant = ButtonVariant.Secondary)
+                // Deliberately doesn't close Settings first — stacks on top instead, so closing
+                // this popup returns you to Settings rather than to the main window.
+                AppButton("Connection info…", onClick = { state.mcpInfoOpen = true }, variant = ButtonVariant.Secondary)
             }
 
             SettingsSectionHeader("About")
@@ -1928,7 +1931,9 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 AppText("Keyboard shortcuts", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                AppButton("Show shortcuts…", onClick = { onDismiss(); state.shortcutsOpen = true }, variant = ButtonVariant.Secondary)
+                // Deliberately doesn't close Settings first — stacks on top instead, so closing
+                // this popup returns you to Settings rather than to the main window.
+                AppButton("Show shortcuts…", onClick = { state.shortcutsOpen = true }, variant = ButtonVariant.Secondary)
             }
             Row(
                 Modifier.fillMaxWidth(),
@@ -1950,6 +1955,11 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
             }
         }
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scroll),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+            style = appScrollbarStyle(tc),
+        )
     }
 }
 
@@ -1962,11 +1972,55 @@ private fun SettingsSectionHeader(title: String) {
     }
 }
 
+private fun mcpConfigSnippet(port: Int): String = """
+    {
+      "mcpServers": {
+        "openlog-control": {
+          "command": "npx",
+          "args": ["tsx", "mcp-server/src/index.ts"],
+          "env": {
+            "OPENLOG_CONTROL_URL": "http://127.0.0.1:$port",
+            "OPENLOG_CLIENT_NAME": "my-tool"
+          }
+        }
+      }
+    }
+    """.trimIndent()
+
+private const val COPIED_FEEDBACK_MS = 1500L
+private const val CLIENT_POLL_INTERVAL_MS = 1500L
+private const val AGO_JUST_NOW_MS = 2_000L
+private const val MS_PER_SECOND = 1000L
+private const val MS_PER_MINUTE = 60_000L
+
+private fun agoLabel(lastSeenMs: Long): String {
+    val delta = System.currentTimeMillis() - lastSeenMs
+    return when {
+        delta < AGO_JUST_NOW_MS -> "just now"
+        delta < MS_PER_MINUTE -> "${delta / MS_PER_SECOND}s ago"
+        else -> "${delta / MS_PER_MINUTE}m ago"
+    }
+}
+
 @Composable
-private fun McpInfoDialog(port: Int, onDismiss: () -> Unit) {
+private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
     val tc = tc()
+    var showCopied by remember { mutableStateOf(false) }
+    LaunchedEffect(showCopied) {
+        if (showCopied) {
+            kotlinx.coroutines.delay(COPIED_FEEDBACK_MS)
+            showCopied = false
+        }
+    }
+    var clients by remember { mutableStateOf<List<ConnectedClientInfo>>(state.connectedMcpClients()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            clients = state.connectedMcpClients()
+            kotlinx.coroutines.delay(CLIENT_POLL_INTERVAL_MS)
+        }
+    }
     Column(
-        Modifier.width(420.dp).background(tc.p, RoundedCornerShape(8.dp))
+        Modifier.width(440.dp).background(tc.p, RoundedCornerShape(8.dp))
             .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(20.dp),
     ) {
         AppText("MCP Connection Info", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
@@ -1976,18 +2030,89 @@ private fun McpInfoDialog(port: Int, onDismiss: () -> Unit) {
         AppText("http://127.0.0.1:$port", color = tc.ts, fontSize = 12.sp, fontFamily = MONO)
         Spacer(Modifier.height(14.dp))
         AppText(
-            "A .mcp.json at the repo root already registers this server for Claude Code — " +
-                "no extra setup needed there. Any other MCP client, or plain curl, can talk to " +
-                "the same JSON/HTTP endpoints directly, e.g.:",
+            "Any MCP client (Claude Code, Codex, or your own tooling) can connect using this " +
+                "server command:",
+            color = tc.td,
+            fontSize = 11.sp,
+            maxLines = 2,
+        )
+        Spacer(Modifier.height(8.dp))
+        Box(
+            Modifier.fillMaxWidth().background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM).padding(10.dp),
+        ) {
+            AppText("npx tsx mcp-server/src/index.ts", color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AppButton(
+                "Copy config for your MCP client",
+                onClick = {
+                    state.copyToClipboard(mcpConfigSnippet(port))
+                    showCopied = true
+                },
+            )
+            if (showCopied) {
+                Spacer(Modifier.width(8.dp))
+                AppText("Copied", color = tc.ac, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        AppText(
+            "A .mcp.json at the repo root already has this registered for tools that " +
+                "auto-discover it. For others, paste the copied snippet into their own MCP " +
+                "config — set OPENLOG_CLIENT_NAME to whatever you want that tool labelled as " +
+                "below.",
             color = tc.td,
             fontSize = 11.sp,
             maxLines = 4,
+        )
+        Spacer(Modifier.height(14.dp))
+        AppText(
+            "Or skip MCP entirely and hit the JSON/HTTP endpoints directly:",
+            color = tc.td,
+            fontSize = 11.sp,
+            maxLines = 1,
         )
         Spacer(Modifier.height(8.dp))
         Box(
             Modifier.fillMaxWidth().background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM).padding(10.dp),
         ) {
             AppText("curl http://127.0.0.1:$port/tabs", color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
+        }
+        Spacer(Modifier.height(18.dp))
+        AppText("Connected clients", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(6.dp))
+        if (clients.isEmpty()) {
+            AppText(
+                "None right now — only tools using the OPENLOG_CLIENT_NAME/id headers above " +
+                    "show up here, so plain curl calls never appear.",
+                color = tc.td,
+                fontSize = 11.sp,
+                maxLines = 3,
+            )
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                clients.forEach { c ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column {
+                            AppText(c.name, color = tc.tx, fontSize = 11.sp)
+                            AppText(agoLabel(c.lastSeenMs), color = tc.td, fontSize = 10.sp)
+                        }
+                        AppButton(
+                            if (c.blocked) "Unblock" else "Block",
+                            isDanger = !c.blocked,
+                            onClick = {
+                                if (c.blocked) state.unblockMcpClient(c.id) else state.blockMcpClient(c.id)
+                                clients = state.connectedMcpClients()
+                            },
+                        )
+                    }
+                }
+            }
         }
         Spacer(Modifier.height(16.dp))
         Row(

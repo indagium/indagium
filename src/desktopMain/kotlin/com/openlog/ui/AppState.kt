@@ -213,6 +213,14 @@ class AppState(
     // false, or it would never auto-start again on the next launch.
     fun stopControlServerForShutdown() = applyControlServerState(enabled = false, port = 0)
 
+    // Read/mutated by the Settings "Connection info" popup — in-process passthrough to the
+    // running ControlServer, no HTTP round trip needed since both live in the same JVM.
+    fun connectedMcpClients() = controlServer?.connectedClients() ?: emptyList()
+
+    fun blockMcpClient(id: String) = controlServer?.blockClient(id)
+
+    fun unblockMcpClient(id: String) = controlServer?.unblockClient(id)
+
     private fun beginLoading() = synchronized(stateLock) {
         pendingLoads += 1
         isLoading = true

@@ -18,15 +18,27 @@ import com.sun.net.httpserver.HttpServer
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.URLDecoder
+import java.util.concurrent.ConcurrentHashMap
 
 private const val GET = "GET"
 private const val POST = "POST"
 private const val STATUS_OK = 200
 private const val STATUS_METHOD_NOT_ALLOWED = 405
+private const val STATUS_FORBIDDEN = 403
 private const val STATUS_SERVER_ERROR = 500
 private const val DEFAULT_VISIBLE_LIMIT = 200
 private const val OPEN_FILE_TIMEOUT_MS = 15_000L
 private const val OPEN_FILE_POLL_INTERVAL_MS = 20L
+private const val CLIENT_STALE_MS = 5 * 60_000L
+private const val CLIENT_ID_HEADER = "X-OpenLog-Client-Id"
+private const val CLIENT_NAME_HEADER = "X-OpenLog-Client-Name"
+private const val DEFAULT_CLIENT_NAME = "MCP client"
+
+// A connecting MCP client (the mcp-server/ stdio bridge, not a raw curl caller) self-identifies
+// with a per-process-launch random id + optional human-readable name (see mcp-server's
+// openlogClient.ts). Surfaced in the Settings "Connection info" popup so a user can see who's
+// talking to their app and, if unwanted, block them.
+data class ConnectedClientInfo(val id: String, val name: String, val lastSeenMs: Long, val blocked: Boolean)
 
 /**
  * Localhost-only debug/automation control surface for the running app. Lets an MCP server (or
@@ -40,7 +52,31 @@ private const val OPEN_FILE_POLL_INTERVAL_MS = 20L
 class ControlServer(private val appState: AppState, private val port: Int) {
     private var server: HttpServer? = null
 
+    private data class ClientRecord(val name: String, val lastSeenMs: Long)
+
+    private val clients = ConcurrentHashMap<String, ClientRecord>()
+    private val blockedIds = ConcurrentHashMap.newKeySet<String>()
+
     val boundPort: Int get() = server?.address?.port ?: port
+
+    // Read by the Settings/Connection-info UI (in-process, no HTTP hop needed — Compose and this
+    // server share the same JVM). Prunes anything not seen in the last CLIENT_STALE_MS so a
+    // closed-and-reopened tool doesn't linger in the list forever.
+    fun connectedClients(): List<ConnectedClientInfo> {
+        val now = System.currentTimeMillis()
+        return clients.entries
+            .filter { now - it.value.lastSeenMs <= CLIENT_STALE_MS }
+            .map { (id, rec) -> ConnectedClientInfo(id, rec.name, rec.lastSeenMs, id in blockedIds) }
+            .sortedByDescending { it.lastSeenMs }
+    }
+
+    fun blockClient(id: String) {
+        blockedIds.add(id)
+    }
+
+    fun unblockClient(id: String) {
+        blockedIds.remove(id)
+    }
 
     fun start() {
         val s = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
@@ -81,11 +117,20 @@ class ControlServer(private val appState: AppState, private val port: Int) {
     private fun handler(vararg allowedMethods: String, block: (HttpExchange, Map<String, Any?>) -> Any?): HttpHandler =
         HttpHandler { exchange ->
             try {
-                if (exchange.requestMethod !in allowedMethods) {
-                    respond(exchange, STATUS_METHOD_NOT_ALLOWED, mapOf("error" to "method not allowed"))
-                } else {
-                    val body = if (exchange.requestMethod == "POST") readBody(exchange) else emptyMap()
-                    respond(exchange, STATUS_OK, block(exchange, body))
+                val clientId = exchange.requestHeaders.getFirst(CLIENT_ID_HEADER)
+                val blocked = clientId != null && clientId in blockedIds
+                if (clientId != null && !blocked) {
+                    val name = exchange.requestHeaders.getFirst(CLIENT_NAME_HEADER)?.takeIf { it.isNotBlank() } ?: DEFAULT_CLIENT_NAME
+                    clients[clientId] = ClientRecord(name, System.currentTimeMillis())
+                }
+                when {
+                    blocked -> respond(exchange, STATUS_FORBIDDEN, mapOf("error" to "this client is blocked"))
+                    exchange.requestMethod !in allowedMethods ->
+                        respond(exchange, STATUS_METHOD_NOT_ALLOWED, mapOf("error" to "method not allowed"))
+                    else -> {
+                        val body = if (exchange.requestMethod == "POST") readBody(exchange) else emptyMap()
+                        respond(exchange, STATUS_OK, block(exchange, body))
+                    }
                 }
             } catch (e: Exception) {
                 respond(exchange, STATUS_SERVER_ERROR, mapOf("error" to (e.message ?: e.toString())))
