@@ -8,7 +8,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
-import com.openlog.debug.ControlServer
 import com.openlog.ui.App
 import com.openlog.ui.AppState
 import java.awt.Taskbar
@@ -38,15 +37,21 @@ fun main() {
     application {
         val windowState = rememberWindowState(size = DpSize(1440.dp, 900.dp))
         val appState = remember { AppState(restoreOnCreate = true) }
-        // Localhost-only automation control server for MCP/dev use (see ControlServer.kt) — off
-        // by default, only starts when OPENLOG_DEBUG_CONTROL or -Dopenlog.debugControl is set.
-        // Packaged builds (packageDmg/packageDeb/packageMsi) never set either, so end users
-        // never have this listener running.
+        // Localhost-only automation control server for MCP/dev use (see debug/ControlServer.kt).
+        // AppState owns the actual server instance (see setMcpControlEnabled /
+        // startControlServerForThisSessionOnly) — this effect only decides the starting state:
+        // OPENLOG_DEBUG_CONTROL / -Dopenlog.debugControl, if set, wins and force-enables for this
+        // run only, without persisting; otherwise the restored/default Settings toggle applies.
+        // Packaged builds (packageDmg/packageDeb/packageMsi) set neither and default the setting
+        // off, so end users never have this listener running unless they explicitly enable it.
         DisposableEffect(Unit) {
-            val port = System.getenv("OPENLOG_DEBUG_CONTROL")?.toIntOrNull()
+            val envPort = System.getenv("OPENLOG_DEBUG_CONTROL")?.toIntOrNull()
                 ?: System.getProperty("openlog.debugControl")?.toIntOrNull()
-            val controlServer = port?.let { p -> ControlServer(appState, p).also { it.start() } }
-            onDispose { controlServer?.stop() }
+            when {
+                envPort != null -> appState.startControlServerForThisSessionOnly(envPort)
+                appState.settings.mcpControlEnabled -> appState.setMcpControlEnabled(true, appState.settings.mcpControlPort)
+            }
+            onDispose { appState.stopControlServerForShutdown() }
         }
         Window(
             onCloseRequest = ::exitApplication,

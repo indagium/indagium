@@ -861,6 +861,13 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     KeyboardShortcutsDialog { state.shortcutsOpen = false }
                 }
             }
+
+            // ── MCP connection info dialog ────────────────────────────
+            if (state.mcpInfoOpen) {
+                Dialog(onDismissRequest = { state.mcpInfoOpen = false }) {
+                    McpInfoDialog(port = state.settings.mcpControlPort) { state.mcpInfoOpen = false }
+                }
+            }
         }
     }
 }
@@ -1872,6 +1879,48 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 AppText("Preview: $previewLabel app.log", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
             }
 
+            SettingsSectionHeader("Automation")
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CompactSetting("MCP control server") {
+                    SegmentedControl(
+                        options = listOf("On", "Off"),
+                        selectedIndices = setOf(if (state.settings.mcpControlEnabled) 0 else 1),
+                        onToggle = { idx -> state.setMcpControlEnabled(idx == 0, state.settings.mcpControlPort) },
+                    )
+                }
+                CompactSetting("Port", horizontalAlignment = Alignment.End) {
+                    var portText by remember(state.settings.mcpControlPort) {
+                        mutableStateOf(state.settings.mcpControlPort.toString())
+                    }
+                    InlineField(
+                        portText,
+                        { v ->
+                            val digits = v.filter { it.isDigit() }.take(5)
+                            portText = digits
+                            digits.toIntOrNull()?.coerceIn(MIN_PORT, MAX_PORT)?.let { p ->
+                                if (state.settings.mcpControlEnabled) state.setMcpControlEnabled(true, p)
+                                else state.updateSettings { it.copy(mcpControlPort = p) }
+                            }
+                        },
+                        "8991",
+                        Modifier.width(72.dp),
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppText("Connection info", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                AppButton("Connection info…", onClick = { onDismiss(); state.mcpInfoOpen = true }, variant = ButtonVariant.Secondary)
+            }
+
             SettingsSectionHeader("About")
             Row(
                 Modifier.fillMaxWidth(),
@@ -1910,6 +1959,44 @@ private fun SettingsSectionHeader(title: String) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(title, color = tc.ts, fontSize = 11.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         Divider()
+    }
+}
+
+@Composable
+private fun McpInfoDialog(port: Int, onDismiss: () -> Unit) {
+    val tc = tc()
+    Column(
+        Modifier.width(420.dp).background(tc.p, RoundedCornerShape(8.dp))
+            .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(20.dp),
+    ) {
+        AppText("MCP Connection Info", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(10.dp))
+        AppText("Base URL", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(3.dp))
+        AppText("http://127.0.0.1:$port", color = tc.ts, fontSize = 12.sp, fontFamily = MONO)
+        Spacer(Modifier.height(14.dp))
+        AppText(
+            "A .mcp.json at the repo root already registers this server for Claude Code — " +
+                "no extra setup needed there. Any other MCP client, or plain curl, can talk to " +
+                "the same JSON/HTTP endpoints directly, e.g.:",
+            color = tc.td,
+            fontSize = 11.sp,
+            maxLines = 4,
+        )
+        Spacer(Modifier.height(8.dp))
+        Box(
+            Modifier.fillMaxWidth().background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM).padding(10.dp),
+        ) {
+            AppText("curl http://127.0.0.1:$port/tabs", color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
+        }
+        Spacer(Modifier.height(16.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            DialogActionButton("Close", active = true, onClick = onDismiss)
+        }
     }
 }
 

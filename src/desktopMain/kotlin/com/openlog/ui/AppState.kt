@@ -2,6 +2,7 @@ package com.openlog.ui
 
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
+import com.openlog.debug.ControlServer
 import com.openlog.model.*
 import com.openlog.utils.FileTailer
 import com.openlog.utils.MergeSourceFile
@@ -50,6 +51,9 @@ internal const val FILTER_PANEL_MIN_WIDTH = 140f
 internal const val FILTER_PANEL_MAX_WIDTH = 420f
 internal const val COMPARE_SPLIT_MIN = 0.2f
 internal const val COMPARE_SPLIT_MAX = 0.8f
+internal const val MIN_PORT = 1
+internal const val MAX_PORT = 65535
+internal const val DEFAULT_MCP_PORT = 8991
 
 data class PendingSequenceStart(val text: String, val tag: String)
 
@@ -93,6 +97,10 @@ class AppState(
 
     private val activeTails = mutableMapOf<String, ActiveTail>()
 
+    // MCP/debug control server (see debug/ControlServer.kt) — same "private resource handle,
+    // guarded start, idempotent stop" shape as activeTails above.
+    private var controlServer: ControlServer? = null
+
     // ── Sequences (per-tab, stored in Filter) ────────────────────────
     var sequences: List<SequenceDef>
         get() = activeTab()?.filter?.sequences ?: emptyList()
@@ -119,6 +127,7 @@ class AppState(
     var tagUsage by mutableStateOf<Map<String, Int>>(emptyMap())
     var settingsOpen by mutableStateOf(false)
     var shortcutsOpen by mutableStateOf(false)
+    var mcpInfoOpen by mutableStateOf(false)
     var recentFiles by mutableStateOf<List<String>>(emptyList())
     var recentMenuOpen by mutableStateOf(false)
     var recentNotes by mutableStateOf<List<String>>(emptyList())
@@ -161,11 +170,48 @@ class AppState(
     fun close() {
         ioJob.cancel() // also cancels every active FileTailer's Job — each is started on ioScope
         activeTails.clear()
+        applyControlServerState(enabled = false, port = 0)
         synchronized(stateLock) {
             pendingLoads = 0
             isLoading = false
         }
     }
+
+    // Actually starts/stops the server, independent of whether the transition should be
+    // persisted — see setMcpControlEnabled (persists) vs startControlServerForThisSessionOnly
+    // (doesn't). Guards against double-starting the same port (ControlServer.start() isn't
+    // safely re-callable while already running) and rebinds if the port actually changed.
+    private fun applyControlServerState(enabled: Boolean, port: Int) {
+        if (enabled) {
+            val running = controlServer
+            if (running != null && running.boundPort == port) return
+            running?.stop()
+            controlServer = ControlServer(this, port).also { it.start() }
+        } else {
+            controlServer?.stop()
+            controlServer = null
+        }
+    }
+
+    // Settings-UI path: persists the toggle (autosaved) AND applies it immediately.
+    fun setMcpControlEnabled(enabled: Boolean, port: Int) {
+        val clamped = port.coerceIn(MIN_PORT, MAX_PORT)
+        if (settings.mcpControlEnabled != enabled || settings.mcpControlPort != clamped) {
+            settings = settings.copy(mcpControlEnabled = enabled, mcpControlPort = clamped)
+            autosaveNow()
+        }
+        applyControlServerState(enabled, clamped)
+    }
+
+    // Main.kt's OPENLOG_DEBUG_CONTROL/-Dopenlog.debugControl path: an ephemeral dev/CI override
+    // for this run only — deliberately never touches persisted settings, so a one-off env-var
+    // launch doesn't silently turn the server on for every future normal launch.
+    fun startControlServerForThisSessionOnly(port: Int) = applyControlServerState(true, port.coerceIn(MIN_PORT, MAX_PORT))
+
+    // Main.kt's shutdown path — stops the server without touching persisted settings, for the
+    // same reason: closing the app must not silently flip a user's saved "enabled" preference to
+    // false, or it would never auto-start again on the next launch.
+    fun stopControlServerForShutdown() = applyControlServerState(enabled = false, port = 0)
 
     private fun beginLoading() = synchronized(stateLock) {
         pendingLoads += 1
@@ -1726,6 +1772,8 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     numberAnnotationBlocks.toString(),
     annotationPrefixLabel,
     navScrollMargin.toString(),
+    mcpControlEnabled.toString(),
+    mcpControlPort.toString(),
 )
 
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
@@ -1746,6 +1794,8 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         numberAnnotationBlocks = p.getOrNull(9)?.toBooleanStrictOrNull() ?: false,
         annotationPrefixLabel = p.getOrNull(10)?.takeIf { it.isNotBlank() } ?: "From",
         navScrollMargin = p.getOrNull(11)?.toIntOrNull()?.coerceIn(0, 30) ?: 5,
+        mcpControlEnabled = p.getOrNull(12)?.toBooleanStrictOrNull() ?: false,
+        mcpControlPort = p.getOrNull(13)?.toIntOrNull()?.coerceIn(MIN_PORT, MAX_PORT) ?: DEFAULT_MCP_PORT,
     )
 }.getOrNull()
 
