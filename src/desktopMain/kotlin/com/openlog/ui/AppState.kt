@@ -110,6 +110,7 @@ class AppState(
     // true — mirrors the CSS :focus-visible pattern so mouse clicks don't outline the panel.
     var keyboardFocusVisible by mutableStateOf(false)
     var ctx by mutableStateOf<CtxMenuState?>(null)
+    var tabCtx by mutableStateOf<TabCtxMenuState?>(null)
     var addAnnRequest by mutableStateOf<AddAnnRequest?>(null)   // dialog to add annotation
     var sfDialog by mutableStateOf(false)
     var sfName by mutableStateOf("")
@@ -132,6 +133,10 @@ class AppState(
         private set
     var pendingZipPicker by mutableStateOf<PendingZipPicker?>(null)
     var mergeTabsDialogOpen by mutableStateOf(false)
+
+    // Read once into the merge dialog's initial selection when opened via a tab's context menu
+    // "Merge…" item — not observed reactively, so a plain var is fine.
+    var mergeTabsPreselectedId: String? = null
 
     val fpState = FilterPanelUiState()
 

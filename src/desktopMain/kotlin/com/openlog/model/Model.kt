@@ -228,6 +228,10 @@ data class CtxMenuState(
     val panelSelectedIds: Set<Int> = emptySet(),
 )
 
+// Right-click on a tab (not a log row) — deliberately separate from CtxMenuState, whose
+// entryId/selText/panelSelectedIds fields don't apply here.
+data class TabCtxMenuState(val tabId: String, val x: Float, val y: Float)
+
 // Request to open the add-annotation dialog
 data class AddAnnRequest(
     val targetTabId: String,

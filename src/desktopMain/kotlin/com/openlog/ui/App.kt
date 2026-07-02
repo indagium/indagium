@@ -6,13 +6,8 @@
 
 package com.openlog.ui
 
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -20,6 +15,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.CallMerge
 import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.LabelOff
 import androidx.compose.material.icons.outlined.ArrowDownward
@@ -54,7 +50,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -389,6 +387,62 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                 }
             }
 
+            // ── Tab context menu ───────────────────────────────────────
+            state.tabCtx?.let { tctx ->
+                val ttab = state.tab(tctx.tabId)
+                if (ttab != null) {
+                    BoxWithConstraints(
+                        Modifier.fillMaxSize().clickable(
+                            indication = null,
+                            interactionSource = remember { MutableInteractionSource() },
+                            onClick = { state.tabCtx = null },
+                        ),
+                    ) {
+                        // Only a tab backed by a real, currently-existing file can be tailed —
+                        // not a zip-extracted tab (sourcePath is a "zip!entry" pseudo-path, no
+                        // real file to watch) or a merged tab (sourcePath is null).
+                        val canTail = remember(ttab.sourcePath) {
+                            val p = ttab.sourcePath
+                            p != null && '!' !in p && File(p).isFile
+                        }
+                        val menuWidth = 200.dp
+                        val estimatedMenuHeight = if (canTail) 88.dp else 44.dp
+                        val x = tctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
+                        val y = tctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
+                        Column(
+                            Modifier.offset(x = x, y = y).width(menuWidth)
+                                .background(tc.p, RoundedCornerShape(7.dp))
+                                .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() },
+                                ) {}
+                                .padding(vertical = 4.dp),
+                        ) {
+                            if (canTail) {
+                                CtxItem(
+                                    icon = Icons.Outlined.PlayArrow,
+                                    label = if (ttab.tailing) "Stop Live Watching" else "Start Live Watching",
+                                    onClick = {
+                                        if (ttab.tailing) state.stopTailing(ttab.id) else state.startTailing(ttab.id)
+                                        state.tabCtx = null
+                                    },
+                                )
+                            }
+                            CtxItem(
+                                icon = Icons.AutoMirrored.Outlined.CallMerge,
+                                label = "Merge…",
+                                onClick = {
+                                    state.mergeTabsPreselectedId = ttab.id
+                                    state.mergeTabsDialogOpen = true
+                                    state.tabCtx = null
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+
             // ── Add annotation dialog ─────────────────────────────────
             state.addAnnRequest?.let { req ->
                 val rows = req.logIds.mapNotNull { state.tab(req.sourceTabId)?.rmap?.get(it) }
@@ -646,11 +700,14 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
             }
 
             if (state.mergeTabsDialogOpen) {
-                var selected by remember { mutableStateOf(emptySet<String>()) }
+                var selected by remember {
+                    mutableStateOf(state.mergeTabsPreselectedId?.let { setOf(it) } ?: emptySet())
+                }
                 var mergedName by remember { mutableStateOf("Merged") }
 
                 fun close() {
                     state.mergeTabsDialogOpen = false
+                    state.mergeTabsPreselectedId = null
                     selected = emptySet()
                 }
                 Dialog(
@@ -1379,12 +1436,6 @@ private fun TabBar(state: AppState) {
             shape = middleShape,
         ) { state.updateCompareMode(!state.compareMode) }
         ToolbarBtn(
-            "Merge",
-            enabled = state.tabs.size >= 2,
-            modifier = Modifier.fillMaxHeight(),
-            shape = middleShape,
-        ) { state.mergeTabsDialogOpen = true }
-        ToolbarBtn(
             "Open",
             modifier = Modifier.fillMaxHeight(),
             shape = if (hasRecentFiles) middleShape else rightShape,
@@ -1626,9 +1677,7 @@ private fun TabOverflowRow(state: AppState, modifier: Modifier) {
                             dragging = isDragging,
                             onClick = { if (dragTabId == null) state.activateTab(tab.id) },
                             onClose = { state.closeTab(tab.id) },
-                            onToggleTail = {
-                                if (tab.tailing) state.stopTailing(tab.id) else state.startTailing(tab.id)
-                            },
+                            onCtxMenu = { x, y -> state.tabCtx = TabCtxMenuState(tab.id, x, y) },
                         )
                     }
                 }
@@ -2134,18 +2183,13 @@ private fun CompactSetting(
 private fun TabItem(
     tab: LogTab, isActive: Boolean, showClose: Boolean,
     dragging: Boolean = false, onClick: () -> Unit, onClose: () -> Unit,
-    onToggleTail: (() -> Unit)? = null,
+    onCtxMenu: (Float, Float) -> Unit = { _, _ -> },
 ) {
     val tc = tc()
+    val density = LocalDensity.current.density
     var hov by remember { mutableStateOf(false) }
+    var rowRoot by remember { mutableStateOf(Offset.Zero) }
     val accent = tc.ac
-    // Only a tab backed by a real, currently-existing file can be tailed — not a zip-extracted
-    // tab (sourcePath is a "zip!entry" pseudo-path, no real file to watch) or a merged tab
-    // (sourcePath is null, its content came from other tabs, not a single growing file).
-    val canTail = remember(tab.sourcePath) {
-        val p = tab.sourcePath
-        p != null && '!' !in p && File(p).isFile
-    }
     Row(
         Modifier.fillMaxWidth().height(36.dp)
             .background(if (isActive) tc.bg else if (hov || dragging) tc.p else tc.p2)
@@ -2160,12 +2204,42 @@ private fun TabItem(
                     )
                 }
             }
+            .onGloballyPositioned { rowRoot = it.positionInRoot() }
             .onPointerEvent(PointerEventType.Enter) { hov = true }
             .onPointerEvent(PointerEventType.Exit) { hov = false }
+            .pointerInput(tab.id) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val ev = awaitPointerEvent(PointerEventPass.Initial)
+                        if (ev.type == PointerEventType.Press && ev.buttons.isSecondaryPressed) {
+                            val ch = ev.changes.firstOrNull() ?: continue
+                            ch.consume()
+                            onCtxMenu((rowRoot.x + ch.position.x) / density, (rowRoot.y + ch.position.y) / density)
+                        }
+                    }
+                }
+            }
             .clickable(onClick = onClick).padding(start = 12.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
+        // Live tailing (utils/FileTailer.kt) is toggled from the tab's right-click context menu,
+        // not a clickable button here — this is purely an indicator, plain and non-interactive.
+        if (tab.tailing) {
+            TooltipArea(
+                tooltip = {
+                    Box(
+                        Modifier.background(tc.p2, RoundedCornerShape(4.dp))
+                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        AppText("Live tailing — watching file for new lines", color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                    }
+                },
+            ) {
+                AppText("●", color = DANGER_RED, fontSize = 10.sp)
+            }
+        }
         AppText(
             tab.filename,
             color = if (isActive || dragging) tc.tx else tc.ts,
@@ -2175,36 +2249,9 @@ private fun TabItem(
             overflow = TextOverflow.Ellipsis,
             maxLines = 1,
         )
-        if (canTail && onToggleTail != null) {
-            TailToggle(tailing = tab.tailing, onClick = onToggleTail)
-        }
         if (showClose) {
             CloseButton(onClick = onClose)
         }
-    }
-}
-
-// Pulsing red dot while tailing (unmistakable "this is live" signal); a static dim dot otherwise,
-// so the toggle affordance is discoverable even before it's ever been used.
-@Composable
-private fun TailToggle(tailing: Boolean, onClick: () -> Unit) {
-    val tc = tc()
-    val transition = rememberInfiniteTransition(label = "tail-pulse")
-    val alpha by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(animation = tween(700), repeatMode = RepeatMode.Reverse),
-        label = "tail-pulse-alpha",
-    )
-    Box(
-        Modifier.size(20.dp).clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        AppText(
-            "●",
-            color = if (tailing) DANGER_RED.copy(alpha = alpha) else tc.td.copy(.4f),
-            fontSize = 10.sp,
-        )
     }
 }
 
