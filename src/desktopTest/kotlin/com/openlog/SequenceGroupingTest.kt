@@ -358,11 +358,13 @@ class SequenceGroupingTest {
     }
 
     @Test
-    fun unboundedSequenceNestsOverlappingCrashInsteadOfDroppingIt() {
+    fun unboundedSequenceDoesNotSwallowCrashItAlwaysRendersAtTopLevel() {
         // "burst" has no endMatchText, so per computeSeqGroups() it swallows everything up to the
         // next start match (there is none here) or end-of-log as its own unstructured "plain"
         // children — including the FATAL EXCEPTION block that follows, which has nothing to do
-        // with the sequence. The crash must still fold, just nested one level inside the sequence.
+        // with the sequence. The crash must still render as its own always-visible collapsible
+        // block, "escaping" the sequence — even while the sequence itself stays collapsed,
+        // unlike its own genuinely-swallowed plain content ("plain content" below).
         val logs = listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "App", "burst start", pid = 1),
             LogEntry(2, "10:00:00.100", LogLevel.I, "App", "plain content", pid = 1),
@@ -376,27 +378,28 @@ class SequenceGroupingTest {
             logData = logs,
             rmap = logs.associateBy { it.id },
             filter = Filter(sequences = listOf(seq)),
-            // Sequence expanded, nested crash still collapsed.
-            expanded = setOf("sg_burst_1"),
         )
 
         val items = computeItems(tab, applyFilter = true)
 
-        assertTrue(items.filterIsInstance<LogItem.SeqHeader>().any { it.entry.id == 1 })
-        assertEquals(listOf(2), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
-        val nestedHeader = items.filterIsInstance<LogItem.StackTraceHeader>().single()
-        assertEquals(3, nestedHeader.entry.id)
-        assertEquals(1, nestedHeader.indent)
-        assertTrue(!nestedHeader.expanded)
-        assertEquals(1, nestedHeader.count)
+        val seqHeader = items.filterIsInstance<LogItem.SeqHeader>().single()
+        assertEquals(1, seqHeader.entry.id)
+        assertTrue(!seqHeader.expanded)
+        assertTrue(items.filterIsInstance<LogItem.Row>().none { it.entry.id == 2 })
+        val crashHeader = items.filterIsInstance<LogItem.StackTraceHeader>().single()
+        assertEquals(3, crashHeader.entry.id)
+        assertEquals(0, crashHeader.indent)
+        assertTrue(!crashHeader.expanded)
+        assertEquals(1, crashHeader.count)
     }
 
     @Test
-    fun expandingNestedStackTraceGroupShowsItsMemberRowOnce() {
+    fun expandingCrashInsideAnExpandedSequenceShowsItsMemberRowOnce() {
         val logs = listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "App", "burst start", pid = 1),
-            LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 1),
-            LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 1),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "App", "plain content", pid = 1),
+            LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 1),
+            LogEntry(4, "10:00:00.300", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 1),
         )
         val seq = SequenceDef("burst", "burst start", priority = 1, color = Color.Blue, tag = "App")
         val tab = LogTab(
@@ -405,17 +408,19 @@ class SequenceGroupingTest {
             logData = logs,
             rmap = logs.associateBy { it.id },
             filter = Filter(sequences = listOf(seq)),
-            expanded = setOf("sg_burst_1", "st_2"),
+            expanded = setOf("sg_burst_1", "st_3"),
         )
 
         val items = computeItems(tab, applyFilter = true)
 
-        val nestedHeader = items.filterIsInstance<LogItem.StackTraceHeader>().single()
-        assertEquals(2, nestedHeader.entry.id)
-        assertTrue(nestedHeader.expanded)
-        val memberRow = items.filterIsInstance<LogItem.Row>().single()
-        assertEquals(3, memberRow.entry.id)
-        assertEquals(2, memberRow.indent)
+        val rows = items.filterIsInstance<LogItem.Row>()
+        assertEquals(listOf(2), rows.filter { it.groupColor != DANGER_RED }.map { it.entry.id })
+        val crashHeader = items.filterIsInstance<LogItem.StackTraceHeader>().single()
+        assertEquals(3, crashHeader.entry.id)
+        assertEquals(0, crashHeader.indent)
+        assertTrue(crashHeader.expanded)
+        val memberRow = rows.single { it.entry.id == 4 }
+        assertEquals(1, memberRow.indent)
         assertEquals(DANGER_RED, memberRow.groupColor)
     }
 

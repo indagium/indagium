@@ -127,28 +127,18 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
             computeSeqGroups(segment, sequences)
         else emptyList()
 
-        // Every id a sequence group claims — its own header line plus all children (plain + nested).
-        // Used to keep stack-trace folding from re-claiming a line a sequence already owns.
-        val seqClaimedIds = buildSet<Int> {
-            seqGroups.forEach { g ->
-                add(g.rid)
-                addAll(g.plain)
-                g.nested.forEach { ng -> add(ng.rid); addAll(ng.ch) }
-            }
-        }
-
-        // Stack-trace folding is always-on, independent of user-defined sequences. A sequence with
-        // no explicit end pattern can swallow everything up to the next start match (or
-        // end-of-log) as unstructured "plain" children — including an exception/ANR block that
-        // has nothing to do with the sequence. Rather than dropping that stack-trace group
-        // entirely (which used to leave it as unfolded, uncollapsible rows), nest it one level
-        // inside the sequence's plain children instead, exactly like an explicit nested
-        // sub-sequence would be. Only a stack-trace group whose lines don't overlap any sequence
-        // claim at all renders at the top level.
-        val allStackGroups = computeStackTraceGroups(segment)
-        val stackGroups = allStackGroups.filter { g -> (g.memberIds + g.rid).none { it in seqClaimedIds } }
-        val nestedStackGroupByRid = (allStackGroups - stackGroups.toSet()).associateBy { it.rid }
-        val nestedStackMemberIds = nestedStackGroupByRid.values.flatMapTo(mutableSetOf()) { it.memberIds }
+        // Stack-trace folding is always-on, independent of user-defined sequences, and always
+        // wins: a sequence with no explicit end pattern can swallow everything up to the next
+        // start match (or end-of-log) as unstructured "plain" children — including an
+        // exception/ANR block that has nothing to do with the sequence. Rather than folding that
+        // crash into the sequence's own collapsed content (which would only ever become visible
+        // once the *sequence* is also expanded — surprising, and expensive to auto-reveal on a
+        // large log), it always renders as its own independent, always-visible collapsible block
+        // at the top level, "escaping" whichever sequence would otherwise have swallowed it. Its
+        // ids are simply excluded wherever a sequence would otherwise have rendered them as
+        // unstructured plain/nested-child rows, so they render exactly once.
+        val stackGroups = computeStackTraceGroups(segment)
+        val stackClaimedIds = buildSet<Int> { stackGroups.forEach { add(it.rid); addAll(it.memberIds) } }
 
         if (seqGroups.isEmpty() && stackGroups.isEmpty()) return segment.map { LogItem.Row(it, 0) }
 
@@ -164,22 +154,18 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
 
         val items = mutableListOf<LogItem>()
 
-        // A "plain" (unstructured) child of a sequence's swallowed range: usually just a bare Row,
-        // but if it's the root of a stack-trace group nested inside this sequence (see
-        // nestedStackGroupByRid above), fold it as a nested StackTraceHeader instead — and skip
-        // its other member lines entirely, since they render inside that header's own expansion.
-        fun appendPlainChild(inner: LogEntry, outerColor: Color) {
-            val nestedStack = nestedStackGroupByRid[inner.id]
-            if (nestedStack != null) {
-                val nsExp = nestedStack.gid in tab.expanded
-                items += LogItem.StackTraceHeader(inner, nestedStack.gid, 1, nsExp, nestedStack.memberIds.size)
-                if (nsExp) {
-                    nestedStack.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 2, DANGER_RED) } }
-                }
-            } else if (inner.id !in nestedStackMemberIds) {
-                items += LogItem.Row(inner, 1, outerColor)
+        // An explicit nested sub-sequence within an expanded outer sequence's plain range —
+        // renders its own header, plus its children if it's also expanded (skipping any that
+        // belong to a stack-trace group, which renders independently at the top level instead).
+        fun appendNestedSubSequence(entry: LogEntry, ng: NestedSeqGroup, outerColor: Color) {
+            val nestedColor = defMap[ng.defId]?.color ?: outerColor
+            val nexp = ng.gid in tab.expanded
+            items += LogItem.SeqHeader(entry, ng.gid, 1, nexp, ng.ch.size, nestedColor)
+            if (nexp) {
+                ng.ch.forEach { id -> if (id !in stackClaimedIds) tab.rmap[id]?.let { items += LogItem.Row(it, 2, nestedColor) } }
             }
         }
+
         for (entry in segment) {
             val sg = seqGroups.find { it.rid == entry.id }
             val stg = if (sg == null) stackGroups.find { it.rid == entry.id } else null
@@ -194,16 +180,11 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
                         val nestedByRoot = sg.nested.associateBy { it.rid }
                         for (inner in segment) {
                             if (inner.id in plainIds) {
-                                appendPlainChild(inner, outerColor)
+                                if (inner.id !in stackClaimedIds) items += LogItem.Row(inner, 1, outerColor)
                                 continue
                             }
                             val ng = nestedByRoot[inner.id] ?: continue
-                            val nestedColor = defMap[ng.defId]?.color ?: outerColor
-                            val nexp = ng.gid in tab.expanded
-                            items += LogItem.SeqHeader(inner, ng.gid, 1, nexp, ng.ch.size, nestedColor)
-                            if (nexp) {
-                                ng.ch.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 2, nestedColor) } }
-                            }
+                            appendNestedSubSequence(inner, ng, outerColor)
                         }
                     }
                 }

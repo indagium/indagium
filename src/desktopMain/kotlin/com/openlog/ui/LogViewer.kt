@@ -705,11 +705,16 @@ private const val CENTER_ON_ITEM_MAX_ATTEMPTS = 5
 // viewport is resized. Scrolling to the item first, then reading its actual measured
 // offset/size from layoutInfo and correcting with scrollBy, keeps it centered regardless.
 //
+// Defaults to a non-animated jump: an *animated* scrollToItem lands the item top-aligned first
+// (that's as far as animateScrollToItem's own API goes) and only then can the centering
+// correction below run, which reads as two distinct, visibly separate motions — a smooth scroll
+// to the top followed by a sudden jump to center. Jumping straight there in one step avoids that.
+//
 // Retries reading layoutInfo a few times before giving up: right after a panel is freshly
 // composed (e.g. the instant the Unfiltered split view opens), the very first scroll can land
 // before that LazyColumn has completed its first real layout pass, so visibleItemsInfo may not
 // contain the target item yet on the first read.
-private suspend fun LazyListState.centerOnItem(index: Int, animate: Boolean = true) {
+private suspend fun LazyListState.centerOnItem(index: Int, animate: Boolean = false) {
     if (animate) animateScrollToItem(index) else scrollToItem(index)
     repeat(CENTER_ON_ITEM_MAX_ATTEMPTS) { attempt ->
         val info = layoutInfo
