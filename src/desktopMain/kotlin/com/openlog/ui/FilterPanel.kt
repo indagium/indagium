@@ -1221,7 +1221,7 @@ fun FilterPanel(
         // Same row-limit/collapse shape as Highlighters — always-on detection, not a user-defined
         // list, so there's nothing to add/remove here, only to browse and jump from.
         SectionHeader(
-            "Crashes & ANRs",
+            "Crashes",
             trailing = if (crashSites.isNotEmpty()) ({
                 AppText("${crashSites.size}", color = tc.td, fontSize = 10.sp, fontFamily = UI)
             }) else null,
