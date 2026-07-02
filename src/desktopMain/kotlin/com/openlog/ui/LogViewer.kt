@@ -530,13 +530,14 @@ fun LogViewer(
                     if (visibleIdx >= 0) return expanded to visibleIdx
                     val collapsedHeaders = candidateItems.mapNotNull { item ->
                         when (item) {
-                            is LogItem.SeqHeader -> item.gid.takeIf { !item.expanded }
-                            is LogItem.ManualHeader -> item.gid.takeIf { !item.expanded }
-                            is LogItem.StackTraceHeader -> item.gid.takeIf { !item.expanded }
+                            is LogItem.SeqHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
+                            is LogItem.ManualHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
+                            is LogItem.StackTraceHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
                             is LogItem.Row -> null
                         }
                     }
-                    val groupToOpen = collapsedHeaders.firstOrNull { gid ->
+                    val ranked = rankCollapsedHeadersByProximity(collapsedHeaders, entryId)
+                    val groupToOpen = ranked.firstOrNull { gid ->
                         computeItems(tab.copy(expanded = expanded + gid), false).any { item ->
                             when (item) {
                                 is LogItem.Row -> item.entry.id == entryId
@@ -545,7 +546,7 @@ fun LogViewer(
                                 is LogItem.StackTraceHeader -> item.entry.id == entryId
                             }
                         }
-                    } ?: collapsedHeaders.firstOrNull() ?: return null
+                    } ?: ranked.firstOrNull() ?: return null
                     expanded = expanded + groupToOpen
                 }
                 return null
@@ -604,13 +605,13 @@ fun LogViewer(
             LaunchedEffect(Unit) {
                 val targetId = tab.selected.minOrNull() ?: return@LaunchedEffect
                 val filteredIdx = items.indexOfFirst { logItemEntryId(it) == targetId }
-                if (filteredIdx >= 0) filteredLazyState.centerOnItem(filteredIdx, animate = false)
+                if (filteredIdx >= 0) filteredLazyState.centerOnItem(filteredIdx)
                 val originalTarget = originalExpansionAndIndexFor(targetId)
                 if (originalTarget != null) {
                     val (expanded, idx) = originalTarget
                     (expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
                     if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
-                    allLazyState.centerOnItem(idx, animate = false)
+                    allLazyState.centerOnItem(idx)
                 }
             }
 
@@ -695,6 +696,49 @@ fun LogViewer(
     }
 }
 
+private const val CENTER_ON_ITEM_RETRY_DELAY_MS = 16L
+private const val CENTER_ON_ITEM_MAX_ATTEMPTS = 5
+
+// Centers `index` in the viewport instead of just scrolling it into view. Scrolling to a fixed
+// "-N rows" margin above the target (the old approach at every call site below) only approximates
+// centering and drifts whenever rows have different heights (a SeqHeader vs. a plain Row) or the
+// viewport is resized. Scrolling to the item first, then reading its actual measured
+// offset/size from layoutInfo and correcting with scrollBy, keeps it centered regardless.
+//
+// Retries reading layoutInfo a few times before giving up: right after a panel is freshly
+// composed (e.g. the instant the Unfiltered split view opens), the very first scroll can land
+// before that LazyColumn has completed its first real layout pass, so visibleItemsInfo may not
+// contain the target item yet on the first read.
+private suspend fun LazyListState.centerOnItem(index: Int, animate: Boolean = true) {
+    if (animate) animateScrollToItem(index) else scrollToItem(index)
+    repeat(CENTER_ON_ITEM_MAX_ATTEMPTS) { attempt ->
+        val info = layoutInfo
+        val item = info.visibleItemsInfo.firstOrNull { it.index == index }
+        if (item != null) {
+            val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
+            val delta = (item.offset + item.size / 2 - viewportHeight / 2).toFloat()
+            if (delta != 0f) scrollBy(delta)
+            return
+        }
+        if (attempt < CENTER_ON_ITEM_MAX_ATTEMPTS - 1) kotlinx.coroutines.delay(CENTER_ON_ITEM_RETRY_DELAY_MS)
+    }
+}
+
+// Ranks collapsed-header candidates (gid to the header's own log entry id) by how likely each is
+// to actually contain `entryId`, cheapest test first. Sequences, nested sub-sequences, stack-trace
+// groups, and manual TO_END blocks all cover lines *after* their own header, so the nearest
+// preceding header is the most likely match; manual TO_START blocks are the one backward-covering
+// exception, so the nearest *following* header is tried next. This is a pure ordering hint, not a
+// filter — the caller still verifies each candidate and falls through the full list if the
+// top-ranked guess is wrong. On a real bug-report log with hundreds of collapsed groups, blindly
+// testing them in arbitrary order (the original approach) could mean thousands of expensive
+// recomputes to reveal one deeply-buried target — this typically finds the right one on the first
+// or second try instead.
+internal fun rankCollapsedHeadersByProximity(headers: List<Pair<String, Int>>, entryId: Int): List<String> {
+    val (preceding, following) = headers.partition { (_, headerId) -> headerId <= entryId }
+    return preceding.sortedByDescending { it.second }.map { it.first } + following.sortedBy { it.second }.map { it.first }
+}
+
 // Keeps `margin` rows of context visible around the cursor (like vim's scrolloff): the
 // highlight moves freely within that window with no scrolling, and only once it would land
 // within `margin` rows of the top/bottom edge does the viewport scroll to restore the margin.
@@ -703,20 +747,6 @@ fun LogViewer(
 // animation produced a visible gap where the old row had already lost its highlight but the
 // new row hadn't scrolled into view yet. An immediate jump keeps the highlight continuously
 // visible across the scroll.
-// Centers `index` in the viewport instead of just scrolling it into view. Scrolling to a fixed
-// "-N rows" margin above the target (the old approach at every call site below) only approximates
-// centering and drifts whenever rows have different heights (a SeqHeader vs. a plain Row) or the
-// viewport is resized. Scrolling to the item first, then reading its actual measured
-// offset/size from layoutInfo and correcting with scrollBy, keeps it centered regardless.
-private suspend fun LazyListState.centerOnItem(index: Int, animate: Boolean = true) {
-    if (animate) animateScrollToItem(index) else scrollToItem(index)
-    val info = layoutInfo
-    val item = info.visibleItemsInfo.firstOrNull { it.index == index } ?: return
-    val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
-    val delta = (item.offset + item.size / 2 - viewportHeight / 2).toFloat()
-    if (delta != 0f) scrollBy(delta)
-}
-
 private fun scrollForCursor(lazyState: LazyListState, scope: CoroutineScope, targetItemsIdx: Int, margin: Int) {
     val visible = lazyState.layoutInfo.visibleItemsInfo
     if (visible.isEmpty()) {
