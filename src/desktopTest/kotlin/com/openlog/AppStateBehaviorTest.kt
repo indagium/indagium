@@ -1004,14 +1004,13 @@ class AppStateBehaviorTest {
     fun recentNotesForTabOnlyReturnsNotesMatchingThatTabName() {
         val dir = createTempDirectory("openlog-recent-notes-tab").toFile()
         val sampleNote = File(dir, "sample_analysis.md").apply { writeText("sample") }
-        val sampleLegacyNote = File(dir, "sample.log_notes.md").apply { writeText("legacy") }
         val otherNote = File(dir, "other_analysis.md").apply { writeText("other") }
         val state = AppState(File(dir, "state.cache"))
-        state.recentNotes = listOf(otherNote.absolutePath, sampleNote.absolutePath, sampleLegacyNote.absolutePath)
+        state.recentNotes = listOf(otherNote.absolutePath, sampleNote.absolutePath)
         val tab = mkTab("log", "sample.log", emptyList())
 
         assertEquals(
-            listOf(sampleNote.absolutePath, sampleLegacyNote.absolutePath),
+            listOf(sampleNote.absolutePath),
             state.recentNotesForTab(tab),
         )
     }
@@ -1091,29 +1090,6 @@ class AppStateBehaviorTest {
             val restored = AppState(cacheFile, restoreOnCreate = true)
             assertEquals(listOf(logFile.absolutePath), restored.recentFiles)
             assertEquals(listOf(noteFile.absolutePath), restored.recentNotes)
-        } finally {
-            System.setProperty("user.home", originalHome)
-        }
-    }
-
-    @Test
-    fun openFileStillFindsLegacyAutoExportedNoteName() {
-        val originalHome = System.getProperty("user.home")
-        val home = createTempDirectory("openlog-home-legacy-note").toFile()
-        try {
-            System.setProperty("user.home", home.absolutePath)
-            val notesDir = File(home, ".openlog2/notes").apply { mkdirs() }
-            val logFile = File(home, "sample.log").apply {
-                writeText("06-26 10:00:00.000  123  456 I App: hello\n")
-            }
-            val legacyNoteFile = File(notesDir, "sample.log_notes.md").apply {
-                writeText("## sample.log\n\nremember this")
-            }
-            val state = AppState(File(home, "state.cache"))
-
-            state.openFile(logFile)
-
-            assertEquals(listOf(legacyNoteFile.absolutePath), state.recentNotes)
         } finally {
             System.setProperty("user.home", originalHome)
         }

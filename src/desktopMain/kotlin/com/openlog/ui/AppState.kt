@@ -1623,11 +1623,7 @@ class AppState(
     }
 
     private fun noteNamesForFilename(filename: String): List<String> {
-        val legacySafeName = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-        return listOf(
-            analysisNoteMarkdownName(filename),
-            "${legacySafeName}_notes.md",
-        )
+        return listOf(analysisNoteMarkdownName(filename))
     }
 
     fun recentNotesForTab(tab: LogTab): List<String> {
