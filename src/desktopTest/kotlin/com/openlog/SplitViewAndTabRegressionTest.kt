@@ -3,11 +3,15 @@ package com.openlog
 import com.openlog.model.LogEntry
 import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
+import com.openlog.model.ManualCollapseBlock
+import com.openlog.model.ManualCollapseDirection
 import com.openlog.ui.AnnotationNavigationTarget
 import com.openlog.ui.AppState
 import com.openlog.ui.LogViewerScrollStateStore
 import com.openlog.ui.annotationNavigationTarget
 import com.openlog.ui.browserTabOrderDuringDrag
+import com.openlog.ui.centerAnchorIndex
+import com.openlog.ui.expansionAndIndexForEntry
 import com.openlog.ui.logItemStableKey
 import com.openlog.ui.mkTab
 import com.openlog.ui.nextOriginalSelectionAfterFilteredSelection
@@ -16,6 +20,7 @@ import com.openlog.ui.splitTabsForVisibility
 import com.openlog.ui.tabOrderAfterVisibleReorder
 import com.openlog.ui.tabRenderX
 import com.openlog.ui.visibleRowRangeIds
+import com.openlog.utils.computeItems
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotSame
@@ -120,6 +125,36 @@ class SplitViewAndTabRegressionTest {
         )
 
         assertEquals(AnnotationNavigationTarget(filteredEntryId = null, originalEntryId = 4), target)
+    }
+
+    @Test
+    fun annotationNavigationCanRevealLineInsideCollapsedManualBlock() {
+        val tab = mkTab(
+            "log",
+            "test.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "App", "first"),
+                LogEntry(2, "10:00:00.100", LogLevel.I, "App", "referenced"),
+                LogEntry(3, "10:00:00.200", LogLevel.I, "App", "manual anchor"),
+            ),
+        ).copy(
+            manualBlocks = listOf(ManualCollapseBlock("m1", 3, ManualCollapseDirection.TO_START)),
+        )
+
+        val target = expansionAndIndexForEntry(tab, applyFilter = true, entryId = 2)
+
+        assertEquals(setOf("m1"), target?.expanded)
+        val expandedItems = computeItems(tab.copy(expanded = target!!.expanded), applyFilter = true)
+        assertEquals(2, expandedItems[target.index].let { (it as LogItem.Row).entry.id })
+    }
+
+    @Test
+    fun centerAnchorIndexUsesCurrentViewportHeight() {
+        val currentSplitViewportRows = List(16) { 32 }
+
+        val anchorIndex = centerAnchorIndex(index = 14, viewportHeight = 16 * 32, visibleItemSizes = currentSplitViewportRows)
+
+        assertEquals(6, anchorIndex)
     }
 
     @Test

@@ -159,6 +159,11 @@ internal data class AnnotationNavigationTarget(
     val originalEntryId: Int?,
 )
 
+internal data class ExpansionAndIndexTarget(
+    val expanded: Set<String>,
+    val index: Int,
+)
+
 internal fun annotationNavigationTarget(
     referencedIds: List<Int>,
     filteredVisibleIds: List<Int>,
@@ -206,6 +211,47 @@ internal fun logItemStableKey(tabId: String, item: LogItem): String = when (item
     is LogItem.SeqHeader -> "$tabId:h${item.gid}"
     is LogItem.ManualHeader -> "$tabId:m${item.gid}"
     is LogItem.StackTraceHeader -> "$tabId:st${item.gid}"
+}
+
+internal fun expansionAndIndexForEntry(
+    tab: LogTab,
+    applyFilter: Boolean,
+    entryId: Int,
+    currentItems: List<LogItem>? = null,
+): ExpansionAndIndexTarget? {
+    var expanded = tab.expanded
+    var candidateItems = currentItems ?: computeItems(tab.copy(expanded = expanded), applyFilter)
+    repeat(24) {
+        val visibleIdx = candidateItems.indexOfEntry(entryId)
+        if (visibleIdx >= 0) return ExpansionAndIndexTarget(expanded, visibleIdx)
+        if (tab.largeFileMode) return null
+        val collapsedHeaders = candidateItems.mapNotNull { item ->
+            when (item) {
+                is LogItem.SeqHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
+                is LogItem.ManualHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
+                is LogItem.StackTraceHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
+                is LogItem.Row -> null
+            }
+        }
+        val ranked = rankCollapsedHeadersByProximity(collapsedHeaders, entryId)
+        val groupToOpen = ranked.firstOrNull { gid ->
+            computeItems(tab.copy(expanded = expanded + gid), applyFilter).anyEntry(entryId)
+        } ?: ranked.firstOrNull() ?: return null
+        expanded = expanded + groupToOpen
+        candidateItems = computeItems(tab.copy(expanded = expanded), applyFilter)
+    }
+    return null
+}
+
+private fun List<LogItem>.indexOfEntry(entryId: Int): Int = indexOfFirst { it.hasEntryId(entryId) }
+
+private fun List<LogItem>.anyEntry(entryId: Int): Boolean = any { it.hasEntryId(entryId) }
+
+private fun LogItem.hasEntryId(entryId: Int): Boolean = when (this) {
+    is LogItem.Row -> entry.id == entryId
+    is LogItem.SeqHeader -> entry.id == entryId
+    is LogItem.ManualHeader -> entry.id == entryId
+    is LogItem.StackTraceHeader -> entry.id == entryId
 }
 
 class LogViewerScrollStateStore {
@@ -646,46 +692,6 @@ fun LogViewer(
             val filteredLazyState = scrollStates.lazyState("${tab.id}:main")
             val syncScope    = rememberCoroutineScope()
 
-            fun originalExpansionAndIndexFor(entryId: Int): Pair<Set<String>, Int>? {
-                val currentIdx = computedAllItems.summary.allIds.indexOf(entryId)
-                if (currentIdx >= 0) return tab.expanded to currentIdx
-                if (tab.largeFileMode) return null
-                var expanded = tab.expanded
-                repeat(24) {
-                    val candidateItems = computeItems(tab.copy(expanded = expanded), false)
-                    val visibleIdx = candidateItems.indexOfFirst { item ->
-                        when (item) {
-                            is LogItem.Row -> item.entry.id == entryId
-                            is LogItem.SeqHeader -> item.entry.id == entryId
-                            is LogItem.ManualHeader -> item.entry.id == entryId
-                            is LogItem.StackTraceHeader -> item.entry.id == entryId
-                        }
-                    }
-                    if (visibleIdx >= 0) return expanded to visibleIdx
-                    val collapsedHeaders = candidateItems.mapNotNull { item ->
-                        when (item) {
-                            is LogItem.SeqHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
-                            is LogItem.ManualHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
-                            is LogItem.StackTraceHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
-                            is LogItem.Row -> null
-                        }
-                    }
-                    val ranked = rankCollapsedHeadersByProximity(collapsedHeaders, entryId)
-                    val groupToOpen = ranked.firstOrNull { gid ->
-                        computeItems(tab.copy(expanded = expanded + gid), false).any { item ->
-                            when (item) {
-                                is LogItem.Row -> item.entry.id == entryId
-                                is LogItem.SeqHeader -> item.entry.id == entryId
-                                is LogItem.ManualHeader -> item.entry.id == entryId
-                                is LogItem.StackTraceHeader -> item.entry.id == entryId
-                            }
-                        }
-                    } ?: ranked.firstOrNull() ?: return null
-                    expanded = expanded + groupToOpen
-                }
-                return null
-            }
-
             // Independent selection for the "Original" panel so clicks there don't
             // highlight rows in the "Filtered" panel and vice-versa.
             var localAllSelected by remember(tab.id) { mutableStateOf(emptySet<Int>()) }
@@ -713,21 +719,26 @@ fun LogViewer(
 
             LaunchedEffect(annotationNavigationRequest?.id, itemsVersion, allItemsVersion, tab.expanded) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
-                val target = annotationNavigationTarget(request.logIds, computedItems.summary.allIds, originalOpen = true)
-                if (target != null) {
+                val filteredTarget = request.logIds.firstNotNullOfOrNull { entryId ->
+                    expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
+                }
+                val originalTarget = request.logIds.firstNotNullOfOrNull { entryId ->
+                    expansionAndIndexForEntry(tab, applyFilter = false, entryId = entryId, currentItems = allItems)
+                }
+                if (filteredTarget != null || originalTarget != null) {
                     localAllSelected = request.logIds.toSet()
-                    target.filteredEntryId?.let { filteredEntryId ->
-                        val idx = computedItems.summary.allIds.indexOf(filteredEntryId)
-                        if (idx >= 0) filteredLazyState.centerOnItem(idx)
+                    var opened = tab.expanded
+                    filteredTarget?.let { target ->
+                        (target.expanded - opened).forEach { gid -> onToggleGroup(gid) }
+                        if (target.expanded != opened) kotlinx.coroutines.delay(80)
+                        opened = opened + target.expanded
+                        filteredLazyState.centerOnItem(target.index)
                     }
-                    target.originalEntryId?.let { originalEntryId ->
-                        val originalTarget = originalExpansionAndIndexFor(originalEntryId)
-                        if (originalTarget != null) {
-                            val (expanded, idx) = originalTarget
-                            (expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
-                            if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
-                            allLazyState.centerOnItem(idx)
-                        }
+                    originalTarget?.let { target ->
+                        (target.expanded - opened).forEach { gid -> onToggleGroup(gid) }
+                        if (target.expanded != opened) kotlinx.coroutines.delay(80)
+                        opened = opened + target.expanded
+                        allLazyState.centerOnItem(target.index)
                     }
                 }
                 onConsumeAnnotationNavigation(request.id)
@@ -747,15 +758,20 @@ fun LogViewer(
                 // against that transient, too-small viewport and never gets a chance to redo it
                 // once the real (larger) size arrives, so it doesn't end up actually centered.
                 snapshotFlow { containerH }.first { it > 0f }
-                val originalTarget = originalExpansionAndIndexFor(targetId)
+                var opened = tab.expanded
+                val originalTarget = expansionAndIndexForEntry(tab, applyFilter = false, entryId = targetId, currentItems = allItems)
                 if (originalTarget != null) {
-                    val (expanded, idx) = originalTarget
-                    (expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
-                    if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
-                    allLazyState.centerOnItem(idx)
+                    (originalTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
+                    if (originalTarget.expanded != opened) kotlinx.coroutines.delay(80)
+                    opened = opened + originalTarget.expanded
+                    allLazyState.centerOnItem(originalTarget.index)
                 }
-                val filteredIdx = computedItems.summary.allIds.indexOf(targetId)
-                if (filteredIdx >= 0) filteredLazyState.centerOnItem(filteredIdx)
+                val filteredTarget = expansionAndIndexForEntry(tab, applyFilter = true, entryId = targetId, currentItems = items)
+                if (filteredTarget != null) {
+                    (filteredTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
+                    if (filteredTarget.expanded != opened) kotlinx.coroutines.delay(80)
+                    filteredLazyState.centerOnItem(filteredTarget.index)
+                }
             }
 
             Column(
@@ -803,12 +819,11 @@ fun LogViewer(
                                 localAllSelected = nextOriginalSelectionAfterFilteredSelection(
                                     filteredSelection = setOf(id),
                                 )
-                                val target = originalExpansionAndIndexFor(id)
+                                val target = expansionAndIndexForEntry(tab, applyFilter = false, entryId = id, currentItems = allItems)
                                 if (target != null) syncScope.launch {
-                                    val (expanded, idx) = target
-                                    (expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
-                                    if (expanded != tab.expanded) kotlinx.coroutines.delay(80)
-                                    allLazyState.centerOnItem(idx)
+                                    (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
+                                    if (target.expanded != tab.expanded) kotlinx.coroutines.delay(80)
+                                    allLazyState.centerOnItem(target.index)
                                 }
                             }
                         },
@@ -827,12 +842,13 @@ fun LogViewer(
             val mainLazyState = scrollStates.lazyState("${tab.id}:main")
             LaunchedEffect(annotationNavigationRequest?.id, itemsVersion) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
-                val target = annotationNavigationTarget(request.logIds, computedItems.summary.allIds, originalOpen = false)
+                val target = request.logIds.firstNotNullOfOrNull { entryId ->
+                    expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
+                }
                 if (target != null) {
-                    target.filteredEntryId?.let { filteredEntryId ->
-                        val idx = computedItems.summary.allIds.indexOf(filteredEntryId)
-                        if (idx >= 0) mainLazyState.centerOnItem(idx)
-                    }
+                    (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
+                    if (target.expanded != tab.expanded) kotlinx.coroutines.delay(80)
+                    mainLazyState.centerOnItem(target.index)
                 }
                 onConsumeAnnotationNavigation(request.id)
             }
@@ -860,16 +876,22 @@ fun LogViewer(
 // half a viewport's worth of rows — since that earlier index lands at the top, the real target
 // naturally ends up near the middle. Approximate (row heights vary) but always in the right
 // direction, which a screen-relative correction was not.
+internal fun centerAnchorIndex(index: Int, viewportHeight: Int, visibleItemSizes: List<Int>): Int {
+    if (visibleItemSizes.isEmpty()) return index
+    val avgRowHeight = visibleItemSizes.sum() / visibleItemSizes.size
+    if (avgRowHeight <= 0) return index
+    val rowsToHalfViewport = (viewportHeight / 2) / avgRowHeight
+    return (index - rowsToHalfViewport).coerceAtLeast(0)
+}
+
 private suspend fun LazyListState.centerOnItem(index: Int) {
     scrollToItem(index)
+    withFrameNanos { }
     val info = layoutInfo
     val visible = info.visibleItemsInfo
     if (visible.isEmpty()) return
-    val avgRowHeight = visible.sumOf { it.size } / visible.size
-    if (avgRowHeight <= 0) return
     val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
-    val rowsToHalfViewport = (viewportHeight / 2) / avgRowHeight
-    val anchorIndex = (index - rowsToHalfViewport).coerceAtLeast(0)
+    val anchorIndex = centerAnchorIndex(index, viewportHeight, visible.map { it.size })
     if (anchorIndex != index) scrollToItem(anchorIndex)
 }
 
