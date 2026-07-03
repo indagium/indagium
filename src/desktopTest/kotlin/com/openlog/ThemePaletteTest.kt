@@ -1,6 +1,7 @@
 package com.openlog
 
 import com.openlog.model.ThemePreset
+import com.openlog.ui.loadingOverlayBackground
 import com.openlog.ui.themeColors
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -56,5 +57,14 @@ class ThemePaletteTest {
         assertNotEquals(light.p, lightPro.p)
         assertNotEquals(light.p2, lightPro.p2)
         assertNotEquals(light.ac, lightPro.ac)
+    }
+
+    @Test
+    fun loadingOverlayBackgroundIsOpaqueSoEmptyStateTextDoesNotShowThrough() {
+        ThemePreset.entries.forEach { preset ->
+            val overlay = loadingOverlayBackground(themeColors(preset))
+
+            assertEquals(1f, overlay.alpha, "${preset.name} loading overlay must hide empty-state copy")
+        }
     }
 }

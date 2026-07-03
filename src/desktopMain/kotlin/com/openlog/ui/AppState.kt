@@ -15,7 +15,7 @@ import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.extractCandidate
-import com.openlog.utils.listLogcatCandidates
+import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.mergeLogs
 import com.openlog.utils.parseLogcat
 import com.openlog.utils.parseLogcatLines
@@ -90,6 +90,7 @@ class AppState(
     restoreOnCreate: Boolean = false,
     private val parser: (File) -> List<LogEntry> = ::parseLogcat,
     private val notesDir: File = DesktopStorage.notesDir(),
+    private val archiveCacheDir: File = DesktopStorage.archiveCacheDir(),
     private val autoExportNotes: Boolean = true,
 ) {
     // ── Settings ────────────────────────────────────────────────────
@@ -165,6 +166,11 @@ class AppState(
     var recentMenuOpen by mutableStateOf(false)
     var recentNotes by mutableStateOf<List<String>>(emptyList())
     var recentNotesMenuOpen by mutableStateOf(false)
+    var cacheClearConfirmOpen by mutableStateOf(false)
+    val archiveCachePath: String = archiveCacheDir.absolutePath
+    val appCachePath: String = archiveCacheDir.parentFile?.absolutePath ?: archiveCacheDir.absolutePath
+    var archiveCacheSizeBytes by mutableStateOf(0L)
+        private set
     var pendingSequenceStart by mutableStateOf<PendingSequenceStart?>(null)
     var pendingFilterLoad by mutableStateOf<PendingFilterLoad?>(null)
     var pendingDuplicateFilterSave by mutableStateOf<PendingDuplicateFilterSave?>(null)
@@ -196,6 +202,7 @@ class AppState(
     private var annotationNavigationCounter = 0L
 
     init {
+        refreshArchiveCacheInfo()
         if (restoreOnCreate) restoreAutosave()
     }
 
@@ -1339,7 +1346,7 @@ class AppState(
     // bundle multiple buffers (main/system/crash/events), and silently picking one wrong is worse
     // than one extra click. 0 candidates is a silent no-op — the zip just isn't a bug report.
     fun openZipFile(file: File) {
-        val candidates = listLogcatCandidates(file)
+        val candidates = listArchiveLogCandidates(file)
         when {
             candidates.size == 1 -> openZipEntry(file, candidates.first())
             candidates.size > 1 -> pendingZipPicker = PendingZipPicker(file, candidates)
@@ -1434,7 +1441,7 @@ class AppState(
     fun saveAnalysis(tabId: String) {
         val t = tab(tabId) ?: return
         val dlg = FileDialog(null as Frame?, "Save Analysis", FileDialog.SAVE).apply {
-            file = t.filename.substringBeforeLast('.') + "_analysis.md"
+            file = analysisNoteMarkdownName(t.filename)
             settings.defaultSaveDir?.let { directory = it }
             isVisible = true
         }
@@ -1480,6 +1487,11 @@ class AppState(
     }
 
     fun openNoteFile(tabId: String, file: File) {
+        if (!file.exists()) {
+            removeRecentNote(file)
+            recentNotesMenuOpen = false
+            return
+        }
         rememberRecentNote(file)
         recentNotesMenuOpen = false
         // Prefer .ann sidecar — restores exact blocks and structure
@@ -1503,17 +1515,31 @@ class AppState(
         ioScope.launch { openNoteFile(tabId, file) }
     }
 
-    private fun autoExportedNoteFile(filename: String): File {
-        val safeName = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-        return File(notesDir, "${safeName}_notes.md")
+    private fun userNotesDir(): File? {
+        val configuredDir = settings.defaultSaveDir?.let(::File) ?: return null
+        return configuredDir.takeIf { it.exists() && it.isDirectory }
+    }
+
+    private fun activeNotesDir(): File = userNotesDir() ?: notesDir
+
+    private fun noteLookupDirs(): List<File> {
+        return listOfNotNull(
+            userNotesDir(),
+            notesDir,
+            DesktopStorage.legacyNotesDir(),
+        ).distinctBy { it.absolutePath }
     }
 
     private fun rememberAutoExportedNoteFor(filename: String) {
-        val safeName = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-        val noteFile = listOf(
-            File(notesDir, "${safeName}_notes.md"),
-            File(DesktopStorage.legacyNotesDir(), "${safeName}_notes.md"),
-        ).firstOrNull { it.exists() } ?: return
+        val legacySafeName = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        val noteNames = listOf(
+            analysisNoteMarkdownName(filename),
+            "${legacySafeName}_notes.md",
+        )
+        val noteFile = noteLookupDirs()
+            .asSequence()
+            .flatMap { dir -> noteNames.asSequence().map { name -> File(dir, name) } }
+            .firstOrNull { it.exists() } ?: return
         if (noteFile.exists()) rememberRecentNote(noteFile)
     }
 
@@ -1523,15 +1549,36 @@ class AppState(
         autosaveNow()
     }
 
+    private fun removeRecentNote(file: File) {
+        val absPath = file.absolutePath
+        val next = recentNotes.filter { it != absPath }
+        if (next == recentNotes) return
+        recentNotes = next
+        autosaveNow()
+    }
+
+    private fun pruneMissingRecentNotes() {
+        val next = recentNotes.filter { File(it).exists() }
+        if (next == recentNotes) return
+        recentNotes = next
+        autosaveNow()
+    }
+
+    fun toggleRecentNotesMenu() {
+        if (!recentNotesMenuOpen) pruneMissingRecentNotes()
+        recentNotesMenuOpen = !recentNotesMenuOpen
+    }
+
     private fun autoExportAnnotations(tab: LogTab) {
         if (!autoExportNotes || !settings.autoExportNotes || tab.annotations.blocks.isEmpty()) return
         ioScope.launch {
             runCatching {
-                notesDir.mkdirs()
-                val mdFile = autoExportedNoteFile(tab.filename)
+                val targetDir = activeNotesDir()
+                targetDir.mkdirs()
+                val mdFile = File(targetDir, analysisNoteMarkdownName(tab.filename))
                 mdFile.writeText(buildMd(tab, settings))
                 // Sidecar stores full block state for restoration
-                File(notesDir, "${mdFile.nameWithoutExtension}.ann").writeText(tab.annotations.annotationsToken())
+                File(targetDir, "${mdFile.nameWithoutExtension}.ann").writeText(tab.annotations.annotationsToken())
                 rememberRecentNote(mdFile)
             }
         }
@@ -1584,6 +1631,32 @@ class AppState(
         ioScope.launch { importFiltersFromFile(file) }
     }
 
+    // ── Archive cache ────────────────────────────────────────────────
+    fun refreshArchiveCacheInfo() {
+        archiveCacheSizeBytes = archiveCacheDir.totalFileSize() + notesDir.totalFileSize()
+    }
+
+    fun clearArchiveCache() {
+        archiveCacheDir.listFiles().orEmpty().forEach { file -> runCatching { file.deleteRecursively() } }
+        notesDir.listFiles().orEmpty().forEach { file -> runCatching { file.deleteRecursively() } }
+        pruneMissingRecentNotes()
+        refreshArchiveCacheInfo()
+    }
+
+    fun requestClearCache() {
+        refreshArchiveCacheInfo()
+        cacheClearConfirmOpen = true
+    }
+
+    fun cancelClearCache() {
+        cacheClearConfirmOpen = false
+    }
+
+    fun confirmClearCache() {
+        cacheClearConfirmOpen = false
+        clearArchiveCache()
+    }
+
     // ── Autosave ─────────────────────────────────────────────────────
     fun autosaveNow() {
         runCatching {
@@ -1604,6 +1677,7 @@ class AppState(
                 restoreAutosaveKey(key, value)
             }
             restoreTabsFromAutosave(tabLines)
+            pruneMissingRecentNotes()
         }
     }
 
@@ -1637,14 +1711,14 @@ class AppState(
         // annotations, expanded/manual blocks); file contents parse in the background. This used
         // to call parseLogcat inline during AppState init — i.e. inside the first composition —
         // so a large tab left open at last quit froze the app for the whole parse on every launch.
-        shells.forEach { shell -> scheduleRestoredTabLoad(shell.tab.id, shell.sourceFile) }
+        shells.forEach { shell -> scheduleRestoredTabLoad(shell.tab.id, shell.source) }
     }
 
-    private fun scheduleRestoredTabLoad(tabId: String, file: File) {
+    private fun scheduleRestoredTabLoad(tabId: String, source: RestoredTabSource) {
         beginLoading("Restoring session...")
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
             try {
-                val logData = runCatching { parser(file) }.getOrElse { emptyList() }
+                val logData = runCatching { source.load(parser) }.getOrElse { emptyList() }
                 ensureActive()
                 val rmap = mkRmap(logData)
                 val analysis = buildLogAnalysis(logData)
@@ -1928,6 +2002,12 @@ private fun String.fieldValue(): String = if (this == "~") "" else unb64()
 private fun tokenFields(vararg values: String): String = values.joinToString("|") { it.fieldToken() }
 
 private fun String.tokenFields(): List<String> = split("|", limit = Int.MAX_VALUE).map { it.fieldValue() }
+
+private fun analysisNoteMarkdownName(filename: String): String {
+    val base = filename.substringBeforeLast('.', filename)
+    val safeBase = base.replace(Regex("[^a-zA-Z0-9_-]"), "_").ifBlank { "analysis" }
+    return "${safeBase}_analysis.md"
+}
 
 private fun String.tokenList(): List<String> =
     if (isBlank()) emptyList() else unb64().split(",").filter { it.isNotBlank() }
@@ -2233,15 +2313,33 @@ private fun LogTab.tabToken(): String {
 }
 
 // Metadata-only restore: log content is parsed afterwards on ioScope (scheduleRestoredTabLoad),
-// so this must stay cheap — it runs synchronously during AppState init. The file-exists check
-// stays here so tabs whose source vanished are dropped before they ever appear.
-private class RestoredTabShell(val tab: LogTab, val sourceFile: File)
+// so this must stay cheap — it runs synchronously during AppState init. Source-exists checks
+// stay here so tabs whose backing file/archive vanished are dropped before they ever appear.
+private class RestoredTabShell(val tab: LogTab, val source: RestoredTabSource)
+
+private sealed class RestoredTabSource {
+    abstract val largeFileMode: Boolean
+
+    abstract fun load(parser: (File) -> List<LogEntry>): List<LogEntry>
+
+    data class FileSource(val file: File) : RestoredTabSource() {
+        override val largeFileMode: Boolean = file.length() >= LARGE_FILE_MODE_BYTES
+
+        override fun load(parser: (File) -> List<LogEntry>): List<LogEntry> = parser(file)
+    }
+
+    data class ArchiveSource(val archiveFile: File, val candidate: ZipLogCandidate) : RestoredTabSource() {
+        override val largeFileMode: Boolean = candidate.sizeBytes >= LARGE_FILE_MODE_BYTES
+
+        override fun load(parser: (File) -> List<LogEntry>): List<LogEntry> = extractCandidate(archiveFile, candidate)
+    }
+}
 
 private fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
     val p = tokenFields()
     if (p.size < 9) return@runCatching null
     val sourcePath = p[2].takeIf { it.isNotBlank() }
-    val sourceFile = sourcePath?.let { path -> File(path).takeIf { it.exists() } } ?: return@runCatching null
+    val source = sourcePath?.restoredTabSource() ?: return@runCatching null
     RestoredTabShell(
         LogTab(
             id = p[0],
@@ -2255,11 +2353,27 @@ private fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             showAnnMd = p[5].toBoolean(),
             manualBlocks = p[8].encodedList().mapNotNull { it.manualBlockFromToken() },
             sourcePath = sourcePath,
-            largeFileMode = sourceFile.length() >= LARGE_FILE_MODE_BYTES,
+            largeFileMode = source.largeFileMode,
         ),
-        sourceFile,
+        source,
     )
 }.getOrNull()
+
+private fun String.restoredTabSource(): RestoredTabSource? {
+    val bangIndex = indexOf('!')
+    if (bangIndex > 0) {
+        val archiveFile = File(substring(0, bangIndex)).takeIf { it.exists() } ?: return null
+        val entryPath = substring(bangIndex + 1).takeIf { it.isNotBlank() } ?: return null
+        val candidate = listArchiveLogCandidates(archiveFile).firstOrNull { it.entryPath == entryPath } ?: return null
+        return RestoredTabSource.ArchiveSource(archiveFile, candidate)
+    }
+    return File(this).takeIf { it.exists() }?.let { RestoredTabSource.FileSource(it) }
+}
+
+private fun File.totalFileSize(): Long =
+    if (!exists()) 0L
+    else if (isFile) length()
+    else listFiles().orEmpty().sumOf { it.totalFileSize() }
 
 private fun String.b64(): String =
     Base64.getUrlEncoder().withoutPadding().encodeToString(toByteArray(Charsets.UTF_8))

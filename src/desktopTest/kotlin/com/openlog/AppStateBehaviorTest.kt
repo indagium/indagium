@@ -846,6 +846,95 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun autosaveRestoresOpenZipEntryFromOriginalArchive() {
+        val dir = createTempDirectory("openlog-zip-restore").toFile()
+        val zip = buildZipFixture(
+            dir,
+            "bugreport.zip",
+            mapOf("FS/data/anr/main_log.txt" to "06-26 10:00:00.000  123  456 I App: hello\n"),
+        )
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+
+        state.openZipFile(zip)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        waitUntil { restored.tabs.size == 1 && !restored.isLoading }
+
+        val restoredTab = restored.tabs.single()
+        assertEquals("main_log.txt", restoredTab.filename)
+        assertEquals("${zip.absolutePath}!FS/data/anr/main_log.txt", restoredTab.sourcePath)
+        assertEquals("hello", restoredTab.logData.single().msg)
+    }
+
+    @Test
+    fun appCacheInfoRefreshesOnDemandAndClearDeletesAppManagedCacheOnlyAfterConfirmation() {
+        val dir = createTempDirectory("openlog-archive-cache").toFile()
+        val archiveCacheDir = File(dir, "archive-cache").apply { mkdirs() }
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val userNotesDir = File(dir, "user-notes").apply { mkdirs() }
+        File(archiveCacheDir, "a.tmp").writeText("12345")
+        File(archiveCacheDir, "nested").apply { mkdirs() }.resolve("b.tmp").writeText("123")
+        File(notesDir, "cached_analysis.md").writeText("note")
+        File(userNotesDir, "saved_analysis.md").writeText("keep")
+
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            notesDir = notesDir,
+            archiveCacheDir = archiveCacheDir,
+        )
+        state.settings = state.settings.copy(defaultSaveDir = userNotesDir.absolutePath)
+        state.recentNotes = listOf(
+            File(notesDir, "cached_analysis.md").absolutePath,
+            File(userNotesDir, "saved_analysis.md").absolutePath,
+        )
+
+        assertEquals(archiveCacheDir.absolutePath, state.archiveCachePath)
+        assertEquals(dir.absolutePath, state.appCachePath)
+        assertEquals(12L, state.archiveCacheSizeBytes)
+        File(archiveCacheDir, "later.tmp").writeText("xx")
+        assertEquals(12L, state.archiveCacheSizeBytes)
+
+        state.refreshArchiveCacheInfo()
+        assertEquals(14L, state.archiveCacheSizeBytes)
+
+        state.requestClearCache()
+        assertTrue(state.cacheClearConfirmOpen)
+        assertTrue(File(notesDir, "cached_analysis.md").exists())
+        assertTrue(File(userNotesDir, "saved_analysis.md").exists())
+
+        state.confirmClearCache()
+        assertFalse(state.cacheClearConfirmOpen)
+        assertEquals(0L, state.archiveCacheSizeBytes)
+        assertTrue(archiveCacheDir.listFiles().orEmpty().isEmpty())
+        assertTrue(notesDir.listFiles().orEmpty().isEmpty())
+        assertTrue(File(userNotesDir, "saved_analysis.md").exists())
+        assertEquals(listOf(File(userNotesDir, "saved_analysis.md").absolutePath), state.recentNotes)
+    }
+
+    @Test
+    fun openingRecentNotesPrunesDeletedNoteFiles() {
+        val dir = createTempDirectory("openlog-recent-notes-prune").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val existingNote = File(dir, "existing_analysis.md").apply { writeText("keep") }
+        val deletedNote = File(dir, "deleted_analysis.md").apply { writeText("gone") }
+        val state = AppState(cacheFile)
+        state.recentNotes = listOf(deletedNote.absolutePath, existingNote.absolutePath)
+        state.autosaveNow()
+        deletedNote.delete()
+
+        state.toggleRecentNotesMenu()
+
+        assertTrue(state.recentNotesMenuOpen)
+        assertEquals(listOf(existingNote.absolutePath), state.recentNotes)
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        assertEquals(listOf(existingNote.absolutePath), restored.recentNotes)
+    }
+
+    @Test
     fun layoutPaneStatePersistsImmediatelyAfterUiChanges() {
         val dir = createTempDirectory("openlog-layout").toFile()
         val cacheFile = File(dir, "state.cache")
@@ -907,7 +996,7 @@ class AppStateBehaviorTest {
             val logFile = File(home, "sample.log").apply {
                 writeText("06-26 10:00:00.000  123  456 I App: hello\n")
             }
-            val noteFile = File(notesDir, "sample.log_notes.md").apply {
+            val noteFile = File(notesDir, "sample_analysis.md").apply {
                 writeText("## sample.log\n\nremember this")
             }
             val cacheFile = File(home, "state.cache")
@@ -923,6 +1012,90 @@ class AppStateBehaviorTest {
         } finally {
             System.setProperty("user.home", originalHome)
         }
+    }
+
+    @Test
+    fun openFileStillFindsLegacyAutoExportedNoteName() {
+        val originalHome = System.getProperty("user.home")
+        val home = createTempDirectory("openlog-home-legacy-note").toFile()
+        try {
+            System.setProperty("user.home", home.absolutePath)
+            val notesDir = File(home, ".openlog2/notes").apply { mkdirs() }
+            val logFile = File(home, "sample.log").apply {
+                writeText("06-26 10:00:00.000  123  456 I App: hello\n")
+            }
+            val legacyNoteFile = File(notesDir, "sample.log_notes.md").apply {
+                writeText("## sample.log\n\nremember this")
+            }
+            val state = AppState(File(home, "state.cache"))
+
+            state.openFile(logFile)
+
+            assertEquals(listOf(legacyNoteFile.absolutePath), state.recentNotes)
+        } finally {
+            System.setProperty("user.home", originalHome)
+        }
+    }
+
+    @Test
+    fun autoExportUsesSameDotlessAnalysisBasenameAsManualSaveDefault() {
+        val dir = createTempDirectory("openlog-auto-export-name").toFile()
+        val notesDir = File(dir, "notes")
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs =
+            listOf(mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))))
+
+        state.confirmAddAnn("log", "log", listOf(1), "save this", null)
+        waitUntil {
+            File(notesDir, "sample_analysis.md").exists() &&
+                File(notesDir, "sample_analysis.ann").exists()
+        }
+
+        assertTrue(File(notesDir, "sample_analysis.ann").exists())
+        assertTrue(!File(notesDir, "sample.log_notes.md").exists())
+        assertEquals(listOf(File(notesDir, "sample_analysis.md").absolutePath), state.recentNotes)
+    }
+
+    @Test
+    fun autoExportUsesDefaultSaveFolderWhenItExists() {
+        val dir = createTempDirectory("openlog-default-notes").toFile()
+        val notesDir = File(dir, "notes")
+        val defaultSaveDir = File(dir, "saved-notes").apply { mkdirs() }
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.settings = state.settings.copy(defaultSaveDir = defaultSaveDir.absolutePath)
+        state.tabs =
+            listOf(mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))))
+
+        state.confirmAddAnn("log", "log", listOf(1), "save this", null)
+        waitUntil {
+            File(defaultSaveDir, "sample_analysis.md").exists() &&
+                File(defaultSaveDir, "sample_analysis.ann").exists()
+        }
+
+        assertTrue(File(defaultSaveDir, "sample_analysis.ann").exists())
+        assertTrue(!notesDir.exists() || notesDir.listFiles().orEmpty().isEmpty())
+        assertEquals(listOf(File(defaultSaveDir, "sample_analysis.md").absolutePath), state.recentNotes)
+    }
+
+    @Test
+    fun autoExportFallsBackToAppNotesWhenDefaultSaveFolderIsMissing() {
+        val dir = createTempDirectory("openlog-missing-default-notes").toFile()
+        val notesDir = File(dir, "notes")
+        val missingDefaultSaveDir = File(dir, "missing-saved-notes")
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.settings = state.settings.copy(defaultSaveDir = missingDefaultSaveDir.absolutePath)
+        state.tabs =
+            listOf(mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))))
+
+        state.confirmAddAnn("log", "log", listOf(1), "save this", null)
+        waitUntil {
+            File(notesDir, "sample_analysis.md").exists() &&
+                File(notesDir, "sample_analysis.ann").exists()
+        }
+
+        assertTrue(File(notesDir, "sample_analysis.ann").exists())
+        assertTrue(!missingDefaultSaveDir.exists())
+        assertEquals(listOf(File(notesDir, "sample_analysis.md").absolutePath), state.recentNotes)
     }
 
     @Test
@@ -1273,7 +1446,7 @@ class AppStateBehaviorTest {
         val dir = createTempDirectory("openlog-note").toFile()
         val logFile = File(dir, "test.log").apply { writeText("06-26 10:00:00.000  1  1 I App: hello\n") }
         val cacheFile = File(dir, "state.cache")
-        val state = AppState(cacheFile)
+        val state = AppState(cacheFile, autoExportNotes = false)
         state.tabs = listOf(mkTab("log", "test.log", emptyList()).copy(sourcePath = logFile.absolutePath))
         state.activeTabId = "log"
         state.addNoteBlock("log")
@@ -1804,5 +1977,17 @@ class AppStateBehaviorTest {
             Thread.sleep(10)
         }
         assertTrue(condition())
+    }
+
+    private fun buildZipFixture(dir: File, name: String, entries: Map<String, String>): File {
+        val file = File(dir, name)
+        java.util.zip.ZipOutputStream(file.outputStream()).use { zos ->
+            entries.forEach { (path, content) ->
+                zos.putNextEntry(java.util.zip.ZipEntry(path))
+                zos.write(content.toByteArray())
+                zos.closeEntry()
+            }
+        }
+        return file
     }
 }

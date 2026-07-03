@@ -23,6 +23,8 @@ object DesktopStorage {
 
     fun autosaveFile(): File = File(appDataDir(), "autosave.cache")
 
+    fun archiveCacheDir(): File = File(appDataDir(), "archive-cache")
+
     fun notesDir(): File = File(appDataDir(), "notes")
 
     fun legacyNotesDir(userHome: String = System.getProperty("user.home").orEmpty()): File =

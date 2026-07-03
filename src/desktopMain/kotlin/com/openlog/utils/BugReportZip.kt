@@ -1,8 +1,8 @@
 package com.openlog.utils
 
 import com.openlog.model.LogEntry
+import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import java.io.File
-import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
 enum class ZipLogCandidateKind { LOGCAT, ANR_TEXT }
@@ -24,36 +24,71 @@ fun isZipFile(file: File): Boolean {
     return runCatching { ZipFile(file).use { } }.isSuccess
 }
 
+fun isSupportedArchiveFile(file: File): Boolean = isZipFile(file) || isSevenZFile(file)
+
+private fun isSevenZFile(file: File): Boolean {
+    if (!file.isFile) return false
+    return runCatching { sevenZFile(file).use { } }.isSuccess
+}
+
 // Candidate filter: entry basename contains "log" (case-insensitive), extension is .txt/.log/none,
 // and the entry's own content sniffs as text — a bug-report zip bundles binary buffers
 // (bugreport-*.txt is itself text, but nested traces/heap dumps aren't) alongside the logcat
 // buffers we actually want.
-fun listLogcatCandidates(zipFile: File): List<ZipLogCandidate> = runCatching {
+fun listLogcatCandidates(zipFile: File): List<ZipLogCandidate> = listArchiveLogCandidates(zipFile)
+
+fun listArchiveLogCandidates(archiveFile: File): List<ZipLogCandidate> = when {
+    isZipFile(archiveFile) -> listZipLogCandidates(archiveFile)
+    isSevenZFile(archiveFile) -> listSevenZLogCandidates(archiveFile)
+    else -> emptyList()
+}
+
+private fun listZipLogCandidates(zipFile: File): List<ZipLogCandidate> = runCatching {
     ZipFile(zipFile).use { zf ->
         zf.entries().asSequence()
             .filter { entry -> !entry.isDirectory }
-            .mapNotNull { entry -> candidateKind(entry, zf)?.let { kind -> ZipLogCandidate(entry.name, entry.name.substringAfterLast('/'), entry.size, kind) } }
+            .mapNotNull { entry ->
+                candidateKind(entry.name) { zf.getInputStream(entry).use(::isLikelyTextStream) }
+                    ?.let { kind -> ZipLogCandidate(entry.name, entry.name.substringAfterLast('/'), entry.size, kind) }
+            }
             .toList()
     }
 }.getOrDefault(emptyList())
 
-private fun candidateKind(entry: ZipEntry, zf: ZipFile): ZipLogCandidateKind? {
-    val name = entry.name.substringAfterLast('/')
-    val lowerPath = entry.name.lowercase()
+private fun listSevenZLogCandidates(archiveFile: File): List<ZipLogCandidate> = runCatching {
+    sevenZFile(archiveFile).use { sevenZ ->
+        sevenZ.entries
+            .asSequence()
+            .filter { entry -> !entry.isDirectory }
+            .mapNotNull { entry ->
+                candidateKind(entry.name) { sevenZ.getInputStream(entry).use(::isLikelyTextStream) }
+                    ?.let { kind -> ZipLogCandidate(entry.name, entry.name.substringAfterLast('/'), entry.size, kind) }
+            }
+            .toList()
+    }
+}.getOrDefault(emptyList())
+
+private fun sevenZFile(file: File): SevenZFile = SevenZFile.builder().setFile(file).get()
+
+private fun candidateKind(entryPath: String, isText: () -> Boolean): ZipLogCandidateKind? {
+    val name = entryPath.substringAfterLast('/')
+    val lowerPath = entryPath.lowercase()
     val lowerName = name.lowercase()
     val ext = name.substringAfterLast('.', missingDelimiterValue = "")
-    val isText = runCatching { zf.getInputStream(entry).use { isLikelyTextStream(it) } }.getOrDefault(false)
-    if (!isText) return null
-
-    if (name.contains("log", ignoreCase = true) && (ext.isEmpty() || ext.lowercase() in LOG_EXTENSIONS)) {
-        return ZipLogCandidateKind.LOGCAT
-    }
-
+    val looksLikeLog = name.contains("log", ignoreCase = true) && (ext.isEmpty() || ext.lowercase() in LOG_EXTENSIONS)
     val inAnrDir = lowerPath.contains("/anr/") || lowerPath.startsWith("anr/")
     val looksLikeAnrTrace = lowerName.startsWith("anr_") ||
         lowerName.startsWith("traces") ||
         lowerName.contains("anr") && (ext.isEmpty() || ext.lowercase() in ANR_EXTENSIONS)
-    return if ((inAnrDir || looksLikeAnrTrace) && (ext.isEmpty() || ext.lowercase() in ANR_EXTENSIONS)) {
+    val looksLikeAnr = (inAnrDir || looksLikeAnrTrace) && (ext.isEmpty() || ext.lowercase() in ANR_EXTENSIONS)
+    if (!looksLikeLog && !looksLikeAnr) return null
+    if (!runCatching { isText() }.getOrDefault(false)) return null
+
+    if (looksLikeLog) {
+        return ZipLogCandidateKind.LOGCAT
+    }
+
+    return if (looksLikeAnr) {
         ZipLogCandidateKind.ANR_TEXT
     } else {
         null
@@ -61,9 +96,22 @@ private fun candidateKind(entry: ZipEntry, zf: ZipFile): ZipLogCandidateKind? {
 }
 
 // Parses in-memory, straight from the zip entry's stream — never extracts to a temp dir.
-fun extractCandidate(zipFile: File, candidate: ZipLogCandidate): List<LogEntry> = runCatching {
+fun extractCandidate(zipFile: File, candidate: ZipLogCandidate): List<LogEntry> = when {
+    isZipFile(zipFile) -> extractZipCandidate(zipFile, candidate)
+    isSevenZFile(zipFile) -> extractSevenZCandidate(zipFile, candidate)
+    else -> emptyList()
+}
+
+private fun extractZipCandidate(zipFile: File, candidate: ZipLogCandidate): List<LogEntry> = runCatching {
     ZipFile(zipFile).use { zf ->
         val entry = zf.getEntry(candidate.entryPath) ?: return@use emptyList()
         zf.getInputStream(entry).use { stream -> parseLogcatLines(stream.bufferedReader().lineSequence()) }
+    }
+}.getOrDefault(emptyList())
+
+private fun extractSevenZCandidate(archiveFile: File, candidate: ZipLogCandidate): List<LogEntry> = runCatching {
+    sevenZFile(archiveFile).use { sevenZ ->
+        val entry = sevenZ.entries.firstOrNull { it.name == candidate.entryPath } ?: return@use emptyList()
+        sevenZ.getInputStream(entry).use { stream -> parseLogcatLines(stream.bufferedReader().lineSequence()) }
     }
 }.getOrDefault(emptyList())

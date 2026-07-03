@@ -11,8 +11,8 @@ import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeStackTraceGroups
-import com.openlog.utils.isZipFile
-import com.openlog.utils.listLogcatCandidates
+import com.openlog.utils.isSupportedArchiveFile
+import com.openlog.utils.listArchiveLogCandidates
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpHandler
 import com.sun.net.httpserver.HttpServer
@@ -196,7 +196,7 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         if (path.isBlank()) return mapOf("error" to "missing path")
         val file = File(path)
         if (!file.exists()) return mapOf("error" to "file not found: $path")
-        if (isZipFile(file)) return openZipRoute(file, entryPath)
+        if (isSupportedArchiveFile(file)) return openZipRoute(file, entryPath)
         val absPath = file.absolutePath
         appState.openFile(file)
         awaitLoad()
@@ -210,7 +210,7 @@ class ControlServer(private val appState: AppState, private val port: Int) {
     // a picker dialog, it echoes the candidate list so a follow-up call can pass entryPath to
     // pick one directly — same round trip the UI's picker dialog does through openZipEntries().
     private fun openZipRoute(file: File, entryPath: String?): Map<String, Any?> {
-        val candidates = listLogcatCandidates(file)
+        val candidates = listArchiveLogCandidates(file)
         if (candidates.isEmpty()) return mapOf("error" to "no candidate log files found in zip: ${file.path}")
         val target = when {
             entryPath != null -> candidates.find { it.entryPath == entryPath }

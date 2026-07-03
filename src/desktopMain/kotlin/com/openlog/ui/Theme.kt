@@ -149,6 +149,8 @@ private val THEME_PALETTES = mapOf(
 
 fun themeColors(preset: ThemePreset) = THEME_PALETTES.getValue(preset)
 
+fun loadingOverlayBackground(tc: ThemeColors) = tc.bg
+
 fun appScrollbarStyle(tc: ThemeColors) = ScrollbarStyle(
     minimalHeight = 24.dp,
     thickness = 10.dp,

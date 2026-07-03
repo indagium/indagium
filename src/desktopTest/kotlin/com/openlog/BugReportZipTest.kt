@@ -3,8 +3,12 @@ package com.openlog
 import com.openlog.model.LogLevel
 import com.openlog.utils.ZipLogCandidateKind
 import com.openlog.utils.extractCandidate
+import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.isZipFile
+import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.listLogcatCandidates
+import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry
+import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
 import java.io.File
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -29,6 +33,23 @@ class BugReportZipTest {
 
     private fun buildTextZip(dir: File, name: String, entries: Map<String, String>): File =
         buildZip(dir, name, entries.mapValues { (_, text) -> text.toByteArray() })
+
+    private fun buildSevenZ(dir: File, name: String, entries: Map<String, String>): File {
+        val file = File(dir, name)
+        SevenZOutputFile(file).use { sevenZ ->
+            entries.forEach { (path, content) ->
+                val bytes = content.toByteArray()
+                val entry = SevenZArchiveEntry().apply {
+                    this.name = path
+                    this.size = bytes.size.toLong()
+                }
+                sevenZ.putArchiveEntry(entry)
+                sevenZ.write(bytes)
+                sevenZ.closeArchiveEntry()
+            }
+        }
+        return file
+    }
 
     @Test
     fun isZipFileDetectsByContentNotExtension() {
@@ -106,6 +127,23 @@ class BugReportZipTest {
         assertEquals("boom", entries[0].msg)
         assertEquals(1, entries[0].id)
         assertEquals(2, entries[1].id)
+    }
+
+    @Test
+    fun sevenZArchivesUseTheSameCandidateAndExtractionFlow() {
+        val dir = createTempDirectory("openlog-7z").toFile()
+        val archive = buildSevenZ(
+            dir,
+            "bugreport.7z",
+            mapOf("FS/data/anr/main_log.txt" to "06-26 10:00:00.000  100  100 E App: boom\n"),
+        )
+
+        val candidates = listArchiveLogCandidates(archive)
+        val entries = extractCandidate(archive, candidates.single())
+
+        assertTrue(isSupportedArchiveFile(archive))
+        assertEquals("FS/data/anr/main_log.txt", candidates.single().entryPath)
+        assertEquals("boom", entries.single().msg)
     }
 
     @Test

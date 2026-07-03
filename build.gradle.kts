@@ -50,6 +50,8 @@ kotlin {
                 implementation(compose.material3)
                 implementation(compose.materialIconsExtended)
                 implementation(compose.components.resources)
+                implementation("org.apache.commons:commons-compress:1.28.0")
+                implementation("org.tukaani:xz:1.10")
             }
         }
         val desktopTest by getting

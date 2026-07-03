@@ -1,4 +1,7 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+)
 
 package com.openlog.ui
 
@@ -398,14 +401,34 @@ private fun RecentNotesPopup(
                     displayNotes.forEachIndexed { idx, path ->
                         val file = File(path)
                         val exists = file.exists()
-                        HoverBox(
-                            modifier = Modifier.fillMaxWidth(),
-                            forceHover = idx == selectedIdx,
-                            onClick = if (exists) ({ onOpenNote(file) }) else null,
+                        TooltipArea(
+                            tooltip = {
+                                Box(
+                                    Modifier
+                                        .widthIn(max = 560.dp)
+                                        .background(tc.p2, RoundedCornerShape(4.dp))
+                                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                                ) {
+                                    AppText(path, color = tc.tx, fontSize = 11.sp, fontFamily = MONO, maxLines = 3)
+                                }
+                            },
                         ) {
-                            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
-                                AppText(file.name, color = if (exists) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
-                                AppText(file.parent ?: path, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                            HoverBox(
+                                modifier = Modifier.fillMaxWidth(),
+                                forceHover = idx == selectedIdx,
+                                onClick = if (exists) ({ onOpenNote(file) }) else null,
+                            ) {
+                                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                                    AppText(
+                                        file.name,
+                                        color = if (exists) tc.tx else tc.td,
+                                        fontSize = 11.sp,
+                                        fontFamily = MONO,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    AppText(file.parent ?: path, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                                }
                             }
                         }
                     }

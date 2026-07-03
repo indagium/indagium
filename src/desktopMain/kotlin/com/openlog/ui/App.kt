@@ -119,7 +119,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             val file = File(URI.create(uri))
                             when {
                                 !file.exists() -> {}
-                                com.openlog.utils.isZipFile(file) -> state.openZipFile(file)
+                                com.openlog.utils.isSupportedArchiveFile(file) -> state.openZipFile(file)
                                 com.openlog.utils.isLikelyTextFile(file) -> state.openFile(file)
                             }
                         }
@@ -195,7 +195,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
             // ── Loading overlay ───────────────────────────────────────
             if (state.isLoading) {
                 Box(
-                    Modifier.fillMaxSize().background(tc.bg.copy(alpha = 0.75f)),
+                    Modifier.fillMaxSize().background(loadingOverlayBackground(tc)),
                     contentAlignment = Alignment.Center,
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -670,6 +670,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         Spacer(Modifier.height(10.dp))
                         Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
                             pending.candidates.forEach { candidate ->
+                                val displayEntryPath = zipEntryPathForDisplay(candidate.entryPath)
                                 CheckRow(
                                     checked = candidate.entryPath in selected,
                                     onToggle = {
@@ -680,8 +681,28 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                         }
                                     },
                                 ) {
-                                    AppText(candidate.entryPath, color = tc2.tx, fontSize = 11.sp, fontFamily = MONO,
-                                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                    TooltipArea(
+                                        tooltip = {
+                                            Box(
+                                                Modifier
+                                                    .widthIn(max = 560.dp)
+                                                    .background(tc2.p2, RoundedCornerShape(4.dp))
+                                                    .border(0.5.dp, tc2.br, RoundedCornerShape(4.dp))
+                                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                            ) {
+                                                AppText(
+                                                    candidate.entryPath,
+                                                    color = tc2.tx,
+                                                    fontSize = 11.sp,
+                                                    fontFamily = MONO,
+                                                    maxLines = 4,
+                                                )
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                    ) {
+                                        AppText(displayEntryPath, color = tc2.tx, fontSize = 11.sp, fontFamily = MONO)
+                                    }
                                 }
                             }
                         }
@@ -851,6 +872,39 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
             if (state.settingsOpen) {
                 Dialog(onDismissRequest = { state.settingsOpen = false }) {
                     SettingsDialog(state) { state.settingsOpen = false }
+                }
+            }
+
+            if (state.cacheClearConfirmOpen) {
+                Dialog(onDismissRequest = { state.cancelClearCache() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(400.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Clear cache?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "Deletes cached archive data and app-managed auto-saved notes in " +
+                                "\"${state.appCachePath}\". Notes in the Default save folder are kept.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 4,
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton(
+                                "Clear cache",
+                                active = true,
+                                danger = true,
+                            ) { state.confirmClearCache() }
+                            DialogActionButton("Cancel", active = false) { state.cancelClearCache() }
+                        }
+                    }
                 }
             }
 
@@ -1186,7 +1240,7 @@ private fun FileView(
                 onToggleMd = { state.toggleMd(tab.id) },
                 onCopy = { state.copyAnn(tab.id) },
                 onSave = { state.saveAnalysis(tab.id) },
-                onToggleRecentNotes = { state.recentNotesMenuOpen = !state.recentNotesMenuOpen },
+                onToggleRecentNotes = { state.toggleRecentNotesMenu() },
                 onOpenNote = { state.openNoteFileAsync(tab.id, it) },
                 onUpdatePrefix = { state.setPrefix(tab.id, it) },
                 onUpdateSuffix = { state.setSuffix(tab.id, it) },
@@ -1395,7 +1449,7 @@ private fun CompareView(
                             onToggleMd = { state.toggleMd(leftTab.id) },
                             onCopy = { state.copyAnn(leftTab.id) },
                             onSave = { state.saveAnalysis(leftTab.id) },
-                            onToggleRecentNotes = { state.recentNotesMenuOpen = !state.recentNotesMenuOpen },
+                            onToggleRecentNotes = { state.toggleRecentNotesMenu() },
                             onOpenNote = { state.openNoteFileAsync(leftTab.id, it) },
                             onUpdatePrefix = { state.setPrefix(leftTab.id, it) },
                             onUpdateSuffix = { state.setSuffix(leftTab.id, it) },
@@ -1460,12 +1514,12 @@ private fun TabBar(state: AppState) {
             val fd = FileDialog(null as Frame?, "Open Log File", FileDialog.LOAD)
             fd.setFilenameFilter { dir, name ->
                 val f = File(dir, name)
-                f.isDirectory || com.openlog.utils.isLikelyTextFile(f) || com.openlog.utils.isZipFile(f)
+                f.isDirectory || com.openlog.utils.isLikelyTextFile(f) || com.openlog.utils.isSupportedArchiveFile(f)
             }
             fd.isVisible = true
             fd.file?.let {
                 val f = File(fd.directory, it)
-                if (com.openlog.utils.isZipFile(f)) state.openZipFile(f) else state.openFile(f)
+                if (com.openlog.utils.isSupportedArchiveFile(f)) state.openZipFile(f) else state.openFile(f)
             }
         }
         if (hasRecentFiles) {
@@ -1748,6 +1802,9 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
     val tc = tc()
     val scroll = rememberScrollState()
     val shape = RoundedCornerShape(8.dp)
+    LaunchedEffect(Unit) {
+        state.refreshArchiveCacheInfo()
+    }
     Box(
         Modifier.width(580.dp).heightIn(max = 860.dp)
             .clip(shape)
@@ -1773,13 +1830,31 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 ThemeGallery(state)
             }
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                AppText(
-                    "Default save folder",
-                    color = tc.td,
-                    fontSize = 10.sp,
-                    fontFamily = UI,
-                    fontWeight = FontWeight.SemiBold
-                )
+                TooltipArea(
+                    tooltip = {
+                        Box(
+                            Modifier
+                                .background(tc.p2, RoundedCornerShape(4.dp))
+                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        ) {
+                            AppText(
+                                "Auto-saved notes are written here when this folder exists. Clear cache keeps this folder.",
+                                color = tc.tx,
+                                fontSize = 11.sp,
+                                maxLines = 2,
+                            )
+                        }
+                    },
+                ) {
+                    AppText(
+                        "Default save folder",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        fontFamily = UI,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     val fullPath = state.settings.defaultSaveDir
                     val pathText: @Composable () -> Unit = {
@@ -1809,6 +1884,40 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                     if (fullPath != null) AppButton(
                         "Clear",
                         onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } })
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                AppText(
+                    "App cache",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    fontFamily = UI,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val cachePath = state.appCachePath
+                    TooltipArea(
+                        tooltip = {
+                            Box(
+                                Modifier
+                                    .background(tc.p2, RoundedCornerShape(4.dp))
+                                    .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                            ) {
+                                AppText(cachePath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                            }
+                        },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        AppText(
+                            "${truncatePathForDisplay(cachePath)} · ${formatByteSize(state.archiveCacheSizeBytes)}",
+                            color = tc.ts,
+                            fontSize = 11.sp,
+                            fontFamily = MONO,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    AppButton("Clear cache", onClick = { state.requestClearCache() }, variant = ButtonVariant.Secondary)
                 }
             }
             Row(
@@ -1996,11 +2105,16 @@ private fun mcpConfigSnippet(port: Int): String = """
     }
     """.trimIndent()
 
+private fun mcpServerCommand(): String = "npx tsx mcp-server/src/index.ts"
+
+private fun mcpCurlCommand(port: Int): String = "curl http://127.0.0.1:$port/tabs"
+
 private const val COPIED_FEEDBACK_MS = 1500L
 private const val CLIENT_POLL_INTERVAL_MS = 1500L
 private const val AGO_JUST_NOW_MS = 2_000L
 private const val MS_PER_SECOND = 1000L
 private const val MS_PER_MINUTE = 60_000L
+private const val BYTES_PER_SIZE_UNIT = 1024.0
 
 private fun agoLabel(lastSeenMs: Long): String {
     val delta = System.currentTimeMillis() - lastSeenMs
@@ -2011,14 +2125,20 @@ private fun agoLabel(lastSeenMs: Long): String {
     }
 }
 
+private enum class McpCopiedField {
+    Config,
+    ServerCommand,
+    CurlCommand,
+}
+
 @Composable
 private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
     val tc = tc()
-    var showCopied by remember { mutableStateOf(false) }
-    LaunchedEffect(showCopied) {
-        if (showCopied) {
+    var copiedField by remember { mutableStateOf<McpCopiedField?>(null) }
+    LaunchedEffect(copiedField) {
+        if (copiedField != null) {
             kotlinx.coroutines.delay(COPIED_FEEDBACK_MS)
-            showCopied = false
+            copiedField = null
         }
     }
     var clients by remember { mutableStateOf<List<ConnectedClientInfo>>(state.connectedMcpClients()) }
@@ -2046,21 +2166,24 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
             maxLines = 2,
         )
         Spacer(Modifier.height(8.dp))
-        Box(
-            Modifier.fillMaxWidth().background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM).padding(10.dp),
-        ) {
-            AppText("npx tsx mcp-server/src/index.ts", color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
-        }
+        CopyableCodeField(
+            text = mcpServerCommand(),
+            copied = copiedField == McpCopiedField.ServerCommand,
+            onCopy = {
+                state.copyToClipboard(mcpServerCommand())
+                copiedField = McpCopiedField.ServerCommand
+            },
+        )
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             AppButton(
                 "Copy config for your MCP client",
                 onClick = {
                     state.copyToClipboard(mcpConfigSnippet(port))
-                    showCopied = true
+                    copiedField = McpCopiedField.Config
                 },
             )
-            if (showCopied) {
+            if (copiedField == McpCopiedField.Config) {
                 Spacer(Modifier.width(8.dp))
                 AppText("Copied", color = tc.ac, fontSize = 11.sp, fontWeight = FontWeight.Medium)
             }
@@ -2083,11 +2206,14 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
             maxLines = 1,
         )
         Spacer(Modifier.height(8.dp))
-        Box(
-            Modifier.fillMaxWidth().background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM).padding(10.dp),
-        ) {
-            AppText("curl http://127.0.0.1:$port/tabs", color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
-        }
+        CopyableCodeField(
+            text = mcpCurlCommand(port),
+            copied = copiedField == McpCopiedField.CurlCommand,
+            onCopy = {
+                state.copyToClipboard(mcpCurlCommand(port))
+                copiedField = McpCopiedField.CurlCommand
+            },
+        )
         Spacer(Modifier.height(18.dp))
         AppText("Connected clients", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(6.dp))
@@ -2134,6 +2260,46 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
     }
 }
 
+@Composable
+private fun CopyableCodeField(text: String, copied: Boolean, onCopy: () -> Unit) {
+    val tc = tc()
+    Row(
+        Modifier.fillMaxWidth()
+            .background(tc.bg, CORNER_SM)
+            .border(1.dp, tc.br, CORNER_SM)
+            .padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AppText(
+            text,
+            color = tc.ts,
+            fontSize = 11.sp,
+            fontFamily = MONO,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Box(
+            Modifier.height(30.dp)
+                .widthIn(min = 34.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .clickable(onClick = onCopy)
+                .padding(horizontal = 8.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (copied) {
+                AppText("Copied", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            } else {
+                Icon(
+                    imageVector = Icons.Outlined.ContentCopy,
+                    contentDescription = "Copy",
+                    tint = tc.ts,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
+    }
+}
+
 // Keeps the most meaningful (rightmost) path segments and collapses the rest into a leading
 // "…/" so long save-folder paths don't overflow or wrap — full path is still shown on hover.
 private fun truncatePathForDisplay(path: String, maxChars: Int = 42): String {
@@ -2146,6 +2312,27 @@ private fun truncatePathForDisplay(path: String, maxChars: Int = 42): String {
         best = candidate
     }
     return best.ifEmpty { "…" + path.takeLast(maxChars - 1) }
+}
+
+internal fun zipEntryPathForDisplay(path: String, maxChars: Int = 40): String {
+    if (path.length <= maxChars) return path
+    if (maxChars <= 3) return path.takeLast(maxChars.coerceAtLeast(0))
+    return "..." + path.takeLast(maxChars - 3)
+}
+
+private fun formatByteSize(bytes: Long): String {
+    val units = listOf("B", "KB", "MB", "GB", "TB")
+    var value = bytes.coerceAtLeast(0).toDouble()
+    var unitIndex = 0
+    while (value >= BYTES_PER_SIZE_UNIT && unitIndex < units.lastIndex) {
+        value /= BYTES_PER_SIZE_UNIT
+        unitIndex++
+    }
+    return if (unitIndex == 0) {
+        "${value.toLong()} ${units[unitIndex]}"
+    } else {
+        "${java.lang.String.format(java.util.Locale.US, "%.1f", value)} ${units[unitIndex]}"
+    }
 }
 
 @Composable
@@ -2360,7 +2547,10 @@ private fun ThemeWindowCard(label: String, colors: ThemeColors, selected: Boolea
 @Composable
 private fun AnnotationSettingsRow(state: AppState) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        CompactSetting("Auto-export") {
+        CompactSettingWithTooltip(
+            label = "Auto-save",
+            tooltip = "Saves note Markdown and its .ann sidecar after note changes.",
+        ) {
             SegmentedControl(
                 options = listOf("On", "Off"),
                 selectedIndices = setOf(if (state.settings.autoExportNotes) 0 else 1),
@@ -2382,6 +2572,34 @@ private fun AnnotationSettingsRow(state: AppState) {
                 onToggle = { idx -> state.updateSettings { it.copy(annotationLogBlockStyle = styles[idx]) } },
             )
         }
+    }
+}
+
+@Composable
+private fun CompactSettingWithTooltip(
+    label: String,
+    tooltip: String,
+    modifier: Modifier = Modifier,
+    horizontalAlignment: Alignment.Horizontal = Alignment.Start,
+    content: @Composable () -> Unit,
+) {
+    val tc = tc()
+    Column(modifier, horizontalAlignment = horizontalAlignment, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        TooltipArea(
+            tooltip = {
+                Box(
+                    Modifier
+                        .background(tc.p2, RoundedCornerShape(4.dp))
+                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    AppText(tooltip, color = tc.tx, fontSize = 11.sp, maxLines = 2)
+                }
+            },
+        ) {
+            AppText(label, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        }
+        content()
     }
 }
 
@@ -2461,15 +2679,35 @@ private fun TabItem(
                 AppText("●", color = DANGER_RED, fontSize = 10.sp)
             }
         }
-        AppText(
-            tab.filename,
-            color = if (isActive || dragging) tc.tx else tc.ts,
-            fontSize = 12.sp,
-            fontFamily = MONO,
+        TooltipArea(
+            tooltip = {
+                Box(
+                    Modifier
+                        .widthIn(max = 640.dp)
+                        .background(tc.p2, RoundedCornerShape(4.dp))
+                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    AppText(
+                        tab.sourcePath ?: tab.filename,
+                        color = tc.tx,
+                        fontSize = 11.sp,
+                        fontFamily = MONO,
+                        maxLines = 3,
+                    )
+                }
+            },
             modifier = Modifier.weight(1f),
-            overflow = TextOverflow.Ellipsis,
-            maxLines = 1,
-        )
+        ) {
+            AppText(
+                tab.filename,
+                color = if (isActive || dragging) tc.tx else tc.ts,
+                fontSize = 12.sp,
+                fontFamily = MONO,
+                overflow = TextOverflow.Ellipsis,
+                maxLines = 1,
+            )
+        }
         if (showClose) {
             CloseButton(onClick = onClose)
         }
