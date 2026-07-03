@@ -172,11 +172,34 @@ per-entry allocation (e.g. flyweight/off-heap entries); the archive path shares
 Load totals for a 1.5GB file/zip entry: ~19s → **~10.5s** (parse 3.3–5.0s variance-bound +
 analysis 6.2–7.1s; zip adds <1s of decompression).
 
+## Round 3: crash-block splice + deferred analysis (2026-07-04)
+
+1. **Stack-group toggle splice** (`spliceStackToggle`, Filter.kt): the round-2 memoization left
+   one cost on every expand/collapse — re-materializing the full item list (~0.4–0.7s at 10.6M
+   unfiltered rows). A stack-trace ("crash") block's rendered footprint is strictly local, so
+   toggling exactly one stack gid now copies the cached item list and splices the member rows
+   in/out (reference arraycopy, no per-item allocation). Any condition the splice can't prove —
+   sequence/manual toggles, multi-gid changes, header not visible — falls back to the full
+   rebuild, i.e. exactly the previous behavior. Equivalence against a cache-invalidated fresh
+   compute is covered by `ComputeItemsSpliceTest` (top-level, filtered, and
+   nested-inside-expanded-sequence cases). Measured: crash-block expand on 10.6M unfiltered
+   rows **~650ms → 38ms** (sequence-gid toggles still take the full-rebuild fallback, ~0.6s).
+2. **Deferred stack/crash analysis** (`LogAnalysis.pending`): tabs now publish as soon as the
+   parse finishes; the ~6s stack/crash analysis runs afterwards in the same background job
+   (cancelled with the tab) and fills in via `upTab`. Time-to-visible-tab for a 1.5GB file drops
+   from ~10.5s to the parse time (~3.5–5s); folding and the crash panel appear when the
+   analysis lands (`tab.analysis` is a compute key, so the item list refreshes itself). Rows
+   render unfolded in the interim; the crash panel shows "Analyzing crashes…". Applies to plain
+   files, archive entries, session restore, and merges. Guarded traps: `computeItems` and
+   FilterPanel's crash-sites fallback must not run the full scan synchronously while pending —
+   both check the flag (the FilterPanel one would have been a ~6s freeze during composition).
+   Tag counts are computed with the parse (cheap) so the filter panel is complete immediately.
+
 ## Future work (explicitly out of scope here)
 
-- The no-filter expand/collapse recompute is now bounded by materializing ~10M `LogItem.Row`s
-  (~0.4-0.7s); going below that needs incremental item-list splicing around the toggled group.
 - klogg-style byte-offset indexing with on-demand line realization — only worth the data-model
   rewrite if 4GB+ files become a target.
 - Keyboard navigation helpers (`handleNavKey`/`handleSelKey`) still do O(n) index scans per
   keypress on the item list; noticeable but not freeze-grade.
+- Tailing recomputes the full analysis per flush (`appendTailedLines`); fine for growing files,
+  costly if someone tails a pre-existing multi-GB file.

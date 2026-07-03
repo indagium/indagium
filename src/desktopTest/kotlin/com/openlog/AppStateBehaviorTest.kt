@@ -2060,6 +2060,34 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun openFilePublishesTabBeforeAnalysisThenFillsItIn() {
+        val dir = createTempDirectory("openlog-deferred").toFile()
+        val logFile = File(dir, "crash.log").apply {
+            writeText(
+                """
+                06-26 10:00:00.000  7  7 I App: hello
+                06-26 10:00:00.001  7  7 E AndroidRuntime: FATAL EXCEPTION: main
+                06-26 10:00:00.002  7  7 E AndroidRuntime: java.lang.IllegalStateException: boom
+                06-26 10:00:00.003  7  7 E AndroidRuntime:     at com.example.Foo.bar(Foo.kt:1)
+                """.trimIndent() + "\n",
+            )
+        }
+        val state = AppState(File(dir, "state.cache"))
+
+        state.openFile(logFile)
+        // isLoading clears as soon as the tab is published (parse done); tag counts must already
+        // be there for the filter panel even if the stack/crash analysis is still pending.
+        waitUntil { !state.isLoading && state.tabs.isNotEmpty() }
+        assertEquals(4, state.tabs.single().logData.size)
+        assertTrue(state.tabs.single().analysis.tagCounts.isNotEmpty())
+
+        // The deferred analysis lands afterwards (same background job).
+        waitUntil { !state.tabs.single().analysis.pending }
+        assertEquals(listOf(2), state.tabs.single().analysis.stackTraceGroups.map { it.rid })
+        assertTrue(state.tabs.single().analysis.crashSites.isNotEmpty())
+    }
+
+    @Test
     fun activeTabIdFallsBackToFirstTabAfterRestore() {
         val dir = createTempDirectory("openlog-active2").toFile()
         val logFile = File(dir, "test.log").apply { writeText("06-26 10:00:00.000  1  1 I App: hello\n") }

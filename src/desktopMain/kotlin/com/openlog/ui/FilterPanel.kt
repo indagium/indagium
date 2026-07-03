@@ -146,10 +146,16 @@ fun FilterPanel(
     val filter = tab.filter
     var panelFocused by remember { mutableStateOf(false) }
 
-    val crashSites = remember(tab.id, tab.analysis.crashSites, tab.logData) {
-        tab.analysis.crashSites.ifEmpty {
-            val stackGroups = computeStackTraceGroups(tab.logData)
-            computeCrashSites(tab.logData, stackGroups)
+    // While the background analysis is pending this must NOT fall through to the synchronous
+    // computation — that's a multi-second full-file scan and this runs during composition.
+    val crashSites = remember(tab.id, tab.analysis.crashSites, tab.analysis.pending, tab.logData) {
+        when {
+            tab.analysis.pending -> emptyList()
+            tab.analysis.crashSites.isNotEmpty() -> tab.analysis.crashSites
+            else -> {
+                val stackGroups = computeStackTraceGroups(tab.logData)
+                computeCrashSites(tab.logData, stackGroups)
+            }
         }
     }
 
@@ -1248,7 +1254,12 @@ fun FilterPanel(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     AppText("◆", color = tc.td.copy(.33f), fontSize = 18.sp)
-                    AppText("No exceptions or ANRs found", color = tc.td, fontSize = 10.sp, maxLines = 2)
+                    AppText(
+                        if (tab.analysis.pending) "Analyzing crashes…" else "No exceptions or ANRs found",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        maxLines = 2,
+                    )
                 }
             } else {
                 BoundedScrollBox(minOf(crashSites.size, filterListRows), rowDp = 44) {

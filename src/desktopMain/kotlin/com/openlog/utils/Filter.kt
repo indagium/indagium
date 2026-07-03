@@ -142,6 +142,11 @@ private class TabComputeCache(
     // an end pattern can swallow most of a 10M-line file, making these worth memoizing too.
     val seqOwnerBySwallowed: Map<Int, String>?,
     val seqChildBits: java.util.BitSet?,
+    // The full result of the last compute, kept so a single stack-group toggle can splice member
+    // rows in/out instead of re-materializing millions of LogItems (see spliceStackToggle).
+    val items: List<LogItem>?,
+    val expanded: Set<String>,
+    val manualBlocks: List<ManualCollapseBlock>,
 )
 
 private val computeCacheByTab = java.util.concurrent.ConcurrentHashMap<String, TabComputeCache>()
@@ -149,6 +154,48 @@ private val computeCacheByTab = java.util.concurrent.ConcurrentHashMap<String, T
 fun invalidateComputeCache(tabId: String) {
     computeCacheByTab.remove("$tabId#true")
     computeCacheByTab.remove("$tabId#false")
+}
+
+// Fast path for the single most common expand/collapse: toggling one stack-trace ("crash")
+// block. Its rendered footprint is strictly local — the header flips its `expanded` flag and the
+// member rows appear/disappear immediately after it; nothing else in the item list changes
+// (top-level filtering by owner-sequence expansion, skipIds, and nested placement all depend on
+// sequence/manual gids, never on a stack gid). So instead of re-materializing millions of
+// LogItems (~0.5s at 10M rows, the remaining expand latency after memoization), copy the cached
+// list and splice. Any condition this can't prove — different toggle kind, multi-gid change,
+// header not currently visible, unexpected neighborhood — returns null and the caller does the
+// full rebuild, so the fallback is exactly the previous behavior.
+@Suppress("ReturnCount")
+private fun spliceStackToggle(tab: LogTab, prior: TabComputeCache): List<LogItem>? {
+    val priorItems = prior.items ?: return null
+    if (prior.manualBlocks != tab.manualBlocks) return null
+    val added = tab.expanded - prior.expanded
+    val removed = prior.expanded - tab.expanded
+    if (added.size + removed.size != 1) return null
+    val gid = added.firstOrNull() ?: removed.first()
+    val expanding = added.isNotEmpty()
+    val groups = prior.filteredStackGroups ?: tab.analysis.stackTraceGroups
+    val group = groups.firstOrNull { it.gid == gid } ?: return null
+    val idx = priorItems.indexOfFirst { it is LogItem.StackTraceHeader && it.gid == gid }
+    if (idx < 0) return null
+    val header = priorItems[idx] as LogItem.StackTraceHeader
+    if (header.expanded == expanding) return null
+
+    val result = ArrayList<LogItem>(priorItems.size + if (expanding) group.memberIds.size else 0)
+    result.addAll(priorItems.subList(0, idx))
+    result.add(header.copy(expanded = expanding))
+    if (expanding) {
+        group.memberIds.forEach { id ->
+            tab.rmap[id]?.let { result.add(LogItem.Row(it, header.indent + 1, DANGER_RED)) }
+        }
+        result.addAll(priorItems.subList(idx + 1, priorItems.size))
+    } else {
+        val end = idx + 1 + group.memberIds.size
+        if (end > priorItems.size) return null
+        for (k in idx + 1 until end) if (priorItems[k] !is LogItem.Row) return null
+        result.addAll(priorItems.subList(end, priorItems.size))
+    }
+    return result
 }
 
 // Complexity is inherent: sequence detection, manual-collapse interleaving, and segment
@@ -168,7 +215,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
     var fullSeqOwner: Map<Int, String>? = prior?.seqOwnerBySwallowed
     var fullSeqChildBits: java.util.BitSet? = prior?.seqChildBits
 
-    fun storeCache() {
+    fun storeCache(items: List<LogItem>) {
         computeCacheByTab[cacheKey] = TabComputeCache(
             logData = tab.logData,
             stackGroupsRef = tab.analysis.stackTraceGroups,
@@ -178,11 +225,25 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
             filteredStackGroups = fullFilteredStackGroups,
             seqOwnerBySwallowed = fullSeqOwner,
             seqChildBits = fullSeqChildBits,
+            items = items,
+            expanded = tab.expanded,
+            manualBlocks = tab.manualBlocks,
         )
+    }
+
+    if (prior != null) {
+        spliceStackToggle(tab, prior)?.let { spliced ->
+            storeCache(spliced)
+            return spliced
+        }
     }
 
     fun cachedStackGroupsFor(segment: List<LogEntry>): List<StackTraceGroup> {
         val cached = tab.analysis.stackTraceGroups
+        // Analysis still computing in the background after a load: render unfolded rather than
+        // blocking this compute on a full multi-second stack-trace scan. When the analysis
+        // lands, tab.analysis is replaced and the item list recomputes with folding.
+        if (tab.analysis.pending) return emptyList()
         if (cached.isEmpty()) return computeStackTraceGroups(segment)
         // Nothing filtered out and the segment spans the whole tab: cached groups apply as-is.
         if (segment.size == tab.logData.size) return cached
@@ -337,7 +398,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
     }
 
     val manualBlocks = tab.manualBlocks.filter { it.enabled }
-    if (manualBlocks.isEmpty()) return sequenceItems(data).also { storeCache() }
+    if (manualBlocks.isEmpty()) return sequenceItems(data).also { storeCache(it) }
 
     // Ids ascend within data, so anchor lookup is a binary search instead of a boxed id->index map.
     val dataIds = IntArray(data.size) { data[it].id }
@@ -407,7 +468,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
         i = manual.range.last + 1
     }
     flushSegment()
-    storeCache()
+    storeCache(result)
     return result
 }
 

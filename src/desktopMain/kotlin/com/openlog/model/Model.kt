@@ -66,6 +66,12 @@ data class LogAnalysis(
     val tagCounts: Map<String, Int> = emptyMap(),
     val stackTraceGroups: List<StackTraceGroup> = emptyList(),
     val crashSites: List<CrashSite> = emptyList(),
+    // True while the stack-trace/crash analysis is still computing in the background after a
+    // load — it costs as much as the parse itself on multi-GB files, and the initial render
+    // doesn't need it. Rows render unfolded and the crash panel shows an "analyzing" hint until
+    // the full analysis replaces this instance. tagCounts is always populated regardless:
+    // it's cheap and the filter panel needs it immediately.
+    val pending: Boolean = false,
 )
 
 enum class ManualCollapseDirection { TO_START, TO_END }

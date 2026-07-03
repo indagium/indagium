@@ -123,8 +123,11 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
     val filter = tab.filter
     val expanded = tab.expanded
     val manualBlocks = tab.manualBlocks
+    // analysis is a key so folding appears once the deferred background analysis lands
+    // (tab.analysis flips from pending to full after a large-file load).
+    val analysis = tab.analysis
     if (!tab.largeFileMode) {
-        return remember(tab.id, dataSize, lastId, filter, expanded, manualBlocks, applyFilter) {
+        return remember(tab.id, dataSize, lastId, filter, expanded, manualBlocks, analysis, applyFilter) {
             val items = computeItems(tab, applyFilter)
             ComputedLogItems(items, summarizeItems(items), loading = false)
         }
@@ -133,7 +136,7 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
     var computed by remember(tab.id, applyFilter) {
         mutableStateOf(ComputedLogItems(emptyList(), EMPTY_SUMMARY, loading = true))
     }
-    LaunchedEffect(tab.id, dataSize, lastId, filter, expanded, manualBlocks, applyFilter) {
+    LaunchedEffect(tab.id, dataSize, lastId, filter, expanded, manualBlocks, analysis, applyFilter) {
         val snapshot = tab.copy(selected = emptySet())
         coroutineScope {
             val deferred = async(Dispatchers.Default) {

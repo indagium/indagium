@@ -48,10 +48,20 @@ private fun buildLogAnalysis(data: List<LogEntry>): LogAnalysis {
     )
 }
 
-fun mkTab(id: String, filename: String, logData: List<LogEntry>) = LogTab(
+// What a freshly loaded tab carries while the stack/crash analysis still runs in the background:
+// tag counts immediately (cheap, the filter panel needs them), folding/crash data deferred.
+private fun pendingAnalysis(data: List<LogEntry>): LogAnalysis =
+    LogAnalysis(tagCounts = data.groupingBy { it.tag }.eachCount(), pending = true)
+
+fun mkTab(
+    id: String,
+    filename: String,
+    logData: List<LogEntry>,
+    analysis: LogAnalysis = buildLogAnalysis(logData),
+) = LogTab(
     id = id, filename = filename, logData = logData, rmap = mkRmap(logData),
     annotations = Annotations(prefix = "From $filename"),
-    analysis = buildLogAnalysis(logData),
+    analysis = analysis,
 )
 
 fun emptyWorkspaceTab() = LogTab(
@@ -1289,17 +1299,23 @@ class AppState(
         val n = tabCounter++
         beginLoading("Merging logs...")
         ioScope.launch {
+            var published = false
             try {
                 val merged = mergeLogs(sources)
                 ensureActive()
-                val t = mkTab("t$n", newTabName, merged)
+                val t = mkTab("t$n", newTabName, merged, analysis = pendingAnalysis(merged))
                 synchronized(stateLock) {
                     ensureActive()
                     tabs = tabs + t
                     activeTabId = t.id
                 }
-            } finally {
                 finishLoading()
+                published = true
+                val full = buildLogAnalysis(merged)
+                ensureActive()
+                upTab("t$n") { it.copy(analysis = full) }
+            } finally {
+                if (!published) finishLoading()
             }
         }
     }
@@ -1389,6 +1405,7 @@ class AppState(
         val largeFile = file.length() >= LARGE_FILE_MODE_BYTES
         beginLoading()
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
+            var published = false
             try {
                 val logData = runCatching { parser(file) }.getOrElse { error ->
                     removeRecentFile(file)
@@ -1401,7 +1418,10 @@ class AppState(
                 }
                 ensureActive()
                 val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
-                val t = mkTab(tabId, file.name, logData)
+                // Publish the tab as soon as parsing finishes — the stack/crash analysis costs
+                // as much as the parse on multi-GB files and fills in below, in the same job so
+                // closing the tab cancels it.
+                val t = mkTab(tabId, file.name, logData, analysis = pendingAnalysis(logData))
                     .copy(
                         sourcePath = path,
                         annotations = Annotations(prefix = "$prefixLabel ${file.name}"),
@@ -1412,9 +1432,14 @@ class AppState(
                     tabs = tabs + t
                     activeTabId = t.id
                 }
+                finishLoading()
+                published = true
+                val full = buildLogAnalysis(logData)
+                ensureActive()
+                upTab(tabId) { it.copy(analysis = full) }
             } finally {
                 activeLoads.remove(tabId)
-                finishLoading()
+                if (!published) finishLoading()
             }
         }
         activeLoads[tabId] = job
@@ -1544,11 +1569,12 @@ class AppState(
         val largeFile = candidate.sizeBytes >= LARGE_FILE_MODE_BYTES
         beginLoading()
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
+            var published = false
             try {
                 val logData = runCatching { extractCandidate(zipFile, candidate) }.getOrElse { emptyList() }
                 ensureActive()
                 val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
-                val t = mkTab(tabId, candidate.displayName, logData)
+                val t = mkTab(tabId, candidate.displayName, logData, analysis = pendingAnalysis(logData))
                     .copy(
                         sourcePath = path,
                         annotations = Annotations(prefix = "$prefixLabel ${candidate.displayName}"),
@@ -1559,9 +1585,14 @@ class AppState(
                     tabs = tabs + t
                     activeTabId = t.id
                 }
+                finishLoading()
+                published = true
+                val full = buildLogAnalysis(logData)
+                ensureActive()
+                upTab(tabId) { it.copy(analysis = full) }
             } finally {
                 activeLoads.remove(tabId)
-                finishLoading()
+                if (!published) finishLoading()
             }
         }
         activeLoads[tabId] = job
@@ -2015,18 +2046,20 @@ class AppState(
     private fun scheduleRestoredTabLoad(tabId: String, source: RestoredTabSource) {
         beginLoading("Restoring session...")
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
+            var published = false
             try {
                 val logData = runCatching { source.load(parser) }.getOrElse { emptyList() }
                 ensureActive()
                 val rmap = mkRmap(logData)
-                val analysis = buildLogAnalysis(logData)
-                synchronized(stateLock) {
-                    ensureActive()
-                    upTab(tabId) { it.copy(logData = logData, rmap = rmap, analysis = analysis) }
-                }
+                upTab(tabId) { it.copy(logData = logData, rmap = rmap, analysis = pendingAnalysis(logData)) }
+                finishLoading()
+                published = true
+                val full = buildLogAnalysis(logData)
+                ensureActive()
+                upTab(tabId) { it.copy(analysis = full) }
             } finally {
                 activeLoads.remove(tabId)
-                finishLoading()
+                if (!published) finishLoading()
             }
         }
         activeLoads[tabId] = job
