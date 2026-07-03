@@ -15,6 +15,8 @@ import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.extractCandidate
+import com.openlog.utils.invalidateComputeCache
+import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.mergeLogs
 import com.openlog.utils.parseLogcat
@@ -80,6 +82,8 @@ data class PendingSequenceStart(val text: String, val tag: String)
 data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val currentFilterId: String?)
 
 data class PendingDuplicateFilterSave(val tabId: String, val existingId: String, val existingName: String, val requestedName: String)
+
+data class OpenFileError(val title: String, val path: String?, val message: String)
 
 data class AnnotationNavigationRequest(val id: Long, val tabId: String, val logIds: List<Int>)
 
@@ -162,6 +166,7 @@ class AppState(
     var settingsOpen by mutableStateOf(false)
     var shortcutsOpen by mutableStateOf(false)
     var mcpInfoOpen by mutableStateOf(false)
+    var openError by mutableStateOf<OpenFileError?>(null)
     var recentFiles by mutableStateOf<List<String>>(emptyList())
     var recentMenuOpen by mutableStateOf(false)
     var recentNotes by mutableStateOf<List<String>>(emptyList())
@@ -336,7 +341,12 @@ class AppState(
         autosaveNow()
     }
 
-    fun upTab(tabId: String, fn: (LogTab) -> LogTab) {
+    // Every read-modify-write of the tabs list goes through stateLock (reentrant, so background
+    // callers already holding it are fine): background fills — restored-tab loads, tailing
+    // flushes, async opens — write tabs under the lock, and an unsynchronized UI-thread
+    // `tabs = tabs + t` racing one of those could lose either update (observed as a flaky
+    // "restored tab counter" test once autosave restore became async).
+    fun upTab(tabId: String, fn: (LogTab) -> LogTab) = synchronized(stateLock) {
         tabs = tabs.map { if (it.id == tabId) fn(it) else it }
     }
 
@@ -1189,23 +1199,28 @@ class AppState(
     }
 
     // ── Tab management ───────────────────────────────────────────────
+    // Structural tabs-list edits synchronize on stateLock for the same reason upTab does: a
+    // background fill landing in the same instant must not lose (or be lost to) this write.
     fun addTab() {
         val n = tabCounter++
         val t = emptyWorkspaceTab().copy(id = "t$n")
-        tabs = tabs + t; activeTabId = t.id
+        synchronized(stateLock) {
+            tabs = tabs + t
+            activeTabId = t.id
+        }
     }
 
     fun activateTab(tabId: String) {
         if (tabs.any { it.id == tabId }) activeTabId = tabId
     }
 
-    fun activateOverflowTab(tabId: String) {
+    fun activateOverflowTab(tabId: String) = synchronized(stateLock) {
         val tab = tabs.find { it.id == tabId } ?: return
         tabs = tabs.filter { it.id != tabId } + tab
         activeTabId = tabId
     }
 
-    fun reorderTabs(fromId: String, beforeId: String?) {
+    fun reorderTabs(fromId: String, beforeId: String?) = synchronized(stateLock) {
         val from = tabs.find { it.id == fromId } ?: return
         val without = tabs.filter { it.id != fromId }
         val idx = beforeId?.let { id -> without.indexOfFirst { it.id == id }.takeIf { it >= 0 } } ?: without.size
@@ -1216,12 +1231,15 @@ class AppState(
         activeLoads.remove(tabId)?.cancel()
         activeTails.remove(tabId)?.job?.cancel()
         visibleItemsByTab.remove(tabId)
-        val next = tabs.filter { it.id != tabId }
-        if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
-        if (compareTabId == tabId) compareTabId = next.firstOrNull()?.id ?: ""
-        if (next.isEmpty()) compareMode = false
+        invalidateComputeCache(tabId)
+        synchronized(stateLock) {
+            val next = tabs.filter { it.id != tabId }
+            if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
+            if (compareTabId == tabId) compareTabId = next.firstOrNull()?.id ?: ""
+            if (next.isEmpty()) compareMode = false
+            tabs = next
+        }
         logViewerScrollStateStore.removeTab(tabId)
-        tabs = next
     }
 
     // Ships "merge already-open tabs" (v1) — data's already in memory, no re-parsing needed.
@@ -1302,9 +1320,18 @@ class AppState(
 
     fun openFile(file: File): String? {
         val path = file.absolutePath
-        recentFiles = (listOf(path) + recentFiles.filter { it != path }).take(30)
+        if (!file.exists() || !file.isFile) {
+            removeRecentFile(file)
+            recentMenuOpen = false
+            showOpenError(
+                title = "Could not open file",
+                path = path,
+                message = "The file does not exist or is not readable.",
+            )
+            return null
+        }
+        rememberRecentFile(file)
         recentMenuOpen = false
-        autosaveNow()
         rememberAutoExportedNoteFor(file.name)
         // Switch to existing tab if this file is already open
         val existing = tabs.find { it.sourcePath == path }
@@ -1317,7 +1344,15 @@ class AppState(
         beginLoading()
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
             try {
-                val logData = runCatching { parser(file) }.getOrElse { emptyList() }
+                val logData = runCatching { parser(file) }.getOrElse { error ->
+                    removeRecentFile(file)
+                    showOpenError(
+                        title = "Could not open file",
+                        path = path,
+                        message = error.message ?: error::class.simpleName.orEmpty().ifBlank { "Unknown error" },
+                    )
+                    return@launch
+                }
                 ensureActive()
                 val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
                 val t = mkTab(tabId, file.name, logData)
@@ -1341,15 +1376,86 @@ class AppState(
         return tabId
     }
 
+    private fun rememberRecentFile(file: File) {
+        val path = file.absolutePath
+        recentFiles = (listOf(path) + recentFiles.filter { it != path }).take(30)
+        autosaveNow()
+    }
+
+    private fun removeRecentFile(file: File) {
+        val path = file.absolutePath
+        val next = recentFiles.filter { it != path }
+        if (next == recentFiles) return
+        recentFiles = next
+        autosaveNow()
+    }
+
+    private fun pruneMissingRecentFiles() {
+        val next = recentFiles.filter { File(it).exists() }
+        if (next == recentFiles) return
+        recentFiles = next
+        autosaveNow()
+    }
+
+    fun toggleRecentFilesMenu() {
+        if (!recentMenuOpen) pruneMissingRecentFiles()
+        recentMenuOpen = !recentMenuOpen
+    }
+
+    fun openPath(file: File): String? {
+        return if (isSupportedArchiveFile(file)) {
+            openZipFile(file)
+            null
+        } else {
+            openFile(file)
+        }
+    }
+
+    fun dismissOpenError() {
+        openError = null
+    }
+
+    private fun showOpenError(title: String, path: String?, message: String) {
+        openError = OpenFileError(title = title, path = path, message = message)
+    }
+
     // A single candidate auto-opens (the common case — most bug reports bundle one logcat
     // buffer). 2+ candidates show a picker rather than guessing: Android 11+ bug reports often
     // bundle multiple buffers (main/system/crash/events), and silently picking one wrong is worse
-    // than one extra click. 0 candidates is a silent no-op — the zip just isn't a bug report.
+    // than one extra click. 0 candidates reports that no log-like entries were found.
     fun openZipFile(file: File) {
+        val path = file.absolutePath
+        if (!file.exists() || !file.isFile) {
+            removeRecentFile(file)
+            recentMenuOpen = false
+            showOpenError(
+                title = "Could not open archive",
+                path = path,
+                message = "The archive does not exist or is not readable.",
+            )
+            return
+        }
         val candidates = listArchiveLogCandidates(file)
         when {
-            candidates.size == 1 -> openZipEntry(file, candidates.first())
-            candidates.size > 1 -> pendingZipPicker = PendingZipPicker(file, candidates)
+            candidates.size == 1 -> {
+                rememberRecentFile(file)
+                recentMenuOpen = false
+                openZipEntry(file, candidates.first())
+            }
+            candidates.size > 1 -> {
+                rememberRecentFile(file)
+                recentMenuOpen = false
+                pendingZipPicker = PendingZipPicker(file, candidates)
+            }
+            else -> {
+                removeRecentFile(file)
+                recentMenuOpen = false
+                showOpenError(
+                    title = "No log files found",
+                    path = path,
+                    message = "This archive does not contain readable .log, .txt, or ANR trace entries.",
+                )
+            }
         }
     }
 
@@ -1530,12 +1636,17 @@ class AppState(
         ).distinctBy { it.absolutePath }
     }
 
+    private fun noteNamesForFilename(filename: String): List<String> {
+        return listOf(analysisNoteMarkdownName(filename))
+    }
+
+    fun recentNotesForTab(tab: LogTab): List<String> {
+        val relatedNames = noteNamesForFilename(tab.filename).toSet()
+        return recentNotes.filter { path -> File(path).name in relatedNames }
+    }
+
     private fun rememberAutoExportedNoteFor(filename: String) {
-        val legacySafeName = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-        val noteNames = listOf(
-            analysisNoteMarkdownName(filename),
-            "${legacySafeName}_notes.md",
-        )
+        val noteNames = noteNamesForFilename(filename)
         val noteFile = noteLookupDirs()
             .asSequence()
             .flatMap { dir -> noteNames.asSequence().map { name -> File(dir, name) } }

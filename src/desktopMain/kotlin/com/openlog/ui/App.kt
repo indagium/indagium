@@ -119,8 +119,8 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             val file = File(URI.create(uri))
                             when {
                                 !file.exists() -> {}
-                                com.openlog.utils.isSupportedArchiveFile(file) -> state.openZipFile(file)
-                                com.openlog.utils.isLikelyTextFile(file) -> state.openFile(file)
+                                com.openlog.utils.isSupportedArchiveFile(file) || com.openlog.utils.isLikelyTextFile(file) ->
+                                    state.openPath(file)
                             }
                         }
                     }
@@ -833,7 +833,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                     val exists = file.exists()
                                     HoverBox(
                                         modifier = Modifier.fillMaxWidth(),
-                                        onClick = { if (exists) state.openFile(file) },
+                                        onClick = { state.openPath(file) },
                                     ) {
                                         Column(
                                             Modifier.fillMaxWidth()
@@ -863,6 +863,43 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                     AppText("… ${state.recentFiles.size - 10} more", color = tc.td, fontSize = 10.sp)
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            state.openError?.let { error ->
+                Dialog(onDismissRequest = { state.dismissOpenError() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(420.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText(error.title, color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(error.message, color = tc2.td, fontSize = 11.sp, maxLines = 4)
+                        error.path?.let { path ->
+                            Spacer(Modifier.height(10.dp))
+                            Box(
+                                Modifier.fillMaxWidth().background(tc2.bg, CORNER_SM)
+                                    .border(1.dp, tc2.br, CORNER_SM).padding(10.dp),
+                            ) {
+                                AppText(
+                                    path,
+                                    color = tc2.ts,
+                                    fontSize = 11.sp,
+                                    fontFamily = MONO,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton("Close", active = true) { state.dismissOpenError() }
                         }
                     }
                 }
@@ -1235,7 +1272,7 @@ private fun FileView(
             AnnotationPanel(
                 tab = tab,
                 settings = state.settings,
-                recentNotes = state.recentNotes,
+                recentNotes = state.recentNotesForTab(tab),
                 recentNotesMenuOpen = state.recentNotesMenuOpen,
                 onToggleMd = { state.toggleMd(tab.id) },
                 onCopy = { state.copyAnn(tab.id) },
@@ -1444,7 +1481,7 @@ private fun CompareView(
                             tab = leftTab,
                             settings = state.settings,
                             headerNote = leftTab.filename,
-                            recentNotes = state.recentNotes,
+                            recentNotes = state.recentNotesForTab(leftTab),
                             recentNotesMenuOpen = state.recentNotesMenuOpen,
                             onToggleMd = { state.toggleMd(leftTab.id) },
                             onCopy = { state.copyAnn(leftTab.id) },
@@ -1519,7 +1556,7 @@ private fun TabBar(state: AppState) {
             fd.isVisible = true
             fd.file?.let {
                 val f = File(fd.directory, it)
-                if (com.openlog.utils.isSupportedArchiveFile(f)) state.openZipFile(f) else state.openFile(f)
+                state.openPath(f)
             }
         }
         if (hasRecentFiles) {
@@ -1529,7 +1566,7 @@ private fun TabBar(state: AppState) {
                 modifier = Modifier.fillMaxHeight().width(18.dp),
                 shape = rightShape,
                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 5.dp),
-            ) { state.recentMenuOpen = !state.recentMenuOpen }
+            ) { state.toggleRecentFilesMenu() }
         }
         Spacer(Modifier.width(toolbarGap))
         ToolbarBtn(

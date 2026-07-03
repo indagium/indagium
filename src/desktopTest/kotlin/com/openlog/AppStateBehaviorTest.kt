@@ -870,6 +870,72 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun openMissingFileShowsErrorAndRemovesItFromRecentFiles() {
+        val dir = createTempDirectory("openlog-open-error-missing").toFile()
+        val missing = File(dir, "missing.log")
+        val state = AppState(File(dir, "state.cache"))
+        state.recentFiles = listOf(missing.absolutePath)
+
+        val tabId = state.openFile(missing)
+
+        assertEquals(null, tabId)
+        assertTrue(state.tabs.isEmpty())
+        assertTrue(state.recentFiles.isEmpty())
+        assertEquals("Could not open file", state.openError?.title)
+        assertEquals(missing.absolutePath, state.openError?.path)
+    }
+
+    @Test
+    fun parserFailureShowsErrorInsteadOfOpeningEmptyTab() {
+        val dir = createTempDirectory("openlog-open-error-parser").toFile()
+        val logFile = File(dir, "broken.log").apply { writeText("broken") }
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            parser = { error("parser exploded") },
+        )
+
+        state.openFile(logFile)
+        waitUntil { !state.isLoading }
+
+        assertTrue(state.tabs.isEmpty())
+        assertEquals("Could not open file", state.openError?.title)
+        assertTrue(state.openError?.message.orEmpty().contains("parser exploded"))
+    }
+
+    @Test
+    fun archiveWithoutLogCandidatesShowsError() {
+        val dir = createTempDirectory("openlog-open-error-archive").toFile()
+        val zip = buildZipFixture(
+            dir,
+            "no-logs.zip",
+            mapOf("images/screenshot.png" to "not a log"),
+        )
+        val state = AppState(File(dir, "state.cache"))
+
+        state.openZipFile(zip)
+
+        assertTrue(state.tabs.isEmpty())
+        assertEquals(null, state.pendingZipPicker)
+        assertEquals("No log files found", state.openError?.title)
+        assertEquals(zip.absolutePath, state.openError?.path)
+    }
+
+    @Test
+    fun openArchiveAddsArchivePathToRecentFiles() {
+        val dir = createTempDirectory("openlog-archive-recent").toFile()
+        val zip = buildZipFixture(
+            dir,
+            "bugreport.zip",
+            mapOf("FS/data/anr/main_log.txt" to "06-26 10:00:00.000  123  456 I App: hello\n"),
+        )
+        val state = AppState(File(dir, "state.cache"))
+
+        state.openZipFile(zip)
+
+        assertEquals(listOf(zip.absolutePath), state.recentFiles)
+    }
+
+    @Test
     fun appCacheInfoRefreshesOnDemandAndClearDeletesAppManagedCacheOnlyAfterConfirmation() {
         val dir = createTempDirectory("openlog-archive-cache").toFile()
         val archiveCacheDir = File(dir, "archive-cache").apply { mkdirs() }
@@ -932,6 +998,21 @@ class AppStateBehaviorTest {
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
         assertEquals(listOf(existingNote.absolutePath), restored.recentNotes)
+    }
+
+    @Test
+    fun recentNotesForTabOnlyReturnsNotesMatchingThatTabName() {
+        val dir = createTempDirectory("openlog-recent-notes-tab").toFile()
+        val sampleNote = File(dir, "sample_analysis.md").apply { writeText("sample") }
+        val otherNote = File(dir, "other_analysis.md").apply { writeText("other") }
+        val state = AppState(File(dir, "state.cache"))
+        state.recentNotes = listOf(otherNote.absolutePath, sampleNote.absolutePath)
+        val tab = mkTab("log", "sample.log", emptyList())
+
+        assertEquals(
+            listOf(sampleNote.absolutePath),
+            state.recentNotesForTab(tab),
+        )
     }
 
     @Test
@@ -1015,29 +1096,6 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun openFileStillFindsLegacyAutoExportedNoteName() {
-        val originalHome = System.getProperty("user.home")
-        val home = createTempDirectory("openlog-home-legacy-note").toFile()
-        try {
-            System.setProperty("user.home", home.absolutePath)
-            val notesDir = File(home, ".openlog2/notes").apply { mkdirs() }
-            val logFile = File(home, "sample.log").apply {
-                writeText("06-26 10:00:00.000  123  456 I App: hello\n")
-            }
-            val legacyNoteFile = File(notesDir, "sample.log_notes.md").apply {
-                writeText("## sample.log\n\nremember this")
-            }
-            val state = AppState(File(home, "state.cache"))
-
-            state.openFile(logFile)
-
-            assertEquals(listOf(legacyNoteFile.absolutePath), state.recentNotes)
-        } finally {
-            System.setProperty("user.home", originalHome)
-        }
-    }
-
-    @Test
     fun autoExportUsesSameDotlessAnalysisBasenameAsManualSaveDefault() {
         val dir = createTempDirectory("openlog-auto-export-name").toFile()
         val notesDir = File(dir, "notes")
@@ -1067,9 +1125,12 @@ class AppStateBehaviorTest {
             listOf(mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))))
 
         state.confirmAddAnn("log", "log", listOf(1), "save this", null)
+        // recentNotes updates one statement after the .ann write on the export thread — wait for
+        // it too, or the assertion below races that window.
         waitUntil {
             File(defaultSaveDir, "sample_analysis.md").exists() &&
-                File(defaultSaveDir, "sample_analysis.ann").exists()
+                File(defaultSaveDir, "sample_analysis.ann").exists() &&
+                state.recentNotes.isNotEmpty()
         }
 
         assertTrue(File(defaultSaveDir, "sample_analysis.ann").exists())
@@ -1840,7 +1901,7 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun fileLoadErrorProducesEmptyTab() {
+    fun fileLoadErrorShowsErrorWithoutOpeningTab() {
         val dir = createTempDirectory("openlog-err").toFile()
         val logFile = File(dir, "test.log").apply { writeText("content") }
         val state = AppState(
@@ -1851,8 +1912,9 @@ class AppStateBehaviorTest {
         state.openFile(logFile)
         waitUntil { !state.isLoading }
 
-        assertEquals(1, state.tabs.size)
-        assertTrue(state.tabs.single().logData.isEmpty())
+        assertTrue(state.tabs.isEmpty())
+        assertEquals("Could not open file", state.openError?.title)
+        assertTrue(state.openError?.message.orEmpty().contains("disk error"))
     }
 
     @Test

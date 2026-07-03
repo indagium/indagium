@@ -135,10 +135,47 @@ End-to-end smoke test: app launched via `./gradlew desktopRun -Dopenlog.debugCon
 -Dopenlog.run.home=<tmp>`, fixture opened through the MCP control server — 10.6M entries
 loaded, keyword filter returned 529,635 rows, 276 crash sites detected, tab closed cleanly.
 
+## Round 2: load speed + expand/collapse latency (2026-07-03)
+
+Per-phase profile showed the ~19s load was: `computeStackTraceGroups` **14.0s**, parse 5.0s,
+crash sites + tag counts 0.7s; and that an expand/collapse click re-ran the full filter pass
+(4.0s with a keyword filter) and the sequence scan (6.6s with a def enabled) even though only
+`tab.expanded` changed. Fixes:
+
+1. **StackTraceComputer `MsgScanner`**: one left-to-right pass per message computing every
+   substring gate (was up to six separate contains() scans, several case-insensitive, per
+   line), plus a verb gate on the prelude regex. 14.0s → **6.2–6.7s**.
+2. **computeItems memoization** (`TabComputeCache`, one slot per tab × applyFilter): the
+   filtered entry list, sequence groups, filtered stack groups, swallowed-id owner map and
+   sequence-child BitSet are all invariant under `expanded` and now survive expand/collapse
+   recomputes. Measured per-click recompute after the filter-establishing pass:
+   keyword filter **4018ms → 25–65ms**; sequence def enabled **~6.6s → 0.45s**; no filter
+   1.0s → 0.4–0.7s (pure item-materialization floor at 10.6M rows).
+3. **Pointer-walk** over rid-sorted group lists in the item loop instead of two HashMap
+   lookups per entry.
+4. **Loading-line grace (250ms)** in `rememberComputedLogItems`: sub-grace recomputes swap in
+   without ever flashing the loading indicator; the previous items stay on screen either way.
+5. Tabs-list writes (upTab + structural edits) now all synchronize on `stateLock` — an
+   unsynchronized UI-thread `tabs = tabs + t` racing a background restore/tailing fill could
+   lose either update (surfaced as a flaky restore test once autosave restore became async).
+
+### Negative result: parallel parsing (tried, measured, removed)
+
+A byte-range-chunked parallel file parse and a batch-pipeline variant for archive streams
+(workers parse, sequential id fix-up after) were implemented and benchmarked same-JVM against
+the sequential parser: **parallel was ~1.7× slower** (8.2s vs 4.2s file; archive pipeline
+similarly worse). Parsing is allocation/GC-bound, not CPU-bound — extra threads contend on the
+collector and the id-rewrite pass doubles allocations. Don't re-attempt without first reducing
+per-entry allocation (e.g. flyweight/off-heap entries); the archive path shares
+`parseLogcatLines`, so it inherits whatever the sequential parser gains instead.
+
+Load totals for a 1.5GB file/zip entry: ~19s → **~10.5s** (parse 3.3–5.0s variance-bound +
+analysis 6.2–7.1s; zip adds <1s of decompression).
+
 ## Future work (explicitly out of scope here)
 
-- `buildLogAnalysis` (~13s at 10.6M lines, background, one-time per open) could be merged into
-  the parse pass or parallelized if time-to-open needs to shrink further.
+- The no-filter expand/collapse recompute is now bounded by materializing ~10M `LogItem.Row`s
+  (~0.4-0.7s); going below that needs incremental item-list splicing around the toggled group.
 - klogg-style byte-offset indexing with on-demand line realization — only worth the data-model
   rewrite if 4GB+ files become a target.
 - Keyboard navigation helpers (`handleNavKey`/`handleSelKey`) still do O(n) index scans per

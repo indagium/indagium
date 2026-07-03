@@ -39,7 +39,7 @@ Skipping this leaves the README showing a stale version after a release ships, w
 ./gradlew packageMsi        # Windows .msi (run on Windows)
 
 # Release (triggers GitHub Actions → builds Linux + Windows + macOS → creates GitHub Release)
-git tag v1.0.6 && git push --tags
+git tag v1.0.8 && git push --tags
 ```
 
 Source sets are `desktopMain` and `desktopTest` (Kotlin Multiplatform with a single `jvm("desktop")` target).

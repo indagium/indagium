@@ -73,12 +73,17 @@ fun computeSeqGroups(logData: List<LogEntry>, defs: List<SequenceDef>): List<Seq
     // A candidate exists exactly where some enabled def start-matches, so "next start match" is
     // just the next candidate's index.
     val startIdxs = candidates.map { it.idx }
+    val nextSameDefStartIdxs = nextSameDefStartIdxs(candidates)
     candidates.forEachIndexed { ci, c ->
         val fallback = startIdxs.getOrNull(ci + 1) ?: logData.size
-        val endIdx = if (c.def.endMatchText.isNullOrBlank()) {
+        val rawEndIdx = if (c.def.endMatchText.isNullOrBlank()) {
             null
         } else {
             scan.endIdxByDef[c.def.id]?.firstAfter(c.idx)
+        }
+        val nextSameDefStartIdx = nextSameDefStartIdxs[ci]
+        val endIdx = rawEndIdx?.takeIf { end ->
+            nextSameDefStartIdx < 0 || end < nextSameDefStartIdx
         }
         c.endExclusive = if (endIdx != null) endIdx + 1 else fallback
     }
@@ -124,6 +129,17 @@ fun computeSeqGroups(logData: List<LogEntry>, defs: List<SequenceDef>): List<Seq
                 defId = root.def.id,
             )
         }
+}
+
+private fun nextSameDefStartIdxs(candidates: List<SeqCandidate>): IntArray {
+    val nextIdxByDef = HashMap<String, Int>()
+    val result = IntArray(candidates.size) { -1 }
+    for (ci in candidates.indices.reversed()) {
+        val c = candidates[ci]
+        result[ci] = nextIdxByDef[c.def.id] ?: -1
+        nextIdxByDef[c.def.id] = c.idx
+    }
+    return result
 }
 
 // Parent = the smallest-length earlier candidate whose range fully contains this one
