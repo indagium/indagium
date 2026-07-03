@@ -1272,7 +1272,7 @@ private fun FileView(
             AnnotationPanel(
                 tab = tab,
                 settings = state.settings,
-                recentNotes = state.recentNotes,
+                recentNotes = state.recentNotesForTab(tab),
                 recentNotesMenuOpen = state.recentNotesMenuOpen,
                 onToggleMd = { state.toggleMd(tab.id) },
                 onCopy = { state.copyAnn(tab.id) },
@@ -1481,7 +1481,7 @@ private fun CompareView(
                             tab = leftTab,
                             settings = state.settings,
                             headerNote = leftTab.filename,
-                            recentNotes = state.recentNotes,
+                            recentNotes = state.recentNotesForTab(leftTab),
                             recentNotesMenuOpen = state.recentNotesMenuOpen,
                             onToggleMd = { state.toggleMd(leftTab.id) },
                             onCopy = { state.copyAnn(leftTab.id) },

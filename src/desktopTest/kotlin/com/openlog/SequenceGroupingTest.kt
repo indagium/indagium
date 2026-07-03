@@ -160,6 +160,31 @@ class SequenceGroupingTest {
     }
 
     @Test
+    fun sameRuleStartBeforeFirstEndStartsSiblingSequence() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "flow start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "App", "flow start"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "App", "flow end"),
+        )
+        val sequence = SequenceDef(
+            "flow",
+            "flow start",
+            priority = 1,
+            color = Color.Blue,
+            tag = "App",
+            endMatchText = "flow end",
+            endTag = "App",
+        )
+
+        val groups = computeSeqGroups(logs, listOf(sequence))
+
+        assertEquals(listOf(1, 2), groups.map { it.rid })
+        assertTrue(groups.all { it.nested.isEmpty() })
+        assertTrue(groups[0].plain.isEmpty())
+        assertEquals(listOf(3), groups[1].plain)
+    }
+
+    @Test
     fun manualCollapseToEndHidesRowsAfterAnchor() {
         val logs = listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "App", "before"),

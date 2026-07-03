@@ -1001,6 +1001,22 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun recentNotesForTabOnlyReturnsNotesMatchingThatTabName() {
+        val dir = createTempDirectory("openlog-recent-notes-tab").toFile()
+        val sampleNote = File(dir, "sample_analysis.md").apply { writeText("sample") }
+        val sampleLegacyNote = File(dir, "sample.log_notes.md").apply { writeText("legacy") }
+        val otherNote = File(dir, "other_analysis.md").apply { writeText("other") }
+        val state = AppState(File(dir, "state.cache"))
+        state.recentNotes = listOf(otherNote.absolutePath, sampleNote.absolutePath, sampleLegacyNote.absolutePath)
+        val tab = mkTab("log", "sample.log", emptyList())
+
+        assertEquals(
+            listOf(sampleNote.absolutePath, sampleLegacyNote.absolutePath),
+            state.recentNotesForTab(tab),
+        )
+    }
+
+    @Test
     fun layoutPaneStatePersistsImmediatelyAfterUiChanges() {
         val dir = createTempDirectory("openlog-layout").toFile()
         val cacheFile = File(dir, "state.cache")

@@ -1622,12 +1622,21 @@ class AppState(
         ).distinctBy { it.absolutePath }
     }
 
-    private fun rememberAutoExportedNoteFor(filename: String) {
+    private fun noteNamesForFilename(filename: String): List<String> {
         val legacySafeName = filename.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-        val noteNames = listOf(
+        return listOf(
             analysisNoteMarkdownName(filename),
             "${legacySafeName}_notes.md",
         )
+    }
+
+    fun recentNotesForTab(tab: LogTab): List<String> {
+        val relatedNames = noteNamesForFilename(tab.filename).toSet()
+        return recentNotes.filter { path -> File(path).name in relatedNames }
+    }
+
+    private fun rememberAutoExportedNoteFor(filename: String) {
+        val noteNames = noteNamesForFilename(filename)
         val noteFile = noteLookupDirs()
             .asSequence()
             .flatMap { dir -> noteNames.asSequence().map { name -> File(dir, name) } }
