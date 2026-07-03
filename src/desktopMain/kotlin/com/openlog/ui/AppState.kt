@@ -15,6 +15,7 @@ import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.extractCandidate
+import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.mergeLogs
 import com.openlog.utils.parseLogcat
@@ -80,6 +81,8 @@ data class PendingSequenceStart(val text: String, val tag: String)
 data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val currentFilterId: String?)
 
 data class PendingDuplicateFilterSave(val tabId: String, val existingId: String, val existingName: String, val requestedName: String)
+
+data class OpenFileError(val title: String, val path: String?, val message: String)
 
 data class AnnotationNavigationRequest(val id: Long, val tabId: String, val logIds: List<Int>)
 
@@ -162,6 +165,7 @@ class AppState(
     var settingsOpen by mutableStateOf(false)
     var shortcutsOpen by mutableStateOf(false)
     var mcpInfoOpen by mutableStateOf(false)
+    var openError by mutableStateOf<OpenFileError?>(null)
     var recentFiles by mutableStateOf<List<String>>(emptyList())
     var recentMenuOpen by mutableStateOf(false)
     var recentNotes by mutableStateOf<List<String>>(emptyList())
@@ -1302,9 +1306,18 @@ class AppState(
 
     fun openFile(file: File): String? {
         val path = file.absolutePath
-        recentFiles = (listOf(path) + recentFiles.filter { it != path }).take(30)
+        if (!file.exists() || !file.isFile) {
+            removeRecentFile(file)
+            recentMenuOpen = false
+            showOpenError(
+                title = "Could not open file",
+                path = path,
+                message = "The file does not exist or is not readable.",
+            )
+            return null
+        }
+        rememberRecentFile(file)
         recentMenuOpen = false
-        autosaveNow()
         rememberAutoExportedNoteFor(file.name)
         // Switch to existing tab if this file is already open
         val existing = tabs.find { it.sourcePath == path }
@@ -1317,7 +1330,15 @@ class AppState(
         beginLoading()
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
             try {
-                val logData = runCatching { parser(file) }.getOrElse { emptyList() }
+                val logData = runCatching { parser(file) }.getOrElse { error ->
+                    removeRecentFile(file)
+                    showOpenError(
+                        title = "Could not open file",
+                        path = path,
+                        message = error.message ?: error::class.simpleName.orEmpty().ifBlank { "Unknown error" },
+                    )
+                    return@launch
+                }
                 ensureActive()
                 val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
                 val t = mkTab(tabId, file.name, logData)
@@ -1341,15 +1362,86 @@ class AppState(
         return tabId
     }
 
+    private fun rememberRecentFile(file: File) {
+        val path = file.absolutePath
+        recentFiles = (listOf(path) + recentFiles.filter { it != path }).take(30)
+        autosaveNow()
+    }
+
+    private fun removeRecentFile(file: File) {
+        val path = file.absolutePath
+        val next = recentFiles.filter { it != path }
+        if (next == recentFiles) return
+        recentFiles = next
+        autosaveNow()
+    }
+
+    private fun pruneMissingRecentFiles() {
+        val next = recentFiles.filter { File(it).exists() }
+        if (next == recentFiles) return
+        recentFiles = next
+        autosaveNow()
+    }
+
+    fun toggleRecentFilesMenu() {
+        if (!recentMenuOpen) pruneMissingRecentFiles()
+        recentMenuOpen = !recentMenuOpen
+    }
+
+    fun openPath(file: File): String? {
+        return if (isSupportedArchiveFile(file)) {
+            openZipFile(file)
+            null
+        } else {
+            openFile(file)
+        }
+    }
+
+    fun dismissOpenError() {
+        openError = null
+    }
+
+    private fun showOpenError(title: String, path: String?, message: String) {
+        openError = OpenFileError(title = title, path = path, message = message)
+    }
+
     // A single candidate auto-opens (the common case — most bug reports bundle one logcat
     // buffer). 2+ candidates show a picker rather than guessing: Android 11+ bug reports often
     // bundle multiple buffers (main/system/crash/events), and silently picking one wrong is worse
-    // than one extra click. 0 candidates is a silent no-op — the zip just isn't a bug report.
+    // than one extra click. 0 candidates reports that no log-like entries were found.
     fun openZipFile(file: File) {
+        val path = file.absolutePath
+        if (!file.exists() || !file.isFile) {
+            removeRecentFile(file)
+            recentMenuOpen = false
+            showOpenError(
+                title = "Could not open archive",
+                path = path,
+                message = "The archive does not exist or is not readable.",
+            )
+            return
+        }
         val candidates = listArchiveLogCandidates(file)
         when {
-            candidates.size == 1 -> openZipEntry(file, candidates.first())
-            candidates.size > 1 -> pendingZipPicker = PendingZipPicker(file, candidates)
+            candidates.size == 1 -> {
+                rememberRecentFile(file)
+                recentMenuOpen = false
+                openZipEntry(file, candidates.first())
+            }
+            candidates.size > 1 -> {
+                rememberRecentFile(file)
+                recentMenuOpen = false
+                pendingZipPicker = PendingZipPicker(file, candidates)
+            }
+            else -> {
+                removeRecentFile(file)
+                recentMenuOpen = false
+                showOpenError(
+                    title = "No log files found",
+                    path = path,
+                    message = "This archive does not contain readable .log, .txt, or ANR trace entries.",
+                )
+            }
         }
     }
 
