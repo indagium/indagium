@@ -12,6 +12,14 @@ const BASE_URL = process.env.OPENLOG_CONTROL_URL ?? "http://127.0.0.1:8991";
 const CLIENT_ID = randomUUID();
 const CLIENT_NAME = process.env.OPENLOG_CLIENT_NAME ?? "MCP client";
 
+type OpenLogFileOptions = {
+  entryPath?: string;
+  splitMode?: "split" | "open_as_is";
+  destinationDir?: string;
+  postfix?: string;
+  partCount?: number;
+};
+
 async function request(method: string, path: string, body?: unknown): Promise<unknown> {
   const res = await fetch(`${BASE_URL}${path}`, {
     method,
@@ -33,8 +41,35 @@ async function request(method: string, path: string, body?: unknown): Promise<un
 export const openlogClient = {
   listTabs: () => request("GET", "/tabs"),
 
-  openLogFile: (path: string, entryPath?: string) =>
-    request("POST", "/open", entryPath !== undefined ? { path, entryPath } : { path }),
+  openLogFile: (path: string, optionsOrEntryPath?: string | OpenLogFileOptions) => {
+    const options = typeof optionsOrEntryPath === "string" ? { entryPath: optionsOrEntryPath } : optionsOrEntryPath;
+    return request("POST", "/open", {
+      path,
+      ...(options?.entryPath !== undefined ? { entryPath: options.entryPath } : {}),
+      ...(options?.splitMode !== undefined ? { splitMode: options.splitMode } : {}),
+      ...(options?.destinationDir !== undefined ? { destinationDir: options.destinationDir } : {}),
+      ...(options?.postfix !== undefined ? { postfix: options.postfix } : {}),
+      ...(options?.partCount !== undefined ? { partCount: options.partCount } : {}),
+    });
+  },
+
+  previewSplitLogFile: (path: string, entryPath?: string) =>
+    request("POST", "/split/preview", entryPath !== undefined ? { path, entryPath } : { path }),
+
+  splitLogFile: (
+    path: string,
+    entryPath?: string,
+    destinationDir?: string,
+    postfix?: string,
+    partCount?: number,
+  ) =>
+    request("POST", "/split", {
+      path,
+      ...(entryPath !== undefined ? { entryPath } : {}),
+      ...(destinationDir !== undefined ? { destinationDir } : {}),
+      ...(postfix !== undefined ? { postfix } : {}),
+      ...(partCount !== undefined ? { partCount } : {}),
+    }),
 
   closeTab: (tabId: string) => request("POST", "/close", { tabId }),
 

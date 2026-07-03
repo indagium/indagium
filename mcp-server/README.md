@@ -32,7 +32,8 @@ npm start
 | Tool | Purpose |
 |---|---|
 | `list_tabs` | List every open tab |
-| `open_log_file` | Open a file (or bug-report .zip) by absolute path, blocks until parsed |
+| `open_log_file` | Open a file (or bug-report .zip) by absolute path, or report `needsSplit` for oversized sources |
+| `preview_split_log_file` / `split_log_file` | Preview split settings or split a real/archive log into line-preserving parts and open them |
 | `close_tab` | Close a tab |
 | `get_filter` / `set_filter` | Read/partially-update a tab's filter |
 | `get_visible_lines` | Read the currently rendered log items (post-filter, post-fold) |

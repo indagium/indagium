@@ -33,13 +33,53 @@ server.registerTool(
   {
     title: "Open a log file",
     description:
-      "Open a plain logcat file, or a bug-report .zip, at the given absolute path. For a plain file, blocks until parsing completes and returns the new tab's id. For a .zip: if it contains exactly one candidate log, that one opens automatically; if it contains none, returns an error; if it contains several, returns { needsSelection: true, candidates: [...] } without opening anything — call again with the same path plus entryPath set to one candidate's entryPath to open that one.",
+      "Open a plain logcat file, or a bug-report .zip, at the given absolute path. For a plain file, blocks until parsing completes and returns the new tab's id. For a .zip: if it contains exactly one candidate log, that one opens automatically; if it contains none, returns an error; if it contains several, returns { needsSelection: true, candidates: [...] } without opening anything — call again with the same path plus entryPath set to one candidate's entryPath to open that one. Oversized sources return { needsSplit: true, ... } instead of opening; use split_log_file to split and open parts.",
     inputSchema: {
       path: z.string().describe("Absolute path to the log file or .zip"),
       entryPath: z.string().optional().describe("For a multi-candidate .zip: the entryPath of the candidate to open"),
+      splitMode: z
+        .enum(["split", "open_as_is"])
+        .optional()
+        .describe("For oversized sources: split and open generated parts, or bypass the split prompt and open the original"),
+      destinationDir: z.string().optional().describe("When splitMode is split, destination directory for generated parts"),
+      postfix: z.string().optional().describe('When splitMode is split, output postfix before the part number; default "part"'),
+      partCount: z.number().int().positive().optional().describe("When splitMode is split, number of line-preserving parts"),
     },
   },
-  async ({ path, entryPath }) => jsonResult(await openlogClient.openLogFile(path, entryPath)),
+  async ({ path, entryPath, splitMode, destinationDir, postfix, partCount }) =>
+    jsonResult(await openlogClient.openLogFile(path, { entryPath, splitMode, destinationDir, postfix, partCount })),
+);
+
+server.registerTool(
+  "preview_split_log_file",
+  {
+    title: "Preview log split",
+    description:
+      "Return split metadata for a real log file or archive entry without opening it: size, suggested part count, default destination, default postfix, and source identifiers.",
+    inputSchema: {
+      path: z.string().describe("Absolute path to the log file or archive"),
+      entryPath: z.string().optional().describe("Archive entry path when splitting a file inside an archive"),
+    },
+  },
+  async ({ path, entryPath }) => jsonResult(await openlogClient.previewSplitLogFile(path, entryPath)),
+);
+
+server.registerTool(
+  "split_log_file",
+  {
+    title: "Split and open log",
+    description:
+      "Split a real log file or archive entry into line-preserving plain log files, save them to the destination directory, and open the generated parts as tabs. Existing outputs are not overwritten.",
+    inputSchema: {
+      path: z.string().describe("Absolute path to the log file or archive"),
+      entryPath: z.string().optional().describe("Archive entry path when splitting a file inside an archive"),
+      destinationDir: z.string().optional().describe("Destination directory for generated parts; defaults to the app's split destination"),
+      postfix: z.string().optional().describe('Output postfix between base name and part number, default "part"'),
+      partCount: z.number().int().positive().optional().describe("Number of line-preserving parts to create"),
+    },
+  },
+  async ({ path, entryPath, destinationDir, postfix, partCount }) =>
+    jsonResult(await openlogClient.splitLogFile(path, entryPath, destinationDir, postfix, partCount)),
 );
 
 server.registerTool(

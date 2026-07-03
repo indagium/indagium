@@ -7,6 +7,7 @@ import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
 import com.openlog.model.SavedFilter
 import com.openlog.ui.AppState
+import com.openlog.ui.SplitSource
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
@@ -85,7 +86,28 @@ class ControlServer(private val appState: AppState, private val port: Int) {
     fun start() {
         val s = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
         s.createContext("/tabs", handler(GET) { _, _ -> listTabs() })
-        s.createContext("/open", handler(POST) { _, body -> openLogFile(body.str("path") ?: "", body.str("entryPath")) })
+        s.createContext("/open", handler(POST) { _, body ->
+            openLogFile(
+                path = body.str("path") ?: "",
+                entryPath = body.str("entryPath"),
+                splitMode = body.str("splitMode"),
+                destinationDir = body.str("destinationDir"),
+                postfix = body.str("postfix") ?: "part",
+                partCount = body.int("partCount"),
+            )
+        })
+        s.createContext("/split", handler(POST) { _, body ->
+            splitLogRoute(
+                path = body.str("path") ?: "",
+                entryPath = body.str("entryPath"),
+                destinationDir = body.str("destinationDir"),
+                postfix = body.str("postfix") ?: "part",
+                partCount = body.int("partCount"),
+            )
+        })
+        s.createContext("/split/preview", handler(POST) { _, body ->
+            splitPreviewRoute(body.str("path") ?: "", body.str("entryPath"))
+        })
         s.createContext("/close", handler(POST) { _, body -> closeTab(body.str("tabId") ?: "") })
         s.createContext("/filter", handler(GET, POST) { ex, body ->
             if (ex.requestMethod == "GET") getFilter(queryParams(ex)["tabId"] ?: "")
@@ -192,13 +214,28 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         )
     }
 
-    private fun openLogFile(path: String, entryPath: String?): Map<String, Any?> {
+    private fun openLogFile(
+        path: String,
+        entryPath: String?,
+        splitMode: String?,
+        destinationDir: String?,
+        postfix: String,
+        partCount: Int?,
+    ): Map<String, Any?> {
         if (path.isBlank()) return mapOf("error" to "missing path")
         val file = File(path)
         if (!file.exists()) return mapOf("error" to "file not found: $path")
-        if (isSupportedArchiveFile(file)) return openZipRoute(file, entryPath)
+        if (isSupportedArchiveFile(file)) return openZipRoute(file, entryPath, splitMode, destinationDir, postfix, partCount)
+        if (splitMode.equals("split", ignoreCase = true)) {
+            return splitLogRoute(path, entryPath = null, destinationDir = destinationDir, postfix = postfix, partCount = partCount)
+        }
         val absPath = file.absolutePath
-        appState.openFile(file)
+        if (splitMode.equals("open_as_is", ignoreCase = true)) appState.openFileAsIs(file) else appState.openFile(file)
+        appState.pendingSplitPrompt?.sources?.firstOrNull { source ->
+            source is SplitSource.RealFile && source.file.absolutePath == absPath
+        }?.let { source ->
+            return splitSourceToMap(source)
+        }
         awaitLoad()
         val tab = appState.tabs.find { it.sourcePath == absPath }
             ?: return mapOf("error" to "file did not load: $path")
@@ -209,7 +246,14 @@ class ControlServer(private val appState: AppState, private val port: Int) {
     // auto-opens like a plain file; 2+ candidates need a pick. Since a caller here isn't clicking
     // a picker dialog, it echoes the candidate list so a follow-up call can pass entryPath to
     // pick one directly — same round trip the UI's picker dialog does through openZipEntries().
-    private fun openZipRoute(file: File, entryPath: String?): Map<String, Any?> {
+    private fun openZipRoute(
+        file: File,
+        entryPath: String?,
+        splitMode: String?,
+        destinationDir: String?,
+        postfix: String,
+        partCount: Int?,
+    ): Map<String, Any?> {
         val candidates = listArchiveLogCandidates(file)
         if (candidates.isEmpty()) return mapOf("error" to "no candidate log files found in zip: ${file.path}")
         val target = when {
@@ -218,12 +262,59 @@ class ControlServer(private val appState: AppState, private val port: Int) {
             candidates.size == 1 -> candidates.first()
             else -> return mapOf("needsSelection" to true, "candidates" to candidates.map { zipCandidateToMap(it) })
         }
+        if (splitMode.equals("split", ignoreCase = true)) {
+            return splitLogRoute(file.absolutePath, target.entryPath, destinationDir, postfix, partCount)
+        }
         val sourcePath = "${file.absolutePath}!${target.entryPath}"
-        appState.openZipEntries(file, listOf(target))
+        if (splitMode.equals("open_as_is", ignoreCase = true)) {
+            appState.openZipEntryAsIs(file, target)
+        } else {
+            appState.openZipEntries(file, listOf(target))
+        }
+        appState.pendingSplitPrompt?.sources?.firstOrNull { source ->
+            source is SplitSource.ArchiveEntry &&
+                source.archiveFile.absolutePath == file.absolutePath &&
+                source.candidate.entryPath == target.entryPath
+        }?.let { source ->
+            return splitSourceToMap(source)
+        }
         awaitLoad()
         val tab = appState.tabs.find { it.sourcePath == sourcePath }
             ?: return mapOf("error" to "entry did not load: ${target.entryPath}")
         return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size)
+    }
+
+    private fun splitLogRoute(
+        path: String,
+        entryPath: String?,
+        destinationDir: String?,
+        postfix: String,
+        partCount: Int?,
+    ): Map<String, Any?> {
+        if (path.isBlank()) return mapOf("error" to "missing path")
+        val source = appState.splitSourceForPath(path, entryPath) ?: return mapOf("error" to "source not found: $path")
+        val destination = destinationDir?.takeIf { it.isNotBlank() }?.let(::File) ?: appState.defaultSplitDestination(source)
+        val count = (partCount ?: appState.defaultSplitPartCount(source)).coerceAtLeast(1)
+        if (appState.pendingSplitPrompt?.sources?.any { it.id == source.id } == true) {
+            appState.cancelSplitPrompt()
+        }
+        val before = appState.tabs.size
+        val outputs = appState.splitSourceAndOpen(source, destination, postfix, count)
+        awaitLoad()
+        val openedTabs = appState.tabs.drop(before).map { tab ->
+            mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size, "sourcePath" to tab.sourcePath)
+        }
+        return mapOf(
+            "ok" to true,
+            "outputPaths" to outputs.map { it.absolutePath },
+            "tabs" to openedTabs,
+        )
+    }
+
+    private fun splitPreviewRoute(path: String, entryPath: String?): Map<String, Any?> {
+        if (path.isBlank()) return mapOf("error" to "missing path")
+        val source = appState.splitSourceForPath(path, entryPath) ?: return mapOf("error" to "source not found: $path")
+        return splitSourceToMap(source)
     }
 
     // openFile/openZipEntries are async (launched on ioScope); block this request thread until
@@ -501,6 +592,22 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         "sizeBytes" to candidate.sizeBytes,
         "kind" to candidate.kind.name,
     )
+
+    private fun splitSourceToMap(source: SplitSource): Map<String, Any?> = mapOf(
+        "needsSplit" to true,
+        "id" to source.id,
+        "displayName" to source.displayName,
+        "sizeBytes" to source.sizeBytes,
+        "suggestedPartCount" to appState.defaultSplitPartCount(source),
+        "defaultDestinationDir" to appState.defaultSplitDestination(source).absolutePath,
+        "defaultPostfix" to "part",
+    ) + when (source) {
+        is SplitSource.RealFile -> mapOf("path" to source.file.absolutePath)
+        is SplitSource.ArchiveEntry -> mapOf(
+            "path" to source.archiveFile.absolutePath,
+            "entryPath" to source.candidate.entryPath,
+        )
+    }
 
     private fun filterPresetToMap(preset: SavedFilter): Map<String, Any?> = mapOf(
         "id" to preset.id,

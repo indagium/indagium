@@ -3,6 +3,8 @@ package com.openlog.utils
 import com.openlog.model.LogEntry
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import java.io.File
+import java.io.FilterInputStream
+import java.io.InputStream
 import java.util.zip.ZipFile
 
 enum class ZipLogCandidateKind { LOGCAT, ANR_TEXT }
@@ -102,6 +104,12 @@ fun extractCandidate(zipFile: File, candidate: ZipLogCandidate): List<LogEntry> 
     else -> emptyList()
 }
 
+fun openArchiveCandidateStream(archiveFile: File, candidate: ZipLogCandidate): InputStream? = when {
+    isZipFile(archiveFile) -> openZipCandidateStream(archiveFile, candidate)
+    isSevenZFile(archiveFile) -> openSevenZCandidateStream(archiveFile, candidate)
+    else -> null
+}
+
 private fun extractZipCandidate(zipFile: File, candidate: ZipLogCandidate): List<LogEntry> = runCatching {
     ZipFile(zipFile).use { zf ->
         val entry = zf.getEntry(candidate.entryPath) ?: return@use emptyList()
@@ -115,3 +123,31 @@ private fun extractSevenZCandidate(archiveFile: File, candidate: ZipLogCandidate
         sevenZ.getInputStream(entry).use { stream -> parseLogcatLines(stream.bufferedReader().lineSequence()) }
     }
 }.getOrDefault(emptyList())
+
+private fun openZipCandidateStream(zipFile: File, candidate: ZipLogCandidate): InputStream? = runCatching {
+    val zf = ZipFile(zipFile)
+    val entry = zf.getEntry(candidate.entryPath) ?: run {
+        zf.close()
+        return@runCatching null
+    }
+    object : FilterInputStream(zf.getInputStream(entry)) {
+        override fun close() {
+            super.close()
+            zf.close()
+        }
+    }
+}.getOrNull()
+
+private fun openSevenZCandidateStream(archiveFile: File, candidate: ZipLogCandidate): InputStream? = runCatching {
+    val sevenZ = sevenZFile(archiveFile)
+    val entry = sevenZ.entries.firstOrNull { it.name == candidate.entryPath } ?: run {
+        sevenZ.close()
+        return@runCatching null
+    }
+    object : FilterInputStream(sevenZ.getInputStream(entry)) {
+        override fun close() {
+            super.close()
+            sevenZ.close()
+        }
+    }
+}.getOrNull()

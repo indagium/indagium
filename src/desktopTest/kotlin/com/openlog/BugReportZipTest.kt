@@ -7,6 +7,7 @@ import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.isZipFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.listLogcatCandidates
+import com.openlog.utils.openArchiveCandidateStream
 import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry
 import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
 import java.io.File
@@ -127,6 +128,18 @@ class BugReportZipTest {
         assertEquals("boom", entries[0].msg)
         assertEquals(1, entries[0].id)
         assertEquals(2, entries[1].id)
+    }
+
+    @Test
+    fun openArchiveCandidateStreamReadsZipEntryWithoutParsingIt() {
+        val dir = createTempDirectory("openlog-zip-stream").toFile()
+        val text = "06-26 10:00:00.000  100  100 E App: boom\nraw second line\n"
+        val zip = buildTextZip(dir, "bugreport.zip", mapOf("main_log.txt" to text))
+        val candidate = listLogcatCandidates(zip).single()
+
+        val raw = openArchiveCandidateStream(zip, candidate)!!.bufferedReader().use { it.readText() }
+
+        assertEquals(text, raw)
     }
 
     @Test

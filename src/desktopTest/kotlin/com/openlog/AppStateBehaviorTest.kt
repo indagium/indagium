@@ -18,10 +18,13 @@ import com.openlog.model.ThemePreset
 import com.openlog.ui.AppState
 import com.openlog.ui.DesktopStorage
 import com.openlog.ui.SEQ_COLORS
+import com.openlog.ui.SplitMode
 import com.openlog.ui.mkTab
+import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
 import java.io.File
+import java.io.RandomAccessFile
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
@@ -1260,6 +1263,103 @@ class AppStateBehaviorTest {
         assertFalse(state.loadingStatus.orEmpty().contains("large", ignoreCase = true))
         release.countDown()
         waitUntil { !state.isLoading }
+    }
+
+    @Test
+    fun openingOversizedFileCreatesPendingSplitPromptInsteadOfParsingImmediately() {
+        val dir = createTempDirectory("openlog-split-open").toFile()
+        val file = File(dir, "large.log")
+        RandomAccessFile(file, "rw").use { it.setLength(SPLIT_PROMPT_BYTES) }
+        var parseCalls = 0
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            parser = {
+                parseCalls += 1
+                emptyList()
+            },
+        )
+
+        state.openFile(file)
+
+        assertEquals(0, parseCalls)
+        assertTrue(state.tabs.isEmpty())
+        assertEquals(listOf("large.log"), state.pendingSplitPrompt?.sources?.map { it.displayName })
+        assertEquals(dir.absolutePath, state.defaultSplitDestination(state.pendingSplitPrompt!!.sources.single()).absolutePath)
+    }
+
+    @Test
+    fun confirmingOpenAsIsForOversizedFileLoadsOriginalTab() {
+        val dir = createTempDirectory("openlog-split-as-is").toFile()
+        val file = File(dir, "large.log")
+        RandomAccessFile(file, "rw").use { it.setLength(SPLIT_PROMPT_BYTES) }
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            parser = { listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "loaded")) },
+        )
+        state.openFile(file)
+        val sourceId = state.pendingSplitPrompt!!.sources.single().id
+
+        state.confirmSplitPrompt(
+            modes = mapOf(sourceId to SplitMode.OPEN_AS_IS),
+            destinationDir = dir,
+            postfix = "part",
+            partCounts = mapOf(sourceId to 2),
+        )
+
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        val tab = state.tabs.single()
+        assertEquals("large.log", tab.filename)
+        assertEquals(file.absolutePath, tab.sourcePath)
+        assertTrue(tab.largeFileMode)
+    }
+
+    @Test
+    fun confirmingSplitWritesPartsAndOpensThemInsteadOfOriginal() {
+        val dir = createTempDirectory("openlog-split-confirm").toFile()
+        val source = File(dir, "large.log").apply {
+            writeText("one\nvery long line two\nthree\nfour\n")
+        }
+        val outputDir = File(dir, "out")
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.requestSplitForFile(source)
+        val sourceId = state.pendingSplitPrompt!!.sources.single().id
+
+        state.confirmSplitPrompt(
+            modes = mapOf(sourceId to SplitMode.SPLIT),
+            destinationDir = outputDir,
+            postfix = "part",
+            partCounts = mapOf(sourceId to 2),
+        )
+
+        waitUntil { state.tabs.size == 2 && !state.isLoading }
+        assertEquals(listOf("large_part_1.log", "large_part_2.log"), state.tabs.map { it.filename })
+        assertEquals(
+            source.readText(),
+            File(outputDir, "large_part_1.log").readText() + File(outputDir, "large_part_2.log").readText(),
+        )
+        assertTrue(state.tabs.none { it.sourcePath == source.absolutePath })
+    }
+
+    @Test
+    fun selectedArchiveEntriesCreateBatchSplitPromptForOversizedCandidates() {
+        val dir = createTempDirectory("openlog-archive-split").toFile()
+        val archive = buildZipFixture(
+            dir,
+            "bugreport.zip",
+            mapOf(
+                "small_log.txt" to "06-26 10:00:00.000  100  100 I App: small\n",
+                "large_log.txt" to "06-26 10:00:01.000  100  100 I App: large\n",
+            ),
+        )
+        val candidates = com.openlog.utils.listArchiveLogCandidates(archive)
+        val large = candidates.single { it.entryPath == "large_log.txt" }.copy(sizeBytes = SPLIT_PROMPT_BYTES)
+        val small = candidates.single { it.entryPath == "small_log.txt" }
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+
+        state.openZipEntries(archive, listOf(small, large))
+
+        assertEquals(listOf("large_log.txt"), state.pendingSplitPrompt?.sources?.map { it.displayName })
+        assertTrue(state.tabs.isEmpty())
     }
 
     @Test

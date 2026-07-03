@@ -19,9 +19,15 @@ import com.openlog.utils.invalidateComputeCache
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.mergeLogs
+import com.openlog.utils.openArchiveCandidateStream
 import com.openlog.utils.parseLogcat
 import com.openlog.utils.parseLogcatLines
 import com.openlog.utils.passesFilter
+import com.openlog.utils.planSplitOutputs
+import com.openlog.utils.requiresSplitPrompt
+import com.openlog.utils.splitFileToFiles
+import com.openlog.utils.splitStreamToFiles
+import com.openlog.utils.suggestedSplitPartCount
 import kotlinx.coroutines.*
 import java.awt.FileDialog
 import java.awt.Frame
@@ -88,6 +94,36 @@ data class OpenFileError(val title: String, val path: String?, val message: Stri
 data class AnnotationNavigationRequest(val id: Long, val tabId: String, val logIds: List<Int>)
 
 data class PendingZipPicker(val zipFile: File, val candidates: List<ZipLogCandidate>)
+
+enum class SplitMode { SPLIT, OPEN_AS_IS }
+
+sealed class SplitSource {
+    abstract val id: String
+    abstract val displayName: String
+    abstract val sizeBytes: Long
+    abstract val sourceFile: File
+
+    data class RealFile(val file: File) : SplitSource() {
+        override val id: String = "file:${file.absolutePath}"
+        override val displayName: String = file.name
+        override val sizeBytes: Long = file.length()
+        override val sourceFile: File = file
+    }
+
+    data class ArchiveEntry(val archiveFile: File, val candidate: ZipLogCandidate) : SplitSource() {
+        override val id: String = "archive:${archiveFile.absolutePath}!${candidate.entryPath}"
+        override val displayName: String = candidate.displayName
+        override val sizeBytes: Long = candidate.sizeBytes
+        override val sourceFile: File = archiveFile
+    }
+}
+
+data class DeferredArchiveEntry(val archiveFile: File, val candidate: ZipLogCandidate)
+
+data class PendingSplitPrompt(
+    val sources: List<SplitSource>,
+    val deferredArchiveEntries: List<DeferredArchiveEntry> = emptyList(),
+)
 
 class AppState(
     private val autosaveFile: File = defaultAutosaveFile(),
@@ -185,6 +221,8 @@ class AppState(
     var pendingAnnotationNavigation by mutableStateOf<AnnotationNavigationRequest?>(null)
         private set
     var pendingZipPicker by mutableStateOf<PendingZipPicker?>(null)
+    var pendingSplitPrompt by mutableStateOf<PendingSplitPrompt?>(null)
+        private set
     var mergeTabsDialogOpen by mutableStateOf(false)
 
     // Read once into the merge dialog's initial selection when opened via a tab's context menu
@@ -1318,7 +1356,11 @@ class AppState(
         }
     }
 
-    fun openFile(file: File): String? {
+    fun openFile(file: File): String? = openFileInternal(file, bypassSplitPrompt = false)
+
+    fun openFileAsIs(file: File): String? = openFileInternal(file, bypassSplitPrompt = true)
+
+    private fun openFileInternal(file: File, bypassSplitPrompt: Boolean): String? {
         val path = file.absolutePath
         if (!file.exists() || !file.isFile) {
             removeRecentFile(file)
@@ -1337,6 +1379,10 @@ class AppState(
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) {
             activeTabId = existing.id; return existing.id
+        }
+        if (!bypassSplitPrompt && requiresSplitPrompt(file.length())) {
+            pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.RealFile(file)))
+            return null
         }
         val n = tabCounter++  // capture on calling thread before launching
         val tabId = "t$n"
@@ -1440,7 +1486,7 @@ class AppState(
             candidates.size == 1 -> {
                 rememberRecentFile(file)
                 recentMenuOpen = false
-                openZipEntry(file, candidates.first())
+                openZipEntries(file, listOf(candidates.first()))
             }
             candidates.size > 1 -> {
                 rememberRecentFile(file)
@@ -1460,8 +1506,21 @@ class AppState(
     }
 
     fun openZipEntries(zipFile: File, selected: List<ZipLogCandidate>) {
-        selected.forEach { openZipEntry(zipFile, it) }
+        val (oversized, normal) = selected.partition { requiresSplitPrompt(it.sizeBytes) }
+        if (oversized.isNotEmpty()) {
+            pendingSplitPrompt = PendingSplitPrompt(
+                sources = oversized.map { SplitSource.ArchiveEntry(zipFile, it) },
+                deferredArchiveEntries = normal.map { DeferredArchiveEntry(zipFile, it) },
+            )
+            pendingZipPicker = null
+            return
+        }
+        selected.forEach { openZipEntry(zipFile, it, bypassSplitPrompt = false) }
         pendingZipPicker = null
+    }
+
+    fun openZipEntryAsIs(zipFile: File, candidate: ZipLogCandidate) {
+        openZipEntry(zipFile, candidate, bypassSplitPrompt = true)
     }
 
     fun cancelZipPicker() {
@@ -1470,11 +1529,15 @@ class AppState(
 
     // Jar-URL-style "!" separator for the source path — for display/dedup only (a zip-extracted
     // tab can't be re-opened from this path directly), matching openFile()'s sourcePath dedup.
-    private fun openZipEntry(zipFile: File, candidate: ZipLogCandidate) {
+    private fun openZipEntry(zipFile: File, candidate: ZipLogCandidate, bypassSplitPrompt: Boolean) {
         val path = "${zipFile.absolutePath}!${candidate.entryPath}"
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) {
             activateTab(existing.id); return
+        }
+        if (!bypassSplitPrompt && requiresSplitPrompt(candidate.sizeBytes)) {
+            pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.ArchiveEntry(zipFile, candidate)))
+            return
         }
         val n = tabCounter++
         val tabId = "t$n"
@@ -1503,6 +1566,130 @@ class AppState(
         }
         activeLoads[tabId] = job
         job.start()
+    }
+
+    fun requestSplitForFile(file: File) {
+        if (!file.isFile) return
+        pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.RealFile(file)))
+    }
+
+    fun requestSplitForTab(tabId: String): Boolean {
+        val sourcePath = tab(tabId)?.sourcePath ?: return false
+        val source = splitSourceFromPath(sourcePath, entryPath = null) ?: return false
+        pendingSplitPrompt = PendingSplitPrompt(listOf(source))
+        return true
+    }
+
+    fun splitSourceForPath(path: String, entryPath: String? = null): SplitSource? =
+        splitSourceFromPath(path, entryPath)
+
+    fun defaultSplitDestination(source: SplitSource): File =
+        settings.defaultSaveDir?.let(::File) ?: source.sourceFile.parentFile ?: File(".")
+
+    fun defaultSplitPartCount(source: SplitSource): Int = suggestedSplitPartCount(source.sizeBytes)
+
+    fun cancelSplitPrompt() {
+        pendingSplitPrompt = null
+    }
+
+    fun confirmSplitPrompt(
+        modes: Map<String, SplitMode>,
+        destinationDir: File,
+        postfix: String,
+        partCounts: Map<String, Int>,
+    ) {
+        val pending = pendingSplitPrompt ?: return
+        pendingSplitPrompt = null
+        settings = settings.copy(defaultSaveDir = destinationDir.absolutePath)
+        beginLoading("Splitting logs...")
+        ioScope.launch {
+            try {
+                pending.deferredArchiveEntries.forEach { deferred ->
+                    openZipEntry(deferred.archiveFile, deferred.candidate, bypassSplitPrompt = true)
+                }
+                pending.sources.forEach { source ->
+                    when (modes[source.id] ?: SplitMode.SPLIT) {
+                        SplitMode.OPEN_AS_IS -> openSplitSourceAsIs(source)
+                        SplitMode.SPLIT -> splitSourceAndOpenParts(
+                            source = source,
+                            destinationDir = destinationDir,
+                            postfix = postfix,
+                            partCount = partCounts[source.id] ?: defaultSplitPartCount(source),
+                        )
+                    }
+                }
+            } finally {
+                finishLoading()
+            }
+        }
+    }
+
+    fun splitSourceAndOpen(source: SplitSource, destinationDir: File, postfix: String, partCount: Int): List<File> =
+        splitSourceAndOpenParts(source, destinationDir, postfix, partCount)
+
+    private fun splitSourceAndOpenParts(source: SplitSource, destinationDir: File, postfix: String, partCount: Int): List<File> {
+        val outputs = planSplitOutputs(source.displayName, destinationDir, postfix, partCount)
+        val written = when (source) {
+            is SplitSource.RealFile -> splitFileToFiles(source.file, outputs)
+            is SplitSource.ArchiveEntry -> {
+                val stream = openArchiveCandidateStream(source.archiveFile, source.candidate) ?: return emptyList()
+                splitStreamToFiles(stream, outputs, source.sizeBytes)
+            }
+        }
+        written.forEach { part -> loadSplitPartAsTab(part) }
+        return written
+    }
+
+    private fun loadSplitPartAsTab(file: File) {
+        val path = file.absolutePath
+        val existing = tabs.find { it.sourcePath == path }
+        if (existing != null) {
+            activeTabId = existing.id
+            return
+        }
+        rememberRecentFile(file)
+        rememberAutoExportedNoteFor(file.name)
+        val n = tabCounter++
+        val tabId = "t$n"
+        val logData = runCatching { parser(file) }.getOrElse { error ->
+            showOpenError(
+                title = "Could not open split file",
+                path = path,
+                message = error.message ?: error::class.simpleName.orEmpty().ifBlank { "Unknown error" },
+            )
+            return
+        }
+        val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
+        val t = mkTab(tabId, file.name, logData)
+            .copy(
+                sourcePath = path,
+                annotations = Annotations(prefix = "$prefixLabel ${file.name}"),
+                largeFileMode = file.length() >= LARGE_FILE_MODE_BYTES,
+            )
+        synchronized(stateLock) {
+            tabs = tabs + t
+            activeTabId = t.id
+        }
+    }
+
+    private fun openSplitSourceAsIs(source: SplitSource) {
+        when (source) {
+            is SplitSource.RealFile -> openFileInternal(source.file, bypassSplitPrompt = true)
+            is SplitSource.ArchiveEntry -> openZipEntry(source.archiveFile, source.candidate, bypassSplitPrompt = true)
+        }
+    }
+
+    private fun splitSourceFromPath(sourcePath: String, entryPath: String?): SplitSource? {
+        val effectivePath = if (entryPath != null) "$sourcePath!$entryPath" else sourcePath
+        val bang = effectivePath.indexOf('!')
+        if (bang < 0) {
+            val file = File(effectivePath)
+            return file.takeIf { it.isFile }?.let { SplitSource.RealFile(it) }
+        }
+        val archiveFile = File(effectivePath.substring(0, bang))
+        val selectedEntryPath = effectivePath.substring(bang + 1)
+        val candidate = listArchiveLogCandidates(archiveFile).firstOrNull { it.entryPath == selectedEntryPath } ?: return null
+        return SplitSource.ArchiveEntry(archiveFile, candidate)
     }
 
     // ── Copy / Save ──────────────────────────────────────────────────

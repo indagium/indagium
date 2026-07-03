@@ -8,7 +8,9 @@ import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
 import com.openlog.ui.AppState
 import com.openlog.ui.mkTab
+import com.openlog.utils.SPLIT_PROMPT_BYTES
 import java.io.File
+import java.io.RandomAccessFile
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -52,6 +54,23 @@ class ControlServerTest {
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .build()
         return client.send(req, HttpResponse.BodyHandlers.ofString()).body()
+    }
+
+    private fun restartServerWith(newState: AppState) {
+        server.stop()
+        state.close()
+        state = newState
+        server = ControlServer(state, 0)
+        server.start()
+    }
+
+    private fun waitUntil(timeoutMs: Long = 2_000, predicate: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (predicate()) return
+            Thread.sleep(20)
+        }
+        assertTrue(predicate(), "condition was not met before timeout")
     }
 
     private fun getAsClient(path: String, clientId: String, clientName: String): HttpResponse<String> {
@@ -435,5 +454,104 @@ class ControlServerTest {
         assertTrue(pickedBody.contains("\"filename\":\"system_log.txt\""))
         assertEquals(1, state.tabs.size)
         zip.delete()
+    }
+
+    @Test
+    fun openLogFileReportsNeedsSplitForOversizedPlainFile() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-control-split-open").toFile()
+        val file = File(dir, "large.log")
+        RandomAccessFile(file, "rw").use { it.setLength(SPLIT_PROMPT_BYTES) }
+
+        val body = post("/open", """{"path":"${file.absolutePath.replace("\\", "\\\\")}"}""")
+
+        assertTrue(body.contains("\"needsSplit\":true"))
+        assertTrue(body.contains("\"displayName\":\"large.log\""))
+        assertTrue(body.contains("\"suggestedPartCount\":1"))
+        assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
+    fun splitPreviewReportsPlanWithoutPromptingOrOpening() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-control-split-preview").toFile()
+        val file = File(dir, "large.log").apply { writeText("one\ntwo\n") }
+
+        val body = post("/split/preview", """{"path":"${file.absolutePath.replace("\\", "\\\\")}"}""")
+
+        assertTrue(body.contains("\"needsSplit\":true"))
+        assertTrue(body.contains("\"defaultPostfix\":\"part\""))
+        assertTrue(body.contains("\"defaultDestinationDir\":\"${dir.absolutePath.replace("\\", "\\\\")}\""))
+        assertEquals(null, state.pendingSplitPrompt)
+        assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
+    fun openLogFileCanSplitOversizedPlainFileWhenRequested() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-control-open-split-mode").toFile()
+        val source = File(dir, "large.log").apply { writeText("one\ntwo\nthree\nfour\n") }
+        val out = File(dir, "parts")
+
+        val body = post(
+            "/open",
+            """
+            {
+              "path":"${source.absolutePath.replace("\\", "\\\\")}",
+              "splitMode":"split",
+              "destinationDir":"${out.absolutePath.replace("\\", "\\\\")}",
+              "partCount":2
+            }
+            """.trimIndent(),
+        )
+
+        assertTrue(body.contains("\"outputPaths\""))
+        waitUntil { state.tabs.size == 2 && !state.isLoading }
+        assertEquals(listOf("large_part_1.log", "large_part_2.log"), state.tabs.map { it.filename })
+    }
+
+    @Test
+    fun openLogFileCanOpenOversizedPlainFileAsIsWhenRequested() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-control-open-as-is-mode").toFile()
+        val file = File(dir, "large.log")
+        RandomAccessFile(file, "rw").use { it.setLength(SPLIT_PROMPT_BYTES) }
+        restartServerWith(
+            AppState(
+                autosaveFile = File(dir, "state.cache"),
+                parser = { listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "loaded")) },
+            ),
+        )
+
+        val body = post(
+            "/open",
+            """{"path":"${file.absolutePath.replace("\\", "\\\\")}","splitMode":"open_as_is"}""",
+        )
+
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        assertTrue(body.contains("\"entryCount\":1"))
+        assertEquals(null, state.pendingSplitPrompt)
+        assertTrue(state.tabs.single().largeFileMode)
+    }
+
+    @Test
+    fun splitRouteWritesPartsAndOpensThem() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-control-split-route").toFile()
+        val source = File(dir, "large.log").apply { writeText("one\ntwo\nthree\nfour\n") }
+        val out = File(dir, "out")
+
+        val body = post(
+            "/split",
+            """
+            {
+              "path":"${source.absolutePath.replace("\\", "\\\\")}",
+              "destinationDir":"${out.absolutePath.replace("\\", "\\\\")}",
+              "postfix":"part",
+              "partCount":2
+            }
+            """.trimIndent(),
+        )
+
+        assertTrue(body.contains("\"outputPaths\""))
+        assertTrue(body.contains("large_part_1.log"))
+        assertTrue(body.contains("large_part_2.log"))
+        waitUntil { state.tabs.size == 2 && !state.isLoading }
+        assertEquals(listOf("large_part_1.log", "large_part_2.log"), state.tabs.map { it.filename })
     }
 }
