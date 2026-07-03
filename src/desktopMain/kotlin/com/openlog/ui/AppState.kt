@@ -15,6 +15,7 @@ import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.extractCandidate
+import com.openlog.utils.invalidateComputeCache
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.mergeLogs
@@ -340,7 +341,12 @@ class AppState(
         autosaveNow()
     }
 
-    fun upTab(tabId: String, fn: (LogTab) -> LogTab) {
+    // Every read-modify-write of the tabs list goes through stateLock (reentrant, so background
+    // callers already holding it are fine): background fills — restored-tab loads, tailing
+    // flushes, async opens — write tabs under the lock, and an unsynchronized UI-thread
+    // `tabs = tabs + t` racing one of those could lose either update (observed as a flaky
+    // "restored tab counter" test once autosave restore became async).
+    fun upTab(tabId: String, fn: (LogTab) -> LogTab) = synchronized(stateLock) {
         tabs = tabs.map { if (it.id == tabId) fn(it) else it }
     }
 
@@ -1193,23 +1199,28 @@ class AppState(
     }
 
     // ── Tab management ───────────────────────────────────────────────
+    // Structural tabs-list edits synchronize on stateLock for the same reason upTab does: a
+    // background fill landing in the same instant must not lose (or be lost to) this write.
     fun addTab() {
         val n = tabCounter++
         val t = emptyWorkspaceTab().copy(id = "t$n")
-        tabs = tabs + t; activeTabId = t.id
+        synchronized(stateLock) {
+            tabs = tabs + t
+            activeTabId = t.id
+        }
     }
 
     fun activateTab(tabId: String) {
         if (tabs.any { it.id == tabId }) activeTabId = tabId
     }
 
-    fun activateOverflowTab(tabId: String) {
+    fun activateOverflowTab(tabId: String) = synchronized(stateLock) {
         val tab = tabs.find { it.id == tabId } ?: return
         tabs = tabs.filter { it.id != tabId } + tab
         activeTabId = tabId
     }
 
-    fun reorderTabs(fromId: String, beforeId: String?) {
+    fun reorderTabs(fromId: String, beforeId: String?) = synchronized(stateLock) {
         val from = tabs.find { it.id == fromId } ?: return
         val without = tabs.filter { it.id != fromId }
         val idx = beforeId?.let { id -> without.indexOfFirst { it.id == id }.takeIf { it >= 0 } } ?: without.size
@@ -1220,12 +1231,15 @@ class AppState(
         activeLoads.remove(tabId)?.cancel()
         activeTails.remove(tabId)?.job?.cancel()
         visibleItemsByTab.remove(tabId)
-        val next = tabs.filter { it.id != tabId }
-        if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
-        if (compareTabId == tabId) compareTabId = next.firstOrNull()?.id ?: ""
-        if (next.isEmpty()) compareMode = false
+        invalidateComputeCache(tabId)
+        synchronized(stateLock) {
+            val next = tabs.filter { it.id != tabId }
+            if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
+            if (compareTabId == tabId) compareTabId = next.firstOrNull()?.id ?: ""
+            if (next.isEmpty()) compareMode = false
+            tabs = next
+        }
         logViewerScrollStateStore.removeTab(tabId)
-        tabs = next
     }
 
     // Ships "merge already-open tabs" (v1) — data's already in memory, no re-parsing needed.

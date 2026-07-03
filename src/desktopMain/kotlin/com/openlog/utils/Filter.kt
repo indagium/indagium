@@ -123,20 +123,72 @@ private fun idBitSet(entries: List<LogEntry>): java.util.BitSet {
     return bits
 }
 
+// Memo of the filter/sequence work from a tab's last computeItems call. An expand/collapse
+// click changes only tab.expanded — but used to re-run the full-file filter pass (~4s at 10M
+// lines with a keyword filter) and the sequence scan (seconds more with sequence defs enabled)
+// just to splice different children into the item list. Everything here is invariant under
+// `expanded`, so those clicks now reuse it and only rebuild the item list itself.
+// Keyed per (tab, applyFilter) since the split "Original" panel computes applyFilter=false
+// alongside the main panel's true. Invalidated by identity checks (logData/analysis are
+// replaced wholesale on reload/tailing) plus Filter equality, and dropped on tab close.
+private class TabComputeCache(
+    val logData: List<LogEntry>,
+    val stackGroupsRef: List<StackTraceGroup>,
+    val filter: Filter,
+    val visible: List<LogEntry>,
+    val seqGroups: List<SeqGroup>?,
+    val filteredStackGroups: List<StackTraceGroup>?,
+    // Derived from seqGroups only, but linear in total swallowed lines — a sequence def without
+    // an end pattern can swallow most of a 10M-line file, making these worth memoizing too.
+    val seqOwnerBySwallowed: Map<Int, String>?,
+    val seqChildBits: java.util.BitSet?,
+)
+
+private val computeCacheByTab = java.util.concurrent.ConcurrentHashMap<String, TabComputeCache>()
+
+fun invalidateComputeCache(tabId: String) {
+    computeCacheByTab.remove("$tabId#true")
+    computeCacheByTab.remove("$tabId#false")
+}
+
 // Complexity is inherent: sequence detection, manual-collapse interleaving, and segment
 // iteration are all coupled — splitting them would require passing shared mutable state.
 @Suppress("CyclomaticComplexMethod", "LongMethod")
 fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
     val sequences = tab.filter.sequences
-    val data = visibleEntries(tab, applyFilter)
+    val cacheKey = "${tab.id}#$applyFilter"
+    val prior = computeCacheByTab[cacheKey]?.takeIf {
+        it.logData === tab.logData &&
+            it.stackGroupsRef === tab.analysis.stackTraceGroups &&
+            it.filter == tab.filter
+    }
+    val data = prior?.visible ?: visibleEntries(tab, applyFilter)
+    var fullSeqGroups: List<SeqGroup>? = prior?.seqGroups
+    var fullFilteredStackGroups: List<StackTraceGroup>? = prior?.filteredStackGroups
+    var fullSeqOwner: Map<Int, String>? = prior?.seqOwnerBySwallowed
+    var fullSeqChildBits: java.util.BitSet? = prior?.seqChildBits
+
+    fun storeCache() {
+        computeCacheByTab[cacheKey] = TabComputeCache(
+            logData = tab.logData,
+            stackGroupsRef = tab.analysis.stackTraceGroups,
+            filter = tab.filter,
+            visible = data,
+            seqGroups = fullSeqGroups,
+            filteredStackGroups = fullFilteredStackGroups,
+            seqOwnerBySwallowed = fullSeqOwner,
+            seqChildBits = fullSeqChildBits,
+        )
+    }
 
     fun cachedStackGroupsFor(segment: List<LogEntry>): List<StackTraceGroup> {
         val cached = tab.analysis.stackTraceGroups
         if (cached.isEmpty()) return computeStackTraceGroups(segment)
         // Nothing filtered out and the segment spans the whole tab: cached groups apply as-is.
         if (segment.size == tab.logData.size) return cached
+        if (segment === data) fullFilteredStackGroups?.let { return it }
         val segmentIds = idBitSet(segment)
-        return cached.mapNotNull { group ->
+        val result = cached.mapNotNull { group ->
             if (!segmentIds.get(group.rid)) {
                 null
             } else {
@@ -144,12 +196,20 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
                 group.copy(memberIds = visibleMembers).takeIf { visibleMembers.isNotEmpty() }
             }
         }
+        if (segment === data) fullFilteredStackGroups = result
+        return result
+    }
+
+    fun seqGroupsFor(segment: List<LogEntry>): List<SeqGroup> {
+        if (!(tab.filter.seqOn && sequences.any { it.enabled })) return emptyList()
+        if (segment === data) fullSeqGroups?.let { return it }
+        val result = computeSeqGroups(segment, sequences)
+        if (segment === data) fullSeqGroups = result
+        return result
     }
 
     fun sequenceItems(segment: List<LogEntry>): List<LogItem> {
-        val seqGroups = if (tab.filter.seqOn && sequences.any { it.enabled })
-            computeSeqGroups(segment, sequences)
-        else emptyList()
+        val seqGroups = seqGroupsFor(segment)
 
         // Stack-trace folding is always-on, independent of user-defined sequences. A sequence with
         // no explicit end pattern can swallow everything up to the next start match (or
@@ -162,9 +222,10 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
         // to search for or blindly expand a group, which is what made it slow (and occasionally
         // expand the wrong one) on a real log.
         val allStackGroups = cachedStackGroupsFor(segment)
-        val seqOwnerGidBySwallowedId = buildMap<Int, String> {
+        val cachedOwner = if (segment === data) fullSeqOwner else null
+        val seqOwnerGidBySwallowedId = cachedOwner ?: buildMap<Int, String> {
             seqGroups.forEach { sg -> sg.plain.forEach { id -> put(id, sg.gid) } }
-        }
+        }.also { if (segment === data) fullSeqOwner = it }
         val stackGroups = allStackGroups.filter { g ->
             val ownerGid = seqOwnerGidBySwallowedId[g.rid]
             ownerGid == null || ownerGid !in tab.expanded
@@ -180,7 +241,10 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
         if (seqGroups.isEmpty() && stackGroups.isEmpty()) return segment.map { LogItem.Row(it, 0) }
 
         val defMap = sequences.associateBy { it.id }
-        val skipIds = java.util.BitSet().also { bits ->
+        // The sequence-child half of skipIds is invariant under `expanded` (memoized); only the
+        // stack-member half depends on which owners are expanded, and that part is tiny.
+        val cachedChildBits = if (segment === data) fullSeqChildBits else null
+        val seqChildBits = cachedChildBits ?: java.util.BitSet().also { bits ->
             seqGroups.forEach { g ->
                 g.plain.forEach(bits::set)
                 g.nested.forEach { ng ->
@@ -188,11 +252,11 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
                     ng.ch.forEach(bits::set)
                 }
             }
+            if (segment === data) fullSeqChildBits = bits
+        }
+        val skipIds = (seqChildBits.clone() as java.util.BitSet).also { bits ->
             stackGroups.forEach { g -> g.memberIds.forEach(bits::set) }
         }
-        val seqGroupByRid = seqGroups.associateBy { it.rid }
-        val stackGroupByRid = stackGroups.associateBy { it.rid }
-
         val items = ArrayList<LogItem>(segment.size)
 
         // A "plain" (unstructured) child of a sequence's swallowed range: usually just a bare Row,
@@ -224,9 +288,19 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
             }
         }
 
+        // Group roots are sorted by rid and the segment's ids ascend, so a pointer walk replaces
+        // two hash lookups per entry (tens of millions of them on a large file).
+        var seqPtr = 0
+        var stackPtr = 0
         for (entry in segment) {
-            val sg = seqGroupByRid[entry.id]
-            val stg = if (sg == null) stackGroupByRid[entry.id] else null
+            while (seqPtr < seqGroups.size && seqGroups[seqPtr].rid < entry.id) seqPtr++
+            val sg = seqGroups.getOrNull(seqPtr)?.takeIf { it.rid == entry.id }
+            val stg = if (sg == null) {
+                while (stackPtr < stackGroups.size && stackGroups[stackPtr].rid < entry.id) stackPtr++
+                stackGroups.getOrNull(stackPtr)?.takeIf { it.rid == entry.id }
+            } else {
+                null
+            }
             when {
                 sg != null -> {
                     val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
@@ -263,7 +337,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
     }
 
     val manualBlocks = tab.manualBlocks.filter { it.enabled }
-    if (manualBlocks.isEmpty()) return sequenceItems(data)
+    if (manualBlocks.isEmpty()) return sequenceItems(data).also { storeCache() }
 
     // Ids ascend within data, so anchor lookup is a binary search instead of a boxed id->index map.
     val dataIds = IntArray(data.size) { data[it].id }
@@ -333,6 +407,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
         i = manual.range.last + 1
     }
     flushSegment()
+    storeCache()
     return result
 }
 

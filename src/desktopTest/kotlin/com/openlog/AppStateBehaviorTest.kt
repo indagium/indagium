@@ -1125,9 +1125,12 @@ class AppStateBehaviorTest {
             listOf(mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))))
 
         state.confirmAddAnn("log", "log", listOf(1), "save this", null)
+        // recentNotes updates one statement after the .ann write on the export thread — wait for
+        // it too, or the assertion below races that window.
         waitUntil {
             File(defaultSaveDir, "sample_analysis.md").exists() &&
-                File(defaultSaveDir, "sample_analysis.ann").exists()
+                File(defaultSaveDir, "sample_analysis.ann").exists() &&
+                state.recentNotes.isNotEmpty()
         }
 
         assertTrue(File(defaultSaveDir, "sample_analysis.ann").exists())

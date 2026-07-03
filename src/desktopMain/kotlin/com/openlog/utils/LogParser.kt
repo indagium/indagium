@@ -31,6 +31,11 @@ fun isLikelyTextFile(file: File): Boolean {
 fun isLikelyTextStream(stream: InputStream): Boolean =
     runCatching { stream.readNBytes(TEXT_SNIFF_BYTES).none { it == 0.toByte() } }.getOrDefault(false)
 
+// Deliberately sequential even for multi-GB files: a byte-range-chunked parallel parse (and a
+// batch-pipeline variant for archive streams) was implemented and benchmarked at ~1.7x SLOWER
+// than this on a 1.5GB/10.6M-line fixture — parsing here is allocation/GC-bound, not CPU-bound,
+// so extra threads just contend on the collector while the id fix-up pass doubles allocations.
+// See docs/perf-large-files.md ("negative results") before re-attempting.
 fun parseLogcat(file: File): List<LogEntry> =
     file.bufferedReader().useLines { lines -> parseLogcatLines(lines) }
 

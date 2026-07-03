@@ -129,6 +129,7 @@ tasks.withType<Test>().configureEach {
         maxHeapSize = "14g"
         systemProperty("openlog.perf.file", perfFixture)
         System.getProperty("openlog.perf.dense")?.let { systemProperty("openlog.perf.dense", it) }
+        System.getProperty("openlog.perf.archive")?.let { systemProperty("openlog.perf.archive", it) }
     }
 }
 

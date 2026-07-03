@@ -41,14 +41,17 @@ import com.openlog.utils.computeItems
 import com.openlog.utils.regexRanges
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
 private const val PAGE_JUMP_ROWS = 15
 private const val CTX_MENU_KEYBOARD_X_DP = 60f
+private const val LOADING_GRACE_MS = 250L
 
 private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
     if (hl.regex) {
@@ -131,11 +134,21 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
         mutableStateOf(ComputedLogItems(emptyList(), EMPTY_SUMMARY, loading = true))
     }
     LaunchedEffect(tab.id, dataSize, lastId, filter, expanded, manualBlocks, applyFilter) {
-        computed = ComputedLogItems(computed.items, computed.summary, loading = true)
         val snapshot = tab.copy(selected = emptySet())
-        computed = withContext(Dispatchers.Default) {
-            val items = computeItems(snapshot, applyFilter)
-            ComputedLogItems(items, summarizeItems(items), loading = false)
+        coroutineScope {
+            val deferred = async(Dispatchers.Default) {
+                val items = computeItems(snapshot, applyFilter)
+                ComputedLogItems(items, summarizeItems(items), loading = false)
+            }
+            // Grace period before flagging as loading: sub-quarter-second recomputes (the common
+            // expand/collapse case, now that filter and sequence results are memoized across
+            // expanded-only changes) swap in without ever flashing the loading line; only
+            // genuinely slow recomputes show it.
+            val quick = withTimeoutOrNull(LOADING_GRACE_MS) { deferred.await() }
+            computed = quick ?: run {
+                computed = ComputedLogItems(computed.items, computed.summary, loading = true)
+                deferred.await()
+            }
         }
     }
     return computed
