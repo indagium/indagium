@@ -14,17 +14,32 @@ import java.awt.Taskbar
 import java.awt.Toolkit
 
 fun main() {
-    // On Linux, AWT/X11 derives the window's WM_CLASS from the main class name (here "MainKt",
-    // since Main.kt has no package). Taskbars/docks match running windows to their .desktop
-    // launcher entry by WM_CLASS, not by the Window() title — a mismatch shows the raw class
-    // name and a generic icon instead of "openLog" and its icon. Must be set before AWT/Toolkit
-    // initializes, so this runs first.
-    System.setProperty("sun.java.command", "openLog")
-    System.setProperty("sun.awt.X11.XWMClass", "openLog")
+    // On Linux, AWT/X11 derives the window's WM_CLASS from the *bottom stack frame's class name*
+    // ("MainKt" here) at toolkit construction — sun.awt.X11.XToolkit reads the main class off a
+    // Throwable stack trace, so no system property can change it (v1.0.5 shipped a
+    // sun.java.command-based attempt; Ubuntu still showed "MainKt" + a gear icon). The only
+    // reliable override is writing XToolkit.awtAppClassName by reflection after the toolkit
+    // exists and before the first window is created. Requires
+    // --add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED (added for Linux builds in
+    // build.gradle.kts); if that's missing the set fails and behavior just stays as before.
+    // The value must match the StartupWMClass that CI writes into the .deb's .desktop entry
+    // (.github/workflows/build.yml), which is how GNOME maps the window back to the launcher.
+    if (System.getProperty("os.name").orEmpty().lowercase().contains("linux")) {
+        runCatching {
+            Toolkit.getDefaultToolkit()
+            val toolkitClass = Class.forName("sun.awt.X11.XToolkit")
+            val field = toolkitClass.getDeclaredField("awtAppClassName")
+            field.isAccessible = true
+            field.set(null, "openLog")
+        }
+    }
 
-    // Set the macOS Dock icon when running unpackaged (IDE / gradlew desktopRun).
-    // The packaged .app uses the .icns via nativeDistributions; this covers dev runs.
-    runCatching {
+    // Set the macOS Dock icon when running unpackaged (IDE / gradlew desktopRun) — and ONLY
+    // then: jpackage-launched apps define jpackage.app-path, and for those the bundle's .icns
+    // must stay the single source of truth. Overriding the Dock icon at runtime in packaged
+    // builds meant a stale bundled PNG could silently replace the (correct) .icns artwork.
+    val isPackaged = System.getProperty("jpackage.app-path") != null
+    if (!isPackaged) runCatching {
         if (Taskbar.isTaskbarSupported()) {
             val taskbar = Taskbar.getTaskbar()
             if (taskbar.isSupported(Taskbar.Feature.ICON_IMAGE)) {

@@ -68,6 +68,14 @@ compose.desktop {
         // (not -Xmx) so small machines aren't over-committed; memory is only committed as used.
         jvmArgs("-XX:MaxRAMPercentage=50")
 
+        // Linux only (jpackage builds for the host OS, so host OS == target OS here): lets
+        // Main.kt overwrite sun.awt.X11.XToolkit.awtAppClassName so the window's WM_CLASS is
+        // "openLog" instead of "MainKt" — required for docks/taskbars to match the running
+        // window to the .desktop entry (StartupWMClass) and show the right name and icon.
+        if (org.gradle.internal.os.OperatingSystem.current().isLinux) {
+            jvmArgs("--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED")
+        }
+
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "openLog"
@@ -103,6 +111,9 @@ tasks.named("compileKotlinDesktop") {
 // the real ~/.openlog2 session state.
 tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
     jvmArgs("-XX:MaxRAMPercentage=50")
+    if (org.gradle.internal.os.OperatingSystem.current().isLinux) {
+        jvmArgs("--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED")
+    }
     System.getProperty("openlog.debugControl")?.let { systemProperty("openlog.debugControl", it) }
     System.getProperty("openlog.run.home")?.let { systemProperty("user.home", it) }
 }
