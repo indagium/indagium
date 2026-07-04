@@ -242,12 +242,6 @@ class AppState(
     var recentNotes by mutableStateOf<List<String>>(emptyList())
     var recentNotesMenuOpen by mutableStateOf(false)
     var cacheClearConfirmOpen by mutableStateOf(false)
-
-    // Session-only (deliberately not persisted to settings): where to find the openLog2 checkout
-    // for the MCP connection-info dialog's copyable config, on a packaged install where the
-    // control server doesn't ship with mcp-server/'s sources at all — see mcpConfigSnippet.
-    var mcpServerCheckoutOverride by mutableStateOf<String?>(null)
-        private set
     val archiveCachePath: String = archiveCacheDir.absolutePath
     val appCachePath: String = archiveCacheDir.parentFile?.absolutePath ?: archiveCacheDir.absolutePath
     var archiveCacheSizeBytes by mutableStateOf(0L)
@@ -2357,27 +2351,6 @@ class AppState(
         } finally {
             System.setProperty("apple.awt.fileDialogForDirectories", "false")
         }
-    }
-
-    // Lets a packaged install's MCP connection-info dialog offer a real, working config instead
-    // of a placeholder — only useful if this machine happens to have an openLog2 checkout
-    // somewhere (e.g. a developer's own machine); doesn't help a clean install with no checkout
-    // at all, which is the actual general case the mcp-server distribution model doesn't solve.
-    fun pickMcpServerCheckout() {
-        System.setProperty("apple.awt.fileDialogForDirectories", "true")
-        try {
-            val dlg = FileDialog(null as Frame?, "Locate your openLog2 checkout", FileDialog.LOAD)
-            dlg.isVisible = true
-            val dir = dlg.directory ?: return
-            val file = dlg.file ?: return
-            mcpServerCheckoutOverride = java.io.File(dir, file).absolutePath
-        } finally {
-            System.setProperty("apple.awt.fileDialogForDirectories", "false")
-        }
-    }
-
-    fun clearMcpServerCheckoutOverride() {
-        mcpServerCheckoutOverride = null
     }
 
     fun exportFiltersToFile(selectedIds: Set<String>? = null) {

@@ -2683,38 +2683,21 @@ private fun SettingsSectionHeader(title: String) {
 // (./gradlew desktopRun sets the JVM's working directory there). The control server can also be
 // turned on from Settings in a normal installed .dmg/.deb/.msi — that's the common case, not a
 // dev-only path — and there user.dir is whatever the OS handed the launched app (often "/" for a
-// Finder/Dock launch), which produced exactly the broken-looking-real "/mcp-server/src/index.ts"
-// a user pasted into LM Studio and got a silent spawn failure from. The mcp-server/ sources
-// aren't bundled into the installed app at all, so there's no real path to offer there — an
-// obvious placeholder beats a wrong-but-plausible one.
-internal fun mcpConfigSnippet(port: Int, checkoutOverride: String? = null): String {
-    val isPackaged = System.getProperty("jpackage.app-path") != null
-    val serverEntry = when {
-        checkoutOverride != null -> File(checkoutOverride, "mcp-server/src/index.ts").absolutePath
-        isPackaged -> "/path/to/openLog2/mcp-server/src/index.ts"
-        else -> File(System.getProperty("user.dir"), "mcp-server/src/index.ts").absolutePath
-    }
-    return """
+// openLog serves MCP natively over Streamable HTTP at /mcp — any MCP client (LM Studio, Claude
+// Code, Codex) connects with just this URL, no Node bridge / npm / repo checkout to install. The
+// snippet is the standard mcpServers-with-url form those clients accept.
+internal fun mcpConfigSnippet(port: Int): String =
+    """
     {
       "mcpServers": {
         "openlog-control": {
-          "command": "npx",
-          "args": ["tsx", "${serverEntry.jsonEscape()}"],
-          "env": {
-            "OPENLOG_CONTROL_URL": "http://127.0.0.1:$port",
-            "OPENLOG_CLIENT_NAME": "my-tool"
-          }
+          "url": "${mcpUrl(port)}"
         }
       }
     }
-        """.trimIndent()
-}
+    """.trimIndent()
 
-// Windows paths contain backslashes, which are JSON escape characters — without this, a copied
-// Windows path like "C:\Users\me\mcp-server\src\index.ts" would paste as invalid JSON.
-internal fun String.jsonEscape(): String = replace("\\", "\\\\")
-
-private fun mcpServerCommand(): String = "npx tsx mcp-server/src/index.ts"
+internal fun mcpUrl(port: Int): String = "http://127.0.0.1:$port/mcp"
 
 private fun mcpCurlCommand(port: Int): String = "curl http://127.0.0.1:$port/tabs"
 
@@ -2735,8 +2718,8 @@ private fun agoLabel(lastSeenMs: Long): String {
 }
 
 private enum class McpCopiedField {
+    Url,
     Config,
-    ServerCommand,
     CurlCommand,
 }
 
@@ -2763,24 +2746,20 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
     ) {
         AppText("MCP Connection Info", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(10.dp))
-        AppText("Base URL", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(3.dp))
-        AppText("http://127.0.0.1:$port", color = tc.ts, fontSize = 12.sp, fontFamily = MONO)
-        Spacer(Modifier.height(14.dp))
         AppText(
-            "Any MCP client (Claude Code, Codex, or your own tooling) can connect using this " +
-                "server command:",
+            "openLog speaks MCP directly. Point any MCP client (LM Studio, Claude Code, Codex) at " +
+                "this URL — nothing to install:",
             color = tc.td,
             fontSize = 11.sp,
-            maxLines = 2,
+            maxLines = 3,
         )
         Spacer(Modifier.height(8.dp))
         CopyableCodeField(
-            text = mcpServerCommand(),
-            copied = copiedField == McpCopiedField.ServerCommand,
+            text = mcpUrl(port),
+            copied = copiedField == McpCopiedField.Url,
             onCopy = {
-                state.copyToClipboard(mcpServerCommand())
-                copiedField = McpCopiedField.ServerCommand
+                state.copyToClipboard(mcpUrl(port))
+                copiedField = McpCopiedField.Url
             },
         )
         Spacer(Modifier.height(8.dp))
@@ -2788,7 +2767,7 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
             AppButton(
                 "Copy config for your MCP client",
                 onClick = {
-                    state.copyToClipboard(mcpConfigSnippet(port, state.mcpServerCheckoutOverride))
+                    state.copyToClipboard(mcpConfigSnippet(port))
                     copiedField = McpCopiedField.Config
                 },
             )
@@ -2798,57 +2777,14 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
             }
         }
         Spacer(Modifier.height(10.dp))
-        if (System.getProperty("jpackage.app-path") != null) {
-            val checkout = state.mcpServerCheckoutOverride
-            if (checkout == null) {
-                AppText(
-                    "This installed copy of openLog doesn't bundle the MCP server's source, so " +
-                        "the copied snippet has a placeholder path. If you have an openLog2 " +
-                        "checkout on this machine, point at it below so the copied config " +
-                        "works as-is:",
-                    color = tc.td,
-                    fontSize = 11.sp,
-                    maxLines = 5,
-                )
-                Spacer(Modifier.height(6.dp))
-                AppButton(
-                    "Locate your openLog2 checkout…",
-                    onClick = { state.pickMcpServerCheckout() },
-                    variant = ButtonVariant.Secondary,
-                )
-            } else {
-                AppText(
-                    "Using mcp-server/ from: $checkout",
-                    color = tc.td,
-                    fontSize = 11.sp,
-                    maxLines = 2,
-                )
-                Spacer(Modifier.height(6.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    AppButton(
-                        "Change…",
-                        onClick = { state.pickMcpServerCheckout() },
-                        variant = ButtonVariant.Secondary,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    AppButton(
-                        "Clear",
-                        onClick = { state.clearMcpServerCheckoutOverride() },
-                        variant = ButtonVariant.Ghost,
-                    )
-                }
-            }
-        } else {
-            AppText(
-                "A .mcp.json at the repo root already has this registered for tools that " +
-                    "auto-discover it. For others, paste the copied snippet into their own MCP " +
-                    "config — set OPENLOG_CLIENT_NAME to whatever you want that tool labelled as " +
-                    "below.",
-                color = tc.td,
-                fontSize = 11.sp,
-                maxLines = 4,
-            )
-        }
+        AppText(
+            "Paste the copied JSON into your client's MCP config (e.g. ~/.lmstudio/mcp.json), or " +
+                "add the URL directly (Claude Code: claude mcp add --transport http openlog " +
+                "${mcpUrl(port)}).",
+            color = tc.td,
+            fontSize = 11.sp,
+            maxLines = 4,
+        )
         Spacer(Modifier.height(14.dp))
         AppText(
             "Or skip MCP entirely and hit the JSON/HTTP endpoints directly:",
@@ -2870,8 +2806,9 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
         Spacer(Modifier.height(6.dp))
         if (clients.isEmpty()) {
             AppText(
-                "None right now — only tools using the OPENLOG_CLIENT_NAME/id headers above " +
-                    "show up here, so plain curl calls never appear.",
+                "None right now. Native MCP clients connected at the URL above aren't listed here; " +
+                    "only legacy REST callers that send an X-OpenLog-Client-Id header appear (and " +
+                    "can be blocked).",
                 color = tc.td,
                 fontSize = 11.sp,
                 maxLines = 3,

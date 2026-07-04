@@ -1,59 +1,27 @@
 package com.openlog
 
-import com.openlog.ui.jsonEscape
 import com.openlog.ui.mcpConfigSnippet
-import kotlin.test.AfterTest
+import com.openlog.ui.mcpUrl
 import kotlin.test.Test
-import kotlin.test.assertFalse
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-// user.dir is only a reliable stand-in for the project root during an unpackaged dev run
-// (./gradlew desktopRun sets the JVM's working directory there). The control server can also be
-// turned on from Settings in a normal installed .dmg/.deb/.msi — not a dev-only path — and there
-// user.dir is whatever the OS handed the launched app (often unrelated to any project checkout),
-// so blindly resolving against it once produced a broken-looking-real path
-// ("/mcp-server/src/index.ts") that silently failed to spawn when pasted into LM Studio.
+// The connection-info dialog now hands out a URL, not a file path: openLog serves MCP natively at
+// http://127.0.0.1:<port>/mcp, so any client connects with nothing to install. This is the whole
+// point of the native-server rework — no Node bridge, no npm, no repo checkout, no per-machine
+// path that could be wrong.
 class McpConfigSnippetTest {
-    // jpackage.app-path is the same packaged-vs-dev-run signal Main.kt already uses; clear it
-    // after each test so a leaked value can't affect any other test sharing this JVM.
-    @AfterTest
-    fun clearPackagedFlag() {
-        System.clearProperty("jpackage.app-path")
+    @Test
+    fun urlPointsAtTheMcpEndpoint() {
+        assertEquals("http://127.0.0.1:8991/mcp", mcpUrl(8991))
     }
 
     @Test
-    fun devRunEmbedsAbsoluteServerPathUnderProjectRoot() {
-        System.clearProperty("jpackage.app-path")
+    fun snippetIsUrlBasedWithNoCommandOrPath() {
         val snippet = mcpConfigSnippet(8991)
-        val expected = java.io.File(System.getProperty("user.dir"), "mcp-server/src/index.ts").absolutePath
-        assertTrue(snippet.contains(expected.jsonEscape()), "expected snippet to contain absolute path $expected:\n$snippet")
-        assertTrue(snippet.contains("\"http://127.0.0.1:8991\""))
-    }
-
-    @Test
-    fun packagedRunEmitsObviousPlaceholderInsteadOfAWrongRealLookingPath() {
-        System.setProperty("jpackage.app-path", "/Applications/openLog.app")
-        val snippet = mcpConfigSnippet(8991)
-        // Must not be user.dir-derived (that's what produced the silently-broken real-looking
-        // path in the first place) and must be obviously a placeholder, not a real filesystem path.
-        val userDirPath = java.io.File(System.getProperty("user.dir"), "mcp-server/src/index.ts").absolutePath
-        assertFalse(snippet.contains(userDirPath.jsonEscape()))
-        assertTrue(snippet.contains("/path/to/openLog2/mcp-server/src/index.ts"))
-    }
-
-    @Test
-    fun explicitCheckoutOverrideWinsEvenWhenPackaged() {
-        // The one case where a packaged install CAN offer a real, working path: the user has
-        // pointed the connection-info dialog at an actual openLog2 checkout on this machine.
-        System.setProperty("jpackage.app-path", "/Applications/openLog.app")
-        val snippet = mcpConfigSnippet(8991, checkoutOverride = "/Users/someone/dev/openLog2")
-        val expected = java.io.File("/Users/someone/dev/openLog2", "mcp-server/src/index.ts").absolutePath
-        assertTrue(snippet.contains(expected.jsonEscape()), "expected snippet to contain $expected:\n$snippet")
-        assertFalse(snippet.contains("/path/to/openLog2"))
-    }
-
-    @Test
-    fun jsonEscapeDoublesBackslashesForWindowsPaths() {
-        assertTrue("C:\\\\Users\\\\me\\\\mcp-server" == "C:\\Users\\me\\mcp-server".jsonEscape())
+        assertTrue(snippet.contains(""""url": "http://127.0.0.1:8991/mcp""""), "snippet should carry the /mcp URL:\n$snippet")
+        // The whole reason for the rework: no subprocess command, no filesystem path to get wrong.
+        assertTrue(!snippet.contains("command"), "URL-based config must not spawn a command:\n$snippet")
+        assertTrue(!snippet.contains("index.ts"), "URL-based config must not reference a source path:\n$snippet")
     }
 }
