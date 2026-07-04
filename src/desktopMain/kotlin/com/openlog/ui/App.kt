@@ -114,16 +114,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                     val files = runCatching {
                         (event.dragData() as DragData.FilesList).readFiles()
                     }.getOrElse { return false }
-                    files.forEach { uri ->
-                        runCatching {
-                            val file = File(URI.create(uri))
-                            when {
-                                !file.exists() -> {}
-                                com.openlog.utils.isSupportedArchiveFile(file) || com.openlog.utils.isLikelyTextFile(file) ->
-                                    state.openPath(file)
-                            }
-                        }
-                    }
+                    state.openPaths(files.mapNotNull { uri -> runCatching { File(URI.create(uri)) }.getOrNull() })
                     return true
                 }
             }
@@ -414,7 +405,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                             ttab.sourcePath?.let { state.splitSourceForPath(it) } != null
                         }
                         val menuWidth = 200.dp
-                        val estimatedMenuHeight = (44 + (if (canTail) 44 else 0) + (if (canSplit) 44 else 0)).dp
+                        val estimatedMenuHeight = (196 + (if (canTail) 44 else 0) + (if (canSplit) 44 else 0)).dp
                         val x = tctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
                         val y = tctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
                         Column(
@@ -453,6 +444,39 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                                 onClick = {
                                     state.mergeTabsPreselectedId = ttab.id
                                     state.mergeTabsDialogOpen = true
+                                    state.tabCtx = null
+                                },
+                            )
+                            CtxDivider()
+                            CtxItem(
+                                icon = Icons.Outlined.Block,
+                                label = "Close other tabs",
+                                onClick = {
+                                    state.closeOtherTabs(ttab.id)
+                                    state.tabCtx = null
+                                },
+                            )
+                            CtxItem(
+                                icon = Icons.Outlined.Block,
+                                label = "Close to right",
+                                onClick = {
+                                    state.closeTabsToRight(ttab.id)
+                                    state.tabCtx = null
+                                },
+                            )
+                            CtxItem(
+                                icon = Icons.Outlined.Block,
+                                label = "Close to left",
+                                onClick = {
+                                    state.closeTabsToLeft(ttab.id)
+                                    state.tabCtx = null
+                                },
+                            )
+                            CtxItem(
+                                icon = Icons.Outlined.Block,
+                                label = "Close all",
+                                onClick = {
+                                    state.closeAllTabs()
                                     state.tabCtx = null
                                 },
                             )
@@ -1112,15 +1136,16 @@ private fun SplitPromptDialog(
 ) {
     val tc = tc()
     val firstSource = pending.sources.first()
+    val isSingleSource = pending.sources.size == 1
     var destination by remember(pending) {
         mutableStateOf(state.defaultSplitDestination(firstSource).absolutePath)
     }
-    var postfix by remember(pending) { mutableStateOf("part") }
-    var modes by remember(pending) {
-        mutableStateOf(pending.sources.associate { it.id to SplitMode.SPLIT })
+    var selected by remember(pending) { mutableStateOf(emptySet<String>()) }
+    var postfixes by remember(pending) {
+        mutableStateOf(pending.sources.associate { it.id to "part" })
     }
     var counts by remember(pending) {
-        mutableStateOf(pending.sources.associate { it.id to state.defaultSplitPartCount(it).toString() })
+        mutableStateOf(pending.sources.associate { it.id to state.defaultSplitPartCount(it) })
     }
 
     fun chooseDestination() {
@@ -1138,15 +1163,39 @@ private fun SplitPromptDialog(
         }
     }
 
+    fun splitPartOptions(value: Int): List<Int> =
+        (listOf(1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32) + value.coerceAtLeast(1)).distinct().sorted()
+
+    fun confirm(splitIds: Set<String>) {
+        state.confirmSplitPrompt(
+            modes = pending.sources.associate { source ->
+                source.id to if (source.id in splitIds) SplitMode.SPLIT else SplitMode.OPEN_AS_IS
+            },
+            destinationDir = File(destination),
+            postfix = "part",
+            partCounts = counts,
+            postfixes = postfixes,
+        )
+    }
+
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(dismissOnClickOutside = false)) {
         Column(
-            Modifier.width(560.dp).background(tc.p, RoundedCornerShape(8.dp))
+            Modifier.width(if (isSingleSource) 520.dp else 620.dp).background(tc.p, RoundedCornerShape(8.dp))
                 .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            AppText("Split large log files", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             AppText(
-                "Choose how each large source should open. Split files are saved first, then opened as tabs.",
+                if (isSingleSource) "Split large log file" else "Split large log files",
+                color = tc.tx,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            AppText(
+                if (isSingleSource) {
+                    "This file is large. Split it into smaller files or open the original as-is."
+                } else {
+                    "Choose which files should be split. Unchecked files will open as-is."
+                },
                 color = tc.td,
                 fontSize = 11.sp,
                 maxLines = 2,
@@ -1161,23 +1210,52 @@ private fun SplitPromptDialog(
                             .border(1.dp, tc.br, CORNER_MD).padding(10.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            AppText(source.displayName, color = tc.tx, fontSize = 12.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
-                            AppText(formatByteSize(source.sizeBytes), color = tc.td, fontSize = 11.sp, fontFamily = MONO)
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            SegmentedControl(
-                                options = listOf("Split", "Open as-is"),
-                                selectedIndices = setOf(if (modes[source.id] == SplitMode.OPEN_AS_IS) 1 else 0),
-                                onToggle = { idx ->
-                                    modes = modes + (source.id to if (idx == 1) SplitMode.OPEN_AS_IS else SplitMode.SPLIT)
+                        if (isSingleSource) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                AppText(
+                                    source.displayName,
+                                    color = tc.tx,
+                                    fontSize = 12.sp,
+                                    fontFamily = MONO,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                AppText(formatByteSize(source.sizeBytes), color = tc.td, fontSize = 11.sp, fontFamily = MONO)
+                            }
+                        } else {
+                            CheckRow(
+                                checked = source.id in selected,
+                                onToggle = {
+                                    selected = if (source.id in selected) selected - source.id else selected + source.id
                                 },
-                            )
+                            ) {
+                                AppText(
+                                    source.displayName,
+                                    color = tc.tx,
+                                    fontSize = 12.sp,
+                                    fontFamily = MONO,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                AppText(formatByteSize(source.sizeBytes), color = tc.td, fontSize = 11.sp, fontFamily = MONO)
+                            }
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
                             AppText("Parts", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                            ListStepper(
+                                options = splitPartOptions(counts[source.id] ?: 1),
+                                value = counts[source.id] ?: 1,
+                                onChange = { value -> counts = counts + (source.id to value) },
+                            )
+                            AppText("Postfix", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                             SplitDialogTextField(
-                                value = counts[source.id].orEmpty(),
-                                onValueChange = { value -> counts = counts + (source.id to value.filter(Char::isDigit).take(3)) },
-                                modifier = Modifier.width(56.dp),
+                                value = postfixes[source.id].orEmpty(),
+                                onValueChange = { value -> postfixes = postfixes + (source.id to value) },
+                                modifier = Modifier.width(if (isSingleSource) 180.dp else 130.dp),
                             )
                         }
                     }
@@ -1194,26 +1272,29 @@ private fun SplitPromptDialog(
                     AppButton("Browse", onClick = ::chooseDestination, variant = ButtonVariant.Secondary)
                 }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                AppText("Postfix", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                SplitDialogTextField(
-                    value = postfix,
-                    onValueChange = { postfix = it },
-                    modifier = Modifier.width(180.dp),
-                )
-            }
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                DialogActionButton("Continue", active = true) {
-                    state.confirmSplitPrompt(
-                        modes = modes,
-                        destinationDir = File(destination),
-                        postfix = postfix,
-                        partCounts = counts.mapValues { (_, value) -> value.toIntOrNull()?.coerceAtLeast(1) ?: 1 },
-                    )
+                if (isSingleSource) {
+                    DialogActionButton("Split", active = true) {
+                        confirm(setOf(firstSource.id))
+                    }
+                    DialogActionButton("Do Not Split", active = false) {
+                        confirm(emptySet())
+                    }
+                } else {
+                    DialogActionButton("Split All", active = true) {
+                        confirm(pending.sources.map { it.id }.toSet())
+                    }
+                    DialogActionButton(
+                        "Split Selected",
+                        active = selected.isNotEmpty(),
+                        enabled = selected.isNotEmpty(),
+                    ) {
+                        confirm(selected)
+                    }
                 }
                 DialogActionButton("Cancel", active = false, onClick = onDismiss)
             }

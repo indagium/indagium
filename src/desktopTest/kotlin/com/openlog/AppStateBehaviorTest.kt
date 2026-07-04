@@ -61,6 +61,43 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun closeTabScopeActionsKeepExpectedTabsAndActiveTab() {
+        val state = AppState()
+        state.tabs = (1..5).map { idx -> mkTab("t$idx", "tab-$idx.log", emptyList()) }
+        state.activeTabId = "t3"
+        state.compareTabId = "t4"
+
+        state.closeTabsToRight("t2")
+
+        assertEquals(listOf("t1", "t2"), state.tabs.map { it.id })
+        assertEquals("t2", state.activeTabId)
+        assertEquals("t1", state.compareTabId)
+
+        state.tabs = (1..5).map { idx -> mkTab("t$idx", "tab-$idx.log", emptyList()) }
+        state.activeTabId = "t3"
+        state.compareTabId = "t2"
+
+        state.closeTabsToLeft("t4")
+
+        assertEquals(listOf("t4", "t5"), state.tabs.map { it.id })
+        assertEquals("t4", state.activeTabId)
+        assertEquals("t4", state.compareTabId)
+
+        state.tabs = (1..4).map { idx -> mkTab("t$idx", "tab-$idx.log", emptyList()) }
+        state.activeTabId = "t2"
+
+        state.closeOtherTabs("t3")
+
+        assertEquals(listOf("t3"), state.tabs.map { it.id })
+        assertEquals("t3", state.activeTabId)
+
+        state.closeAllTabs()
+
+        assertTrue(state.tabs.isEmpty())
+        assertEquals("", state.activeTabId)
+    }
+
+    @Test
     fun activatingVisibleTabDoesNotReorderTabs() {
         val state = AppState()
         state.tabs = (1..5).map { idx ->
@@ -791,6 +828,7 @@ class AppStateBehaviorTest {
         val block = assertIs<AnnBlock.LogRef>(restored.tabs.single().annotations.blocks.single())
         assertEquals("remember this", block.caption)
         assertEquals("app only", restored.savedFilters.single().name)
+        assertEquals(restored.savedFilters.single().id, restored.activeSavedFilterId(restored.tabs.single().id))
     }
 
     @Test
@@ -1338,6 +1376,48 @@ class AppStateBehaviorTest {
             File(outputDir, "large_part_1.log").readText() + File(outputDir, "large_part_2.log").readText(),
         )
         assertTrue(state.tabs.none { it.sourcePath == source.absolutePath })
+    }
+
+    @Test
+    fun openingMultipleOversizedFilesCreatesOneBatchSplitPrompt() {
+        val dir = createTempDirectory("openlog-split-batch-open").toFile()
+        val first = File(dir, "first.log")
+        val second = File(dir, "second.log")
+        RandomAccessFile(first, "rw").use { it.setLength(SPLIT_PROMPT_BYTES) }
+        RandomAccessFile(second, "rw").use { it.setLength(SPLIT_PROMPT_BYTES) }
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+
+        state.openPaths(listOf(first, second))
+
+        assertEquals(listOf("first.log", "second.log"), state.pendingSplitPrompt?.sources?.map { it.displayName })
+        assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
+    fun confirmingSelectedBatchSplitOpensSelectedPartsAndDeferredNormalFiles() {
+        val dir = createTempDirectory("openlog-split-batch-confirm").toFile()
+        val first = File(dir, "first.log").apply { writeText("one\ntwo\n") }
+        val second = File(dir, "second.log").apply { writeText("three\nfour\n") }
+        val normal = File(dir, "normal.log").apply { writeText("") }
+        val out = File(dir, "out")
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.openPaths(listOf(first, second, normal), splitPromptThresholdBytes = 5L)
+        val firstId = state.pendingSplitPrompt!!.sources.single { it.displayName == "first.log" }.id
+        val secondId = state.pendingSplitPrompt!!.sources.single { it.displayName == "second.log" }.id
+
+        state.confirmSplitPrompt(
+            modes = mapOf(firstId to SplitMode.SPLIT, secondId to SplitMode.OPEN_AS_IS),
+            destinationDir = out,
+            postfix = "part",
+            partCounts = mapOf(firstId to 2, secondId to 2),
+            postfixes = mapOf(firstId to "chunk", secondId to "ignored"),
+        )
+
+        waitUntil { state.tabs.size == 4 && !state.isLoading }
+        assertEquals(
+            listOf("first_chunk_1.log", "first_chunk_2.log", "normal.log", "second.log"),
+            state.tabs.map { it.filename }.sorted(),
+        )
     }
 
     @Test

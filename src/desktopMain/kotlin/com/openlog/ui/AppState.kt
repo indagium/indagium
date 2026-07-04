@@ -7,6 +7,7 @@ import com.openlog.model.*
 import com.openlog.utils.EntryIdMap
 import com.openlog.utils.FileTailer
 import com.openlog.utils.MergeSourceFile
+import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.buildFilteredCsv
 import com.openlog.utils.buildFilteredTxt
@@ -16,6 +17,7 @@ import com.openlog.utils.computeItems
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.extractCandidate
 import com.openlog.utils.invalidateComputeCache
+import com.openlog.utils.isLikelyTextFile
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.mergeLogs
@@ -132,6 +134,7 @@ data class DeferredArchiveEntry(val archiveFile: File, val candidate: ZipLogCand
 
 data class PendingSplitPrompt(
     val sources: List<SplitSource>,
+    val deferredFiles: List<File> = emptyList(),
     val deferredArchiveEntries: List<DeferredArchiveEntry> = emptyList(),
 )
 
@@ -841,6 +844,7 @@ class AppState(
         val entries = json.jsonObjectArray().getOrElse { return }
         val imported = entries.mapNotNull { obj ->
             val name = obj.stringField("name") ?: return@mapNotNull null
+            val id = obj.stringField("id")?.takeIf { it.isNotBlank() } ?: "sf${System.currentTimeMillis()}_${name.hashCode()}"
             val levels =
                 obj.stringArrayField("levels").mapNotNull { c -> LogLevel.entries.find { it.key.toString() == c } }
                     .toSet()
@@ -862,7 +866,7 @@ class AppState(
             val sequences = obj.stringArrayField("sequences").mapNotNull { it.sequenceFromToken() }
             val messageRules = obj.stringArrayField("messageRules").mapNotNull { it.messageRuleFromToken() }
             SavedFilter(
-                "sf${System.currentTimeMillis()}_${name.hashCode()}", name,
+                id, name,
                 levels.ifEmpty { LogLevel.entries.toSet() }, activeTags, kwText, kwRegex, mode,
                 excludeTags, excludeKw, excludeKwRegex, highlighters, seqOn,
                 kwInTag, kwInTagRegex, pkgPrefixes, pidTidFilter, sequences, messageRules,
@@ -1276,18 +1280,47 @@ class AppState(
     }
 
     fun closeTab(tabId: String) {
-        activeLoads.remove(tabId)?.cancel()
-        activeTails.remove(tabId)?.job?.cancel()
-        visibleItemsByTab.remove(tabId)
-        invalidateComputeCache(tabId)
+        closeTabsById(setOf(tabId), preferredActiveId = null)
+    }
+
+    fun closeOtherTabs(tabId: String) {
+        if (tabs.none { it.id == tabId }) return
+        closeTabsById(tabs.map { it.id }.filter { it != tabId }.toSet(), preferredActiveId = tabId)
+    }
+
+    fun closeTabsToRight(tabId: String) {
+        val idx = tabs.indexOfFirst { it.id == tabId }
+        if (idx < 0) return
+        closeTabsById(tabs.drop(idx + 1).map { it.id }.toSet(), preferredActiveId = tabId)
+    }
+
+    fun closeTabsToLeft(tabId: String) {
+        val idx = tabs.indexOfFirst { it.id == tabId }
+        if (idx < 0) return
+        closeTabsById(tabs.take(idx).map { it.id }.toSet(), preferredActiveId = tabId)
+    }
+
+    fun closeAllTabs() {
+        closeTabsById(tabs.map { it.id }.toSet(), preferredActiveId = null)
+    }
+
+    private fun closeTabsById(tabIds: Set<String>, preferredActiveId: String?) {
+        if (tabIds.isEmpty()) return
+        tabIds.forEach { tabId ->
+            activeLoads.remove(tabId)?.cancel()
+            activeTails.remove(tabId)?.job?.cancel()
+            visibleItemsByTab.remove(tabId)
+            invalidateComputeCache(tabId)
+            logViewerScrollStateStore.removeTab(tabId)
+        }
         synchronized(stateLock) {
-            val next = tabs.filter { it.id != tabId }
-            if (activeTabId == tabId) activeTabId = next.lastOrNull()?.id ?: ""
-            if (compareTabId == tabId) compareTabId = next.firstOrNull()?.id ?: ""
+            val next = tabs.filter { it.id !in tabIds }
+            if (activeTabId in tabIds) activeTabId = preferredActiveId?.takeIf { id -> next.any { it.id == id } } ?: next.lastOrNull()?.id ?: ""
+            if (compareTabId in tabIds) compareTabId = next.firstOrNull()?.id ?: ""
             if (next.isEmpty()) compareMode = false
             tabs = next
         }
-        logViewerScrollStateStore.removeTab(tabId)
+        activeSavedFilterIds = activeSavedFilterIds - tabIds
     }
 
     // Ships "merge already-open tabs" (v1) — data's already in memory, no re-parsing needed.
@@ -1375,6 +1408,31 @@ class AppState(
     fun openFile(file: File): String? = openFileInternal(file, bypassSplitPrompt = false)
 
     fun openFileAsIs(file: File): String? = openFileInternal(file, bypassSplitPrompt = true)
+
+    fun openPaths(files: List<File>, splitPromptThresholdBytes: Long = SPLIT_PROMPT_BYTES) {
+        val openable = files.filter { file ->
+            file.exists() && (isSupportedArchiveFile(file) || isLikelyLogPath(file) || isLikelyTextFile(file))
+        }
+        val oversizedFiles = openable.filter { file ->
+            !isSupportedArchiveFile(file) && requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
+        }
+        if (oversizedFiles.isNotEmpty()) {
+            pendingSplitPrompt = PendingSplitPrompt(
+                sources = oversizedFiles.map { SplitSource.RealFile(it) },
+                deferredFiles = openable - oversizedFiles.toSet(),
+            )
+            oversizedFiles.forEach { file ->
+                rememberRecentFile(file)
+                rememberAutoExportedNoteFor(file.name)
+            }
+            recentMenuOpen = false
+            return
+        }
+        openable.forEach { openPath(it) }
+    }
+
+    private fun isLikelyLogPath(file: File): Boolean =
+        file.isFile && file.extension.lowercase() in setOf("log", "txt")
 
     private fun openFileInternal(file: File, bypassSplitPrompt: Boolean): String? {
         val path = file.absolutePath
@@ -1628,6 +1686,7 @@ class AppState(
         destinationDir: File,
         postfix: String,
         partCounts: Map<String, Int>,
+        postfixes: Map<String, String> = emptyMap(),
     ) {
         val pending = pendingSplitPrompt ?: return
         pendingSplitPrompt = null
@@ -1635,6 +1694,9 @@ class AppState(
         beginLoading("Splitting logs...")
         ioScope.launch {
             try {
+                pending.deferredFiles.forEach { file ->
+                    openPath(file)
+                }
                 pending.deferredArchiveEntries.forEach { deferred ->
                     openZipEntry(deferred.archiveFile, deferred.candidate, bypassSplitPrompt = true)
                 }
@@ -1644,7 +1706,7 @@ class AppState(
                         SplitMode.SPLIT -> splitSourceAndOpenParts(
                             source = source,
                             destinationDir = destinationDir,
-                            postfix = postfix,
+                            postfix = postfixes[source.id] ?: postfix,
                             partCount = partCounts[source.id] ?: defaultSplitPartCount(source),
                         )
                     }
