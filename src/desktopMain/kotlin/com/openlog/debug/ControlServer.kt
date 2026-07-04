@@ -707,23 +707,36 @@ private fun JsonElement.toAny(): Any? = when (this) {
 }
 
 // One declaration per operation, shared by the MCP tool registry and the REST route table so the
-// two transports can never drift on tool name or path. Descriptions/schemas mirror the retired
-// Node bridge (mcp-server/src/index.ts) exactly, so agent behavior is unchanged by the swap.
+// two transports can never drift on tool name or path.
 private class McpTool(val name: String, val description: String, val schema: ToolSchema)
 
+// "array" means array-of-string (tag lists, tab ids, ...); "array<integer>" means array-of-number
+// (line ids). Getting this right in the schema matters beyond cosmetics: a client model sees this
+// JSON Schema at tools/list time, and a schema that (wrongly) says "array of strings" measurably
+// nudges models toward quoting line ids as "73" instead of emitting bare 73 — observed with a
+// local Gemma build mangling its own tool-call syntax on a quoted lineIds element.
 private fun schema(vararg props: Pair<String, String>, required: List<String> = emptyList()): ToolSchema =
     ToolSchema(
         properties = buildJsonObject {
             props.forEach { (name, type) ->
-                put(name, buildJsonObject { if (type == "array") arrayOfStrings() else put("type", type) })
+                put(
+                    name,
+                    buildJsonObject {
+                        when (type) {
+                            "array" -> arrayOfItems("string")
+                            "array<integer>" -> arrayOfItems("integer")
+                            else -> put("type", type)
+                        }
+                    },
+                )
             }
         },
         required = required.ifEmpty { null },
     )
 
-private fun kotlinx.serialization.json.JsonObjectBuilder.arrayOfStrings() {
+private fun kotlinx.serialization.json.JsonObjectBuilder.arrayOfItems(itemType: String) {
     put("type", "array")
-    put("items", buildJsonObject { put("type", "string") })
+    put("items", buildJsonObject { put("type", itemType) })
 }
 
 private val MCP_TOOLS: List<McpTool> = listOf(
@@ -778,7 +791,7 @@ private val MCP_TOOLS: List<McpTool> = listOf(
     ),
     McpTool(
         "select_lines", "Replace a tab's current selected log line ids.",
-        schema("tabId" to "string", "lineIds" to "array", required = listOf("tabId", "lineIds")),
+        schema("tabId" to "string", "lineIds" to "array<integer>", required = listOf("tabId", "lineIds")),
     ),
     McpTool("get_selection", "Return the selected log line ids for a tab.", schema("tabId" to "string", required = listOf("tabId"))),
     McpTool(
@@ -812,8 +825,11 @@ private val MCP_TOOLS: List<McpTool> = listOf(
     ),
     McpTool(
         "add_log_note",
-        "Append an annotation block referencing one or more log line ids.",
-        schema("tabId" to "string", "lineIds" to "array", "caption" to "string", required = listOf("tabId", "lineIds")),
+        "Append an annotation block referencing one or more log line ids. lineIds must be bare " +
+            "integers from get_visible_lines, never quoted strings or descriptive text — for a " +
+            "large multi-line block (e.g. a stack trace), pass just its first and last line id as " +
+            "anchors rather than enumerating every line, and put the full description in caption.",
+        schema("tabId" to "string", "lineIds" to "array<integer>", "caption" to "string", required = listOf("tabId", "lineIds")),
     ),
     McpTool(
         "update_note_block", "Update a text note's text or a log note's caption.",

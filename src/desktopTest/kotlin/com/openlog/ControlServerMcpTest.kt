@@ -86,6 +86,21 @@ class ControlServerMcpTest {
     }
 
     @Test
+    fun toolsListDeclaresLineIdsAsIntegersNotStrings() {
+        // Regression: the schema used to hardcode every array property as items:{type:string},
+        // which measurably nudges client models toward quoting line ids (observed with a local
+        // Gemma build). add_log_note and select_lines must advertise integer items.
+        val session = initSession()
+        val body = mcp("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""", session).body()
+        val lineIdsSchemas = Regex(""""lineIds":\{[^}]*\}""").findAll(body).map { it.value }.toList()
+        assertTrue(lineIdsSchemas.isNotEmpty(), "no lineIds property found in tools/list:\n$body")
+        lineIdsSchemas.forEach { s ->
+            assertTrue(s.contains("integer"), "lineIds schema should declare integer items:\n$s")
+            assertTrue(!s.contains("\"string\""), "lineIds schema should not declare string items:\n$s")
+        }
+    }
+
+    @Test
     fun toolCallReadsLiveAppState() {
         state.tabs = listOf(mkTab("t1", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
         val session = initSession()
