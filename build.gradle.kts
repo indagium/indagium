@@ -85,6 +85,14 @@ compose.desktop {
             description = "Android logcat analysis tool"
             vendor = appAuthor
             copyright = "Copyright (C) 2026 $appAuthor"
+            // Packaged builds ship a jlink-trimmed JVM, sized from jdeps' static analysis of our
+            // jars. jdeps doesn't detect com.sun.net.httpserver.* (used by ControlServer.kt) as
+            // a real dependency — it's a JDK-internal-looking package, not a public java.* API —
+            // so without this the module (and the whole class) is silently missing at runtime:
+            // NoClassDefFoundError: com/sun/net/httpserver/HttpServer the moment anyone enables
+            // the MCP control server in a packaged .dmg/.deb/.msi. desktopRun never surfaces
+            // this because it runs on your full local JDK, not the trimmed runtime image.
+            modules("jdk.httpserver")
             macOS {
                 bundleID = "com.romanarnaut.openlog"
                 iconFile.set(project.file("icons/openlog.icns"))
