@@ -998,6 +998,9 @@ class AppStateBehaviorTest {
         state.autosaveNow()
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
+        // Restore parses the tab's file on a background job; wait for it to settle so assertions
+        // observe a fully-materialized tab rather than racing the in-flight load.
+        waitUntil { !restored.isLoading }
         assertEquals("test.log", restored.tabs.single().filename)
         assertEquals(6, restored.settings.visibleTabLimit)
         assertEquals("Evidence", restored.settings.annotationPrefixLabel)

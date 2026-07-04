@@ -14,20 +14,41 @@ import com.openlog.utils.computeItems
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
-import com.sun.net.httpserver.HttpExchange
-import com.sun.net.httpserver.HttpHandler
-import com.sun.net.httpserver.HttpServer
+import io.ktor.http.HttpMethod
+import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.install
+import io.ktor.server.cio.CIO
+import io.ktor.server.engine.EmbeddedServer
+import io.ktor.server.engine.embeddedServer
+import io.ktor.server.plugins.cors.routing.CORS
+import io.ktor.server.request.receiveText
+import io.ktor.server.response.respondText
+import io.ktor.server.routing.RoutingContext
+import io.ktor.server.routing.get
+import io.ktor.server.routing.post
+import io.ktor.server.routing.routing
+import io.modelcontextprotocol.kotlin.sdk.server.Server
+import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
+import io.modelcontextprotocol.kotlin.sdk.server.mcpStreamableHttp
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
+import io.modelcontextprotocol.kotlin.sdk.types.Implementation
+import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
+import io.modelcontextprotocol.kotlin.sdk.types.TextContent
+import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 import java.io.File
-import java.net.InetSocketAddress
-import java.net.URLDecoder
 import java.util.concurrent.ConcurrentHashMap
 
-private const val GET = "GET"
-private const val POST = "POST"
-private const val STATUS_OK = 200
-private const val STATUS_METHOD_NOT_ALLOWED = 405
-private const val STATUS_FORBIDDEN = 403
-private const val STATUS_SERVER_ERROR = 500
 private const val DEFAULT_VISIBLE_LIMIT = 200
 
 // Long enough for a 1.5GB logcat (~20s parse + analysis, measured); at 15s open_log_file
@@ -39,30 +60,40 @@ private const val CLIENT_ID_HEADER = "X-OpenLog-Client-Id"
 private const val CLIENT_NAME_HEADER = "X-OpenLog-Client-Name"
 private const val DEFAULT_CLIENT_NAME = "MCP client"
 
-// A connecting MCP client (the mcp-server/ stdio bridge, not a raw curl caller) self-identifies
-// with a per-process-launch random id + optional human-readable name (see mcp-server's
-// openlogClient.ts). Surfaced in the Settings "Connection info" popup so a user can see who's
-// talking to their app and, if unwanted, block them.
+// A REST caller can self-identify with a per-process-launch random id + optional human-readable
+// name (see mcp-server's openlogClient.ts, and the plain-curl escape hatch). Surfaced in the
+// Settings "Connection info" popup so a user can see who's talking to their app and, if unwanted,
+// block them. Native MCP clients connect over the /mcp Streamable HTTP endpoint and don't send
+// these headers, so they aren't listed here — an accepted limitation of the transport swap.
 data class ConnectedClientInfo(val id: String, val name: String, val lastSeenMs: Long, val blocked: Boolean)
 
 /**
- * Localhost-only debug/automation control surface for the running app. Lets an MCP server (or
- * plain curl) drive real app state — open files, change filters, toggle groups — and read back
- * exactly what's rendered, without a screenshot. See Main.kt for startup gating: this must never
- * start in packaged builds, only when OPENLOG_DEBUG_CONTROL / -Dopenlog.debugControl is set.
+ * Localhost-only debug/automation control surface for the running app. Two ways in, one shared
+ * set of operations:
+ *  - the MCP Streamable HTTP endpoint at `/mcp` (io.modelcontextprotocol kotlin-sdk), which any
+ *    MCP client — LM Studio, Claude Code, Codex — connects to by URL with nothing to install;
+ *  - the legacy REST routes (GET /tabs, POST /open, …) kept for the `curl` escape hatch and the
+ *    ControlServerTest suite.
+ * Both dispatch into the same `runOp` handlers, which read/mutate real app state. See Main.kt for
+ * startup gating: this must never start in packaged builds unless the user enables it in Settings
+ * (or OPENLOG_DEBUG_CONTROL / -Dopenlog.debugControl is set).
  *
- * AppState's mutableStateOf fields are documented as snapshot-safe to read/write from any
- * thread, so HttpServer's own request-handling thread can call AppState directly.
+ * AppState's mutableStateOf fields are documented as snapshot-safe to read/write from any thread,
+ * so Ktor's request-handling coroutines can call AppState directly. Public API
+ * (constructor/start/stop/boundPort/connectedClients/blockClient/unblockClient) is unchanged from
+ * the previous JDK-HttpServer implementation so callers and tests are unaffected.
  */
 class ControlServer(private val appState: AppState, private val port: Int) {
-    private var server: HttpServer? = null
+    private var engine: EmbeddedServer<*, *>? = null
 
     private data class ClientRecord(val name: String, val lastSeenMs: Long)
 
     private val clients = ConcurrentHashMap<String, ClientRecord>()
     private val blockedIds = ConcurrentHashMap.newKeySet<String>()
 
-    val boundPort: Int get() = server?.address?.port ?: port
+    @Volatile
+    private var resolvedPort: Int = port
+    val boundPort: Int get() = resolvedPort
 
     // Read by the Settings/Connection-info UI (in-process, no HTTP hop needed — Compose and this
     // server share the same JVM). Prunes anything not seen in the last CLIENT_STALE_MS so a
@@ -84,121 +115,132 @@ class ControlServer(private val appState: AppState, private val port: Int) {
     }
 
     fun start() {
-        val s = HttpServer.create(InetSocketAddress("127.0.0.1", port), 0)
-        s.createContext("/tabs", handler(GET) { _, _ -> listTabs() })
-        s.createContext("/open", handler(POST) { _, body ->
-            openLogFile(
-                path = body.str("path") ?: "",
-                entryPath = body.str("entryPath"),
-                splitMode = body.str("splitMode"),
-                destinationDir = body.str("destinationDir"),
-                postfix = body.str("postfix") ?: "part",
-                partCount = body.int("partCount"),
-            )
-        })
-        s.createContext("/split", handler(POST) { _, body ->
-            splitLogRoute(
-                path = body.str("path") ?: "",
-                entryPath = body.str("entryPath"),
-                destinationDir = body.str("destinationDir"),
-                postfix = body.str("postfix") ?: "part",
-                partCount = body.int("partCount"),
-            )
-        })
-        s.createContext("/split/preview", handler(POST) { _, body ->
-            splitPreviewRoute(body.str("path") ?: "", body.str("entryPath"))
-        })
-        s.createContext("/close", handler(POST) { _, body -> closeTab(body.str("tabId") ?: "") })
-        s.createContext("/filter", handler(GET, POST) { ex, body ->
-            if (ex.requestMethod == "GET") getFilter(queryParams(ex)["tabId"] ?: "")
-            else setFilter(body.str("tabId") ?: "", body)
-        })
-        s.createContext("/visible", handler(GET) { ex, _ ->
-            val q = queryParams(ex)
-            getVisibleLines(q["tabId"] ?: "", q["limit"]?.toIntOrNull() ?: DEFAULT_VISIBLE_LIMIT, q["offset"]?.toIntOrNull() ?: 0)
-        })
-        s.createContext("/selection", handler(GET, POST) { ex, body ->
-            if (ex.requestMethod == "GET") getSelection(queryParams(ex)["tabId"] ?: "")
-            else setSelection(body.str("tabId") ?: "", body.intList("lineIds") ?: emptyList())
-        })
-        s.createContext("/toggle", handler(POST) { _, body -> toggleGroupRoute(body.str("tabId") ?: "", body.str("gid") ?: "") })
-        s.createContext("/expand-all", handler(POST) { _, body -> expandAllRoute(body.str("tabId") ?: "") })
-        s.createContext("/collapse-all", handler(POST) { _, body -> collapseAllRoute(body.str("tabId") ?: "") })
-        s.createContext("/tags", handler(GET) { ex, _ -> getTags(queryParams(ex)["tabId"] ?: "") })
-        s.createContext("/crashes", handler(GET) { ex, _ -> getCrashSites(queryParams(ex)["tabId"] ?: "") })
-        s.createContext("/annotations/note", handler(POST) { _, body ->
-            addTextNoteRoute(body.str("tabId") ?: "", body.str("text") ?: "", body.str("afterId"))
-        })
-        s.createContext("/annotations/log", handler(POST) { _, body ->
-            addLogNoteRoute(body.str("tabId") ?: "", body.intList("lineIds") ?: emptyList(), body.str("caption") ?: "")
-        })
-        s.createContext("/annotations/update", handler(POST) { _, body ->
-            updateAnnotationRoute(body.str("tabId") ?: "", body.str("blockId") ?: "", body.str("text") ?: "")
-        })
-        s.createContext("/annotations/move", handler(POST) { _, body ->
-            moveAnnotationRoute(body.str("tabId") ?: "", body.str("blockId") ?: "", body.int("delta") ?: 0)
-        })
-        s.createContext("/annotations/delete", handler(POST) { _, body ->
-            deleteAnnotationRoute(body.str("tabId") ?: "", body.str("blockId") ?: "")
-        })
-        s.createContext("/annotations/save", handler(POST) { _, body ->
-            saveAnnotationsRoute(body.str("tabId") ?: "", body.str("path") ?: "")
-        })
-        s.createContext("/annotations/load", handler(POST) { _, body ->
-            loadAnnotationsRoute(body.str("tabId") ?: "", body.str("path") ?: "")
-        })
-        s.createContext("/export/analysis", handler(POST) { _, body -> exportAnalysisRoute(body.str("tabId") ?: "", body.str("path") ?: "") })
-        s.createContext("/export/filtered", handler(POST) { _, body ->
-            exportFilteredRoute(body.str("tabId") ?: "", body.str("path") ?: "", body.str("format") ?: "txt")
-        })
-        s.createContext("/filter/presets", handler(GET) { _, _ -> listFilterPresets() })
-        s.createContext("/filter/apply-preset", handler(POST) { _, body ->
-            applyFilterPresetRoute(body.str("tabId") ?: "", body.str("presetId") ?: "")
-        })
-        s.createContext("/merge", handler(POST) { _, body ->
-            mergeTabsRoute(body.strList("tabIds") ?: emptyList(), body.str("newTabName") ?: "Merged")
-        })
-        s.createContext("/tail/start", handler(POST) { _, body -> startTailingRoute(body.str("tabId") ?: "") })
-        s.createContext("/tail/stop", handler(POST) { _, body -> stopTailingRoute(body.str("tabId") ?: "") })
-        // No executor set: HttpServer's default runs requests sequentially on the thread that
-        // called start() — fine for a low-throughput, single-client dev tool, and means no
-        // extra synchronization is needed around AppState access from this server.
-        s.start()
-        server = s
+        val mcp = buildMcpServer()
+        val server = embeddedServer(CIO, host = "127.0.0.1", port = port) {
+            // Browser-based MCP inspectors need CORS with the MCP-specific session/version headers.
+            install(CORS) {
+                anyHost()
+                allowHeader("Mcp-Session-Id")
+                allowHeader("Mcp-Protocol-Version")
+                allowHeader("Content-Type")
+            }
+            // Native MCP over Streamable HTTP at /mcp — what LM Studio, Claude Code, and Codex
+            // connect to by URL with nothing to install. Same shared server for every connection;
+            // its tools are stateless (they read live appState).
+            mcpStreamableHttp { mcp }
+            routing { registerRestRoutes() }
+        }
+        server.start(wait = false)
+        resolvedPort = runBlocking { server.engine.resolvedConnectors().first().port }
+        engine = server
     }
 
     fun stop() {
-        server?.stop(0)
-        server = null
+        engine?.stop()
+        engine = null
     }
 
-    // Wraps a route body with method-allowlist checking, JSON body parsing, and a catch-all that
-    // turns any unexpected failure into a 500 instead of dropping the connection — a control
-    // surface used by automated tooling should never hang a caller on an unhandled exception.
-    private fun handler(vararg allowedMethods: String, block: (HttpExchange, Map<String, Any?>) -> Any?): HttpHandler =
-        HttpHandler { exchange ->
-            try {
-                val clientId = exchange.requestHeaders.getFirst(CLIENT_ID_HEADER)
-                val blocked = clientId != null && clientId in blockedIds
-                if (clientId != null && !blocked) {
-                    val name = exchange.requestHeaders.getFirst(CLIENT_NAME_HEADER)?.takeIf { it.isNotBlank() } ?: DEFAULT_CLIENT_NAME
-                    clients[clientId] = ClientRecord(name, System.currentTimeMillis())
-                }
-                when {
-                    blocked -> respond(exchange, STATUS_FORBIDDEN, mapOf("error" to "this client is blocked"))
-                    exchange.requestMethod !in allowedMethods ->
-                        respond(exchange, STATUS_METHOD_NOT_ALLOWED, mapOf("error" to "method not allowed"))
-                    else -> {
-                        val body = if (exchange.requestMethod == "POST") readBody(exchange) else emptyMap()
-                        respond(exchange, STATUS_OK, block(exchange, body))
-                    }
-                }
-            } catch (e: Exception) {
-                respond(exchange, STATUS_SERVER_ERROR, mapOf("error" to (e.message ?: e.toString())))
-            } finally {
-                exchange.close()
+    // Single source of truth for every operation, keyed by MCP tool name. Both the native MCP
+    // tools and the legacy REST routes shape their inputs into this Map<String, Any?> and call
+    // here — so the actual behavior lives in exactly one place (the private route methods below,
+    // unchanged from the JDK-HttpServer version). Returns a Map/List that Json.encode serializes.
+    @Suppress("CyclomaticComplexMethod")
+    private fun runOp(name: String, a: Map<String, Any?>): Any? = when (name) {
+        "list_tabs" -> listTabs()
+        "open_log_file" -> openLogFile(
+            a.str("path") ?: "", a.str("entryPath"), a.str("splitMode"),
+            a.str("destinationDir"), a.str("postfix") ?: "part", a.anyInt("partCount"),
+        )
+        "preview_split_log_file" -> splitPreviewRoute(a.str("path") ?: "", a.str("entryPath"))
+        "split_log_file" -> splitLogRoute(
+            a.str("path") ?: "", a.str("entryPath"), a.str("destinationDir"), a.str("postfix") ?: "part", a.anyInt("partCount"),
+        )
+        "close_tab" -> closeTab(a.str("tabId") ?: "")
+        "get_filter" -> getFilter(a.str("tabId") ?: "")
+        "set_filter" -> setFilter(a.str("tabId") ?: "", a)
+        "get_visible_lines" -> getVisibleLines(a.str("tabId") ?: "", a.anyInt("limit") ?: DEFAULT_VISIBLE_LIMIT, a.anyInt("offset") ?: 0)
+        "select_lines" -> setSelection(a.str("tabId") ?: "", a.intList("lineIds") ?: emptyList())
+        "get_selection" -> getSelection(a.str("tabId") ?: "")
+        "toggle_group" -> toggleGroupRoute(a.str("tabId") ?: "", a.str("gid") ?: "")
+        "expand_all" -> expandAllRoute(a.str("tabId") ?: "")
+        "collapse_all" -> collapseAllRoute(a.str("tabId") ?: "")
+        "get_tags" -> getTags(a.str("tabId") ?: "")
+        "get_crash_sites" -> getCrashSites(a.str("tabId") ?: "")
+        "add_text_note" -> addTextNoteRoute(a.str("tabId") ?: "", a.str("text") ?: "", a.str("afterId"))
+        "add_log_note" -> addLogNoteRoute(a.str("tabId") ?: "", a.intList("lineIds") ?: emptyList(), a.str("caption") ?: "")
+        "update_note_block" -> updateAnnotationRoute(a.str("tabId") ?: "", a.str("blockId") ?: "", a.str("text") ?: "")
+        "move_note_block" -> moveAnnotationRoute(a.str("tabId") ?: "", a.str("blockId") ?: "", a.anyInt("delta") ?: 0)
+        "delete_note_block" -> deleteAnnotationRoute(a.str("tabId") ?: "", a.str("blockId") ?: "")
+        "export_analysis" -> exportAnalysisRoute(a.str("tabId") ?: "", a.str("path") ?: "")
+        "export_filtered_log" -> exportFilteredRoute(a.str("tabId") ?: "", a.str("path") ?: "", a.str("format") ?: "txt")
+        "save_annotations" -> saveAnnotationsRoute(a.str("tabId") ?: "", a.str("path") ?: "")
+        "load_annotations" -> loadAnnotationsRoute(a.str("tabId") ?: "", a.str("path") ?: "")
+        "list_filter_presets" -> listFilterPresets()
+        "apply_filter_preset" -> applyFilterPresetRoute(a.str("tabId") ?: "", a.str("presetId") ?: "")
+        "merge_tabs" -> mergeTabsRoute(a.strList("tabIds") ?: emptyList(), a.str("newTabName") ?: "Merged")
+        "start_tailing" -> startTailingRoute(a.str("tabId") ?: "")
+        "stop_tailing" -> stopTailingRoute(a.str("tabId") ?: "")
+        else -> mapOf("error" to "unknown operation: $name")
+    }
+
+    // ── REST transport (curl escape hatch + ControlServerTest) ─────────────
+    // Each op is registered on its original path/method; GET reads query params, POST reads a
+    // JSON body — merged into the same Map<String, Any?> runOp expects. Client-identity tracking
+    // and blocking (X-OpenLog-Client-* headers) apply here exactly as before; native MCP callers
+    // go through /mcp and aren't tracked/blockable this way (see ConnectedClientInfo).
+    private fun io.ktor.server.routing.Routing.registerRestRoutes() {
+        REST_ROUTES.forEach { (method, path, op) ->
+            when (method) {
+                HttpMethod.Get -> get(path) { handleRest(op) }
+                else -> post(path) { handleRest(op) }
             }
         }
+    }
+
+    private suspend fun RoutingContext.handleRest(op: String) {
+        val headers = call.request.headers
+        val clientId = headers[CLIENT_ID_HEADER]
+        if (clientId != null && clientId in blockedIds) {
+            respondJson(HttpStatusCode.Forbidden, mapOf("error" to "this client is blocked"))
+            return
+        }
+        if (clientId != null) {
+            clients[clientId] = ClientRecord(headers[CLIENT_NAME_HEADER]?.takeIf { it.isNotBlank() } ?: DEFAULT_CLIENT_NAME, System.currentTimeMillis())
+        }
+        val args = buildMap<String, Any?> {
+            call.request.queryParameters.entries().forEach { (k, v) -> put(k, v.firstOrNull()) }
+            if (call.request.local.method == HttpMethod.Post) {
+                val text = call.receiveText()
+                if (text.isNotBlank()) {
+                    @Suppress("UNCHECKED_CAST")
+                    (Json.decode(text) as? Map<String, Any?>)?.forEach { (k, v) -> put(k, v) }
+                }
+            }
+        }
+        val result = runCatching { runOp(op, args) }
+            .getOrElse { e -> return respondJson(HttpStatusCode.InternalServerError, mapOf("error" to (e.message ?: e.toString()))) }
+        respondJson(HttpStatusCode.OK, result)
+    }
+
+    private suspend fun RoutingContext.respondJson(status: HttpStatusCode, body: Any?) {
+        call.respondText(Json.encode(body), io.ktor.http.ContentType.Application.Json, status)
+    }
+
+    // ── Native MCP server ──────────────────────────────────────────────────
+    private fun buildMcpServer(): Server {
+        val server = Server(
+            serverInfo = Implementation(name = "openlog-control", version = "1.0.0"),
+            options = ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false))),
+        )
+        MCP_TOOLS.forEach { tool ->
+            server.addTool(name = tool.name, description = tool.description, inputSchema = tool.schema) { request ->
+                val result = runCatching { runOp(tool.name, request.arguments?.toArgMap() ?: emptyMap()) }
+                    .getOrElse { e -> mapOf("error" to (e.message ?: e.toString())) }
+                CallToolResult(content = listOf(TextContent(Json.encode(result))))
+            }
+        }
+        return server
+    }
 
     // ── Routes ──────────────────────────────────────────────────────────
 
@@ -618,24 +660,222 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         "excludeTags" to preset.excludeTags.toList(),
     )
 
-    private fun queryParams(exchange: HttpExchange): Map<String, String> =
-        (exchange.requestURI.query ?: "").split("&").filter { it.isNotBlank() }.associate { pair ->
-            val idx = pair.indexOf('=')
-            if (idx < 0) URLDecoder.decode(pair, "UTF-8") to ""
-            else URLDecoder.decode(pair.substring(0, idx), "UTF-8") to URLDecoder.decode(pair.substring(idx + 1), "UTF-8")
-        }
-
-    private fun readBody(exchange: HttpExchange): Map<String, Any?> {
-        val text = exchange.requestBody.bufferedReader().readText()
-        if (text.isBlank()) return emptyMap()
-        @Suppress("UNCHECKED_CAST")
-        return (Json.decode(text) as? Map<String, Any?>) ?: emptyMap()
-    }
-
-    private fun respond(exchange: HttpExchange, status: Int, body: Any?) {
-        val bytes = Json.encode(body).toByteArray(Charsets.UTF_8)
-        exchange.responseHeaders.add("Content-Type", "application/json; charset=utf-8")
-        exchange.sendResponseHeaders(status, bytes.size.toLong())
-        exchange.responseBody.use { it.write(bytes) }
+    // Integer from either a REST query param (String) or a JSON body / MCP argument (Number).
+    private fun Map<String, Any?>.anyInt(key: String): Int? = when (val v = this[key]) {
+        is Number -> v.toInt()
+        is String -> v.toIntOrNull()
+        else -> null
     }
 }
+
+// MCP tool argument objects arrive as kotlinx JsonObject; flatten to the same String/Int/Boolean/
+// List/Map shapes Json.decode produces for REST bodies, so runOp's accessors work identically.
+private fun JsonObject.toArgMap(): Map<String, Any?> = entries.associate { (k, v) -> k to v.toAny() }
+
+private fun JsonElement.toAny(): Any? = when (this) {
+    is JsonNull -> null
+    is JsonArray -> map { it.toAny() }
+    is JsonObject -> entries.associate { (k, v) -> k to v.toAny() }
+    is JsonPrimitive -> when {
+        isString -> content
+        booleanOrNull != null -> booleanOrNull
+        longOrNull != null -> longOrNull!!.let { if (it in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) it.toInt() else it }
+        doubleOrNull != null -> doubleOrNull
+        else -> content
+    }
+}
+
+// One declaration per operation, shared by the MCP tool registry and the REST route table so the
+// two transports can never drift on tool name or path. Descriptions/schemas mirror the retired
+// Node bridge (mcp-server/src/index.ts) exactly, so agent behavior is unchanged by the swap.
+private class McpTool(val name: String, val description: String, val schema: ToolSchema)
+
+private fun schema(vararg props: Pair<String, String>, required: List<String> = emptyList()): ToolSchema =
+    ToolSchema(
+        properties = buildJsonObject {
+            props.forEach { (name, type) ->
+                put(name, buildJsonObject { if (type == "array") arrayOfStrings() else put("type", type) })
+            }
+        },
+        required = required.ifEmpty { null },
+    )
+
+private fun kotlinx.serialization.json.JsonObjectBuilder.arrayOfStrings() {
+    put("type", "array")
+    put("items", buildJsonObject { put("type", "string") })
+}
+
+private val MCP_TOOLS: List<McpTool> = listOf(
+    McpTool("list_tabs", "List every tab currently open in the running openLog app.", schema()),
+    McpTool(
+        "open_log_file",
+        "Open a plain logcat file, or a bug-report .zip, at the given absolute path. For a plain " +
+            "file, blocks until parsing completes and returns the new tab's id. For a .zip: if it " +
+            "contains exactly one candidate log, that one opens automatically; if it contains none, " +
+            "returns an error; if it contains several, returns { needsSelection: true, candidates: " +
+            "[...] } without opening anything — call again with the same path plus entryPath set to " +
+            "one candidate's entryPath to open that one. Oversized sources return { needsSplit: true, " +
+            "... } instead of opening; use split_log_file to split and open parts.",
+        schema(
+            "path" to "string", "entryPath" to "string", "splitMode" to "string",
+            "destinationDir" to "string", "postfix" to "string", "partCount" to "integer",
+            required = listOf("path"),
+        ),
+    ),
+    McpTool(
+        "preview_split_log_file",
+        "Return split metadata for a real log file or archive entry without opening it: size, " +
+            "suggested part count, default destination, default postfix, and source identifiers.",
+        schema("path" to "string", "entryPath" to "string", required = listOf("path")),
+    ),
+    McpTool(
+        "split_log_file",
+        "Split a real log file or archive entry into line-preserving plain log files, save them to " +
+            "the destination directory, and open the generated parts as tabs. Existing outputs are " +
+            "not overwritten.",
+        schema(
+            "path" to "string", "entryPath" to "string", "destinationDir" to "string",
+            "postfix" to "string", "partCount" to "integer", required = listOf("path"),
+        ),
+    ),
+    McpTool("close_tab", "Close the tab with the given id.", schema("tabId" to "string", required = listOf("tabId"))),
+    McpTool("get_filter", "Read the current filter (levels, tags, keyword, mode) for a tab.", schema("tabId" to "string", required = listOf("tabId"))),
+    McpTool(
+        "set_filter",
+        "Partially update a tab's filter — only the fields you provide are changed.",
+        schema(
+            "tabId" to "string", "levels" to "array", "activeTags" to "array",
+            "kwText" to "string", "kwRegex" to "boolean", "mode" to "string", required = listOf("tabId"),
+        ),
+    ),
+    McpTool(
+        "get_visible_lines",
+        "Read the currently rendered log items for a tab — after filtering and sequence/manual-" +
+            "collapse/stack-trace folding, i.e. what a user would actually see. Each item has a " +
+            "`type` (Row, SeqHeader, ManualHeader, or StackTraceHeader).",
+        schema("tabId" to "string", "limit" to "integer", "offset" to "integer", required = listOf("tabId")),
+    ),
+    McpTool(
+        "select_lines", "Replace a tab's current selected log line ids.",
+        schema("tabId" to "string", "lineIds" to "array", required = listOf("tabId", "lineIds")),
+    ),
+    McpTool("get_selection", "Return the selected log line ids for a tab.", schema("tabId" to "string", required = listOf("tabId"))),
+    McpTool(
+        "toggle_group",
+        "Expand or collapse a sequence/manual-collapse group by its gid (from get_visible_lines).",
+        schema("tabId" to "string", "gid" to "string", required = listOf("tabId", "gid")),
+    ),
+    McpTool(
+        "expand_all", "Expand every currently visible collapsible sequence/manual/stack-trace group in a tab.",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "collapse_all", "Collapse every expanded sequence/manual/stack-trace group in a tab.",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "get_tags", "List every distinct tag present in a tab's full log file (not just the currently filtered set).",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "get_crash_sites",
+        "List every detected exception (FATAL EXCEPTION / bare exception header) and ANR in a tab's " +
+            "full log file, each with the log id to jump to. Detected on the whole file regardless " +
+            "of the active filter.",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "add_text_note",
+        "Append a plain text analysis note block, optionally after an existing block id.",
+        schema("tabId" to "string", "text" to "string", "afterId" to "string", required = listOf("tabId", "text")),
+    ),
+    McpTool(
+        "add_log_note",
+        "Append an annotation block referencing one or more log line ids.",
+        schema("tabId" to "string", "lineIds" to "array", "caption" to "string", required = listOf("tabId", "lineIds")),
+    ),
+    McpTool(
+        "update_note_block", "Update a text note's text or a log note's caption.",
+        schema("tabId" to "string", "blockId" to "string", "text" to "string", required = listOf("tabId", "blockId", "text")),
+    ),
+    McpTool(
+        "move_note_block", "Move an annotation block up or down by delta positions.",
+        schema("tabId" to "string", "blockId" to "string", "delta" to "integer", required = listOf("tabId", "blockId", "delta")),
+    ),
+    McpTool(
+        "delete_note_block", "Delete an annotation block by id.",
+        schema("tabId" to "string", "blockId" to "string", required = listOf("tabId", "blockId")),
+    ),
+    McpTool(
+        "export_analysis", "Write the tab's Markdown analysis to an absolute path.",
+        schema("tabId" to "string", "path" to "string", required = listOf("tabId", "path")),
+    ),
+    McpTool(
+        "export_filtered_log", "Write the tab's current filtered log to an absolute path as txt or csv.",
+        schema("tabId" to "string", "path" to "string", "format" to "string", required = listOf("tabId", "path")),
+    ),
+    McpTool(
+        "save_annotations", "Write the tab's .ann sidecar data to an absolute path.",
+        schema("tabId" to "string", "path" to "string", required = listOf("tabId", "path")),
+    ),
+    McpTool(
+        "load_annotations", "Load .ann sidecar data from an absolute path into a tab.",
+        schema("tabId" to "string", "path" to "string", required = listOf("tabId", "path")),
+    ),
+    McpTool("list_filter_presets", "List saved filter presets available in the running app.", schema()),
+    McpTool(
+        "apply_filter_preset", "Apply a saved filter preset to a tab by preset id.",
+        schema("tabId" to "string", "presetId" to "string", required = listOf("tabId", "presetId")),
+    ),
+    McpTool(
+        "merge_tabs",
+        "Merge 2 or more already-open tabs into one new tab, interleaved by time-of-day (not " +
+            "calendar-aware — entries are compared purely by HH:mm:ss.SSS, so this is only correct " +
+            "when the sources span a single day). Each merged row is tagged with which source tab's " +
+            "filename it came from.",
+        schema("tabIds" to "array", "newTabName" to "string", required = listOf("tabIds")),
+    ),
+    McpTool(
+        "start_tailing",
+        "Start watching a tab's backing file for external growth (e.g. `adb logcat > out.log` run " +
+            "outside the app) and appending new lines as they arrive. Only works for a tab backed by " +
+            "a real, currently-existing file (not a zip-extracted or merged tab). Session-only: " +
+            "resets to off on app relaunch. Poll list_tabs or get_visible_lines afterward to observe growth.",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool("stop_tailing", "Stop watching a tab's backing file for growth.", schema("tabId" to "string", required = listOf("tabId"))),
+)
+
+// REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl
+// escape hatch and ControlServerTest are unaffected. Keyed to the same op names as MCP_TOOLS.
+private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
+    Triple(HttpMethod.Get, "/tabs", "list_tabs"),
+    Triple(HttpMethod.Post, "/open", "open_log_file"),
+    Triple(HttpMethod.Post, "/split", "split_log_file"),
+    Triple(HttpMethod.Post, "/split/preview", "preview_split_log_file"),
+    Triple(HttpMethod.Post, "/close", "close_tab"),
+    Triple(HttpMethod.Get, "/filter", "get_filter"),
+    Triple(HttpMethod.Post, "/filter", "set_filter"),
+    Triple(HttpMethod.Get, "/visible", "get_visible_lines"),
+    Triple(HttpMethod.Get, "/selection", "get_selection"),
+    Triple(HttpMethod.Post, "/selection", "select_lines"),
+    Triple(HttpMethod.Post, "/toggle", "toggle_group"),
+    Triple(HttpMethod.Post, "/expand-all", "expand_all"),
+    Triple(HttpMethod.Post, "/collapse-all", "collapse_all"),
+    Triple(HttpMethod.Get, "/tags", "get_tags"),
+    Triple(HttpMethod.Get, "/crashes", "get_crash_sites"),
+    Triple(HttpMethod.Post, "/annotations/note", "add_text_note"),
+    Triple(HttpMethod.Post, "/annotations/log", "add_log_note"),
+    Triple(HttpMethod.Post, "/annotations/update", "update_note_block"),
+    Triple(HttpMethod.Post, "/annotations/move", "move_note_block"),
+    Triple(HttpMethod.Post, "/annotations/delete", "delete_note_block"),
+    Triple(HttpMethod.Post, "/annotations/save", "save_annotations"),
+    Triple(HttpMethod.Post, "/annotations/load", "load_annotations"),
+    Triple(HttpMethod.Post, "/export/analysis", "export_analysis"),
+    Triple(HttpMethod.Post, "/export/filtered", "export_filtered_log"),
+    Triple(HttpMethod.Get, "/filter/presets", "list_filter_presets"),
+    Triple(HttpMethod.Post, "/filter/apply-preset", "apply_filter_preset"),
+    Triple(HttpMethod.Post, "/merge", "merge_tabs"),
+    Triple(HttpMethod.Post, "/tail/start", "start_tailing"),
+    Triple(HttpMethod.Post, "/tail/stop", "stop_tailing"),
+)
