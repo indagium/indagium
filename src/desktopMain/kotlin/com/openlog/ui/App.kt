@@ -2092,16 +2092,12 @@ private fun TabBar(state: AppState) {
             modifier = Modifier.fillMaxHeight(),
             shape = if (hasRecentFiles) middleShape else rightShape,
         ) {
+            // No setFilenameFilter here: it's unreliable on macOS (the native NSOpenPanel doesn't
+            // consistently invoke it), which greyed out files that would open fine by drag-and-drop.
+            // Show everything and validate after the pick — see AppState.openPathOrShowError.
             val fd = FileDialog(null as Frame?, "Open Log File", FileDialog.LOAD)
-            fd.setFilenameFilter { dir, name ->
-                val f = File(dir, name)
-                f.isDirectory || com.openlog.utils.isLikelyTextFile(f) || com.openlog.utils.isSupportedArchiveFile(f)
-            }
             fd.isVisible = true
-            fd.file?.let {
-                val f = File(fd.directory, it)
-                state.openPath(f)
-            }
+            fd.file?.let { state.openPathOrShowError(File(fd.directory, it)) }
         }
         if (hasRecentFiles) {
             ToolbarBtn(

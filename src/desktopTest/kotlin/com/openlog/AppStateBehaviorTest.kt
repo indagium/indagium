@@ -1107,6 +1107,35 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun openPathOrShowErrorAcceptsExtensionlessTextFileLikeDragAndDrop() {
+        // Regression: the Open toolbar button used to gate on FileDialog.setFilenameFilter,
+        // which is unreliable on macOS and greyed out exactly this kind of file even though
+        // drag-and-drop (openPaths -> isOpenableAsLog) has always accepted it by content.
+        val dir = createTempDirectory("openlog-open-noext").toFile()
+        val noExt = File(dir, "bugreport").apply { writeText("10-01 10:00:00.000 1 1 I App: hi\n") }
+        val state = AppState(File(dir, "state.cache"))
+
+        state.openPathOrShowError(noExt)
+        waitUntil { !state.isLoading }
+
+        assertEquals(null, state.openError)
+        assertEquals(1, state.tabs.size)
+    }
+
+    @Test
+    fun openPathOrShowErrorRejectsUnsupportedBinaryWithClearMessage() {
+        val dir = createTempDirectory("openlog-open-binary").toFile()
+        val binary = File(dir, "image.dat").apply { writeBytes(byteArrayOf(0, 1, 2, 3, 0, 4)) }
+        val state = AppState(File(dir, "state.cache"))
+
+        state.openPathOrShowError(binary)
+
+        assertTrue(state.tabs.isEmpty())
+        assertEquals("Could not open file", state.openError?.title)
+        assertEquals(binary.absolutePath, state.openError?.path)
+    }
+
+    @Test
     fun parserFailureShowsErrorInsteadOfOpeningEmptyTab() {
         val dir = createTempDirectory("openlog-open-error-parser").toFile()
         val logFile = File(dir, "broken.log").apply { writeText("broken") }

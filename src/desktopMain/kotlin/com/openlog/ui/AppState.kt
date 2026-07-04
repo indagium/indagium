@@ -1772,9 +1772,7 @@ class AppState(
     fun openFileAsIs(file: File): String? = openFileInternal(file, bypassSplitPrompt = true)
 
     fun openPaths(files: List<File>, splitPromptThresholdBytes: Long = SPLIT_PROMPT_BYTES) {
-        val openable = files.filter { file ->
-            file.exists() && (isSupportedArchiveFile(file) || isLikelyLogPath(file) || isLikelyTextFile(file))
-        }
+        val openable = files.filter { isOpenableAsLog(it) }
         val oversizedFiles = openable.filter { file ->
             !isSupportedArchiveFile(file) && requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
         }
@@ -1795,6 +1793,27 @@ class AppState(
 
     private fun isLikelyLogPath(file: File): Boolean =
         file.isFile && file.extension.lowercase() in setOf("log", "txt")
+
+    // Same "will this actually open" check drag-and-drop uses (openPaths above), reused by the
+    // Open toolbar button in App.kt. Needed there because java.awt.FileDialog.setFilenameFilter
+    // is unreliable on macOS — the native NSOpenPanel doesn't consistently invoke it, so a
+    // content-sniffed text file with a non-standard extension can be greyed out in the picker
+    // even though it would open fine. The dialog shows all files instead, and this validates
+    // (with a real error message) after the user actually picks one.
+    fun isOpenableAsLog(file: File): Boolean =
+        file.exists() && (isSupportedArchiveFile(file) || isLikelyLogPath(file) || isLikelyTextFile(file))
+
+    fun openPathOrShowError(file: File) {
+        if (!isOpenableAsLog(file)) {
+            showOpenError(
+                title = "Could not open file",
+                path = file.absolutePath,
+                message = "This doesn't look like a log/text file or a supported archive (.zip/.7z).",
+            )
+            return
+        }
+        openPath(file)
+    }
 
     private fun openFileInternal(file: File, bypassSplitPrompt: Boolean): String? {
         val path = file.absolutePath
