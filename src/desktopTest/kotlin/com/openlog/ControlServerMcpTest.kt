@@ -42,8 +42,8 @@ class ControlServerMcpTest {
         state.close()
     }
 
-    private fun mcp(json: String, sessionId: String? = null): HttpResponse<String> {
-        var b = HttpRequest.newBuilder(URI.create("http://127.0.0.1:${server.boundPort}/mcp"))
+    private fun mcp(json: String, sessionId: String? = null, port: Int = server.boundPort): HttpResponse<String> {
+        var b = HttpRequest.newBuilder(URI.create("http://127.0.0.1:$port/mcp"))
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream")
             .POST(HttpRequest.BodyPublishers.ofString(json))
@@ -51,14 +51,14 @@ class ControlServerMcpTest {
         return client.send(b.build(), HttpResponse.BodyHandlers.ofString())
     }
 
-    private fun initSession(): String {
-        val init = mcp(INITIALIZE_REQUEST)
+    private fun initSession(port: Int = server.boundPort): String {
+        val init = mcp(INITIALIZE_REQUEST, port = port)
         assertTrue(init.statusCode() in 200..299, "initialize failed: ${init.statusCode()} ${init.body()}")
         val session = init.headers().firstValue("mcp-session-id")
             .orElseThrow { AssertionError("no Mcp-Session-Id:\n${init.body()}") }
         // Real MCP clients must send notifications/initialized before issuing requests; skipping it
         // leaves the server in a pre-ready state where tool calls behave inconsistently.
-        mcp("""{"jsonrpc":"2.0","method":"notifications/initialized"}""", session)
+        mcp("""{"jsonrpc":"2.0","method":"notifications/initialized"}""", session, port = port)
         return session
     }
 
@@ -147,6 +147,24 @@ class ControlServerMcpTest {
         // The transport is gone, so a follow-up call on the old (header-based) session id must be rejected.
         val afterClose = mcp("""{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}""", session)
         assertTrue(afterClose.statusCode() !in 200..299, "expected disconnected session to be rejected")
+    }
+
+    @Test
+    fun staleMcpSessionWithNoListeningChannelIsReapedAutomatically() {
+        // Regression for orphaned "lmstudio-mcp-server-session" entries piling up: a client that
+        // never opens the GET/SSE stream a server would use to deliver a spontaneous ping (this
+        // test harness is exactly that, like a real client that lost its listening connection)
+        // must eventually be dropped by the periodic reaper instead of lingering forever.
+        val reaping = ControlServer(state, 0, mcpReapIntervalMs = 30, mcpPingTimeoutMs = 200)
+        reaping.start()
+        try {
+            initSession(port = reaping.boundPort)
+            assertEquals(1, reaping.mcpSessions().size)
+
+            waitUntil(timeoutMs = 5_000) { reaping.mcpSessions().isEmpty() }
+        } finally {
+            reaping.stop()
+        }
     }
 
     private fun waitUntil(timeoutMs: Long = 2_000, condition: () -> Boolean) {

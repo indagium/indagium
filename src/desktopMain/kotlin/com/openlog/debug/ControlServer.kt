@@ -35,7 +35,12 @@ import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -59,6 +64,16 @@ private const val CLIENT_STALE_MS = 5 * 60_000L
 private const val CLIENT_ID_HEADER = "X-OpenLog-Client-Id"
 private const val CLIENT_NAME_HEADER = "X-OpenLog-Client-Name"
 private const val DEFAULT_CLIENT_NAME = "MCP client"
+
+// Unlike REST clients (stateless HTTP, staleness is just "stop displaying"), an MCP session is a
+// live transport connection with nothing to time it out on its own — a client that vanishes
+// without a clean shutdown (killed process, closed chat the client library doesn't tear down)
+// leaves a session in Server.sessions forever. Ping is a base MCP capability every compliant
+// client must answer (no capability negotiation gates it, unlike sampling/roots/elicitation), so
+// it's a safe liveness probe. Interval/timeout are generous since this runs over localhost and
+// should never fire for a genuinely-connected client mid-conversation.
+private const val MCP_SESSION_REAP_INTERVAL_MS = 2 * 60_000L
+private const val MCP_SESSION_PING_TIMEOUT_MS = 5_000L
 
 // A REST caller can self-identify with a per-process-launch random id + optional human-readable
 // name (see the plain-curl escape hatch). Surfaced in the Settings "Connection info" popup so a
@@ -87,7 +102,12 @@ data class McpSessionInfo(val id: String, val name: String, val version: String?
  * (constructor/start/stop/boundPort/connectedClients/blockClient/unblockClient) is unchanged from
  * the previous JDK-HttpServer implementation so callers and tests are unaffected.
  */
-class ControlServer(private val appState: AppState, private val port: Int) {
+class ControlServer(
+    private val appState: AppState,
+    private val port: Int,
+    private val mcpReapIntervalMs: Long = MCP_SESSION_REAP_INTERVAL_MS,
+    private val mcpPingTimeoutMs: Long = MCP_SESSION_PING_TIMEOUT_MS,
+) {
     private var engine: EmbeddedServer<*, *>? = null
     private var mcpServer: Server? = null
 
@@ -133,6 +153,24 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         runBlocking { session.close() }
     }
 
+    // Periodically pings every open MCP session and closes any that don't answer within
+    // MCP_SESSION_PING_TIMEOUT_MS — the leaked-session cleanup REST clients get for free by being
+    // stateless. Each ping runs in its own child coroutine so one slow/dead session never delays
+    // the liveness check for the others.
+    private fun CoroutineScope.reapStaleMcpSessions(mcp: Server) {
+        launch {
+            while (isActive) {
+                delay(mcpReapIntervalMs)
+                mcp.sessions.values.forEach { session ->
+                    launch {
+                        val alive = runCatching { withTimeout(mcpPingTimeoutMs) { session.ping() } }.isSuccess
+                        if (!alive) runCatching { session.close() }
+                    }
+                }
+            }
+        }
+    }
+
     fun start() {
         val mcp = buildMcpServer()
         mcpServer = mcp
@@ -149,6 +187,9 @@ class ControlServer(private val appState: AppState, private val port: Int) {
             // its tools are stateless (they read live appState).
             mcpStreamableHttp { mcp }
             routing { registerRestRoutes() }
+            // Application is itself a CoroutineScope tied to the server's lifecycle, so this loop
+            // is cancelled for free when stop() calls engine.stop() — no separate Job to track.
+            reapStaleMcpSessions(mcp)
         }
         server.start(wait = false)
         resolvedPort = runBlocking { server.engine.resolvedConnectors().first().port }
