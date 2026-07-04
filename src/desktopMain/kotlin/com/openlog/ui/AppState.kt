@@ -398,6 +398,10 @@ class AppState(
 
     fun unblockMcpClient(id: String) = controlServer?.unblockClient(id)
 
+    fun mcpSessions() = controlServer?.mcpSessions() ?: emptyList()
+
+    fun disconnectMcpSession(id: String) = controlServer?.disconnectMcpSession(id)
+
     private fun beginLoading(status: String = "Loading file...") = synchronized(stateLock) {
         pendingLoads += 1
         isLoading = true

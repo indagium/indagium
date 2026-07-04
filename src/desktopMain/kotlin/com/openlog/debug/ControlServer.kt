@@ -61,11 +61,15 @@ private const val CLIENT_NAME_HEADER = "X-OpenLog-Client-Name"
 private const val DEFAULT_CLIENT_NAME = "MCP client"
 
 // A REST caller can self-identify with a per-process-launch random id + optional human-readable
-// name (see mcp-server's openlogClient.ts, and the plain-curl escape hatch). Surfaced in the
-// Settings "Connection info" popup so a user can see who's talking to their app and, if unwanted,
-// block them. Native MCP clients connect over the /mcp Streamable HTTP endpoint and don't send
-// these headers, so they aren't listed here — an accepted limitation of the transport swap.
+// name (see the plain-curl escape hatch). Surfaced in the Settings "Connection info" popup so a
+// user can see who's talking to their app and, if unwanted, block them by that id.
 data class ConnectedClientInfo(val id: String, val name: String, val lastSeenMs: Long, val blocked: Boolean)
+
+// A native MCP client (LM Studio, Claude Code, Codex) connected over /mcp. The SDK assigns
+// sessionId per-connection (it changes on reconnect), so unlike ConnectedClientInfo there's no
+// stable id to persist a "blocked" flag against — the only available action is to kick the
+// current session via Server.sessions[id].close(), which the client can reconnect after.
+data class McpSessionInfo(val id: String, val name: String, val version: String?)
 
 /**
  * Localhost-only debug/automation control surface for the running app. Two ways in, one shared
@@ -85,6 +89,7 @@ data class ConnectedClientInfo(val id: String, val name: String, val lastSeenMs:
  */
 class ControlServer(private val appState: AppState, private val port: Int) {
     private var engine: EmbeddedServer<*, *>? = null
+    private var mcpServer: Server? = null
 
     private data class ClientRecord(val name: String, val lastSeenMs: Long)
 
@@ -114,8 +119,23 @@ class ControlServer(private val appState: AppState, private val port: Int) {
         blockedIds.remove(id)
     }
 
+    // Server.sessions is a live snapshot keyed by sessionId; clientVersion is populated once the
+    // MCP initialize handshake completes (null very briefly before that).
+    fun mcpSessions(): List<McpSessionInfo> = mcpServer?.sessions?.values
+        ?.map { s -> McpSessionInfo(s.sessionId, s.clientVersion?.name ?: "MCP client", s.clientVersion?.version) }
+        ?.sortedBy { it.name }
+        ?: emptyList()
+
+    // ServerSession.close() (inherited from Protocol) closes the underlying transport, which
+    // actually drops the client's HTTP/SSE connection rather than just forgetting our own state.
+    fun disconnectMcpSession(id: String) {
+        val session = mcpServer?.sessions?.get(id) ?: return
+        runBlocking { session.close() }
+    }
+
     fun start() {
         val mcp = buildMcpServer()
+        mcpServer = mcp
         val server = embeddedServer(CIO, host = "127.0.0.1", port = port) {
             // Browser-based MCP inspectors need CORS with the MCP-specific session/version headers.
             install(CORS) {
@@ -138,6 +158,7 @@ class ControlServer(private val appState: AppState, private val port: Int) {
     fun stop() {
         engine?.stop()
         engine = null
+        mcpServer = null
     }
 
     // Single source of truth for every operation, keyed by MCP tool name. Both the native MCP
@@ -187,7 +208,7 @@ class ControlServer(private val appState: AppState, private val port: Int) {
     // Each op is registered on its original path/method; GET reads query params, POST reads a
     // JSON body — merged into the same Map<String, Any?> runOp expects. Client-identity tracking
     // and blocking (X-OpenLog-Client-* headers) apply here exactly as before; native MCP callers
-    // go through /mcp and aren't tracked/blockable this way (see ConnectedClientInfo).
+    // go through /mcp and are tracked separately via mcpSessions()/disconnectMcpSession().
     private fun io.ktor.server.routing.Routing.registerRestRoutes() {
         REST_ROUTES.forEach { (method, path, op) ->
             when (method) {

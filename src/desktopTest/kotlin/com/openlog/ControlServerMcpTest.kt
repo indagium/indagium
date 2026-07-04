@@ -116,4 +116,29 @@ class ControlServerMcpTest {
         )
         assertEquals(setOf(LogLevel.E), state.tab("t1")!!.filter.levels)
     }
+
+    @Test
+    fun mcpSessionIsListedAndDisconnectDropsIt() {
+        val session = initSession()
+        // mcpSessions() is keyed by the SDK's internal ServerSession.sessionId, which is a
+        // separate UUID from the transport-level Mcp-Session-Id HTTP header used for routing.
+        val info = server.mcpSessions().singleOrNull() ?: error("expected exactly one mcp session: ${server.mcpSessions()}")
+        assertEquals("test", info.name)
+        assertEquals("1", info.version)
+
+        server.disconnectMcpSession(info.id)
+        waitUntil { server.mcpSessions().isEmpty() }
+
+        // The transport is gone, so a follow-up call on the old (header-based) session id must be rejected.
+        val afterClose = mcp("""{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}""", session)
+        assertTrue(afterClose.statusCode() !in 200..299, "expected disconnected session to be rejected")
+    }
+
+    private fun waitUntil(timeoutMs: Long = 2_000, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!condition()) {
+            if (System.currentTimeMillis() > deadline) error("condition not met within ${timeoutMs}ms")
+            Thread.sleep(10)
+        }
+    }
 }

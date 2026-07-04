@@ -67,6 +67,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.openlog.debug.ConnectedClientInfo
+import com.openlog.debug.McpSessionInfo
 import com.openlog.generated.BuildInfo
 import com.openlog.model.*
 import java.awt.FileDialog
@@ -2734,9 +2735,11 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
         }
     }
     var clients by remember { mutableStateOf<List<ConnectedClientInfo>>(state.connectedMcpClients()) }
+    var mcpSessions by remember { mutableStateOf<List<McpSessionInfo>>(state.mcpSessions()) }
     LaunchedEffect(Unit) {
         while (true) {
             clients = state.connectedMcpClients()
+            mcpSessions = state.mcpSessions()
             kotlinx.coroutines.delay(CLIENT_POLL_INTERVAL_MS)
         }
     }
@@ -2804,17 +2807,35 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
         Spacer(Modifier.height(18.dp))
         AppText("Connected clients", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(6.dp))
-        if (clients.isEmpty()) {
+        if (clients.isEmpty() && mcpSessions.isEmpty()) {
             AppText(
-                "None right now. Native MCP clients connected at the URL above aren't listed here; " +
-                    "only legacy REST callers that send an X-OpenLog-Client-Id header appear (and " +
-                    "can be blocked).",
+                "None right now.",
                 color = tc.td,
                 fontSize = 11.sp,
-                maxLines = 3,
+                maxLines = 1,
             )
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                mcpSessions.forEach { s ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column {
+                            AppText(s.name, color = tc.tx, fontSize = 11.sp)
+                            AppText(s.version?.let { "MCP session · v$it" } ?: "MCP session", color = tc.td, fontSize = 10.sp)
+                        }
+                        AppButton(
+                            "Disconnect",
+                            isDanger = true,
+                            onClick = {
+                                state.disconnectMcpSession(s.id)
+                                mcpSessions = state.mcpSessions()
+                            },
+                        )
+                    }
+                }
                 clients.forEach { c ->
                     Row(
                         Modifier.fillMaxWidth(),
