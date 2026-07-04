@@ -2608,11 +2608,23 @@ private fun SettingsSectionHeader(title: String) {
 // that auto-discover it (Claude Code) spawn the server with cwd already at the project root.
 // This copy-for-other-tools snippet can't assume that — a client like LM Studio spawns MCP
 // servers from ITS OWN working directory, so a relative path there resolves to nothing and the
-// server fails to start. user.dir is safe to resolve here specifically because the control
-// server only ever runs via `./gradlew desktopRun` (see ControlServer's kdoc — it's gated off in
-// every packaged build), and Gradle's run task's working directory is the project root.
+// server fails to start.
+//
+// user.dir is only a reliable stand-in for "the project root" during an unpackaged dev run
+// (./gradlew desktopRun sets the JVM's working directory there). The control server can also be
+// turned on from Settings in a normal installed .dmg/.deb/.msi — that's the common case, not a
+// dev-only path — and there user.dir is whatever the OS handed the launched app (often "/" for a
+// Finder/Dock launch), which produced exactly the broken-looking-real "/mcp-server/src/index.ts"
+// a user pasted into LM Studio and got a silent spawn failure from. The mcp-server/ sources
+// aren't bundled into the installed app at all, so there's no real path to offer there — an
+// obvious placeholder beats a wrong-but-plausible one.
 internal fun mcpConfigSnippet(port: Int): String {
-    val serverEntry = File(System.getProperty("user.dir"), "mcp-server/src/index.ts").absolutePath
+    val isPackaged = System.getProperty("jpackage.app-path") != null
+    val serverEntry = if (isPackaged) {
+        "/path/to/openLog2/mcp-server/src/index.ts"
+    } else {
+        File(System.getProperty("user.dir"), "mcp-server/src/index.ts").absolutePath
+    }
     return """
     {
       "mcpServers": {
@@ -2717,15 +2729,27 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
             }
         }
         Spacer(Modifier.height(10.dp))
-        AppText(
-            "A .mcp.json at the repo root already has this registered for tools that " +
-                "auto-discover it. For others, paste the copied snippet into their own MCP " +
-                "config — set OPENLOG_CLIENT_NAME to whatever you want that tool labelled as " +
-                "below.",
-            color = tc.td,
-            fontSize = 11.sp,
-            maxLines = 4,
-        )
+        if (System.getProperty("jpackage.app-path") != null) {
+            AppText(
+                "This installed copy of openLog doesn't bundle the MCP server's source, so the " +
+                    "copied snippet has a placeholder path — replace it with wherever you've " +
+                    "cloned the openLog2 repo's mcp-server/src/index.ts before pasting it into " +
+                    "your MCP client's config.",
+                color = tc.td,
+                fontSize = 11.sp,
+                maxLines = 5,
+            )
+        } else {
+            AppText(
+                "A .mcp.json at the repo root already has this registered for tools that " +
+                    "auto-discover it. For others, paste the copied snippet into their own MCP " +
+                    "config — set OPENLOG_CLIENT_NAME to whatever you want that tool labelled as " +
+                    "below.",
+                color = tc.td,
+                fontSize = 11.sp,
+                maxLines = 4,
+            )
+        }
         Spacer(Modifier.height(14.dp))
         AppText(
             "Or skip MCP entirely and hit the JSON/HTTP endpoints directly:",
