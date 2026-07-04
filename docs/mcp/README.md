@@ -1,0 +1,55 @@
+# Driving openLog with an MCP client
+
+openLog has a Model Context Protocol server **built into the app** — it speaks MCP over
+Streamable HTTP, so any MCP client (LM Studio, Claude Code, Codex, or your own tooling) connects
+with just a URL. There is nothing to install: no Node.js, no `npm`, no repo checkout.
+
+## Enable it
+
+The server is off by default and never runs in a packaged build unless you turn it on.
+
+- **Installed app:** Settings → Automation → *MCP control server* → **On**. The default port is
+  8991 (configurable). Click *Connection info…* for the exact URL and a copyable client config.
+- **Dev run:** `OPENLOG_DEBUG_CONTROL=8991 ./gradlew desktopRun` (or `-Dopenlog.debugControl=8991`).
+
+## Connect a client
+
+The endpoint is `http://127.0.0.1:8991/mcp` (swap the port if you changed it).
+
+**LM Studio / Cursor-style `mcp.json`** (e.g. `~/.lmstudio/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "openlog-control": {
+      "url": "http://127.0.0.1:8991/mcp"
+    }
+  }
+}
+```
+
+**Claude Code:**
+
+```bash
+claude mcp add --transport http openlog http://127.0.0.1:8991/mcp
+```
+
+**Codex** (`~/.codex/config.toml`): add a streamable-HTTP MCP server pointed at the same URL.
+
+The repo root `.mcp.json` already registers this for tools that auto-discover it.
+
+## Tools
+
+The server exposes 29 tools covering the whole analysis workflow — open files/archives, split
+oversized logs, read/set filters, read the rendered (post-fold) lines, list crash sites and tags,
+manage selection and collapsible groups, write annotations, export, merge tabs, and live-tail.
+Call `tools/list` for the authoritative set and their schemas.
+
+See [ANALYSIS_PLAYBOOK.md](ANALYSIS_PLAYBOOK.md) for a system-prompt skeleton that teaches an
+agent how to actually investigate a log with these tools.
+
+## Direct HTTP (no MCP)
+
+The same server also serves a plain JSON/REST surface for quick scripting or `curl`, e.g.
+`curl http://127.0.0.1:8991/tabs`. This is the escape hatch the MCP tools are built on; the MCP
+endpoint at `/mcp` is what agent clients should use.

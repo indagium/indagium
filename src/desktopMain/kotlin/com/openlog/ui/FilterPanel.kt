@@ -77,7 +77,7 @@ fun FilterPanel(
     tab: LogTab,
     fpState: FilterPanelUiState,
     savedFilters: List<SavedFilter>,
-    activeSavedFilterId: String?,
+    activeFilterItemId: String?,
     tagUsage: Map<String, Int>,
     newHlPat: String, newHlRx: Boolean, newHlColor: Color,
     newSeqText: String,
@@ -122,6 +122,7 @@ fun FilterPanel(
     onSetNewHlColor: (Color) -> Unit,
     onLoadFilter: (SavedFilter) -> Unit,
     onDeleteSF: (String) -> Unit,
+    onRenameSF: (String) -> Unit,
     onOpenSFDialog: () -> Unit,
     onSetKwInTag: (String) -> Unit,
     onAddPkgPrefix: (String) -> Unit,
@@ -1280,15 +1281,33 @@ fun FilterPanel(
             if (savedFilters.isNotEmpty()) {
                 ScrollableItems(savedFilters.size) {
                     savedFilters.forEach { sf ->
-                        val active = activeSavedFilterId == sf.id
+                        val active = activeFilterItemId == sf.id
                         HoverBox(modifier = Modifier.fillMaxWidth(), baseBg = if (active) tc.abg else Color.Transparent) {
                             Row(
                                 Modifier.fillMaxWidth().clickable { onLoadFilter(sf) }.padding(horizontal = 12.dp, vertical = 5.dp),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 AppText(if (active) "●" else "○", color = if (active) tc.ac else tc.td, fontSize = 12.sp)
-                                AppText(sf.name, color = if (active) tc.tx else tc.ts, fontSize = 11.sp,
-                                    modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                                TooltipArea(
+                                    tooltip = {
+                                        Box(
+                                            Modifier.background(tc.p2, RoundedCornerShape(4.dp))
+                                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                                        ) {
+                                            AppText(sf.name, color = tc.tx, fontSize = 11.sp)
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                ) {
+                                    AppText(
+                                        sf.name,
+                                        color = if (active) tc.tx else tc.ts,
+                                        fontSize = 11.sp,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                AppText("✎", color = tc.td, fontSize = 12.sp, modifier = Modifier.clickable { onRenameSF(sf.id) })
                                 AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onDeleteSF(sf.id) })
                             }
                         }

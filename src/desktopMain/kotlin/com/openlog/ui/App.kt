@@ -67,6 +67,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.openlog.debug.ConnectedClientInfo
+import com.openlog.debug.McpSessionInfo
 import com.openlog.generated.BuildInfo
 import com.openlog.model.*
 import java.awt.FileDialog
@@ -78,7 +79,7 @@ import kotlin.math.roundToInt
 private const val TAB_DRAG_SNAP_BIAS = 0.25f
 
 @Composable
-fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
+fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) }) {
     val theme = themeColors(state.settings.theme)
     val rootFocusRequester = remember { FocusRequester() }
     var pendingPanelFocus by remember { mutableStateOf<KeyboardPanel?>(null) }
@@ -195,6 +196,34 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         IndeterminateLoadingLine(Modifier.width(180.dp))
                     }
                 }
+            }
+
+            // ── Stuck-loading watchdog ─────────────────────────────────
+            // A load that never finishes (a genuine hang, not just a big file) otherwise leaves
+            // no way back into the app short of force-quitting — this surfaces after a long
+            // stretch of continuous isLoading and offers real escape hatches instead. This can
+            // only catch hangs in BACKGROUND work that's still reporting isLoading=true but never
+            // completing; it can't do anything for the UI thread itself being blocked (nothing
+            // running on that same thread could), which is a separate class of bug fixed instead
+            // by making sure the UI thread is never handed blocking work in the first place (see
+            // AppState.applyControlServerState's ioScope move).
+            var stuckPromptSnoozeCount by remember { mutableStateOf(0) }
+            var showStuckPrompt by remember { mutableStateOf(false) }
+            LaunchedEffect(state.isLoading, stuckPromptSnoozeCount) {
+                showStuckPrompt = false
+                if (state.isLoading) {
+                    kotlinx.coroutines.delay(STUCK_LOADING_PROMPT_DELAY_MS)
+                    if (state.isLoading) showStuckPrompt = true
+                }
+            }
+            if (showStuckPrompt) {
+                StuckLoadingDialog(
+                    status = state.loadingStatus,
+                    onCancelLoading = { state.cancelAllLoads(); showStuckPrompt = false },
+                    onCloseAllTabs = { state.closeAllTabs(); showStuckPrompt = false },
+                    onClearCache = { state.requestClearCache(); showStuckPrompt = false },
+                    onKeepWaiting = { showStuckPrompt = false; stuckPromptSnoozeCount++ },
+                )
             }
 
             // ── Context menu ──────────────────────────────────────────
@@ -661,16 +690,33 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
             }
 
             state.pendingDeleteFilterId?.let { filterId ->
-                val filterName = state.savedFilters.find { it.id == filterId }?.name ?: "this filter"
+                val draftName = state.filterDraftsByTab.values.find { it.id == filterId }?.name
+                val filterName = state.savedFilters.find { it.id == filterId }?.name
+                    ?: draftName
+                    ?: "this filter"
                 Dialog(onDismissRequest = { state.cancelDeleteSF() }) {
                     val tc2 = tc()
                     Column(
                         Modifier.width(360.dp).background(tc2.p, RoundedCornerShape(8.dp))
                             .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
                     ) {
-                        AppText("Delete saved filter?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        AppText(
+                            if (draftName != null) "Delete filter draft?" else "Delete saved filter?",
+                            color = tc2.tx,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
                         Spacer(Modifier.height(6.dp))
-                        AppText("Delete \"$filterName\" from saved filters.", color = tc2.td, fontSize = 11.sp, maxLines = 2)
+                        AppText(
+                            if (draftName != null) {
+                                "Remove \"$filterName\" from this tab's filter list. Current filter values stay applied."
+                            } else {
+                                "Delete \"$filterName\" from saved filters."
+                            },
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 3,
+                        )
                         Spacer(Modifier.height(14.dp))
                         Row(
                             Modifier.fillMaxWidth(),
@@ -679,6 +725,222 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         ) {
                             DialogActionButton("Delete", active = true, danger = true) { state.confirmDeleteSF() }
                             DialogActionButton("Cancel", active = false) { state.cancelDeleteSF() }
+                        }
+                    }
+                }
+            }
+
+            state.pendingFilterRename?.let { pending ->
+                Dialog(onDismissRequest = { state.cancelRenameFilter() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(380.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText(
+                            if (pending.isDraft) "Save draft filter" else "Rename saved filter",
+                            color = tc2.tx,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            if (pending.isDraft) {
+                                "Renaming this draft saves it as a normal filter preset."
+                            } else {
+                                "Choose a unique name for \"${pending.currentName}\"."
+                            },
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 3,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        InlineField(
+                            state.filterRenameName,
+                            {
+                                state.filterRenameName = it
+                                state.filterRenameError = null
+                            },
+                            "Filter name…",
+                            Modifier.fillMaxWidth(),
+                            fontSize = 13.sp,
+                        )
+                        state.filterRenameError?.let {
+                            Spacer(Modifier.height(6.dp))
+                            AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton("Save", active = state.filterRenameName.isNotBlank()) {
+                                state.confirmRenameFilter()
+                            }
+                            DialogActionButton("Cancel", active = false) { state.cancelRenameFilter() }
+                        }
+                    }
+                }
+            }
+
+            if (state.filterExportDialogOpen) {
+                Dialog(onDismissRequest = { state.cancelExportFilters() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(440.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Export saved filters", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText("Choose which normal saved filters to export.", color = tc2.td, fontSize = 11.sp, maxLines = 2)
+                        Spacer(Modifier.height(10.dp))
+                        Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                            state.savedFilters.forEach { sf ->
+                                CheckRow(
+                                    checked = sf.id in state.filterExportSelectedIds,
+                                    onToggle = { state.toggleExportFilterSelection(sf.id) },
+                                ) {
+                                    TooltipArea(
+                                        tooltip = {
+                                            Box(
+                                                Modifier.background(tc2.p2, RoundedCornerShape(4.dp))
+                                                    .border(0.5.dp, tc2.br, RoundedCornerShape(4.dp))
+                                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                            ) {
+                                                AppText(sf.name, color = tc2.tx, fontSize = 11.sp)
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                    ) {
+                                        AppText(sf.name, color = tc2.tx, fontSize = 11.sp, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton("Export all", active = true) { state.exportFiltersToFile() }
+                            DialogActionButton(
+                                "Export selected",
+                                active = state.filterExportSelectedIds.isNotEmpty(),
+                                enabled = state.filterExportSelectedIds.isNotEmpty(),
+                            ) { state.exportFiltersToFile(state.filterExportSelectedIds) }
+                            DialogActionButton("Cancel", active = false) { state.cancelExportFilters() }
+                        }
+                    }
+                }
+            }
+
+            state.pendingImportReview?.let { review ->
+                Dialog(onDismissRequest = { state.cancelImportFilters() }, properties = DialogProperties(dismissOnClickOutside = false)) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(560.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Import saved filters", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            review.sourceName?.let { "Review filters from \"$it\" before importing." }
+                                ?: "Review filters before importing.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 2,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Column(
+                            Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            review.rows.forEach { row ->
+                                Column(
+                                    Modifier.fillMaxWidth().background(tc2.bg, CORNER_MD)
+                                        .border(1.dp, tc2.br, CORNER_MD).padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                        AppText(
+                                            row.incoming.name,
+                                            color = tc2.tx,
+                                            fontSize = 11.sp,
+                                            modifier = Modifier.weight(1f),
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        AppText(
+                                            when (row.action) {
+                                                ImportFilterAction.ADD -> "add"
+                                                ImportFilterAction.RENAME -> "rename"
+                                                ImportFilterAction.REPLACE -> "replace"
+                                                ImportFilterAction.SKIP -> "skip"
+                                            },
+                                            color = if (row.action == ImportFilterAction.SKIP) tc2.td else tc2.ac,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                        )
+                                    }
+                                    if (row.action == ImportFilterAction.RENAME) {
+                                        InlineField(
+                                            row.resolvedName,
+                                            { state.setImportFilterRename(row.rowId, it) },
+                                            "Imported name…",
+                                            Modifier.fillMaxWidth(),
+                                            fontSize = 12.sp,
+                                        )
+                                    } else {
+                                        AppText(
+                                            row.skippedReason?.let { "Skipped: $it" } ?: "Will import as \"${row.resolvedName}\".",
+                                            color = tc2.td,
+                                            fontSize = 10.sp,
+                                            maxLines = 2,
+                                        )
+                                    }
+                                    if (row.targetId != null && row.skippedReason == null) {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            AppButton("Rename", onClick = {
+                                                state.setImportFilterAction(row.rowId, ImportFilterAction.RENAME)
+                                            }, variant = if (row.action == ImportFilterAction.RENAME) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                            AppButton("Replace", onClick = {
+                                                state.setImportFilterAction(row.rowId, ImportFilterAction.REPLACE)
+                                            }, variant = if (row.action == ImportFilterAction.REPLACE) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                            AppButton("Skip", onClick = {
+                                                state.setImportFilterAction(row.rowId, ImportFilterAction.SKIP)
+                                            }, variant = if (row.action == ImportFilterAction.SKIP) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton("Import", active = true) { state.confirmImportFilters() }
+                            DialogActionButton("Cancel", active = false) { state.cancelImportFilters() }
+                        }
+                    }
+                }
+            }
+
+            state.importError?.let { message ->
+                Dialog(onDismissRequest = { state.importError = null }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(360.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Could not import filters", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(message, color = tc2.td, fontSize = 11.sp, maxLines = 3)
+                        Spacer(Modifier.height(14.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                            DialogActionButton("OK", active = true) { state.importError = null }
                         }
                     }
                 }
@@ -1323,6 +1585,47 @@ private fun SplitDialogTextField(
     )
 }
 
+// How long isLoading must stay continuously true before the watchdog offers to intervene. Big
+// real files legitimately take a few seconds (see docs/perf-large-files.md); 30s is comfortably
+// past that so this doesn't fire on normal big-file loads, only on something that's actually
+// stuck.
+private const val STUCK_LOADING_PROMPT_DELAY_MS = 30_000L
+
+@Composable
+private fun StuckLoadingDialog(
+    status: String?,
+    onCancelLoading: () -> Unit,
+    onCloseAllTabs: () -> Unit,
+    onClearCache: () -> Unit,
+    onKeepWaiting: () -> Unit,
+) {
+    val tc = tc()
+    Dialog(onDismissRequest = onKeepWaiting) {
+        Column(
+            Modifier.width(360.dp).background(tc.p, RoundedCornerShape(8.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(20.dp),
+        ) {
+            AppText("Still loading…", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            AppText(
+                "This has been loading for a while" + (status?.let { " ($it)" } ?: "") +
+                    ". If it looks stuck, you can:",
+                color = tc.td,
+                fontSize = 11.sp,
+                maxLines = 4,
+            )
+            Spacer(Modifier.height(14.dp))
+            AppButton("Cancel loading", onClick = onCancelLoading, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(6.dp))
+            AppButton("Close all tabs", onClick = onCloseAllTabs, isDanger = true, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(6.dp))
+            AppButton("Clear cache…", onClick = onClearCache, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(10.dp))
+            AppButton("Keep waiting", onClick = onKeepWaiting, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
 @Composable
 private fun DialogActionButton(
     label: String,
@@ -1358,8 +1661,8 @@ private fun BoundFilterPanel(
 ) {
     if (!state.filterVisible) return
     FilterPanel(
-        tab = tab, savedFilters = state.savedFilters,
-        activeSavedFilterId = state.activeSavedFilterId(tab.id),
+        tab = tab, savedFilters = state.savedFiltersForTab(tab.id),
+        activeFilterItemId = state.activeFilterItemId(tab.id),
         tagUsage = state.tagUsage, fpState = state.fpState,
         newHlPat = state.newHlPat, newHlRx = state.newHlRx, newHlColor = state.newHlColor,
         newSeqText = state.newSeqText, newSeqRegex = state.newSeqRegex,
@@ -1405,15 +1708,16 @@ private fun BoundFilterPanel(
         onSetNewHlColor = { state.newHlColor = it },
         onLoadFilter = { state.requestLoadFilter(tab.id, it) },
         onDeleteSF = { state.requestDeleteSF(it) },
+        onRenameSF = { state.beginRenameFilter(it) },
         onOpenSFDialog = { state.sfDialog = true; state.sfTabId = tab.id; state.sfName = "" },
         onSetKwInTag = { state.setKwInTag(tab.id, it) },
         onAddPkgPrefix = { state.addPkgPrefix(tab.id, it) },
         onRemovePkgPrefix = { state.removePkgPrefix(tab.id, it) },
         onAddExcludePkgPrefix = { state.addExcludePkgPrefix(tab.id, it) },
         onRemoveExcludePkgPrefix = { state.removeExcludePkgPrefix(tab.id, it) },
-        onExportFilters = { state.exportFiltersToFile() },
+        onExportFilters = { state.beginExportFilters() },
         onImportFilters = { state.importFiltersFromFile() },
-        onImportFiltersFromFiles = { files -> files.forEach { state.importFiltersFromFileAsync(it) } },
+        onImportFiltersFromFiles = { files -> state.importFiltersFromFilesAsync(files) },
         onClearFilter = { state.requestClearFilter(tab.id) },
         onNavigateCrash = { site -> state.requestCrashNavigation(tab.id, site.entry.id) },
         onUiStateChanged = { state.autosaveNow() },
@@ -1788,16 +2092,12 @@ private fun TabBar(state: AppState) {
             modifier = Modifier.fillMaxHeight(),
             shape = if (hasRecentFiles) middleShape else rightShape,
         ) {
+            // No setFilenameFilter here: it's unreliable on macOS (the native NSOpenPanel doesn't
+            // consistently invoke it), which greyed out files that would open fine by drag-and-drop.
+            // Show everything and validate after the pick — see AppState.openPathOrShowError.
             val fd = FileDialog(null as Frame?, "Open Log File", FileDialog.LOAD)
-            fd.setFilenameFilter { dir, name ->
-                val f = File(dir, name)
-                f.isDirectory || com.openlog.utils.isLikelyTextFile(f) || com.openlog.utils.isSupportedArchiveFile(f)
-            }
             fd.isVisible = true
-            fd.file?.let {
-                val f = File(fd.directory, it)
-                state.openPath(f)
-            }
+            fd.file?.let { state.openPathOrShowError(File(fd.directory, it)) }
         }
         if (hasRecentFiles) {
             ToolbarBtn(
@@ -2308,6 +2608,9 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                     )
                 }
             }
+            state.mcpControlError?.let { message ->
+                AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+            }
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -2367,22 +2670,31 @@ private fun SettingsSectionHeader(title: String) {
     }
 }
 
-private fun mcpConfigSnippet(port: Int): String = """
+// The repo's own .mcp.json can get away with a relative "mcp-server/src/index.ts" because tools
+// that auto-discover it (Claude Code) spawn the server with cwd already at the project root.
+// This copy-for-other-tools snippet can't assume that — a client like LM Studio spawns MCP
+// servers from ITS OWN working directory, so a relative path there resolves to nothing and the
+// server fails to start.
+//
+// user.dir is only a reliable stand-in for "the project root" during an unpackaged dev run
+// (./gradlew desktopRun sets the JVM's working directory there). The control server can also be
+// turned on from Settings in a normal installed .dmg/.deb/.msi — that's the common case, not a
+// dev-only path — and there user.dir is whatever the OS handed the launched app (often "/" for a
+// openLog serves MCP natively over Streamable HTTP at /mcp — any MCP client (LM Studio, Claude
+// Code, Codex) connects with just this URL, no Node bridge / npm / repo checkout to install. The
+// snippet is the standard mcpServers-with-url form those clients accept.
+internal fun mcpConfigSnippet(port: Int): String =
+    """
     {
       "mcpServers": {
         "openlog-control": {
-          "command": "npx",
-          "args": ["tsx", "mcp-server/src/index.ts"],
-          "env": {
-            "OPENLOG_CONTROL_URL": "http://127.0.0.1:$port",
-            "OPENLOG_CLIENT_NAME": "my-tool"
-          }
+          "url": "${mcpUrl(port)}"
         }
       }
     }
     """.trimIndent()
 
-private fun mcpServerCommand(): String = "npx tsx mcp-server/src/index.ts"
+internal fun mcpUrl(port: Int): String = "http://127.0.0.1:$port/mcp"
 
 private fun mcpCurlCommand(port: Int): String = "curl http://127.0.0.1:$port/tabs"
 
@@ -2403,8 +2715,8 @@ private fun agoLabel(lastSeenMs: Long): String {
 }
 
 private enum class McpCopiedField {
+    Url,
     Config,
-    ServerCommand,
     CurlCommand,
 }
 
@@ -2419,9 +2731,11 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
         }
     }
     var clients by remember { mutableStateOf<List<ConnectedClientInfo>>(state.connectedMcpClients()) }
+    var mcpSessions by remember { mutableStateOf<List<McpSessionInfo>>(state.mcpSessions()) }
     LaunchedEffect(Unit) {
         while (true) {
             clients = state.connectedMcpClients()
+            mcpSessions = state.mcpSessions()
             kotlinx.coroutines.delay(CLIENT_POLL_INTERVAL_MS)
         }
     }
@@ -2431,24 +2745,20 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
     ) {
         AppText("MCP Connection Info", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(10.dp))
-        AppText("Base URL", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(3.dp))
-        AppText("http://127.0.0.1:$port", color = tc.ts, fontSize = 12.sp, fontFamily = MONO)
-        Spacer(Modifier.height(14.dp))
         AppText(
-            "Any MCP client (Claude Code, Codex, or your own tooling) can connect using this " +
-                "server command:",
+            "openLog speaks MCP directly. Point any MCP client (LM Studio, Claude Code, Codex) at " +
+                "this URL — nothing to install:",
             color = tc.td,
             fontSize = 11.sp,
-            maxLines = 2,
+            maxLines = 3,
         )
         Spacer(Modifier.height(8.dp))
         CopyableCodeField(
-            text = mcpServerCommand(),
-            copied = copiedField == McpCopiedField.ServerCommand,
+            text = mcpUrl(port),
+            copied = copiedField == McpCopiedField.Url,
             onCopy = {
-                state.copyToClipboard(mcpServerCommand())
-                copiedField = McpCopiedField.ServerCommand
+                state.copyToClipboard(mcpUrl(port))
+                copiedField = McpCopiedField.Url
             },
         )
         Spacer(Modifier.height(8.dp))
@@ -2467,10 +2777,9 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
         }
         Spacer(Modifier.height(10.dp))
         AppText(
-            "A .mcp.json at the repo root already has this registered for tools that " +
-                "auto-discover it. For others, paste the copied snippet into their own MCP " +
-                "config — set OPENLOG_CLIENT_NAME to whatever you want that tool labelled as " +
-                "below.",
+            "Paste the copied JSON into your client's MCP config (e.g. ~/.lmstudio/mcp.json), or " +
+                "add the URL directly (Claude Code: claude mcp add --transport http openlog " +
+                "${mcpUrl(port)}).",
             color = tc.td,
             fontSize = 11.sp,
             maxLines = 4,
@@ -2494,16 +2803,35 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
         Spacer(Modifier.height(18.dp))
         AppText("Connected clients", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(6.dp))
-        if (clients.isEmpty()) {
+        if (clients.isEmpty() && mcpSessions.isEmpty()) {
             AppText(
-                "None right now — only tools using the OPENLOG_CLIENT_NAME/id headers above " +
-                    "show up here, so plain curl calls never appear.",
+                "None right now.",
                 color = tc.td,
                 fontSize = 11.sp,
-                maxLines = 3,
+                maxLines = 1,
             )
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                mcpSessions.forEach { s ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column {
+                            AppText(s.name, color = tc.tx, fontSize = 11.sp)
+                            AppText(s.version?.let { "MCP session · v$it" } ?: "MCP session", color = tc.td, fontSize = 10.sp)
+                        }
+                        AppButton(
+                            "Disconnect",
+                            isDanger = true,
+                            onClick = {
+                                state.disconnectMcpSession(s.id)
+                                mcpSessions = state.mcpSessions()
+                            },
+                        )
+                    }
+                }
                 clients.forEach { c ->
                     Row(
                         Modifier.fillMaxWidth(),
@@ -2832,6 +3160,16 @@ private fun AnnotationSettingsRow(state: AppState) {
                 options = listOf("On", "Off"),
                 selectedIndices = setOf(if (state.settings.autoExportNotes) 0 else 1),
                 onToggle = { idx -> state.updateSettings { it.copy(autoExportNotes = idx == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Filter backups",
+            tooltip = "Writes timestamped saved-filter backups after saved-filter changes.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.autoSaveFilters) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(autoSaveFilters = idx == 0) } },
             )
         }
         CompactSetting("Number blocks") {

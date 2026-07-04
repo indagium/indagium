@@ -201,6 +201,7 @@ data class AppSettings(
     val filterListRows: Int = 5,
     val visibleTabLimit: Int = 8,
     val autoExportNotes: Boolean = true,
+    val autoSaveFilters: Boolean = true,
     val annotationLogBlockStyle: AnnotationLogBlockStyle = AnnotationLogBlockStyle.JIRA_JAVA,
     val numberAnnotationBlocks: Boolean = false,
     val annotationPrefixLabel: String = "From",

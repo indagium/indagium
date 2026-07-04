@@ -101,6 +101,21 @@ data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val 
 
 data class PendingDuplicateFilterSave(val tabId: String, val existingId: String, val existingName: String, val requestedName: String)
 
+data class PendingFilterRename(val id: String, val currentName: String, val isDraft: Boolean, val tabId: String?)
+
+enum class ImportFilterAction { RENAME, REPLACE, SKIP, ADD }
+
+data class ImportFilterReviewRow(
+    val rowId: String,
+    val incoming: SavedFilter,
+    val action: ImportFilterAction,
+    val resolvedName: String,
+    val targetId: String? = null,
+    val skippedReason: String? = null,
+)
+
+data class PendingImportReview(val rows: List<ImportFilterReviewRow>, val sourceName: String? = null)
+
 data class OpenFileError(val title: String, val path: String?, val message: String)
 
 data class AnnotationNavigationRequest(val id: Long, val tabId: String, val logIds: List<Int>)
@@ -144,6 +159,7 @@ class AppState(
     private val parser: (File) -> List<LogEntry> = ::parseLogcat,
     private val notesDir: File = DesktopStorage.notesDir(),
     private val archiveCacheDir: File = DesktopStorage.archiveCacheDir(),
+    private val filterBackupsDir: File? = null,
     private val autoExportNotes: Boolean = true,
 ) {
     // ── Settings ────────────────────────────────────────────────────
@@ -215,6 +231,11 @@ class AppState(
     var settingsOpen by mutableStateOf(false)
     var shortcutsOpen by mutableStateOf(false)
     var mcpInfoOpen by mutableStateOf(false)
+
+    // Set when applyControlServerState fails to bind (e.g. port already in use); shown next to
+    // the Settings toggle. Cleared on the next successful start.
+    var mcpControlError by mutableStateOf<String?>(null)
+        private set
     var openError by mutableStateOf<OpenFileError?>(null)
     var recentFiles by mutableStateOf<List<String>>(emptyList())
     var recentMenuOpen by mutableStateOf(false)
@@ -228,9 +249,18 @@ class AppState(
     var pendingSequenceStart by mutableStateOf<PendingSequenceStart?>(null)
     var pendingFilterLoad by mutableStateOf<PendingFilterLoad?>(null)
     var pendingDuplicateFilterSave by mutableStateOf<PendingDuplicateFilterSave?>(null)
+    var pendingFilterRename by mutableStateOf<PendingFilterRename?>(null)
+    var filterRenameName by mutableStateOf("")
+    var filterRenameError by mutableStateOf<String?>(null)
+    var pendingImportReview by mutableStateOf<PendingImportReview?>(null)
+    var importError by mutableStateOf<String?>(null)
+    var filterExportDialogOpen by mutableStateOf(false)
+    var filterExportSelectedIds by mutableStateOf<Set<String>>(emptySet())
     var pendingDeleteFilterId by mutableStateOf<String?>(null)
     var pendingClearFilterTabId by mutableStateOf<String?>(null)
     var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
+    var filterDraftsByTab by mutableStateOf<Map<String, SavedFilter>>(emptyMap())
+    var activeFilterDraftTabIds by mutableStateOf<Set<String>>(emptySet())
     var pendingAnnotationNavigation by mutableStateOf<AnnotationNavigationRequest?>(null)
         private set
     var pendingZipPicker by mutableStateOf<PendingZipPicker?>(null)
@@ -274,23 +304,73 @@ class AppState(
         }
     }
 
+    // Manual escape hatch for the "still loading" prompt the UI shows after a long stretch of
+    // isLoading — surfaced so a load that's genuinely stuck (not just slow) doesn't leave the
+    // user with no way back into the app short of force-quitting. Deliberately doesn't touch
+    // pendingLoads/isLoading directly: every load path's own `finally` block already calls
+    // finishLoading() exactly once on any exit including cancellation, so cancelling the jobs
+    // here and letting those existing finally blocks unwind naturally is what actually drives
+    // isLoading back to false — resetting the counter by hand here too would double-decrement it
+    // once those blocks run, and could under-count a totally unrelated load that starts in the
+    // gap between this call and the cancelled jobs' cancellation actually being observed.
+    fun cancelAllLoads() {
+        activeLoads.values.toList().forEach { it.cancel() }
+    }
+
     // Actually starts/stops the server, independent of whether the transition should be
     // persisted — see setMcpControlEnabled (persists) vs startControlServerForThisSessionOnly
     // (doesn't). Guards against double-starting the same port (ControlServer.start() isn't
     // safely re-callable while already running) and rebinds if the port actually changed.
+    //
+    // ControlServer.start() binds a real socket (HttpServer.create). Two distinct failure modes:
+    // (1) it throws fast — typically BindException: Address already in use — handled below by
+    // catching and reverting the persisted toggle so a failed bind can't crash-loop every future
+    // launch (a past version let this propagate uncaught and crash the whole JVM); (2) it can
+    // also just be SLOW rather than fail — e.g. macOS's first-time "accept incoming connections"
+    // firewall prompt, or VPN/security software intercepting the bind — with no fixed bound on
+    // how slow. This function is called both from a Settings-toggle click and from Main.kt's
+    // startup DisposableEffect, both of which used to run it synchronously on the Compose UI
+    // thread, so a slow bind froze the entire window for as long as it took, indistinguishable
+    // from a real hang. Every other blocking operation in this class already runs on ioScope for
+    // exactly this reason (see openFile, mergeTabs, etc.) — the control server was the one
+    // exception. Only the START side needs this: stop() just tears down an already-bound socket
+    // (no network I/O to block on) and must stay synchronous so the Main.kt shutdown path
+    // (stopControlServerForShutdown, called from onDispose right before the process exits) can't
+    // race a fire-and-forget coroutine that might never get scheduled before exit.
     private fun applyControlServerState(enabled: Boolean, port: Int) {
         if (enabled) {
             val running = controlServer
             if (running != null && running.boundPort == port) return
             running?.stop()
-            controlServer = ControlServer(this, port).also { it.start() }
+            controlServer = null
+            mcpControlError = null
+            ioScope.launch {
+                val started = runCatching { ControlServer(this@AppState, port).also { it.start() } }
+                started.fold(
+                    onSuccess = { controlServer = it; mcpControlError = null },
+                    onFailure = { error ->
+                        mcpControlError = "Could not start automation server on port $port: " +
+                            (error.message ?: error::class.simpleName.orEmpty().ifBlank { "unknown error" })
+                        // Only the persisted (Settings-toggle) path needs undoing — the ephemeral
+                        // debug-env-var path never sets this in the first place, so this is a
+                        // no-op there and doesn't touch the setting it deliberately keeps out of.
+                        if (settings.mcpControlEnabled) {
+                            settings = settings.copy(mcpControlEnabled = false)
+                            autosaveNow()
+                        }
+                    },
+                )
+            }
         } else {
             controlServer?.stop()
             controlServer = null
         }
     }
 
-    // Settings-UI path: persists the toggle (autosaved) AND applies it immediately.
+    // Settings-UI path: persists the toggle (autosaved) AND applies it immediately. If the bind
+    // fails, applyControlServerState reverts settings.mcpControlEnabled and reports the failure
+    // via mcpControlError — re-read here so the just-written autosave reflects the outcome that
+    // actually happened, not the request.
     fun setMcpControlEnabled(enabled: Boolean, port: Int) {
         val clamped = port.coerceIn(MIN_PORT, MAX_PORT)
         if (settings.mcpControlEnabled != enabled || settings.mcpControlPort != clamped) {
@@ -317,6 +397,10 @@ class AppState(
     fun blockMcpClient(id: String) = controlServer?.blockClient(id)
 
     fun unblockMcpClient(id: String) = controlServer?.unblockClient(id)
+
+    fun mcpSessions() = controlServer?.mcpSessions() ?: emptyList()
+
+    fun disconnectMcpSession(id: String) = controlServer?.disconnectMcpSession(id)
 
     private fun beginLoading(status: String = "Loading file...") = synchronized(stateLock) {
         pendingLoads += 1
@@ -401,7 +485,12 @@ class AppState(
         tabs = tabs.map { if (it.id == tabId) fn(it) else it }
     }
 
-    fun upFlt(tabId: String, fn: (Filter) -> Filter) = upTab(tabId) { it.copy(filter = fn(it.filter)) }
+    fun upFlt(tabId: String, fn: (Filter) -> Filter) = upFlt(tabId, trackDraft = true, fn)
+
+    private fun upFlt(tabId: String, trackDraft: Boolean, fn: (Filter) -> Filter) {
+        upTab(tabId) { it.copy(filter = fn(it.filter)) }
+        if (trackDraft) updateFilterDraftAfterEdit(tabId)
+    }
 
     fun activeTab() = tabs.find { it.id == activeTabId } ?: tabs.firstOrNull()
 
@@ -428,8 +517,9 @@ class AppState(
     fun toggleSeq(tabId: String) = upFlt(tabId) { it.copy(seqOn = !it.seqOn) }
 
     fun clearFilter(tabId: String) {
-        upFlt(tabId) { Filter() }
+        upFlt(tabId, trackDraft = false) { Filter() }
         activeSavedFilterIds = activeSavedFilterIds - tabId
+        activeFilterDraftTabIds = activeFilterDraftTabIds - tabId
     }
 
     fun requestClearFilter(tabId: String) {
@@ -661,6 +751,36 @@ class AppState(
     }
 
     // ── Saved filters ────────────────────────────────────────────────
+    private fun draftIdForTab(tabId: String) = "draft_$tabId"
+
+    private fun draftNameForTab(tabId: String): String =
+        "unsaved_${tab(tabId)?.filename ?: tabId}"
+
+    fun filterDraftForTab(tabId: String): SavedFilter? = filterDraftsByTab[tabId]
+
+    fun savedFiltersForTab(tabId: String): List<SavedFilter> =
+        listOfNotNull(filterDraftsByTab[tabId]) + savedFilters
+
+    private fun updateFilterDraftAfterEdit(tabId: String) {
+        val hasActiveNormal = tabId in activeSavedFilterIds
+        val hasActiveDraft = tabId in activeFilterDraftTabIds
+        if (!hasActiveNormal && !hasActiveDraft) return
+        val draft = snapshotFilter(tabId, draftIdForTab(tabId), draftNameForTab(tabId)) ?: return
+        filterDraftsByTab = filterDraftsByTab + (tabId to draft)
+        activeSavedFilterIds = activeSavedFilterIds - tabId
+        activeFilterDraftTabIds = activeFilterDraftTabIds + tabId
+    }
+
+    private fun clearDraftForTab(tabId: String) {
+        filterDraftsByTab = filterDraftsByTab - tabId
+        activeFilterDraftTabIds = activeFilterDraftTabIds - tabId
+    }
+
+    private fun savedFilterNameExists(name: String, exceptId: String? = null): Boolean {
+        val clean = name.trim()
+        return savedFilters.any { it.id != exceptId && it.name.trim().equals(clean, ignoreCase = true) }
+    }
+
     fun saveFilter(tabId: String, name: String) {
         val cleanName = name.trim()
         if (cleanName.isBlank()) return
@@ -672,7 +792,9 @@ class AppState(
         val sf = snapshotFilter(tabId, "sf${System.nanoTime()}_${savedFilters.size}", cleanName) ?: return
         savedFilters = savedFilters + sf
         activeSavedFilterIds = activeSavedFilterIds + (tabId to sf.id)
+        clearDraftForTab(tabId)
         sfDialog = false; sfName = ""
+        writeFilterBackup()
         loadPendingFilterAfterSaving(tabId)
     }
 
@@ -681,9 +803,11 @@ class AppState(
         val updated = snapshotFilter(pending.tabId, pending.existingId, pending.requestedName) ?: return
         savedFilters = savedFilters.map { if (it.id == pending.existingId) updated else it }
         activeSavedFilterIds = activeSavedFilterIds + (pending.tabId to pending.existingId)
+        clearDraftForTab(pending.tabId)
         pendingDuplicateFilterSave = null
         sfDialog = false
         sfName = ""
+        writeFilterBackup()
         loadPendingFilterAfterSaving(pending.tabId)
     }
 
@@ -692,6 +816,12 @@ class AppState(
     }
 
     fun requestLoadFilter(tabId: String, sf: SavedFilter) {
+        if (sf.id == filterDraftsByTab[tabId]?.id) {
+            upFlt(tabId, trackDraft = false) { _ -> sf.toFilter() }
+            activeSavedFilterIds = activeSavedFilterIds - tabId
+            activeFilterDraftTabIds = activeFilterDraftTabIds + tabId
+            return
+        }
         val currentId = activeSavedFilterIds[tabId]
         val current = currentId?.let { id -> savedFilters.find { it.id == id } }
         if (current != null && !currentFilterMatches(tabId, current)) {
@@ -711,6 +841,8 @@ class AppState(
         val current = savedFilters.find { it.id == currentId } ?: return
         val updated = snapshotFilter(pending.tabId, current.id, current.name) ?: return
         savedFilters = savedFilters.map { if (it.id == currentId) updated else it }
+        clearDraftForTab(pending.tabId)
+        writeFilterBackup()
         loadPendingFilter(pending)
     }
 
@@ -767,8 +899,9 @@ class AppState(
     }
 
     fun loadFilter(tabId: String, sf: SavedFilter) {
-        upFlt(tabId) { _ -> sf.toFilter() }
+        upFlt(tabId, trackDraft = false) { _ -> sf.toFilter() }
         activeSavedFilterIds = activeSavedFilterIds + (tabId to sf.id)
+        activeFilterDraftTabIds = activeFilterDraftTabIds - tabId
     }
 
     fun loadFilterById(tabId: String, presetId: String): Boolean {
@@ -780,8 +913,11 @@ class AppState(
 
     fun activeSavedFilterId(tabId: String): String? = activeSavedFilterIds[tabId]
 
+    fun activeFilterItemId(tabId: String): String? =
+        if (tabId in activeFilterDraftTabIds) filterDraftsByTab[tabId]?.id else activeSavedFilterIds[tabId]
+
     fun requestDeleteSF(id: String) {
-        if (savedFilters.any { it.id == id }) pendingDeleteFilterId = id
+        if (savedFilters.any { it.id == id } || filterDraftsByTab.values.any { it.id == id }) pendingDeleteFilterId = id
     }
 
     fun cancelDeleteSF() {
@@ -795,13 +931,79 @@ class AppState(
     }
 
     private fun deleteSF(id: String) {
+        val draftTabId = filterDraftsByTab.entries.firstOrNull { it.value.id == id }?.key
+        if (draftTabId != null) {
+            filterDraftsByTab = filterDraftsByTab - draftTabId
+            activeFilterDraftTabIds = activeFilterDraftTabIds - draftTabId
+            return
+        }
         savedFilters = savedFilters.filter { it.id != id }
         activeSavedFilterIds = activeSavedFilterIds.filterValues { it != id }
+        writeFilterBackup()
     }
 
-    fun exportFilters(): String = buildString {
+    fun beginRenameFilter(id: String) {
+        val draftEntry = filterDraftsByTab.entries.firstOrNull { it.value.id == id }
+        val current = draftEntry?.value ?: savedFilters.find { it.id == id } ?: return
+        pendingFilterRename = PendingFilterRename(id, current.name, draftEntry != null, draftEntry?.key)
+        filterRenameName = current.name
+        filterRenameError = null
+    }
+
+    fun cancelRenameFilter() {
+        pendingFilterRename = null
+        filterRenameName = ""
+        filterRenameError = null
+    }
+
+    fun confirmRenameFilter(name: String = filterRenameName) {
+        val pending = pendingFilterRename ?: return
+        val cleanName = name.trim()
+        filterRenameError = when {
+            cleanName.isBlank() -> "Filter name cannot be empty."
+            savedFilterNameExists(cleanName, exceptId = if (pending.isDraft) null else pending.id) ->
+                "A saved filter named \"$cleanName\" already exists."
+            else -> null
+        }
+        if (filterRenameError != null) return
+        if (pending.isDraft) {
+            val tabId = pending.tabId ?: return
+            val draft = filterDraftsByTab[tabId] ?: return
+            val promoted = draft.copy(id = "sf${System.nanoTime()}_${savedFilters.size}", name = cleanName)
+            savedFilters = savedFilters + promoted
+            activeSavedFilterIds = activeSavedFilterIds + (tabId to promoted.id)
+            clearDraftForTab(tabId)
+        } else {
+            savedFilters = savedFilters.map { if (it.id == pending.id) it.copy(name = cleanName) else it }
+        }
+        pendingFilterRename = null
+        filterRenameName = ""
+        filterRenameError = null
+        writeFilterBackup()
+    }
+
+    fun beginExportFilters() {
+        filterExportSelectedIds = savedFilters.map { it.id }.toSet()
+        filterExportDialogOpen = true
+    }
+
+    fun toggleExportFilterSelection(id: String) {
+        filterExportSelectedIds = if (id in filterExportSelectedIds) filterExportSelectedIds - id else filterExportSelectedIds + id
+    }
+
+    fun cancelExportFilters() {
+        filterExportDialogOpen = false
+        filterExportSelectedIds = emptySet()
+    }
+
+    fun exportFilters(selectedIds: Set<String>? = null): String {
+        val filters = selectedIds?.let { ids -> savedFilters.filter { it.id in ids } } ?: savedFilters
+        return exportFiltersList(filters)
+    }
+
+    private fun exportFiltersList(filters: List<SavedFilter>): String = buildString {
         appendLine("[")
-        savedFilters.forEachIndexed { i, sf ->
+        filters.forEachIndexed { i, sf ->
             appendLine("  {")
             appendLine("    \"id\": \"${sf.id}\",")
             appendLine("    \"name\": ${sf.name.jsonStr()},")
@@ -835,14 +1037,85 @@ class AppState(
                 }]"
             )
             append("  }")
-            if (i < savedFilters.lastIndex) appendLine(",") else appendLine()
+            if (i < filters.lastIndex) appendLine(",") else appendLine()
         }
         append("]")
     }
 
     fun importFilters(json: String) {
-        val entries = json.jsonObjectArray().getOrElse { return }
-        val imported = entries.mapNotNull { obj ->
+        val imported = decodeFilters(json).getOrElse { return }
+        if (imported.isEmpty()) return
+        savedFilters = savedFilters + imported
+    }
+
+    fun beginImportFilters(json: String, sourceName: String? = null) {
+        val imported = decodeFilters(json).getOrElse {
+            importError = "Could not read filter file."
+            pendingImportReview = null
+            return
+        }
+        beginImportFilterList(imported, sourceName)
+    }
+
+    private fun beginImportFilterList(imported: List<SavedFilter>, sourceName: String? = null) {
+        if (imported.isEmpty()) {
+            importError = "No saved filters found."
+            pendingImportReview = null
+            return
+        }
+        val rows = buildImportRows(imported)
+        pendingImportReview = PendingImportReview(rows, sourceName)
+        importError = null
+    }
+
+    fun cancelImportFilters() {
+        pendingImportReview = null
+    }
+
+    fun setImportFilterAction(rowId: String, action: ImportFilterAction) {
+        val review = pendingImportReview ?: return
+        pendingImportReview = review.copy(rows = review.rows.map { row ->
+            if (row.rowId != rowId) row else row.withImportAction(action)
+        })
+    }
+
+    fun setImportFilterRename(rowId: String, name: String) {
+        val review = pendingImportReview ?: return
+        pendingImportReview = review.copy(rows = review.rows.map { row ->
+            if (row.rowId != rowId) row else row.copy(action = ImportFilterAction.RENAME, resolvedName = uniqueFilterName(name, row.targetId))
+        })
+    }
+
+    fun confirmImportFilters() {
+        val review = pendingImportReview ?: return
+        var next = savedFilters
+        var changed = false
+        review.rows.forEach { row ->
+            when (row.action) {
+                ImportFilterAction.ADD, ImportFilterAction.RENAME -> {
+                    next = next + row.incoming.copy(id = freshSavedFilterId(), name = uniqueNameAgainst(row.resolvedName, next))
+                    changed = true
+                }
+
+                ImportFilterAction.REPLACE -> {
+                    val targetId = row.targetId ?: return@forEach
+                    next = next.map { existing ->
+                        if (existing.id == targetId) row.incoming.copy(id = existing.id, name = existing.name) else existing
+                    }
+                    changed = true
+                }
+
+                ImportFilterAction.SKIP -> Unit
+            }
+        }
+        savedFilters = next
+        pendingImportReview = null
+        if (changed) writeFilterBackup()
+    }
+
+    private fun decodeFilters(json: String): Result<List<SavedFilter>> = runCatching {
+        val entries = json.jsonObjectArray().getOrThrow()
+        entries.mapNotNull { obj ->
             val name = obj.stringField("name") ?: return@mapNotNull null
             val id = obj.stringField("id")?.takeIf { it.isNotBlank() } ?: "sf${System.currentTimeMillis()}_${name.hashCode()}"
             val levels =
@@ -873,7 +1146,94 @@ class AppState(
                 excludePkgPrefixes,
             )
         }
-        savedFilters = savedFilters + imported
+    }
+
+    private fun buildImportRows(imported: List<SavedFilter>): List<ImportFilterReviewRow> {
+        var usedNames = savedFilters.map { it.name.normalizedFilterName() }.toMutableSet()
+        return imported.mapIndexed { idx, incoming ->
+            val existing = savedFilters.firstOrNull { it.name.normalizedFilterName() == incoming.name.normalizedFilterName() }
+            val rowId = "import_${System.nanoTime()}_$idx"
+            when {
+                existing != null && existing.sameFilterPayloadAs(incoming) ->
+                    ImportFilterReviewRow(
+                        rowId = rowId,
+                        incoming = incoming,
+                        action = ImportFilterAction.SKIP,
+                        resolvedName = existing.name,
+                        targetId = existing.id,
+                        skippedReason = "identical",
+                    )
+
+                existing != null -> {
+                    val renamed = uniqueName(incoming.name + " (imported)", usedNames)
+                    usedNames += renamed.normalizedFilterName()
+                    ImportFilterReviewRow(
+                        rowId = rowId,
+                        incoming = incoming,
+                        action = ImportFilterAction.RENAME,
+                        resolvedName = renamed,
+                        targetId = existing.id,
+                    )
+                }
+
+                else -> {
+                    val name = uniqueName(incoming.name, usedNames)
+                    usedNames += name.normalizedFilterName()
+                    ImportFilterReviewRow(
+                        rowId = rowId,
+                        incoming = incoming,
+                        action = ImportFilterAction.ADD,
+                        resolvedName = name,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun ImportFilterReviewRow.withImportAction(action: ImportFilterAction): ImportFilterReviewRow =
+        when (action) {
+            ImportFilterAction.REPLACE -> if (targetId != null) copy(action = action) else this
+            ImportFilterAction.SKIP -> copy(action = action)
+            ImportFilterAction.RENAME -> copy(action = action, resolvedName = uniqueFilterName(incoming.name + " (imported)", targetId))
+            ImportFilterAction.ADD -> if (targetId == null) copy(action = action) else this
+        }
+
+    private fun uniqueFilterName(baseName: String, targetId: String? = null): String {
+        val used = savedFilters
+            .filter { it.id != targetId }
+            .map { it.name.normalizedFilterName() }
+            .toMutableSet()
+        return uniqueName(baseName.trim().ifBlank { "Imported filter" }, used)
+    }
+
+    private fun uniqueNameAgainst(baseName: String, filters: List<SavedFilter>): String =
+        uniqueName(baseName.trim().ifBlank { "Imported filter" }, filters.map { it.name.normalizedFilterName() }.toMutableSet())
+
+    private fun uniqueName(baseName: String, usedNormalizedNames: MutableSet<String>): String {
+        val cleanBase = baseName.trim().ifBlank { "Imported filter" }
+        if (cleanBase.normalizedFilterName() !in usedNormalizedNames) return cleanBase
+        var idx = 2
+        while (true) {
+            val candidate = "$cleanBase $idx"
+            if (candidate.normalizedFilterName() !in usedNormalizedNames) return candidate
+            idx += 1
+        }
+    }
+
+    private fun freshSavedFilterId(): String = "sf${System.nanoTime()}_${savedFilters.size}"
+
+    private fun writeFilterBackup() {
+        if (!settings.autoSaveFilters) return
+        val backupsDir = filterBackupsDir ?: return
+        runCatching {
+            backupsDir.mkdirs()
+            val file = File(backupsDir, "filters-${System.currentTimeMillis()}-${System.nanoTime()}.json")
+            file.writeText(exportFilters())
+            val backups = backupsDir.listFiles { f -> f.isFile && f.extension.equals("json", ignoreCase = true) }
+                .orEmpty()
+                .sortedByDescending { it.name }
+            backups.drop(20).forEach { it.delete() }
+        }
     }
 
     // ── Row selection ────────────────────────────────────────────────
@@ -1321,6 +1681,8 @@ class AppState(
             tabs = next
         }
         activeSavedFilterIds = activeSavedFilterIds - tabIds
+        filterDraftsByTab = filterDraftsByTab - tabIds
+        activeFilterDraftTabIds = activeFilterDraftTabIds - tabIds
     }
 
     // Ships "merge already-open tabs" (v1) — data's already in memory, no re-parsing needed.
@@ -1410,9 +1772,7 @@ class AppState(
     fun openFileAsIs(file: File): String? = openFileInternal(file, bypassSplitPrompt = true)
 
     fun openPaths(files: List<File>, splitPromptThresholdBytes: Long = SPLIT_PROMPT_BYTES) {
-        val openable = files.filter { file ->
-            file.exists() && (isSupportedArchiveFile(file) || isLikelyLogPath(file) || isLikelyTextFile(file))
-        }
+        val openable = files.filter { isOpenableAsLog(it) }
         val oversizedFiles = openable.filter { file ->
             !isSupportedArchiveFile(file) && requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
         }
@@ -1433,6 +1793,27 @@ class AppState(
 
     private fun isLikelyLogPath(file: File): Boolean =
         file.isFile && file.extension.lowercase() in setOf("log", "txt")
+
+    // Same "will this actually open" check drag-and-drop uses (openPaths above), reused by the
+    // Open toolbar button in App.kt. Needed there because java.awt.FileDialog.setFilenameFilter
+    // is unreliable on macOS — the native NSOpenPanel doesn't consistently invoke it, so a
+    // content-sniffed text file with a non-standard extension can be greyed out in the picker
+    // even though it would open fine. The dialog shows all files instead, and this validates
+    // (with a real error message) after the user actually picks one.
+    fun isOpenableAsLog(file: File): Boolean =
+        file.exists() && (isSupportedArchiveFile(file) || isLikelyLogPath(file) || isLikelyTextFile(file))
+
+    fun openPathOrShowError(file: File) {
+        if (!isOpenableAsLog(file)) {
+            showOpenError(
+                title = "Could not open file",
+                path = file.absolutePath,
+                message = "This doesn't look like a log/text file or a supported archive (.zip/.7z).",
+            )
+            return
+        }
+        openPath(file)
+    }
 
     private fun openFileInternal(file: File, bypassSplitPrompt: Boolean): String? {
         val path = file.absolutePath
@@ -1995,14 +2376,15 @@ class AppState(
         }
     }
 
-    fun exportFiltersToFile() {
+    fun exportFiltersToFile(selectedIds: Set<String>? = null) {
         val dlg = FileDialog(null as Frame?, "Export Filters", FileDialog.SAVE).apply {
             file = "openlog_filters.json"; isVisible = true
         }
         val path = dlg.file ?: return
         val dir = dlg.directory ?: return
         val file = File(dir, path)
-        ioScope.launch { runCatching { file.writeText(exportFilters()) } }
+        ioScope.launch { runCatching { file.writeText(exportFilters(selectedIds)) } }
+        cancelExportFilters()
     }
 
     fun importFiltersFromFile() {
@@ -2015,11 +2397,23 @@ class AppState(
     }
 
     fun importFiltersFromFile(file: File) {
-        runCatching { importFilters(file.readText()) }
+        runCatching { beginImportFilters(file.readText(), file.name) }
+            .onFailure {
+                importError = "Could not read filter file."
+                pendingImportReview = null
+            }
     }
 
     fun importFiltersFromFileAsync(file: File) {
         ioScope.launch { importFiltersFromFile(file) }
+    }
+
+    fun importFiltersFromFilesAsync(files: List<File>) {
+        ioScope.launch {
+            val decoded = files.mapNotNull { file -> runCatching { decodeFilters(file.readText()).getOrNull() }.getOrNull() }
+            val imported = decoded.flatten()
+            beginImportFilterList(imported, files.joinToString(", ") { it.name })
+        }
     }
 
     // ── Archive cache ────────────────────────────────────────────────
@@ -2417,6 +2811,7 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     filterListRows.toString(),
     visibleTabLimit.toString(),
     autoExportNotes.toString(),
+    autoSaveFilters.toString(),
     annotationLogBlockStyle.name,
     numberAnnotationBlocks.toString(),
     annotationPrefixLabel,
@@ -2428,6 +2823,8 @@ private fun AppSettings.settingsToken(): String = tokenFields(
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
     val p = token.tokenFields()
     if (p.size < 5) return@runCatching null
+    val hasFilterAutosaveField = p.getOrNull(8)?.toBooleanStrictOrNull() != null
+    val tailOffset = if (hasFilterAutosaveField) 1 else 0
     AppSettings(
         theme = runCatching { ThemePreset.valueOf(p[0]) }.getOrElse { ThemePreset.LIGHT },
         fontSize = p[1].toIntOrNull() ?: 12,
@@ -2437,14 +2834,15 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         filterListRows = p.getOrNull(5)?.toIntOrNull()?.coerceIn(1, 20) ?: 5,
         visibleTabLimit = p.getOrNull(6)?.toIntOrNull()?.coerceIn(2, 20) ?: 8,
         autoExportNotes = p.getOrNull(7)?.toBooleanStrictOrNull() ?: true,
-        annotationLogBlockStyle = p.getOrNull(8)
+        autoSaveFilters = if (hasFilterAutosaveField) p.getOrNull(8)?.toBooleanStrictOrNull() ?: true else true,
+        annotationLogBlockStyle = p.getOrNull(8 + tailOffset)
             ?.let { runCatching { AnnotationLogBlockStyle.valueOf(it) }.getOrNull() }
             ?: AnnotationLogBlockStyle.INDENTED,
-        numberAnnotationBlocks = p.getOrNull(9)?.toBooleanStrictOrNull() ?: false,
-        annotationPrefixLabel = p.getOrNull(10)?.takeIf { it.isNotBlank() } ?: "From",
-        navScrollMargin = p.getOrNull(11)?.toIntOrNull()?.coerceIn(0, 30) ?: 5,
-        mcpControlEnabled = p.getOrNull(12)?.toBooleanStrictOrNull() ?: false,
-        mcpControlPort = p.getOrNull(13)?.toIntOrNull()?.coerceIn(MIN_PORT, MAX_PORT) ?: DEFAULT_MCP_PORT,
+        numberAnnotationBlocks = p.getOrNull(9 + tailOffset)?.toBooleanStrictOrNull() ?: false,
+        annotationPrefixLabel = p.getOrNull(10 + tailOffset)?.takeIf { it.isNotBlank() } ?: "From",
+        navScrollMargin = p.getOrNull(11 + tailOffset)?.toIntOrNull()?.coerceIn(0, 30) ?: 5,
+        mcpControlEnabled = p.getOrNull(12 + tailOffset)?.toBooleanStrictOrNull() ?: false,
+        mcpControlPort = p.getOrNull(13 + tailOffset)?.toIntOrNull()?.coerceIn(MIN_PORT, MAX_PORT) ?: DEFAULT_MCP_PORT,
     )
 }.getOrNull()
 
@@ -2594,6 +2992,11 @@ private fun SavedFilter.toFilter(): Filter = Filter(
     pidTidFilter = pidTidFilter,
     sequences = sequences,
 )
+
+private fun String.normalizedFilterName(): String = trim().lowercase()
+
+private fun SavedFilter.sameFilterPayloadAs(other: SavedFilter): Boolean =
+    copy(id = "", name = "") == other.copy(id = "", name = "")
 
 private fun String.encodedList(): List<String> =
     if (isBlank()) emptyList() else split(",").filter { it.isNotBlank() }.map { it.unb64() }

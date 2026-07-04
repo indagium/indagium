@@ -3,13 +3,23 @@
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
-    kotlin("multiplatform") version "2.1.0"
-    id("org.jetbrains.compose") version "1.7.3"
-    id("org.jetbrains.kotlin.plugin.compose") version "2.1.0"
+    // Kotlin/Compose bumped 2.1.0 -> 2.4.0 so the app can consume the official Kotlin MCP SDK
+    // (io.modelcontextprotocol:kotlin-sdk-server), which is built with Kotlin 2.4.0 and whose
+    // metadata isn't consumable ~3 minor versions back. Compose Multiplatform 1.11.1 is the
+    // matching pairing for Kotlin 2.4.0.
+    kotlin("multiplatform") version "2.4.0"
+    id("org.jetbrains.compose") version "1.11.1"
+    id("org.jetbrains.kotlin.plugin.compose") version "2.4.0"
     id("io.gitlab.arturbosch.detekt") version "1.23.7"
     id("org.jlleitschuh.gradle.ktlint") version "12.1.2"
-    id("org.jetbrains.kotlinx.kover") version "0.7.6"
+    // Kover 0.7.6 references KotlinJvmCompilation.compileKotlinTask, removed in the Kotlin 2.4.0
+    // Gradle plugin — bumped to 0.9.8, which also uses the 0.8.0+ `kover { reports { ... } }` DSL.
+    id("org.jetbrains.kotlinx.kover") version "0.9.8"
 }
+
+// MCP SDK 0.14.0 is built with Kotlin 2.3.21 (consumable by our 2.4.0 compiler) and Ktor 3.4.3;
+// it exposes the mcpStreamableHttp {} Ktor helper the older 0.8.x line lacked.
+val ktorVersion = "3.4.3"
 
 val appVersion: String = providers.gradleProperty("app.version").get()
 val appAuthor = "Roman Arnaut"
@@ -52,6 +62,12 @@ kotlin {
                 implementation(compose.components.resources)
                 implementation("org.apache.commons:commons-compress:1.28.0")
                 implementation("org.tukaani:xz:1.10")
+                // Native MCP server (ControlServer.kt): the app speaks MCP over Streamable HTTP
+                // so clients connect by URL with no Node bridge. The SDK's mcpStreamableHttp {}
+                // helper runs on Ktor (CIO engine); CORS lets browser-based MCP inspectors reach it.
+                implementation("io.modelcontextprotocol:kotlin-sdk-server:0.14.0")
+                implementation("io.ktor:ktor-server-cio:$ktorVersion")
+                implementation("io.ktor:ktor-server-cors:$ktorVersion")
             }
         }
         val desktopTest by getting
@@ -85,6 +101,14 @@ compose.desktop {
             description = "Android logcat analysis tool"
             vendor = appAuthor
             copyright = "Copyright (C) 2026 $appAuthor"
+            // Packaged builds ship a jlink-trimmed JVM, sized from jdeps' static analysis of our
+            // jars. jdeps doesn't detect com.sun.net.httpserver.* (used by ControlServer.kt) as
+            // a real dependency — it's a JDK-internal-looking package, not a public java.* API —
+            // so without this the module (and the whole class) is silently missing at runtime:
+            // NoClassDefFoundError: com/sun/net/httpserver/HttpServer the moment anyone enables
+            // the MCP control server in a packaged .dmg/.deb/.msi. desktopRun never surfaces
+            // this because it runs on your full local JDK, not the trimmed runtime image.
+            modules("jdk.httpserver")
             macOS {
                 bundleID = "com.romanarnaut.openlog"
                 iconFile.set(project.file("icons/openlog.icns"))
@@ -173,10 +197,8 @@ tasks.matching { it.name == "runKtlintCheckOverDesktopMainSourceSet" }.configure
 
 // ── Kover ───────────────────────────────────────────────────────────
 // Run: ./gradlew koverHtmlReport
-koverReport {
-    defaults {
-        html { onCheck = false }
-        xml { onCheck = false }
+kover {
+    reports {
         filters {
             excludes {
                 // Exclude pure Compose UI files — these are rendering-only projections of
@@ -192,6 +214,10 @@ koverReport {
                     "com.openlog.ui.MainKt",
                 )
             }
+        }
+        total {
+            html { onCheck = false }
+            xml { onCheck = false }
         }
     }
 }
