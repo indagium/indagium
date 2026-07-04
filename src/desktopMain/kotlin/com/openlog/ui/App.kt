@@ -2542,6 +2542,9 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                     )
                 }
             }
+            state.mcpControlError?.let { message ->
+                AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+            }
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -2601,12 +2604,21 @@ private fun SettingsSectionHeader(title: String) {
     }
 }
 
-private fun mcpConfigSnippet(port: Int): String = """
+// The repo's own .mcp.json can get away with a relative "mcp-server/src/index.ts" because tools
+// that auto-discover it (Claude Code) spawn the server with cwd already at the project root.
+// This copy-for-other-tools snippet can't assume that — a client like LM Studio spawns MCP
+// servers from ITS OWN working directory, so a relative path there resolves to nothing and the
+// server fails to start. user.dir is safe to resolve here specifically because the control
+// server only ever runs via `./gradlew desktopRun` (see ControlServer's kdoc — it's gated off in
+// every packaged build), and Gradle's run task's working directory is the project root.
+internal fun mcpConfigSnippet(port: Int): String {
+    val serverEntry = File(System.getProperty("user.dir"), "mcp-server/src/index.ts").absolutePath
+    return """
     {
       "mcpServers": {
         "openlog-control": {
           "command": "npx",
-          "args": ["tsx", "mcp-server/src/index.ts"],
+          "args": ["tsx", "${serverEntry.jsonEscape()}"],
           "env": {
             "OPENLOG_CONTROL_URL": "http://127.0.0.1:$port",
             "OPENLOG_CLIENT_NAME": "my-tool"
@@ -2614,7 +2626,12 @@ private fun mcpConfigSnippet(port: Int): String = """
         }
       }
     }
-    """.trimIndent()
+        """.trimIndent()
+}
+
+// Windows paths contain backslashes, which are JSON escape characters — without this, a copied
+// Windows path like "C:\Users\me\mcp-server\src\index.ts" would paste as invalid JSON.
+internal fun String.jsonEscape(): String = replace("\\", "\\\\")
 
 private fun mcpServerCommand(): String = "npx tsx mcp-server/src/index.ts"
 

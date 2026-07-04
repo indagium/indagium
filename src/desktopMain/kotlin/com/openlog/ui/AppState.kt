@@ -231,6 +231,11 @@ class AppState(
     var settingsOpen by mutableStateOf(false)
     var shortcutsOpen by mutableStateOf(false)
     var mcpInfoOpen by mutableStateOf(false)
+
+    // Set when applyControlServerState fails to bind (e.g. port already in use); shown next to
+    // the Settings toggle. Cleared on the next successful start.
+    var mcpControlError by mutableStateOf<String?>(null)
+        private set
     var openError by mutableStateOf<OpenFileError?>(null)
     var recentFiles by mutableStateOf<List<String>>(emptyList())
     var recentMenuOpen by mutableStateOf(false)
@@ -303,19 +308,47 @@ class AppState(
     // persisted — see setMcpControlEnabled (persists) vs startControlServerForThisSessionOnly
     // (doesn't). Guards against double-starting the same port (ControlServer.start() isn't
     // safely re-callable while already running) and rebinds if the port actually changed.
+    //
+    // ControlServer.start() binds a real socket (HttpServer.create) — it throws (typically
+    // BindException: Address already in use) whenever the port is already taken by another
+    // process, including a second openLog instance. That's a routine, expected failure mode for
+    // "listen on a fixed port", not a program bug, so it must never crash the app: a past version
+    // let it propagate uncaught, which crashed the whole JVM on toggle AND — because
+    // setMcpControlEnabled had already persisted enabled=true to autosave before this ran —
+    // made every subsequent launch retry the same failing bind and crash again before the
+    // window ever appeared, with no way back into Settings to turn it off. Catching here and
+    // reverting the persisted toggle on failure (below) closes both holes at once.
     private fun applyControlServerState(enabled: Boolean, port: Int) {
         if (enabled) {
             val running = controlServer
             if (running != null && running.boundPort == port) return
             running?.stop()
-            controlServer = ControlServer(this, port).also { it.start() }
+            controlServer = null
+            val started = runCatching { ControlServer(this, port).also { it.start() } }
+            started.fold(
+                onSuccess = { controlServer = it; mcpControlError = null },
+                onFailure = { error ->
+                    mcpControlError = "Could not start automation server on port $port: " +
+                        (error.message ?: error::class.simpleName.orEmpty().ifBlank { "unknown error" })
+                    // Only the persisted (Settings-toggle) path needs undoing — the ephemeral
+                    // debug-env-var path never sets this in the first place, so this is a no-op
+                    // there and doesn't touch the setting it deliberately keeps out of.
+                    if (settings.mcpControlEnabled) {
+                        settings = settings.copy(mcpControlEnabled = false)
+                        autosaveNow()
+                    }
+                },
+            )
         } else {
             controlServer?.stop()
             controlServer = null
         }
     }
 
-    // Settings-UI path: persists the toggle (autosaved) AND applies it immediately.
+    // Settings-UI path: persists the toggle (autosaved) AND applies it immediately. If the bind
+    // fails, applyControlServerState reverts settings.mcpControlEnabled and reports the failure
+    // via mcpControlError — re-read here so the just-written autosave reflects the outcome that
+    // actually happened, not the request.
     fun setMcpControlEnabled(enabled: Boolean, port: Int) {
         val clamped = port.coerceIn(MIN_PORT, MAX_PORT)
         if (settings.mcpControlEnabled != enabled || settings.mcpControlPort != clamped) {

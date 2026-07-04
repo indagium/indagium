@@ -1,6 +1,7 @@
 package com.openlog
 
 import androidx.compose.ui.graphics.Color
+import com.openlog.debug.ControlServer
 import com.openlog.model.AnnBlock
 import com.openlog.model.AnnotationLogBlockStyle
 import com.openlog.model.Annotations
@@ -33,6 +34,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -2416,6 +2418,53 @@ class AppStateBehaviorTest {
         state.activeTabId = "t1"
         state.selectAll("t1")
         assertEquals(setOf(2), state.activeTab()!!.selected)
+    }
+
+    @Test
+    fun mcpControlEnableSurvivesPortAlreadyInUse() {
+        // Occupy a real port first (0 → OS picks a free one) so the app's own bind attempt on
+        // that same port genuinely fails, the same way it would if another instance — or a
+        // stray leftover process — already held the configured port.
+        val blocker = ControlServer(AppState(), 0)
+        blocker.start()
+        try {
+            val state = AppState()
+            state.settings = state.settings.copy(mcpControlPort = blocker.boundPort)
+
+            // Must not throw: a past version let ControlServer.start()'s BindException escape
+            // uncaught, crashing the whole app on this exact toggle.
+            state.setMcpControlEnabled(true, blocker.boundPort)
+
+            assertNotNull(state.mcpControlError)
+            assertTrue(state.mcpControlError!!.contains(blocker.boundPort.toString()))
+            // The failed attempt must not leave the toggle persisted as "on" — otherwise Main.kt
+            // retries the identical failing bind on every future launch before the window ever
+            // appears, with no way back into Settings to turn it off.
+            assertFalse(state.settings.mcpControlEnabled)
+        } finally {
+            blocker.stop()
+        }
+    }
+
+    @Test
+    fun mcpControlEnableSucceedsOnFreePortAfterEarlierFailure() {
+        val blocker = ControlServer(AppState(), 0)
+        blocker.start()
+        val state = AppState()
+        state.setMcpControlEnabled(true, blocker.boundPort)
+        assertNotNull(state.mcpControlError)
+        blocker.stop()
+
+        // A free port right after must succeed and clear the earlier error — the failure isn't
+        // "sticky" once the underlying conflict is gone. java.net.ServerSocket(0)'s bind-then-
+        // release-immediately is the same "let the OS hand back a free port" idiom ControlServer
+        // itself uses for tests (port 0); the tiny reuse race is standard for this pattern.
+        val freePort = java.net.ServerSocket(0).use { it.localPort }
+        state.setMcpControlEnabled(true, freePort)
+
+        assertEquals(null, state.mcpControlError)
+        assertTrue(state.settings.mcpControlEnabled)
+        state.setMcpControlEnabled(false, state.settings.mcpControlPort)
     }
 
     private fun waitUntil(timeoutMs: Long = 2_000, condition: () -> Boolean) {
