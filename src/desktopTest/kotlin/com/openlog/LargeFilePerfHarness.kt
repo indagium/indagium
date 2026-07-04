@@ -73,9 +73,12 @@ class LargeFilePerfHarness {
         // "expand after X" measurement must run immediately after its filter-establishing call —
         // exactly the succession a user's expand click produces.
         timed("computeItems warmup") { computeItems(tab, applyFilter = true) }
-        timed("computeItems noFilter") { computeItems(tab, applyFilter = true) }
+        val baseItems = timed("computeItems noFilter") { computeItems(tab, applyFilter = true) }
+        val baseSummary = timed("summarizeItems full") { com.openlog.ui.summarizeItems(baseItems) }
         val firstGid = tab.analysis.stackTraceGroups.first().gid
-        timed("computeItems expandOneGroup") { computeItems(tab.copy(expanded = setOf(firstGid)), applyFilter = true) }
+        val expandedItems =
+            timed("computeItems expandOneGroup") { computeItems(tab.copy(expanded = setOf(firstGid)), applyFilter = true) }
+        timed("spliceSummarize") { com.openlog.ui.spliceSummarize(baseItems, baseSummary, expandedItems) }
         val kwTab = tab.copy(filter = Filter(mode = FilterMode.KEYWORD, kwText = "denied"))
         timed("computeItems keyword'denied'") { computeItems(kwTab, applyFilter = true) }
         timed("computeItems keywordThenExpand") {
@@ -94,6 +97,15 @@ class LargeFilePerfHarness {
             timed("computeItems denseSequenceDef") { computeItems(denseSeqTab, applyFilter = true) }
         }
         println("PERF heapEnd: ${heapUsedMb() - baselineHeap}MB")
+
+        // File splitting throughput (pure streaming copy — should be I/O-bound, a couple of
+        // seconds for 1.5GB, not minutes).
+        val splitDir = kotlin.io.path.createTempDirectory("openlog-split-bench").toFile()
+        val splitOutputs = com.openlog.utils.planSplitOutputs(file.name, splitDir, "part", 3)
+        timed("split into 3 parts") { com.openlog.utils.splitFileToFiles(file, splitOutputs) }
+        check(splitOutputs.sumOf { it.length() } == file.length()) { "split parts must sum to source size" }
+        println("PERF splitPartSizes: ${splitOutputs.map { it.length() / BYTES_PER_MB }}MB")
+        splitOutputs.forEach { it.delete() }
 
         // Archive path: -Dopenlog.perf.archive=<path to zip containing a large log>.
         val archivePath = System.getProperty("openlog.perf.archive").orEmpty()

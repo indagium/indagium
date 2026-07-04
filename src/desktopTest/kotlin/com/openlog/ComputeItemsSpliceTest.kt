@@ -9,12 +9,16 @@ import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
 import com.openlog.model.LogTab
 import com.openlog.model.SequenceDef
+import com.openlog.ui.ItemsSummary
 import com.openlog.ui.mkTab
+import com.openlog.ui.spliceSummarize
+import com.openlog.ui.summarizeItems
 import com.openlog.utils.EntryIdMap
 import com.openlog.utils.computeItems
 import com.openlog.utils.invalidateComputeCache
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 // The stack-group toggle splice (spliceStackToggle in Filter.kt) must be indistinguishable from
@@ -89,6 +93,48 @@ class ComputeItemsSpliceTest {
         invalidateComputeCache(seqTab.id)
         val fresh = computeItems(seqTab.copy(expanded = toggled), applyFilter = true)
         assertEquals(fresh, spliced)
+    }
+
+    private fun assertSummariesEqual(expected: ItemsSummary, actual: ItemsSummary?) {
+        assertNotNull(actual)
+        assertTrue(expected.allIds.contentEquals(actual.allIds), "allIds differ")
+        assertTrue(expected.rowIds.contentEquals(actual.rowIds), "rowIds differ")
+        assertEquals(expected.idBits, actual.idBits, "idBits differ")
+        assertEquals(expected.collapsedGroupCount, actual.collapsedGroupCount)
+        assertEquals(expected.expandedGroupCount, actual.expandedGroupCount)
+    }
+
+    @Test
+    fun spliceSummarizeMatchesFullSummarizeForExpandAndCollapse() {
+        val tab = mkTab("sp-sum", "a.log", crashEntries())
+        val gid = tab.analysis.stackTraceGroups.first().gid
+        invalidateComputeCache(tab.id)
+        val base = computeItems(tab, applyFilter = true)
+        val baseSummary = summarizeItems(base)
+
+        // Expand: items share identity outside the spliced window.
+        val expandedItems = computeItems(tab.copy(expanded = setOf(gid)), applyFilter = true)
+        val expandedFull = summarizeItems(expandedItems)
+        assertSummariesEqual(expandedFull, spliceSummarize(base, baseSummary, expandedItems))
+
+        // Collapse back.
+        val collapsedItems = computeItems(tab.copy(expanded = emptySet()), applyFilter = true)
+        assertSummariesEqual(summarizeItems(collapsedItems), spliceSummarize(expandedItems, expandedFull, collapsedItems))
+    }
+
+    @Test
+    fun spliceSummarizeOnUnrelatedListsIsNullOrEquivalent() {
+        val tab = mkTab("sp-sum2", "a.log", crashEntries())
+        invalidateComputeCache(tab.id)
+        val base = computeItems(tab, applyFilter = true)
+        val baseSummary = summarizeItems(base)
+        invalidateComputeCache(tab.id)
+        // Full rebuild allocates fresh objects — no shared identity. Above the size guard the
+        // splice bails to null; below it, it splices the whole window, which must still be
+        // exactly equivalent to a full summarize. Either outcome is safe; wrongness isn't.
+        val rebuilt = computeItems(tab, applyFilter = true)
+        val result = spliceSummarize(base, baseSummary, rebuilt)
+        if (result != null) assertSummariesEqual(summarizeItems(rebuilt), result)
     }
 
     @Test

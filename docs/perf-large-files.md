@@ -195,6 +195,31 @@ analysis 6.2–7.1s; zip adds <1s of decompression).
    both check the flag (the FilterPanel one would have been a ~6s freeze during composition).
    Tag counts are computed with the parse (cheap) so the filter panel is complete immediately.
 
+## Round 4: summary splice + splitter rewrite (2026-07-04)
+
+Field feedback after round 3: crash-block toggles still felt slow, and splitting took far
+longer than opening. Both root causes were outside what the harness measured:
+
+1. **`summarizeItems` was the real per-toggle cost — 485ms at 10.6M items.** The round-3 splice
+   made `computeItems` 27–38ms, but the UI path also rebuilds the `ItemsSummary` (id arrays,
+   row ids, BitSet, group counts) with a full O(n) object walk on every toggle — unmeasured
+   until now. `spliceSummarize` (LogViewer.kt) exploits the item-list splice shape: identity
+   head/tail scans find the single changed window, unchanged regions arraycopy from the old
+   summary, only the window is walked. **485ms → 102ms**; whole toggle ≈130ms, under the 250ms
+   loading-line grace, so crash-block expand/collapse no longer flashes anything. Falls back to
+   the full summarize whenever identity sharing doesn't hold (first compute, full rebuilds,
+   window >25% on large lists); equivalence pinned in `ComputeItemsSpliceTest`.
+2. **`splitStreamToFiles` read one byte at a time and `File.appendBytes`-ed each line** — an
+   open/write/close cycle per line, ~30M+ syscalls for 10M lines: minutes to split what takes
+   4s to open. Rewritten as a chunked copy with one held-open buffered stream per part;
+   rotation decisions still happen at line starts near part boundaries only. **1.5GB → 3 parts
+   in 1.1s** (497MB each, byte-sum == source). Behavioral nuance vs the old code: a line
+   straddling a bulk-copied chunk edge may overshoot the part target by its own length —
+   parts still contain only whole lines and concatenate byte-exactly.
+
+Fixture note: perf fixtures now live in `build/perf-fixtures/` (gitignored) — the system tmp
+cleaner was deleting scratchpad copies mid-session.
+
 ## Future work (explicitly out of scope here)
 
 - klogg-style byte-offset indexing with on-demand line realization — only worth the data-model

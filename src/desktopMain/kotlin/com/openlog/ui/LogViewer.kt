@@ -52,6 +52,7 @@ import java.awt.Cursor as AwtCursor
 private const val PAGE_JUMP_ROWS = 15
 private const val CTX_MENU_KEYBOARD_X_DP = 60f
 private const val LOADING_GRACE_MS = 250L
+private const val SPLICE_SUMMARY_GUARD_MIN_ITEMS = 4096
 
 private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
     if (hl.regex) {
@@ -106,6 +107,84 @@ internal fun summarizeItems(items: List<LogItem>): ItemsSummary {
     return ItemsSummary(allIds, rowIds, idBits, collapsed, expanded)
 }
 
+// Splice-aware summary update. computeItems' stack-toggle fast path returns a list sharing
+// object identity with the previous one outside a single contiguous window; when that holds,
+// the summary arrays rebuild via arraycopy of the unchanged regions plus a walk of just the
+// window — instead of the full O(n) object walk of summarizeItems, which had become the
+// dominant per-toggle cost (~300ms at 10M items) once computeItems itself was spliced.
+// Returns null (caller does the full summarize) whenever the shape doesn't hold: first compute,
+// full rebuilds (fresh objects everywhere), or a window too large to be worth it.
+// Branchy by nature: head/tail identity scans plus per-array splicing in one place IS the
+// optimization — factoring it apart would re-walk the lists it exists to avoid walking.
+@Suppress("ReturnCount", "LongMethod", "CyclomaticComplexMethod")
+internal fun spliceSummarize(
+    oldItems: List<LogItem>,
+    oldSummary: ItemsSummary,
+    newItems: List<LogItem>,
+): ItemsSummary? {
+    val oldN = oldItems.size
+    val newN = newItems.size
+    if (oldN == 0 || newN == 0 || oldSummary.allIds.size != oldN) return null
+    var head = 0
+    var headRows = 0
+    val maxHead = minOf(oldN, newN)
+    while (head < maxHead && oldItems[head] === newItems[head]) {
+        if (oldItems[head] is LogItem.Row) headRows++
+        head++
+    }
+    if (head == oldN && head == newN) return oldSummary
+    var tail = 0
+    var tailRows = 0
+    val maxTail = minOf(oldN, newN) - head
+    while (tail < maxTail && oldItems[oldN - 1 - tail] === newItems[newN - 1 - tail]) {
+        if (oldItems[oldN - 1 - tail] is LogItem.Row) tailRows++
+        tail++
+    }
+    // Large changed window on a large list: the clone+clear/set overhead beats a clean full
+    // summarize, so bail. Small lists always splice — either way is microseconds there, and it
+    // keeps the equivalence tests exercising this path.
+    if (newN > SPLICE_SUMMARY_GUARD_MIN_ITEMS && newN - head - tail > newN / 4) return null
+
+    val allIds = IntArray(newN)
+    System.arraycopy(oldSummary.allIds, 0, allIds, 0, head)
+    System.arraycopy(oldSummary.allIds, oldN - tail, allIds, newN - tail, tail)
+    val idBits = oldSummary.idBits.clone() as java.util.BitSet
+    var collapsed = oldSummary.collapsedGroupCount
+    var expanded = oldSummary.expandedGroupCount
+
+    fun headerDelta(item: LogItem, sign: Int) {
+        when (item) {
+            is LogItem.Row -> {} // row counts are derived from the window row-id list below
+            is LogItem.SeqHeader -> if (item.expanded) expanded += sign else collapsed += sign
+            is LogItem.ManualHeader -> if (item.expanded) expanded += sign else collapsed += sign
+            is LogItem.StackTraceHeader -> if (item.expanded) expanded += sign else collapsed += sign
+        }
+    }
+
+    for (i in head until oldN - tail) {
+        val item = oldItems[i]
+        idBits.clear(logItemEntryId(item))
+        headerDelta(item, -1)
+    }
+    val windowRowIds = ArrayList<Int>(newN - head - tail)
+    for (i in head until newN - tail) {
+        val item = newItems[i]
+        val id = logItemEntryId(item)
+        allIds[i] = id
+        idBits.set(id)
+        headerDelta(item, +1)
+        if (item is LogItem.Row) windowRowIds.add(id)
+    }
+
+    val oldWindowRows = oldSummary.rowCount - headRows - tailRows
+    val rowCount = oldSummary.rowCount - oldWindowRows + windowRowIds.size
+    val rowIds = IntArray(rowCount)
+    System.arraycopy(oldSummary.rowIds, 0, rowIds, 0, headRows)
+    windowRowIds.forEachIndexed { k, id -> rowIds[headRows + k] = id }
+    System.arraycopy(oldSummary.rowIds, oldSummary.rowCount - tailRows, rowIds, rowCount - tailRows, tailRows)
+    return ItemsSummary(allIds, rowIds, idBits, collapsed, expanded)
+}
+
 // Plain class on purpose: instances serve as remember/LaunchedEffect keys, where identity
 // comparison is O(1) but a data-class equals would deep-compare millions of items.
 internal class ComputedLogItems(
@@ -138,10 +217,13 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
     }
     LaunchedEffect(tab.id, dataSize, lastId, filter, expanded, manualBlocks, analysis, applyFilter) {
         val snapshot = tab.copy(selected = emptySet())
+        val previous = computed
         coroutineScope {
             val deferred = async(Dispatchers.Default) {
                 val items = computeItems(snapshot, applyFilter)
-                ComputedLogItems(items, summarizeItems(items), loading = false)
+                val summary = spliceSummarize(previous.items, previous.summary, items)
+                    ?: summarizeItems(items)
+                ComputedLogItems(items, summary, loading = false)
             }
             // Grace period before flagging as loading: sub-quarter-second recomputes (the common
             // expand/collapse case, now that filter and sequence results are memoized across
