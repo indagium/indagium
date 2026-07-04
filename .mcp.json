@@ -1,8 +1,7 @@
 {
   "mcpServers": {
     "openlog-control": {
-      "command": "npx",
-      "args": ["tsx", "mcp-server/src/index.ts"]
+      "url": "http://127.0.0.1:8991/mcp"
     }
   }
 }
