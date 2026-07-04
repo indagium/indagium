@@ -78,7 +78,7 @@ import kotlin.math.roundToInt
 private const val TAB_DRAG_SNAP_BIAS = 0.25f
 
 @Composable
-fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
+fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) }) {
     val theme = themeColors(state.settings.theme)
     val rootFocusRequester = remember { FocusRequester() }
     var pendingPanelFocus by remember { mutableStateOf<KeyboardPanel?>(null) }
@@ -661,16 +661,33 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
             }
 
             state.pendingDeleteFilterId?.let { filterId ->
-                val filterName = state.savedFilters.find { it.id == filterId }?.name ?: "this filter"
+                val draftName = state.filterDraftsByTab.values.find { it.id == filterId }?.name
+                val filterName = state.savedFilters.find { it.id == filterId }?.name
+                    ?: draftName
+                    ?: "this filter"
                 Dialog(onDismissRequest = { state.cancelDeleteSF() }) {
                     val tc2 = tc()
                     Column(
                         Modifier.width(360.dp).background(tc2.p, RoundedCornerShape(8.dp))
                             .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
                     ) {
-                        AppText("Delete saved filter?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        AppText(
+                            if (draftName != null) "Delete filter draft?" else "Delete saved filter?",
+                            color = tc2.tx,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
                         Spacer(Modifier.height(6.dp))
-                        AppText("Delete \"$filterName\" from saved filters.", color = tc2.td, fontSize = 11.sp, maxLines = 2)
+                        AppText(
+                            if (draftName != null) {
+                                "Remove \"$filterName\" from this tab's filter list. Current filter values stay applied."
+                            } else {
+                                "Delete \"$filterName\" from saved filters."
+                            },
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 3,
+                        )
                         Spacer(Modifier.height(14.dp))
                         Row(
                             Modifier.fillMaxWidth(),
@@ -679,6 +696,222 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true) }) {
                         ) {
                             DialogActionButton("Delete", active = true, danger = true) { state.confirmDeleteSF() }
                             DialogActionButton("Cancel", active = false) { state.cancelDeleteSF() }
+                        }
+                    }
+                }
+            }
+
+            state.pendingFilterRename?.let { pending ->
+                Dialog(onDismissRequest = { state.cancelRenameFilter() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(380.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText(
+                            if (pending.isDraft) "Save draft filter" else "Rename saved filter",
+                            color = tc2.tx,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            if (pending.isDraft) {
+                                "Renaming this draft saves it as a normal filter preset."
+                            } else {
+                                "Choose a unique name for \"${pending.currentName}\"."
+                            },
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 3,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        InlineField(
+                            state.filterRenameName,
+                            {
+                                state.filterRenameName = it
+                                state.filterRenameError = null
+                            },
+                            "Filter name…",
+                            Modifier.fillMaxWidth(),
+                            fontSize = 13.sp,
+                        )
+                        state.filterRenameError?.let {
+                            Spacer(Modifier.height(6.dp))
+                            AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton("Save", active = state.filterRenameName.isNotBlank()) {
+                                state.confirmRenameFilter()
+                            }
+                            DialogActionButton("Cancel", active = false) { state.cancelRenameFilter() }
+                        }
+                    }
+                }
+            }
+
+            if (state.filterExportDialogOpen) {
+                Dialog(onDismissRequest = { state.cancelExportFilters() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(440.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Export saved filters", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText("Choose which normal saved filters to export.", color = tc2.td, fontSize = 11.sp, maxLines = 2)
+                        Spacer(Modifier.height(10.dp))
+                        Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                            state.savedFilters.forEach { sf ->
+                                CheckRow(
+                                    checked = sf.id in state.filterExportSelectedIds,
+                                    onToggle = { state.toggleExportFilterSelection(sf.id) },
+                                ) {
+                                    TooltipArea(
+                                        tooltip = {
+                                            Box(
+                                                Modifier.background(tc2.p2, RoundedCornerShape(4.dp))
+                                                    .border(0.5.dp, tc2.br, RoundedCornerShape(4.dp))
+                                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                            ) {
+                                                AppText(sf.name, color = tc2.tx, fontSize = 11.sp)
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                    ) {
+                                        AppText(sf.name, color = tc2.tx, fontSize = 11.sp, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton("Export all", active = true) { state.exportFiltersToFile() }
+                            DialogActionButton(
+                                "Export selected",
+                                active = state.filterExportSelectedIds.isNotEmpty(),
+                                enabled = state.filterExportSelectedIds.isNotEmpty(),
+                            ) { state.exportFiltersToFile(state.filterExportSelectedIds) }
+                            DialogActionButton("Cancel", active = false) { state.cancelExportFilters() }
+                        }
+                    }
+                }
+            }
+
+            state.pendingImportReview?.let { review ->
+                Dialog(onDismissRequest = { state.cancelImportFilters() }, properties = DialogProperties(dismissOnClickOutside = false)) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(560.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Import saved filters", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            review.sourceName?.let { "Review filters from \"$it\" before importing." }
+                                ?: "Review filters before importing.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 2,
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Column(
+                            Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            review.rows.forEach { row ->
+                                Column(
+                                    Modifier.fillMaxWidth().background(tc2.bg, CORNER_MD)
+                                        .border(1.dp, tc2.br, CORNER_MD).padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                        AppText(
+                                            row.incoming.name,
+                                            color = tc2.tx,
+                                            fontSize = 11.sp,
+                                            modifier = Modifier.weight(1f),
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        AppText(
+                                            when (row.action) {
+                                                ImportFilterAction.ADD -> "add"
+                                                ImportFilterAction.RENAME -> "rename"
+                                                ImportFilterAction.REPLACE -> "replace"
+                                                ImportFilterAction.SKIP -> "skip"
+                                            },
+                                            color = if (row.action == ImportFilterAction.SKIP) tc2.td else tc2.ac,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                        )
+                                    }
+                                    if (row.action == ImportFilterAction.RENAME) {
+                                        InlineField(
+                                            row.resolvedName,
+                                            { state.setImportFilterRename(row.rowId, it) },
+                                            "Imported name…",
+                                            Modifier.fillMaxWidth(),
+                                            fontSize = 12.sp,
+                                        )
+                                    } else {
+                                        AppText(
+                                            row.skippedReason?.let { "Skipped: $it" } ?: "Will import as \"${row.resolvedName}\".",
+                                            color = tc2.td,
+                                            fontSize = 10.sp,
+                                            maxLines = 2,
+                                        )
+                                    }
+                                    if (row.targetId != null && row.skippedReason == null) {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            AppButton("Rename", onClick = {
+                                                state.setImportFilterAction(row.rowId, ImportFilterAction.RENAME)
+                                            }, variant = if (row.action == ImportFilterAction.RENAME) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                            AppButton("Replace", onClick = {
+                                                state.setImportFilterAction(row.rowId, ImportFilterAction.REPLACE)
+                                            }, variant = if (row.action == ImportFilterAction.REPLACE) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                            AppButton("Skip", onClick = {
+                                                state.setImportFilterAction(row.rowId, ImportFilterAction.SKIP)
+                                            }, variant = if (row.action == ImportFilterAction.SKIP) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton("Import", active = true) { state.confirmImportFilters() }
+                            DialogActionButton("Cancel", active = false) { state.cancelImportFilters() }
+                        }
+                    }
+                }
+            }
+
+            state.importError?.let { message ->
+                Dialog(onDismissRequest = { state.importError = null }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(360.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Could not import filters", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(message, color = tc2.td, fontSize = 11.sp, maxLines = 3)
+                        Spacer(Modifier.height(14.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                            DialogActionButton("OK", active = true) { state.importError = null }
                         }
                     }
                 }
@@ -1358,8 +1591,8 @@ private fun BoundFilterPanel(
 ) {
     if (!state.filterVisible) return
     FilterPanel(
-        tab = tab, savedFilters = state.savedFilters,
-        activeSavedFilterId = state.activeSavedFilterId(tab.id),
+        tab = tab, savedFilters = state.savedFiltersForTab(tab.id),
+        activeFilterItemId = state.activeFilterItemId(tab.id),
         tagUsage = state.tagUsage, fpState = state.fpState,
         newHlPat = state.newHlPat, newHlRx = state.newHlRx, newHlColor = state.newHlColor,
         newSeqText = state.newSeqText, newSeqRegex = state.newSeqRegex,
@@ -1405,15 +1638,16 @@ private fun BoundFilterPanel(
         onSetNewHlColor = { state.newHlColor = it },
         onLoadFilter = { state.requestLoadFilter(tab.id, it) },
         onDeleteSF = { state.requestDeleteSF(it) },
+        onRenameSF = { state.beginRenameFilter(it) },
         onOpenSFDialog = { state.sfDialog = true; state.sfTabId = tab.id; state.sfName = "" },
         onSetKwInTag = { state.setKwInTag(tab.id, it) },
         onAddPkgPrefix = { state.addPkgPrefix(tab.id, it) },
         onRemovePkgPrefix = { state.removePkgPrefix(tab.id, it) },
         onAddExcludePkgPrefix = { state.addExcludePkgPrefix(tab.id, it) },
         onRemoveExcludePkgPrefix = { state.removeExcludePkgPrefix(tab.id, it) },
-        onExportFilters = { state.exportFiltersToFile() },
+        onExportFilters = { state.beginExportFilters() },
         onImportFilters = { state.importFiltersFromFile() },
-        onImportFiltersFromFiles = { files -> files.forEach { state.importFiltersFromFileAsync(it) } },
+        onImportFiltersFromFiles = { files -> state.importFiltersFromFilesAsync(files) },
         onClearFilter = { state.requestClearFilter(tab.id) },
         onNavigateCrash = { site -> state.requestCrashNavigation(tab.id, site.entry.id) },
         onUiStateChanged = { state.autosaveNow() },
@@ -2832,6 +3066,16 @@ private fun AnnotationSettingsRow(state: AppState) {
                 options = listOf("On", "Off"),
                 selectedIndices = setOf(if (state.settings.autoExportNotes) 0 else 1),
                 onToggle = { idx -> state.updateSettings { it.copy(autoExportNotes = idx == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Filter backups",
+            tooltip = "Writes timestamped saved-filter backups after saved-filter changes.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.autoSaveFilters) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(autoSaveFilters = idx == 0) } },
             )
         }
         CompactSetting("Number blocks") {

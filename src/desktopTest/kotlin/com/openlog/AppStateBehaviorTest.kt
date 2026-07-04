@@ -17,6 +17,7 @@ import com.openlog.model.SequenceDef
 import com.openlog.model.ThemePreset
 import com.openlog.ui.AppState
 import com.openlog.ui.DesktopStorage
+import com.openlog.ui.ImportFilterAction
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitMode
 import com.openlog.ui.mkTab
@@ -575,7 +576,7 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun pendingFilterLoadCanUpdateCurrentPresetBeforeSwitching() {
+    fun editedPresetDraftDoesNotUpdateOriginalPresetBeforeSwitching() {
         val state = AppState()
         state.addTab()
         val tabId = state.tabs.single().id
@@ -591,10 +592,11 @@ class AppStateBehaviorTest {
         state.addPkgPrefix(tabId, "com.extra")
         state.requestLoadFilter(tabId, two)
 
-        state.updateCurrentPresetAndLoadPending()
+        assertEquals(null, state.pendingFilterLoad?.currentFilterId)
+        state.discardPendingFilterChangesAndLoad()
 
         assertEquals(null, state.pendingFilterLoad)
-        assertEquals(setOf("com.one", "com.extra"), state.savedFilters.first { it.id == one.id }.pkgPrefixes)
+        assertEquals(setOf("com.one"), state.savedFilters.first { it.id == one.id }.pkgPrefixes)
         assertEquals(setOf("com.two"), state.tabs.single().filter.pkgPrefixes)
     }
 
@@ -752,6 +754,8 @@ class AppStateBehaviorTest {
         val target = AppState(File(dir, "target.cache"))
         target.importFiltersFromFile(file)
 
+        assertEquals("filters.json", target.pendingImportReview?.sourceName)
+        target.confirmImportFilters()
         assertEquals("dropped", target.savedFilters.single().name)
     }
 
@@ -771,6 +775,178 @@ class AppStateBehaviorTest {
         assertEquals(Filter(), state.tabs.single().filter)
         assertEquals(null, state.activeSavedFilterId(tabId))
         assertEquals(null, state.pendingClearFilterTabId)
+    }
+
+    @Test
+    fun editingActiveSavedFilterCreatesTabLocalDraftOnly() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("one", "one.log", emptyList()),
+            mkTab("two", "two.log", emptyList()),
+        )
+        state.activeTabId = "one"
+        state.addPkgPrefix("one", "com.base")
+        state.saveFilter("one", "base")
+        val saved = state.savedFilters.single()
+        state.loadFilter("two", saved)
+
+        state.addPkgPrefix("one", "1234")
+
+        assertEquals(null, state.activeSavedFilterId("one"))
+        assertEquals(saved.id, state.activeSavedFilterId("two"))
+        assertEquals(setOf("com.base"), state.tab("two")!!.filter.pkgPrefixes)
+        assertEquals(listOf("unsaved_one.log", "base"), state.savedFiltersForTab("one").map { it.name })
+        assertEquals(listOf("base"), state.savedFiltersForTab("two").map { it.name })
+    }
+
+    @Test
+    fun deletingDraftKeepsCurrentTabFilterValues() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("one", "one.log", emptyList()))
+        state.activeTabId = "one"
+        state.addPkgPrefix("one", "com.base")
+        state.saveFilter("one", "base")
+        state.addPkgPrefix("one", "1234")
+        val draft = state.filterDraftForTab("one")!!
+
+        state.requestDeleteSF(draft.id)
+        state.confirmDeleteSF()
+
+        assertEquals(null, state.filterDraftForTab("one"))
+        assertEquals(setOf("com.base", "1234"), state.tab("one")!!.filter.pkgPrefixes)
+    }
+
+    @Test
+    fun renamingDraftPromotesItToGlobalSavedFilter() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("one", "one.log", emptyList()))
+        state.activeTabId = "one"
+        state.addPkgPrefix("one", "com.base")
+        state.saveFilter("one", "base")
+        state.addPkgPrefix("one", "1234")
+        val draft = state.filterDraftForTab("one")!!
+
+        state.beginRenameFilter(draft.id)
+        state.confirmRenameFilter("pid 1234")
+
+        val promoted = state.savedFilters.single { it.name == "pid 1234" }
+        assertEquals(null, state.filterDraftForTab("one"))
+        assertEquals(promoted.id, state.activeSavedFilterId("one"))
+        assertEquals(setOf("com.base", "1234"), promoted.pkgPrefixes)
+    }
+
+    @Test
+    fun renamingSavedFilterKeepsIdAndRejectsDuplicateNames() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addPkgPrefix(tabId, "com.first")
+        state.saveFilter(tabId, "network")
+        state.clearFilter(tabId)
+        state.addPkgPrefix(tabId, "com.second")
+        state.saveFilter(tabId, "errors")
+        val networkId = state.savedFilters.first { it.name == "network" }.id
+
+        state.beginRenameFilter(networkId)
+        state.confirmRenameFilter("Network renamed")
+
+        assertEquals(networkId, state.savedFilters.first { it.name == "Network renamed" }.id)
+        state.beginRenameFilter(networkId)
+        state.confirmRenameFilter(" errors ")
+        assertEquals("A saved filter named \"errors\" already exists.", state.filterRenameError)
+        assertEquals(null, state.savedFilters.find { it.name == "errors" }?.let { if (it.id == networkId) it else null })
+    }
+
+    @Test
+    fun selectedFilterExportIncludesOnlyChosenFilters() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addPkgPrefix(tabId, "com.one")
+        state.saveFilter(tabId, "one")
+        state.clearFilter(tabId)
+        state.addPkgPrefix(tabId, "com.two")
+        state.saveFilter(tabId, "two")
+        val one = state.savedFilters.first { it.name == "one" }
+
+        val exported = state.exportFilters(setOf(one.id))
+
+        assertTrue(exported.contains("\"name\": \"one\""))
+        assertFalse(exported.contains("\"name\": \"two\""))
+    }
+
+    @Test
+    fun importSkipsIdenticalConflictsAndRenamesDifferentOnesWithFreshIds() {
+        val target = AppState()
+        target.addTab()
+        val tabId = target.tabs.single().id
+        target.addPkgPrefix(tabId, "com.base")
+        target.saveFilter(tabId, "network")
+        val existingId = target.savedFilters.single().id
+
+        val identical = AppState().apply {
+            addTab()
+            addPkgPrefix(tabs.single().id, "com.base")
+            saveFilter(tabs.single().id, "network")
+        }
+        target.beginImportFilters(identical.exportFilters())
+        target.confirmImportFilters()
+        assertEquals(1, target.savedFilters.size)
+
+        val different = AppState().apply {
+            addTab()
+            addPkgPrefix(tabs.single().id, "com.other")
+            saveFilter(tabs.single().id, "network")
+        }
+        target.beginImportFilters(different.exportFilters())
+        assertEquals(ImportFilterAction.RENAME, target.pendingImportReview!!.rows.single().action)
+        target.confirmImportFilters()
+
+        assertEquals(listOf("network", "network (imported)"), target.savedFilters.map { it.name })
+        assertEquals(2, target.savedFilters.map { it.id }.toSet().size)
+        assertEquals(existingId, target.savedFilters.first { it.name == "network" }.id)
+    }
+
+    @Test
+    fun importReplaceKeepsExistingFilterId() {
+        val target = AppState()
+        target.addTab()
+        val tabId = target.tabs.single().id
+        target.addPkgPrefix(tabId, "com.base")
+        target.saveFilter(tabId, "network")
+        val existingId = target.savedFilters.single().id
+
+        val source = AppState().apply {
+            addTab()
+            addPkgPrefix(tabs.single().id, "com.replacement")
+            saveFilter(tabs.single().id, "network")
+        }
+        target.beginImportFilters(source.exportFilters())
+        val rowId = target.pendingImportReview!!.rows.single().rowId
+        target.setImportFilterAction(rowId, ImportFilterAction.REPLACE)
+        target.confirmImportFilters()
+
+        assertEquals(existingId, target.savedFilters.single().id)
+        assertEquals(setOf("com.replacement"), target.savedFilters.single().pkgPrefixes)
+    }
+
+    @Test
+    fun filterBackupsDefaultOnAndKeepLatestTwenty() {
+        val dir = createTempDirectory("openlog-filter-backups").toFile()
+        val state = AppState(File(dir, "state.cache"), filterBackupsDir = File(dir, "filter-backups"))
+        state.addTab()
+        val tabId = state.tabs.single().id
+
+        assertTrue(state.settings.autoSaveFilters)
+        repeat(25) { idx ->
+            state.clearFilter(tabId)
+            state.addPkgPrefix(tabId, "com.$idx")
+            state.saveFilter(tabId, "filter-$idx")
+        }
+
+        val backups = File(dir, "filter-backups").listFiles { file -> file.extension == "json" }.orEmpty()
+        assertEquals(20, backups.size)
+        assertTrue(backups.maxBy { it.name }.readText().contains("\"name\": \"filter-24\""))
     }
 
     @Test
@@ -1667,6 +1843,7 @@ class AppStateBehaviorTest {
                 fontSize = 16,
                 fontMono = false,
                 mostUsedTagLimit = 10,
+                autoSaveFilters = false,
                 annotationLogBlockStyle = AnnotationLogBlockStyle.JIRA_JAVA,
                 numberAnnotationBlocks = true,
             )
@@ -1678,6 +1855,7 @@ class AppStateBehaviorTest {
         assertEquals(16, restored.settings.fontSize)
         assertEquals(false, restored.settings.fontMono)
         assertEquals(10, restored.settings.mostUsedTagLimit)
+        assertEquals(false, restored.settings.autoSaveFilters)
         assertEquals(AnnotationLogBlockStyle.JIRA_JAVA, restored.settings.annotationLogBlockStyle)
         assertEquals(true, restored.settings.numberAnnotationBlocks)
     }

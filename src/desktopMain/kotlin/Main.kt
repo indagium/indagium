@@ -10,6 +10,7 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.openlog.ui.App
 import com.openlog.ui.AppState
+import com.openlog.ui.DesktopStorage
 import java.awt.Taskbar
 import java.awt.Toolkit
 
@@ -52,7 +53,7 @@ fun main() {
 
     application {
         val windowState = rememberWindowState(size = DpSize(1440.dp, 900.dp))
-        val appState = remember { AppState(restoreOnCreate = true) }
+        val appState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) }
         // Localhost-only automation control server for MCP/dev use (see debug/ControlServer.kt).
         // AppState owns the actual server instance (see setMcpControlEnabled /
         // startControlServerForThisSessionOnly) — this effect only decides the starting state:
