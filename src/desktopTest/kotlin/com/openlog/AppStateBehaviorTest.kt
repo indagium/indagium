@@ -34,7 +34,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
-import kotlin.test.assertNotNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -2421,6 +2420,25 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun mcpControlEnableReturnsImmediatelyWithoutBlockingCaller() {
+        // The actual bind (ControlServer.start()) now runs on ioScope specifically so a slow or
+        // hung bind (macOS's first-time incoming-connection firewall prompt, VPN/security
+        // software intercepting the socket, etc.) can't freeze the Compose UI thread — a past
+        // version ran it synchronously on whichever thread called this, which is exactly what
+        // that thread is here (the test's own thread, standing in for the UI thread). This can't
+        // prove non-blocking for every possible slow bind, but it does pin the regression a
+        // revert-to-synchronous would reintroduce: the call must return long before any bind on
+        // a real port could plausibly complete network-stack setup.
+        val state = AppState()
+        val elapsedMs = kotlin.system.measureTimeMillis {
+            state.setMcpControlEnabled(true, 0)
+        }
+        assertTrue(elapsedMs < 500, "setMcpControlEnabled took ${elapsedMs}ms — looks synchronous again")
+        waitUntil { state.settings.mcpControlEnabled }
+        state.setMcpControlEnabled(false, state.settings.mcpControlPort)
+    }
+
+    @Test
     fun mcpControlEnableSurvivesPortAlreadyInUse() {
         // Occupy a real port first (0 → OS picks a free one) so the app's own bind attempt on
         // that same port genuinely fails, the same way it would if another instance — or a
@@ -2435,7 +2453,7 @@ class AppStateBehaviorTest {
             // uncaught, crashing the whole app on this exact toggle.
             state.setMcpControlEnabled(true, blocker.boundPort)
 
-            assertNotNull(state.mcpControlError)
+            waitUntil { state.mcpControlError != null }
             assertTrue(state.mcpControlError!!.contains(blocker.boundPort.toString()))
             // The failed attempt must not leave the toggle persisted as "on" — otherwise Main.kt
             // retries the identical failing bind on every future launch before the window ever
@@ -2452,7 +2470,7 @@ class AppStateBehaviorTest {
         blocker.start()
         val state = AppState()
         state.setMcpControlEnabled(true, blocker.boundPort)
-        assertNotNull(state.mcpControlError)
+        waitUntil { state.mcpControlError != null }
         blocker.stop()
 
         // A free port right after must succeed and clear the earlier error — the failure isn't
@@ -2462,8 +2480,8 @@ class AppStateBehaviorTest {
         val freePort = java.net.ServerSocket(0).use { it.localPort }
         state.setMcpControlEnabled(true, freePort)
 
+        waitUntil { state.settings.mcpControlEnabled }
         assertEquals(null, state.mcpControlError)
-        assertTrue(state.settings.mcpControlEnabled)
         state.setMcpControlEnabled(false, state.settings.mcpControlPort)
     }
 

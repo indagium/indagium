@@ -42,6 +42,17 @@ class McpConfigSnippetTest {
     }
 
     @Test
+    fun explicitCheckoutOverrideWinsEvenWhenPackaged() {
+        // The one case where a packaged install CAN offer a real, working path: the user has
+        // pointed the connection-info dialog at an actual openLog2 checkout on this machine.
+        System.setProperty("jpackage.app-path", "/Applications/openLog.app")
+        val snippet = mcpConfigSnippet(8991, checkoutOverride = "/Users/someone/dev/openLog2")
+        val expected = java.io.File("/Users/someone/dev/openLog2", "mcp-server/src/index.ts").absolutePath
+        assertTrue(snippet.contains(expected.jsonEscape()), "expected snippet to contain $expected:\n$snippet")
+        assertFalse(snippet.contains("/path/to/openLog2"))
+    }
+
+    @Test
     fun jsonEscapeDoublesBackslashesForWindowsPaths() {
         assertTrue("C:\\\\Users\\\\me\\\\mcp-server" == "C:\\Users\\me\\mcp-server".jsonEscape())
     }

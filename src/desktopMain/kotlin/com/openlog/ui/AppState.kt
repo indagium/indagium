@@ -242,6 +242,12 @@ class AppState(
     var recentNotes by mutableStateOf<List<String>>(emptyList())
     var recentNotesMenuOpen by mutableStateOf(false)
     var cacheClearConfirmOpen by mutableStateOf(false)
+
+    // Session-only (deliberately not persisted to settings): where to find the openLog2 checkout
+    // for the MCP connection-info dialog's copyable config, on a packaged install where the
+    // control server doesn't ship with mcp-server/'s sources at all — see mcpConfigSnippet.
+    var mcpServerCheckoutOverride by mutableStateOf<String?>(null)
+        private set
     val archiveCachePath: String = archiveCacheDir.absolutePath
     val appCachePath: String = archiveCacheDir.parentFile?.absolutePath ?: archiveCacheDir.absolutePath
     var archiveCacheSizeBytes by mutableStateOf(0L)
@@ -304,41 +310,63 @@ class AppState(
         }
     }
 
+    // Manual escape hatch for the "still loading" prompt the UI shows after a long stretch of
+    // isLoading — surfaced so a load that's genuinely stuck (not just slow) doesn't leave the
+    // user with no way back into the app short of force-quitting. Deliberately doesn't touch
+    // pendingLoads/isLoading directly: every load path's own `finally` block already calls
+    // finishLoading() exactly once on any exit including cancellation, so cancelling the jobs
+    // here and letting those existing finally blocks unwind naturally is what actually drives
+    // isLoading back to false — resetting the counter by hand here too would double-decrement it
+    // once those blocks run, and could under-count a totally unrelated load that starts in the
+    // gap between this call and the cancelled jobs' cancellation actually being observed.
+    fun cancelAllLoads() {
+        activeLoads.values.toList().forEach { it.cancel() }
+    }
+
     // Actually starts/stops the server, independent of whether the transition should be
     // persisted — see setMcpControlEnabled (persists) vs startControlServerForThisSessionOnly
     // (doesn't). Guards against double-starting the same port (ControlServer.start() isn't
     // safely re-callable while already running) and rebinds if the port actually changed.
     //
-    // ControlServer.start() binds a real socket (HttpServer.create) — it throws (typically
-    // BindException: Address already in use) whenever the port is already taken by another
-    // process, including a second openLog instance. That's a routine, expected failure mode for
-    // "listen on a fixed port", not a program bug, so it must never crash the app: a past version
-    // let it propagate uncaught, which crashed the whole JVM on toggle AND — because
-    // setMcpControlEnabled had already persisted enabled=true to autosave before this ran —
-    // made every subsequent launch retry the same failing bind and crash again before the
-    // window ever appeared, with no way back into Settings to turn it off. Catching here and
-    // reverting the persisted toggle on failure (below) closes both holes at once.
+    // ControlServer.start() binds a real socket (HttpServer.create). Two distinct failure modes:
+    // (1) it throws fast — typically BindException: Address already in use — handled below by
+    // catching and reverting the persisted toggle so a failed bind can't crash-loop every future
+    // launch (a past version let this propagate uncaught and crash the whole JVM); (2) it can
+    // also just be SLOW rather than fail — e.g. macOS's first-time "accept incoming connections"
+    // firewall prompt, or VPN/security software intercepting the bind — with no fixed bound on
+    // how slow. This function is called both from a Settings-toggle click and from Main.kt's
+    // startup DisposableEffect, both of which used to run it synchronously on the Compose UI
+    // thread, so a slow bind froze the entire window for as long as it took, indistinguishable
+    // from a real hang. Every other blocking operation in this class already runs on ioScope for
+    // exactly this reason (see openFile, mergeTabs, etc.) — the control server was the one
+    // exception. Only the START side needs this: stop() just tears down an already-bound socket
+    // (no network I/O to block on) and must stay synchronous so the Main.kt shutdown path
+    // (stopControlServerForShutdown, called from onDispose right before the process exits) can't
+    // race a fire-and-forget coroutine that might never get scheduled before exit.
     private fun applyControlServerState(enabled: Boolean, port: Int) {
         if (enabled) {
             val running = controlServer
             if (running != null && running.boundPort == port) return
             running?.stop()
             controlServer = null
-            val started = runCatching { ControlServer(this, port).also { it.start() } }
-            started.fold(
-                onSuccess = { controlServer = it; mcpControlError = null },
-                onFailure = { error ->
-                    mcpControlError = "Could not start automation server on port $port: " +
-                        (error.message ?: error::class.simpleName.orEmpty().ifBlank { "unknown error" })
-                    // Only the persisted (Settings-toggle) path needs undoing — the ephemeral
-                    // debug-env-var path never sets this in the first place, so this is a no-op
-                    // there and doesn't touch the setting it deliberately keeps out of.
-                    if (settings.mcpControlEnabled) {
-                        settings = settings.copy(mcpControlEnabled = false)
-                        autosaveNow()
-                    }
-                },
-            )
+            mcpControlError = null
+            ioScope.launch {
+                val started = runCatching { ControlServer(this@AppState, port).also { it.start() } }
+                started.fold(
+                    onSuccess = { controlServer = it; mcpControlError = null },
+                    onFailure = { error ->
+                        mcpControlError = "Could not start automation server on port $port: " +
+                            (error.message ?: error::class.simpleName.orEmpty().ifBlank { "unknown error" })
+                        // Only the persisted (Settings-toggle) path needs undoing — the ephemeral
+                        // debug-env-var path never sets this in the first place, so this is a
+                        // no-op there and doesn't touch the setting it deliberately keeps out of.
+                        if (settings.mcpControlEnabled) {
+                            settings = settings.copy(mcpControlEnabled = false)
+                            autosaveNow()
+                        }
+                    },
+                )
+            }
         } else {
             controlServer?.stop()
             controlServer = null
@@ -2329,6 +2357,27 @@ class AppState(
         } finally {
             System.setProperty("apple.awt.fileDialogForDirectories", "false")
         }
+    }
+
+    // Lets a packaged install's MCP connection-info dialog offer a real, working config instead
+    // of a placeholder — only useful if this machine happens to have an openLog2 checkout
+    // somewhere (e.g. a developer's own machine); doesn't help a clean install with no checkout
+    // at all, which is the actual general case the mcp-server distribution model doesn't solve.
+    fun pickMcpServerCheckout() {
+        System.setProperty("apple.awt.fileDialogForDirectories", "true")
+        try {
+            val dlg = FileDialog(null as Frame?, "Locate your openLog2 checkout", FileDialog.LOAD)
+            dlg.isVisible = true
+            val dir = dlg.directory ?: return
+            val file = dlg.file ?: return
+            mcpServerCheckoutOverride = java.io.File(dir, file).absolutePath
+        } finally {
+            System.setProperty("apple.awt.fileDialogForDirectories", "false")
+        }
+    }
+
+    fun clearMcpServerCheckoutOverride() {
+        mcpServerCheckoutOverride = null
     }
 
     fun exportFiltersToFile(selectedIds: Set<String>? = null) {

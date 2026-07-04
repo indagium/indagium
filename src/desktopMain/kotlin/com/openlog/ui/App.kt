@@ -197,6 +197,34 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                 }
             }
 
+            // ── Stuck-loading watchdog ─────────────────────────────────
+            // A load that never finishes (a genuine hang, not just a big file) otherwise leaves
+            // no way back into the app short of force-quitting — this surfaces after a long
+            // stretch of continuous isLoading and offers real escape hatches instead. This can
+            // only catch hangs in BACKGROUND work that's still reporting isLoading=true but never
+            // completing; it can't do anything for the UI thread itself being blocked (nothing
+            // running on that same thread could), which is a separate class of bug fixed instead
+            // by making sure the UI thread is never handed blocking work in the first place (see
+            // AppState.applyControlServerState's ioScope move).
+            var stuckPromptSnoozeCount by remember { mutableStateOf(0) }
+            var showStuckPrompt by remember { mutableStateOf(false) }
+            LaunchedEffect(state.isLoading, stuckPromptSnoozeCount) {
+                showStuckPrompt = false
+                if (state.isLoading) {
+                    kotlinx.coroutines.delay(STUCK_LOADING_PROMPT_DELAY_MS)
+                    if (state.isLoading) showStuckPrompt = true
+                }
+            }
+            if (showStuckPrompt) {
+                StuckLoadingDialog(
+                    status = state.loadingStatus,
+                    onCancelLoading = { state.cancelAllLoads(); showStuckPrompt = false },
+                    onCloseAllTabs = { state.closeAllTabs(); showStuckPrompt = false },
+                    onClearCache = { state.requestClearCache(); showStuckPrompt = false },
+                    onKeepWaiting = { showStuckPrompt = false; stuckPromptSnoozeCount++ },
+                )
+            }
+
             // ── Context menu ──────────────────────────────────────────
             state.ctx?.let { ctx ->
                 val ctxTab = state.tab(ctx.tabId)
@@ -1556,6 +1584,47 @@ private fun SplitDialogTextField(
     )
 }
 
+// How long isLoading must stay continuously true before the watchdog offers to intervene. Big
+// real files legitimately take a few seconds (see docs/perf-large-files.md); 30s is comfortably
+// past that so this doesn't fire on normal big-file loads, only on something that's actually
+// stuck.
+private const val STUCK_LOADING_PROMPT_DELAY_MS = 30_000L
+
+@Composable
+private fun StuckLoadingDialog(
+    status: String?,
+    onCancelLoading: () -> Unit,
+    onCloseAllTabs: () -> Unit,
+    onClearCache: () -> Unit,
+    onKeepWaiting: () -> Unit,
+) {
+    val tc = tc()
+    Dialog(onDismissRequest = onKeepWaiting) {
+        Column(
+            Modifier.width(360.dp).background(tc.p, RoundedCornerShape(8.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(20.dp),
+        ) {
+            AppText("Still loading…", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            AppText(
+                "This has been loading for a while" + (status?.let { " ($it)" } ?: "") +
+                    ". If it looks stuck, you can:",
+                color = tc.td,
+                fontSize = 11.sp,
+                maxLines = 4,
+            )
+            Spacer(Modifier.height(14.dp))
+            AppButton("Cancel loading", onClick = onCancelLoading, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(6.dp))
+            AppButton("Close all tabs", onClick = onCloseAllTabs, isDanger = true, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(6.dp))
+            AppButton("Clear cache…", onClick = onClearCache, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(10.dp))
+            AppButton("Keep waiting", onClick = onKeepWaiting, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
 @Composable
 private fun DialogActionButton(
     label: String,
@@ -2618,12 +2687,12 @@ private fun SettingsSectionHeader(title: String) {
 // a user pasted into LM Studio and got a silent spawn failure from. The mcp-server/ sources
 // aren't bundled into the installed app at all, so there's no real path to offer there — an
 // obvious placeholder beats a wrong-but-plausible one.
-internal fun mcpConfigSnippet(port: Int): String {
+internal fun mcpConfigSnippet(port: Int, checkoutOverride: String? = null): String {
     val isPackaged = System.getProperty("jpackage.app-path") != null
-    val serverEntry = if (isPackaged) {
-        "/path/to/openLog2/mcp-server/src/index.ts"
-    } else {
-        File(System.getProperty("user.dir"), "mcp-server/src/index.ts").absolutePath
+    val serverEntry = when {
+        checkoutOverride != null -> File(checkoutOverride, "mcp-server/src/index.ts").absolutePath
+        isPackaged -> "/path/to/openLog2/mcp-server/src/index.ts"
+        else -> File(System.getProperty("user.dir"), "mcp-server/src/index.ts").absolutePath
     }
     return """
     {
@@ -2719,7 +2788,7 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
             AppButton(
                 "Copy config for your MCP client",
                 onClick = {
-                    state.copyToClipboard(mcpConfigSnippet(port))
+                    state.copyToClipboard(mcpConfigSnippet(port, state.mcpServerCheckoutOverride))
                     copiedField = McpCopiedField.Config
                 },
             )
@@ -2730,15 +2799,45 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
         }
         Spacer(Modifier.height(10.dp))
         if (System.getProperty("jpackage.app-path") != null) {
-            AppText(
-                "This installed copy of openLog doesn't bundle the MCP server's source, so the " +
-                    "copied snippet has a placeholder path — replace it with wherever you've " +
-                    "cloned the openLog2 repo's mcp-server/src/index.ts before pasting it into " +
-                    "your MCP client's config.",
-                color = tc.td,
-                fontSize = 11.sp,
-                maxLines = 5,
-            )
+            val checkout = state.mcpServerCheckoutOverride
+            if (checkout == null) {
+                AppText(
+                    "This installed copy of openLog doesn't bundle the MCP server's source, so " +
+                        "the copied snippet has a placeholder path. If you have an openLog2 " +
+                        "checkout on this machine, point at it below so the copied config " +
+                        "works as-is:",
+                    color = tc.td,
+                    fontSize = 11.sp,
+                    maxLines = 5,
+                )
+                Spacer(Modifier.height(6.dp))
+                AppButton(
+                    "Locate your openLog2 checkout…",
+                    onClick = { state.pickMcpServerCheckout() },
+                    variant = ButtonVariant.Secondary,
+                )
+            } else {
+                AppText(
+                    "Using mcp-server/ from: $checkout",
+                    color = tc.td,
+                    fontSize = 11.sp,
+                    maxLines = 2,
+                )
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AppButton(
+                        "Change…",
+                        onClick = { state.pickMcpServerCheckout() },
+                        variant = ButtonVariant.Secondary,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    AppButton(
+                        "Clear",
+                        onClick = { state.clearMcpServerCheckoutOverride() },
+                        variant = ButtonVariant.Ghost,
+                    )
+                }
+            }
         } else {
             AppText(
                 "A .mcp.json at the repo root already has this registered for tools that " +
