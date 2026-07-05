@@ -147,6 +147,19 @@ tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
 // Manual large-file perf harness (LargeFilePerfHarness.kt) — activated by passing
 // -Dopenlog.perf.file=<fixture path> to Gradle; needs a multi-GB heap for the ~1.5GB fixture.
 // Normal test runs are unaffected (the property is blank and the harness returns immediately).
+// Sandbox every test run's `user.home` to a throwaway dir under build/ — unconditionally, unlike
+// desktopRun's opt-in openlog.run.home. Dozens of tests construct AppState() with no autosaveFile
+// override, which otherwise resolves DesktopStorage.appDataDir() to the REAL
+// ~/Library/Application Support/openLog2 (or platform equivalent): a test that calls
+// autosaveNow() (directly, or via any state-mutating call — updateSettings, closeTab, etc.) then
+// silently overwrites the developer's actual saved tabs/session/settings. Confirmed happening via
+// AppStateBehaviorTest's autoExportNotes-toggle tests, which wiped a real autosave.cache.
+val testHomeDir = layout.buildDirectory.dir("test-home").get().asFile
+tasks.withType<Test>().configureEach {
+    doFirst { testHomeDir.mkdirs() }
+    systemProperty("user.home", testHomeDir.absolutePath)
+}
+
 val perfFixture: String? = System.getProperty("openlog.perf.file")
 tasks.withType<Test>().configureEach {
     if (perfFixture != null) {
