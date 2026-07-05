@@ -134,6 +134,72 @@ class ControlServerTest {
     }
 
     @Test
+    fun setFilterAutoSwitchesToKeywordModeWhenRegexSuppliedWithoutExplicitMode() {
+        // Regression: mode defaults to TAGS, and passesTagOrKeywordFilter never evaluates
+        // kwText/kwRegex in TAGS mode — so a client setting a regex filter with no mode used to
+        // get a silent no-op (the view stayed unfiltered). Mirrors the UI's own Tags/Regex tabs,
+        // which set mode as a side effect of the tab click.
+        state.tabs = listOf(
+            mkTab(
+                "t1", "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "boom happened"),
+                    LogEntry(2, "10:00:00.001", LogLevel.I, "App", "all quiet"),
+                ),
+            ),
+        )
+        assertEquals(FilterMode.TAGS, state.tab("t1")!!.filter.mode)
+        post("/filter", """{"tabId":"t1","kwText":"boom","kwRegex":true}""")
+        assertEquals(FilterMode.KEYWORD, state.tab("t1")!!.filter.mode)
+
+        val body = get("/visible?tabId=t1")
+        assertTrue(body.contains("boom happened"), body)
+        assertTrue(!body.contains("all quiet"), body)
+    }
+
+    @Test
+    fun setFilterAutoSwitchesToTagsModeWhenActiveTagsSuppliedWithoutExplicitMode() {
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        state.upFlt("t1") { it.copy(mode = FilterMode.KEYWORD) }
+        post("/filter", """{"tabId":"t1","activeTags":["App"]}""")
+        assertEquals(FilterMode.TAGS, state.tab("t1")!!.filter.mode)
+    }
+
+    @Test
+    fun setFilterClearingAFieldDoesNotForceModeSwitch() {
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        state.upFlt("t1") { it.copy(mode = FilterMode.KEYWORD) }
+        // Explicitly clearing activeTags (empty list) must not force a switch back to TAGS.
+        post("/filter", """{"tabId":"t1","activeTags":[]}""")
+        assertEquals(FilterMode.KEYWORD, state.tab("t1")!!.filter.mode)
+
+        state.upFlt("t1") { it.copy(mode = FilterMode.TAGS) }
+        // Same for clearing kwText to blank while in TAGS mode.
+        post("/filter", """{"tabId":"t1","kwText":""}""")
+        assertEquals(FilterMode.TAGS, state.tab("t1")!!.filter.mode)
+    }
+
+    @Test
+    fun setFilterWithBothTagAndKeywordSignalsLeavesModeUnchangedAndWarns() {
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        val before = state.tab("t1")!!.filter.mode
+        val body = post("/filter", """{"tabId":"t1","activeTags":["App"],"kwText":"boom"}""")
+        assertEquals(before, state.tab("t1")!!.filter.mode)
+        assertTrue(body.contains("\"warning\""), body)
+        // Both fields are still saved even though mode itself was left alone.
+        assertEquals(setOf("App"), state.tab("t1")!!.filter.activeTags)
+        assertEquals("boom", state.tab("t1")!!.filter.kwText)
+    }
+
+    @Test
+    fun setFilterExplicitModeWinsOverConflictingSignalsWithNoWarning() {
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        val body = post("/filter", """{"tabId":"t1","activeTags":["App"],"kwText":"boom","mode":"KEYWORD"}""")
+        assertEquals(FilterMode.KEYWORD, state.tab("t1")!!.filter.mode)
+        assertTrue(!body.contains("\"warning\""), body)
+    }
+
+    @Test
     fun getFilterReturnsCurrentFilterState() {
         state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
         state.upFlt("t1") { it.copy(kwText = "boom", mode = FilterMode.KEYWORD) }

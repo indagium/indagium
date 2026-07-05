@@ -522,6 +522,31 @@ class ControlServer(
                 ?: return mapOf("error" to "unknown mode '$m'; valid: ${FilterMode.entries.joinToString(",") { it.name }}")
         } else null
 
+        // TAGS and KEYWORD are mutually exclusive base filters (passesTagOrKeywordFilter only
+        // evaluates kwText/kwRegex when mode == KEYWORD) — a client that sets a regex filter
+        // without also switching mode gets a silent no-op. Mirror what the UI's own Tags/Regex
+        // tabs already do (FilterPanel.kt: clicking a tab sets mode as a side effect) so a plain
+        // set_filter call "just works" the way clicking the matching tab would. Only a
+        // non-empty/meaningful value counts as a signal, so clearing a field (activeTags: [],
+        // kwText: "") never forces an unwanted mode change. An explicit `mode` in the body always
+        // wins outright and skips this inference entirely.
+        var modeWarning: String? = null
+        val inferredMode: FilterMode? = if (parsedMode == null) {
+            val tagSignal = (body.strList("activeTags")?.isNotEmpty() == true) ||
+                (body.strList("pkgPrefixes")?.isNotEmpty() == true)
+            val keywordSignal = (body.str("kwText")?.isNotBlank() == true) || (body.bool("kwRegex") == true)
+            when {
+                tagSignal && keywordSignal -> {
+                    modeWarning = "both tag and keyword filter values were supplied with no explicit mode; " +
+                        "mode was left unchanged — pass mode explicitly (TAGS or KEYWORD) to disambiguate"
+                    null
+                }
+                tagSignal -> FilterMode.TAGS
+                keywordSignal -> FilterMode.KEYWORD
+                else -> null
+            }
+        } else null
+
         val parsedRules: List<MessageRule>? = if (body.containsKey("messageRules")) {
             parseMessageRules(body.mapList("messageRules") ?: emptyList())
                 .getOrElse { return mapOf("error" to (it.message ?: "invalid messageRules")) }
@@ -571,7 +596,7 @@ class ControlServer(
             if (body.containsKey("seqOn")) {
                 body.bool("seqOn")?.let { result = result.copy(seqOn = it) }
             }
-            parsedMode?.let { result = result.copy(mode = it) }
+            (parsedMode ?: inferredMode)?.let { result = result.copy(mode = it) }
             // messageRules / sequences: a supplied list replaces the current one wholesale; the
             // clear* booleans remove all of them. This is what lets a client detect (via get_filter)
             // and undo a stale rule/sequence that was silently hiding or folding rows.
@@ -581,7 +606,11 @@ class ControlServer(
             if (body.bool("clearSequences") == true) result = result.copy(sequences = emptyList())
             result
         }
-        return mapOf("ok" to true, "filter" to filterToMap(appState.tab(tabId)!!.filter))
+        return buildMap {
+            put("ok", true)
+            put("filter", filterToMap(appState.tab(tabId)!!.filter))
+            modeWarning?.let { put("warning", it) }
+        }
     }
 
     // Parse client-supplied message rules; throws (captured as a Result failure) with a
@@ -1031,7 +1060,13 @@ private val MCP_TOOLS: List<McpTool> = listOf(
         "Partially update a tab's filter — only the fields you provide are changed. A supplied " +
             "messageRules or sequences list replaces the current one; clearMessageRules / " +
             "clearSequences remove all of them. Unknown level or mode values are rejected with an " +
-            "error rather than silently ignored.",
+            "error rather than silently ignored. TAGS and KEYWORD are mutually exclusive base " +
+            "filters — only one is active at a time (activeTags/pkgPrefixes are ignored entirely " +
+            "in KEYWORD mode, and kwText/kwRegex are ignored entirely in TAGS mode). Supplying a " +
+            "non-empty activeTags/pkgPrefixes with no explicit mode switches to TAGS; supplying a " +
+            "non-blank kwText or kwRegex:true with no explicit mode switches to KEYWORD. Supplying " +
+            "both together with no explicit mode leaves mode unchanged and returns a warning — pass " +
+            "mode explicitly to disambiguate.",
         schema(
             "tabId" to "string", "levels" to "array", "activeTags" to "array",
             "excludeTags" to "array", "pkgPrefixes" to "array", "excludePkgPrefixes" to "array",
@@ -1044,7 +1079,7 @@ private val MCP_TOOLS: List<McpTool> = listOf(
             enums = mapOf("levels" to LEVEL_KEYS, "mode" to FilterMode.entries.map { it.name }),
             descriptions = mapOf(
                 "levels" to "Single-char level keys to KEEP: ${LEVEL_KEYS.joinToString(",")} (V=Verbose … A=Assert). An empty or malformed list is rejected.",
-                "mode" to "Base filter mode: TAGS or KEYWORD.",
+                "mode" to "Base filter mode: TAGS or KEYWORD. Leave unset to let activeTags/pkgPrefixes or kwText/kwRegex auto-select it.",
                 "pidTidFilter" to "Comma-separated PIDs/TIDs to include.",
             ),
         ),
