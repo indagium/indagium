@@ -72,6 +72,30 @@ private val COMPACT_DROP_KEYS = setOf("pid", "tid", "indent")
 // Entry-derived columns a client may whitelist via `fields` (structural keys are always kept).
 private val ROW_FIELD_KEYS = listOf("id", "ts", "level", "tag", "msg", "pid", "tid", "indent")
 
+// Table-driven set_filter field application: each entry is (body key, Filter.copy(...) setter).
+// Applying these via a loop keeps applyFilterUpdate's own branching to one `forEach` per type
+// instead of one `if` per field, regardless of how many fields the table grows to.
+private val STRING_SET_FIELD_SETTERS: List<Pair<String, Filter.(Set<String>) -> Filter>> = listOf(
+    "activeTags" to { copy(activeTags = it) },
+    "excludeTags" to { copy(excludeTags = it) },
+    "pkgPrefixes" to { copy(pkgPrefixes = it) },
+    "excludePkgPrefixes" to { copy(excludePkgPrefixes = it) },
+)
+
+private val STRING_FIELD_SETTERS: List<Pair<String, Filter.(String) -> Filter>> = listOf(
+    "kwText" to { copy(kwText = it) },
+    "excludeKw" to { copy(excludeKw = it) },
+    "kwInTag" to { copy(kwInTag = it) },
+    "pidTidFilter" to { copy(pidTidFilter = it) },
+)
+
+private val BOOL_FIELD_SETTERS: List<Pair<String, Filter.(Boolean) -> Filter>> = listOf(
+    "kwRegex" to { copy(kwRegex = it) },
+    "excludeKwRegex" to { copy(excludeKwRegex = it) },
+    "kwInTagRegex" to { copy(kwInTagRegex = it) },
+    "seqOn" to { copy(seqOn = it) },
+)
+
 private fun isEmptyOrZero(v: Any?): Boolean = when (v) {
     null -> true
     is String -> v.isEmpty()
@@ -591,41 +615,14 @@ class ControlServer(
     private fun applyFilterUpdate(f: Filter, body: Map<String, Any?>, parsed: ParsedFilterUpdate): Filter {
         var result = f
         parsed.levels?.let { result = result.copy(levels = it) }
-        if (body.containsKey("activeTags")) {
-            body.strList("activeTags")?.let { result = result.copy(activeTags = it.toSet()) }
+        STRING_SET_FIELD_SETTERS.forEach { (key, setter) ->
+            if (body.containsKey(key)) body.strList(key)?.let { result = result.setter(it.toSet()) }
         }
-        if (body.containsKey("excludeTags")) {
-            body.strList("excludeTags")?.let { result = result.copy(excludeTags = it.toSet()) }
+        STRING_FIELD_SETTERS.forEach { (key, setter) ->
+            if (body.containsKey(key)) body.str(key)?.let { result = result.setter(it) }
         }
-        if (body.containsKey("pkgPrefixes")) {
-            body.strList("pkgPrefixes")?.let { result = result.copy(pkgPrefixes = it.toSet()) }
-        }
-        if (body.containsKey("excludePkgPrefixes")) {
-            body.strList("excludePkgPrefixes")?.let { result = result.copy(excludePkgPrefixes = it.toSet()) }
-        }
-        if (body.containsKey("kwText")) {
-            body.str("kwText")?.let { result = result.copy(kwText = it) }
-        }
-        if (body.containsKey("kwRegex")) {
-            body.bool("kwRegex")?.let { result = result.copy(kwRegex = it) }
-        }
-        if (body.containsKey("excludeKw")) {
-            body.str("excludeKw")?.let { result = result.copy(excludeKw = it) }
-        }
-        if (body.containsKey("excludeKwRegex")) {
-            body.bool("excludeKwRegex")?.let { result = result.copy(excludeKwRegex = it) }
-        }
-        if (body.containsKey("kwInTag")) {
-            body.str("kwInTag")?.let { result = result.copy(kwInTag = it) }
-        }
-        if (body.containsKey("kwInTagRegex")) {
-            body.bool("kwInTagRegex")?.let { result = result.copy(kwInTagRegex = it) }
-        }
-        if (body.containsKey("pidTidFilter")) {
-            body.str("pidTidFilter")?.let { result = result.copy(pidTidFilter = it) }
-        }
-        if (body.containsKey("seqOn")) {
-            body.bool("seqOn")?.let { result = result.copy(seqOn = it) }
+        BOOL_FIELD_SETTERS.forEach { (key, setter) ->
+            if (body.containsKey(key)) body.bool(key)?.let { result = result.setter(it) }
         }
         parsed.mode?.let { result = result.copy(mode = it) }
         // messageRules / sequences: a supplied list replaces the current one wholesale; the
