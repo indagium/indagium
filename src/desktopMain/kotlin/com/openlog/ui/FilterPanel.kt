@@ -503,7 +503,7 @@ fun FilterPanel(
                 "Tags",
                 trailing = if (totalActive > 0) ({
                     Row(
-                        Modifier.clickable {
+                        Modifier.hoverPill().clickable {
                             fpState.incPillsExpanded = !fpState.incPillsExpanded
                             onUiStateChanged()
                         }
@@ -748,7 +748,7 @@ fun FilterPanel(
                 trailing = if (msgInc.isNotEmpty() || msgExc.isNotEmpty()) ({
                     if (msgInc.isNotEmpty()) {
                         Row(
-                            Modifier.clickable {
+                            Modifier.hoverPill().clickable {
                                 fpState.incMsgPillsExpanded = !fpState.incMsgPillsExpanded
                                 if (fpState.incMsgPillsExpanded) fpState.excMsgPillsExpanded = false
                                 onUiStateChanged()
@@ -762,7 +762,7 @@ fun FilterPanel(
                     }
                     if (msgExc.isNotEmpty()) {
                         Row(
-                            Modifier.clickable {
+                            Modifier.hoverPill().clickable {
                                 fpState.excMsgPillsExpanded = !fpState.excMsgPillsExpanded
                                 if (fpState.excMsgPillsExpanded) fpState.incMsgPillsExpanded = false
                                 onUiStateChanged()
@@ -941,7 +941,7 @@ fun FilterPanel(
             "Highlighters",
             trailing = if (filter.highlighters.isNotEmpty()) ({
                 Row(
-                    Modifier.clickable {
+                    Modifier.hoverPill().clickable {
                         fpState.hlListExpanded = !fpState.hlListExpanded
                         onUiStateChanged()
                     }
@@ -967,10 +967,9 @@ fun FilterPanel(
                             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
                             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            Box(
-                                Modifier.size(12.dp).background(hl.color, RoundedCornerShape(2.dp))
-                                    .border(2.dp, if (colorPickerHlId == hl.id) tc.tx else hl.color, RoundedCornerShape(2.dp))
-                                    .clickable { colorPickerHlId = if (colorPickerHlId == hl.id) null else hl.id },
+                            ColorPickerSwatch(
+                                color = hl.color, pickerOpen = colorPickerHlId == hl.id,
+                                onClick = { colorPickerHlId = if (colorPickerHlId == hl.id) null else hl.id },
                             )
                             AppText((if (hl.regex) "/" else "") + hl.pattern + (if (hl.regex) "/i" else ""),
                                 color = if (hl.on) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO,
@@ -1106,10 +1105,10 @@ fun FilterPanel(
                                         )
                                     })
                                 AppText("${idx + 1}", color = tc.td, fontSize = 9.sp, fontFamily = MONO, modifier = Modifier.width(12.dp))
-                                Box(
-                                    Modifier.size(10.dp)
-                                        .background(if (def.enabled) def.color else tc.br, RoundedCornerShape(2.dp))
-                                        .clickable { colorPickerSeqId = if (colorPickerSeqId == def.id) null else def.id },
+                                ColorPickerSwatch(
+                                    color = if (def.enabled) def.color else tc.br, size = 10.dp,
+                                    pickerOpen = colorPickerSeqId == def.id,
+                                    onClick = { colorPickerSeqId = if (colorPickerSeqId == def.id) null else def.id },
                                 )
                                 AppText(
                                     sequenceLabel(def),

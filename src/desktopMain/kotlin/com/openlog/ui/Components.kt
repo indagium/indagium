@@ -455,6 +455,43 @@ fun RoundIndicator(active: Boolean, color: Color, onClick: () -> Unit, modifier:
     }
 }
 
+// Rounded-pill hover highlight for compact clickable summary rows (e.g. the "N active ▾" /
+// "N excluded ▾" toggles in Tags/Message rules/Highlighters section headers) — these used to be
+// a bare Row + .clickable() with no visual cue that they're clickable at all.
+@Composable
+fun Modifier.hoverPill(): Modifier {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    return this
+        .background(if (hovered) tc.hv else Color.Transparent, RoundedCornerShape(percent = 50))
+        .clip(RoundedCornerShape(percent = 50))
+        .onPointerEvent(PointerEventType.Enter) { hovered = true }
+        .onPointerEvent(PointerEventType.Exit) { hovered = false }
+}
+
+// Shared square color swatch that opens a color picker (highlighters/sequences). A plain colored
+// square gave no visual cue that it's clickable — especially when its own fill color happens to
+// blend with the hover tint — so the affordance lives OUTSIDE the color itself: a hover highlight
+// and, when the picker is open, a colored ring, both drawn in the surrounding box.
+@Composable
+fun ColorPickerSwatch(color: Color, pickerOpen: Boolean, onClick: () -> Unit, size: Dp = 12.dp) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    Box(
+        Modifier
+            .size(size + 8.dp)
+            .background(if (hovered || pickerOpen) tc.hv else Color.Transparent, CORNER_SM)
+            .border(1.dp, if (pickerOpen) tc.ac else Color.Transparent, CORNER_SM)
+            .clip(CORNER_SM)
+            .clickable(onClick = onClick)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.size(size).background(color, CORNER_SM))
+    }
+}
+
 // ── Segmented control ────────────────────────────────────────────────
 @Composable
 fun SegmentedControl(
