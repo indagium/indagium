@@ -571,7 +571,7 @@ private fun NoteBlock(
             .border(BorderStroke(2.dp, if (focused) tc.ac else tc.ac.copy(.35f)))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        BlockControls(tc, "text", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow)
+        BlockControls("text", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow)
         Spacer(Modifier.height(5.dp))
         BasicTextField(
             value = block.text,
@@ -617,7 +617,7 @@ private fun LogRefBlock(
             .border(BorderStroke(2.dp, if (focused) tc.ac else borderColor))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        BlockControls(tc, "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate)
+        BlockControls("log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate)
         if (block.sourceFilename != null) {
             Spacer(Modifier.height(3.dp))
             Box(
@@ -674,7 +674,6 @@ private fun LogRefBlock(
 // ── Block controls (move / delete / add note) ──────────────────────────
 @Composable
 private fun BlockControls(
-    tc: ThemeColors,
     typeLabel: String, typeColor: Color,
     isFirst: Boolean, isLast: Boolean,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,

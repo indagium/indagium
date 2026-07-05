@@ -1656,13 +1656,13 @@ class AppState(
         if (tabs.any { it.id == tabId }) activeTabId = tabId
     }
 
-    fun activateOverflowTab(tabId: String) = synchronized(stateLock) {
+    fun activateOverflowTab(tabId: String): Unit = synchronized(stateLock) {
         val tab = tabs.find { it.id == tabId } ?: return
         tabs = tabs.filter { it.id != tabId } + tab
         activeTabId = tabId
     }
 
-    fun reorderTabs(fromId: String, beforeId: String?) = synchronized(stateLock) {
+    fun reorderTabs(fromId: String, beforeId: String?): Unit = synchronized(stateLock) {
         val from = tabs.find { it.id == fromId } ?: return
         val without = tabs.filter { it.id != fromId }
         val idx = beforeId?.let { id -> without.indexOfFirst { it.id == id }.takeIf { it >= 0 } } ?: without.size

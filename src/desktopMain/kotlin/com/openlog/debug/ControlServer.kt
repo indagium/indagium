@@ -1,6 +1,5 @@
 package com.openlog.debug
 
-import androidx.compose.ui.graphics.Color
 import com.openlog.model.CrashSite
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
@@ -504,23 +503,48 @@ class ControlServer(
         if (tabId.isBlank()) return mapOf("error" to "missing tabId")
         if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
 
-        // Validate value-constrained fields BEFORE mutating anything, so a bad value is a loud
-        // error rather than a silent no-op — and specifically so a malformed `levels` can never
-        // collapse to an empty set (which would hide every row while reporting {ok:true}).
-        val parsedLevels: Set<LogLevel>? = if (body.containsKey("levels")) {
+        val parsed = parseFilterUpdate(body)
+            .getOrElse { return mapOf("error" to (it.message ?: "invalid filter update")) }
+
+        appState.upFlt(tabId) { f -> applyFilterUpdate(f, body, parsed) }
+
+        return buildMap {
+            put("ok", true)
+            put("filter", filterToMap(appState.tab(tabId)!!.filter))
+            parsed.modeWarning?.let { put("warning", it) }
+        }
+    }
+
+    // Bundles every value-constrained field set_filter validates up front, so a bad value is a
+    // loud error rather than a silent no-op — and specifically so a malformed `levels` can never
+    // collapse to an empty set (which would hide every row while reporting {ok:true}).
+    private data class ParsedFilterUpdate(
+        val levels: Set<LogLevel>?,
+        val mode: FilterMode?,
+        val modeWarning: String?,
+        val messageRules: List<MessageRule>?,
+        val sequences: List<SequenceDef>?,
+    )
+
+    private fun parseFilterUpdate(body: Map<String, Any?>): Result<ParsedFilterUpdate> = runCatching {
+        val levels: Set<LogLevel>? = if (body.containsKey("levels")) {
             val keys = body.strList("levels") ?: emptyList()
             val unknown = keys.filter { k -> LogLevel.entries.none { it.key.toString() == k } }
             if (unknown.isNotEmpty()) {
-                return mapOf("error" to "unknown level key(s) $unknown; valid single-char keys: ${LEVEL_KEYS.joinToString(",")}")
+                error("unknown level key(s) $unknown; valid single-char keys: ${LEVEL_KEYS.joinToString(",")}")
             }
             keys.mapNotNull { k -> LogLevel.entries.find { it.key.toString() == k } }.toSet()
-        } else null
+        } else {
+            null
+        }
 
-        val parsedMode: FilterMode? = if (body.containsKey("mode")) {
+        val explicitMode: FilterMode? = if (body.containsKey("mode")) {
             val m = body.str("mode")
             m?.let { runCatching { FilterMode.valueOf(it) }.getOrNull() }
-                ?: return mapOf("error" to "unknown mode '$m'; valid: ${FilterMode.entries.joinToString(",") { it.name }}")
-        } else null
+                ?: error("unknown mode '$m'; valid: ${FilterMode.entries.joinToString(",") { it.name }}")
+        } else {
+            null
+        }
 
         // TAGS and KEYWORD are mutually exclusive base filters (passesTagOrKeywordFilter only
         // evaluates kwText/kwRegex when mode == KEYWORD) — a client that sets a regex filter
@@ -531,7 +555,7 @@ class ControlServer(
         // kwText: "") never forces an unwanted mode change. An explicit `mode` in the body always
         // wins outright and skips this inference entirely.
         var modeWarning: String? = null
-        val inferredMode: FilterMode? = if (parsedMode == null) {
+        val inferredMode: FilterMode? = if (explicitMode == null) {
             val tagSignal = (body.strList("activeTags")?.isNotEmpty() == true) ||
                 (body.strList("pkgPrefixes")?.isNotEmpty() == true)
             val keywordSignal = (body.str("kwText")?.isNotBlank() == true) || (body.bool("kwRegex") == true)
@@ -545,72 +569,73 @@ class ControlServer(
                 keywordSignal -> FilterMode.KEYWORD
                 else -> null
             }
-        } else null
-
-        val parsedRules: List<MessageRule>? = if (body.containsKey("messageRules")) {
-            parseMessageRules(body.mapList("messageRules") ?: emptyList())
-                .getOrElse { return mapOf("error" to (it.message ?: "invalid messageRules")) }
-        } else null
-
-        val parsedSeqs: List<SequenceDef>? = if (body.containsKey("sequences")) {
-            parseSequences(body.mapList("sequences") ?: emptyList())
-                .getOrElse { return mapOf("error" to (it.message ?: "invalid sequences")) }
-        } else null
-
-        appState.upFlt(tabId) { f ->
-            var result = f
-            parsedLevels?.let { result = result.copy(levels = it) }
-            if (body.containsKey("activeTags")) {
-                body.strList("activeTags")?.let { result = result.copy(activeTags = it.toSet()) }
-            }
-            if (body.containsKey("excludeTags")) {
-                body.strList("excludeTags")?.let { result = result.copy(excludeTags = it.toSet()) }
-            }
-            if (body.containsKey("pkgPrefixes")) {
-                body.strList("pkgPrefixes")?.let { result = result.copy(pkgPrefixes = it.toSet()) }
-            }
-            if (body.containsKey("excludePkgPrefixes")) {
-                body.strList("excludePkgPrefixes")?.let { result = result.copy(excludePkgPrefixes = it.toSet()) }
-            }
-            if (body.containsKey("kwText")) {
-                body.str("kwText")?.let { result = result.copy(kwText = it) }
-            }
-            if (body.containsKey("kwRegex")) {
-                body.bool("kwRegex")?.let { result = result.copy(kwRegex = it) }
-            }
-            if (body.containsKey("excludeKw")) {
-                body.str("excludeKw")?.let { result = result.copy(excludeKw = it) }
-            }
-            if (body.containsKey("excludeKwRegex")) {
-                body.bool("excludeKwRegex")?.let { result = result.copy(excludeKwRegex = it) }
-            }
-            if (body.containsKey("kwInTag")) {
-                body.str("kwInTag")?.let { result = result.copy(kwInTag = it) }
-            }
-            if (body.containsKey("kwInTagRegex")) {
-                body.bool("kwInTagRegex")?.let { result = result.copy(kwInTagRegex = it) }
-            }
-            if (body.containsKey("pidTidFilter")) {
-                body.str("pidTidFilter")?.let { result = result.copy(pidTidFilter = it) }
-            }
-            if (body.containsKey("seqOn")) {
-                body.bool("seqOn")?.let { result = result.copy(seqOn = it) }
-            }
-            (parsedMode ?: inferredMode)?.let { result = result.copy(mode = it) }
-            // messageRules / sequences: a supplied list replaces the current one wholesale; the
-            // clear* booleans remove all of them. This is what lets a client detect (via get_filter)
-            // and undo a stale rule/sequence that was silently hiding or folding rows.
-            parsedRules?.let { result = result.copy(messageRules = it) }
-            if (body.bool("clearMessageRules") == true) result = result.copy(messageRules = emptyList())
-            parsedSeqs?.let { result = result.copy(sequences = it) }
-            if (body.bool("clearSequences") == true) result = result.copy(sequences = emptyList())
-            result
+        } else {
+            null
         }
-        return buildMap {
-            put("ok", true)
-            put("filter", filterToMap(appState.tab(tabId)!!.filter))
-            modeWarning?.let { put("warning", it) }
+
+        val rules: List<MessageRule>? = if (body.containsKey("messageRules")) {
+            parseMessageRules(body.mapList("messageRules") ?: emptyList()).getOrThrow()
+        } else {
+            null
         }
+
+        val seqs: List<SequenceDef>? = if (body.containsKey("sequences")) {
+            parseSequences(body.mapList("sequences") ?: emptyList()).getOrThrow()
+        } else {
+            null
+        }
+
+        ParsedFilterUpdate(levels, explicitMode ?: inferredMode, modeWarning, rules, seqs)
+    }
+
+    private fun applyFilterUpdate(f: Filter, body: Map<String, Any?>, parsed: ParsedFilterUpdate): Filter {
+        var result = f
+        parsed.levels?.let { result = result.copy(levels = it) }
+        if (body.containsKey("activeTags")) {
+            body.strList("activeTags")?.let { result = result.copy(activeTags = it.toSet()) }
+        }
+        if (body.containsKey("excludeTags")) {
+            body.strList("excludeTags")?.let { result = result.copy(excludeTags = it.toSet()) }
+        }
+        if (body.containsKey("pkgPrefixes")) {
+            body.strList("pkgPrefixes")?.let { result = result.copy(pkgPrefixes = it.toSet()) }
+        }
+        if (body.containsKey("excludePkgPrefixes")) {
+            body.strList("excludePkgPrefixes")?.let { result = result.copy(excludePkgPrefixes = it.toSet()) }
+        }
+        if (body.containsKey("kwText")) {
+            body.str("kwText")?.let { result = result.copy(kwText = it) }
+        }
+        if (body.containsKey("kwRegex")) {
+            body.bool("kwRegex")?.let { result = result.copy(kwRegex = it) }
+        }
+        if (body.containsKey("excludeKw")) {
+            body.str("excludeKw")?.let { result = result.copy(excludeKw = it) }
+        }
+        if (body.containsKey("excludeKwRegex")) {
+            body.bool("excludeKwRegex")?.let { result = result.copy(excludeKwRegex = it) }
+        }
+        if (body.containsKey("kwInTag")) {
+            body.str("kwInTag")?.let { result = result.copy(kwInTag = it) }
+        }
+        if (body.containsKey("kwInTagRegex")) {
+            body.bool("kwInTagRegex")?.let { result = result.copy(kwInTagRegex = it) }
+        }
+        if (body.containsKey("pidTidFilter")) {
+            body.str("pidTidFilter")?.let { result = result.copy(pidTidFilter = it) }
+        }
+        if (body.containsKey("seqOn")) {
+            body.bool("seqOn")?.let { result = result.copy(seqOn = it) }
+        }
+        parsed.mode?.let { result = result.copy(mode = it) }
+        // messageRules / sequences: a supplied list replaces the current one wholesale; the
+        // clear* booleans remove all of them. This is what lets a client detect (via get_filter)
+        // and undo a stale rule/sequence that was silently hiding or folding rows.
+        parsed.messageRules?.let { result = result.copy(messageRules = it) }
+        if (body.bool("clearMessageRules") == true) result = result.copy(messageRules = emptyList())
+        parsed.sequences?.let { result = result.copy(sequences = it) }
+        if (body.bool("clearSequences") == true) result = result.copy(sequences = emptyList())
+        return result
     }
 
     // Parse client-supplied message rules; throws (captured as a Result failure) with a
@@ -1095,7 +1120,8 @@ private val MCP_TOOLS: List<McpTool> = listOf(
             "fields" to "array", "compact" to "boolean", required = listOf("tabId"),
             enums = mapOf("fields" to ROW_FIELD_KEYS),
             descriptions = mapOf(
-                "fields" to "Whitelist of entry columns to include (${ROW_FIELD_KEYS.joinToString(",")}); structural keys (type,id,gid,expanded,count) are always kept.",
+                "fields" to "Whitelist of entry columns to include (${ROW_FIELD_KEYS.joinToString(",")}); " +
+                    "structural keys (type,id,gid,expanded,count) are always kept.",
                 "compact" to "When true, drop pid/tid/indent and any empty/zero-valued fields.",
             ),
         ),
