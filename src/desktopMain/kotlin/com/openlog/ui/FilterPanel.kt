@@ -975,9 +975,8 @@ fun FilterPanel(
                             AppText((if (hl.regex) "/" else "") + hl.pattern + (if (hl.regex) "/i" else ""),
                                 color = if (hl.on) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO,
                                 modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
-                            AppText(if (hl.on) "●" else "○", color = if (hl.on) hl.color else tc.td,
-                                fontSize = 11.sp, modifier = Modifier.clickable { onToggleHl(hl.id) })
-                            AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onRemoveHl(hl.id) })
+                            RoundIndicator(active = hl.on, color = hl.color, onClick = { onToggleHl(hl.id) })
+                            SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveHl(hl.id) })
                         }
                         if (colorPickerHlId == hl.id) {
                             FlowRow(
@@ -1117,12 +1116,11 @@ fun FilterPanel(
                                     color = if (def.enabled) tc.tx else tc.td,
                                     fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis,
                                 )
-                                AppText("✎", color = tc.td, fontSize = 11.sp, modifier = Modifier.clickable {
+                                SquareIconButton("✎", fontSize = 11.sp, onClick = {
                                     editingSeqId = if (editingSeqId == def.id) null else def.id
                                 })
-                                AppText(if (def.enabled) "●" else "○", color = if (def.enabled) def.color else tc.td,
-                                    fontSize = 11.sp, modifier = Modifier.clickable { onToggleSeqEnabled(def.id) })
-                                AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onRemoveSeq(def.id) })
+                                RoundIndicator(active = def.enabled, color = def.color, onClick = { onToggleSeqEnabled(def.id) })
+                                SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveSeq(def.id) })
                             }
                             if (editingSeqId == def.id) {
                                 SequenceEditor(def, onUpdateSeq, onCancel = { editingSeqId = null })
@@ -1287,7 +1285,13 @@ fun FilterPanel(
                                 Modifier.fillMaxWidth().clickable { onLoadFilter(sf) }.padding(horizontal = 12.dp, vertical = 5.dp),
                                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
-                                AppText(if (active) "●" else "○", color = if (active) tc.ac else tc.td, fontSize = 12.sp)
+                                // Own click handler (separate from the row's onLoadFilter click below):
+                                // clicking while already active clears the live filter — the same effect
+                                // as "Clear filters" — without deleting this saved preset.
+                                RoundIndicator(
+                                    active = active, color = tc.ac,
+                                    onClick = { if (active) onClearFilter() else onLoadFilter(sf) },
+                                )
                                 TooltipArea(
                                     tooltip = {
                                         Box(
@@ -1307,8 +1311,8 @@ fun FilterPanel(
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                 }
-                                AppText("✎", color = tc.td, fontSize = 12.sp, modifier = Modifier.clickable { onRenameSF(sf.id) })
-                                AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onDeleteSF(sf.id) })
+                                SquareIconButton("✎", fontSize = 12.sp, onClick = { onRenameSF(sf.id) })
+                                SquareIconButton("×", fontSize = 14.sp, onClick = { onDeleteSF(sf.id) })
                             }
                         }
                     }
@@ -1321,7 +1325,9 @@ fun FilterPanel(
                     AppButton("Export", onClick = onExportFilters)
                     AppButton("Import", onClick = onImportFilters)
                 }
-                AppText("Drop filter .json here to import", color = tc.td, fontSize = 10.sp)
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    AppText("Drop filter .json here to import", color = tc.td, fontSize = 10.sp)
+                }
             }
         }
     }

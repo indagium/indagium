@@ -11,6 +11,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Checkbox
@@ -382,6 +383,76 @@ fun ColorSwatch(color: Color, selected: Boolean, onClick: () -> Unit) {
             .clip(CORNER_SM)
             .clickable(onClick = onClick),
     )
+}
+
+// Shared small square icon-button — single-glyph edit/remove/reorder buttons (✎, ×, ↑, ↓) across
+// Notes/Highlighters/Sequences/Saved-filters used to be bare AppText + .clickable() with no
+// shape, size, or hover highlight, each drifting independently. This gives them one consistent
+// footprint, following CloseButton's own hover-highlight convention (tc.hv on pointer-enter).
+// 18dp matches the height of the adjacent type badge (BlockControls' Note/LogRef pill) they sit
+// next to in the same row.
+@Composable
+fun SquareIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    Box(
+        modifier
+            .size(18.dp)
+            .background(if (hovered) tc.hv else Color.Transparent, CORNER_MD)
+            .clip(CORNER_MD)
+            .clickable(onClick = onClick)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
+        contentAlignment = Alignment.Center,
+    ) {
+        AppText(text, color = tc.td, fontSize = fontSize)
+    }
+}
+
+// Same height/shape/hover convention as SquareIconButton, for multi-character labels (e.g.
+// "+ note") that can't fit a fixed square — auto-width via horizontal padding instead.
+@Composable
+fun LabelIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    Box(
+        modifier
+            .height(18.dp)
+            .background(if (hovered) tc.hv else Color.Transparent, CORNER_MD)
+            .clip(CORNER_MD)
+            .clickable(onClick = onClick)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(horizontal = 6.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        AppText(text, color = tc.td, fontSize = fontSize)
+    }
+}
+
+// Shared round enabled/active indicator — replaces the bare "●"/"○" glyph trick (highlighters,
+// sequences, saved filters) with a real CircleShape so its hover highlight is a round halo behind
+// the dot, not a square highlight box behind a round glyph.
+@Composable
+fun RoundIndicator(active: Boolean, color: Color, onClick: () -> Unit, modifier: Modifier = Modifier, size: Dp = 10.dp) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    Box(
+        modifier
+            .size(size + 8.dp)
+            .background(if (hovered) tc.hv else Color.Transparent, CircleShape)
+            .clip(CircleShape)
+            .clickable(onClick = onClick)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier.size(size)
+                .background(if (active) color else Color.Transparent, CircleShape)
+                .border(1.dp, color, CircleShape),
+        )
+    }
 }
 
 // ── Segmented control ────────────────────────────────────────────────

@@ -729,10 +729,10 @@ private fun BlockControls(
 
         Spacer(Modifier.weight(1f))
 
-        if (!isFirst) AppText("↑", color = tc.td, fontSize = 12.sp, modifier = Modifier.clickable(onClick = onMoveUp))
-        if (!isLast)  AppText("↓", color = tc.td, fontSize = 12.sp, modifier = Modifier.clickable(onClick = onMoveDown))
-        AppText("+ note", color = tc.td, fontSize = 10.sp, modifier = Modifier.clickable(onClick = onAddBelow))
-        AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable(onClick = onRemove))
+        if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp)
+        if (!isLast)  SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown)
+        LabelIconButton("+ note", fontSize = 10.sp, onClick = onAddBelow)
+        SquareIconButton("×", fontSize = 14.sp, onClick = onRemove)
     }
 }
 
