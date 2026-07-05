@@ -2326,10 +2326,47 @@ class AppStateBehaviorTest {
         val pendingTabId = state.openFile(logFile)!!
         assertTrue(parserStarted.await(2, TimeUnit.SECONDS))
         state.closeTab(pendingTabId)
+        assertFalse(state.isLoading)
         releaseParser.countDown()
-        waitUntil { !state.isLoading }
 
         assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
+    fun closeAllTabsCancelsOrphanedPendingLoad() {
+        val dir = createTempDirectory("openlog-cancel-orphan-load").toFile()
+        val logFile = File(dir, "slow.log").apply { writeText("06-26 10:00:00.000  1  1 I App: hello\n") }
+        val parserStarted = CountDownLatch(1)
+        val releaseParser = CountDownLatch(1)
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            parser = {
+                parserStarted.countDown()
+                releaseParser.await(2, TimeUnit.SECONDS)
+                listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))
+            },
+        )
+
+        state.openFile(logFile)
+        assertTrue(parserStarted.await(2, TimeUnit.SECONDS))
+        state.tabs = emptyList()
+        state.closeAllTabs()
+
+        assertFalse(state.isLoading)
+        releaseParser.countDown()
+        assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
+    fun closeAllTabsClearsOrphanedLoadingState() {
+        val state = AppState()
+        state.isLoading = true
+        state.loadingStatus = "Loading file..."
+
+        state.closeAllTabs()
+
+        assertFalse(state.isLoading)
+        assertEquals(null, state.loadingStatus)
     }
 
     @Test

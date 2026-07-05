@@ -38,6 +38,7 @@ import java.awt.datatransfer.StringSelection
 import java.io.File
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 private fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = EntryIdMap(data)
 
@@ -185,8 +186,10 @@ class AppState(
     // every tailer's Job for free, since each is started on ioScope.
     private data class ActiveTail(val tailer: FileTailer, val job: Job)
 
+    private data class ActiveLoad(val job: Job, val countsAsLoading: AtomicBoolean = AtomicBoolean(true))
+
     private val activeTails = mutableMapOf<String, ActiveTail>()
-    private val activeLoads = ConcurrentHashMap<String, Job>()
+    private val activeLoads = ConcurrentHashMap<String, ActiveLoad>()
 
     // Latest filtered item summary per tab, pushed by LogViewer whenever its (possibly
     // background-computed) item list lands. Selection ops reuse it instead of recomputing the
@@ -306,15 +309,12 @@ class AppState(
 
     // Manual escape hatch for the "still loading" prompt the UI shows after a long stretch of
     // isLoading — surfaced so a load that's genuinely stuck (not just slow) doesn't leave the
-    // user with no way back into the app short of force-quitting. Deliberately doesn't touch
-    // pendingLoads/isLoading directly: every load path's own `finally` block already calls
-    // finishLoading() exactly once on any exit including cancellation, so cancelling the jobs
-    // here and letting those existing finally blocks unwind naturally is what actually drives
-    // isLoading back to false — resetting the counter by hand here too would double-decrement it
-    // once those blocks run, and could under-count a totally unrelated load that starts in the
-    // gap between this call and the cancelled jobs' cancellation actually being observed.
+    // user with no way back into the app short of force-quitting. Each ActiveLoad owns exactly one
+    // loading counter slot, and cancelActiveLoad releases that slot immediately instead of waiting
+    // for a stuck parser/extractor to observe coroutine cancellation.
     fun cancelAllLoads() {
-        activeLoads.values.toList().forEach { it.cancel() }
+        activeLoads.keys.toList().forEach { cancelActiveLoad(it) }
+        clearLoadingState()
     }
 
     // Actually starts/stops the server, independent of whether the transition should be
@@ -412,6 +412,26 @@ class AppState(
         if (pendingLoads > 0) pendingLoads -= 1
         isLoading = pendingLoads > 0
         if (!isLoading) loadingStatus = null
+    }
+
+    private fun clearLoadingState() = synchronized(stateLock) {
+        pendingLoads = 0
+        isLoading = false
+        loadingStatus = null
+    }
+
+    private fun finishActiveLoad(load: ActiveLoad?) {
+        if (load?.countsAsLoading?.compareAndSet(true, false) == true) finishLoading()
+    }
+
+    private fun markActiveLoadFinished(tabId: String) {
+        finishActiveLoad(activeLoads[tabId])
+    }
+
+    private fun cancelActiveLoad(tabId: String) {
+        val load = activeLoads.remove(tabId) ?: return
+        finishActiveLoad(load)
+        load.job.cancel()
     }
 
     fun updateFilterVisible(visible: Boolean) {
@@ -1662,12 +1682,13 @@ class AppState(
 
     fun closeAllTabs() {
         closeTabsById(tabs.map { it.id }.toSet(), preferredActiveId = null)
+        cancelAllLoads()
     }
 
     private fun closeTabsById(tabIds: Set<String>, preferredActiveId: String?) {
         if (tabIds.isEmpty()) return
         tabIds.forEach { tabId ->
-            activeLoads.remove(tabId)?.cancel()
+            cancelActiveLoad(tabId)
             activeTails.remove(tabId)?.job?.cancel()
             visibleItemsByTab.remove(tabId)
             invalidateComputeCache(tabId)
@@ -1871,17 +1892,17 @@ class AppState(
                     tabs = tabs + t
                     activeTabId = t.id
                 }
-                finishLoading()
+                markActiveLoadFinished(tabId)
                 published = true
                 val full = buildLogAnalysis(logData)
                 ensureActive()
                 upTab(tabId) { it.copy(analysis = full) }
             } finally {
-                activeLoads.remove(tabId)
-                if (!published) finishLoading()
+                val load = activeLoads.remove(tabId)
+                if (!published) finishActiveLoad(load)
             }
         }
-        activeLoads[tabId] = job
+        activeLoads[tabId] = ActiveLoad(job)
         job.start()
         return tabId
     }
@@ -2024,17 +2045,17 @@ class AppState(
                     tabs = tabs + t
                     activeTabId = t.id
                 }
-                finishLoading()
+                markActiveLoadFinished(tabId)
                 published = true
                 val full = buildLogAnalysis(logData)
                 ensureActive()
                 upTab(tabId) { it.copy(analysis = full) }
             } finally {
-                activeLoads.remove(tabId)
-                if (!published) finishLoading()
+                val load = activeLoads.remove(tabId)
+                if (!published) finishActiveLoad(load)
             }
         }
-        activeLoads[tabId] = job
+        activeLoads[tabId] = ActiveLoad(job)
         job.start()
     }
 
@@ -2508,17 +2529,17 @@ class AppState(
                 ensureActive()
                 val rmap = mkRmap(logData)
                 upTab(tabId) { it.copy(logData = logData, rmap = rmap, analysis = pendingAnalysis(logData)) }
-                finishLoading()
+                markActiveLoadFinished(tabId)
                 published = true
                 val full = buildLogAnalysis(logData)
                 ensureActive()
                 upTab(tabId) { it.copy(analysis = full) }
             } finally {
-                activeLoads.remove(tabId)
-                if (!published) finishLoading()
+                val load = activeLoads.remove(tabId)
+                if (!published) finishActiveLoad(load)
             }
         }
-        activeLoads[tabId] = job
+        activeLoads[tabId] = ActiveLoad(job)
         job.start()
     }
 
