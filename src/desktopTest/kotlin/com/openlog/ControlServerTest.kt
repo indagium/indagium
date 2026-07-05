@@ -234,6 +234,92 @@ class ControlServerTest {
     }
 
     @Test
+    fun getPackagesReturnsDottedPrefixesWithCounts() {
+        state.tabs = listOf(
+            mkTab(
+                "t1", "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Net", "a"),
+                    LogEntry(2, "10:00:00.001", LogLevel.I, "com.app.Net", "b"),
+                    LogEntry(3, "10:00:00.002", LogLevel.I, "com.app.Auth", "c"),
+                    LogEntry(4, "10:00:00.003", LogLevel.I, "org.lib.Foo", "d"),
+                    LogEntry(5, "10:00:00.004", LogLevel.I, "BareTag", "e"),
+                ),
+            ),
+        )
+        val body = get("/packages?tabId=t1")
+        // The parent package (before the last dot) is the bucket: all com.app.* fold into com.app
+        // (count 3, sorted first); org.lib count 1; BareTag has no dot so is omitted.
+        assertTrue(body.contains("\"prefix\":\"com.app\",\"count\":3"), body)
+        assertTrue(body.contains("\"prefix\":\"org.lib\",\"count\":1"), body)
+        assertTrue(!body.contains("BareTag"), body)
+    }
+
+    @Test
+    fun getFilterExposesMessageRulesAndSequencesThatSetFilterCanClear() {
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        // A client authors a rule + sequence, reads them back, then clears both — the exact
+        // detect-and-undo path that was impossible before these fields were exposed over MCP.
+        post("/filter", """{"tabId":"t1","messageRules":[{"include":true,"pattern":"boom","tag":"App"}],"sequences":[{"matchText":"start"}]}""")
+        assertEquals(1, state.tab("t1")!!.filter.messageRules.size)
+        assertEquals(1, state.tab("t1")!!.filter.sequences.size)
+
+        val body = get("/filter?tabId=t1")
+        assertTrue(body.contains("\"pattern\":\"boom\""), body)
+        assertTrue(body.contains("\"matchText\":\"start\""), body)
+
+        post("/filter", """{"tabId":"t1","clearMessageRules":true,"clearSequences":true}""")
+        assertTrue(state.tab("t1")!!.filter.messageRules.isEmpty())
+        assertTrue(state.tab("t1")!!.filter.sequences.isEmpty())
+    }
+
+    @Test
+    fun setFilterRejectsUnknownLevelKeyAndLeavesLevelsIntact() {
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        val before = state.tab("t1")!!.filter.levels
+        val body = post("/filter", """{"tabId":"t1","levels":["Error"]}""")
+        assertTrue(body.contains("\"error\""), body)
+        assertTrue(body.contains("unknown level key"), body)
+        assertEquals(before, state.tab("t1")!!.filter.levels)
+    }
+
+    @Test
+    fun getLineContextReturnsUnfilteredNeighborsIgnoringActiveFilter() {
+        state.tabs = listOf(
+            mkTab(
+                "t1", "test.log",
+                (1..10).map { LogEntry(it, "10:00:0$it.000", if (it == 5) LogLevel.E else LogLevel.I, "App", "line $it") },
+            ),
+        )
+        // Filter down to errors-only — line 5 is the only visible row — but context must still see
+        // its Info neighbors, which the filter hides.
+        state.upFlt("t1") { it.copy(levels = setOf(LogLevel.E)) }
+        val body = get("/context?tabId=t1&lineId=5&before=2&after=2")
+        listOf("line 3", "line 4", "line 5", "line 6", "line 7").forEach {
+            assertTrue(body.contains(it), "context missing $it:\n$body")
+        }
+        assertTrue(!body.contains("line 2"), "context should not extend past before window:\n$body")
+    }
+
+    @Test
+    fun getVisibleLinesCompactAndFieldsShrinkOutputButDefaultIsUnchanged() {
+        state.tabs = listOf(
+            mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi", pid = 42, tid = 7))),
+        )
+        val full = get("/visible?tabId=t1")
+        assertTrue(full.contains("\"pid\":42"), full)
+        assertTrue(full.contains("\"tid\":7"), full)
+        assertTrue(full.contains("\"indent\":0"), full)
+
+        // compact is a query-string boolean here; drop the low-signal columns.
+        val compact = get("/visible?tabId=t1&compact=true")
+        assertTrue(!compact.contains("\"pid\""), compact)
+        assertTrue(!compact.contains("\"tid\""), compact)
+        assertTrue(!compact.contains("\"indent\""), compact)
+        assertTrue(compact.contains("\"msg\":\"hi\""), compact)
+    }
+
+    @Test
     fun getCrashSitesReturnsStackTraceAndAnrSites() {
         state.tabs = listOf(
             mkTab(

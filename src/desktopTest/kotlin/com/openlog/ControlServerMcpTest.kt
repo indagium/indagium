@@ -23,7 +23,7 @@ private const val INITIALIZE_REQUEST =
 // Exercises the native MCP Streamable HTTP endpoint the same ControlServer also serves the REST
 // routes from — proving a real MCP client (which does exactly these JSON-RPC-over-HTTP calls)
 // can drive the app by URL with no Node bridge: initialize handshake -> session id -> tools/list
-// (all 29 tools) -> tools/call reading live AppState.
+// (all tools) -> tools/call reading live AppState.
 class ControlServerMcpTest {
     private lateinit var state: AppState
     private lateinit var server: ControlServer
@@ -69,20 +69,49 @@ class ControlServerMcpTest {
     }
 
     @Test
-    fun toolsListExposesAllTwentyNineTools() {
+    fun toolsListExposesAllTools() {
         val session = initSession()
         val body = mcp("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""", session).body()
-        // Every op the retired Node bridge exposed must still be present, by exact name.
+        // Every op the retired Node bridge exposed must still be present, by exact name, plus the
+        // tools added since (get_line_context, get_packages).
         val expected = listOf(
             "list_tabs", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
-            "get_filter", "set_filter", "get_visible_lines", "select_lines", "get_selection",
-            "toggle_group", "expand_all", "collapse_all", "get_tags", "get_crash_sites",
+            "get_filter", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
+            "toggle_group", "expand_all", "collapse_all", "get_tags", "get_packages", "get_crash_sites",
             "add_text_note", "add_log_note", "update_note_block", "move_note_block", "delete_note_block",
             "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing",
         )
-        assertEquals(29, expected.size)
+        assertEquals(31, expected.size)
         expected.forEach { name -> assertTrue(body.contains("\"$name\""), "tools/list missing $name:\n$body") }
+    }
+
+    @Test
+    fun toolsListDeclaresLevelsEnum() {
+        // set_filter.levels must advertise its single-char enum so a compliant client can't send a
+        // value the handler would reject (and that used to silently blackout the whole view).
+        val session = initSession()
+        val body = mcp("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""", session).body()
+        val levelsSchema = Regex(""""levels":\{[^{}]*\{[^{}]*\}[^{}]*\}""").find(body)?.value
+            ?: error("no levels property found in tools/list:\n$body")
+        listOf("V", "D", "I", "W", "E", "A").forEach {
+            assertTrue(levelsSchema.contains("\"$it\""), "levels schema missing enum value $it:\n$levelsSchema")
+        }
+    }
+
+    @Test
+    fun setFilterRejectsUnknownLevelKeyWithoutBlackout() {
+        // Regression: a malformed level string used to be silently dropped; if every supplied key
+        // was bad the levels set collapsed to empty, hiding every row while returning {ok:true}.
+        state.tabs = listOf(mkTab("t1", "s.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        val before = state.tab("t1")!!.filter.levels
+        val session = initSession()
+        val body = mcp(
+            """{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"set_filter","arguments":{"tabId":"t1","levels":["Error"]}}}""",
+            session,
+        ).body()
+        assertTrue(body.contains("unknown level key"), "expected an explicit error:\n$body")
+        assertEquals(before, state.tab("t1")!!.filter.levels, "levels must be unchanged after a rejected update")
     }
 
     @Test

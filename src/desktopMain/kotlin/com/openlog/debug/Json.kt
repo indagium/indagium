@@ -163,6 +163,17 @@ fun Map<String, Any?>.intList(key: String): List<Int>? = (this[key] as? List<Any
 
 fun Map<String, Any?>.bool(key: String): Boolean? = this[key] as? Boolean
 
+// Boolean from either a JSON body / MCP argument (Boolean) or a REST query param (String).
+fun Map<String, Any?>.anyBool(key: String): Boolean? = when (val v = this[key]) {
+    is Boolean -> v
+    is String -> v.toBooleanStrictOrNull()
+    else -> null
+}
+
+@Suppress("UNCHECKED_CAST")
+fun Map<String, Any?>.mapList(key: String): List<Map<String, Any?>>? =
+    (this[key] as? List<Any?>)?.mapNotNull { it as? Map<String, Any?> }
+
 fun Map<String, Any?>.int(key: String): Int? = when (val value = this[key]) {
     is Int -> value
     is Double -> value.toInt()

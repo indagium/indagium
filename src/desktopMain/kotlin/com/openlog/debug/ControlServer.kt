@@ -1,12 +1,18 @@
 package com.openlog.debug
 
+import androidx.compose.ui.graphics.Color
 import com.openlog.model.CrashSite
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
+import com.openlog.model.LogEntry
 import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
+import com.openlog.model.MessageRule
+import com.openlog.model.RuleTarget
 import com.openlog.model.SavedFilter
+import com.openlog.model.SequenceDef
 import com.openlog.ui.AppState
+import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitSource
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.computeCrashSites
@@ -46,7 +52,9 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.longOrNull
@@ -55,6 +63,22 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 private const val DEFAULT_VISIBLE_LIMIT = 200
+
+// Keys kept regardless of any fields/compact projection, so projected items stay identifiable.
+private val STRUCTURAL_ITEM_KEYS = setOf("type", "id", "gid", "expanded", "count")
+
+// Keys the `compact` projection always drops (low-signal for reading a log).
+private val COMPACT_DROP_KEYS = setOf("pid", "tid", "indent")
+
+// Entry-derived columns a client may whitelist via `fields` (structural keys are always kept).
+private val ROW_FIELD_KEYS = listOf("id", "ts", "level", "tag", "msg", "pid", "tid", "indent")
+
+private fun isEmptyOrZero(v: Any?): Boolean = when (v) {
+    null -> true
+    is String -> v.isEmpty()
+    is Number -> v.toDouble() == 0.0
+    else -> false
+}
 
 // Long enough for a 1.5GB logcat (~20s parse + analysis, measured); at 15s open_log_file
 // reported "file did not load" for a load that then completed successfully seconds later.
@@ -220,13 +244,21 @@ class ControlServer(
         "close_tab" -> closeTab(a.str("tabId") ?: "")
         "get_filter" -> getFilter(a.str("tabId") ?: "")
         "set_filter" -> setFilter(a.str("tabId") ?: "", a)
-        "get_visible_lines" -> getVisibleLines(a.str("tabId") ?: "", a.anyInt("limit") ?: DEFAULT_VISIBLE_LIMIT, a.anyInt("offset") ?: 0)
+        "get_visible_lines" -> getVisibleLines(
+            a.str("tabId") ?: "", a.anyInt("limit") ?: DEFAULT_VISIBLE_LIMIT, a.anyInt("offset") ?: 0,
+            a.strList("fields")?.toSet(), a.anyBool("compact") == true,
+        )
+        "get_line_context" -> getLineContext(
+            a.str("tabId") ?: "", a.anyInt("lineId") ?: -1, a.anyInt("before") ?: 10, a.anyInt("after") ?: 10,
+            a.strList("fields")?.toSet(), a.anyBool("compact") == true,
+        )
         "select_lines" -> setSelection(a.str("tabId") ?: "", a.intList("lineIds") ?: emptyList())
         "get_selection" -> getSelection(a.str("tabId") ?: "")
         "toggle_group" -> toggleGroupRoute(a.str("tabId") ?: "", a.str("gid") ?: "")
         "expand_all" -> expandAllRoute(a.str("tabId") ?: "")
         "collapse_all" -> collapseAllRoute(a.str("tabId") ?: "")
         "get_tags" -> getTags(a.str("tabId") ?: "")
+        "get_packages" -> getPackages(a.str("tabId") ?: "")
         "get_crash_sites" -> getCrashSites(a.str("tabId") ?: "")
         "add_text_note" -> addTextNoteRoute(a.str("tabId") ?: "", a.str("text") ?: "", a.str("afterId"))
         "add_log_note" -> addLogNoteRoute(a.str("tabId") ?: "", a.intList("lineIds") ?: emptyList(), a.str("caption") ?: "")
@@ -471,13 +503,38 @@ class ControlServer(
     private fun setFilter(tabId: String, body: Map<String, Any?>): Map<String, Any?> {
         if (tabId.isBlank()) return mapOf("error" to "missing tabId")
         if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+
+        // Validate value-constrained fields BEFORE mutating anything, so a bad value is a loud
+        // error rather than a silent no-op — and specifically so a malformed `levels` can never
+        // collapse to an empty set (which would hide every row while reporting {ok:true}).
+        val parsedLevels: Set<LogLevel>? = if (body.containsKey("levels")) {
+            val keys = body.strList("levels") ?: emptyList()
+            val unknown = keys.filter { k -> LogLevel.entries.none { it.key.toString() == k } }
+            if (unknown.isNotEmpty()) {
+                return mapOf("error" to "unknown level key(s) $unknown; valid single-char keys: ${LEVEL_KEYS.joinToString(",")}")
+            }
+            keys.mapNotNull { k -> LogLevel.entries.find { it.key.toString() == k } }.toSet()
+        } else null
+
+        val parsedMode: FilterMode? = if (body.containsKey("mode")) {
+            val m = body.str("mode")
+            m?.let { runCatching { FilterMode.valueOf(it) }.getOrNull() }
+                ?: return mapOf("error" to "unknown mode '$m'; valid: ${FilterMode.entries.joinToString(",") { it.name }}")
+        } else null
+
+        val parsedRules: List<MessageRule>? = if (body.containsKey("messageRules")) {
+            parseMessageRules(body.mapList("messageRules") ?: emptyList())
+                .getOrElse { return mapOf("error" to (it.message ?: "invalid messageRules")) }
+        } else null
+
+        val parsedSeqs: List<SequenceDef>? = if (body.containsKey("sequences")) {
+            parseSequences(body.mapList("sequences") ?: emptyList())
+                .getOrElse { return mapOf("error" to (it.message ?: "invalid sequences")) }
+        } else null
+
         appState.upFlt(tabId) { f ->
             var result = f
-            if (body.containsKey("levels")) {
-                body.strList("levels")?.let { keys ->
-                    result = result.copy(levels = keys.mapNotNull { k -> LogLevel.entries.find { it.key.toString() == k } }.toSet())
-                }
-            }
+            parsedLevels?.let { result = result.copy(levels = it) }
             if (body.containsKey("activeTags")) {
                 body.strList("activeTags")?.let { result = result.copy(activeTags = it.toSet()) }
             }
@@ -514,18 +571,103 @@ class ControlServer(
             if (body.containsKey("seqOn")) {
                 body.bool("seqOn")?.let { result = result.copy(seqOn = it) }
             }
-            if (body.containsKey("mode")) {
-                body.str("mode")?.let { m -> runCatching { FilterMode.valueOf(m) }.getOrNull()?.let { result = result.copy(mode = it) } }
-            }
+            parsedMode?.let { result = result.copy(mode = it) }
+            // messageRules / sequences: a supplied list replaces the current one wholesale; the
+            // clear* booleans remove all of them. This is what lets a client detect (via get_filter)
+            // and undo a stale rule/sequence that was silently hiding or folding rows.
+            parsedRules?.let { result = result.copy(messageRules = it) }
+            if (body.bool("clearMessageRules") == true) result = result.copy(messageRules = emptyList())
+            parsedSeqs?.let { result = result.copy(sequences = it) }
+            if (body.bool("clearSequences") == true) result = result.copy(sequences = emptyList())
             result
         }
         return mapOf("ok" to true, "filter" to filterToMap(appState.tab(tabId)!!.filter))
     }
 
-    private fun getVisibleLines(tabId: String, limit: Int, offset: Int): Map<String, Any?> {
+    // Parse client-supplied message rules; throws (captured as a Result failure) with a
+    // descriptive message when a required field is missing or an enum value is unrecognized.
+    private fun parseMessageRules(raw: List<Map<String, Any?>>): Result<List<MessageRule>> = runCatching {
+        raw.mapIndexed { idx, m ->
+            val pattern = m.str("pattern")?.takeIf { it.isNotBlank() }
+                ?: error("messageRules[$idx]: missing or blank 'pattern'")
+            val target = when (val t = m.str("target")) {
+                null -> RuleTarget.MESSAGE
+                else -> runCatching { RuleTarget.valueOf(t) }.getOrElse {
+                    error("messageRules[$idx]: unknown target '$t'; valid: ${RuleTarget.entries.joinToString(",") { it.name }}")
+                }
+            }
+            MessageRule(
+                id = m.str("id")?.takeIf { it.isNotBlank() } ?: "rule${System.currentTimeMillis()}_$idx",
+                include = m.bool("include") ?: true,
+                pattern = pattern,
+                regex = m.bool("regex") ?: false,
+                tag = m.str("tag")?.takeIf { it.isNotBlank() },
+                packagePrefix = m.str("packagePrefix")?.takeIf { it.isNotBlank() },
+                enabled = m.bool("enabled") ?: true,
+                target = target,
+            )
+        }
+    }
+
+    // Parse client-supplied sequences. Colors are assigned round-robin from SEQ_COLORS (the same
+    // palette the UI uses) — clients don't supply colors over MCP. Priority defaults to list order.
+    private fun parseSequences(raw: List<Map<String, Any?>>): Result<List<SequenceDef>> = runCatching {
+        raw.mapIndexed { idx, m ->
+            val matchText = m.str("matchText")?.takeIf { it.isNotBlank() }
+                ?: error("sequences[$idx]: missing or blank 'matchText'")
+            SequenceDef(
+                id = m.str("id")?.takeIf { it.isNotBlank() } ?: "seq${System.currentTimeMillis()}_$idx",
+                matchText = matchText,
+                isRegex = m.bool("isRegex") ?: false,
+                priority = m.int("priority") ?: (idx + 1),
+                color = SEQ_COLORS[idx % SEQ_COLORS.size],
+                enabled = m.bool("enabled") ?: true,
+                tag = m.str("tag")?.takeIf { it.isNotBlank() },
+                endMatchText = m.str("endMatchText")?.takeIf { it.isNotBlank() },
+                endIsRegex = m.bool("endIsRegex") ?: false,
+                endTag = m.str("endTag")?.takeIf { it.isNotBlank() },
+            )
+        }
+    }
+
+    private fun getVisibleLines(tabId: String, limit: Int, offset: Int, fields: Set<String>?, compact: Boolean): Map<String, Any?> {
         val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         val items = computeItems(tab, true)
-        return mapOf("totalCount" to items.size, "items" to items.drop(offset).take(limit).map { logItemToMap(it) })
+        return mapOf(
+            "totalCount" to items.size,
+            "items" to items.drop(offset).take(limit).map { projectItem(logItemToMap(it), fields, compact) },
+        )
+    }
+
+    // Unfiltered context around a single line, read straight from the tab's parsed entries — so it
+    // is unaffected by the active filter or any folding, and needs no filter-widen/restore dance.
+    private fun getLineContext(tabId: String, lineId: Int, before: Int, after: Int, fields: Set<String>?, compact: Boolean): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val idx = tab.logData.indexOfFirst { it.id == lineId }
+        if (idx < 0) return mapOf("error" to "no such line id $lineId in tab $tabId")
+        val from = (idx - before.coerceAtLeast(0)).coerceAtLeast(0)
+        val to = (idx + after.coerceAtLeast(0)).coerceAtMost(tab.logData.lastIndex)
+        return mapOf(
+            "tabId" to tabId, "lineId" to lineId,
+            "lines" to (from..to).map { rowMap(tab.logData[it], fields, compact) },
+        )
+    }
+
+    // Distinct dotted tag-prefixes present in the full file, with counts — mirrors get_tags so a
+    // client can discover valid values for pkgPrefixes / excludePkgPrefixes instead of guessing.
+    private fun getPackages(tabId: String): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val counts = HashMap<String, Int>()
+        tab.logData.forEach { e ->
+            val dot = e.tag.lastIndexOf('.')
+            if (dot > 0) {
+                val prefix = e.tag.substring(0, dot)
+                counts[prefix] = (counts[prefix] ?: 0) + 1
+            }
+        }
+        val packages = counts.entries.sortedByDescending { it.value }
+            .map { mapOf("prefix" to it.key, "count" to it.value) }
+        return mapOf("packages" to packages)
     }
 
     private fun getSelection(tabId: String): Map<String, Any?> {
@@ -653,6 +795,22 @@ class ControlServer(
         "pidTidFilter" to f.pidTidFilter,
         "seqOn" to f.seqOn,
         "mode" to f.mode.name,
+        // messageRules and sequences also hide/fold rows; exposing them here is what lets a client
+        // detect a "looks filtered but tags/levels are empty" state it would otherwise miss.
+        "messageRules" to f.messageRules.map { messageRuleToMap(it) },
+        "sequences" to f.sequences.map { sequenceDefToMap(it) },
+    )
+
+    private fun messageRuleToMap(r: MessageRule): Map<String, Any?> = mapOf(
+        "id" to r.id, "include" to r.include, "pattern" to r.pattern, "regex" to r.regex,
+        "tag" to r.tag, "packagePrefix" to r.packagePrefix, "enabled" to r.enabled,
+        "target" to r.target.name,
+    )
+
+    private fun sequenceDefToMap(s: SequenceDef): Map<String, Any?> = mapOf(
+        "id" to s.id, "enabled" to s.enabled, "priority" to s.priority,
+        "tag" to s.tag, "matchText" to s.matchText, "isRegex" to s.isRegex,
+        "endTag" to s.endTag, "endMatchText" to s.endMatchText, "endIsRegex" to s.endIsRegex,
     )
 
     // Deliberately no `else` branch, so adding a new LogItem variant is a compile error here,
@@ -689,6 +847,27 @@ class ControlServer(
         "logId" to site.entry.id, "ts" to site.entry.ts, "level" to site.entry.level.key.toString(),
         "tag" to site.entry.tag, "msg" to site.entry.msg,
     )
+
+    // Opt-in token-saving projection over a full item map. With neither arg the map is returned
+    // unchanged (byte-for-byte identical to the pre-existing output). `fields` is a whitelist of
+    // entry-derived keys to keep; `compact` drops pid/tid/indent and any empty/zero-valued key.
+    // Structural keys (type/id/gid/expanded/count) are always kept so items stay usable.
+    private fun projectItem(full: Map<String, Any?>, fields: Set<String>?, compact: Boolean): Map<String, Any?> {
+        if (fields == null && !compact) return full
+        return buildMap {
+            full.forEach { (k, v) ->
+                when {
+                    k in STRUCTURAL_ITEM_KEYS -> put(k, v)
+                    fields != null -> if (k in fields) put(k, v)
+                    k in COMPACT_DROP_KEYS -> Unit
+                    !isEmptyOrZero(v) -> put(k, v)
+                }
+            }
+        }
+    }
+
+    private fun rowMap(entry: LogEntry, fields: Set<String>?, compact: Boolean): Map<String, Any?> =
+        projectItem(logItemToMap(LogItem.Row(entry, 0)), fields, compact)
 
     private fun zipCandidateToMap(candidate: ZipLogCandidate): Map<String, Any?> = mapOf(
         "entryPath" to candidate.entryPath,
@@ -756,7 +935,17 @@ private class McpTool(val name: String, val description: String, val schema: Too
 // JSON Schema at tools/list time, and a schema that (wrongly) says "array of strings" measurably
 // nudges models toward quoting line ids as "73" instead of emitting bare 73 — observed with a
 // local Gemma build mangling its own tool-call syntax on a quoted lineIds element.
-private fun schema(vararg props: Pair<String, String>, required: List<String> = emptyList()): ToolSchema =
+// `enums` constrains a property to a fixed set of string values (for a scalar prop it goes on the
+// property; for an "array"/"array<integer>" prop it goes on the array items). `descriptions` adds a
+// per-property JSON-Schema description. Both are opt-in so untouched call sites are unaffected —
+// but for enum-shaped fields (levels, mode, format) declaring them lets a compliant client avoid
+// sending values the handler would otherwise reject (see setFilter's level/mode validation).
+private fun schema(
+    vararg props: Pair<String, String>,
+    required: List<String> = emptyList(),
+    enums: Map<String, List<String>> = emptyMap(),
+    descriptions: Map<String, String> = emptyMap(),
+): ToolSchema =
     ToolSchema(
         properties = buildJsonObject {
             props.forEach { (name, type) ->
@@ -764,10 +953,14 @@ private fun schema(vararg props: Pair<String, String>, required: List<String> = 
                     name,
                     buildJsonObject {
                         when (type) {
-                            "array" -> arrayOfItems("string")
+                            "array" -> arrayOfItems("string", enums[name])
                             "array<integer>" -> arrayOfItems("integer")
-                            else -> put("type", type)
+                            else -> {
+                                put("type", type)
+                                enums[name]?.let { putEnum(it) }
+                            }
                         }
+                        descriptions[name]?.let { put("description", it) }
                     },
                 )
             }
@@ -775,10 +968,21 @@ private fun schema(vararg props: Pair<String, String>, required: List<String> = 
         required = required.ifEmpty { null },
     )
 
-private fun kotlinx.serialization.json.JsonObjectBuilder.arrayOfItems(itemType: String) {
+private fun kotlinx.serialization.json.JsonObjectBuilder.arrayOfItems(itemType: String, itemEnum: List<String>? = null) {
     put("type", "array")
-    put("items", buildJsonObject { put("type", itemType) })
+    put("items", buildJsonObject {
+        put("type", itemType)
+        itemEnum?.let { putEnum(it) }
+    })
 }
+
+private fun kotlinx.serialization.json.JsonObjectBuilder.putEnum(values: List<String>) {
+    put("enum", buildJsonArray { values.forEach { add(it) } })
+}
+
+// Single-char keys the levels filter accepts, in display order. Shared by the schema enum and
+// setFilter's validation so the two can never disagree on what a valid level is.
+private val LEVEL_KEYS: List<String> = LogLevel.entries.map { it.key.toString() }
 
 private val MCP_TOOLS: List<McpTool> = listOf(
     McpTool("list_tabs", "List every tab currently open in the running openLog app.", schema()),
@@ -814,21 +1018,64 @@ private val MCP_TOOLS: List<McpTool> = listOf(
         ),
     ),
     McpTool("close_tab", "Close the tab with the given id.", schema("tabId" to "string", required = listOf("tabId"))),
-    McpTool("get_filter", "Read the current filter (levels, tags, keyword, mode) for a tab.", schema("tabId" to "string", required = listOf("tabId"))),
+    McpTool(
+        "get_filter",
+        "Read a tab's full filter: levels, include/exclude tags and package prefixes, keyword, " +
+            "mode, plus messageRules and sequences. Note that messageRules (scoped include/exclude " +
+            "rules) and sequences (which fold matching runs) can hide or collapse rows even when " +
+            "tags/levels look empty — check them if a tab looks filtered but activeTags is empty.",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
     McpTool(
         "set_filter",
-        "Partially update a tab's filter — only the fields you provide are changed.",
+        "Partially update a tab's filter — only the fields you provide are changed. A supplied " +
+            "messageRules or sequences list replaces the current one; clearMessageRules / " +
+            "clearSequences remove all of them. Unknown level or mode values are rejected with an " +
+            "error rather than silently ignored.",
         schema(
             "tabId" to "string", "levels" to "array", "activeTags" to "array",
-            "kwText" to "string", "kwRegex" to "boolean", "mode" to "string", required = listOf("tabId"),
+            "excludeTags" to "array", "pkgPrefixes" to "array", "excludePkgPrefixes" to "array",
+            "kwText" to "string", "kwRegex" to "boolean", "excludeKw" to "string", "excludeKwRegex" to "boolean",
+            "kwInTag" to "string", "kwInTagRegex" to "boolean", "pidTidFilter" to "string",
+            "seqOn" to "boolean", "mode" to "string",
+            "messageRules" to "array", "sequences" to "array",
+            "clearMessageRules" to "boolean", "clearSequences" to "boolean",
+            required = listOf("tabId"),
+            enums = mapOf("levels" to LEVEL_KEYS, "mode" to FilterMode.entries.map { it.name }),
+            descriptions = mapOf(
+                "levels" to "Single-char level keys to KEEP: ${LEVEL_KEYS.joinToString(",")} (V=Verbose … A=Assert). An empty or malformed list is rejected.",
+                "mode" to "Base filter mode: TAGS or KEYWORD.",
+                "pidTidFilter" to "Comma-separated PIDs/TIDs to include.",
+            ),
         ),
     ),
     McpTool(
         "get_visible_lines",
         "Read the currently rendered log items for a tab — after filtering and sequence/manual-" +
             "collapse/stack-trace folding, i.e. what a user would actually see. Each item has a " +
-            "`type` (Row, SeqHeader, ManualHeader, or StackTraceHeader).",
-        schema("tabId" to "string", "limit" to "integer", "offset" to "integer", required = listOf("tabId")),
+            "`type` (Row, SeqHeader, ManualHeader, or StackTraceHeader). Use `fields` and/or " +
+            "`compact` to shrink the payload when you only need some columns.",
+        schema(
+            "tabId" to "string", "limit" to "integer", "offset" to "integer",
+            "fields" to "array", "compact" to "boolean", required = listOf("tabId"),
+            enums = mapOf("fields" to ROW_FIELD_KEYS),
+            descriptions = mapOf(
+                "fields" to "Whitelist of entry columns to include (${ROW_FIELD_KEYS.joinToString(",")}); structural keys (type,id,gid,expanded,count) are always kept.",
+                "compact" to "When true, drop pid/tid/indent and any empty/zero-valued fields.",
+            ),
+        ),
+    ),
+    McpTool(
+        "get_line_context",
+        "Read raw log lines around a given line id, IGNORING the active filter and all folding — " +
+            "the reliable way to see what surrounds a filtered line without touching the tab's " +
+            "filter. Returns `before` lines before and `after` lines after the line (defaults 10/10), " +
+            "in original file order. Supports the same `fields`/`compact` projection as get_visible_lines.",
+        schema(
+            "tabId" to "string", "lineId" to "integer", "before" to "integer", "after" to "integer",
+            "fields" to "array", "compact" to "boolean", required = listOf("tabId", "lineId"),
+            enums = mapOf("fields" to ROW_FIELD_KEYS),
+        ),
     ),
     McpTool(
         "select_lines", "Replace a tab's current selected log line ids.",
@@ -850,6 +1097,13 @@ private val MCP_TOOLS: List<McpTool> = listOf(
     ),
     McpTool(
         "get_tags", "List every distinct tag present in a tab's full log file (not just the currently filtered set).",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "get_packages",
+        "List distinct dotted tag-prefixes present in a tab's full log file, each with a count " +
+            "(most frequent first). Use these to discover valid values for set_filter's pkgPrefixes " +
+            "/ excludePkgPrefixes instead of guessing.",
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(
@@ -890,7 +1144,10 @@ private val MCP_TOOLS: List<McpTool> = listOf(
     ),
     McpTool(
         "export_filtered_log", "Write the tab's current filtered log to an absolute path as txt or csv.",
-        schema("tabId" to "string", "path" to "string", "format" to "string", required = listOf("tabId", "path")),
+        schema(
+            "tabId" to "string", "path" to "string", "format" to "string", required = listOf("tabId", "path"),
+            enums = mapOf("format" to listOf("txt", "csv")),
+        ),
     ),
     McpTool(
         "save_annotations", "Write the tab's .ann sidecar data to an absolute path.",
@@ -935,12 +1192,14 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Get, "/filter", "get_filter"),
     Triple(HttpMethod.Post, "/filter", "set_filter"),
     Triple(HttpMethod.Get, "/visible", "get_visible_lines"),
+    Triple(HttpMethod.Get, "/context", "get_line_context"),
     Triple(HttpMethod.Get, "/selection", "get_selection"),
     Triple(HttpMethod.Post, "/selection", "select_lines"),
     Triple(HttpMethod.Post, "/toggle", "toggle_group"),
     Triple(HttpMethod.Post, "/expand-all", "expand_all"),
     Triple(HttpMethod.Post, "/collapse-all", "collapse_all"),
     Triple(HttpMethod.Get, "/tags", "get_tags"),
+    Triple(HttpMethod.Get, "/packages", "get_packages"),
     Triple(HttpMethod.Get, "/crashes", "get_crash_sites"),
     Triple(HttpMethod.Post, "/annotations/note", "add_text_note"),
     Triple(HttpMethod.Post, "/annotations/log", "add_log_note"),

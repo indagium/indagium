@@ -7,12 +7,17 @@ read second.
 ## Standard sequence
 
 1. `get_crash_sites` — always start here. Exceptions/ANRs are the highest-signal anchors.
-2. For each crash relevant to the bug description: `set_filter` to a tight window around
-   its timestamp/pid, then `get_visible_lines` to read the surrounding context (aim for
-   ~200-500 lines per read, not the whole file).
+2. For each crash relevant to the bug description: `set_filter` to narrow by tag/level/pid,
+   then `get_visible_lines` to read the filtered view (aim for ~200-500 lines per read, not
+   the whole file). To see the raw lines *surrounding* a specific line without disturbing the
+   filter, use `get_line_context` (it ignores the active filter and all folding).
 3. Cross-reference: same PID/TID across tags, `toggle_group` on any folded sequence/stack
    block that looks relevant instead of guessing its contents.
 4. Only widen the filter (or drop it) if the crash sites don't explain the reported symptom.
+
+If a tab looks filtered but `activeTags`/levels seem empty, read `get_filter` in full:
+`messageRules` and `sequences` can hide or fold rows on their own. Clear a stale one with
+`set_filter` + `clearMessageRules` / `clearSequences`.
 
 ## Tool discipline
 

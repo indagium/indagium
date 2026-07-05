@@ -40,10 +40,21 @@ The repo root `.mcp.json` already registers this for tools that auto-discover it
 
 ## Tools
 
-The server exposes 29 tools covering the whole analysis workflow — open files/archives, split
-oversized logs, read/set filters, read the rendered (post-fold) lines, list crash sites and tags,
+The server exposes 31 tools covering the whole analysis workflow — open files/archives, split
+oversized logs, read/set filters (including message rules and sequences), read the rendered
+(post-fold) lines, read unfiltered context around a line, list crash sites, tags and packages,
 manage selection and collapsible groups, write annotations, export, merge tabs, and live-tail.
 Call `tools/list` for the authoritative set and their schemas.
+
+A few worth calling out:
+- `get_filter` returns the **full** filter, including `messageRules` and `sequences` — both can
+  hide or fold rows even when tags/levels look empty. `set_filter` accepts them too, plus
+  `clearMessageRules` / `clearSequences` to remove a stale one.
+- `get_line_context` reads raw lines around a line id **ignoring the active filter and folding** —
+  the reliable way to see what surrounds a filtered line without touching the filter.
+- `get_visible_lines` / `get_line_context` accept `fields` (column whitelist) and `compact` to
+  shrink the payload when you don't need every column.
+- `get_packages` lists dotted tag-prefixes (with counts) to discover values for `pkgPrefixes`.
 
 See [ANALYSIS_PLAYBOOK.md](ANALYSIS_PLAYBOOK.md) for a system-prompt skeleton that teaches an
 agent how to actually investigate a log with these tools.
