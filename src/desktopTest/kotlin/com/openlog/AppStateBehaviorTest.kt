@@ -998,6 +998,7 @@ class AppStateBehaviorTest {
         state.autosaveNow()
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
+        restored.startPendingRestoredTabLoads()
         // Restore parses the tab's file on a background job; wait for it to settle so assertions
         // observe a fully-materialized tab rather than racing the in-flight load.
         waitUntil { !restored.isLoading }
@@ -1009,6 +1010,32 @@ class AppStateBehaviorTest {
         assertEquals("remember this", block.caption)
         assertEquals("app only", restored.savedFilters.single().name)
         assertEquals(restored.savedFilters.single().id, restored.activeSavedFilterId(restored.tabs.single().id))
+    }
+
+    @Test
+    fun autosaveRestoresFileOpenedThroughOpenFile() {
+        val dir = createTempDirectory("openlog-openfile-restore").toFile()
+        val logFile = File(dir, "restart.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I App: hello after restart\n")
+        }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+
+        state.openFile(logFile)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        assertEquals(1, restored.tabs.size)
+        assertFalse(restored.isLoading)
+        assertTrue(restored.tabs.single().logData.isEmpty())
+        restored.startPendingRestoredTabLoads()
+        waitUntil { restored.tabs.size == 1 && !restored.isLoading }
+
+        val restoredTab = restored.tabs.single()
+        assertEquals("restart.log", restoredTab.filename)
+        assertEquals(logFile.absolutePath, restoredTab.sourcePath)
+        assertEquals("hello after restart", restoredTab.logData.single().msg)
     }
 
     @Test
@@ -1082,6 +1109,7 @@ class AppStateBehaviorTest {
         state.autosaveNow()
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
+        restored.startPendingRestoredTabLoads()
         waitUntil { restored.tabs.size == 1 && !restored.isLoading }
 
         val restoredTab = restored.tabs.single()

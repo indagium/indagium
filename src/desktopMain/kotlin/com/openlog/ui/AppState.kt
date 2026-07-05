@@ -190,6 +190,7 @@ class AppState(
 
     private val activeTails = mutableMapOf<String, ActiveTail>()
     private val activeLoads = ConcurrentHashMap<String, ActiveLoad>()
+    private val pendingRestoredLoads = mutableListOf<RestoredTabShell>()
 
     // Latest filtered item summary per tab, pushed by LogViewer whenever its (possibly
     // background-computed) item list lands. Selection ops reuse it instead of recomputing the
@@ -296,12 +297,14 @@ class AppState(
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
+
     fun close() {
         ioJob.cancel() // also cancels every active FileTailer's Job — each is started on ioScope
         activeTails.clear()
         activeLoads.clear()
         applyControlServerState(enabled = false, port = 0)
         synchronized(stateLock) {
+            pendingRestoredLoads.clear()
             pendingLoads = 0
             isLoading = false
         }
@@ -401,6 +404,13 @@ class AppState(
     fun mcpSessions() = controlServer?.mcpSessions() ?: emptyList()
 
     fun disconnectMcpSession(id: String) = controlServer?.disconnectMcpSession(id)
+
+    fun startPendingRestoredTabLoads() {
+        val loads = synchronized(stateLock) {
+            pendingRestoredLoads.toList().also { pendingRestoredLoads.clear() }
+        }
+        loads.forEach { shell -> scheduleRestoredTabLoad(shell.tab.id, shell.source) }
+    }
 
     private fun beginLoading(status: String = "Loading file...") = synchronized(stateLock) {
         pendingLoads += 1
@@ -1695,6 +1705,7 @@ class AppState(
             logViewerScrollStateStore.removeTab(tabId)
         }
         synchronized(stateLock) {
+            pendingRestoredLoads.removeAll { it.tab.id in tabIds }
             val next = tabs.filter { it.id !in tabIds }
             if (activeTabId in tabIds) activeTabId = preferredActiveId?.takeIf { id -> next.any { it.id == id } } ?: next.lastOrNull()?.id ?: ""
             if (compareTabId in tabIds) compareTabId = next.firstOrNull()?.id ?: ""
@@ -2514,10 +2525,13 @@ class AppState(
             tabs.getOrNull(1)?.id ?: tabs.firstOrNull()?.id ?: ""
         tabCounter = (tabs.mapNotNull { it.id.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1
         // Shells restore synchronously with every user-visible piece of metadata (filter,
-        // annotations, expanded/manual blocks); file contents parse in the background. This used
-        // to call parseLogcat inline during AppState init — i.e. inside the first composition —
-        // so a large tab left open at last quit froze the app for the whole parse on every launch.
-        shells.forEach { shell -> scheduleRestoredTabLoad(shell.tab.id, shell.source) }
+        // annotations, expanded/manual blocks). The file contents are queued and started by App()
+        // after first composition; starting them inside AppState construction can race Compose's
+        // initial snapshot apply and leave the UI stuck on the empty shell/loading state.
+        synchronized(stateLock) {
+            pendingRestoredLoads.clear()
+            pendingRestoredLoads += shells
+        }
     }
 
     private fun scheduleRestoredTabLoad(tabId: String, source: RestoredTabSource) {

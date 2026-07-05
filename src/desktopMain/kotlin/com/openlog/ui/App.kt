@@ -109,6 +109,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
         LaunchedEffect(Unit) {
             runCatching { rootFocusRequester.requestFocus() }
         }
+        LaunchedEffect(state) {
+            state.startPendingRestoredTabLoads()
+        }
         val dropTarget = remember {
             object : DragAndDropTarget {
                 override fun onDrop(event: DragAndDropEvent): Boolean {
