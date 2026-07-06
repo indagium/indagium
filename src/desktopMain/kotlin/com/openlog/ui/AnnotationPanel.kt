@@ -59,6 +59,7 @@ import java.awt.Cursor as AwtCursor
 
 private const val BLOCK_DRAG_SNAP_BIAS = 0.25f
 private const val AUTO_SCROLL_SPEED_FACTOR = 0.6f
+private const val STICK_TO_BOTTOM_THRESHOLD_DP = 24f
 
 // Cumulative top-Y offset of each id in `orderedIds`, in that order — the building block both
 // blockOrderDuringDrag (over the stable list order) and the render loop (over the live visual
@@ -133,6 +134,7 @@ fun AnnotationPanel(
     val headerButtonModifier = Modifier.height(28.dp)
     var panelFocused by remember { mutableStateOf(false) }
     var prefixFocused by remember { mutableStateOf(false) }
+    var issueDescFocused by remember { mutableStateOf(false) }
     var suffixFocused by remember { mutableStateOf(false) }
     // Session-only, not persisted — only the text itself needs to survive a restart.
     var issueDescExpanded by remember(tab.id) { mutableStateOf(false) }
@@ -305,7 +307,7 @@ fun AnnotationPanel(
                     actionPressed && ev.key == Key.S -> { onSave(); true }
                     actionPressed && ev.key == Key.C -> { onCopy(); true }
                     actionPressed && ev.key == Key.O -> { openNotePicker(); true }
-                    prefixFocused || suffixFocused || blockFieldFocused -> {
+                    prefixFocused || suffixFocused || blockFieldFocused || issueDescFocused -> {
                         if (ev.key == Key.Escape) {
                             runCatching { focusRequester?.requestFocus() }
                             true
@@ -384,6 +386,24 @@ fun AnnotationPanel(
         // already uses for exactly this reason.
         val notesScrollStates = scrollStateStore ?: remember { LogViewerScrollStateStore() }
         val scroll = notesScrollStates.scrollState("${tab.id}:notes")
+        val stickToBottomPx = STICK_TO_BOTTOM_THRESHOLD_DP * blockDensity
+        // If the user was scrolled to (or very near) the bottom, keep them pinned there as
+        // totalBlockHeightPx settles from per-block estimates to real measured heights. Without
+        // this, a tab scrolled to the end lands a little short after switching away and back: the
+        // content grows (guesses correcting to real sizes) after the scroll position has already
+        // been restored, so the restored value is now short of the new true bottom. Reacts only to
+        // content-height changes, never to the user's own scrolling, so a deliberate scroll away
+        // from the bottom is never fought.
+        var stickToBottom by remember(tab.id) {
+            mutableStateOf(scroll.maxValue <= 0 || scroll.value >= scroll.maxValue - stickToBottomPx)
+        }
+        LaunchedEffect(scroll) {
+            snapshotFlow { scroll.maxValue <= 0 || scroll.value >= scroll.maxValue - stickToBottomPx }
+                .collect { stickToBottom = it }
+        }
+        LaunchedEffect(totalBlockHeightPx, scroll) {
+            if (stickToBottom) scroll.scrollTo(scroll.maxValue)
+        }
         Box(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 8.dp)) {
                 // Issue description — a private working note, persisted in the .ann sidecar and
@@ -404,6 +424,7 @@ fun AnnotationPanel(
                             modifier = Modifier.fillMaxWidth()
                                 .background(tc.bg, CORNER_SM)
                                 .border(1.dp, tc.br, CORNER_SM)
+                                .onFocusChanged { issueDescFocused = it.isFocused }
                                 .padding(8.dp).defaultMinSize(minHeight = 60.dp),
                             decorationBox = { inner ->
                                 if (ann.issueDescription.isEmpty()) {
