@@ -813,6 +813,26 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun reapplyingAnUnchangedKeywordDoesNotDemoteTheActivePresetToADraft() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.setFilterMode(tabId, FilterMode.KEYWORD)
+        state.setKw(tabId, "boot")
+        state.saveFilter(tabId, "boot filter")
+        val saved = state.savedFilters.single()
+        assertEquals(saved.id, state.activeSavedFilterId(tabId))
+
+        // FilterPanel's debounced kwDisplay field re-pushes its current value through setKw once
+        // its LaunchedEffect settles after every recomposition, including one triggered by nothing
+        // more than switching tabs away and back — not just on genuine user edits.
+        state.setKw(tabId, "boot")
+
+        assertEquals(saved.id, state.activeSavedFilterId(tabId))
+        assertEquals(null, state.filterDraftForTab(tabId))
+    }
+
+    @Test
     fun editingActiveSavedFilterCreatesTabLocalDraftOnly() {
         val state = AppState()
         state.tabs = listOf(
@@ -868,6 +888,22 @@ class AppStateBehaviorTest {
         assertEquals(null, state.filterDraftForTab("one"))
         assertEquals(promoted.id, state.activeSavedFilterId("one"))
         assertEquals(setOf("com.base", "1234"), promoted.pkgPrefixes)
+    }
+
+    @Test
+    fun beginRenameFilterStartsBlankForADraftSoConfirmingDoesNotLeakItsPlaceholderName() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("one", "one.log", emptyList()))
+        state.activeTabId = "one"
+        state.addPkgPrefix("one", "com.base")
+        state.saveFilter("one", "base")
+        state.addPkgPrefix("one", "1234")
+        val draft = state.filterDraftForTab("one")!!
+        assertTrue(draft.name.startsWith("unsaved_"))
+
+        state.beginRenameFilter(draft.id)
+
+        assertEquals("", state.filterRenameName)
     }
 
     @Test

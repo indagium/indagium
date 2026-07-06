@@ -518,9 +518,17 @@ class AppState(
 
     fun upFlt(tabId: String, fn: (Filter) -> Filter) = upFlt(tabId, trackDraft = true, fn)
 
+    // Debounced FilterPanel fields (kwDisplay, msgRuleInput, ...) re-push their current value
+    // through upFlt once their LaunchedEffect settles after every recomposition — including one
+    // triggered by nothing more than switching tabs away and back, which re-initializes their
+    // remember(tab.id) state from the filter's current value. That re-push is a no-op content-
+    // wise, but upFlt used to treat any call as an edit regardless, demoting an untouched tab's
+    // active saved preset to an unsaved draft just from revisiting it. Only actual content
+    // changes should count as an edit.
     private fun upFlt(tabId: String, trackDraft: Boolean, fn: (Filter) -> Filter) {
+        val before = tab(tabId)?.filter
         upTab(tabId) { it.copy(filter = fn(it.filter)) }
-        if (trackDraft) updateFilterDraftAfterEdit(tabId)
+        if (trackDraft && before != null && before != tab(tabId)?.filter) updateFilterDraftAfterEdit(tabId)
     }
 
     fun activeTab() = tabs.find { it.id == activeTabId } ?: tabs.firstOrNull()
@@ -993,7 +1001,12 @@ class AppState(
         val draftEntry = filterDraftsByTab.entries.firstOrNull { it.value.id == id }
         val current = draftEntry?.value ?: savedFilters.find { it.id == id } ?: return
         pendingFilterRename = PendingFilterRename(id, current.name, draftEntry != null, draftEntry?.key)
-        filterRenameName = current.name
+        // Promoting a draft creates a new preset shared across every tab — pre-filling the box
+        // with the draft's internal placeholder name ("unsaved_<filename>") makes it too easy to
+        // confirm without typing a real name, leaving a permanent global preset that still reads
+        // "unsaved" and shows up in every tab. Force a deliberate name instead; a rename of an
+        // already-named saved preset keeps its current name pre-filled as before.
+        filterRenameName = if (draftEntry != null) "" else current.name
         filterRenameError = null
     }
 
