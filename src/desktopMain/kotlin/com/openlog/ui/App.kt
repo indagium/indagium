@@ -437,7 +437,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             ttab.sourcePath?.let { state.splitSourceForPath(it) } != null
                         }
                         val menuWidth = 200.dp
-                        val estimatedMenuHeight = (196 + (if (canTail) 44 else 0) + (if (canSplit) 44 else 0)).dp
+                        val estimatedMenuHeight = (268 + (if (canTail) 44 else 0) + (if (canSplit) 44 else 0)).dp
                         val x = tctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
                         val y = tctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
                         Column(
@@ -450,6 +450,27 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                 ) {}
                                 .padding(vertical = 4.dp),
                         ) {
+                            CtxItem(
+                                icon = Icons.Outlined.ContentCopy,
+                                label = "Copy tab name",
+                                onClick = {
+                                    state.copyToClipboard(ttab.filename)
+                                    state.tabCtx = null
+                                },
+                            )
+                            CtxItem(
+                                icon = Icons.Outlined.ContentCopy,
+                                label = "Copy full path",
+                                onClick = {
+                                    // Two tabs can share a filename (same file opened twice, or two
+                                    // files with the same name from different folders) — the full
+                                    // path is what actually disambiguates them, e.g. for an MCP
+                                    // client asked to "analyze the tab named X".
+                                    state.copyToClipboard(ttab.sourcePath ?: ttab.filename)
+                                    state.tabCtx = null
+                                },
+                            )
+                            CtxDivider()
                             if (canTail) {
                                 CtxItem(
                                     icon = Icons.Outlined.PlayArrow,
@@ -1907,9 +1928,11 @@ private fun FileView(
                 onOpenNote = { state.openNoteFileAsync(tab.id, it) },
                 onUpdatePrefix = { state.setPrefix(tab.id, it) },
                 onUpdateSuffix = { state.setSuffix(tab.id, it) },
+                onUpdateIssueDescription = { state.setIssueDescription(tab.id, it) },
                 onUpdateBlock = { blockId, text -> state.updateBlock(tab.id, blockId, text) },
                 onRemoveBlock = { state.removeBlock(tab.id, it) },
                 onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
+                onReorderBlock = { blockId, idx -> state.reorderBlock(tab.id, blockId, idx) },
                 onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
                 onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
                 width = state.annotationPanelWidth,
@@ -2116,9 +2139,11 @@ private fun CompareView(
                             onOpenNote = { state.openNoteFileAsync(leftTab.id, it) },
                             onUpdatePrefix = { state.setPrefix(leftTab.id, it) },
                             onUpdateSuffix = { state.setSuffix(leftTab.id, it) },
+                            onUpdateIssueDescription = { state.setIssueDescription(leftTab.id, it) },
                             onUpdateBlock = { bid, t -> state.updateBlock(leftTab.id, bid, t) },
                             onRemoveBlock = { state.removeBlock(leftTab.id, it) },
                             onMoveBlock = { bid, d -> state.moveBlock(leftTab.id, bid, d) },
+                            onReorderBlock = { bid, idx -> state.reorderBlock(leftTab.id, bid, idx) },
                             onAddNoteAfter = { state.addNoteBlock(leftTab.id, it) },
                             onNavigateLogRef = { state.requestAnnotationNavigation(leftTab.id, it) },
                             width = state.annotationPanelWidth,

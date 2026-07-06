@@ -300,6 +300,17 @@ class ControlServerTest {
     }
 
     @Test
+    fun getIssueDescriptionReturnsAnnotationTextNotExposedInAnyExport() {
+        state.tabs = listOf(mkTab("t1", "test.log", emptyList()))
+        state.setIssueDescription("t1", "root cause: null pointer in PetMapper")
+
+        assertEquals(
+            """{"issueDescription":"root cause: null pointer in PetMapper"}""",
+            get("/annotations/issue-description?tabId=t1"),
+        )
+    }
+
+    @Test
     fun getPackagesReturnsDottedPrefixesWithCounts() {
         state.tabs = listOf(
             mkTab(
@@ -410,6 +421,7 @@ class ControlServerTest {
         assertTrue(get("/visible?tabId=nope").contains("\"error\""))
         assertTrue(get("/tags?tabId=nope").contains("\"error\""))
         assertTrue(get("/crashes?tabId=nope").contains("\"error\""))
+        assertTrue(get("/annotations/issue-description?tabId=nope").contains("\"error\""))
     }
 
     @Test

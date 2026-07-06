@@ -283,6 +283,7 @@ class ControlServer(
         "get_tags" -> getTags(a.str("tabId") ?: "")
         "get_packages" -> getPackages(a.str("tabId") ?: "")
         "get_crash_sites" -> getCrashSites(a.str("tabId") ?: "")
+        "get_issue_description" -> getIssueDescription(a.str("tabId") ?: "")
         "add_text_note" -> addTextNoteRoute(a.str("tabId") ?: "", a.str("text") ?: "", a.str("afterId"))
         "add_log_note" -> addLogNoteRoute(a.str("tabId") ?: "", a.intList("lineIds") ?: emptyList(), a.str("caption") ?: "")
         "update_note_block" -> updateAnnotationRoute(a.str("tabId") ?: "", a.str("blockId") ?: "", a.str("text") ?: "")
@@ -821,6 +822,11 @@ class ControlServer(
         return mapOf("tags" to tab.logData.map { it.tag }.distinct().sorted())
     }
 
+    private fun getIssueDescription(tabId: String): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        return mapOf("issueDescription" to tab.annotations.issueDescription)
+    }
+
     // Detected on the whole (unfiltered) file, matching CrashPanel's own "complete inventory"
     // behavior — see ui/CrashPanel.kt.
     private fun getCrashSites(tabId: String): Map<String, Any?> {
@@ -1036,7 +1042,14 @@ private fun kotlinx.serialization.json.JsonObjectBuilder.putEnum(values: List<St
 private val LEVEL_KEYS: List<String> = LogLevel.entries.map { it.key.toString() }
 
 private val MCP_TOOLS: List<McpTool> = listOf(
-    McpTool("list_tabs", "List every tab currently open in the running openLog app.", schema()),
+    McpTool(
+        "list_tabs",
+        "List every tab currently open in the running openLog app. Multiple tabs can share the " +
+            "same filename (e.g. the same log opened twice, or two files with identical names from " +
+            "different folders) — sourcePath is the full absolute path and is the reliable way to " +
+            "tell them apart; fall back to id, never assume filename alone is unique.",
+        schema(),
+    ),
     McpTool(
         "open_log_file",
         "Open a plain logcat file, or a bug-report .zip, at the given absolute path. For a plain " +
@@ -1172,6 +1185,12 @@ private val MCP_TOOLS: List<McpTool> = listOf(
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(
+        "get_issue_description",
+        "Read a tab's collapsible issue description block — a private working note kept in the " +
+            "Notes panel that is never included in Markdown exports, previews, or copied issue text.",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
         "add_text_note",
         "Append a plain text analysis note block, optionally after an existing block id.",
         schema("tabId" to "string", "text" to "string", "afterId" to "string", required = listOf("tabId", "text")),
@@ -1259,6 +1278,7 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Get, "/tags", "get_tags"),
     Triple(HttpMethod.Get, "/packages", "get_packages"),
     Triple(HttpMethod.Get, "/crashes", "get_crash_sites"),
+    Triple(HttpMethod.Get, "/annotations/issue-description", "get_issue_description"),
     Triple(HttpMethod.Post, "/annotations/note", "add_text_note"),
     Triple(HttpMethod.Post, "/annotations/log", "add_log_note"),
     Triple(HttpMethod.Post, "/annotations/update", "update_note_block"),

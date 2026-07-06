@@ -1454,7 +1454,7 @@ class AppState(
         }
         upAnn(targetTabId) { t ->
             val block = AnnBlock.LogRef(
-                id = "r${System.currentTimeMillis()}",
+                id = "r${System.nanoTime()}",
                 logIds = logIds.sorted(),
                 caption = caption,
                 sourceTabId = if (crossFile) sourceTabId else null,
@@ -1518,9 +1518,22 @@ class AppState(
         t.copy(annotations = t.annotations.copy(blocks = list))
     }
 
+    // Drag-and-drop counterpart to moveBlock's ±1 buttons — moves a block to an arbitrary index,
+    // mirroring reorderSequence.
+    fun reorderBlock(tabId: String, blockId: String, toIdx: Int) = upAnn(tabId) { t ->
+        val list = t.annotations.blocks.toMutableList()
+        val fromIdx = list.indexOfFirst { it.id == blockId }.takeIf { it >= 0 } ?: return@upAnn t
+        val item = list.removeAt(fromIdx)
+        list.add(toIdx.coerceIn(0, list.size), item)
+        t.copy(annotations = t.annotations.copy(blocks = list))
+    }
+
     fun setPrefix(tabId: String, v: String) = upAnn(tabId) { t -> t.copy(annotations = t.annotations.copy(prefix = v)) }
 
     fun setSuffix(tabId: String, v: String) = upAnn(tabId) { t -> t.copy(annotations = t.annotations.copy(suffix = v)) }
+
+    fun setIssueDescription(tabId: String, v: String) =
+        upAnn(tabId) { t -> t.copy(annotations = t.annotations.copy(issueDescription = v)) }
 
     fun toggleMd(tabId: String) = upTab(tabId) { it.copy(showAnnMd = !it.showAnnMd) }
 
@@ -3136,6 +3149,7 @@ private fun Annotations.annotationsToken(): String = tokenFields(
     prefix,
     suffix,
     blocks.joinToString(",") { it.annBlockToken().b64() },
+    issueDescription,
 )
 
 private fun String.annotationsFromToken(): Annotations? = runCatching {
@@ -3145,6 +3159,7 @@ private fun String.annotationsFromToken(): Annotations? = runCatching {
         prefix = p[0],
         suffix = p[1],
         blocks = p[2].encodedList().mapNotNull { it.annBlockFromToken() },
+        issueDescription = p.getOrNull(3) ?: "",
     )
 }.getOrNull()
 
