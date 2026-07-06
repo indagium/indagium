@@ -252,6 +252,7 @@ class AppState(
         private set
     var pendingSequenceStart by mutableStateOf<PendingSequenceStart?>(null)
     var pendingFilterLoad by mutableStateOf<PendingFilterLoad?>(null)
+    var updateExistingPickerOpen by mutableStateOf(false)
     var pendingDuplicateFilterSave by mutableStateOf<PendingDuplicateFilterSave?>(null)
     var pendingFilterRename by mutableStateOf<PendingFilterRename?>(null)
     var filterRenameName by mutableStateOf("")
@@ -549,7 +550,7 @@ class AppState(
     fun clearFilter(tabId: String) {
         upFlt(tabId, trackDraft = false) { Filter() }
         activeSavedFilterIds = activeSavedFilterIds - tabId
-        activeFilterDraftTabIds = activeFilterDraftTabIds - tabId
+        clearDraftForTab(tabId)
     }
 
     fun requestClearFilter(tabId: String) {
@@ -865,19 +866,33 @@ class AppState(
         loadFilter(tabId, sf)
     }
 
-    fun updateCurrentPresetAndLoadPending() {
+    // "Update existing" always opens a picker rather than silently overwriting whatever preset
+    // happened to be active — the common case is editing a preset (which immediately demotes the
+    // tab to an unsaved draft, see updateFilterDraftAfterEdit), so there usually isn't a single
+    // obvious "current" preset left to update by the time this dialog shows.
+    fun beginUpdateExistingPick() {
+        if (pendingFilterLoad == null) return
+        updateExistingPickerOpen = true
+    }
+
+    fun cancelUpdateExistingPick() {
+        updateExistingPickerOpen = false
+    }
+
+    fun confirmUpdateExisting(presetId: String) {
         val pending = pendingFilterLoad ?: return
-        val currentId = pending.currentFilterId ?: return
-        val current = savedFilters.find { it.id == currentId } ?: return
-        val updated = snapshotFilter(pending.tabId, current.id, current.name) ?: return
-        savedFilters = savedFilters.map { if (it.id == currentId) updated else it }
+        val target = savedFilters.find { it.id == presetId } ?: return
+        val updated = snapshotFilter(pending.tabId, presetId, target.name) ?: return
+        savedFilters = savedFilters.map { if (it.id == presetId) updated else it }
         clearDraftForTab(pending.tabId)
+        updateExistingPickerOpen = false
         writeFilterBackup()
         loadPendingFilter(pending)
     }
 
     fun cancelPendingFilterLoad() {
         pendingFilterLoad = null
+        updateExistingPickerOpen = false
     }
 
     fun discardPendingFilterChangesAndLoad() {
@@ -931,7 +946,9 @@ class AppState(
     fun loadFilter(tabId: String, sf: SavedFilter) {
         upFlt(tabId, trackDraft = false) { _ -> sf.toFilter() }
         activeSavedFilterIds = activeSavedFilterIds + (tabId to sf.id)
-        activeFilterDraftTabIds = activeFilterDraftTabIds - tabId
+        // Loading a different preset abandons this tab's in-progress unsaved draft (if any) —
+        // otherwise it lingers forever in savedFiltersForTab()'s list, never active but never gone.
+        clearDraftForTab(tabId)
     }
 
     fun loadFilterById(tabId: String, presetId: String): Boolean {

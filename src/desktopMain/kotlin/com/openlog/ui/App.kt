@@ -558,20 +558,21 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             color = tc2.td, fontSize = 11.sp, maxLines = 2
                         )
                         Spacer(Modifier.height(14.dp))
+                        val trySaveFilter = {
+                            val tid = state.sfTabId
+                            if (tid != null && state.sfName.isNotBlank()) state.saveFilter(tid, state.sfName)
+                        }
                         InlineField(
                             state.sfName,
                             { state.sfName = it },
                             "Preset name…",
                             Modifier.fillMaxWidth(),
-                            fontSize = 13.sp
+                            fontSize = 13.sp,
+                            onSubmit = trySaveFilter,
                         )
                         Spacer(Modifier.height(12.dp))
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
-                            DialogActionButton("Save", active = state.sfName.isNotBlank()) {
-                                if (state.sfName.isNotBlank()) state.saveFilter(
-                                    state.sfTabId ?: return@DialogActionButton, state.sfName
-                                )
-                            }
+                            DialogActionButton("Save", active = state.sfName.isNotBlank()) { trySaveFilter() }
                             DialogActionButton("Cancel", active = false) { state.sfDialog = false }
                         }
                     }
@@ -606,7 +607,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                 }
             }
 
-            state.pendingFilterLoad?.takeIf { !state.sfDialog }?.let { pending ->
+            state.pendingFilterLoad?.takeIf { !state.sfDialog && !state.updateExistingPickerOpen }?.let { pending ->
                 val current = pending.currentFilterId?.let { id -> state.savedFilters.find { it.id == id } }
                 val target = state.savedFilters.find { it.id == pending.targetFilterId }
                 Dialog(onDismissRequest = { state.cancelPendingFilterLoad() }) {
@@ -638,9 +639,8 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                 DialogActionButton("Save as new", active = true) { state.beginSavePendingFilterAsNew() }
                                 DialogActionButton(
                                     "Update existing",
-                                    active = current != null,
-                                    enabled = current != null
-                                ) { state.updateCurrentPresetAndLoadPending() }
+                                    active = true,
+                                ) { state.beginUpdateExistingPick() }
                             }
                             Row(
                                 Modifier.fillMaxWidth(),
@@ -654,6 +654,84 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                 ) { state.discardPendingFilterChangesAndLoad() }
                                 DialogActionButton("Cancel", active = false) { state.cancelPendingFilterLoad() }
                             }
+                        }
+                    }
+                }
+            }
+
+            state.pendingFilterLoad?.takeIf { state.updateExistingPickerOpen }?.let { pending ->
+                val target = state.savedFilters.find { it.id == pending.targetFilterId }
+                Dialog(onDismissRequest = { state.cancelUpdateExistingPick() }) {
+                    val tc2 = tc()
+                    var pickerExpanded by remember { mutableStateOf(false) }
+                    val pickerDensity = LocalDensity.current.density
+                    Column(
+                        Modifier.width(320.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText(
+                            "Update which filter?",
+                            color = tc2.tx,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "Overwrite the chosen preset with your current changes, then load \"${target?.name ?: "another filter"}\".",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 3,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Box(Modifier.fillMaxWidth()) {
+                            HoverBox(
+                                modifier = Modifier.fillMaxWidth()
+                                    .border(1.dp, tc2.br, RoundedCornerShape(5.dp))
+                                    .clip(RoundedCornerShape(5.dp)),
+                                onClick = { pickerExpanded = true },
+                            ) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    AppText("Choose a filter…", color = tc2.td, fontSize = 12.sp)
+                                    AppText("▾", color = tc2.td, fontSize = 12.sp)
+                                }
+                            }
+                            if (pickerExpanded) {
+                                Popup(
+                                    alignment = Alignment.TopStart,
+                                    offset = IntOffset(0, (36 * pickerDensity).roundToInt()),
+                                    onDismissRequest = { pickerExpanded = false },
+                                    properties = PopupProperties(focusable = true),
+                                ) {
+                                    Column(
+                                        Modifier.width(280.dp).heightIn(max = 220.dp).verticalScroll(rememberScrollState())
+                                            .background(tc2.p, RoundedCornerShape(7.dp))
+                                            .border(1.dp, tc2.br, RoundedCornerShape(7.dp))
+                                            .padding(vertical = 4.dp),
+                                    ) {
+                                        state.savedFilters.forEach { sf ->
+                                            HoverBox(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                onClick = { pickerExpanded = false; state.confirmUpdateExisting(sf.id) },
+                                            ) {
+                                                AppText(
+                                                    sf.name,
+                                                    color = tc2.tx,
+                                                    fontSize = 12.sp,
+                                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 7.dp),
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            DialogActionButton("Cancel", active = false) { state.cancelUpdateExistingPick() }
                         }
                     }
                 }

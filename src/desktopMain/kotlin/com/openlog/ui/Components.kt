@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.runtime.*
@@ -29,6 +31,7 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
@@ -325,12 +328,16 @@ fun InlineField(
     placeholder: String = "", modifier: Modifier = Modifier,
     fontSize: TextUnit = LocalFontBase.current.sp,
     onClear: (() -> Unit)? = null,
+    onSubmit: (() -> Unit)? = null,
 ) {
     val tc = tc()
     BasicTextField(
         value = value, onValueChange = onValue,
         textStyle = TextStyle(color = tc.tx, fontSize = fontSize, fontFamily = FontFamily.Default),
         cursorBrush = SolidColor(tc.ac),
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { onSubmit?.invoke() }),
         modifier = modifier
             .background(tc.bg, CORNER_SM)
             .border(1.dp, tc.br, CORNER_SM)
@@ -343,8 +350,10 @@ fun InlineField(
                         inner()
                     }
                     if (value.isNotEmpty()) {
-                        AppText("×", color = tc.td, fontSize = 14.sp,
-                            modifier = Modifier.clickable(onClick = onClear).padding(start = 4.dp))
+                        SquareIconButton(
+                            "×", fontSize = 12.sp, onClick = onClear,
+                            modifier = Modifier.padding(start = 4.dp), size = 16.dp,
+                        )
                     }
                 }
             } else {
@@ -392,12 +401,12 @@ fun ColorSwatch(color: Color, selected: Boolean, onClick: () -> Unit) {
 // 18dp matches the height of the adjacent type badge (BlockControls' Note/LogRef pill) they sit
 // next to in the same row.
 @Composable
-fun SquareIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun SquareIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modifier: Modifier = Modifier, size: Dp = 18.dp) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     Box(
         modifier
-            .size(18.dp)
+            .size(size)
             .background(if (hovered) tc.hv else Color.Transparent, CORNER_MD)
             .clip(CORNER_MD)
             .clickable(onClick = onClick)

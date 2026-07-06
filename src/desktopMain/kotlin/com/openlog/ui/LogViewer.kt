@@ -82,6 +82,11 @@ class ItemsSummary(
     val expandedGroupCount: Int,
 ) {
     val rowCount: Int get() = rowIds.size
+
+    // Every header (Seq/Manual/StackTrace) is itself one real log entry rendered in header style,
+    // whether its group is collapsed or expanded — rowCount alone (Row items only, kept row-only
+    // for select-all) undercounts the "entries currently shown" label by exactly the header count.
+    val visibleEntryCount: Int get() = rowCount + collapsedGroupCount + expandedGroupCount
 }
 
 internal fun summarizeItems(items: List<LogItem>): ItemsSummary {
@@ -443,7 +448,7 @@ fun LogViewer(
     val computedItems = rememberComputedLogItems(tab, true)
     val items = computedItems.items
     val itemsVersion = items.size to items.lastOrNull()?.let(::logItemEntryId)
-    val visCnt = computedItems.summary.rowCount
+    val visCnt = computedItems.summary.visibleEntryCount
     val totalCnt  = tab.logData.size
     val hasPidTid = remember(tab.id) { tab.logData.any { it.pid > 0 } }
     LaunchedEffect(computedItems) {

@@ -650,6 +650,40 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun updateExistingPickerOverwritesChosenPresetRegardlessOfWhichWasActive() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+
+        state.addPkgPrefix(tabId, "com.one")
+        state.saveFilter(tabId, "one")
+        state.clearFilter(tabId)
+        state.addPkgPrefix(tabId, "com.two")
+        state.saveFilter(tabId, "two")
+        val one = state.savedFilters.first { it.name == "one" }
+        val two = state.savedFilters.first { it.name == "two" }
+        state.loadFilter(tabId, one)
+        state.addPkgPrefix(tabId, "com.extra")
+
+        state.requestLoadFilter(tabId, two)
+        // Editing "one" already demoted the tab to a draft, so there is no unambiguous "current"
+        // preset — the picker must still let the user pick "two" (not just "one") to overwrite.
+        assertEquals(null, state.pendingFilterLoad?.currentFilterId)
+
+        state.beginUpdateExistingPick()
+        assertTrue(state.updateExistingPickerOpen)
+
+        state.confirmUpdateExisting(two.id)
+
+        assertEquals(false, state.updateExistingPickerOpen)
+        assertEquals(null, state.pendingFilterLoad)
+        assertEquals(setOf("com.one", "com.extra"), state.savedFilters.first { it.id == two.id }.pkgPrefixes)
+        assertEquals(setOf("com.one", "com.extra"), state.tabs.single().filter.pkgPrefixes)
+        assertEquals(two.id, state.activeSavedFilterId(tabId))
+        assertEquals(null, state.filterDraftForTab(tabId))
+    }
+
+    @Test
     fun changingSavedFilterWithDirtyUnsavedFilterRequestsConfirmation() {
         val source = AppState()
         source.addTab()

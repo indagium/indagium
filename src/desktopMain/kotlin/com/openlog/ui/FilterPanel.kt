@@ -733,7 +733,7 @@ fun FilterPanel(
                         .onFocusChanged { kwFieldFocused = it.isFocused },
                 )
                 if (kwDisplay.isNotBlank())
-                    AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { kwDisplay = ""; onSetKw("") })
+                    SquareIconButton("×", fontSize = 12.sp, onClick = { kwDisplay = ""; onSetKw("") }, size = 16.dp)
             }
             Divider()
         }
