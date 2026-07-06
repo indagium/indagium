@@ -2541,10 +2541,24 @@ class AppState(
             "sequences" -> { /* legacy global-sequences key — migrated into tab filter; ignored on load */ }
             "saved" -> importFilters(value.unb64())
             "activeFilters" -> activeSavedFilterIds = activeFilterMapFromToken(value.unb64())
+            "drafts" -> restoreDraftsFromToken(value.unb64())
             "recent" -> recentFiles = value.pathTokenList()
             "recentNotes" -> recentNotes = value.pathTokenList()
             "filterPanel" -> fpState.restoreFilterPanelToken(value.unb64())
         }
+    }
+
+    // filterDraftsByTab/activeFilterDraftTabIds are the only pieces of the draft state that ever
+    // need saving — a draft's id is always "draft_<tabId>" (see draftIdForTab), so the tab it
+    // belongs to round-trips for free without a separate id->tabId token. Any restored draft is
+    // by definition currently active for its tab (there's no "inactive draft" state), so
+    // activeFilterDraftTabIds is just derived from the restored keys.
+    private fun draftsToken(): String = exportFiltersList(filterDraftsByTab.values.toList())
+
+    private fun restoreDraftsFromToken(json: String) {
+        val decoded = decodeFilters(json).getOrElse { return }
+        filterDraftsByTab = decoded.associateBy { it.id.removePrefix("draft_") }
+        activeFilterDraftTabIds = filterDraftsByTab.keys.toSet()
     }
 
     private fun restoreTabsFromAutosave(tabLines: List<String>) {
@@ -2594,6 +2608,7 @@ class AppState(
         appendLine("compare\t${compareStateToken().b64()}")
         appendLine("saved\t${exportFilters().b64()}")
         appendLine("activeFilters\t${activeFilterMapToken().b64()}")
+        appendLine("drafts\t${draftsToken().b64()}")
         appendLine("recent\t${recentFiles.joinToString(",") { it.b64() }.b64()}")
         appendLine("recentNotes\t${recentNotes.joinToString(",") { it.b64() }.b64()}")
         appendLine("filterPanel\t${fpState.filterPanelToken().b64()}")

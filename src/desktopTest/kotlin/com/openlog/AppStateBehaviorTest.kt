@@ -1142,6 +1142,37 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun autosaveRestoresAnUnsavedFilterDraftAsStillActiveAndEditable() {
+        val dir = createTempDirectory("openlog-cache").toFile()
+        val logFile = File(dir, "test.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I App: hello\n")
+        }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        val tab = mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+            .copy(sourcePath = logFile.absolutePath)
+        state.tabs = listOf(tab)
+        state.activeTabId = "log"
+        state.addPkgPrefix("log", "com.base")
+        state.saveFilter("log", "base")
+        state.addPkgPrefix("log", "1234")
+        val draftBeforeSave = state.filterDraftForTab("log")
+        assertEquals(setOf("com.base", "1234"), draftBeforeSave?.pkgPrefixes)
+
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        val restoredDraft = restored.filterDraftForTab("log")
+        assertEquals(setOf("com.base", "1234"), restoredDraft?.pkgPrefixes)
+        assertEquals(restoredDraft?.id, restored.activeFilterItemId("log"))
+        assertEquals(setOf("com.base", "1234"), restored.tab("log")!!.filter.pkgPrefixes)
+
+        // A further edit after restore must still update the draft, not silently no-op.
+        restored.addPkgPrefix("log", "5678")
+        assertEquals(setOf("com.base", "1234", "5678"), restored.filterDraftForTab("log")?.pkgPrefixes)
+    }
+
+    @Test
     fun autosaveSkipsTabsWhoseSourceFileNoLongerExists() {
         val dir = createTempDirectory("openlog-cache").toFile()
         val logFile = File(dir, "test.log").apply {
