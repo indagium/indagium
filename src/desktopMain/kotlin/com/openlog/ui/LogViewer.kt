@@ -351,7 +351,10 @@ class LogViewerScrollStateStore {
     fun lazyState(panelKey: String): LazyListState =
         lazyStates.getOrPut(panelKey) { LazyListState() }
 
-    fun horizontalState(panelKey: String): ScrollState =
+    // ScrollState itself is axis-agnostic — this backs the log rows' horizontal scroll, but is
+    // reused as-is (same store, same "$tabId:" prefix cleanup) for other single-axis scroll
+    // positions that need to survive a tab switch, e.g. the Notes panel's vertical scroll.
+    fun scrollState(panelKey: String): ScrollState =
         horizontalStates.getOrPut(panelKey) { ScrollState(0) }
 
     fun removeTab(tabId: String) {
@@ -554,7 +557,7 @@ fun LogViewer(
                 return
             }
             val lazyState = listState ?: scrollStates.lazyState(panelKey)
-            val hScroll   = scrollStates.horizontalState(panelKey)
+            val hScroll   = scrollStates.scrollState(panelKey)
             val scrollbarStyle = appScrollbarStyle(tc)
             val density = LocalDensity.current
             val verticalScrollbarGutterPx = with(density) { 16.dp.toPx() }

@@ -1941,6 +1941,7 @@ private fun FileView(
                     if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
                 },
                 keyboardFocusVisible = state.keyboardFocusVisible,
+                scrollStateStore = state.logViewerScrollStateStore,
             )
         }
     }
@@ -2152,6 +2153,7 @@ private fun CompareView(
                                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
                             },
                             keyboardFocusVisible = state.keyboardFocusVisible,
+                            scrollStateStore = state.logViewerScrollStateStore,
                         )
                     }
                 }
