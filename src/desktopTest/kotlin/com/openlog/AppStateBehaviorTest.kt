@@ -22,6 +22,11 @@ import com.openlog.ui.ImportFilterAction
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitMode
 import com.openlog.ui.mkTab
+import com.openlog.ui.sequenceOrderDuringDrag
+import com.openlog.ui.sequenceRenderY
+import com.openlog.ui.sequenceRowBaseBackground
+import com.openlog.ui.shouldSyncSequenceVisualOrder
+import com.openlog.ui.themeColors
 import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
@@ -1071,7 +1076,7 @@ class AppStateBehaviorTest {
         restored.startPendingRestoredTabLoads()
         // Restore parses the tab's file on a background job; wait for it to settle so assertions
         // observe a fully-materialized tab rather than racing the in-flight load.
-        waitUntil { !restored.isLoading }
+        waitUntil(timeoutMs = 5_000) { !restored.isLoading && restored.tabs.isNotEmpty() }
         assertEquals("test.log", restored.tabs.single().filename)
         assertEquals(6, restored.settings.visibleTabLimit)
         assertEquals("Evidence", restored.settings.annotationPrefixLabel)
@@ -2189,6 +2194,69 @@ class AppStateBehaviorTest {
 
         assertEquals(secondId, state.sequences[1].id)
         assertEquals(2, state.sequences.size)
+    }
+
+    @Test
+    fun sequenceOrderDuringDragMovesSequenceAsItsCenterCrossesNeighbors() {
+        val order = sequenceOrderDuringDrag(
+            visibleIds = listOf("first", "second", "third", "fourth"),
+            draggedId = "first",
+            dragStartIndex = 0,
+            dragOffsetY = 108f,
+            rowHeight = 32f,
+        )
+
+        assertEquals(listOf("second", "third", "fourth", "first"), order)
+    }
+
+    @Test
+    fun sequenceRenderYMatchesTabDragAnimationRules() {
+        assertEquals(
+            46f,
+            sequenceRenderY(
+                isDragging = true,
+                isJustReleased = false,
+                pointerY = 46f,
+                targetY = 80f,
+                animatedY = 20f,
+            ),
+        )
+        assertEquals(
+            20f,
+            sequenceRenderY(
+                isDragging = false,
+                isJustReleased = false,
+                pointerY = 46f,
+                targetY = 80f,
+                animatedY = 20f,
+            ),
+        )
+        assertEquals(
+            80f,
+            sequenceRenderY(
+                isDragging = false,
+                isJustReleased = true,
+                pointerY = 46f,
+                targetY = 80f,
+                animatedY = 20f,
+            ),
+        )
+    }
+
+    @Test
+    fun draggedSequenceRowUsesOpaqueBaseBackground() {
+        val tc = themeColors(ThemePreset.LIGHT)
+
+        val background = sequenceRowBaseBackground(isDragging = true, enabled = true, theme = tc)
+
+        assertEquals(1f, background.alpha)
+        assertEquals(tc.p, background)
+    }
+
+    @Test
+    fun sequenceVisualOrderDoesNotSyncBackWhileReleaseAnimationIsSettling() {
+        assertFalse(shouldSyncSequenceVisualOrder(dragId = null, justReleasedSequenceId = "seq-1"))
+        assertTrue(shouldSyncSequenceVisualOrder(dragId = null, justReleasedSequenceId = null))
     }
 
     @Test

@@ -1773,6 +1773,7 @@ private fun BoundFilterPanel(
         onToggleMessageRuleRegex = { state.toggleKwInTagRx(tab.id) },
         onMoveSeqUp = { state.moveSequenceUp(it) },
         onMoveSeqDown = { state.moveSequenceDown(it) },
+        onReorderSeq = { id, index -> state.reorderSequence(id, index) },
         onSetNewSeqText = { state.newSeqText = it },
         onSetNewSeqRx = { state.newSeqRegex = it },
         onSetNewSeqEndText = { state.newSeqEndText = it },

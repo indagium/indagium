@@ -1,8 +1,9 @@
 package com.openlog.ui
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.*
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -18,13 +19,16 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
@@ -37,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.zIndex
 import com.openlog.model.*
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeStackTraceGroups
@@ -53,6 +58,47 @@ import kotlin.math.roundToInt
 private data class MsgCandidate(val pattern: String, val target: RuleTarget, val inScope: Boolean)
 
 private const val LARGE_FILE_CANDIDATE_SCAN_LIMIT = 50_000
+private const val SEQUENCE_DRAG_SNAP_BIAS = 0.25f
+
+internal fun sequenceOrderDuringDrag(
+    visibleIds: List<String>,
+    draggedId: String?,
+    dragStartIndex: Int,
+    dragOffsetY: Float,
+    rowHeight: Float,
+): List<String> {
+    val dragged = draggedId?.takeIf { it in visibleIds } ?: return visibleIds
+    if (rowHeight <= 0f || dragStartIndex !in visibleIds.indices) return visibleIds
+    val sensitivityBias = rowHeight * SEQUENCE_DRAG_SNAP_BIAS * dragOffsetY.compareTo(0f)
+    val draggedCenter = dragStartIndex * rowHeight + rowHeight / 2f + dragOffsetY + sensitivityBias
+    val without = visibleIds.filter { it != dragged }
+    val insertAt = without.indexOfFirst { id ->
+        val center = visibleIds.indexOf(id) * rowHeight + rowHeight / 2f
+        draggedCenter < center
+    }.takeIf { it >= 0 } ?: without.size
+    return without.take(insertAt) + dragged + without.drop(insertAt)
+}
+
+internal fun sequenceRenderY(
+    isDragging: Boolean,
+    isJustReleased: Boolean,
+    pointerY: Float,
+    targetY: Float,
+    animatedY: Float,
+): Float = when {
+    isDragging -> pointerY
+    isJustReleased -> targetY
+    else -> animatedY
+}
+
+internal fun sequenceRowBaseBackground(isDragging: Boolean, enabled: Boolean, theme: ThemeColors): Color = when {
+    isDragging -> theme.p
+    !enabled -> theme.hv
+    else -> Color.Transparent
+}
+
+internal fun shouldSyncSequenceVisualOrder(dragId: String?, justReleasedSequenceId: String?): Boolean =
+    dragId == null && justReleasedSequenceId == null
 
 // Collapse/expand state for the filter panel. Held outside the composable so it survives
 // the panel being hidden and re-shown (FilterPanel is removed from the tree when invisible).
@@ -106,6 +152,7 @@ fun FilterPanel(
     onToggleMessageRuleRegex: () -> Unit,
     onMoveSeqUp: (String) -> Unit,
     onMoveSeqDown: (String) -> Unit,
+    onReorderSeq: (String, Int) -> Unit,
     onSetNewSeqText: (String) -> Unit,
     onSetNewSeqRx: (Boolean) -> Unit,
     onSetNewSeqEndText: (String) -> Unit,
@@ -1069,76 +1116,175 @@ fun FilterPanel(
             }
             if (tab.filter.sequences.isNotEmpty()) {
                 var dragId by remember { mutableStateOf<String?>(null) }
+                var dragStartIndex by remember { mutableStateOf(-1) }
+                var dragStartTopY by remember { mutableStateOf(0f) }
                 var dragOffsetY by remember { mutableStateOf(0f) }
+                var justReleasedSequenceId by remember { mutableStateOf<String?>(null) }
+                var liveVisualSequenceIds by remember { mutableStateOf(emptyList<String>()) }
                 val density = LocalDensity.current.density
-                Column(Modifier.fillMaxWidth()) {
-                    tab.filter.sequences.forEachIndexed { idx, def ->
-                        val isDragging = dragId == def.id
-                        Column(
-                            Modifier.fillMaxWidth()
-                                .then(if (isDragging) Modifier.offset { IntOffset(0, dragOffsetY.roundToInt()) } else Modifier)
-                        ) {
-                            Row(
-                                Modifier.fillMaxWidth()
-                                    .background(if (isDragging) tc.ac.copy(.12f) else if (!def.enabled) tc.hv else Color.Transparent)
-                                    .padding(horizontal = 12.dp, vertical = 3.dp),
-                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp),
-                            ) {
-                                AppText("⠿", color = tc.td, fontSize = 12.sp,
-                                    modifier = Modifier.pointerInput(def.id) {
-                                        detectDragGestures(
-                                            onDragStart = { dragId = def.id; dragOffsetY = 0f },
-                                            onDragEnd = {
-                                                val rowH = 28f * density
-                                                val steps = (dragOffsetY / rowH).roundToInt()
-                                                val targetIdx = (idx + steps).coerceIn(0, tab.filter.sequences.lastIndex)
-                                                if (targetIdx != idx) {
-                                                    repeat(kotlin.math.abs(targetIdx - idx)) {
-                                                        if (targetIdx < idx) onMoveSeqUp(def.id)
-                                                        else onMoveSeqDown(def.id)
-                                                    }
+                val sequenceIds = tab.filter.sequences.map { it.id }
+                LaunchedEffect(sequenceIds, dragId, justReleasedSequenceId) {
+                    if (shouldSyncSequenceVisualOrder(dragId, justReleasedSequenceId)) {
+                        liveVisualSequenceIds = sequenceIds
+                    }
+                }
+                LaunchedEffect(justReleasedSequenceId) {
+                    if (justReleasedSequenceId != null) {
+                        kotlinx.coroutines.delay(120)
+                        justReleasedSequenceId = null
+                    }
+                }
+                val visualSequenceIds =
+                    liveVisualSequenceIds.takeIf { it.toSet() == sequenceIds.toSet() && it.size == sequenceIds.size }
+                        ?: sequenceIds
+                val currentVisualSequenceIds = rememberUpdatedState(visualSequenceIds)
+                val currentDragId = rememberUpdatedState(dragId)
+                val rowHeightPx = 28f * density
+                val rowHeightDp = (rowHeightPx / density).dp
+                Box(
+                    Modifier.fillMaxWidth()
+                        .height(rowHeightDp * sequenceIds.size)
+                        .pointerInput(sequenceIds, rowHeightPx) {
+                            var downPos = Offset.Zero
+                            var downId: String? = null
+                            var dragging = false
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                    val ch = ev.changes.firstOrNull() ?: continue
+                                    when (ev.type) {
+                                        PointerEventType.Press -> {
+                                            downPos = ch.position
+                                            dragging = false
+                                            val idx = (ch.position.y / rowHeightPx).toInt()
+                                                .coerceIn(0, sequenceIds.lastIndex.coerceAtLeast(0))
+                                            downId = sequenceIds.getOrNull(idx)
+                                        }
+
+                                        PointerEventType.Move -> {
+                                            if (downId != null && !dragging && (ch.position - downPos).getDistance() > 8f) {
+                                                val id = downId ?: continue
+                                                dragging = true
+                                                dragId = id
+                                                dragStartIndex = sequenceIds.indexOf(id)
+                                                dragStartTopY = dragStartIndex * rowHeightPx
+                                                dragOffsetY = 0f
+                                                justReleasedSequenceId = null
+                                                liveVisualSequenceIds = sequenceIds
+                                            }
+                                            if (dragging && dragId != null) {
+                                                ch.consume()
+                                                dragOffsetY = ch.position.y - downPos.y
+                                                liveVisualSequenceIds = sequenceOrderDuringDrag(
+                                                    visibleIds = sequenceIds,
+                                                    draggedId = dragId,
+                                                    dragStartIndex = dragStartIndex,
+                                                    dragOffsetY = dragOffsetY,
+                                                    rowHeight = rowHeightPx,
+                                                )
+                                            }
+                                        }
+
+                                        PointerEventType.Release -> {
+                                            if (dragging && dragId != null) {
+                                                val releasedId = currentDragId.value ?: dragId
+                                                val releasedOrder = currentVisualSequenceIds.value
+                                                val targetIdx = releasedOrder.indexOf(releasedId)
+                                                if (releasedId != null && targetIdx >= 0 && targetIdx != sequenceIds.indexOf(releasedId)) {
+                                                    liveVisualSequenceIds = releasedOrder
+                                                    onReorderSeq(releasedId, targetIdx)
                                                 }
-                                                dragId = null; dragOffsetY = 0f
-                                            },
-                                            onDragCancel = { dragId = null; dragOffsetY = 0f },
-                                            onDrag = { ch, d -> ch.consume(); dragOffsetY += d.y },
-                                        )
-                                    })
-                                AppText("${idx + 1}", color = tc.td, fontSize = 9.sp, fontFamily = MONO, modifier = Modifier.width(12.dp))
-                                ColorPickerSwatch(
-                                    color = if (def.enabled) def.color else tc.br, size = 10.dp,
-                                    pickerOpen = colorPickerSeqId == def.id,
-                                    onClick = { colorPickerSeqId = if (colorPickerSeqId == def.id) null else def.id },
-                                )
-                                AppText(
-                                    sequenceLabel(def),
-                                    color = if (def.enabled) tc.tx else tc.td,
-                                    fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis,
-                                )
-                                SquareIconButton("✎", fontSize = 11.sp, onClick = {
-                                    editingSeqId = if (editingSeqId == def.id) null else def.id
-                                })
-                                RoundIndicator(active = def.enabled, color = def.color, onClick = { onToggleSeqEnabled(def.id) })
-                                SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveSeq(def.id) })
-                            }
-                            if (editingSeqId == def.id) {
-                                SequenceEditor(def, onUpdateSeq, onCancel = { editingSeqId = null })
-                            }
-                            if (colorPickerSeqId == def.id) {
-                                FlowRow(
-                                    Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                                ) {
-                                    SEQ_COLORS.forEach { c ->
-                                        Box(
-                                            Modifier.size(14.dp).background(c, CORNER_SM)
-                                                .border(2.dp, if (c == def.color) tc.tx else Color.Transparent, CORNER_SM)
-                                                .clickable { onSetSeqColor(def.id, c); colorPickerSeqId = null },
-                                        )
+                                                justReleasedSequenceId = releasedId
+                                            }
+                                            dragId = null
+                                            dragStartIndex = -1
+                                            dragStartTopY = 0f
+                                            dragOffsetY = 0f
+                                            downId = null
+                                            dragging = false
+                                        }
+
+                                        else -> {}
                                     }
                                 }
                             }
+                        }
+                ) {
+                    tab.filter.sequences.forEach { def ->
+                        key(def.id) {
+                            val isDragging = dragId == def.id
+                            val targetIndex = visualSequenceIds.indexOf(def.id).takeIf { it >= 0 }
+                                ?: tab.filter.sequences.indexOf(def)
+                            val targetY = targetIndex * rowHeightPx
+                            val animatedY by animateFloatAsState(
+                                targetValue = targetY,
+                                animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
+                                label = "sequence-y-${def.id}",
+                            )
+                            val sequenceY = sequenceRenderY(
+                                isDragging = isDragging,
+                                isJustReleased = justReleasedSequenceId == def.id,
+                                pointerY = dragStartTopY + dragOffsetY,
+                                targetY = targetY,
+                                animatedY = animatedY,
+                            )
+                            Column(
+                                Modifier.fillMaxWidth()
+                                    .height(rowHeightDp)
+                                    .offset { IntOffset(0, sequenceY.roundToInt()) }
+                                    .zIndex(if (isDragging) 1f else 0f)
+                                    .graphicsLayer {
+                                        if (isDragging) {
+                                            scaleX = 1.02f
+                                            scaleY = 1.02f
+                                        }
+                                    }
+                            ) {
+                                Row(
+                                    Modifier.fillMaxWidth()
+                                        .fillMaxHeight()
+                                        .background(sequenceRowBaseBackground(isDragging, def.enabled, tc))
+                                        .background(if (isDragging) tc.ac.copy(.12f) else Color.Transparent)
+                                        .padding(horizontal = 12.dp, vertical = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                ) {
+                                    AppText("⠿", color = tc.td, fontSize = 12.sp)
+                                    AppText("${targetIndex + 1}", color = tc.td, fontSize = 9.sp, fontFamily = MONO, modifier = Modifier.width(12.dp))
+                                    ColorPickerSwatch(
+                                        color = if (def.enabled) def.color else tc.br, size = 10.dp,
+                                        pickerOpen = colorPickerSeqId == def.id,
+                                        onClick = { colorPickerSeqId = if (colorPickerSeqId == def.id) null else def.id },
+                                    )
+                                    AppText(
+                                        sequenceLabel(def),
+                                        color = if (def.enabled) tc.tx else tc.td,
+                                        fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis,
+                                    )
+                                    SquareIconButton("✎", fontSize = 11.sp, onClick = {
+                                        editingSeqId = if (editingSeqId == def.id) null else def.id
+                                    })
+                                    RoundIndicator(active = def.enabled, color = def.color, onClick = { onToggleSeqEnabled(def.id) })
+                                    SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveSeq(def.id) })
+                                }
+                            }
+                        }
+                    }
+                }
+                tab.filter.sequences.firstOrNull { it.id == editingSeqId }?.let { def ->
+                    SequenceEditor(def, onUpdateSeq, onCancel = { editingSeqId = null })
+                }
+                tab.filter.sequences.firstOrNull { it.id == colorPickerSeqId }?.let { def ->
+                    FlowRow(
+                        Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        SEQ_COLORS.forEach { c ->
+                            Box(
+                                Modifier.size(14.dp).background(c, CORNER_SM)
+                                    .border(2.dp, if (c == def.color) tc.tx else Color.Transparent, CORNER_SM)
+                                    .clickable { onSetSeqColor(def.id, c); colorPickerSeqId = null },
+                            )
                         }
                     }
                 }
