@@ -5,7 +5,10 @@
 
 package com.openlog.ui
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -18,6 +21,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
@@ -28,6 +32,8 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -41,6 +47,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.zIndex
 import com.openlog.model.AnnBlock
 import com.openlog.model.AppSettings
 import com.openlog.model.LogTab
@@ -49,6 +56,48 @@ import java.awt.Frame
 import java.io.File
 import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
+
+private const val BLOCK_DRAG_SNAP_BIAS = 0.25f
+private const val AUTO_SCROLL_SPEED_FACTOR = 0.6f
+private const val STICK_TO_BOTTOM_THRESHOLD_DP = 24f
+
+// Cumulative top-Y offset of each id in `orderedIds`, in that order — the building block both
+// blockOrderDuringDrag (over the stable list order) and the render loop (over the live visual
+// order) need, since unlike sequence rows, note blocks have no uniform row height.
+internal fun cumulativeBlockOffsets(orderedIds: List<String>, heightOf: (String) -> Float): Map<String, Float> {
+    val result = LinkedHashMap<String, Float>(orderedIds.size)
+    var acc = 0f
+    for (id in orderedIds) {
+        result[id] = acc
+        acc += heightOf(id)
+    }
+    return result
+}
+
+// Variable-height counterpart to FilterPanel's sequenceOrderDuringDrag — same "dragged center
+// crosses a neighbor's center" rule, but positions come from measured per-block heights via
+// cumulativeBlockOffsets instead of index * a uniform rowHeight. Looks up the dragged block's
+// start position by id (via cumulativeBlockOffsets) rather than taking a start index directly,
+// since with variable heights the index alone isn't enough to derive a Y position.
+internal fun blockOrderDuringDrag(
+    visibleIds: List<String>,
+    draggedId: String?,
+    dragOffsetY: Float,
+    heightOf: (String) -> Float,
+): List<String> {
+    val dragged = draggedId?.takeIf { it in visibleIds } ?: return visibleIds
+    val tops = cumulativeBlockOffsets(visibleIds, heightOf)
+    val draggedTop = tops.getValue(dragged)
+    val draggedHeight = heightOf(dragged)
+    val sensitivityBias = draggedHeight * BLOCK_DRAG_SNAP_BIAS * dragOffsetY.compareTo(0f)
+    val draggedCenter = draggedTop + draggedHeight / 2f + dragOffsetY + sensitivityBias
+    val without = visibleIds.filter { it != dragged }
+    val insertAt = without.indexOfFirst { id ->
+        val center = tops.getValue(id) + heightOf(id) / 2f
+        draggedCenter < center
+    }.takeIf { it >= 0 } ?: without.size
+    return without.take(insertAt) + dragged + without.drop(insertAt)
+}
 
 @Composable
 fun AnnotationPanel(
@@ -64,15 +113,18 @@ fun AnnotationPanel(
     onOpenNote: (File) -> Unit,
     onUpdatePrefix: (String) -> Unit,
     onUpdateSuffix: (String) -> Unit,
+    onUpdateIssueDescription: (String) -> Unit,
     onUpdateBlock: (String, String) -> Unit,
     onRemoveBlock: (String) -> Unit,
     onMoveBlock: (String, Int) -> Unit,
+    onReorderBlock: (String, Int) -> Unit,
     onAddNoteAfter: (String?) -> Unit,
     onNavigateLogRef: (AnnBlock.LogRef) -> Unit,
     width: Float,
     focusRequester: FocusRequester? = null,
     onPanelFocusChanged: (Boolean) -> Unit = {},
     keyboardFocusVisible: Boolean = false,
+    scrollStateStore: LogViewerScrollStateStore? = null,
 ) {
     val tc = tc()
     val mono = monoFont()
@@ -82,7 +134,10 @@ fun AnnotationPanel(
     val headerButtonModifier = Modifier.height(28.dp)
     var panelFocused by remember { mutableStateOf(false) }
     var prefixFocused by remember { mutableStateOf(false) }
+    var issueDescFocused by remember { mutableStateOf(false) }
     var suffixFocused by remember { mutableStateOf(false) }
+    // Session-only, not persisted — only the text itself needs to survive a restart.
+    var issueDescExpanded by remember(tab.id) { mutableStateOf(false) }
     var blockFieldFocused by remember { mutableStateOf(false) }
     var navIndex by remember(tab.id) { mutableStateOf(0) }
     val prefixFr = remember { FocusRequester() }
@@ -98,9 +153,95 @@ fun AnnotationPanel(
         )
     }
 
+    // Drag-and-drop reorder for note blocks — same live-preview/animation recipe as sequences
+    // (FilterPanel.kt), adapted for variable block heights (a LogRef block showing several log
+    // lines is much taller than a short Note; see cumulativeBlockOffsets/blockOrderDuringDrag
+    // above). Unlike sequences' compact rows, blocks contain free-text editors, so the drag
+    // gesture is scoped to a dedicated handle (BlockControls' "⠿") rather than the whole block —
+    // otherwise selecting text inside a note would fight with reordering it.
+    var dragBlockId by remember { mutableStateOf<String?>(null) }
+    var dragOffsetY by remember { mutableStateOf(0f) }
+    var justReleasedBlockId by remember { mutableStateOf<String?>(null) }
+    var liveVisualBlockIds by remember { mutableStateOf(emptyList<String>()) }
+    // Deliberately never cleared/keyed on tab.id: block ids are unique across every tab (never
+    // collide), and keeping a revisited tab's already-known heights around is what lets its
+    // blocks render at the correct position immediately instead of needing to re-measure (see the
+    // heightIn(min=...) block below) — clearing this on every tab switch was tried and reverted:
+    // it forced every revisit through a brief no-real-heights-yet window, and a plain-flow
+    // fallback layout that existed for that window turned out to be more fragile (lost drag
+    // capability on revisit) than just letting old entries accumulate, which costs a few floats
+    // per note ever created in the session — negligible.
+    val blockHeights = remember { mutableStateMapOf<String, Float>() }
+    val blockDensity = LocalDensity.current.density
+    val autoScrollEdgePx = 56f * blockDensity
+
+    // Used only until a block's real size arrives via onSizeChanged below. A flat guess (the old
+    // 90f-for-everything constant) was too far off for long notes or multi-line LogRefs: the
+    // scrollable content's height is temporarily under-reported on a tab's first-ever layout pass,
+    // which makes Compose clamp the persisted ScrollState.value down to fit — and it never climbs
+    // back up once the real (larger) height lands, since clamping overwrites the stored value
+    // rather than remembering what it "should" be. A closer guess shrinks that under-report window
+    // close to zero. Deliberately biased to overshoot slightly rather than undershoot: an
+    // over-estimate just leaves temporary blank space (self-corrects, no scroll-clamp risk); an
+    // under-estimate is what causes the clamp.
+    fun estimateBlockHeightPx(block: AnnBlock): Float {
+        val avgCharWidthDp = 6.5f
+        val chromeDp = 56f
+        val charsPerLine = ((width - chromeDp) / avgCharWidthDp).coerceAtLeast(10f)
+
+        fun textFieldDp(text: String, lineHeightDp: Float, minHeightDp: Float): Float {
+            val lines = if (text.isEmpty()) 1f else kotlin.math.ceil(text.length / charsPerLine).coerceAtLeast(1f)
+            return maxOf(minHeightDp, lines * lineHeightDp + 16f)
+        }
+        val controlsDp = 23f
+        val outerChromeDp = 20f
+        val dp = when (block) {
+            is AnnBlock.Note -> controlsDp + textFieldDp(block.text, 20.7f, 60f) + outerChromeDp
+            is AnnBlock.LogRef -> {
+                val captionDp = textFieldDp(block.caption, 20.7f, 52f)
+                val rowCount = block.sourceEntries?.size ?: block.logIds.size
+                val rowsDp = rowCount * 15f + 12f
+                val filenameBadgeDp = if (block.sourceFilename != null) 21f else 0f
+                controlsDp + filenameBadgeDp + captionDp + 6f + rowsDp + outerChromeDp
+            }
+        }
+        return dp * blockDensity
+    }
+
+    fun blockHeightOf(id: String): Float = blockHeights[id]
+        ?: ann.blocks.firstOrNull { it.id == id }?.let(::estimateBlockHeightPx)
+        ?: (90f * blockDensity)
+    val blockIds = ann.blocks.map { it.id }
+    LaunchedEffect(blockIds, dragBlockId, justReleasedBlockId) {
+        if (shouldSyncSequenceVisualOrder(dragBlockId, justReleasedBlockId)) {
+            liveVisualBlockIds = blockIds
+        }
+    }
+    LaunchedEffect(justReleasedBlockId) {
+        if (justReleasedBlockId != null) {
+            kotlinx.coroutines.delay(120)
+            justReleasedBlockId = null
+        }
+    }
+    val visualBlockIds = liveVisualBlockIds
+        .takeIf { it.toSet() == blockIds.toSet() && it.size == blockIds.size } ?: blockIds
+    val currentVisualBlockIds = rememberUpdatedState(visualBlockIds)
+    val currentDragBlockId = rememberUpdatedState(dragBlockId)
+    // pointerInput below is keyed on block.id alone (stable across reorders, unlike sequences'
+    // whole-list key) so an in-progress drag isn't cancelled by the reorder it's causing — but
+    // that also means detectDragGestures' coroutine is never restarted after the first drag on a
+    // given block, so any plain `val` it closes over (blockIds) goes stale on every drag after
+    // the first. rememberUpdatedState is what keeps it reading the current order instead.
+    val currentBlockIds = rememberUpdatedState(blockIds)
+    val blockTargetOffsets = cumulativeBlockOffsets(visualBlockIds, ::blockHeightOf)
+    val blockStartOffsets = cumulativeBlockOffsets(blockIds, ::blockHeightOf)
+    // Read inside onDrag below, same staleness reasoning as currentBlockIds.
+    val currentBlockStartOffsets = rememberUpdatedState(blockStartOffsets)
+    val totalBlockHeightPx = blockIds.sumOf { blockHeightOf(it).toDouble() }.toFloat()
+
     fun openNotePicker() {
         val fd = FileDialog(null as Frame?, "Open Note File", FileDialog.LOAD)
-        fd.setFilenameFilter { _, n -> n.endsWith(".md") || n.endsWith(".txt") }
+        fd.setFilenameFilter { _, n -> n.endsWith(".md") || n.endsWith(".txt") || n.endsWith(".ann") }
         fd.isVisible = true
         fd.file?.let { onOpenNote(File(fd.directory, it)) }
     }
@@ -166,7 +307,7 @@ fun AnnotationPanel(
                     actionPressed && ev.key == Key.S -> { onSave(); true }
                     actionPressed && ev.key == Key.C -> { onCopy(); true }
                     actionPressed && ev.key == Key.O -> { openNotePicker(); true }
-                    prefixFocused || suffixFocused || blockFieldFocused -> {
+                    prefixFocused || suffixFocused || blockFieldFocused || issueDescFocused -> {
                         if (ev.key == Key.Escape) {
                             runCatching { focusRequester?.requestFocus() }
                             true
@@ -237,9 +378,65 @@ fun AnnotationPanel(
             MdPreviewDialog(tab = tab, settings = settings, mono = mono, onCopy = onCopy, onDismiss = onToggleMd)
         }
 
-        val scroll = rememberScrollState()
+        // Un-keyed rememberScrollState() here would tie the scroll position to this composable's
+        // slot, not to the tab — since AnnotationPanel is recomposed in place as `tab` changes
+        // (not one instance per tab), that single shared ScrollState leaks between tabs and gets
+        // clamped/reset by whichever tab's content is shorter, rather than each tab keeping its
+        // own remembered position. Route it through the same per-tab keyed store the log viewer
+        // already uses for exactly this reason.
+        val notesScrollStates = scrollStateStore ?: remember { LogViewerScrollStateStore() }
+        val scroll = notesScrollStates.scrollState("${tab.id}:notes")
+        val stickToBottomPx = STICK_TO_BOTTOM_THRESHOLD_DP * blockDensity
+        // If the user was scrolled to (or very near) the bottom, keep them pinned there as
+        // totalBlockHeightPx settles from per-block estimates to real measured heights. Without
+        // this, a tab scrolled to the end lands a little short after switching away and back: the
+        // content grows (guesses correcting to real sizes) after the scroll position has already
+        // been restored, so the restored value is now short of the new true bottom. Reacts only to
+        // content-height changes, never to the user's own scrolling, so a deliberate scroll away
+        // from the bottom is never fought.
+        var stickToBottom by remember(tab.id) {
+            mutableStateOf(scroll.maxValue <= 0 || scroll.value >= scroll.maxValue - stickToBottomPx)
+        }
+        LaunchedEffect(scroll) {
+            snapshotFlow { scroll.maxValue <= 0 || scroll.value >= scroll.maxValue - stickToBottomPx }
+                .collect { stickToBottom = it }
+        }
+        LaunchedEffect(totalBlockHeightPx, scroll) {
+            if (stickToBottom) scroll.scrollTo(scroll.maxValue)
+        }
         Box(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 8.dp)) {
+                // Issue description — a private working note, persisted in the .ann sidecar and
+                // autosave, but deliberately never rendered into the Markdown preview/export/MCP
+                // markdown so it stays out of anything shared or copied as the issue writeup.
+                SectionHeader(
+                    "Issue description",
+                    expanded = issueDescExpanded,
+                    onToggle = { issueDescExpanded = !issueDescExpanded },
+                )
+                if (issueDescExpanded) {
+                    Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+                        BasicTextField(
+                            value = ann.issueDescription,
+                            onValueChange = onUpdateIssueDescription,
+                            textStyle = TextStyle(color = tc.tx, fontSize = 11.sp, fontFamily = FontFamily.Default, lineHeight = 16.sp),
+                            cursorBrush = SolidColor(tc.ac),
+                            modifier = Modifier.fillMaxWidth()
+                                .background(tc.bg, CORNER_SM)
+                                .border(1.dp, tc.br, CORNER_SM)
+                                .onFocusChanged { issueDescFocused = it.isFocused }
+                                .padding(8.dp).defaultMinSize(minHeight = 60.dp),
+                            decorationBox = { inner ->
+                                if (ann.issueDescription.isEmpty()) {
+                                    AppText("Not included in previews or exports…", color = tc.td, fontSize = 11.sp)
+                                }
+                                inner()
+                            },
+                        )
+                    }
+                }
+                Divider()
+
                 // Prefix
                 AnnSection(tc) {
                     AppText("Prefix", color = tc.td, fontSize = 10.sp, fontFamily = UI)
@@ -252,6 +449,7 @@ fun AnnotationPanel(
                             .focusRequester(prefixFr)
                             .onFocusChanged { prefixFocused = it.isFocused },
                         fontSize = 12.sp,
+                        singleLine = false,
                     )
                 }
 
@@ -272,10 +470,8 @@ fun AnnotationPanel(
                     }
                 }
 
-                ann.blocks.forEachIndexed { idx, block ->
-                    val isFirst = idx == 0
-                    val isLast  = idx == ann.blocks.lastIndex
-
+                @Composable
+                fun BlockContent(block: AnnBlock, isFirst: Boolean, isLast: Boolean, dragHandleModifier: Modifier) {
                     when (block) {
                         is AnnBlock.Note -> NoteBlock(
                             block = block, tc = tc, isFirst = isFirst, isLast = isLast,
@@ -287,6 +483,7 @@ fun AnnotationPanel(
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
                             onAddBelow = { onAddNoteAfter(block.id) },
+                            dragHandleModifier = dragHandleModifier,
                         )
                         is AnnBlock.LogRef -> LogRefBlock(
                             block = block, tab = tab, mono = mono, tc = tc,
@@ -300,7 +497,130 @@ fun AnnotationPanel(
                             onMoveDown = { onMoveBlock(block.id, 1) },
                             onAddBelow = { onAddNoteAfter(block.id) },
                             onNavigate = { onNavigateLogRef(block) },
+                            dragHandleModifier = dragHandleModifier,
                         )
+                    }
+                }
+
+                // heightIn(min=...), not height(...): a fixed height would force that exact
+                // maxHeight down onto every child during measurement (Box passes its own
+                // constraints straight through), silently truncating whichever block hadn't
+                // reported its real size yet. A min-height only reserves scroll space; it never
+                // caps how tall a child measures. blockHeights is never cleared on tab switch (see
+                // its declaration) specifically so a revisited tab's blocks — already measured
+                // once — get accurate positions immediately, with no re-measure flicker and no
+                // window where this whole layout would need to fall back to something else.
+                Box(Modifier.fillMaxWidth().heightIn(min = (totalBlockHeightPx / blockDensity).dp)) {
+                    ann.blocks.forEach { block ->
+                        key(block.id) {
+                            val idx = blockIds.indexOf(block.id)
+                            val isFirst = idx == 0
+                            val isLast = idx == blockIds.lastIndex
+                            val isDragging = dragBlockId == block.id
+                            val targetY = blockTargetOffsets[block.id] ?: 0f
+                            // Keyed on "has this block ever been really measured": the first time a
+                            // block's real height replaces its estimate, targetY jumps from a guess
+                            // to the true value. Re-keying here disposes and recreates the
+                            // Animatable at exactly that moment, and a freshly-created
+                            // animateFloatAsState starts AT its target (no interpolation) — so that
+                            // one-time correction snaps instead of visibly gliding, which is what
+                            // read as blocks "recreating". Once true, this stays true (blockHeights
+                            // is never cleared), so real drags/reorders keep the spring animation.
+                            val everMeasured = blockHeights.containsKey(block.id)
+                            val animatedY by key(everMeasured) {
+                                animateFloatAsState(
+                                    targetValue = targetY,
+                                    animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
+                                    label = "block-y-${block.id}",
+                                )
+                            }
+                            val blockY = sequenceRenderY(
+                                isDragging = isDragging,
+                                isJustReleased = justReleasedBlockId == block.id,
+                                pointerY = (blockStartOffsets[block.id] ?: 0f) + dragOffsetY,
+                                targetY = targetY,
+                                animatedY = animatedY,
+                            )
+                            val dragHandleModifier = Modifier.pointerInput(block.id) {
+                                detectDragGestures(
+                                    onDragStart = {
+                                        dragBlockId = block.id
+                                        dragOffsetY = 0f
+                                        justReleasedBlockId = null
+                                        liveVisualBlockIds = currentBlockIds.value
+                                    },
+                                    onDrag = { change, delta ->
+                                        change.consume()
+                                        dragOffsetY += delta.y
+                                        liveVisualBlockIds = blockOrderDuringDrag(
+                                            visibleIds = currentBlockIds.value,
+                                            draggedId = dragBlockId,
+                                            dragOffsetY = dragOffsetY,
+                                            heightOf = ::blockHeightOf,
+                                        )
+                                        // Auto-scroll the panel while the dragged block is within
+                                        // the edge margin of the visible viewport — otherwise a
+                                        // note could never be dragged past whatever already fits
+                                        // on screen. dispatchRawDelta (not scrollBy) since onDrag
+                                        // isn't a suspend callback.
+                                        val draggedTop = (currentBlockStartOffsets.value[block.id] ?: 0f) + dragOffsetY
+                                        val draggedBottom = draggedTop + blockHeightOf(block.id)
+                                        val viewportTop = scroll.value.toFloat()
+                                        val viewportBottom = viewportTop + scroll.viewportSize
+                                        val overshootTop = viewportTop + autoScrollEdgePx - draggedTop
+                                        val overshootBottom = draggedBottom - (viewportBottom - autoScrollEdgePx)
+                                        val wantedScrollDelta = when {
+                                            overshootTop > 0f -> -overshootTop * AUTO_SCROLL_SPEED_FACTOR
+                                            overshootBottom > 0f -> overshootBottom * AUTO_SCROLL_SPEED_FACTOR
+                                            else -> 0f
+                                        }
+                                        if (wantedScrollDelta != 0f) {
+                                            // dragOffsetY is a raw accumulated pointer delta — it
+                                            // has no idea the content just moved underneath the
+                                            // cursor. Without this compensation the dragged block
+                                            // drifts away from the mouse the instant auto-scroll
+                                            // starts (content scrolls one way, the block's tracked
+                                            // offset doesn't follow), which is what read as "bad"
+                                            // auto-scroll. Use the delta dispatchRawDelta actually
+                                            // consumed (not the requested one) so this stays exact
+                                            // even at the top/bottom of the scrollable range.
+                                            dragOffsetY += scroll.dispatchRawDelta(wantedScrollDelta)
+                                        }
+                                    },
+                                    onDragEnd = {
+                                        val releasedId = currentDragBlockId.value ?: block.id
+                                        val releasedOrder = currentVisualBlockIds.value
+                                        val targetIdx = releasedOrder.indexOf(releasedId)
+                                        if (targetIdx >= 0 && targetIdx != currentBlockIds.value.indexOf(releasedId)) {
+                                            liveVisualBlockIds = releasedOrder
+                                            onReorderBlock(releasedId, targetIdx)
+                                        }
+                                        justReleasedBlockId = releasedId
+                                        dragBlockId = null
+                                        dragOffsetY = 0f
+                                    },
+                                    onDragCancel = {
+                                        dragBlockId = null
+                                        dragOffsetY = 0f
+                                    },
+                                )
+                            }
+                            Box(
+                                Modifier.fillMaxWidth()
+                                    .offset { IntOffset(0, blockY.roundToInt()) }
+                                    .zIndex(if (isDragging) 1f else 0f)
+                                    .graphicsLayer {
+                                        if (isDragging) {
+                                            scaleX = 1.02f
+                                            scaleY = 1.02f
+                                        }
+                                    }
+                                    .onSizeChanged { size -> blockHeights[block.id] = size.height.toFloat() }
+                                    .background(if (isDragging) tc.p else Color.Transparent),
+                            ) {
+                                BlockContent(block, isFirst, isLast, dragHandleModifier)
+                            }
+                        }
                     }
                 }
 
@@ -325,6 +645,7 @@ fun AnnotationPanel(
                                 .focusRequester(suffixFr)
                                 .onFocusChanged { suffixFocused = it.isFocused },
                             fontSize = 11.sp,
+                            singleLine = false,
                         )
                     }
                 }
@@ -493,7 +814,14 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
     var blockNumber = 1
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (tab.annotations.prefix.isNotBlank()) {
-            AppText(tab.annotations.prefix, color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            AppText(
+                tab.annotations.prefix,
+                color = tc.tx,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = Int.MAX_VALUE,
+                overflow = TextOverflow.Clip,
+            )
         }
         tab.annotations.blocks.forEach { block ->
             when (block) {
@@ -565,13 +893,14 @@ private fun NoteBlock(
     onRemove: () -> Unit,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onAddBelow: () -> Unit,
+    dragHandleModifier: Modifier = Modifier,
 ) {
     Column(
         Modifier.fillMaxWidth()
             .border(BorderStroke(2.dp, if (focused) tc.ac else tc.ac.copy(.35f)))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        BlockControls("text", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow)
+        BlockControls("text", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, dragHandleModifier = dragHandleModifier)
         Spacer(Modifier.height(5.dp))
         BasicTextField(
             value = block.text,
@@ -608,6 +937,7 @@ private fun LogRefBlock(
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onAddBelow: () -> Unit,
     onNavigate: () -> Unit,
+    dragHandleModifier: Modifier = Modifier,
 ) {
     val rows = block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }
     val borderColor = rows.firstOrNull()?.level?.defaultColor ?: tc.ac
@@ -617,7 +947,10 @@ private fun LogRefBlock(
             .border(BorderStroke(2.dp, if (focused) tc.ac else borderColor))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        BlockControls("log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate)
+        BlockControls(
+            "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate,
+            dragHandleModifier = dragHandleModifier,
+        )
         if (block.sourceFilename != null) {
             Spacer(Modifier.height(3.dp))
             Box(
@@ -680,6 +1013,7 @@ private fun BlockControls(
     onRemove: () -> Unit,
     onAddBelow: () -> Unit,
     onNavigate: (() -> Unit)? = null,
+    dragHandleModifier: Modifier = Modifier,
 ) {
     val badgeShape = CORNER_SM
     val isNavigationBadge = onNavigate != null
@@ -703,6 +1037,12 @@ private fun BlockControls(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        AppText(
+            "⠿",
+            color = tc().td,
+            fontSize = 12.sp,
+            modifier = dragHandleModifier.pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR))),
+        )
         Box(
             badgeModifier,
             contentAlignment = Alignment.Center,

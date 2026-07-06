@@ -329,13 +329,14 @@ fun InlineField(
     fontSize: TextUnit = LocalFontBase.current.sp,
     onClear: (() -> Unit)? = null,
     onSubmit: (() -> Unit)? = null,
+    singleLine: Boolean = true,
 ) {
     val tc = tc()
     BasicTextField(
         value = value, onValueChange = onValue,
         textStyle = TextStyle(color = tc.tx, fontSize = fontSize, fontFamily = FontFamily.Default),
         cursorBrush = SolidColor(tc.ac),
-        singleLine = true,
+        singleLine = singleLine,
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
         keyboardActions = KeyboardActions(onDone = { onSubmit?.invoke() }),
         modifier = modifier

@@ -148,10 +148,14 @@ sealed class AnnBlock {
     ) : AnnBlock()
 }
 
+// issueDescription is persisted (.ann sidecar + autosave) but deliberately excluded from
+// buildMd() — a private working note for whoever (human or MCP client) is investigating this
+// tab, never meant to leak into the exported/shared Markdown.
 data class Annotations(
     val blocks: List<AnnBlock> = emptyList(),
     val prefix: String = "",
     val suffix: String = "",
+    val issueDescription: String = "",
 )
 
 // ── Tab ────────────────────────────────────────────────────────────

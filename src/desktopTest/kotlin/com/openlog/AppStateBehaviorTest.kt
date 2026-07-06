@@ -21,7 +21,14 @@ import com.openlog.ui.DesktopStorage
 import com.openlog.ui.ImportFilterAction
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitMode
+import com.openlog.ui.blockOrderDuringDrag
+import com.openlog.ui.cumulativeBlockOffsets
 import com.openlog.ui.mkTab
+import com.openlog.ui.sequenceOrderDuringDrag
+import com.openlog.ui.sequenceRenderY
+import com.openlog.ui.sequenceRowBaseBackground
+import com.openlog.ui.shouldSyncSequenceVisualOrder
+import com.openlog.ui.themeColors
 import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
@@ -344,6 +351,34 @@ class AppStateBehaviorTest {
         val block = assertIs<AnnBlock.LogRef>(state.tabs.single().annotations.blocks.single())
         assertEquals(listOf(1), block.logIds)
         assertEquals("Investigate", block.caption)
+    }
+
+    @Test
+    fun consecutiveLogRefAnnotationsGetDistinctIdsAndDoNotCrossContaminateReferencedLines() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "log", "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.E, "App", "first"),
+                    LogEntry(2, "10:00:00.001", LogLevel.E, "App", "second"),
+                ),
+            ),
+        )
+
+        // Regression: the LogRef id used to be seeded from System.currentTimeMillis(), so two
+        // annotations confirmed within the same millisecond got identical ids and clobbered each
+        // other's data (only one note's lines/caption would show, or lines leaked between notes).
+        state.confirmAddAnn("log", "log", listOf(1), "first note", null)
+        state.confirmAddAnn("log", "log", listOf(2), "second note", null)
+
+        val blocks = state.tabs.single().annotations.blocks.filterIsInstance<AnnBlock.LogRef>()
+        assertEquals(2, blocks.size)
+        assertTrue(blocks[0].id != blocks[1].id)
+        assertEquals(listOf(1), blocks[0].logIds)
+        assertEquals("first note", blocks[0].caption)
+        assertEquals(listOf(2), blocks[1].logIds)
+        assertEquals("second note", blocks[1].caption)
     }
 
     @Test
@@ -1071,7 +1106,7 @@ class AppStateBehaviorTest {
         restored.startPendingRestoredTabLoads()
         // Restore parses the tab's file on a background job; wait for it to settle so assertions
         // observe a fully-materialized tab rather than racing the in-flight load.
-        waitUntil { !restored.isLoading }
+        waitUntil(timeoutMs = 5_000) { !restored.isLoading && restored.tabs.isNotEmpty() }
         assertEquals("test.log", restored.tabs.single().filename)
         assertEquals(6, restored.settings.visibleTabLimit)
         assertEquals("Evidence", restored.settings.annotationPrefixLabel)
@@ -1080,6 +1115,81 @@ class AppStateBehaviorTest {
         assertEquals("remember this", block.caption)
         assertEquals("app only", restored.savedFilters.single().name)
         assertEquals(restored.savedFilters.single().id, restored.activeSavedFilterId(restored.tabs.single().id))
+    }
+
+    @Test
+    fun autosaveRestoresIssueDescription() {
+        val dir = createTempDirectory("openlog-cache").toFile()
+        val logFile = File(dir, "test.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I App: hello\n")
+        }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        val tab = mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+            .copy(sourcePath = logFile.absolutePath)
+        state.tabs = listOf(tab)
+        state.activeTabId = "log"
+        state.setIssueDescription("log", "Repro steps:\n1. Open app\n2. Crash")
+
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        restored.startPendingRestoredTabLoads()
+        waitUntil(timeoutMs = 5_000) { !restored.isLoading && restored.tabs.isNotEmpty() }
+        assertEquals("Repro steps:\n1. Open app\n2. Crash", restored.tabs.single().annotations.issueDescription)
+    }
+
+    @Test
+    fun issueDescriptionRoundTripsThroughAnnSidecarFile() {
+        val dir = createTempDirectory("openlog-ann-issue-desc").toFile()
+        val state = AppState(File(dir, "state.cache"))
+        state.tabs = listOf(mkTab("log", "test.log", emptyList()))
+        state.activeTabId = "log"
+        state.setIssueDescription("log", "multi\nline description")
+        val ann = File(dir, "test_analysis.ann")
+        state.saveAnnotationsTo("log", ann)
+
+        val restored = AppState(File(dir, "restored.cache"))
+        restored.tabs = listOf(mkTab("log", "test.log", emptyList()))
+        assertTrue(restored.loadAnnotationsFrom("log", ann))
+
+        assertEquals("multi\nline description", restored.tab("log")!!.annotations.issueDescription)
+    }
+
+    @Test
+    fun oldThreeFieldAnnFilesStillParseWithBlankIssueDescription() {
+        val dir = createTempDirectory("openlog-ann-legacy").toFile()
+        val state = AppState(File(dir, "state.cache"))
+        state.tabs = listOf(mkTab("log", "test.log", emptyList()))
+        state.activeTabId = "log"
+        state.setPrefix("log", "Heading")
+        val legacyAnn = File(dir, "legacy.ann")
+        state.saveAnnotationsTo("log", legacyAnn)
+        // Simulate a .ann file written before issueDescription existed: drop the trailing
+        // (base64-or-"~"-encoded, so "|"-free) 4th token, leaving exactly the old 3-field format.
+        legacyAnn.writeText(legacyAnn.readText().substringBeforeLast("|"))
+
+        val restored = AppState(File(dir, "restored.cache"))
+        restored.tabs = listOf(mkTab("log", "test.log", emptyList()))
+        assertTrue(restored.loadAnnotationsFrom("log", legacyAnn))
+
+        assertEquals("Heading", restored.tab("log")!!.annotations.prefix)
+        assertEquals("", restored.tab("log")!!.annotations.issueDescription)
+    }
+
+    @Test
+    fun buildMdNeverIncludesIssueDescription() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.setPrefix(tabId, "Heading")
+        state.addNoteBlock(tabId, "Body", null)
+        state.setSuffix(tabId, "Follow up")
+        state.setIssueDescription(tabId, "SECRET_MARKER_should_not_leak")
+
+        val md = buildMd(state.tab(tabId)!!)
+
+        assertTrue(!md.contains("SECRET_MARKER_should_not_leak"))
     }
 
     @Test
@@ -1377,6 +1487,32 @@ class AppStateBehaviorTest {
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
         assertEquals(listOf(existingNote.absolutePath), restored.recentNotes)
+    }
+
+    @Test
+    fun openNoteFileRestoresAnnotationsFromAnnSidecarEvenWhenMdIsMissing() {
+        val dir = createTempDirectory("openlog-ann-recovery").toFile()
+        val state = AppState(File(dir, "state.cache"))
+        state.tabs = listOf(mkTab("log", "test.log", emptyList()))
+        state.activeTabId = "log"
+        state.setPrefix("log", "Heading")
+        state.addNoteBlock("log", "Body text", null)
+        state.setSuffix("log", "Next steps")
+        val md = File(dir, "test_analysis.md")
+        val ann = File(dir, "test_analysis.ann")
+        state.saveAnnotationsTo("log", ann)
+        // The paired .md was never written (or was since deleted) — only the .ann sidecar exists.
+        assertTrue(!md.exists())
+        assertTrue(ann.exists())
+
+        val restored = AppState(File(dir, "restored.cache"))
+        restored.tabs = listOf(mkTab("log", "test.log", emptyList()))
+        restored.openNoteFile("log", ann)
+
+        val restoredAnn = restored.tab("log")!!.annotations
+        assertEquals("Heading", restoredAnn.prefix)
+        assertEquals("Next steps", restoredAnn.suffix)
+        assertEquals(listOf("Body text"), restoredAnn.blocks.filterIsInstance<AnnBlock.Note>().map { it.text })
     }
 
     @Test
@@ -2189,6 +2325,121 @@ class AppStateBehaviorTest {
 
         assertEquals(secondId, state.sequences[1].id)
         assertEquals(2, state.sequences.size)
+    }
+
+    @Test
+    fun sequenceOrderDuringDragMovesSequenceAsItsCenterCrossesNeighbors() {
+        val order = sequenceOrderDuringDrag(
+            visibleIds = listOf("first", "second", "third", "fourth"),
+            draggedId = "first",
+            dragStartIndex = 0,
+            dragOffsetY = 108f,
+            rowHeight = 32f,
+        )
+
+        assertEquals(listOf("second", "third", "fourth", "first"), order)
+    }
+
+    @Test
+    fun sequenceRenderYMatchesTabDragAnimationRules() {
+        assertEquals(
+            46f,
+            sequenceRenderY(
+                isDragging = true,
+                isJustReleased = false,
+                pointerY = 46f,
+                targetY = 80f,
+                animatedY = 20f,
+            ),
+        )
+        assertEquals(
+            20f,
+            sequenceRenderY(
+                isDragging = false,
+                isJustReleased = false,
+                pointerY = 46f,
+                targetY = 80f,
+                animatedY = 20f,
+            ),
+        )
+        assertEquals(
+            80f,
+            sequenceRenderY(
+                isDragging = false,
+                isJustReleased = true,
+                pointerY = 46f,
+                targetY = 80f,
+                animatedY = 20f,
+            ),
+        )
+    }
+
+    @Test
+    fun draggedSequenceRowUsesOpaqueBaseBackground() {
+        val tc = themeColors(ThemePreset.LIGHT)
+
+        val background = sequenceRowBaseBackground(isDragging = true, enabled = true, theme = tc)
+
+        assertEquals(1f, background.alpha)
+        assertEquals(tc.p, background)
+    }
+
+    @Test
+    fun sequenceVisualOrderDoesNotSyncBackWhileReleaseAnimationIsSettling() {
+        assertFalse(shouldSyncSequenceVisualOrder(dragId = null, justReleasedSequenceId = "seq-1"))
+        assertTrue(shouldSyncSequenceVisualOrder(dragId = null, justReleasedSequenceId = null))
+    }
+
+    @Test
+    fun cumulativeBlockOffsetsComputesRunningTotalOfVariableHeights() {
+        val heights = mapOf("a" to 20f, "b" to 100f, "c" to 20f)
+
+        val offsets = cumulativeBlockOffsets(listOf("a", "b", "c")) { heights.getValue(it) }
+
+        assertEquals(mapOf("a" to 0f, "b" to 20f, "c" to 120f), offsets)
+    }
+
+    @Test
+    fun blockOrderDuringDragAccountsForVariableBlockHeights() {
+        // "a" (20) starts above a much taller "b" (100) and a short "c" (20). Dragging "a" down
+        // by 90 moves its center (10 -> 100, plus a snap bias) past "b"'s center (70) but not
+        // "c"'s (130) — unlike sequences' uniform rowHeight, this only resolves correctly if the
+        // reorder math uses each block's own measured height rather than a fixed row height.
+        val heights = mapOf("a" to 20f, "b" to 100f, "c" to 20f)
+
+        val order = blockOrderDuringDrag(
+            visibleIds = listOf("a", "b", "c"),
+            draggedId = "a",
+            dragOffsetY = 90f,
+        ) { heights.getValue(it) }
+
+        assertEquals(listOf("b", "a", "c"), order)
+    }
+
+    @Test
+    fun blockOrderDuringDragIgnoresUnknownDraggedId() {
+        val order = blockOrderDuringDrag(
+            visibleIds = listOf("a", "b"),
+            draggedId = "not-in-list",
+            dragOffsetY = 500f,
+        ) { 20f }
+
+        assertEquals(listOf("a", "b"), order)
+    }
+
+    @Test
+    fun reorderBlockMovesBlockToArbitraryIndex() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        val firstId = state.addNoteBlock(tabId, "first", null)!!
+        val secondId = state.addNoteBlock(tabId, "second", firstId)!!
+        val thirdId = state.addNoteBlock(tabId, "third", secondId)!!
+
+        state.reorderBlock(tabId, thirdId, 0)
+
+        val order = state.tab(tabId)!!.annotations.blocks.map { it.id }
+        assertEquals(listOf(thirdId, firstId, secondId), order)
     }
 
     @Test
