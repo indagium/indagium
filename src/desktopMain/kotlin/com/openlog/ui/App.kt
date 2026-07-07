@@ -308,7 +308,11 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             )
                             add(
                                 CtxMenuEntry.Action(Icons.Outlined.Code, "Copy as Markdown") {
-                                    state.copyToClipboard("**[${entry.ts}] `${entry.level.key}/${entry.tag}`:** ${entry.msg}")
+                                    if (selCount > 1) {
+                                        state.copySelectedLinesAsMarkdown(ctx.tabId, selectedIds)
+                                    } else {
+                                        state.copyToClipboard(logEntryMarkdownLine(entry))
+                                    }
                                     state.ctx = null
                                 },
                             )
@@ -2022,7 +2026,7 @@ private fun CompareView(
             ) {
                 // Empty bar matching the right panel's header height, so both LogViewers start
                 // at the same vertical offset — this is a side-by-side diff view.
-                Box(Modifier.fillMaxWidth().height(36.dp).background(tc.p2))
+                Box(Modifier.fillMaxWidth().height(22.dp).background(tc.p2))
                 Row(Modifier.weight(1f).fillMaxWidth()) {
                     BoundFilterPanel(
                         state = state,
@@ -2073,22 +2077,21 @@ private fun CompareView(
             // ── Right panel ──────────────────────────────────────────
             Column(Modifier.weight(1f).fillMaxHeight()) {
                 Row(
-                    Modifier.fillMaxWidth().height(36.dp).background(tc.p2).padding(horizontal = 4.dp),
+                    Modifier.fillMaxWidth().height(22.dp).background(tc.p2).padding(horizontal = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    state.tabs.forEach { t ->
-                        PillBtn(t.filename, active = t.id == rightTab.id) {
-                            // Picking the tab already shown on the left swaps sides instead of
-                            // colliding both panes on the same tab (see LogViewerScrollStateStore).
-                            if (t.id == leftTab.id) state.activateTab(rightTab.id)
-                            state.compareTabId = t.id
-                        }
-                    }
-                    Spacer(Modifier.weight(1f))
-                    PillBtn(
+                    CompareTabPicker(
+                        state = state,
+                        leftTab = leftTab,
+                        rightTab = rightTab,
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                    )
+                    CompareTabPill(
                         label = if (state.compareFilterRight) "⊟ Filter" else "⊞ Filter",
                         active = state.compareFilterRight,
+                        tooltip = "Toggle right-side filtering",
+                        modifier = Modifier.fillMaxHeight(),
                         onClick = { state.updateCompareFilterRight(!state.compareFilterRight) },
                     )
                 }
@@ -2130,7 +2133,6 @@ private fun CompareView(
                         AnnotationPanel(
                             tab = leftTab,
                             settings = state.settings,
-                            headerNote = leftTab.filename,
                             recentNotes = state.recentNotesForTab(leftTab),
                             recentNotesMenuOpen = state.recentNotesMenuOpen,
                             onToggleMd = { state.toggleMd(leftTab.id) },
@@ -2159,6 +2161,290 @@ private fun CompareView(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun CompareTabPicker(
+    state: AppState,
+    leftTab: LogTab,
+    rightTab: LogTab,
+    modifier: Modifier = Modifier,
+) {
+    val tc = tc()
+    val density = LocalDensity.current.density
+    var containerPx by remember { mutableStateOf(0) }
+    var tabAreaPx by remember { mutableStateOf(0) }
+    var compareOrderIds by remember { mutableStateOf(state.tabs.map { it.id }) }
+    var dragTabId by remember { mutableStateOf<String?>(null) }
+    var dragStartIndex by remember { mutableStateOf(-1) }
+    var dragOffsetX by remember { mutableStateOf(0f) }
+    var justReleasedTabId by remember { mutableStateOf<String?>(null) }
+    var liveVisualTabIds by remember { mutableStateOf(emptyList<String>()) }
+    var overflowOpen by remember { mutableStateOf(false) }
+    val minTabPx = (100 * density).toInt()
+    val ovBtnPx = (44 * density).toInt()
+    val orderedTabs = remember(state.tabs, compareOrderIds) {
+        orderedTabsForComparePicker(state.tabs, compareOrderIds)
+    }
+    LaunchedEffect(state.tabs.map { it.id }) {
+        compareOrderIds = orderedTabsForComparePicker(state.tabs, compareOrderIds).map { it.id }
+    }
+    val (visibleTabs, overflowTabs) = remember(orderedTabs, containerPx, state.settings.visibleTabLimit) {
+        splitTabsForVisibility(
+            tabs = orderedTabs,
+            containerPx = containerPx,
+            minTabPx = minTabPx,
+            overflowButtonPx = ovBtnPx,
+            visibleTabLimit = state.settings.visibleTabLimit,
+        )
+    }
+
+    val visibleTabIds = visibleTabs.map { it.id }
+    val overflowTabIds = overflowTabs.map { it.id }
+    LaunchedEffect(visibleTabIds, dragTabId) {
+        if (dragTabId == null) liveVisualTabIds = visibleTabIds
+    }
+    LaunchedEffect(justReleasedTabId) {
+        if (justReleasedTabId != null) {
+            kotlinx.coroutines.delay(120)
+            justReleasedTabId = null
+        }
+    }
+    val tabWidthPx =
+        if (visibleTabs.isNotEmpty() && tabAreaPx > 0) tabAreaPx.toFloat() / visibleTabs.size else minTabPx.toFloat()
+    val visualOrderIds =
+        liveVisualTabIds.takeIf { it.toSet() == visibleTabIds.toSet() && it.size == visibleTabIds.size }
+            ?: visibleTabIds
+    val currentVisualOrderIds by rememberUpdatedState(visualOrderIds)
+    val currentOverflowTabIds by rememberUpdatedState(overflowTabIds)
+
+    fun selectCompareTab(tabId: String, fromOverflow: Boolean = false) {
+        if (fromOverflow) compareOrderIds = comparePickerOrderAfterOverflowSelection(compareOrderIds, tabId)
+        if (tabId == leftTab.id) state.activateTab(rightTab.id)
+        state.compareTabId = tabId
+        overflowOpen = false
+    }
+
+    Row(
+        modifier.onSizeChanged { containerPx = it.width },
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.weight(1f).fillMaxHeight()
+                .onSizeChanged { tabAreaPx = it.width }
+                .pointerInput(visibleTabIds, tabWidthPx) {
+                    var downPos = Offset.Zero
+                    var downId: String? = null
+                    var dragging = false
+                    awaitPointerEventScope {
+                        while (true) {
+                            val ev = awaitPointerEvent(PointerEventPass.Initial)
+                            val ch = ev.changes.firstOrNull() ?: continue
+                            when (ev.type) {
+                                PointerEventType.Press -> {
+                                    downPos = ch.position
+                                    dragging = false
+                                    val idx = (ch.position.x / tabWidthPx).toInt()
+                                        .coerceIn(0, visibleTabIds.lastIndex.coerceAtLeast(0))
+                                    downId = visibleTabIds.getOrNull(idx)
+                                }
+
+                                PointerEventType.Move -> {
+                                    if (downId != null && !dragging && (ch.position - downPos).getDistance() > 8f) {
+                                        dragging = true
+                                        dragTabId = downId
+                                        justReleasedTabId = null
+                                        dragStartIndex = visibleTabIds.indexOf(downId)
+                                        dragOffsetX = 0f
+                                    }
+                                    if (dragging && dragTabId != null) {
+                                        ch.consume()
+                                        dragOffsetX = ch.position.x - downPos.x
+                                        liveVisualTabIds = browserTabOrderDuringDrag(
+                                            visibleIds = visibleTabIds,
+                                            draggedId = dragTabId,
+                                            dragStartIndex = dragStartIndex,
+                                            dragOffsetX = dragOffsetX,
+                                            tabWidth = tabWidthPx,
+                                        )
+                                    }
+                                }
+
+                                PointerEventType.Release -> {
+                                    if (dragging && dragTabId != null) {
+                                        justReleasedTabId = dragTabId
+                                        val newOrder = tabOrderAfterVisibleReorder(
+                                            visibleIds = currentVisualOrderIds,
+                                            overflowIds = currentOverflowTabIds,
+                                        )
+                                        compareOrderIds = newOrder
+                                    }
+                                    dragTabId = null
+                                    dragStartIndex = -1
+                                    dragOffsetX = 0f
+                                    downId = null
+                                    dragging = false
+                                }
+
+                                else -> {}
+                            }
+                        }
+                    }
+                },
+        ) {
+            visibleTabs.forEach { tab ->
+                key(tab.id) {
+                    val isDragging = tab.id == dragTabId
+                    val targetIndex = visualOrderIds.indexOf(tab.id).takeIf { it >= 0 } ?: visibleTabs.indexOf(tab)
+                    val targetX = targetIndex * tabWidthPx
+                    val animatedX by animateFloatAsState(
+                        targetValue = targetX,
+                        animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
+                        label = "compare-tab-x-${tab.id}",
+                    )
+                    val startX = (dragStartIndex.takeIf { it >= 0 } ?: targetIndex) * tabWidthPx
+                    val tabX = tabRenderX(
+                        isDragging = isDragging,
+                        isJustReleased = tab.id == justReleasedTabId,
+                        pointerX = startX + dragOffsetX,
+                        targetX = targetX,
+                        animatedX = animatedX,
+                    )
+                    Box(
+                        Modifier
+                            .offset { IntOffset(tabX.roundToInt(), 0) }
+                            .width((tabWidthPx / density).dp)
+                            .fillMaxHeight()
+                            .zIndex(if (isDragging) 1f else 0f)
+                            .graphicsLayer {
+                                if (isDragging) {
+                                    scaleX = 1.02f
+                                    scaleY = 1.02f
+                                }
+                            },
+                    ) {
+                        CompareTabPill(
+                            label = tab.filename,
+                            active = tab.id == rightTab.id,
+                            dragging = isDragging,
+                            tooltip = "Compare with ${tab.filename}",
+                            modifier = Modifier.fillMaxSize(),
+                            onClick = { if (dragTabId == null) selectCompareTab(tab.id) },
+                        )
+                    }
+                }
+            }
+        }
+        if (overflowTabs.isNotEmpty()) {
+            Box(Modifier.fillMaxHeight()) {
+                CompareTabPill(
+                    label = "▾ ${overflowTabs.size}",
+                    active = overflowOpen,
+                    tooltip = "Show hidden compare tabs",
+                    modifier = Modifier.fillMaxHeight(),
+                ) { overflowOpen = !overflowOpen }
+                if (overflowOpen) {
+                    Popup(
+                        alignment = Alignment.TopEnd,
+                        offset = IntOffset(0, (22 * density).toInt()),
+                        onDismissRequest = { overflowOpen = false },
+                        properties = PopupProperties(focusable = true),
+                    ) {
+                        Box(
+                            Modifier.width(280.dp)
+                                .heightIn(max = 320.dp)
+                                .background(tc.p, RoundedCornerShape(7.dp))
+                                .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                                .verticalScroll(rememberScrollState()),
+                        ) {
+                            Column(Modifier.padding(vertical = 4.dp)) {
+                                overflowTabs.forEach { tab ->
+                                    HoverBox(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        onClick = { selectCompareTab(tab.id, fromOverflow = true) },
+                                    ) {
+                                        TooltipArea(
+                                            tooltip = { CompareTooltip("Compare with ${tab.filename}") },
+                                        ) {
+                                            AppText(
+                                                tab.filename,
+                                                color = if (tab.id == rightTab.id) tc.ac else tc.tx,
+                                                fontSize = 12.sp,
+                                                fontFamily = MONO,
+                                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+internal fun orderedTabsForComparePicker(tabs: List<LogTab>, orderIds: List<String>): List<LogTab> {
+    val byId = tabs.associateBy { it.id }
+    val ordered = orderIds.mapNotNull { byId[it] }
+    val orderedIds = ordered.mapTo(mutableSetOf()) { it.id }
+    return ordered + tabs.filter { it.id !in orderedIds }
+}
+
+internal fun comparePickerOrderAfterOverflowSelection(orderIds: List<String>, tabId: String): List<String> {
+    if (tabId !in orderIds) return orderIds
+    return orderIds.filter { it != tabId } + tabId
+}
+
+@Composable
+private fun CompareTabPill(
+    label: String,
+    active: Boolean,
+    dragging: Boolean = false,
+    tooltip: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    TooltipArea(
+        tooltip = { CompareTooltip(tooltip) },
+    ) {
+        Box(
+            modifier
+                .border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
+                .background(if (active) tc.ac.copy(.15f) else if (hovered || dragging) tc.hv else Color.Transparent, CORNER_MD)
+                .clip(CORNER_MD)
+                .clickable(onClick = onClick)
+                .onPointerEvent(PointerEventType.Enter) { hovered = true }
+                .onPointerEvent(PointerEventType.Exit) { hovered = false }
+                .padding(horizontal = 6.dp, vertical = 0.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            AppText(
+                label,
+                color = if (active) tc.ac else tc.ts,
+                fontSize = 9.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompareTooltip(text: String) {
+    val tc = tc()
+    Box(
+        Modifier.background(tc.p2, RoundedCornerShape(4.dp))
+            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    ) {
+        AppText(text, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
     }
 }
 

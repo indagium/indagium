@@ -1,11 +1,14 @@
 package com.openlog
 
+import androidx.compose.ui.input.key.Key
 import com.openlog.ui.KeyboardPanel
 import com.openlog.ui.KeyboardTargetKind
 import com.openlog.ui.RovingItem
 import com.openlog.ui.annotationKeyboardTargets
+import com.openlog.ui.annotationPreviewCopyShortcutHandled
 import com.openlog.ui.filterKeyboardTargets
 import com.openlog.ui.keyboardShortcutHelpGroups
+import com.openlog.ui.messageRuleInputConsumesKey
 import com.openlog.ui.rovingActivationId
 import com.openlog.ui.rovingMove
 import kotlin.test.Test
@@ -92,5 +95,21 @@ class KeyboardNavigationTest {
         assertTrue(targets.any { it.kind == KeyboardTargetKind.NoteBlock && it.id == "block:note-a" })
         assertTrue(targets.any { it.kind == KeyboardTargetKind.NoteAddTextBlock && it.id == "add-after-last" })
         assertEquals(KeyboardTargetKind.NoteSuffix, targets.last().kind)
+    }
+
+    @Test
+    fun messageRuleInputLeavesHorizontalArrowsForTextCursor() {
+        assertFalse(messageRuleInputConsumesKey(Key.DirectionLeft))
+        assertFalse(messageRuleInputConsumesKey(Key.DirectionRight))
+        assertTrue(messageRuleInputConsumesKey(Key.DirectionUp))
+        assertTrue(messageRuleInputConsumesKey(Key.DirectionDown))
+        assertTrue(messageRuleInputConsumesKey(Key.Enter))
+    }
+
+    @Test
+    fun annotationPreviewCopyShortcutDoesNotStealFocusedTextFieldCopy() {
+        assertFalse(annotationPreviewCopyShortcutHandled(actionPressed = true, key = Key.C, textFieldFocused = true))
+        assertTrue(annotationPreviewCopyShortcutHandled(actionPressed = true, key = Key.C, textFieldFocused = false))
+        assertFalse(annotationPreviewCopyShortcutHandled(actionPressed = false, key = Key.C, textFieldFocused = false))
     }
 }

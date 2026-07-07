@@ -61,6 +61,9 @@ private const val BLOCK_DRAG_SNAP_BIAS = 0.25f
 private const val AUTO_SCROLL_SPEED_FACTOR = 0.6f
 private const val STICK_TO_BOTTOM_THRESHOLD_DP = 24f
 
+internal fun annotationPreviewCopyShortcutHandled(actionPressed: Boolean, key: Key, textFieldFocused: Boolean): Boolean =
+    actionPressed && key == Key.C && !textFieldFocused
+
 // Cumulative top-Y offset of each id in `orderedIds`, in that order — the building block both
 // blockOrderDuringDrag (over the stable list order) and the render loop (over the live visual
 // order) need, since unlike sequence rows, note blocks have no uniform row height.
@@ -103,7 +106,6 @@ internal fun blockOrderDuringDrag(
 fun AnnotationPanel(
     tab: LogTab,
     settings: AppSettings,
-    headerNote: String? = null,
     recentNotes: List<String> = emptyList(),
     recentNotesMenuOpen: Boolean = false,
     onToggleMd: () -> Unit,
@@ -303,11 +305,12 @@ fun AnnotationPanel(
             .onPreviewKeyEvent { ev ->
                 if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 val actionPressed = if (isMacOs) ev.isMetaPressed else ev.isCtrlPressed
+                val textFieldFocused = prefixFocused || suffixFocused || blockFieldFocused || issueDescFocused
                 when {
                     actionPressed && ev.key == Key.S -> { onSave(); true }
-                    actionPressed && ev.key == Key.C -> { onCopy(); true }
+                    annotationPreviewCopyShortcutHandled(actionPressed, ev.key, textFieldFocused) -> { onCopy(); true }
                     actionPressed && ev.key == Key.O -> { openNotePicker(); true }
-                    prefixFocused || suffixFocused || blockFieldFocused || issueDescFocused -> {
+                    textFieldFocused -> {
                         if (ev.key == Key.Escape) {
                             runCatching { focusRequester?.requestFocus() }
                             true
@@ -333,19 +336,9 @@ fun AnnotationPanel(
     ) {
         // Header row 1: title + action buttons
         Box(
-            Modifier.fillMaxWidth().height(if (headerNote != null) 46.dp else 36.dp).background(tc.p2)
+            Modifier.fillMaxWidth().height(36.dp).background(tc.p2)
                 .border(BorderStroke(1.dp, tc.br)).padding(horizontal = 12.dp),
         ) {
-            if (headerNote != null) {
-                AppText(
-                    headerNote,
-                    color = tc.td,
-                    fontSize = 9.sp,
-                    fontFamily = MONO,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.align(Alignment.CenterStart).widthIn(max = 88.dp),
-                )
-            }
             Row(
                 Modifier.align(Alignment.Center),
                 verticalAlignment = Alignment.CenterVertically,

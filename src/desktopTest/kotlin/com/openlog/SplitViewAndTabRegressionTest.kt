@@ -11,10 +11,12 @@ import com.openlog.ui.LogViewerScrollStateStore
 import com.openlog.ui.annotationNavigationTarget
 import com.openlog.ui.browserTabOrderDuringDrag
 import com.openlog.ui.centerAnchorIndex
+import com.openlog.ui.comparePickerOrderAfterOverflowSelection
 import com.openlog.ui.expansionAndIndexForEntry
 import com.openlog.ui.logItemStableKey
 import com.openlog.ui.mkTab
 import com.openlog.ui.nextOriginalSelectionAfterFilteredSelection
+import com.openlog.ui.orderedTabsForComparePicker
 import com.openlog.ui.panelCopySelectionIds
 import com.openlog.ui.splitTabsForVisibility
 import com.openlog.ui.tabOrderAfterVisibleReorder
@@ -202,6 +204,53 @@ class SplitViewAndTabRegressionTest {
     }
 
     @Test
+    fun selectedMarkdownTextCanUsePanelLocalSelection() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "log",
+                "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "filtered"),
+                    LogEntry(2, "10:00:00.100", LogLevel.W, "Binder", "original one"),
+                    LogEntry(3, "10:00:00.200", LogLevel.E, "Binder", "original two"),
+                ),
+            ).copy(selected = setOf(1)),
+        )
+
+        val text = state.selectedLinesMarkdownText("log", explicitIds = setOf(2, 3))
+
+        assertEquals(
+            "**[10:00:00.100] `W/Binder`:** original one\n" +
+                "**[10:00:00.200] `E/Binder`:** original two",
+            text,
+        )
+    }
+
+    @Test
+    fun selectedMarkdownTextFallsBackToTabSelection() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "log",
+                "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "one"),
+                    LogEntry(2, "10:00:00.100", LogLevel.W, "Binder", "two"),
+                ),
+            ).copy(selected = setOf(1, 2)),
+        )
+
+        val text = state.selectedLinesMarkdownText("log")
+
+        assertEquals(
+            "**[10:00:00.000] `I/App`:** one\n" +
+                "**[10:00:00.100] `W/Binder`:** two",
+            text,
+        )
+    }
+
+    @Test
     fun visibleRowRangeIdsUsesCurrentPanelVisibleOrder() {
         val visibleIds = listOf(10, 20, 30, 40)
 
@@ -275,6 +324,45 @@ class SplitViewAndTabRegressionTest {
 
         assertEquals((3..10).map { "t$it" }, visible.map { it.id })
         assertEquals(listOf("t1", "t2"), overflow.map { it.id })
+    }
+
+    @Test
+    fun comparePickerCanOverflowWhenManyTabsDoNotFit() {
+        val tabs = (1..8).map { idx -> mkTab("t$idx", "tab-$idx.log", emptyList()) }
+
+        val (visible, overflow) = splitTabsForVisibility(
+            tabs = tabs,
+            containerPx = 360,
+            minTabPx = 100,
+            overflowButtonPx = 44,
+            visibleTabLimit = 8,
+        )
+
+        assertEquals(listOf("t6", "t7", "t8"), visible.map { it.id })
+        assertEquals((1..5).map { "t$it" }, overflow.map { it.id })
+    }
+
+    @Test
+    fun comparePickerOrderingCanDifferFromMainTabsOrder() {
+        val tabs = (1..5).map { idx -> mkTab("t$idx", "tab-$idx.log", emptyList()) }
+
+        val ordered = orderedTabsForComparePicker(
+            tabs = tabs,
+            orderIds = listOf("t1", "t3", "t2", "t4", "t5"),
+        )
+
+        assertEquals(listOf("t1", "t3", "t2", "t4", "t5"), ordered.map { it.id })
+        assertEquals((1..5).map { "t$it" }, tabs.map { it.id })
+    }
+
+    @Test
+    fun comparePickerOverflowSelectionPromotesOnlyCompareOrder() {
+        val mainOrder = (1..5).map { idx -> "t$idx" }
+
+        val compareOrder = comparePickerOrderAfterOverflowSelection(mainOrder, "t1")
+
+        assertEquals(listOf("t2", "t3", "t4", "t5", "t1"), compareOrder)
+        assertEquals((1..5).map { "t$it" }, mainOrder)
     }
 
     @Test

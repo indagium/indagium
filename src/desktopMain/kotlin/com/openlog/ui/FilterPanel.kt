@@ -867,13 +867,12 @@ fun FilterPanel(
                         .onFocusChanged { msgRuleFieldFocused = it.isFocused }
                         .onPreviewKeyEvent { ev ->
                             if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                            if (!messageRuleInputConsumesKey(ev.key)) return@onPreviewKeyEvent false
                             when (ev.key) {
                                 Key.Tab -> { runCatching { hlFr.requestFocus() }; true }
                                 Key.DirectionDown -> { msgRuleSelectedIdx = (msgRuleSelectedIdx + 1).coerceAtMost(unifiedCandidates.lastIndex); true }
                                 Key.DirectionUp -> { msgRuleSelectedIdx = (msgRuleSelectedIdx - 1).coerceAtLeast(-1); true }
-                                Key.DirectionRight -> { msgRuleSelectedAction = 1; true }
-                                Key.DirectionLeft -> { msgRuleSelectedAction = 0; true }
-                                Key.Enter -> {
+                                Key.Enter, Key.NumPadEnter -> {
                                     val c = unifiedCandidates.getOrNull(msgRuleSelectedIdx)
                                     if (c != null) {
                                         onAddMessageRule(msgRuleSelectedAction == 0, c.pattern, false, null, null, c.target)
@@ -1679,6 +1678,13 @@ fun messageRuleInputSpec(input: String, regexMode: Boolean): MessageRuleInputSpe
     }
     return MessageRuleInputSpec(trimmed, regex = regexMode, target = RuleTarget.MESSAGE)
 }
+
+internal fun messageRuleInputConsumesKey(key: Key): Boolean =
+    key == Key.Tab ||
+        key == Key.DirectionDown ||
+        key == Key.DirectionUp ||
+        key == Key.Enter ||
+        key == Key.NumPadEnter
 
 private fun slashWrappedRegex(input: String): String? {
     if (!input.startsWith("/") || input.length < 2) return null

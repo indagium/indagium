@@ -56,6 +56,9 @@ private fun buildLogAnalysis(data: List<LogEntry>): LogAnalysis {
 private fun pendingAnalysis(data: List<LogEntry>): LogAnalysis =
     LogAnalysis(tagCounts = data.groupingBy { it.tag }.eachCount(), pending = true)
 
+internal fun logEntryMarkdownLine(entry: LogEntry): String =
+    "**[${entry.ts}] `${entry.level.key}/${entry.tag}`:** ${entry.msg}"
+
 fun mkTab(
     id: String,
     filename: String,
@@ -1674,6 +1677,10 @@ class AppState(
         copyToClipboard(selectedLinesText(tabId, explicitIds))
     }
 
+    fun copySelectedLinesAsMarkdown(tabId: String, explicitIds: Set<Int>?) {
+        copyToClipboard(selectedLinesMarkdownText(tabId, explicitIds))
+    }
+
     fun selectedLinesText(tabId: String, explicitIds: Set<Int>? = null): String {
         val t = tab(tabId) ?: return ""
         val ids = explicitIds ?: t.selected
@@ -1681,6 +1688,12 @@ class AppState(
             val pid = if (e.pid > 0) "  ${e.pid.toString().padStart(5)} ${e.tid.toString().padStart(5)}" else ""
             "${e.ts}$pid  ${e.level.key}  ${e.tag}: ${e.msg}"
         }
+    }
+
+    fun selectedLinesMarkdownText(tabId: String, explicitIds: Set<Int>? = null): String {
+        val t = tab(tabId) ?: return ""
+        val ids = explicitIds ?: t.selected
+        return ids.sorted().mapNotNull { id -> t.rmap[id] }.joinToString("\n", transform = ::logEntryMarkdownLine)
     }
 
     // ── Tab management ───────────────────────────────────────────────
