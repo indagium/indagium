@@ -7,6 +7,7 @@ import com.openlog.ui.RovingItem
 import com.openlog.ui.annotationKeyboardTargets
 import com.openlog.ui.annotationPreviewCopyShortcutHandled
 import com.openlog.ui.filterKeyboardTargets
+import com.openlog.ui.inputValueAfterEscape
 import com.openlog.ui.keyboardShortcutHelpGroups
 import com.openlog.ui.messageRuleInputConsumesKey
 import com.openlog.ui.rovingActivationId
@@ -98,12 +99,19 @@ class KeyboardNavigationTest {
     }
 
     @Test
-    fun messageRuleInputLeavesHorizontalArrowsForTextCursor() {
-        assertFalse(messageRuleInputConsumesKey(Key.DirectionLeft))
-        assertFalse(messageRuleInputConsumesKey(Key.DirectionRight))
+    fun messageRuleInputConsumesActionSelectionAndCancelKeys() {
+        assertTrue(messageRuleInputConsumesKey(Key.DirectionLeft))
+        assertTrue(messageRuleInputConsumesKey(Key.DirectionRight))
         assertTrue(messageRuleInputConsumesKey(Key.DirectionUp))
         assertTrue(messageRuleInputConsumesKey(Key.DirectionDown))
         assertTrue(messageRuleInputConsumesKey(Key.Enter))
+        assertTrue(messageRuleInputConsumesKey(Key.Escape))
+    }
+
+    @Test
+    fun escapeClearsFilterTextInputs() {
+        assertEquals("", inputValueAfterEscape("Network", escapePressed = true))
+        assertEquals("Network", inputValueAfterEscape("Network", escapePressed = false))
     }
 
     @Test

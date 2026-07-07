@@ -36,6 +36,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -56,6 +57,21 @@ import kotlin.math.roundToInt
 // tag/package filter — out-of-scope candidates are shown after in-scope ones and dimmed, so
 // matches unrelated to the active filter are still discoverable instead of vanishing.
 private data class MsgCandidate(val pattern: String, val target: RuleTarget, val inScope: Boolean)
+
+internal data class PendingMessageRuleDraft(
+    val include: Boolean,
+    val pattern: String,
+    val regex: Boolean,
+    val target: RuleTarget,
+)
+
+internal data class MessageRuleScopeOption(
+    val label: String,
+    val tag: String? = null,
+    val packagePrefix: String? = null,
+) {
+    val isAll: Boolean get() = tag == null && packagePrefix == null
+}
 
 private const val LARGE_FILE_CANDIDATE_SCAN_LIMIT = 50_000
 private const val SEQUENCE_DRAG_SNAP_BIAS = 0.25f
@@ -216,6 +232,7 @@ fun FilterPanel(
     val tagFr = remember { FocusRequester() }
     val kwFr = remember { FocusRequester() }
     val msgRuleFr = remember { FocusRequester() }
+    val msgRuleScopeFr = remember { FocusRequester() }
     val hlFr = remember { FocusRequester() }
 
     var tagInput by remember { mutableStateOf("") }
@@ -281,6 +298,11 @@ fun FilterPanel(
     var msgCandidatesHovered by remember { mutableStateOf(false) }
     var msgRuleSelectedIdx by remember { mutableStateOf(-1) }
     var msgRuleSelectedAction by remember { mutableStateOf(0) } // 0 = include, 1 = exclude
+    var msgRuleScopeOpen by remember(tab.id) { mutableStateOf(false) }
+    var msgRuleScopeSearch by remember(tab.id) { mutableStateOf("") }
+    var msgRuleScopeFieldFocused by remember { mutableStateOf(false) }
+    var msgRuleScopeSelectedIdx by remember(tab.id) { mutableStateOf(0) }
+    var pendingMessageRule by remember(tab.id) { mutableStateOf<PendingMessageRuleDraft?>(null) }
     LaunchedEffect(msgRuleInput) {
         val snap = msgRuleInput
         kotlinx.coroutines.delay(if (tab.largeFileMode) 350 else 120)
@@ -456,6 +478,84 @@ fun FilterPanel(
             pidCandidates + msgCandidates
         }
     }
+    // Tags/prefixes the scope picker offers are narrowed to ones the pending rule's pattern
+    // actually occurs under — an "All" rule for "timeout" shouldn't list every tag in the file,
+    // only ones that have ever logged something matching "timeout". Falls back to the full tag
+    // list if nothing matched (e.g. scan-limit truncation on a huge file) so the picker never
+    // goes empty.
+    val relevantScopeTags = remember(tab.id, tab.largeFileMode, pendingMessageRule) {
+        val pending = pendingMessageRule
+        if (pending == null) {
+            null
+        } else {
+            val candidateEntries = if (tab.largeFileMode) {
+                tab.logData.asSequence().take(LARGE_FILE_CANDIDATE_SCAN_LIMIT).toList()
+            } else {
+                tab.logData
+            }
+            if (pending.target == RuleTarget.PID_TID) {
+                val tokens = pending.pattern.split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
+                candidateEntries.asSequence()
+                    .filter { entry -> tokens.any { it == entry.pid.toString() || it == entry.tid.toString() } }
+                    .map { it.tag }.toSet()
+            } else {
+                candidateEntries.asSequence()
+                    .filter { entry -> containsPattern(entry.msg, pending.pattern, pending.regex) }
+                    .map { it.tag }.toSet()
+            }
+        }
+    }
+    val scopeOptionTags = remember(sortedTags, relevantScopeTags) {
+        if (relevantScopeTags.isNullOrEmpty()) sortedTags else sortedTags.filter { it in relevantScopeTags }
+    }
+    val msgRuleScopeOptions = remember(scopeOptionTags, msgRuleScopeSearch) {
+        messageRuleScopeOptions(scopeOptionTags, msgRuleScopeSearch)
+    }
+    val searchedMsgRuleScopeOptions = remember(msgRuleScopeOptions) { msgRuleScopeOptions.drop(1) }
+    fun openMessageRuleScopeChooser(include: Boolean, pattern: String, regex: Boolean, target: RuleTarget) {
+        pendingMessageRule = PendingMessageRuleDraft(include, pattern, regex, target)
+        msgRuleScopeOpen = true
+        msgRuleScopeSearch = ""
+        msgRuleScopeSelectedIdx = 0
+        showMsgRuleCandidates = false
+    }
+    fun cancelPendingMessageRule() {
+        pendingMessageRule = null
+        msgRuleScopeOpen = false
+        msgRuleScopeSearch = ""
+        msgRuleScopeSelectedIdx = 0
+        msgRuleInput = ""
+        // Clear the debounced search value synchronously too — otherwise it still holds the old
+        // query for the debounce delay after refocusing, and unifiedCandidates (keyed on it)
+        // briefly renders the stale dropdown before the debounce catches up and clears it.
+        msgRuleSearch = ""
+        msgRuleSelectedIdx = -1
+        msgRuleSelectedAction = 0
+        onSetKwInTag("")
+        runCatching { msgRuleFr.requestFocus() }
+    }
+    fun commitPendingMessageRule(scope: MessageRuleScopeOption) {
+        val pending = pendingMessageRule ?: return
+        onAddMessageRule(pending.include, pending.pattern, pending.regex, scope.tag, scope.packagePrefix, pending.target)
+        pendingMessageRule = null
+        msgRuleScopeOpen = false
+        msgRuleScopeSearch = ""
+        msgRuleScopeSelectedIdx = 0
+        msgRuleInput = ""
+        msgRuleSearch = ""
+        msgRuleSelectedIdx = -1
+        msgRuleSelectedAction = 0
+        runCatching { msgRuleFr.requestFocus() }
+    }
+    fun clearTagSearch() {
+        tagInput = inputValueAfterEscape(tagInput, escapePressed = true)
+        tagSearch = ""
+        tagSelectedIdx = -1
+        showTagCandidates = false
+    }
+    LaunchedEffect(msgRuleScopeOpen) {
+        if (msgRuleScopeOpen) runCatching { msgRuleScopeFr.requestFocus() }
+    }
     val scroll = rememberScrollState()
     val filterDropTarget = remember(onImportFiltersFromFiles) {
         object : DragAndDropTarget {
@@ -484,10 +584,16 @@ fun FilterPanel(
             .onFocusChanged { panelFocused = it.hasFocus; onPanelFocusChanged(it.hasFocus) }
             .onPreviewKeyEvent { ev ->
                 if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                val fieldFocused = tagFieldFocused || msgRuleFieldFocused || hlFieldFocused || kwFieldFocused
+                val fieldFocused = tagFieldFocused || msgRuleFieldFocused || msgRuleScopeFieldFocused || hlFieldFocused || kwFieldFocused
                 if (fieldFocused) {
                     if (ev.key == Key.Escape) {
-                        runCatching { focusRequester?.requestFocus() }
+                        if (tagFieldFocused) {
+                            clearTagSearch()
+                        } else if (msgRuleFieldFocused || msgRuleScopeFieldFocused) {
+                            cancelPendingMessageRule()
+                        } else {
+                            runCatching { focusRequester?.requestFocus() }
+                        }
                         true
                     } else {
                         false
@@ -607,6 +713,7 @@ fun FilterPanel(
                             Key.Tab -> { runCatching { msgRuleFr.requestFocus() }; true }
                             Key.DirectionDown -> { tagSelectedIdx = (tagSelectedIdx + 1).coerceAtMost(combinedTagCandidates.lastIndex); true }
                             Key.DirectionUp -> { tagSelectedIdx = (tagSelectedIdx - 1).coerceAtLeast(-1); true }
+                            Key.Escape -> { clearTagSearch(); true }
                             Key.DirectionRight -> {
                                 val c = combinedTagCandidates.getOrNull(tagSelectedIdx)
                                 if (c != null) { tagSelectedAction = 1; true } else {
@@ -831,9 +938,7 @@ fun FilterPanel(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         msgInc.forEach { rule ->
-                            val label = if (rule.target == RuleTarget.PID_TID) "pid:${rule.pattern}"
-                            else if (rule.regex) "/${rule.pattern}/" else rule.pattern
-                            TagPill(label, tc.ac) { onRemoveMessageRule(rule.id) }
+                            TagPill(messageRulePillLabel(rule), tc.ac) { onRemoveMessageRule(rule.id) }
                         }
                     }
                 }
@@ -846,9 +951,7 @@ fun FilterPanel(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         msgExc.forEach { rule ->
-                            val label = if (rule.target == RuleTarget.PID_TID) "pid:${rule.pattern}"
-                            else if (rule.regex) "/${rule.pattern}/" else rule.pattern
-                            TagPill(label, msgExNeg) { onRemoveMessageRule(rule.id) }
+                            TagPill(messageRulePillLabel(rule), msgExNeg) { onRemoveMessageRule(rule.id) }
                         }
                     }
                 }
@@ -872,26 +975,21 @@ fun FilterPanel(
                                 Key.Tab -> { runCatching { hlFr.requestFocus() }; true }
                                 Key.DirectionDown -> { msgRuleSelectedIdx = (msgRuleSelectedIdx + 1).coerceAtMost(unifiedCandidates.lastIndex); true }
                                 Key.DirectionUp -> { msgRuleSelectedIdx = (msgRuleSelectedIdx - 1).coerceAtLeast(-1); true }
+                                Key.DirectionLeft -> { msgRuleSelectedAction = 0; true }
+                                Key.DirectionRight -> { msgRuleSelectedAction = 1; true }
+                                Key.Escape -> { cancelPendingMessageRule(); true }
                                 Key.Enter, Key.NumPadEnter -> {
                                     val c = unifiedCandidates.getOrNull(msgRuleSelectedIdx)
                                     if (c != null) {
-                                        onAddMessageRule(msgRuleSelectedAction == 0, c.pattern, false, null, null, c.target)
+                                        openMessageRuleScopeChooser(msgRuleSelectedAction == 0, c.pattern, false, c.target)
                                     } else if (msgRuleInput.isNotBlank()) {
                                         // No candidate selected — add typed text directly.
                                         // All-digit input → PID/TID rule; anything else → message rule.
                                         val spec = messageRuleInputSpec(msgRuleInput, regexMode = filter.kwInTagRegex)
-                                        onAddMessageRule(
-                                            msgRuleSelectedAction == 0,
-                                            spec.pattern,
-                                            spec.regex,
-                                            null,
-                                            null,
-                                            spec.target,
-                                        )
+                                        openMessageRuleScopeChooser(msgRuleSelectedAction == 0, spec.pattern, spec.regex, spec.target)
                                     } else {
                                         return@onPreviewKeyEvent false
                                     }
-                                    msgRuleInput = ""; msgRuleSelectedIdx = -1
                                     true
                                 }
                                 else -> false
@@ -901,7 +999,136 @@ fun FilterPanel(
                 )
                 PillBtn(".*", active = filter.kwInTagRegex, onClick = onToggleMessageRuleRegex)
             }
-            if (showMsgRuleCandidates && unifiedCandidates.isNotEmpty()) {
+            if (msgRuleScopeOpen) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        AppText(
+                            messageRuleScopePrompt(pendingMessageRule?.include ?: true),
+                            color = if (pendingMessageRule?.include == false) msgExNeg else tc.ac,
+                            fontSize = 10.sp,
+                            fontFamily = UI,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f),
+                        )
+                        SquareIconButton("×", fontSize = 12.sp, onClick = {
+                            cancelPendingMessageRule()
+                        })
+                    }
+                    pendingMessageRule?.let { pending ->
+                        FullTextHint(pendingMessageRulePatternLabel(pending)) { onTextLayout ->
+                            AppText(
+                                pendingMessageRulePatternLabel(pending),
+                                color = tc.tx,
+                                fontSize = 11.sp,
+                                fontFamily = MONO,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.fillMaxWidth(),
+                                onTextLayout = onTextLayout,
+                            )
+                        }
+                    }
+                    HoverBox(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                        baseBg = if (msgRuleScopeSelectedIdx == 0) tc.abg else Color.Transparent,
+                        hoverBg = tc.hv,
+                        onClick = { commitPendingMessageRule(messageRuleAllScope()) },
+                    ) {
+                        Box(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            AppText(
+                                "All",
+                                color = if (msgRuleScopeSelectedIdx == 0) tc.tx else tc.ts,
+                                fontSize = 11.sp,
+                                fontFamily = MONO,
+                            )
+                        }
+                    }
+                    InlineField(
+                        msgRuleScopeSearch,
+                        { msgRuleScopeSearch = it; msgRuleScopeSelectedIdx = 0 },
+                        "scope tag or prefix…",
+                        Modifier.fillMaxWidth()
+                            .focusRequester(msgRuleScopeFr)
+                            .onFocusChanged { msgRuleScopeFieldFocused = it.isFocused }
+                            .onPreviewKeyEvent { ev ->
+                                if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                when (ev.key) {
+                                    Key.DirectionDown -> {
+                                        msgRuleScopeSelectedIdx =
+                                            (msgRuleScopeSelectedIdx + 1).coerceAtMost(msgRuleScopeOptions.lastIndex)
+                                        true
+                                    }
+                                    Key.DirectionUp -> {
+                                        msgRuleScopeSelectedIdx =
+                                            (msgRuleScopeSelectedIdx - 1).coerceAtLeast(0)
+                                        true
+                                    }
+                                    Key.Enter, Key.NumPadEnter -> {
+                                        msgRuleScopeOptions.getOrNull(msgRuleScopeSelectedIdx)?.let { commitPendingMessageRule(it) }
+                                        true
+                                    }
+                                    Key.Escape -> { cancelPendingMessageRule(); true }
+                                    else -> false
+                                }
+                            },
+                        onClear = { msgRuleScopeSearch = ""; msgRuleScopeSelectedIdx = 0 },
+                    )
+                    ScrollableItems(searchedMsgRuleScopeOptions.size, maxDp = 140, scrollToIndex = msgRuleScopeSelectedIdx - 1) {
+                        searchedMsgRuleScopeOptions.forEachIndexed { idx, scope ->
+                            val optionIndex = idx + 1
+                            HoverBox(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                                baseBg = if (msgRuleScopeSelectedIdx == optionIndex) tc.abg else Color.Transparent,
+                                hoverBg = tc.hv,
+                                onClick = { commitPendingMessageRule(scope) },
+                            ) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    AppText(
+                                        when {
+                                            scope.isAll -> "all"
+                                            scope.packagePrefix != null -> "pkg"
+                                            else -> "tag"
+                                        },
+                                        color = tc.td,
+                                        fontSize = 9.sp,
+                                        fontFamily = UI,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.width(26.dp),
+                                    )
+                                    FullTextHint(
+                                        scope.label,
+                                        modifier = Modifier.weight(1f),
+                                        forceShow = msgRuleScopeSelectedIdx == optionIndex,
+                                    ) { onTextLayout ->
+                                        AppText(
+                                            scope.label,
+                                            color = if (msgRuleScopeSelectedIdx == optionIndex) tc.tx else tc.ts,
+                                            fontSize = 11.sp,
+                                            fontFamily = MONO,
+                                            modifier = Modifier.fillMaxWidth(),
+                                            overflow = TextOverflow.Ellipsis,
+                                            maxLines = 1,
+                                            onTextLayout = onTextLayout,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (!msgRuleScopeOpen && showMsgRuleCandidates && unifiedCandidates.isNotEmpty()) {
                 ScrollableItems(unifiedCandidates.size, maxDp = 220, scrollToIndex = msgRuleSelectedIdx,
                     modifier = Modifier
                         .onPointerEvent(PointerEventType.Enter) { msgCandidatesHovered = true }
@@ -910,10 +1137,16 @@ fun FilterPanel(
                     unifiedCandidates.forEachIndexed { idx, cand ->
                         val (pattern, target, inScope) = cand
                         val isPid = target == RuleTarget.PID_TID
-                        val isIncluded = if (isPid) msgInc.any { it.target == RuleTarget.PID_TID && it.pattern == pattern }
-                        else msgInc.any { it.target == RuleTarget.MESSAGE && it.pattern == pattern && !it.regex }
-                        val isExcluded = if (isPid) msgExc.any { it.target == RuleTarget.PID_TID && it.pattern == pattern }
-                        else msgExc.any { it.target == RuleTarget.MESSAGE && it.pattern == pattern && !it.regex }
+                        val isIncluded = if (isPid) {
+                            msgInc.any { it.target == RuleTarget.PID_TID && it.pattern == pattern }
+                        } else {
+                            msgInc.any { it.target == RuleTarget.MESSAGE && it.pattern == pattern && !it.regex }
+                        }
+                        val isExcluded = if (isPid) {
+                            msgExc.any { it.target == RuleTarget.PID_TID && it.pattern == pattern }
+                        } else {
+                            msgExc.any { it.target == RuleTarget.MESSAGE && it.pattern == pattern && !it.regex }
+                        }
                         val isRowSelected = idx == msgRuleSelectedIdx
                         HoverBox(
                             modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
@@ -960,7 +1193,7 @@ fun FilterPanel(
                                     Modifier.size(20.dp)
                                         .background(if (incHighlight) tc.ac.copy(.2f) else if (incKbd) tc.ac.copy(.1f) else Color.Transparent, CORNER_SM)
                                         .border(1.dp, if (incHighlight || incKbd) tc.ac else tc.br, CORNER_SM)
-                                        .clickable { onAddMessageRule(true, pattern, false, null, null, target); msgRuleInput = "" },
+                                        .clickable { openMessageRuleScopeChooser(true, pattern, false, target) },
                                     contentAlignment = Alignment.Center,
                                 ) { AppText("+", color = if (incHighlight || incKbd) tc.ac else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
                                 val exHighlight = isExcluded
@@ -969,7 +1202,7 @@ fun FilterPanel(
                                     Modifier.size(20.dp)
                                         .background(if (exHighlight) msgExNeg.copy(.2f) else if (exKbd) msgExNeg.copy(.1f) else Color.Transparent, CORNER_SM)
                                         .border(1.dp, if (exHighlight || exKbd) msgExNeg else tc.br, CORNER_SM)
-                                        .clickable { onAddMessageRule(false, pattern, false, null, null, target); msgRuleInput = "" },
+                                        .clickable { openMessageRuleScopeChooser(false, pattern, false, target) },
                                     contentAlignment = Alignment.Center,
                                 ) { AppText("−", color = if (exHighlight || exKbd) msgExNeg else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
                             }
@@ -1584,18 +1817,31 @@ private fun FullTextHint(
     content: @Composable BoxScope.((TextLayoutResult) -> Unit) -> Unit,
 ) {
     val tc = tc()
+    val density = LocalDensity.current
     var hovered by remember { mutableStateOf(false) }
     var isOverflowing by remember(text) { mutableStateOf(false) }
+    var anchorHeightPx by remember { mutableStateOf(0) }
     Box(
         modifier
+            .onSizeChanged { anchorHeightPx = it.height }
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false },
     ) {
         content { result -> isOverflowing = result.hasVisualOverflow }
         if ((hovered || forceShow) && isOverflowing) {
+            // Popup(alignment, offset) aligns matching corners of anchor and popup — TopStart
+            // means "popup's top-left = anchor's top-left", NOT "popup below anchor". Placing it
+            // below requires shifting by the anchor's own *measured* height (device px, matching
+            // offset's unit) plus a gap; a guessed constant (the previous approach, and an even
+            // more wrong alignment=BottomStart before that) either overlaps the anchor on some
+            // densities/text sizes or — with BottomStart — aligns the popup's own bottom-left to
+            // the anchor's bottom-left, making the popup extend upward and fully cover the anchor.
+            // Either overlap makes the popup the topmost hit-test target at the cursor, which
+            // fires Exit on the anchor, hides the popup, then Enter fires again — rapid flicker.
+            val gapPx = with(density) { 4.dp.roundToPx() }
             Popup(
                 alignment = Alignment.TopStart,
-                offset = IntOffset(0, 24),
+                offset = IntOffset(0, anchorHeightPx + gapPx),
                 properties = PopupProperties(focusable = false),
             ) {
                 Box(
@@ -1662,6 +1908,55 @@ private fun scopedSequencePart(tag: String?, text: String, isRegex: Boolean): St
     return (tag?.let { "$it: " } ?: "") + pattern
 }
 
+internal fun messageRuleAllScope(): MessageRuleScopeOption = MessageRuleScopeOption("All")
+
+internal fun messageRuleScopeLabel(tag: String?, packagePrefix: String?): String = when {
+    !tag.isNullOrBlank() -> tag
+    !packagePrefix.isNullOrBlank() -> "$packagePrefix.*"
+    else -> "All"
+}
+
+internal fun messageRuleScopeOptions(
+    sortedTags: List<String>,
+    search: String,
+    limit: Int = 8,
+): List<MessageRuleScopeOption> {
+    val needle = search.trim()
+    val prefixes = if (needle.isBlank()) emptyList() else packagePrefixCandidates(sortedTags, needle, limit = 4)
+    val tags = sortedTags.asSequence()
+        .filter { tag -> needle.isBlank() || tag.contains(needle, ignoreCase = true) }
+        .filter { tag -> tag !in prefixes }
+        .take(limit.coerceAtLeast(0))
+        .map { tag -> MessageRuleScopeOption(label = tag, tag = tag) }
+        .toList()
+    return listOf(messageRuleAllScope()) +
+        prefixes.map { prefix -> MessageRuleScopeOption(label = "$prefix.*", packagePrefix = prefix) } +
+        tags
+}
+
+private fun ruleTargetPatternLabel(pattern: String, regex: Boolean, target: RuleTarget): String = when (target) {
+    RuleTarget.PID_TID -> "pid:$pattern"
+    RuleTarget.MESSAGE -> if (regex) "/$pattern/" else pattern
+}
+
+internal fun messageRulePillLabel(rule: MessageRule): String {
+    val pattern = ruleTargetPatternLabel(rule.pattern, rule.regex, rule.target)
+    val scope = messageRuleScopeLabel(rule.tag, rule.packagePrefix)
+    // "→" rather than ".*" as the scope/pattern separator — a package-prefix scope label already
+    // ends in ".*" (e.g. "com.app.*"), so using ".*" again here made scoped-prefix pills read as
+    // "com.app.* .* pattern", two unrelated ".*" tokens back to back with no visual distinction.
+    return if (scope == "All") pattern else "$scope → $pattern"
+}
+
+internal fun pendingMessageRulePatternLabel(pending: PendingMessageRuleDraft): String =
+    ruleTargetPatternLabel(pending.pattern, pending.regex, pending.target)
+
+internal fun messageRuleScopePrompt(include: Boolean): String =
+    if (include) "Add + rule to" else "Add - rule to"
+
+internal fun inputValueAfterEscape(value: String, escapePressed: Boolean): String =
+    if (escapePressed) "" else value
+
 data class MessageRuleInputSpec(
     val pattern: String,
     val regex: Boolean,
@@ -1683,6 +1978,9 @@ internal fun messageRuleInputConsumesKey(key: Key): Boolean =
     key == Key.Tab ||
         key == Key.DirectionDown ||
         key == Key.DirectionUp ||
+        key == Key.DirectionLeft ||
+        key == Key.DirectionRight ||
+        key == Key.Escape ||
         key == Key.Enter ||
         key == Key.NumPadEnter
 
@@ -1697,16 +1995,30 @@ private fun slashWrappedRegex(input: String): String? {
 
 @Composable
 private fun TagPill(tag: String, color: Color, onRemove: () -> Unit) {
-    Box(
-        Modifier.background(color.copy(.13f), CORNER_SM)
-            .border(1.dp, color.copy(.27f), CORNER_SM)
-            .clip(CORNER_SM)
-            .clickable(onClick = onRemove)
-            .padding(start = 7.dp, end = 4.dp, top = 1.dp, bottom = 1.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-            AppText(tag, color = color, fontSize = 11.sp, fontFamily = MONO)
-            AppText("×", color = color.copy(.7f), fontSize = 14.sp)
+    BoxWithConstraints {
+        // Cap the text to the pill's actual available width (from the enclosing FlowRow), not a
+        // guessed constant — the filter panel can be resized down to 140dp (FILTER_PANEL_MIN_WIDTH),
+        // narrower than a fixed 260dp cap, which let the trailing × render past the panel's own
+        // edge and get clipped instead of the text truncating to make room for it.
+        val textCap = (maxWidth - 32.dp).coerceAtLeast(40.dp)
+        Box(
+            Modifier.background(color.copy(.13f), CORNER_SM)
+                .border(1.dp, color.copy(.27f), CORNER_SM)
+                .clip(CORNER_SM)
+                .clickable(onClick = onRemove)
+                .padding(start = 7.dp, end = 4.dp, top = 1.dp, bottom = 1.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                FullTextHint(tag) { onTextLayout ->
+                    AppText(
+                        tag, color = color, fontSize = 11.sp, fontFamily = MONO,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = textCap),
+                        onTextLayout = onTextLayout,
+                    )
+                }
+                AppText("×", color = color.copy(.7f), fontSize = 14.sp)
+            }
         }
     }
 }

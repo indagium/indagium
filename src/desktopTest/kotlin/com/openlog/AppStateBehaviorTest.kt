@@ -2012,6 +2012,32 @@ class AppStateBehaviorTest {
         assertEquals(true, rules[1].include)
         assertEquals("heartbeat", rules[0].pattern)
         assertEquals("com.app.Network", rules[0].tag)
+        assertEquals("com.app.Network", rules[1].tag)
+        assertEquals(null, rules[0].packagePrefix)
+        assertEquals(null, rules[1].packagePrefix)
+    }
+
+    @Test
+    fun contextMenuMessageRulesUseSelectedTextWithinClickedTag() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "log",
+                "test.log",
+                listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "request timeout after 5s"))
+            )
+        )
+
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "timeout")
+        state.hideMessagesLikeCtx()
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "timeout")
+        state.showOnlyMessagesLikeCtx()
+
+        val rules = state.tabs.single().filter.messageRules
+        assertEquals(listOf("timeout", "timeout"), rules.map { it.pattern })
+        assertEquals(listOf(false, true), rules.map { it.include })
+        assertEquals(listOf("com.app.Network", "com.app.Network"), rules.map { it.tag })
+        assertEquals(listOf(null, null), rules.map { it.packagePrefix })
     }
 
     @Test
@@ -2252,6 +2278,19 @@ class AppStateBehaviorTest {
         val rules = state.tabs.single().filter.messageRules
         assertEquals(2, rules.size)
         assertFalse(rules[0].id == rules[1].id)
+    }
+
+    @Test
+    fun unscopedManualMessageRuleStoresAllScope() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+
+        state.addMessageRule(tabId, include = true, pattern = "error", regex = false, tag = null, packagePrefix = null)
+
+        val rule = state.tabs.single().filter.messageRules.single()
+        assertEquals(null, rule.tag)
+        assertEquals(null, rule.packagePrefix)
     }
 
     @Test

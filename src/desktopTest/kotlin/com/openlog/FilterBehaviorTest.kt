@@ -244,6 +244,24 @@ class FilterBehaviorTest {
     }
 
     @Test
+    fun scopedPositiveRuleMatchesPackagePrefixChildrenOnly() {
+        val childHit = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "ERROR occurred")
+        val exactHit = LogEntry(2, "10:00:00.001", LogLevel.I, "com.app", "ERROR occurred")
+        val wrongPrefix = LogEntry(3, "10:00:00.002", LogLevel.I, "com.other.Network", "ERROR occurred")
+        val wrongPattern = LogEntry(4, "10:00:00.003", LogLevel.I, "com.app.Auth", "request ok")
+        val filter = Filter(
+            messageRules = listOf(
+                MessageRule(id = "r1", include = true, pattern = "ERROR", packagePrefix = "com.app"),
+            ),
+        )
+
+        assertTrue(passesFilter(childHit, filter))
+        assertTrue(passesFilter(exactHit, filter))
+        assertFalse(passesFilter(wrongPrefix, filter))
+        assertFalse(passesFilter(wrongPattern, filter))
+    }
+
+    @Test
     fun pidTidFilterAllowsMatchingPidAndBlocksOthers() {
         val matching = LogEntry(1, "10:00:00.000", LogLevel.I, "App", "msg", pid = 1234)
         val notMatching = LogEntry(2, "10:00:00.001", LogLevel.I, "App", "msg", pid = 5678)
