@@ -1,5 +1,7 @@
 package com.openlog
 
+import androidx.compose.ui.graphics.Color
+import com.openlog.model.Filter
 import com.openlog.model.LogEntry
 import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
@@ -7,6 +9,7 @@ import com.openlog.model.ManualCollapseBlock
 import com.openlog.model.ManualCollapseDirection
 import com.openlog.ui.AnnotationNavigationTarget
 import com.openlog.ui.AppState
+import com.openlog.ui.DANGER_RED
 import com.openlog.ui.LogViewerScrollStateStore
 import com.openlog.ui.annotationNavigationTarget
 import com.openlog.ui.browserTabOrderDuringDrag
@@ -14,8 +17,9 @@ import com.openlog.ui.centerAnchorIndex
 import com.openlog.ui.comparePickerOrderAfterOverflowSelection
 import com.openlog.ui.effectiveLogWrapLimitChars
 import com.openlog.ui.expansionAndIndexForEntry
-import com.openlog.ui.logItemStableKey
+import com.openlog.ui.isCrashGroupRow
 import com.openlog.ui.keyboardCopyTextForLogPanel
+import com.openlog.ui.logItemStableKey
 import com.openlog.ui.mkTab
 import com.openlog.ui.nextOriginalSelectionAfterFilteredSelection
 import com.openlog.ui.orderedTabsForComparePicker
@@ -24,11 +28,12 @@ import com.openlog.ui.splitTabsForVisibility
 import com.openlog.ui.stripVisualWrapBreaks
 import com.openlog.ui.tabOrderAfterVisibleReorder
 import com.openlog.ui.tabRenderX
-import com.openlog.ui.visualLogLineForWrapLimit
 import com.openlog.ui.visibleRowRangeIds
+import com.openlog.ui.visualLogLineForWrapLimit
 import com.openlog.utils.computeItems
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotSame
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -110,30 +115,78 @@ class SplitViewAndTabRegressionTest {
     }
 
     @Test
+    fun visualLogLineWrappingBreaksAtWordBoundaryInsteadOfMidWord() {
+        // Regression: naive char-count chunking split "stacktrace" into "stacktr"/"ace" — the
+        // budget boundary must back up to the last space instead of cutting the word itself.
+        val original = "settings_config.xml with stacktrace"
+        val wrapped = visualLogLineForWrapLimit(original, limitChars = 30)
+
+        assertEquals("settings_config.xml with \nstacktrace", wrapped)
+        assertEquals(original, stripVisualWrapBreaks(wrapped))
+    }
+
+    @Test
+    fun visualLogLineWrappingHardBreaksAnUnbrokenTokenLongerThanTheLimit() {
+        // No space anywhere within budget (a long URI/base64 blob) — must still hard-break so a
+        // single token can never overflow the viewport unbounded.
+        val original = "prefix_word_" + "x".repeat(20) + "_suffix"
+        val wrapped = visualLogLineForWrapLimit(original, limitChars = 10)
+
+        assertEquals(original, stripVisualWrapBreaks(wrapped))
+        assertTrue(wrapped.lines().all { it.length <= 10 })
+    }
+
+    @Test
+    fun isCrashGroupRowOnlyWhenSettingOnAndColorIsExactlyDangerRed() {
+        assertTrue(isCrashGroupRow(DANGER_RED, highlightEntireCrashGroup = true))
+        assertFalse(isCrashGroupRow(DANGER_RED, highlightEntireCrashGroup = false))
+        // A sequence/manual-collapse groupColor is never exactly DANGER_RED (see computeItems) —
+        // must not be treated as a crash-group row even with the setting on.
+        assertFalse(isCrashGroupRow(Color.Red, highlightEntireCrashGroup = true))
+        assertFalse(isCrashGroupRow(null, highlightEntireCrashGroup = true))
+    }
+
+    @Test
     fun autoLogWrapLimitFollowsVisibleWidth() {
         val narrow = effectiveLogWrapLimitChars(
             auto = true,
             configuredLimitChars = 480,
             visibleWidthDp = 500f,
-            fontSizeSp = 12f,
+            charWidthDp = 7f,
         )
         val wide = effectiveLogWrapLimitChars(
             auto = true,
             configuredLimitChars = 480,
             visibleWidthDp = 1000f,
-            fontSizeSp = 12f,
+            charWidthDp = 7f,
         )
         val enoughForContext = effectiveLogWrapLimitChars(
             auto = true,
             configuredLimitChars = 480,
             visibleWidthDp = 760f,
-            fontSizeSp = 12f,
+            charWidthDp = 7f,
         )
 
-        assertEquals(480, effectiveLogWrapLimitChars(false, 480, visibleWidthDp = 500f, fontSizeSp = 12f))
+        assertEquals(480, effectiveLogWrapLimitChars(false, 480, visibleWidthDp = 500f, charWidthDp = 7f))
         assertTrue(narrow < wide)
         assertTrue(narrow in 80 until 480)
         assertTrue(enoughForContext >= 100)
+    }
+
+    @Test
+    fun autoLogWrapLimitPacksFewerCharsWhenGlyphsAreWider() {
+        // Regression: an underestimated char width lets visualLogLineForWrapLimit pack more
+        // characters into a manual line-break than the font actually renders, so
+        // BasicTextField's own wrapping silently adds an extra real line on top of the intended
+        // count. A wider measured glyph width must yield a smaller (not larger) char limit.
+        val withNarrowGlyphs = effectiveLogWrapLimitChars(
+            auto = true, configuredLimitChars = 480, visibleWidthDp = 760f, charWidthDp = 6f,
+        )
+        val withWiderGlyphs = effectiveLogWrapLimitChars(
+            auto = true, configuredLimitChars = 480, visibleWidthDp = 760f, charWidthDp = 8f,
+        )
+
+        assertTrue(withWiderGlyphs < withNarrowGlyphs)
     }
 
     @Test
@@ -199,6 +252,27 @@ class SplitViewAndTabRegressionTest {
         assertEquals(setOf("m1"), target?.expanded)
         val expandedItems = computeItems(tab.copy(expanded = target!!.expanded), applyFilter = true)
         assertEquals(2, expandedItems[target.index].let { (it as LogItem.Row).entry.id })
+    }
+
+    @Test
+    fun expansionAndIndexForEntryReturnsNullImmediatelyForAnEntryExcludedByTheFilter() {
+        // Regression: before the fast-fail check, this burned up to 24 rounds of full
+        // computeItems() recomputation trying every collapsed header in the file for an entry
+        // that can never be surfaced by expanding anything — on a large log, a bulk hide/exclude
+        // ctx action that requested navigation to its own (now-excluded) row felt like a hang.
+        val tab = mkTab(
+            "log",
+            "test.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "App", "first"),
+                LogEntry(2, "10:00:00.100", LogLevel.I, "App", "boom"),
+                LogEntry(3, "10:00:00.200", LogLevel.I, "App", "third"),
+            ),
+        ).copy(filter = Filter(excludeKw = "boom"))
+
+        val target = expansionAndIndexForEntry(tab, applyFilter = true, entryId = 2)
+
+        assertEquals(null, target)
     }
 
     @Test

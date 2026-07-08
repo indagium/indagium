@@ -412,6 +412,10 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
         val range = when (block.direction) {
             ManualCollapseDirection.TO_START -> 0..anchor
             ManualCollapseDirection.TO_END -> anchor..data.lastIndex
+            ManualCollapseDirection.RANGE -> {
+                val end = block.endId?.let(::indexOfId) ?: return@mapNotNull null
+                minOf(anchor, end)..maxOf(anchor, end)
+            }
         }
         ManualRange(block, range)
     }.sortedWith(compareBy<ManualRange> { it.range.first }.thenByDescending { it.range.last })

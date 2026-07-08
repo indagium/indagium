@@ -1,5 +1,6 @@
 package com.openlog.utils
 
+import com.openlog.model.CrashCategory
 import com.openlog.model.CrashKind
 import com.openlog.model.CrashSite
 import com.openlog.model.LogEntry
@@ -15,6 +16,11 @@ private val PROCESS_LINE_RE = Regex("""^Process:\s+\S+,\s*PID:\s*\d+""")
 private val EXCEPTION_PRELUDE_RE = Regex("""\b(caught|uncaught|throwing|threw)\b.*(exception|error|throwable)""", RegexOption.IGNORE_CASE)
 private val ANR_MSG_RE = Regex("""ANR in\s+\S+""")
 private const val ANR_TAG = "ActivityManager"
+
+// Tombstone dumps ("debuggerd") report native (C/C++) crashes on logcat's DEBUG tag with a line
+// like "Fatal signal 11 (SIGSEGV), code 1, fault addr 0x0 in tid 1234".
+private val NATIVE_CRASH_MSG_RE = Regex("""Fatal signal \d+""")
+private const val NATIVE_CRASH_TAG = "DEBUG"
 
 // Single left-to-right scan computing every substring gate the per-line classification needs.
 // This runs for every line of the file on load; the previous per-gate contains() calls (several
@@ -103,7 +109,12 @@ private fun isExceptionPrelude(scan: MsgScanner, msg: String): Boolean {
 // v1 produces flat groups only (trigger + all continuation lines) — no nesting for "Caused by:"
 // chains, matching the single-header requirement and avoiding a second nesting model on day one.
 fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
-    class OpenTrace(val triggerIdx: Int) {
+    // isFatal is decided once, at the moment the trace opens, from the trigger line's own scan —
+    // "FATAL EXCEPTION" headers set MsgScanner.fatalException directly; a generic
+    // <Class>Exception/Error header (no "fatal exception" substring) leaves it false. Metadata/
+    // classname lines folded in later via isHeaderFollowUp never open a new trace, so they can't
+    // change this once set.
+    class OpenTrace(val triggerIdx: Int, val isFatal: Boolean) {
         val memberIds = mutableListOf<Int>()
         var sawFrame = false
     }
@@ -116,7 +127,7 @@ fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
         val open = openByPid.remove(pid) ?: return
         if (open.memberIds.isNotEmpty()) {
             val rid = logData[open.triggerIdx].id
-            groups += StackTraceGroup(gid = "st_$rid", rid = rid, memberIds = open.memberIds.toList())
+            groups += StackTraceGroup(gid = "st_$rid", rid = rid, memberIds = open.memberIds.toList(), isFatal = open.isFatal)
         }
     }
 
@@ -144,7 +155,7 @@ fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
         if (trigger) {
             val preludeIdx = pendingPreludeByPid[entry.pid]
                 ?.takeIf { it == i - 1 && logData[it].tag == entry.tag }
-            openByPid[entry.pid] = OpenTrace(preludeIdx ?: i).also { trace ->
+            openByPid[entry.pid] = OpenTrace(preludeIdx ?: i, isFatal = scanner.fatalException).also { trace ->
                 if (preludeIdx != null) trace.memberIds += entry.id
             }
             pendingPreludeByPid.remove(entry.pid)
@@ -167,14 +178,38 @@ fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
 // dumps continue with Reason:/Load:/CPU usage lines, but v1 only needs the anchor line to jump
 // to, not a folded group. Tag/pattern coverage is deliberately narrow (see plan's flagged risk:
 // format varies across Android versions/OEMs) — broaden only once validated against real samples.
+// NATIVE_CRASH sites are the same kind of single-line anchor scan as ANR: a tombstone dump's
+// "Fatal signal N (SIGxxx)..." line on the DEBUG tag. Like ANR, v1 doesn't fold the surrounding
+// "***" banner / backtrace frames into a group — flagged as needing validation against real
+// native-crash samples before broadening (format/tag can vary across Android versions/OEMs).
 fun computeCrashSites(logData: List<LogEntry>, stackGroups: List<StackTraceGroup>): List<CrashSite> {
     // Binary-search view, not a HashMap copy — only a handful of rids ever get looked up.
     val byId = EntryIdMap(logData)
     val exceptionSites = stackGroups.mapNotNull { g ->
-        byId[g.rid]?.let { entry -> CrashSite(id = "crash_${g.rid}", entry = entry, kind = CrashKind.EXCEPTION, groupGid = g.gid) }
+        byId[g.rid]?.let { entry ->
+            CrashSite(id = "crash_${g.rid}", entry = entry, kind = CrashKind.EXCEPTION, groupGid = g.gid, isFatal = g.isFatal)
+        }
     }
     val anrSites = logData
         .filter { it.tag == ANR_TAG && ANR_MSG_RE.containsMatchIn(it.msg) }
         .map { CrashSite(id = "crash_${it.id}", entry = it, kind = CrashKind.ANR, groupGid = null) }
-    return (exceptionSites + anrSites).sortedBy { it.entry.id }
+    val nativeCrashSites = logData
+        .filter { it.tag == NATIVE_CRASH_TAG && NATIVE_CRASH_MSG_RE.containsMatchIn(it.msg) }
+        .map { CrashSite(id = "crash_${it.id}", entry = it, kind = CrashKind.NATIVE_CRASH, groupGid = null, isFatal = true) }
+    return (exceptionSites + anrSites + nativeCrashSites).sortedBy { it.entry.id }
+}
+
+// Selects the crash sites belonging to one crash-panel dropdown category. ALL is the default; the
+// next four each narrow to exactly one kind (CRASHES = native, ANRS = ANR) or one EXCEPTION
+// subtype (FATAL_EXCEPTIONS / EXCEPTIONS, split by isFatal); OTHERS is whatever (if anything)
+// doesn't match any of those four — always empty today, see CrashCategory's doc.
+fun crashSitesForCategory(sites: List<CrashSite>, category: CrashCategory): List<CrashSite> = when (category) {
+    CrashCategory.ALL -> sites
+    CrashCategory.CRASHES -> sites.filter { it.kind == CrashKind.NATIVE_CRASH }
+    CrashCategory.ANRS -> sites.filter { it.kind == CrashKind.ANR }
+    CrashCategory.FATAL_EXCEPTIONS -> sites.filter { it.kind == CrashKind.EXCEPTION && it.isFatal }
+    CrashCategory.EXCEPTIONS -> sites.filter { it.kind == CrashKind.EXCEPTION && !it.isFatal }
+    CrashCategory.OTHERS -> sites.filterNot {
+        it.kind == CrashKind.NATIVE_CRASH || it.kind == CrashKind.ANR || it.kind == CrashKind.EXCEPTION
+    }
 }

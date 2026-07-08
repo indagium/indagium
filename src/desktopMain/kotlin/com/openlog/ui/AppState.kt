@@ -42,6 +42,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 private fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = EntryIdMap(data)
 
+// Separators the "Hide/Show messages like this" (and "Add as sequence") flyout truncates a
+// message at — the same rough set a human skimming logcat output uses to separate a message's
+// stable/templated part from its variable tail, e.g. "Card stack expanded: stackId=stack_home"
+// truncates at ':' first ("Card stack expanded") then at '=' ("Card stack expanded: stackId").
+private val MESSAGE_RULE_SEPARATORS = charArrayOf('-', '/', '\\', ',', '.', ':', '=')
+
+// Loop safety cap for resolveNoteTarget's "_2", "_3", ... disambiguation walk — effectively
+// unreachable in practice (that many genuinely distinct files sharing one display name), just a
+// hard stop against an unbounded loop.
+private const val MAX_NOTE_TARGET_SUFFIX = 1000
+
 private fun buildLogAnalysis(data: List<LogEntry>): LogAnalysis {
     val stackGroups = computeStackTraceGroups(data)
     return LogAnalysis(
@@ -661,6 +672,32 @@ class AppState(
 
     fun removeHl(tabId: String, id: String) =
         upFlt(tabId) { f -> f.copy(highlighters = f.highlighters.filter { it.id != id }) }
+
+    // Finds the enabled highlighter that the given selection is an exact instance of — a plain
+    // pattern must equal the (trimmed) selection verbatim, a regex pattern must fully match it —
+    // so the ctx menu can offer "Remove highlight" only when the user selected a fully highlighted
+    // span, not just any text that happens to overlap one.
+    private fun highlighterMatchingSelection(highlighters: List<Highlighter>, selText: String): Highlighter? {
+        val sel = selText.trim()
+        if (sel.isBlank()) return null
+        return highlighters.filter { it.on }.firstOrNull { hl ->
+            if (hl.regex) {
+                runCatching { Regex(hl.pattern, RegexOption.IGNORE_CASE).matches(sel) }.getOrDefault(false)
+            } else {
+                hl.pattern.equals(sel, ignoreCase = true)
+            }
+        }
+    }
+
+    fun matchingHighlighterId(tabId: String, selText: String): String? =
+        highlighterMatchingSelection(tab(tabId)?.filter?.highlighters.orEmpty(), selText)?.id
+
+    fun removeHlFromCtx() {
+        val c = ctx ?: return
+        val hl = highlighterMatchingSelection(tab(c.tabId)?.filter?.highlighters.orEmpty(), c.selText) ?: return
+        removeHl(c.tabId, hl.id)
+        ctx = null
+    }
 
     fun toggleHl(tabId: String, id: String) = upFlt(tabId) { f ->
         f.copy(highlighters = f.highlighters.map { if (it.id == id) it.copy(on = !it.on) else it })
@@ -1429,14 +1466,57 @@ class AppState(
     fun toggleUnfiltered(tabId: String) = upTab(tabId) { it.copy(showUnfiltered = !it.showUnfiltered) }
 
     // ── Annotations (block model) ────────────────────────────────────
+    // Zip-backed tabs encode sourcePath as "<absZipPath>!<entryPath>" (see openZipEntry) — the
+    // bare entry filename alone doesn't say which archive it came from, so this is qualified
+    // unconditionally, regardless of whether it collides with the other tab's name.
+    // Truncates `msg` right before the nth (1-indexed) separator character — the same rough
+    // "stable prefix" heuristic a human skimming a log message uses to spot its templated part
+    // before the variable tail (ids, durations, paths...). Returns the full message if there are
+    // fewer than n separators.
+    private fun truncateAtMessageSeparator(msg: String, n: Int): String {
+        var count = 0
+        for (i in msg.indices) {
+            if (msg[i] in MESSAGE_RULE_SEPARATORS) {
+                count++
+                if (count == n) return msg.substring(0, i).trimEnd()
+            }
+        }
+        return msg
+    }
+
+    private fun archiveQualifiedLabel(sourcePath: String?): String? {
+        val bangIdx = sourcePath?.indexOf('!') ?: return null
+        if (bangIdx < 0) return null
+        val zipPath = sourcePath.substring(0, bangIdx)
+        val entryPath = sourcePath.substring(bangIdx + 1)
+        return "${File(zipPath).name}/$entryPath"
+    }
+
+    // "From <label>" source display for a cross-tab annotation (compare mode, or referencing
+    // another open tab). A plain file only gets its parent folder prefixed when its filename
+    // actually collides with otherFilename (e.g. comparing two same-named files from different
+    // folders) — otherwise the bare filename stays the simple, unqualified default.
+    private fun displaySourceLabel(sourcePath: String?, filename: String, otherFilename: String?): String {
+        archiveQualifiedLabel(sourcePath)?.let { return it }
+        if (sourcePath != null && filename == otherFilename) {
+            File(sourcePath).parentFile?.name?.let { return "$it/$filename" }
+        }
+        return filename
+    }
+
     fun requestAddAnn(sourceTabId: String, logIds: List<Int>) {
         val targetTabId = if (compareMode && sourceTabId != activeTabId) activeTabId else sourceTabId
         val crossFile = targetTabId != sourceTabId
+        val sourceTab = tab(sourceTabId)
         addAnnRequest = AddAnnRequest(
             targetTabId = targetTabId,
             sourceTabId = sourceTabId,
             logIds = logIds,
-            sourceFilename = if (crossFile) tab(sourceTabId)?.filename else null,
+            sourceFilename = if (crossFile && sourceTab != null) {
+                displaySourceLabel(sourceTab.sourcePath, sourceTab.filename, tab(targetTabId)?.filename)
+            } else {
+                null
+            },
         )
         ctx = null
     }
@@ -1558,18 +1638,42 @@ class AppState(
         return s
     }
 
-    fun addTagFilterFromCtx() {
-        val c = ctx ?: return; toggleTag(c.tabId, tab(c.tabId)?.rmap?.get(c.entryId)?.tag ?: return); ctx = null
+    // Re-centers the viewport on `entryId` after a ctx-menu action changes the tab's filter
+    // (message rule / tag include-exclude / keyword mode) — those can add or remove rows above
+    // the current scroll position, so without this the row the user just acted on visually
+    // "jumps" to wherever the now-stale scroll index happens to land. Reuses the same
+    // jump-to-log-line mechanism as annotation/crash navigation (pendingAnnotationNavigation,
+    // see requestCrashNavigation), which already knows how to auto-expand whatever collapsed
+    // group ends up owning the row.
+    private fun requestScrollAnchor(tabId: String, entryId: Int) {
+        setSelectedRows(tabId, listOf(entryId))
+        annotationNavigationCounter += 1
+        pendingAnnotationNavigation = AnnotationNavigationRequest(annotationNavigationCounter, tabId, listOf(entryId))
     }
 
+    fun addTagFilterFromCtx() {
+        val c = ctx ?: return
+        val tag = tab(c.tabId)?.rmap?.get(c.entryId)?.tag ?: return
+        toggleTag(c.tabId, tag); requestScrollAnchor(c.tabId, c.entryId); ctx = null
+    }
+
+    // No requestScrollAnchor — excluding this row's own tag removes it from the filtered view.
     fun addExcludeTagFromCtx() {
-        val c = ctx ?: return; toggleExcludeTag(c.tabId, tab(c.tabId)?.rmap?.get(c.entryId)?.tag ?: return); ctx = null
+        val c = ctx ?: return
+        val tag = tab(c.tabId)?.rmap?.get(c.entryId)?.tag ?: return
+        toggleExcludeTag(c.tabId, tag); ctx = null
     }
 
     fun addHlFromCtx() {
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
-        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
+        // Unlike the message-only actions below, highlighter matching runs against the full
+        // rendered line (ts/pid/tid/level/tag/msg — see fullLineText/buildFullLineAnnotation in
+        // LogViewer.kt), so the raw selection is used verbatim rather than run through
+        // extractMsgText — that helper strips a "tag: " prefix on the assumption the pattern only
+        // ever matches entry.msg, which would silently change what a cross-boundary selection
+        // (e.g. spanning tag + message) actually highlights.
+        val text = c.selText.trim().ifBlank { entry.msg }
         addHl(c.tabId, text, false, newHlColor); ctx = null
     }
 
@@ -1586,6 +1690,15 @@ class AppState(
         addSequence(text, false, newSeqColor, entry.tag); ctx = null
     }
 
+    // Same match-scope choice as the "Hide/Show messages like this" flyout (see
+    // messageRuleVariantsFromCtx) — reused as-is since SequenceDef.tag is nullable/scoping exactly
+    // like MessageRule.tag.
+    fun addSequenceVariant(variant: MessageRuleVariant) {
+        if (ctx == null) return
+        addSequence(variant.pattern, false, newSeqColor, variant.tag)
+        ctx = null
+    }
+
     fun collapseToStartFromCtx() {
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
@@ -1600,11 +1713,21 @@ class AppState(
         ctx = null
     }
 
-    private fun addManualCollapse(tabId: String, anchorId: Int, direction: ManualCollapseDirection) =
+    private fun addManualCollapse(tabId: String, anchorId: Int, direction: ManualCollapseDirection, endId: Int? = null) =
         upTab(tabId) { t ->
             val id = "mc${System.currentTimeMillis()}_${anchorId}_${direction.name}"
-            t.copy(manualBlocks = t.manualBlocks + ManualCollapseBlock(id, anchorId, direction))
+            t.copy(manualBlocks = t.manualBlocks + ManualCollapseBlock(id, anchorId, direction, endId = endId))
         }
+
+    // Collapses an arbitrary multi-line selection into one block — unlike collapseTo{Start,End}Ctx
+    // (anchored to a file edge), this covers exactly [min(ids), max(ids)] regardless of which of
+    // the selected rows was right-clicked.
+    fun collapseSelectedLinesFromCtx(tabId: String, ids: Set<Int>) {
+        if (ids.size < 2) return
+        val sorted = ids.sorted()
+        addManualCollapse(tabId, sorted.first(), ManualCollapseDirection.RANGE, endId = sorted.last())
+        ctx = null
+    }
 
     fun toggleManualCollapse(tabId: String, id: String) = upTab(tabId) { t ->
         t.copy(manualBlocks = t.manualBlocks.map { if (it.id == id) it.copy(enabled = !it.enabled) else it })
@@ -1632,13 +1755,8 @@ class AppState(
         ctx = null
     }
 
-    fun addNegKwFromCtx() {
-        val c = ctx ?: return
-        val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
-        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
-        setExcludeKw(c.tabId, text); ctx = null
-    }
-
+    // No requestScrollAnchor — this excludes the acted-on row from the filtered view by
+    // definition, so there's nothing sensible to re-select/re-center on.
     fun hideMessagesLikeCtx() {
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
@@ -1652,15 +1770,52 @@ class AppState(
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
         val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
         addMessageRule(c.tabId, include = true, pattern = text, regex = false, tag = entry.tag, packagePrefix = null)
+        requestScrollAnchor(c.tabId, c.entryId)
         ctx = null
     }
 
-    fun addKwFilterFromCtx() {
+    // Scope + pattern for one "Hide/Show messages like this" flyout choice. tag == null means
+    // unscoped (matches the pattern in any tag), matching addMessageRule's existing tag/
+    // packagePrefix scoping fields — no separate "bake the tag into the pattern" step needed.
+    data class MessageRuleVariant(val label: String, val pattern: String, val tag: String?)
+
+    // Up to 4 match-scope choices for the ▶ flyout on "Hide/Show messages like this":
+    //  - with a selection: tag-scoped selection, then unscoped selection (2 choices — there's no
+    //    separator truncation to vary once the user already picked the exact text).
+    //  - without a selection: tag-scoped message truncated at the 1st separator, then the 2nd,
+    //    then the same two unscoped — the same four separators (- / \ , .) the message-rule
+    //    itself will later match against.
+    fun messageRuleVariantsFromCtx(): List<MessageRuleVariant> {
+        val c = ctx ?: return emptyList()
+        val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return emptyList()
+        if (c.selText.isNotBlank()) {
+            val text = extractMsgText(c.selText, entry)
+            return listOf(
+                MessageRuleVariant("${entry.tag}: $text", text, entry.tag),
+                MessageRuleVariant(text, text, null),
+            )
+        }
+        val toFirst = truncateAtMessageSeparator(entry.msg, 1)
+        val toSecond = truncateAtMessageSeparator(entry.msg, 2)
+        return buildList {
+            add(MessageRuleVariant("${entry.tag}: $toFirst", toFirst, entry.tag))
+            if (toSecond != toFirst) add(MessageRuleVariant("${entry.tag}: $toSecond", toSecond, entry.tag))
+            add(MessageRuleVariant(toFirst, toFirst, null))
+            if (toSecond != toFirst) add(MessageRuleVariant(toSecond, toSecond, null))
+        }.take(4)
+    }
+
+    // No requestScrollAnchor — see hideMessagesLikeCtx.
+    fun hideMessagesLikeVariant(variant: MessageRuleVariant) {
         val c = ctx ?: return
-        val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
-        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
-        setFilterMode(c.tabId, FilterMode.KEYWORD)
-        setKw(c.tabId, text)
+        addMessageRule(c.tabId, include = false, pattern = variant.pattern, regex = false, tag = variant.tag, packagePrefix = null)
+        ctx = null
+    }
+
+    fun showOnlyMessagesLikeVariant(variant: MessageRuleVariant) {
+        val c = ctx ?: return
+        addMessageRule(c.tabId, include = true, pattern = variant.pattern, regex = false, tag = variant.tag, packagePrefix = null)
+        requestScrollAnchor(c.tabId, c.entryId)
         ctx = null
     }
 
@@ -2096,10 +2251,13 @@ class AppState(
                 val logData = runCatching { extractCandidate(zipFile, candidate) }.getOrElse { emptyList() }
                 ensureActive()
                 val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
+                // Archive-sourced tabs always get an archive-qualified prefix ("archive.zip/entry/
+                // path.log") — the bare display name alone doesn't say which archive it came from.
+                val prefixName = archiveQualifiedLabel(path) ?: candidate.displayName
                 val t = mkTab(tabId, candidate.displayName, logData, analysis = pendingAnalysis(logData))
                     .copy(
                         sourcePath = path,
-                        annotations = Annotations(prefix = "$prefixLabel ${candidate.displayName}"),
+                        annotations = Annotations(prefix = "$prefixLabel $prefixName"),
                         largeFileMode = largeFile,
                     )
                 synchronized(stateLock) {
@@ -2255,7 +2413,7 @@ class AppState(
     }
 
     fun copyAnn(tabId: String) {
-        tab(tabId)?.let { copyToClipboard(buildMd(it, settings)) }
+        tab(tabId)?.let { copyToClipboard(maskWordForCopy(buildMd(it, settings), settings)) }
     }
 
     fun exportAnalysisTo(tabId: String, file: File): Boolean {
@@ -2384,9 +2542,20 @@ class AppState(
         return listOf(analysisNoteMarkdownName(filename))
     }
 
+    // Two tabs can share a bare filename while being entirely different files (different
+    // folders, or one from inside a zip) — matching by name alone would surface one file's notes
+    // as a "recent note" suggestion for the other. Excludes only on POSITIVE evidence of a
+    // mismatch (both a recorded fingerprint and a known sourcePath for this tab, and they
+    // differ); a note saved before this fingerprinting existed (no .src sidecar) or a tab with no
+    // sourcePath (e.g. a merged tab) still matches by name as before — see resolveNoteTarget.
     fun recentNotesForTab(tab: LogTab): List<String> {
         val relatedNames = noteNamesForFilename(tab.filename).toSet()
-        return recentNotes.filter { path -> File(path).name in relatedNames }
+        return recentNotes.filter { path ->
+            val f = File(path)
+            if (f.name !in relatedNames) return@filter false
+            val recorded = readSourceFingerprint(f)
+            recorded == null || tab.sourcePath == null || recorded == tab.sourcePath
+        }
     }
 
     private fun rememberAutoExportedNoteFor(filename: String) {
@@ -2430,13 +2599,53 @@ class AppState(
             runCatching {
                 val targetDir = activeNotesDir()
                 targetDir.mkdirs()
-                val mdFile = File(targetDir, analysisNoteMarkdownName(tab.filename))
+                val mdFile = resolveNoteTarget(targetDir, tab.filename, tab.sourcePath)
                 mdFile.writeText(buildMd(tab, settings))
                 // Sidecar stores full block state for restoration
                 File(targetDir, "${mdFile.nameWithoutExtension}.ann").writeText(tab.annotations.annotationsToken())
+                writeSourceFingerprint(mdFile, tab.sourcePath)
                 rememberRecentNote(mdFile)
             }
         }
+    }
+
+    // Fingerprint sidecar recording which sourcePath a saved note "<name>_analysis.md" actually
+    // belongs to — lets resolveNoteTarget/recentNotesForTab tell apart two different files that
+    // happen to share a display name, without changing the plain filename in the common
+    // (non-colliding) case. Deliberately a tiny separate file rather than a new field in the
+    // .ann token format: the .ann/.md pair's own format is shared with the user-facing
+    // Save/Open-note flow and stays untouched by this auto-export-only bookkeeping.
+    private fun sourceFingerprintFile(mdFile: File): File = File(mdFile.parent, "${mdFile.name}.src")
+
+    private fun readSourceFingerprint(mdFile: File): String? =
+        sourceFingerprintFile(mdFile).takeIf { it.exists() }
+            ?.let { runCatching { it.readText().trim() }.getOrNull() }
+            ?.takeIf { it.isNotBlank() }
+
+    private fun writeSourceFingerprint(mdFile: File, sourcePath: String?) {
+        if (sourcePath == null) return
+        runCatching { sourceFingerprintFile(mdFile).writeText(sourcePath) }
+    }
+
+    // Picks the .md target for this tab's auto-exported note in targetDir. Reuses the plain
+    // "<name>_analysis.md" whenever there's no evidence of a different owner (no fingerprint
+    // recorded yet — a legacy or first-time save — or it already matches this tab's sourcePath,
+    // or this tab has no sourcePath to compare); otherwise walks "_2", "_3", ... until it finds a
+    // slot with no conflicting fingerprint, so a genuine collision no longer silently overwrites
+    // an unrelated file's saved notes.
+    private fun resolveNoteTarget(targetDir: File, filename: String, sourcePath: String?): File {
+        val baseName = analysisNoteMarkdownName(filename)
+        if (sourcePath == null) return File(targetDir, baseName)
+        var candidateName = baseName
+        var suffix = 2
+        while (suffix < MAX_NOTE_TARGET_SUFFIX) {
+            val candidate = File(targetDir, candidateName)
+            val recorded = readSourceFingerprint(candidate)
+            if (recorded == null || recorded == sourcePath) return candidate
+            candidateName = "${baseName.removeSuffix(".md")}_$suffix.md"
+            suffix++
+        }
+        return File(targetDir, candidateName)
     }
 
     // Annotation-aware tab updater — auto-exports after any annotation change.
@@ -2891,6 +3100,20 @@ private fun tokenFields(vararg values: String): String = values.joinToString("|"
 
 private fun String.tokenFields(): List<String> = split("|", limit = Int.MAX_VALUE).map { it.fieldValue() }
 
+// Some issue trackers (certain Jira instances) reject a comment containing the literal word
+// "java" outside a code block. Masks a configurable whole word (default "java") when copying a
+// note's Markdown — skips the {code:java}/{code} fence marker lines buildMd() emits for
+// AnnotationLogBlockStyle.JIRA_JAVA so the block's type token itself is never mangled.
+internal fun maskWordForCopy(text: String, settings: AppSettings): String {
+    if (!settings.maskWordOnCopy || settings.maskWordTarget.isBlank()) return text
+    val wordRegex = Regex("\\b${Regex.escape(settings.maskWordTarget)}\\b")
+    return text.lines().joinToString("\n") { line ->
+        val trimmed = line.trim()
+        if (trimmed == "{code:java}" || trimmed == "{code}") line
+        else wordRegex.replace(line, settings.maskWordReplacement)
+    }
+}
+
 private fun analysisNoteMarkdownName(filename: String): String {
     val base = filename.substringBeforeLast('.', filename)
     val safeBase = base.replace(Regex("[^a-zA-Z0-9_-]"), "_").ifBlank { "analysis" }
@@ -2921,6 +3144,10 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     autoLogRowWrap.toString(),
     mcpControlEnabled.toString(),
     mcpControlPort.toString(),
+    maskWordOnCopy.toString(),
+    maskWordTarget,
+    maskWordReplacement,
+    highlightEntireCrashGroup.toString(),
 )
 
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
@@ -2959,6 +3186,10 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         },
         mcpControlEnabled = p.getOrNull(mcpIndex)?.toBooleanStrictOrNull() ?: false,
         mcpControlPort = p.getOrNull(mcpIndex + 1)?.toIntOrNull()?.coerceIn(MIN_PORT, MAX_PORT) ?: DEFAULT_MCP_PORT,
+        maskWordOnCopy = p.getOrNull(mcpIndex + 2)?.toBooleanStrictOrNull() ?: false,
+        maskWordTarget = p.getOrNull(mcpIndex + 3)?.takeIf { it.isNotBlank() } ?: "java",
+        maskWordReplacement = p.getOrNull(mcpIndex + 4)?.takeIf { it.isNotBlank() } ?: "j*ava",
+        highlightEntireCrashGroup = p.getOrNull(mcpIndex + 5)?.toBooleanStrictOrNull() ?: false,
     )
 }.getOrNull()
 
@@ -2995,6 +3226,7 @@ private fun FilterPanelUiState.filterPanelToken(): String = tokenFields(
     incMsgPillsExpanded.toString(),
     excMsgPillsExpanded.toString(),
     crashExpanded.toString(),
+    crashCategory.name,
 )
 
 private fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
@@ -3008,6 +3240,7 @@ private fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
     incMsgPillsExpanded = p[5].toBoolean()
     excMsgPillsExpanded = p[6].toBoolean()
     crashExpanded = p.getOrNull(7)?.toBooleanStrictOrNull() ?: crashExpanded
+    crashCategory = p.getOrNull(8)?.let { runCatching { CrashCategory.valueOf(it) }.getOrNull() } ?: crashCategory
 }
 
 private fun AppState.activeFilterMapToken(): String =
@@ -3192,6 +3425,7 @@ private fun ManualCollapseBlock.manualBlockToken(): String = tokenFields(
     direction.name,
     color.value.toString(),
     enabled.toString(),
+    endId?.toString().orEmpty(),
 )
 
 private fun String.manualBlockFromToken(): ManualCollapseBlock? = runCatching {
@@ -3203,6 +3437,7 @@ private fun String.manualBlockFromToken(): ManualCollapseBlock? = runCatching {
         direction = runCatching { ManualCollapseDirection.valueOf(p[2]) }.getOrElse { ManualCollapseDirection.TO_END },
         color = Color(p[3].toULong()),
         enabled = p[4].toBoolean(),
+        endId = p.getOrNull(5)?.toIntOrNull(),
     )
 }.getOrNull()
 

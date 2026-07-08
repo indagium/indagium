@@ -16,6 +16,7 @@ import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.DragData
 import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -32,11 +33,12 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -47,6 +49,7 @@ import com.openlog.model.*
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.containsPattern
+import com.openlog.utils.crashSitesForCategory
 import com.openlog.utils.firstRegexMatch
 import com.openlog.utils.passesFilter
 import java.io.File
@@ -123,6 +126,7 @@ class FilterPanelUiState {
     var lvlExpanded         by mutableStateOf(true)
     var seqExpanded         by mutableStateOf(true)
     var crashExpanded       by mutableStateOf(true)
+    var crashCategory       by mutableStateOf(CrashCategory.ALL)
     var sfExpanded          by mutableStateOf(true)
     var incPillsExpanded    by mutableStateOf(true)
     var incMsgPillsExpanded by mutableStateOf(true)
@@ -212,7 +216,7 @@ fun FilterPanel(
 
     // While the background analysis is pending this must NOT fall through to the synchronous
     // computation — that's a multi-second full-file scan and this runs during composition.
-    val crashSites = remember(tab.id, tab.analysis.crashSites, tab.analysis.pending, tab.logData) {
+    val allCrashSites = remember(tab.id, tab.analysis.crashSites, tab.analysis.pending, tab.logData) {
         when {
             tab.analysis.pending -> emptyList()
             tab.analysis.crashSites.isNotEmpty() -> tab.analysis.crashSites
@@ -221,6 +225,9 @@ fun FilterPanel(
                 computeCrashSites(tab.logData, stackGroups)
             }
         }
+    }
+    val crashSites = remember(allCrashSites, fpState.crashCategory) {
+        crashSitesForCategory(allCrashSites, fpState.crashCategory)
     }
 
     // Tags sorted by frequency in log data; default suggestions come from user tag usage.
@@ -512,6 +519,7 @@ fun FilterPanel(
         messageRuleScopeOptions(scopeOptionTags, msgRuleScopeSearch)
     }
     val searchedMsgRuleScopeOptions = remember(msgRuleScopeOptions) { msgRuleScopeOptions.drop(1) }
+
     fun openMessageRuleScopeChooser(include: Boolean, pattern: String, regex: Boolean, target: RuleTarget) {
         pendingMessageRule = PendingMessageRuleDraft(include, pattern, regex, target)
         msgRuleScopeOpen = true
@@ -519,6 +527,7 @@ fun FilterPanel(
         msgRuleScopeSelectedIdx = 0
         showMsgRuleCandidates = false
     }
+
     fun cancelPendingMessageRule() {
         pendingMessageRule = null
         msgRuleScopeOpen = false
@@ -534,6 +543,7 @@ fun FilterPanel(
         onSetKwInTag("")
         runCatching { msgRuleFr.requestFocus() }
     }
+
     fun commitPendingMessageRule(scope: MessageRuleScopeOption) {
         val pending = pendingMessageRule ?: return
         onAddMessageRule(pending.include, pending.pattern, pending.regex, scope.tag, scope.packagePrefix, pending.target)
@@ -547,6 +557,7 @@ fun FilterPanel(
         msgRuleSelectedAction = 0
         runCatching { msgRuleFr.requestFocus() }
     }
+
     fun clearTagSearch() {
         tagInput = inputValueAfterEscape(tagInput, escapePressed = true)
         tagSearch = ""
@@ -1536,7 +1547,11 @@ fun FilterPanel(
                             horizontalArrangement = Arrangement.spacedBy(5.dp),
                         ) {
                             Box(Modifier.size(10.dp).background(if (block.enabled) block.color else tc.br, RoundedCornerShape(2.dp)))
-                            val direction = if (block.direction == ManualCollapseDirection.TO_START) "to start" else "to end"
+                            val direction = when (block.direction) {
+                                ManualCollapseDirection.TO_START -> "to start"
+                                ManualCollapseDirection.TO_END -> "to end"
+                                ManualCollapseDirection.RANGE -> "selection"
+                            }
                             Column(Modifier.weight(1f)) {
                                 AppText(direction, color = if (block.enabled) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO)
                                 AppText(
@@ -1544,9 +1559,8 @@ fun FilterPanel(
                                     color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis,
                                 )
                             }
-                            AppText(if (block.enabled) "●" else "○", color = if (block.enabled) block.color else tc.td,
-                                fontSize = 11.sp, modifier = Modifier.clickable { onToggleManualCollapse(block.id) })
-                            AppText("×", color = tc.td, fontSize = 14.sp, modifier = Modifier.clickable { onRemoveManualCollapse(block.id) })
+                            RoundIndicator(active = block.enabled, color = block.color, onClick = { onToggleManualCollapse(block.id) })
+                            SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveManualCollapse(block.id) })
                         }
                     }
                 }
@@ -1624,6 +1638,19 @@ fun FilterPanel(
             },
         )
         if (fpState.crashExpanded) {
+            val crashCategoryCounts = remember(allCrashSites) {
+                CrashCategory.entries.associateWith { c -> crashSitesForCategory(allCrashSites, c).size }
+            }
+            Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                CrashCategoryDropdown(
+                    category = fpState.crashCategory,
+                    counts = crashCategoryCounts,
+                    onSelect = { category ->
+                        fpState.crashCategory = category
+                        onUiStateChanged()
+                    },
+                )
+            }
             if (crashSites.isEmpty()) {
                 Column(
                     Modifier.fillMaxWidth().padding(vertical = 16.dp),
@@ -1632,7 +1659,7 @@ fun FilterPanel(
                 ) {
                     AppText("◆", color = tc.td.copy(.33f), fontSize = 18.sp)
                     AppText(
-                        if (tab.analysis.pending) "Analyzing crashes…" else "No exceptions or ANRs found",
+                        if (tab.analysis.pending) "Analyzing crashes…" else "None found in this category",
                         color = tc.td,
                         fontSize = 10.sp,
                         maxLines = 2,
@@ -1768,14 +1795,118 @@ private fun BoundedScrollBox(
     }
 }
 
-private fun CrashSite.accentColor(): Color = when (kind) {
-    CrashKind.EXCEPTION -> DANGER_RED
-    CrashKind.ANR -> LogLevel.W.defaultColor
+private val NATIVE_CRASH_COLOR = Color(0xFF8957e5)
+
+private fun CrashSite.accentColor(): Color = when {
+    kind == CrashKind.NATIVE_CRASH -> NATIVE_CRASH_COLOR
+    kind == CrashKind.ANR -> LogLevel.W.defaultColor
+    isFatal -> DANGER_RED
+    else -> LogLevel.D.defaultColor
 }
 
-private fun CrashSite.kindLabel(): String = when (kind) {
-    CrashKind.EXCEPTION -> "Exception"
-    CrashKind.ANR -> "ANR"
+private fun CrashSite.kindLabel(): String = when {
+    kind == CrashKind.NATIVE_CRASH -> "Native crash"
+    kind == CrashKind.ANR -> "ANR"
+    isFatal -> "Fatal exception"
+    else -> "Exception"
+}
+
+private fun CrashCategory.label(): String = when (this) {
+    CrashCategory.ALL -> "All"
+    CrashCategory.CRASHES -> "Crashes"
+    CrashCategory.ANRS -> "ANRs"
+    CrashCategory.FATAL_EXCEPTIONS -> "Fatal Exceptions"
+    CrashCategory.EXCEPTIONS -> "Exceptions"
+    CrashCategory.OTHERS -> "Others"
+}
+
+// Hand-rolled dropdown (matching this file's/App.kt's convention of custom-styled Popups rather
+// than Material's default DropdownMenu chrome) — a clickable field showing the current category
+// that opens a themed option list on click. The popup's width is measured from the field itself
+// (rather than a fixed guess) so it never leaves a gap at the edge showing the crash list behind it.
+@Composable
+private fun CrashCategoryDropdown(
+    category: CrashCategory,
+    counts: Map<CrashCategory, Int>,
+    onSelect: (CrashCategory) -> Unit,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var open by remember { mutableStateOf(false) }
+    var fieldWidth by remember { mutableStateOf(0.dp) }
+    // The Popup's own dismissOnClickOutside also fires for a click back on the field itself (it's
+    // "outside" the popup's bounds) — without this guard, that dismiss (closing it) and the
+    // field's own onClick (toggling it) can both fire for the same press, netting out to "stayed
+    // open" instead of the intended close. Suppressing the toggle for a moment after a dismiss
+    // makes a click on the field while open reliably close it instead of racing back open.
+    var suppressToggleUntilMs by remember { mutableStateOf(0L) }
+    Box(
+        Modifier.fillMaxWidth().onGloballyPositioned { coords ->
+            fieldWidth = with(density) { coords.size.width.toDp() }
+        },
+    ) {
+        HoverBox(
+            modifier = Modifier.fillMaxWidth().height(26.dp)
+                .clip(CORNER_SM)
+                .background(tc.p2, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM),
+            onClick = {
+                if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open
+            },
+        ) {
+            Row(
+                Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                AppText(category.label(), color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
+            }
+        }
+        if (open) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
+                onDismissRequest = {
+                    open = false
+                    suppressToggleUntilMs = System.currentTimeMillis() + 200
+                },
+                properties = PopupProperties(focusable = false),
+            ) {
+                Column(
+                    Modifier.width(fieldWidth)
+                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    CrashCategory.entries.forEach { c ->
+                        val active = c == category
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                            baseBg = if (active) tc.abg else Color.Transparent,
+                            onClick = { open = false; onSelect(c) },
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                AppText(
+                                    c.label(),
+                                    color = if (active) tc.ac else tc.tx,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                )
+                                AppText("${counts[c] ?: 0}", color = if (active) tc.ac else tc.td, fontSize = 10.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable

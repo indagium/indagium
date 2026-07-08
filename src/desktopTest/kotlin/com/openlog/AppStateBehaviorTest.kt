@@ -6,6 +6,7 @@ import com.openlog.model.AnnBlock
 import com.openlog.model.AnnotationLogBlockStyle
 import com.openlog.model.Annotations
 import com.openlog.model.AppSettings
+import com.openlog.model.CrashCategory
 import com.openlog.model.CtxMenuState
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
@@ -23,6 +24,7 @@ import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitMode
 import com.openlog.ui.blockOrderDuringDrag
 import com.openlog.ui.cumulativeBlockOffsets
+import com.openlog.ui.maskWordForCopy
 import com.openlog.ui.mkTab
 import com.openlog.ui.sequenceOrderDuringDrag
 import com.openlog.ui.sequenceRenderY
@@ -1330,6 +1332,22 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun openingAZipEntryGivesTheTabAnArchiveQualifiedAnnotationPrefix() {
+        val dir = createTempDirectory("openlog-zip-prefix").toFile()
+        val zip = buildZipFixture(
+            dir,
+            "bugreport.zip",
+            mapOf("FS/data/anr/main_log.txt" to "06-26 10:00:00.000  123  456 I App: hello\n"),
+        )
+        val state = AppState(File(dir, "state.cache"))
+
+        state.openZipFile(zip)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+
+        assertEquals("From bugreport.zip/FS/data/anr/main_log.txt", state.tabs.single().annotations.prefix)
+    }
+
+    @Test
     fun openMissingFileShowsErrorAndRemovesItFromRecentFiles() {
         val dir = createTempDirectory("openlog-open-error-missing").toFile()
         val missing = File(dir, "missing.log")
@@ -1569,6 +1587,7 @@ class AppStateBehaviorTest {
             incPillsExpanded = false
             incMsgPillsExpanded = false
             excMsgPillsExpanded = true
+            crashCategory = CrashCategory.FATAL_EXCEPTIONS
         }
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
@@ -1580,6 +1599,7 @@ class AppStateBehaviorTest {
         assertEquals(false, restored.fpState.incPillsExpanded)
         assertEquals(false, restored.fpState.incMsgPillsExpanded)
         assertEquals(true, restored.fpState.excMsgPillsExpanded)
+        assertEquals(CrashCategory.FATAL_EXCEPTIONS, restored.fpState.crashCategory)
     }
 
     @Test
@@ -1627,6 +1647,75 @@ class AppStateBehaviorTest {
         assertTrue(File(notesDir, "sample_analysis.ann").exists())
         assertTrue(!File(notesDir, "sample.log_notes.md").exists())
         assertEquals(listOf(File(notesDir, "sample_analysis.md").absolutePath), state.recentNotes)
+    }
+
+    @Test
+    fun autoExportDisambiguatesWhenADifferentFileSharesTheSameName() {
+        val dir = createTempDirectory("openlog-collision-notes").toFile()
+        val notesDir = File(dir, "notes")
+        val stateA = AppState(File(dir, "state-a.cache"), notesDir = notesDir)
+        stateA.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = File(dir, "folder_a/sample.log").absolutePath),
+        )
+        stateA.confirmAddAnn("log", "log", listOf(1), "notes for file A", null)
+        waitUntil { File(notesDir, "sample_analysis.md").exists() && File(notesDir, "sample_analysis.ann").exists() }
+        val originalContent = File(notesDir, "sample_analysis.md").readText()
+
+        // A different file (different sourcePath) that happens to share the same display name.
+        val stateB = AppState(File(dir, "state-b.cache"), notesDir = notesDir)
+        stateB.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "goodbye")))
+                .copy(sourcePath = File(dir, "folder_b/sample.log").absolutePath),
+        )
+        stateB.confirmAddAnn("log", "log", listOf(1), "notes for file B", null)
+        waitUntil { File(notesDir, "sample_analysis_2.md").exists() && File(notesDir, "sample_analysis_2.ann").exists() }
+
+        // File A's saved note must survive untouched — this is the silent-overwrite bug being fixed.
+        assertEquals(originalContent, File(notesDir, "sample_analysis.md").readText())
+        assertEquals(listOf(File(notesDir, "sample_analysis_2.md").absolutePath), stateB.recentNotes)
+    }
+
+    @Test
+    fun autoExportReusesPlainNameOnRepeatedSaveOfTheSameFile() {
+        val dir = createTempDirectory("openlog-same-file-notes").toFile()
+        val notesDir = File(dir, "notes")
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        val sourcePath = File(dir, "sample.log").absolutePath
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = sourcePath),
+        )
+
+        state.confirmAddAnn("log", "log", listOf(1), "first note", null)
+        waitUntil { File(notesDir, "sample_analysis.md").exists() }
+        state.addNoteBlock("log", "second note")
+        waitUntil { File(notesDir, "sample_analysis.md").readText().contains("second note") }
+
+        // Same sourcePath re-saving must keep reusing the plain name, never disambiguate itself.
+        assertTrue(!File(notesDir, "sample_analysis_2.md").exists())
+    }
+
+    @Test
+    fun recentNotesForTabExcludesNoteKnownToBelongToADifferentFile() {
+        val dir = createTempDirectory("openlog-recent-notes-collision").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        val noteFile = File(notesDir, "sample_analysis.md").apply { writeText("belongs to folder_a") }
+        File(notesDir, "sample_analysis.md.src").writeText(File(dir, "folder_a/sample.log").absolutePath)
+        state.recentNotes = listOf(noteFile.absolutePath)
+
+        val unrelatedTab = mkTab("log", "sample.log", emptyList())
+            .copy(sourcePath = File(dir, "folder_b/sample.log").absolutePath)
+        val sameTab = mkTab("log", "sample.log", emptyList())
+            .copy(sourcePath = File(dir, "folder_a/sample.log").absolutePath)
+        val unknownTab = mkTab("log", "sample.log", emptyList())
+
+        assertTrue(state.recentNotesForTab(unrelatedTab).isEmpty())
+        assertEquals(listOf(noteFile.absolutePath), state.recentNotesForTab(sameTab))
+        // No sourcePath to compare against (e.g. a merged tab) — can't prove a mismatch, so it
+        // still matches by name, same as before fingerprinting existed.
+        assertEquals(listOf(noteFile.absolutePath), state.recentNotesForTab(unknownTab))
     }
 
     @Test
@@ -2040,6 +2129,232 @@ class AppStateBehaviorTest {
         assertEquals(listOf(null, null), rules.map { it.packagePrefix })
     }
 
+    // ── requestScrollAnchor (via filter-changing ctx actions) ────────────────
+    // Filter/tag/keyword ctx actions can change which rows exist above the current scroll
+    // position; each one must re-request the jump-to-log-line navigation for the row it just
+    // acted on, so the viewport re-centers there instead of leaving a stale scroll index pointing
+    // at whatever row now happens to occupy that slot.
+
+    @Test
+    fun hideMessagesLikeCtxDoesNotRequestScrollAnchor() {
+        // Hiding excludes the acted-on row from the filtered view by definition — anchoring on it
+        // would just burn cycles (expansionAndIndexForEntry can never find it) for no visible
+        // benefit, which is exactly what made this action feel like a hang on large files.
+        val state = AppState()
+        state.tabs = listOf(mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "boom"))))
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
+
+        state.hideMessagesLikeCtx()
+
+        assertEquals(null, state.pendingAnnotationNavigation)
+    }
+
+    @Test
+    fun showOnlyMessagesLikeCtxRequestsScrollAnchorForActedOnRow() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "boom"))))
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
+
+        state.showOnlyMessagesLikeCtx()
+
+        assertEquals(listOf(1), state.pendingAnnotationNavigation?.logIds)
+    }
+
+    @Test
+    fun addTagFilterFromCtxRequestsScrollAnchorForActedOnRow() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "boom"))))
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
+
+        state.addTagFilterFromCtx()
+
+        assertEquals(listOf(1), state.pendingAnnotationNavigation?.logIds)
+    }
+
+    @Test
+    fun addExcludeTagFromCtxDoesNotRequestScrollAnchor() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "boom"))))
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
+
+        state.addExcludeTagFromCtx()
+
+        assertEquals(null, state.pendingAnnotationNavigation)
+    }
+
+    // ── messageRuleVariantsFromCtx / hideMessagesLikeVariant / showOnlyMessagesLikeVariant ────
+
+    @Test
+    fun messageRuleVariantsWithoutSelectionOffersFourSeparatorTruncatedChoices() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "Net", "conn/reset-retrying,attempt 3")
+        state.tabs = listOf(mkTab("log", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
+
+        val variants = state.messageRuleVariantsFromCtx()
+
+        assertEquals(
+            listOf(
+                Triple("Net: conn", "conn", "Net"),
+                Triple("Net: conn/reset", "conn/reset", "Net"),
+                Triple("conn", "conn", null),
+                Triple("conn/reset", "conn/reset", null),
+            ),
+            variants.map { Triple(it.label, it.pattern, it.tag) },
+        )
+    }
+
+    @Test
+    fun messageRuleVariantsHandleColonAndEqualsSeparators() {
+        // Exact reported example: "Card stack expanded: stackId=stack_home" — ':' is the 1st
+        // separator, '=' is the 2nd.
+        val state = AppState()
+        val entry = LogEntry(
+            1, "20:15:00.457", LogLevel.D, "com.my.app.ui.PetsScreen",
+            "Card stack expanded: stackId=stack_home",
+        )
+        state.tabs = listOf(mkTab("log", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
+
+        val variants = state.messageRuleVariantsFromCtx()
+
+        assertEquals(
+            listOf(
+                Triple("com.my.app.ui.PetsScreen: Card stack expanded", "Card stack expanded", "com.my.app.ui.PetsScreen"),
+                Triple(
+                    "com.my.app.ui.PetsScreen: Card stack expanded: stackId",
+                    "Card stack expanded: stackId",
+                    "com.my.app.ui.PetsScreen",
+                ),
+                Triple("Card stack expanded", "Card stack expanded", null),
+                Triple("Card stack expanded: stackId", "Card stack expanded: stackId", null),
+            ),
+            variants.map { Triple(it.label, it.pattern, it.tag) },
+        )
+    }
+
+    @Test
+    fun messageRuleVariantsWithSelectionMatchingExactReportedExample() {
+        val state = AppState()
+        val entry = LogEntry(
+            1, "20:15:00.457", LogLevel.D, "com.my.app.ui.PetsScreen",
+            "Card stack expanded: stackId=stack_home",
+        )
+        state.tabs = listOf(mkTab("log", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "Card stack expanded: stackId")
+
+        val variants = state.messageRuleVariantsFromCtx()
+
+        assertEquals(
+            listOf(
+                Triple(
+                    "com.my.app.ui.PetsScreen: Card stack expanded: stackId",
+                    "Card stack expanded: stackId",
+                    "com.my.app.ui.PetsScreen",
+                ),
+                Triple("Card stack expanded: stackId", "Card stack expanded: stackId", null),
+            ),
+            variants.map { Triple(it.label, it.pattern, it.tag) },
+        )
+    }
+
+    @Test
+    fun messageRuleVariantsCollapseToTwoWhenMessageHasNoSeparators() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "Net", "nofillerhere")
+        state.tabs = listOf(mkTab("log", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
+
+        val variants = state.messageRuleVariantsFromCtx()
+
+        assertEquals(
+            listOf(
+                Triple("Net: nofillerhere", "nofillerhere", "Net"),
+                Triple("nofillerhere", "nofillerhere", null),
+            ),
+            variants.map { Triple(it.label, it.pattern, it.tag) },
+        )
+    }
+
+    @Test
+    fun messageRuleVariantsWithSelectionOffersTagScopedAndUnscopedChoices() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "Net", "conn/reset-retrying,attempt 3")
+        state.tabs = listOf(mkTab("log", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "attempt 3")
+
+        val variants = state.messageRuleVariantsFromCtx()
+
+        assertEquals(
+            listOf(
+                Triple("Net: attempt 3", "attempt 3", "Net"),
+                Triple("attempt 3", "attempt 3", null),
+            ),
+            variants.map { Triple(it.label, it.pattern, it.tag) },
+        )
+    }
+
+    @Test
+    fun hideMessagesLikeVariantAppliesTheChosenScopeAndPattern() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "Net", "conn/reset-retrying")
+        state.tabs = listOf(mkTab("log", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
+        val unscoped = state.messageRuleVariantsFromCtx().first { it.tag == null }
+
+        state.hideMessagesLikeVariant(unscoped)
+
+        val rule = state.tabs.single().filter.messageRules.single()
+        assertEquals(false, rule.include)
+        assertEquals(unscoped.pattern, rule.pattern)
+        assertEquals(null, rule.tag)
+        assertEquals(null, state.ctx)
+        assertEquals(null, state.pendingAnnotationNavigation)
+    }
+
+    @Test
+    fun showOnlyMessagesLikeVariantAppliesTheChosenScopeAndPattern() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "Net", "conn/reset-retrying")
+        state.tabs = listOf(mkTab("log", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
+        val tagScoped = state.messageRuleVariantsFromCtx().first { it.tag == "Net" }
+
+        state.showOnlyMessagesLikeVariant(tagScoped)
+
+        val rule = state.tabs.single().filter.messageRules.single()
+        assertEquals(true, rule.include)
+        assertEquals(tagScoped.pattern, rule.pattern)
+        assertEquals("Net", rule.tag)
+    }
+
+    @Test
+    fun collapseSelectedLinesFromCtxCoversMinToMaxOfTheSelection() {
+        val state = AppState()
+        val entries = (1..5).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        state.tabs = listOf(mkTab("log", "test.log", entries))
+        state.ctx = CtxMenuState("log", 3, 0f, 0f, "")
+
+        state.collapseSelectedLinesFromCtx("log", setOf(4, 2))
+
+        val block = state.tabs.single().manualBlocks.single()
+        assertEquals(ManualCollapseDirection.RANGE, block.direction)
+        assertEquals(2, block.anchorId)
+        assertEquals(4, block.endId)
+        assertEquals(null, state.ctx)
+    }
+
+    @Test
+    fun collapseSelectedLinesFromCtxIsNoOpForASingleLine() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
+
+        state.collapseSelectedLinesFromCtx("log", setOf(1))
+
+        assertTrue(state.tabs.single().manualBlocks.isEmpty())
+    }
+
     @Test
     fun canDisableAndRemoveManualCollapseBlocks() {
         val state = AppState()
@@ -2080,6 +2395,23 @@ class AppStateBehaviorTest {
         assertEquals("com.app.Start", sequence.tag)
         assertEquals("flow done", sequence.endMatchText)
         assertEquals("com.app.End", sequence.endTag)
+    }
+
+    @Test
+    fun addSequenceVariantAppliesTheChosenScopeAndPattern() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "Net", "conn/reset-retrying")
+        state.tabs = listOf(mkTab("log", "test.log", listOf(entry)))
+        state.activeTabId = "log"
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
+        val unscoped = state.messageRuleVariantsFromCtx().first { it.tag == null }
+
+        state.addSequenceVariant(unscoped)
+
+        val sequence = state.sequences.single()
+        assertEquals(unscoped.pattern, sequence.matchText)
+        assertEquals(null, sequence.tag)
+        assertEquals(null, state.ctx)
     }
 
     @Test
@@ -2172,6 +2504,10 @@ class AppStateBehaviorTest {
                 numberAnnotationBlocks = true,
                 logRowWrapLimitChars = 1200,
                 autoLogRowWrap = false,
+                maskWordOnCopy = true,
+                maskWordTarget = "kotlin",
+                maskWordReplacement = "k*otlin",
+                highlightEntireCrashGroup = true,
             )
         }
 
@@ -2186,6 +2522,10 @@ class AppStateBehaviorTest {
         assertEquals(true, restored.settings.numberAnnotationBlocks)
         assertEquals(1200, restored.settings.logRowWrapLimitChars)
         assertEquals(false, restored.settings.autoLogRowWrap)
+        assertEquals(true, restored.settings.maskWordOnCopy)
+        assertEquals("kotlin", restored.settings.maskWordTarget)
+        assertEquals("k*otlin", restored.settings.maskWordReplacement)
+        assertEquals(true, restored.settings.highlightEntireCrashGroup)
     }
 
     @Test
@@ -2230,6 +2570,31 @@ class AppStateBehaviorTest {
         assertEquals(1, restoredBlock.anchorId)
         assertEquals(ManualCollapseDirection.TO_END, restoredBlock.direction)
         assertEquals(Color.Red, restoredBlock.color)
+        assertEquals(null, restoredBlock.endId)
+    }
+
+    @Test
+    fun manualCollapseRangeBlockEndIdSurvivesAutosaveRoundTrip() {
+        val dir = createTempDirectory("openlog-manual-range").toFile()
+        val logFile = File(dir, "test.log").apply { writeText("06-26 10:00:00.000  1  1 I App: hello\n") }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        val block = ManualCollapseBlock("m1", 2, ManualCollapseDirection.RANGE, endId = 5)
+        state.tabs = listOf(
+            mkTab("log", "test.log", emptyList()).copy(
+                sourcePath = logFile.absolutePath,
+                manualBlocks = listOf(block),
+            ),
+        )
+        state.activeTabId = "log"
+
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        val restoredBlock = restored.tabs.single().manualBlocks.single()
+        assertEquals(ManualCollapseDirection.RANGE, restoredBlock.direction)
+        assertEquals(2, restoredBlock.anchorId)
+        assertEquals(5, restoredBlock.endId)
     }
 
     // ── Filter mutations ──────────────────────────────────────────────────────
@@ -2615,7 +2980,11 @@ class AppStateBehaviorTest {
         assertTrue(state.tabs.single().selected.isEmpty())
     }
 
-    // ── extractMsgText (via addHlFromCtx) ────────────────────────────────────
+    // ── extractMsgText (via hideMessagesLikeCtx) ──────────────────────────────
+    // Message-only ctx actions (sequence/message-rule filters) route the selection through
+    // extractMsgText since they match against entry.msg specifically. addHlFromCtx is
+    // deliberately NOT one of these vehicles — see its own tests below — because highlighter
+    // matching runs against the full rendered line, not just entry.msg.
 
     @Test
     fun extractMsgTextStripsTagColonPrefix() {
@@ -2625,9 +2994,9 @@ class AppStateBehaviorTest {
         state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
         state.ctx = CtxMenuState("t1", 1, 0f, 0f, "MyTag: partial text")
 
-        state.addHlFromCtx()
+        state.hideMessagesLikeCtx()
 
-        assertEquals("partial text", state.tabs.single().filter.highlighters.single().pattern)
+        assertEquals("partial text", state.tabs.single().filter.messageRules.single().pattern)
     }
 
     @Test
@@ -2638,9 +3007,166 @@ class AppStateBehaviorTest {
         state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
         state.ctx = CtxMenuState("t1", 1, 0f, 0f, "10:00:00.000  I MyTag real message")
 
+        state.hideMessagesLikeCtx()
+
+        assertEquals("real message", state.tabs.single().filter.messageRules.single().pattern)
+    }
+
+    // ── addHlFromCtx ──────────────────────────────────────────────────────────
+
+    @Test
+    fun addHlFromCtxUsesRawSelectionAcrossTagAndMessageBoundary() {
+        // A selection spanning part of the tag plus part of the message must be highlighted
+        // verbatim — extractMsgText's "tag: " stripping is for message-only actions and would
+        // otherwise silently drop the tag portion the user actually selected.
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "yTag: full mess")
+
         state.addHlFromCtx()
 
-        assertEquals("real message", state.tabs.single().filter.highlighters.single().pattern)
+        assertEquals("yTag: full mess", state.tabs.single().filter.highlighters.single().pattern)
+    }
+
+    @Test
+    fun addHlFromCtxFallsBackToFullMessageWhenNoSelection() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "")
+
+        state.addHlFromCtx()
+
+        assertEquals("full message", state.tabs.single().filter.highlighters.single().pattern)
+    }
+
+    // ── requestAddAnn source label (displaySourceLabel) ──────────────────────
+
+    @Test
+    fun requestAddAnnUsesArchiveQualifiedLabelForZipSourcedTab() {
+        val state = AppState()
+        val sourceTab = mkTab("src", "logcat.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+            .copy(sourcePath = "/abs/path/archive.zip!inner/dir/logcat.log")
+        val targetTab = mkTab("tgt", "other.log", emptyList())
+        state.tabs = listOf(sourceTab, targetTab)
+        state.compareMode = true
+        state.activeTabId = "tgt"
+
+        state.requestAddAnn("src", listOf(1))
+
+        assertEquals("archive.zip/inner/dir/logcat.log", state.addAnnRequest?.sourceFilename)
+    }
+
+    @Test
+    fun requestAddAnnUsesFolderQualifiedLabelWhenNamesCollide() {
+        val state = AppState()
+        val sourceTab = mkTab("src", "logcat.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+            .copy(sourcePath = "/tmp/folder_before/logcat.log")
+        val targetTab = mkTab("tgt", "logcat.log", emptyList())
+        state.tabs = listOf(sourceTab, targetTab)
+        state.compareMode = true
+        state.activeTabId = "tgt"
+
+        state.requestAddAnn("src", listOf(1))
+
+        assertEquals("folder_before/logcat.log", state.addAnnRequest?.sourceFilename)
+    }
+
+    @Test
+    fun requestAddAnnUsesBareFilenameWhenNoCollisionOrArchive() {
+        val state = AppState()
+        val sourceTab = mkTab("src", "logcat.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+            .copy(sourcePath = "/tmp/folder_before/logcat.log")
+        val targetTab = mkTab("tgt", "other.log", emptyList())
+        state.tabs = listOf(sourceTab, targetTab)
+        state.compareMode = true
+        state.activeTabId = "tgt"
+
+        state.requestAddAnn("src", listOf(1))
+
+        assertEquals("logcat.log", state.addAnnRequest?.sourceFilename)
+    }
+
+    @Test
+    fun requestAddAnnLeavesSourceFilenameNullWhenNotCrossFile() {
+        val state = AppState()
+        val tab = mkTab("t1", "logcat.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+        state.tabs = listOf(tab)
+
+        state.requestAddAnn("t1", listOf(1))
+
+        assertEquals(null, state.addAnnRequest?.sourceFilename)
+    }
+
+    // ── matchingHighlighterId / removeHlFromCtx ──────────────────────────────
+
+    @Test
+    fun matchingHighlighterIdFindsExactCaseInsensitivePatternMatch() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.addHl("t1", "full message", false, Color.Yellow)
+
+        val id = state.matchingHighlighterId("t1", "FULL MESSAGE")
+
+        assertEquals(state.tabs.single().filter.highlighters.single().id, id)
+    }
+
+    @Test
+    fun matchingHighlighterIdReturnsNullForPartialOverlap() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.addHl("t1", "full message", false, Color.Yellow)
+
+        // Selecting only part of the highlighted text is not "the fully highlighted part".
+        assertEquals(null, state.matchingHighlighterId("t1", "full"))
+    }
+
+    @Test
+    fun removeHlFromCtxRemovesTheMatchingHighlighter() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.addHl("t1", "full message", false, Color.Yellow)
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "full message")
+
+        state.removeHlFromCtx()
+
+        assertTrue(state.tabs.single().filter.highlighters.isEmpty())
+    }
+
+    // ── maskWordForCopy ───────────────────────────────────────────────────────
+
+    @Test
+    fun maskWordForCopyReplacesWholeWordCaseSensitively() {
+        val settings = AppSettings(maskWordOnCopy = true, maskWordTarget = "java", maskWordReplacement = "j*ava")
+
+        val result = maskWordForCopy("Crash seen in java, not Java or javascript.", settings)
+
+        assertEquals("Crash seen in j*ava, not Java or javascript.", result)
+    }
+
+    @Test
+    fun maskWordForCopyPreservesCodeJavaFenceMarkers() {
+        val settings = AppSettings(maskWordOnCopy = true)
+        val text = "See below:\n{code:java}\nthrow new RuntimeException(\"java issue\");\n{code}\n"
+
+        val result = maskWordForCopy(text, settings)
+
+        assertTrue(result.contains("{code:java}"))
+        assertTrue(result.contains("{code}"))
+        assertTrue(result.contains("j*ava issue"))
+    }
+
+    @Test
+    fun maskWordForCopyNoOpWhenSettingDisabled() {
+        val settings = AppSettings(maskWordOnCopy = false)
+
+        val result = maskWordForCopy("plain java text", settings)
+
+        assertEquals("plain java text", result)
     }
 
     @Test

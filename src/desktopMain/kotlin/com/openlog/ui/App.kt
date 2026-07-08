@@ -27,7 +27,6 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Icon
@@ -70,6 +69,7 @@ import com.openlog.debug.ConnectedClientInfo
 import com.openlog.debug.McpSessionInfo
 import com.openlog.generated.BuildInfo
 import com.openlog.model.*
+import kotlinx.coroutines.delay
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
@@ -247,18 +247,24 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                         // with its own local selection (e.g. the "Original" unfiltered panel).
                         val selectedIds = ctx.panelSelectedIds.ifEmpty { ctxTab.selected }
                         val selCount = selectedIds.size
+                        val matchingHlId = ctx.selText.takeIf { it.isNotBlank() }
+                            ?.let { state.matchingHighlighterId(ctx.tabId, it) }
                         // Estimate full menu height from items that will actually render:
-                        //   header(37) + divider(9) + preview(63) + 5 items(160) + divider(9)
-                        //   + 3 items(96) + divider(9) + 2 items(64) = 447
-                        // Selection text adds preview extension(15) + 4 items(128) + divider(9) = 152
-                        val estimatedMenuHeight = (447 +
-                            (if (ctx.selText.isNotBlank()) 152 else 0) +
+                        //   header(37) + divider(9) + preview(63) + 2 items(64) + divider(9)
+                        //   + 5 items(160) + divider(9) + 3 items(96) + divider(9) + 2 items(64) = 520
+                        // Selection text adds a preview extension line(15) on top of that.
+                        val estimatedMenuHeight = (520 +
+                            (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (state.pendingSequenceStart != null) 32 else 0) +
-                            (if (selCount > 1) 32 else 0)).dp
+                            (if (selCount > 1) 64 else 0)).dp
                         val menuScroll = rememberScrollState()
                         val x = ctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
                         val y = ctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
+                        // Not enough room for the submenu to the right of the whole menu — open it
+                        // to the left instead (see CtxItemWithSubmenu's preferLeft).
+                        val submenuOpensLeft = (x + menuWidth + CTX_SUBMENU_WIDTH) > maxWidth
 
+                        val ruleVariants = state.messageRuleVariantsFromCtx()
                         val menuEntries = buildList {
                             add(
                                 CtxMenuEntry.ActionHeader(
@@ -270,25 +276,58 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             )
                             add(CtxMenuEntry.Divider)
                             add(CtxMenuEntry.Preview)
-                            if (ctx.selText.isNotBlank()) {
-                                add(CtxMenuEntry.Action(Icons.Outlined.Bookmark, "Highlight selection") { state.addHlFromCtx() })
-                                add(CtxMenuEntry.Action(Icons.Outlined.Layers, "Add as sequence") { state.addSeqFromCtx() })
-                                add(CtxMenuEntry.Action(Icons.Outlined.Search, "Filter by keyword") { state.addKwFilterFromCtx() })
-                                add(CtxMenuEntry.Action(Icons.Outlined.Block, "Exclude keyword") { state.addNegKwFromCtx() })
+                            run {
+                                // Selecting an already-fully-highlighted span offers only "Remove
+                                // highlight" — "Highlight selection" would just be a same-color
+                                // no-op re-highlight of something already highlighted.
+                                if (matchingHlId != null) {
+                                    add(CtxMenuEntry.Action(Icons.Outlined.Block, "Remove highlight") { state.removeHlFromCtx() })
+                                } else {
+                                    add(CtxMenuEntry.Action(Icons.Outlined.Bookmark, "Highlight selection") { state.addHlFromCtx() })
+                                }
+                                add(
+                                    CtxMenuEntry.ActionWithSubmenu(
+                                        Icons.Outlined.Layers,
+                                        "Add as sequence",
+                                        onClick = { state.addSeqFromCtx() },
+                                        submenu = ruleVariants.map { v -> v.label to { state.addSequenceVariant(v) } },
+                                    ),
+                                )
                                 add(CtxMenuEntry.Divider)
                             }
                             if (state.pendingSequenceStart != null) {
                                 add(CtxMenuEntry.Action(Icons.Outlined.Flag, "Complete sequence end") { state.completeSequenceEndFromCtx() })
                             }
                             add(CtxMenuEntry.Action(Icons.Outlined.PlayArrow, "Set sequence start") { state.setSequenceStartFromCtx() })
+                            if (selCount > 1) {
+                                add(
+                                    CtxMenuEntry.Action(Icons.Outlined.Layers, "Collapse $selCount selected lines") {
+                                        state.collapseSelectedLinesFromCtx(ctx.tabId, selectedIds)
+                                    },
+                                )
+                            }
                             add(CtxMenuEntry.Action(Icons.Outlined.ArrowUpward, "Collapse to file start") { state.collapseToStartFromCtx() })
                             add(CtxMenuEntry.Action(Icons.Outlined.ArrowDownward, "Collapse to file end") { state.collapseToEndFromCtx() })
-                            add(CtxMenuEntry.Action(Icons.Outlined.VisibilityOff, "Hide messages like this") { state.hideMessagesLikeCtx() })
-                            add(CtxMenuEntry.Action(Icons.Outlined.Visibility, "Show messages like this") { state.showOnlyMessagesLikeCtx() })
+                            add(
+                                CtxMenuEntry.ActionWithSubmenu(
+                                    Icons.Outlined.VisibilityOff,
+                                    "Hide messages like this",
+                                    onClick = { state.hideMessagesLikeCtx() },
+                                    submenu = ruleVariants.map { v -> v.label to { state.hideMessagesLikeVariant(v) } },
+                                ),
+                            )
+                            add(
+                                CtxMenuEntry.ActionWithSubmenu(
+                                    Icons.Outlined.Visibility,
+                                    "Show messages like this",
+                                    onClick = { state.showOnlyMessagesLikeCtx() },
+                                    submenu = ruleVariants.map { v -> v.label to { state.showOnlyMessagesLikeVariant(v) } },
+                                ),
+                            )
                             add(CtxMenuEntry.Divider)
                             add(CtxMenuEntry.Action(Icons.AutoMirrored.Outlined.Label, "Include tag") { state.addTagFilterFromCtx() })
-                            add(CtxMenuEntry.Action(Icons.Outlined.Bookmark, "Highlight tag") { state.addHlTagFromCtx() })
                             add(CtxMenuEntry.Action(Icons.AutoMirrored.Outlined.LabelOff, "Exclude tag") { state.addExcludeTagFromCtx() })
+                            add(CtxMenuEntry.Action(Icons.Outlined.Bookmark, "Highlight tag") { state.addHlTagFromCtx() })
                             add(CtxMenuEntry.Divider)
                             if (selCount > 1) {
                                 add(
@@ -318,7 +357,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             )
                         }
                         val selectableEntries = menuEntries.filter {
-                            it is CtxMenuEntry.ActionHeader || it is CtxMenuEntry.Action
+                            it is CtxMenuEntry.ActionHeader || it is CtxMenuEntry.Action || it is CtxMenuEntry.ActionWithSubmenu
                         }
                         var selectedIdx by remember(ctx) { mutableStateOf(0) }
                         val selectedEntry = selectableEntries.getOrNull(selectedIdx)
@@ -353,6 +392,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                                 when (it) {
                                                     is CtxMenuEntry.ActionHeader -> it.onClick()
                                                     is CtxMenuEntry.Action -> it.onClick()
+                                                    is CtxMenuEntry.ActionWithSubmenu -> it.onClick()
                                                     else -> {}
                                                 }
                                             }
@@ -380,6 +420,13 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                         }
                                         is CtxMenuEntry.Action ->
                                             CtxItem(e.icon, e.label, highlighted = e === selectedEntry, onClick = e.onClick)
+                                        is CtxMenuEntry.ActionWithSubmenu ->
+                                            CtxItemWithSubmenu(
+                                                e.icon, e.label, e.submenu,
+                                                highlighted = e === selectedEntry,
+                                                preferLeft = submenuOpensLeft,
+                                                onClick = e.onClick,
+                                            )
                                         CtxMenuEntry.Divider -> CtxDivider()
                                         CtxMenuEntry.Preview -> Column(
                                             Modifier.fillMaxWidth()
@@ -2999,6 +3046,18 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                     }
                 }
             }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                CompactSettingWithTooltip(
+                    label = "Crash group rows highlight",
+                    tooltip = "Colors every row in an expanded crash/stack-trace group, not just the header.",
+                ) {
+                    SegmentedControl(
+                        options = listOf("Header only", "Full group"),
+                        selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 1 else 0),
+                        onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 1) } },
+                    )
+                }
+            }
 
             SettingsSectionHeader("Export & annotations")
             AnnotationSettingsRow(state)
@@ -3019,6 +3078,49 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 )
                 val previewLabel = state.settings.annotationPrefixLabel.trim().ifBlank { "From" }
                 AppText("Preview: $previewLabel app.log", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AppText("Mask word on copy", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                    SegmentedControl(
+                        options = listOf("On", "Off"),
+                        selectedIndices = setOf(if (state.settings.maskWordOnCopy) 0 else 1),
+                        onToggle = { idx -> state.updateSettings { it.copy(maskWordOnCopy = idx == 0) } },
+                    )
+                }
+                if (state.settings.maskWordOnCopy) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            AppText("Word", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                            InlineField(
+                                state.settings.maskWordTarget,
+                                { value -> state.updateSettings { it.copy(maskWordTarget = value) } },
+                                "java",
+                                Modifier.fillMaxWidth(),
+                                fontSize = 12.sp,
+                            )
+                        }
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            AppText("Replacement", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                            InlineField(
+                                state.settings.maskWordReplacement,
+                                { value -> state.updateSettings { it.copy(maskWordReplacement = value) } },
+                                "j*ava",
+                                Modifier.fillMaxWidth(),
+                                fontSize = 12.sp,
+                            )
+                        }
+                    }
+                    AppText(
+                        "Replaces the whole word \"${state.settings.maskWordTarget}\" when copying a note — " +
+                            "{code:java} block markers are never touched.",
+                        color = tc.td, fontSize = 10.sp, maxLines = 2,
+                    )
+                }
             }
 
             SettingsSectionHeader("Automation")
@@ -3786,6 +3888,15 @@ private sealed class CtxMenuEntry {
 
     data class Action(val icon: ImageVector, val label: String, val onClick: () -> Unit) : CtxMenuEntry()
 
+    // The main row keeps today's default onClick; hovering/pressing the trailing ▶ opens a
+    // flyout with up to 4 narrower match-scope choices instead (see messageRuleVariantsFromCtx).
+    data class ActionWithSubmenu(
+        val icon: ImageVector,
+        val label: String,
+        val onClick: () -> Unit,
+        val submenu: List<Pair<String, () -> Unit>>,
+    ) : CtxMenuEntry()
+
     object Divider : CtxMenuEntry()
 
     object Preview : CtxMenuEntry()
@@ -3804,6 +3915,140 @@ private fun CtxItem(icon: ImageVector, label: String, highlighted: Boolean = fal
             }
             Spacer(Modifier.width(8.dp))
             AppText(label, color = tc.tx, fontSize = 12.sp, modifier = Modifier.weight(1f))
+        }
+    }
+}
+
+// Same row as CtxItem plus a trailing ▶ hit target: hovering/pressing that arrow specifically
+// opens a flyout of narrower match-scope choices without triggering the row's own default
+// onClick, which still fires from anywhere else on the row (matching today's one-click behavior).
+private val CTX_SUBMENU_WIDTH = 240.dp
+
+// Grace period between the pointer leaving both the ▶ trigger and the popup, and the popup
+// actually closing — without it, crossing the (small) visual gap between trigger and popup would
+// close the menu before the pointer ever reaches it.
+private const val CTX_SUBMENU_CLOSE_DELAY_MS = 200L
+
+@Composable
+private fun CtxItemWithSubmenu(
+    icon: ImageVector,
+    label: String,
+    submenu: List<Pair<String, () -> Unit>>,
+    highlighted: Boolean = false,
+    preferLeft: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var hoveringTrigger by remember { mutableStateOf(false) }
+    var hoveringPopup by remember { mutableStateOf(false) }
+    var submenuOpen by remember { mutableStateOf(false) }
+    var rowWidthPx by remember { mutableStateOf(0) }
+    // Opens instantly on hover/press; closes only after a grace period with the pointer outside
+    // BOTH the trigger and the popup, so moving the mouse out doesn't leave it stuck open forever
+    // (the old behavior) nor close it while crossing the gap to reach the popup.
+    LaunchedEffect(hoveringTrigger, hoveringPopup) {
+        if (hoveringTrigger || hoveringPopup) {
+            submenuOpen = true
+        } else if (submenuOpen) {
+            delay(CTX_SUBMENU_CLOSE_DELAY_MS)
+            submenuOpen = false
+        }
+    }
+    Box(Modifier.onGloballyPositioned { coords -> rowWidthPx = coords.size.width }) {
+        HoverBox(modifier = Modifier.fillMaxWidth(), forceHover = highlighted, onClick = onClick) {
+            Row(
+                Modifier.fillMaxWidth().height(32.dp).padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                    Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp), tint = tc.td.copy(alpha = 0.65f))
+                }
+                Spacer(Modifier.width(8.dp))
+                AppText(label, color = tc.tx, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                // Same rounded-hover affordance as the log row collapse chevron (CollapseChevron
+                // in LogViewer.kt) — a plain unstyled glyph gave no feedback that this was a
+                // separate, more-specific hit target than the rest of the row.
+                HoverBox(
+                    modifier = Modifier.size(24.dp).clip(RoundedCornerShape(6.dp))
+                        .onPointerEvent(PointerEventType.Enter) { hoveringTrigger = true }
+                        .onPointerEvent(PointerEventType.Exit) { hoveringTrigger = false },
+                    onClick = { submenuOpen = true },
+                ) {
+                    AppText(
+                        "▶", color = tc.td.copy(alpha = 0.65f), fontSize = 10.sp,
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+                }
+            }
+        }
+        if (submenuOpen) {
+            Popup(
+                // Popup's alignment describes where the popup's OWN alignment point lands within
+                // the anchor's bounds — TopStart with zero offset overlaps the anchor exactly
+                // (popup's top-left = anchor's top-left). To sit the popup beside the anchor with
+                // no overlap, keep alignment fixed at TopStart and shift by a real measured
+                // distance instead: +rowWidth pushes it past the anchor's right edge (submenu
+                // appears to the right); -popupWidth pushes it past the anchor's own left edge
+                // (submenu appears to the left) when there isn't enough window space on the right.
+                alignment = Alignment.TopStart,
+                offset = IntOffset(
+                    if (preferLeft) -with(density) { CTX_SUBMENU_WIDTH.roundToPx() } else rowWidthPx,
+                    0,
+                ),
+                onDismissRequest = { submenuOpen = false },
+                properties = PopupProperties(focusable = false),
+            ) {
+                Column(
+                    Modifier.width(CTX_SUBMENU_WIDTH)
+                        .shadow(8.dp, RoundedCornerShape(7.dp))
+                        .background(tc.p, RoundedCornerShape(7.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                        .padding(vertical = 4.dp)
+                        .onPointerEvent(PointerEventType.Enter) { hoveringPopup = true }
+                        .onPointerEvent(PointerEventType.Exit) { hoveringPopup = false },
+                ) {
+                    submenu.forEach { (optLabel, optOnClick) ->
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { submenuOpen = false; optOnClick() },
+                        ) {
+                            // Only long variant labels (a long tag/package prefix, or an
+                            // untruncated message) actually get ellipsized in this fixed-width
+                            // popup — onTextLayout reports whether *this* label did, so short
+                            // labels that already fit in full don't get a redundant tooltip.
+                            var isTruncated by remember(optLabel) { mutableStateOf(false) }
+                            val labelText: @Composable () -> Unit = {
+                                Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                    AppText(
+                                        optLabel, color = tc.tx, fontSize = 12.sp, maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        onTextLayout = { result -> isTruncated = result.hasVisualOverflow },
+                                    )
+                                }
+                            }
+                            if (isTruncated) {
+                                TooltipArea(
+                                    tooltip = {
+                                        Box(
+                                            Modifier.background(tc.p2, RoundedCornerShape(4.dp))
+                                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                .widthIn(max = 320.dp),
+                                        ) {
+                                            AppText(optLabel, color = tc.tx, fontSize = 11.sp, maxLines = 4)
+                                        }
+                                    },
+                                ) {
+                                    labelText()
+                                }
+                            } else {
+                                labelText()
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -13,6 +13,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -39,6 +40,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.*
 import com.openlog.utils.computeItems
+import com.openlog.utils.passesFilter
 import com.openlog.utils.regexRanges
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +56,14 @@ private const val PAGE_JUMP_ROWS = 15
 private const val CTX_MENU_KEYBOARD_X_DP = 60f
 private const val LOADING_GRACE_MS = 250L
 private const val SPLICE_SUMMARY_GUARD_MIN_ITEMS = 4096
+
+// DANGER_RED is only ever assigned as a LogItem.Row's groupColor for expanded crash/stack-trace
+// group members (see Filter.kt's computeItems — sequence/manual-collapse groupColors always come
+// from a different palette). By default those rows only get a thin left-edge stripe, while the
+// group's own header gets a full red background+text tint; the highlightEntireCrashGroup setting
+// extends that full tint to every row in the group, not just the header.
+internal fun isCrashGroupRow(groupColor: Color?, highlightEntireCrashGroup: Boolean): Boolean =
+    highlightEntireCrashGroup && groupColor == DANGER_RED
 
 private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
     if (hl.regex) {
@@ -310,6 +320,14 @@ internal fun expansionAndIndexForEntry(
     entryId: Int,
     currentItems: List<LogItem>? = null,
 ): ExpansionAndIndexTarget? {
+    // An entry excluded by the filter itself (not merely folded inside a collapsed group) can
+    // never be surfaced by expanding groups — bail before the loop below instead of burning up to
+    // 24 rounds of full computeItems() recomputation trying every collapsed header in the file,
+    // which on a large log made a bulk exclude/hide action feel like a hang.
+    if (applyFilter) {
+        val entry = tab.rmap[entryId] ?: return null
+        if (!passesFilter(entry, tab.filter)) return null
+    }
     var expanded = tab.expanded
     var candidateItems = currentItems ?: computeItems(tab.copy(expanded = expanded), applyFilter)
     repeat(24) {
@@ -418,10 +436,40 @@ fun buildFullLineAnnotation(
     }
 }
 
+// Start offset of each wrapped visual line (always begins with 0; count == number of lines).
+// Breaks after the last space within budget so ordinary words are never split mid-word — only
+// falls back to a hard break at the budget boundary when a single unbroken token (a long URI,
+// base64 blob, ...) exceeds the whole limit by itself, which still guarantees bounded overflow.
+// Never removes or adds a character — the break is always a choice of *where* to insert '\n'
+// into the existing sequence — so stripVisualWrapBreaks always reconstructs the original exactly.
+private fun wrapBreakStarts(text: CharSequence, limit: Int): List<Int> {
+    val starts = mutableListOf(0)
+    var start = 0
+    while (start < text.length) {
+        val maxEnd = (start + limit).coerceAtMost(text.length)
+        if (maxEnd == text.length) break
+        var breakAt = maxEnd
+        var i = maxEnd - 1
+        while (i > start) {
+            if (text[i] == ' ') {
+                breakAt = i + 1
+                break
+            }
+            i--
+        }
+        starts += breakAt
+        start = breakAt
+    }
+    return starts
+}
+
 fun visualLogLineForWrapLimit(text: String, limitChars: Int): String {
     val limit = limitChars.coerceAtLeast(1)
     if (text.length <= limit) return text
-    return text.chunked(limit).joinToString("\n")
+    val starts = wrapBreakStarts(text, limit)
+    return starts.indices.joinToString("\n") { idx ->
+        text.substring(starts[idx], starts.getOrNull(idx + 1) ?: text.length)
+    }
 }
 
 fun stripVisualWrapBreaks(text: String): String = text.replace("\n", "")
@@ -432,34 +480,37 @@ fun keyboardCopyTextForLogPanel(selectedText: String?, selectedRowsText: () -> S
 private fun visualLogLineForWrapLimit(line: AnnotatedString, limitChars: Int): AnnotatedString {
     val limit = limitChars.coerceAtLeast(1)
     if (line.length <= limit) return line
+    val starts = wrapBreakStarts(line.text, limit)
     val builder = AnnotatedString.Builder()
-    var start = 0
-    while (start < line.length) {
-        if (start > 0) builder.append('\n')
-        val end = (start + limit).coerceAtMost(line.length)
-        builder.append(line.subSequence(start, end))
-        start = end
+    starts.forEachIndexed { idx, from ->
+        if (idx > 0) builder.append('\n')
+        builder.append(line.subSequence(from, starts.getOrNull(idx + 1) ?: line.length))
     }
     return builder.toAnnotatedString()
 }
 
-private fun estimatedLogCharWidthDp(fontSizeSp: Float): Float =
-    (fontSizeSp * 0.56f).coerceAtLeast(6f)
+private const val MIN_WRAP_LIMIT_CHARS = 80
+private const val MAX_WRAP_LIMIT_CHARS = 20_000
+private const val ROW_HORIZONTAL_CHROME_DP = 24f
+private const val MIN_CHAR_WIDTH_DP = 1f
+private const val CONTENT_WIDTH_PADDING_DP = 80f
+private const val MIN_LOG_CONTENT_WIDTH_DP = 2000
 
 fun effectiveLogWrapLimitChars(
     auto: Boolean,
     configuredLimitChars: Int,
     visibleWidthDp: Float,
-    fontSizeSp: Float,
+    charWidthDp: Float,
 ): Int {
-    if (!auto) return configuredLimitChars.coerceIn(80, 20_000)
-    val usableWidthDp = (visibleWidthDp - 24f).coerceAtLeast(0f)
-    return (usableWidthDp / estimatedLogCharWidthDp(fontSizeSp)).roundToInt().coerceIn(80, 20_000)
+    if (!auto) return configuredLimitChars.coerceIn(MIN_WRAP_LIMIT_CHARS, MAX_WRAP_LIMIT_CHARS)
+    val usableWidthDp = (visibleWidthDp - ROW_HORIZONTAL_CHROME_DP).coerceAtLeast(0f)
+    return (usableWidthDp / charWidthDp.coerceAtLeast(MIN_CHAR_WIDTH_DP)).roundToInt()
+        .coerceIn(MIN_WRAP_LIMIT_CHARS, MAX_WRAP_LIMIT_CHARS)
 }
 
-private fun logContentWidthDp(wrapLimitChars: Int, fontSizeSp: Float): Dp {
-    val charWidthDp = estimatedLogCharWidthDp(fontSizeSp)
-    return (wrapLimitChars.coerceAtLeast(80) * charWidthDp + 80f).dp.coerceAtLeast(2000.dp)
+private fun logContentWidthDp(wrapLimitChars: Int, charWidthDp: Float): Dp {
+    return (wrapLimitChars.coerceAtLeast(MIN_WRAP_LIMIT_CHARS) * charWidthDp + CONTENT_WIDTH_PADDING_DP).dp
+        .coerceAtLeast(MIN_LOG_CONTENT_WIDTH_DP.dp)
 }
 
 @Composable
@@ -775,16 +826,31 @@ fun LogViewer(
                     BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                         val tailSpaceHeight = maxHeight * 0.5f
                         val fontSizeSp = baseSp().value
+                        // Only Manual mode's fixed-chars-per-line sizing (effectiveWrapLimitChars/
+                        // logContentWidthDp below) still needs this estimate — Auto mode relies on
+                        // BasicTextField's own softWrap for the actual row text (see LogRow's
+                        // autoWrap param), which uses the real font metrics with zero estimation
+                        // error, so rowContentWidth there is just the real viewport width directly.
+                        val density = LocalDensity.current.density
+                        val textMeasurer = rememberTextMeasurer()
+                        val charWidthDp = remember(textMeasurer, fontSizeSp, density) {
+                            val sampleLen = 64
+                            val measured = textMeasurer.measure(
+                                AnnotatedString("M".repeat(sampleLen)),
+                                TextStyle(fontFamily = MONO, fontSize = fontSizeSp.sp),
+                            )
+                            (measured.size.width / sampleLen) / density
+                        }
                         val effectiveWrapLimitChars = effectiveLogWrapLimitChars(
                             auto = settings.autoLogRowWrap,
                             configuredLimitChars = settings.logRowWrapLimitChars,
                             visibleWidthDp = maxWidth.value,
-                            fontSizeSp = fontSizeSp,
+                            charWidthDp = charWidthDp,
                         )
                         val rowContentWidth = if (settings.autoLogRowWrap) {
                             maxWidth
                         } else {
-                            logContentWidthDp(effectiveWrapLimitChars, fontSizeSp)
+                            logContentWidthDp(effectiveWrapLimitChars, charWidthDp)
                         }
                         val contentModifier = if (settings.autoLogRowWrap) {
                             Modifier.fillMaxSize()
@@ -821,6 +887,8 @@ fun LogViewer(
                                             onCtxMenu = itemOnCtxMenu,
                                             onSelectedTextChange = { selectedTextForCopy = it },
                                             rowBoundsAbs = boundsMap,
+                                            highlightEntireCrashGroup = settings.highlightEntireCrashGroup,
+                                            autoWrap = settings.autoLogRowWrap,
                                         )
                                         is LogItem.SeqHeader ->
                                             SeqHeaderRow(item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
@@ -1262,6 +1330,14 @@ private fun LogRow(
     onCtxMenu: (Int, Float, Float, String) -> Unit,
     onSelectedTextChange: (String) -> Unit,
     rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
+    highlightEntireCrashGroup: Boolean = false,
+    // Auto mode's whole point is "use the real available width" — BasicTextField's own softWrap
+    // already does that with zero estimation error, using the real font metrics Skia will render
+    // with. Pre-wrapping with an estimated wrapLimitChars (as Manual mode deliberately does, for
+    // its fixed-chars-per-line preference) instead introduced compounding estimation error here:
+    // wherever the estimate was even slightly off, the manually-inserted break landed before the
+    // real available width was used up, so the line wrapped one row earlier than necessary.
+    autoWrap: Boolean = false,
 ) {
     val density  = LocalDensity.current.density
     val entry    = item.entry
@@ -1274,13 +1350,21 @@ private fun LogRow(
         onDispose { rowBoundsAbs.remove(entry.id) }
     }
 
-    val annoLine = remember(tab.id, entry, tab.filter.highlighters, tc.td, tc.ts, tc.tx, wrapLimitChars) {
-        buildFullLineAnnotation(entry, tab.filter.highlighters, tc.td, tc.td.copy(0.5f), tc.ts, tc.tx)
-            .let { visualLogLineForWrapLimit(it, wrapLimitChars) }
+    val isCrashGroupRow = isCrashGroupRow(item.groupColor, highlightEntireCrashGroup)
+    val annoLine = remember(tab.id, entry, tab.filter.highlighters, tc.td, tc.ts, tc.tx, wrapLimitChars, isCrashGroupRow, autoWrap) {
+        val tagColor = if (isCrashGroupRow) DANGER_RED else tc.ts
+        val msgColor = if (isCrashGroupRow) DANGER_RED else tc.tx
+        val built = buildFullLineAnnotation(entry, tab.filter.highlighters, tc.td, tc.td.copy(0.5f), tagColor, msgColor)
+        if (autoWrap) built else visualLogLineForWrapLimit(built, wrapLimitChars)
     }
 
     val levelColor = entry.level.defaultColor
-    val bg = when { isSel -> tc.sl; hov -> tc.hv; else -> Color.Transparent }
+    val bg = when {
+        isSel -> tc.sl
+        isCrashGroupRow -> DANGER_RED.copy(alpha = if (hov) 0.15f else 0.07f)
+        hov -> tc.hv
+        else -> Color.Transparent
+    }
     val groupColor = item.groupColor
 
     Row(
@@ -1403,6 +1487,26 @@ private fun LogRow(
     }
 }
 
+// Shared expand/collapse toggle for SeqHeaderRow/ManualHeaderRow/StackTraceHeaderRow — a rounded
+// hover background gives it the same "clickable chip" affordance as other icon buttons in the app
+// (e.g. HoverBox usages elsewhere), instead of a bare glyph with no feedback until the click lands.
+@Composable
+private fun CollapseChevron(expanded: Boolean, color: Color, mono: FontFamily, onClick: () -> Unit) {
+    HoverBox(
+        modifier = Modifier.size(24.dp).clip(RoundedCornerShape(6.dp)),
+        hoverBg = color.copy(alpha = 0.18f),
+        onClick = onClick,
+    ) {
+        AppText(
+            if (expanded) "▼" else "▶",
+            color = color,
+            fontSize = 14.sp,
+            fontFamily = mono,
+            modifier = Modifier.align(Alignment.Center),
+        )
+    }
+}
+
 @Composable
 private fun SeqHeaderRow(
     item: LogItem.SeqHeader,
@@ -1481,12 +1585,7 @@ private fun SeqHeaderRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(
-            Modifier.size(24.dp).clickable { onToggleGroup(item.gid) },
-            contentAlignment = Alignment.Center,
-        ) {
-            AppText(if (item.expanded) "▼" else "▶", color = sc, fontSize = 14.sp, fontFamily = mono)
-        }
+        CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
             modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
@@ -1566,14 +1665,13 @@ private fun ManualHeaderRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(
-            Modifier.size(24.dp).clickable { onToggleGroup(item.gid) },
-            contentAlignment = Alignment.Center,
-        ) {
-            AppText(if (item.expanded) "▼" else "▶", color = sc, fontSize = 14.sp, fontFamily = mono)
+        CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
+        val label = when (item.direction) {
+            ManualCollapseDirection.TO_START -> "Collapsed to file start"
+            ManualCollapseDirection.TO_END -> "Collapsed to file end"
+            ManualCollapseDirection.RANGE -> "Collapsed selection"
         }
-        val direction = if (item.direction == ManualCollapseDirection.TO_START) "file start" else "file end"
-        AppText("Collapsed to $direction", color = sc, fontSize = 11.sp, fontFamily = mono, fontWeight = FontWeight.SemiBold)
+        AppText(label, color = sc, fontSize = 11.sp, fontFamily = mono, fontWeight = FontWeight.SemiBold)
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
             modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
@@ -1663,12 +1761,7 @@ private fun StackTraceHeaderRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(
-            Modifier.size(24.dp).clickable { onToggleGroup(item.gid) },
-            contentAlignment = Alignment.Center,
-        ) {
-            AppText(if (item.expanded) "▼" else "▶", color = sc, fontSize = 14.sp, fontFamily = mono)
-        }
+        CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
             modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)

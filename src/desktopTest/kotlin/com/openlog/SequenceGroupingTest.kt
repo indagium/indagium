@@ -233,6 +233,58 @@ class SequenceGroupingTest {
     }
 
     @Test
+    fun manualCollapseRangeCollapsesExactlyTheSpecifiedSpan() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "before"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "App", "start"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "App", "middle"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "App", "end"),
+            LogEntry(5, "10:00:00.400", LogLevel.I, "App", "after"),
+        )
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(),
+            manualBlocks = listOf(ManualCollapseBlock("m1", 2, ManualCollapseDirection.RANGE, endId = 4)),
+        )
+
+        val items = computeItems(tab, applyFilter = true)
+
+        assertEquals(listOf(1, 5), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+        val header = items.filterIsInstance<LogItem.ManualHeader>().single()
+        assertEquals(2, header.entry.id)
+        assertEquals(3, header.count)
+    }
+
+    @Test
+    fun manualCollapseRangeIsOrderIndependentBetweenAnchorAndEnd() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "before"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "App", "start"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "App", "middle"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "App", "end"),
+        )
+        // anchorId is the LATER id and endId is the EARLIER one — the covered range must still be
+        // [2,4] via min/max, regardless of which end is which.
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(),
+            manualBlocks = listOf(ManualCollapseBlock("m1", 4, ManualCollapseDirection.RANGE, endId = 2)),
+        )
+
+        val items = computeItems(tab, applyFilter = true)
+
+        assertEquals(listOf(1), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+        val header = items.filterIsInstance<LogItem.ManualHeader>().single()
+        assertEquals(3, header.count)
+    }
+
+    @Test
     fun expandedManualCollapseCanShowExpandedSequencesInsideItsRange() {
         val logs = listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "Seq", "flow start"),

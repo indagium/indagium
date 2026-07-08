@@ -1,7 +1,7 @@
 package com.openlog
 
-import com.openlog.model.RuleTarget
 import com.openlog.model.MessageRule
+import com.openlog.model.RuleTarget
 import com.openlog.ui.messageRuleInputSpec
 import com.openlog.ui.messageRulePillLabel
 import com.openlog.ui.messageRuleScopeOptions

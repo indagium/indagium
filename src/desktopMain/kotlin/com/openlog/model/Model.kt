@@ -56,11 +56,22 @@ data class SeqGroup(
     val defId: String
 )
 
-data class StackTraceGroup(val gid: String, val rid: Int, val memberIds: List<Int>)
+data class StackTraceGroup(val gid: String, val rid: Int, val memberIds: List<Int>, val isFatal: Boolean = false)
 
-enum class CrashKind { EXCEPTION, ANR }
+enum class CrashKind { EXCEPTION, ANR, NATIVE_CRASH }
 
-data class CrashSite(val id: String, val entry: LogEntry, val kind: CrashKind, val groupGid: String?)
+// isFatal only distinguishes EXCEPTION sites ("FATAL EXCEPTION" dumps vs. a merely-logged
+// <Class>Exception/Error that didn't kill the process) — ANR and NATIVE_CRASH are always
+// process-ending by definition, so it's left false (unused) for those kinds.
+data class CrashSite(val id: String, val entry: LogEntry, val kind: CrashKind, val groupGid: String?, val isFatal: Boolean = false)
+
+// Crash-panel dropdown filter categories. ALL is the default/umbrella; CRASHES/ANRS/
+// FATAL_EXCEPTIONS/EXCEPTIONS each narrow to exactly one CrashKind or EXCEPTION subtype (split by
+// CrashSite.isFatal). OTHERS is a catch-all safety net — every CrashKind maps to one of the four
+// specific categories today, so it's always empty in practice, but it exists so a future CrashKind
+// added without an explicit bucket lands somewhere visible instead of silently vanishing from
+// every specific filter.
+enum class CrashCategory { ALL, CRASHES, ANRS, FATAL_EXCEPTIONS, EXCEPTIONS, OTHERS }
 
 data class LogAnalysis(
     val tagCounts: Map<String, Int> = emptyMap(),
@@ -74,7 +85,9 @@ data class LogAnalysis(
     val pending: Boolean = false,
 )
 
-enum class ManualCollapseDirection { TO_START, TO_END }
+// RANGE covers exactly [anchorId, endId] (order-independent — Filter.kt takes min/max of the two
+// resolved indices), unlike TO_START/TO_END which extend from anchorId to a file edge.
+enum class ManualCollapseDirection { TO_START, TO_END, RANGE }
 
 data class ManualCollapseBlock(
     val id: String,
@@ -82,6 +95,8 @@ data class ManualCollapseBlock(
     val direction: ManualCollapseDirection,
     val color: Color = MANUAL_COLLAPSE_DEFAULT_COLOR,
     val enabled: Boolean = true,
+    // Only set (and only meaningful) for RANGE — the other end of the selected-lines range.
+    val endId: Int? = null,
 )
 
 // ── Filter ─────────────────────────────────────────────────────────
@@ -217,6 +232,16 @@ data class AppSettings(
     // never persists into this setting (see AppState.startControlServerForThisSessionOnly).
     val mcpControlEnabled: Boolean = false,
     val mcpControlPort: Int = 8991,
+    // Some issue trackers (e.g. certain Jira instances) reject comments containing the literal
+    // word "java" outside a code block. This masks a configurable whole word when copying a
+    // note's Markdown (copyAnn) — the {code:java}/{code} fence markers are never touched.
+    val maskWordOnCopy: Boolean = false,
+    val maskWordTarget: String = "java",
+    val maskWordReplacement: String = "j*ava",
+    // An expanded crash/stack-trace group's member rows only get a thin left-edge stripe by
+    // default (see LogRow's groupColor drawBehind) — the header alone gets the full red
+    // background+text tint. Enabling this extends that full tint to every row in the group.
+    val highlightEntireCrashGroup: Boolean = false,
 )
 
 enum class ThemePreset(val label: String) {
