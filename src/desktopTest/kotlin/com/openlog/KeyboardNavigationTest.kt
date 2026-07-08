@@ -100,8 +100,10 @@ class KeyboardNavigationTest {
 
     @Test
     fun messageRuleInputConsumesActionSelectionAndCancelKeys() {
-        assertTrue(messageRuleInputConsumesKey(Key.DirectionLeft))
-        assertTrue(messageRuleInputConsumesKey(Key.DirectionRight))
+        assertFalse(messageRuleInputConsumesKey(Key.DirectionLeft, hasActionCandidate = false))
+        assertFalse(messageRuleInputConsumesKey(Key.DirectionRight, hasActionCandidate = false))
+        assertTrue(messageRuleInputConsumesKey(Key.DirectionLeft, hasActionCandidate = true))
+        assertTrue(messageRuleInputConsumesKey(Key.DirectionRight, hasActionCandidate = true))
         assertTrue(messageRuleInputConsumesKey(Key.DirectionUp))
         assertTrue(messageRuleInputConsumesKey(Key.DirectionDown))
         assertTrue(messageRuleInputConsumesKey(Key.Enter))

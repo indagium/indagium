@@ -330,6 +330,7 @@ fun InlineField(
     onClear: (() -> Unit)? = null,
     onSubmit: (() -> Unit)? = null,
     singleLine: Boolean = true,
+    centerTextVertically: Boolean = false,
 ) {
     val tc = tc()
     BasicTextField(
@@ -358,8 +359,15 @@ fun InlineField(
                     }
                 }
             } else {
-                if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
-                inner()
+                if (centerTextVertically) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                        if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                        inner()
+                    }
+                } else {
+                    if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                    inner()
+                }
             }
         },
     )

@@ -11,10 +11,12 @@ import androidx.compose.ui.window.rememberWindowState
 import com.openlog.ui.App
 import com.openlog.ui.AppState
 import com.openlog.ui.DesktopStorage
+import java.awt.Desktop
 import java.awt.Taskbar
 import java.awt.Toolkit
+import java.io.File
 
-fun main() {
+fun main(args: Array<String>) {
     // On Linux, AWT/X11 derives the window's WM_CLASS from the *bottom stack frame's class name*
     // ("MainKt" here) at toolkit construction — sun.awt.X11.XToolkit reads the main class off a
     // Throwable stack trace, so no system property can change it (v1.0.5 shipped a
@@ -54,6 +56,26 @@ fun main() {
     application {
         val windowState = rememberWindowState(size = DpSize(1440.dp, 900.dp))
         val appState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) }
+        DisposableEffect(appState) {
+            val desktop = runCatching { if (Desktop.isDesktopSupported()) Desktop.getDesktop() else null }.getOrNull()
+            if (desktop?.isSupported(Desktop.Action.APP_OPEN_FILE) == true) {
+                runCatching {
+                    desktop.setOpenFileHandler { event ->
+                        appState.openPaths(event.files.filterIsInstance<File>())
+                    }
+                }
+            }
+            onDispose {
+                if (desktop?.isSupported(Desktop.Action.APP_OPEN_FILE) == true) {
+                    runCatching { desktop.setOpenFileHandler(null) }
+                }
+            }
+        }
+        DisposableEffect(Unit) {
+            val startupFiles = args.map(::File).filter { it.exists() }
+            if (startupFiles.isNotEmpty()) appState.openPaths(startupFiles)
+            onDispose {}
+        }
         // Localhost-only automation control server for MCP/dev use (see debug/ControlServer.kt).
         // AppState owns the actual server instance (see setMcpControlEnabled /
         // startControlServerForThisSessionOnly) — this effect only decides the starting state:

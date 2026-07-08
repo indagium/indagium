@@ -2917,6 +2917,8 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     numberAnnotationBlocks.toString(),
     annotationPrefixLabel,
     navScrollMargin.toString(),
+    logRowWrapLimitChars.toString(),
+    autoLogRowWrap.toString(),
     mcpControlEnabled.toString(),
     mcpControlPort.toString(),
 )
@@ -2926,6 +2928,13 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
     if (p.size < 5) return@runCatching null
     val hasFilterAutosaveField = p.getOrNull(8)?.toBooleanStrictOrNull() != null
     val tailOffset = if (hasFilterAutosaveField) 1 else 0
+    val wrapIndex = 12 + tailOffset
+    val hasWrapLimitField = p.getOrNull(wrapIndex)?.toIntOrNull() != null
+    val autoWrapIndex = wrapIndex + 1
+    val hasAutoWrapField = hasWrapLimitField &&
+        p.getOrNull(autoWrapIndex)?.toBooleanStrictOrNull() != null &&
+        p.getOrNull(autoWrapIndex + 1)?.toBooleanStrictOrNull() != null
+    val mcpIndex = wrapIndex + (if (hasWrapLimitField) 1 else 0) + (if (hasAutoWrapField) 1 else 0)
     AppSettings(
         theme = runCatching { ThemePreset.valueOf(p[0]) }.getOrElse { ThemePreset.LIGHT },
         fontSize = p[1].toIntOrNull() ?: 12,
@@ -2942,8 +2951,14 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         numberAnnotationBlocks = p.getOrNull(9 + tailOffset)?.toBooleanStrictOrNull() ?: false,
         annotationPrefixLabel = p.getOrNull(10 + tailOffset)?.takeIf { it.isNotBlank() } ?: "From",
         navScrollMargin = p.getOrNull(11 + tailOffset)?.toIntOrNull()?.coerceIn(0, 30) ?: 5,
-        mcpControlEnabled = p.getOrNull(12 + tailOffset)?.toBooleanStrictOrNull() ?: false,
-        mcpControlPort = p.getOrNull(13 + tailOffset)?.toIntOrNull()?.coerceIn(MIN_PORT, MAX_PORT) ?: DEFAULT_MCP_PORT,
+        logRowWrapLimitChars = p.getOrNull(wrapIndex)?.toIntOrNull()?.coerceIn(80, 20_000) ?: 480,
+        autoLogRowWrap = if (hasAutoWrapField) {
+            p.getOrNull(autoWrapIndex)?.toBooleanStrictOrNull() ?: true
+        } else {
+            true
+        },
+        mcpControlEnabled = p.getOrNull(mcpIndex)?.toBooleanStrictOrNull() ?: false,
+        mcpControlPort = p.getOrNull(mcpIndex + 1)?.toIntOrNull()?.coerceIn(MIN_PORT, MAX_PORT) ?: DEFAULT_MCP_PORT,
     )
 }.getOrNull()
 

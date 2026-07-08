@@ -101,6 +101,11 @@ compose.desktop {
             description = "Android logcat analysis tool"
             vendor = appAuthor
             copyright = "Copyright (C) 2026 $appAuthor"
+            fileAssociation("text/plain", "log", "Log file")
+            fileAssociation("text/plain", "txt", "Text log file")
+            fileAssociation("text/plain", "logcat", "Android logcat file")
+            fileAssociation("text/plain", "trace", "Trace log file")
+            fileAssociation("text/plain", "out", "Output log file")
             // Packaged builds ship a jlink-trimmed JVM, sized from jdeps' static analysis of our
             // jars. jdeps doesn't detect com.sun.net.httpserver.* (used by ControlServer.kt) as
             // a real dependency — it's a JDK-internal-looking package, not a public java.* API —

@@ -1892,6 +1892,7 @@ private fun FileView(
         )
         LogViewer(
             tab = tab, modifier = Modifier.weight(1f),
+            settings = state.settings,
             onSelRow = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
             onSelRowRange = { ids -> state.setSelectedRows(tab.id, ids) },
             onCtxMenu = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(tab.id, id, x, y, sel, panelSel) },
@@ -1908,6 +1909,7 @@ private fun FileView(
             onSelectAll = { state.selectAll(tab.id) },
             onClearSelection = { state.clearSelection(tab.id) },
             onCopySelection = { selectedIds -> state.copySelectedLines(tab.id, selectedIds) },
+            onCopyText = { text -> state.copyToClipboard(text) },
             navScrollMargin = state.settings.navScrollMargin,
             focusRequester = logViewerFr,
             onPanelFocusChanged = { focused ->
@@ -2039,6 +2041,7 @@ private fun CompareView(
                     )
                     LogViewer(
                         tab = leftTab, modifier = Modifier.weight(1f),
+                        settings = state.settings,
                         onSelRow = { id, m, r -> state.selRow(leftTab.id, id, m, r) },
                         onSelRowRange = { ids -> state.setSelectedRows(leftTab.id, ids) },
                         onCtxMenu = { id, x, y, sel, panelSel ->
@@ -2057,6 +2060,7 @@ private fun CompareView(
                         onSelectAll = { state.selectAll(leftTab.id) },
                         onClearSelection = { state.clearSelection(leftTab.id) },
                         onCopySelection = { selectedIds -> state.copySelectedLines(leftTab.id, selectedIds) },
+                        onCopyText = { text -> state.copyToClipboard(text) },
                         navScrollMargin = state.settings.navScrollMargin,
                         focusRequester = leftLogFr,
                         onPanelFocusChanged = { focused ->
@@ -2098,6 +2102,7 @@ private fun CompareView(
                 Row(Modifier.weight(1f).fillMaxWidth()) {
                     LogViewer(
                         tab = effectiveRightTab, modifier = Modifier.weight(1f),
+                        settings = state.settings,
                         onSelRow = { id, m, r -> state.selRow(rightTab.id, id, m, r) },
                         onSelRowRange = { ids -> state.setSelectedRows(rightTab.id, ids) },
                         onCtxMenu = { id, x, y, sel, panelSel ->
@@ -2116,6 +2121,7 @@ private fun CompareView(
                         onSelectAll = { state.selectAll(rightTab.id) },
                         onClearSelection = { state.clearSelection(rightTab.id) },
                         onCopySelection = { selectedIds -> state.copySelectedLines(rightTab.id, selectedIds) },
+                        onCopyText = { text -> state.copyToClipboard(text) },
                         navScrollMargin = state.settings.navScrollMargin,
                         focusRequester = rightLogFr,
                         onPanelFocusChanged = { focused ->
@@ -2948,6 +2954,51 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                     )
                 }
             }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                CompactSetting("Row wrapping") {
+                    SegmentedControl(
+                        options = listOf("Auto", "Manual"),
+                        selectedIndices = setOf(if (state.settings.autoLogRowWrap) 0 else 1),
+                        onToggle = { idx -> state.updateSettings { it.copy(autoLogRowWrap = idx == 0) } },
+                    )
+                }
+                CompactSetting("Row wrap chars") {
+                    var wrapLimitText by remember(state.settings.logRowWrapLimitChars) {
+                        mutableStateOf(state.settings.logRowWrapLimitChars.toString())
+                    }
+                    if (state.settings.autoLogRowWrap) {
+                        Box(
+                            Modifier.width(76.dp)
+                                .height(28.dp)
+                                .background(tc.bg.copy(alpha = 0.35f), CORNER_SM)
+                                .border(1.dp, tc.br.copy(alpha = 0.45f), CORNER_SM)
+                                .padding(horizontal = 7.dp, vertical = 4.dp),
+                            contentAlignment = Alignment.CenterStart,
+                        ) {
+                            AppText(wrapLimitText, color = tc.td.copy(alpha = 0.65f), fontSize = 12.sp)
+                        }
+                    } else {
+                        InlineField(
+                            wrapLimitText,
+                            { value ->
+                                val digits = value.filter { it.isDigit() }.take(5)
+                                wrapLimitText = digits
+                                digits.toIntOrNull()?.let { limit ->
+                                    state.updateSettings { it.copy(logRowWrapLimitChars = limit.coerceIn(80, 20_000)) }
+                                }
+                            },
+                            "480",
+                            Modifier.width(76.dp).height(28.dp),
+                            fontSize = 12.sp,
+                            centerTextVertically = true,
+                        )
+                    }
+                }
+            }
 
             SettingsSectionHeader("Export & annotations")
             AnnotationSettingsRow(state)
@@ -3691,11 +3742,14 @@ private fun TabItem(
         }
         TooltipArea(
             tooltip = {
+                val tooltipScroll = rememberScrollState()
                 Box(
                     Modifier
-                        .widthIn(max = 640.dp)
+                        .widthIn(max = 760.dp)
+                        .heightIn(max = 180.dp)
                         .background(tc.p2, RoundedCornerShape(4.dp))
                         .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                        .verticalScroll(tooltipScroll)
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                 ) {
                     AppText(
@@ -3703,7 +3757,8 @@ private fun TabItem(
                         color = tc.tx,
                         fontSize = 11.sp,
                         fontFamily = MONO,
-                        maxLines = 3,
+                        maxLines = Int.MAX_VALUE,
+                        overflow = TextOverflow.Clip,
                     )
                 }
             },

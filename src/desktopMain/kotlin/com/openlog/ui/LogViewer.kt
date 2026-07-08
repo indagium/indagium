@@ -31,6 +31,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -417,10 +418,55 @@ fun buildFullLineAnnotation(
     }
 }
 
+fun visualLogLineForWrapLimit(text: String, limitChars: Int): String {
+    val limit = limitChars.coerceAtLeast(1)
+    if (text.length <= limit) return text
+    return text.chunked(limit).joinToString("\n")
+}
+
+fun stripVisualWrapBreaks(text: String): String = text.replace("\n", "")
+
+fun keyboardCopyTextForLogPanel(selectedText: String?, selectedRowsText: () -> String): String =
+    selectedText?.takeIf { it.isNotBlank() } ?: selectedRowsText()
+
+private fun visualLogLineForWrapLimit(line: AnnotatedString, limitChars: Int): AnnotatedString {
+    val limit = limitChars.coerceAtLeast(1)
+    if (line.length <= limit) return line
+    val builder = AnnotatedString.Builder()
+    var start = 0
+    while (start < line.length) {
+        if (start > 0) builder.append('\n')
+        val end = (start + limit).coerceAtMost(line.length)
+        builder.append(line.subSequence(start, end))
+        start = end
+    }
+    return builder.toAnnotatedString()
+}
+
+private fun estimatedLogCharWidthDp(fontSizeSp: Float): Float =
+    (fontSizeSp * 0.56f).coerceAtLeast(6f)
+
+fun effectiveLogWrapLimitChars(
+    auto: Boolean,
+    configuredLimitChars: Int,
+    visibleWidthDp: Float,
+    fontSizeSp: Float,
+): Int {
+    if (!auto) return configuredLimitChars.coerceIn(80, 20_000)
+    val usableWidthDp = (visibleWidthDp - 24f).coerceAtLeast(0f)
+    return (usableWidthDp / estimatedLogCharWidthDp(fontSizeSp)).roundToInt().coerceIn(80, 20_000)
+}
+
+private fun logContentWidthDp(wrapLimitChars: Int, fontSizeSp: Float): Dp {
+    val charWidthDp = estimatedLogCharWidthDp(fontSizeSp)
+    return (wrapLimitChars.coerceAtLeast(80) * charWidthDp + 80f).dp.coerceAtLeast(2000.dp)
+}
+
 @Composable
 fun LogViewer(
     tab: LogTab,
     modifier: Modifier = Modifier,
+    settings: AppSettings = AppSettings(),
     onSelRow: (Int, Boolean, Boolean) -> Unit,
     onSelRowRange: (List<Int>) -> Unit = { _ -> },
     onCtxMenu: (Int, Float, Float, String, Set<Int>) -> Unit,
@@ -437,6 +483,7 @@ fun LogViewer(
     onSelectAll: (() -> Unit)? = null,
     onClearSelection: (() -> Unit)? = null,
     onCopySelection: ((Set<Int>?) -> Unit)? = null,
+    onCopyText: (String) -> Unit = {},
     navScrollMargin: Int = 5,
     focusRequester: FocusRequester? = null,
     onPanelFocusChanged: (Boolean) -> Unit = {},
@@ -564,6 +611,7 @@ fun LogViewer(
             val horizontalScrollbarGutterPx = with(density) { 18.dp.toPx() }
             val visibleIds = listSummary.allIds
             val currentOnSelRowRange by rememberUpdatedState(itemOnSelRowRange)
+            var selectedTextForCopy by remember(panelKey) { mutableStateOf("") }
             // Prune bounds of rows that no longer exist — once per new item list, NOT once per
             // recomposition: the old SideEffect built a boxed HashSet of every visible id on
             // every recomposition, a multi-hundred-ms UI stall on multi-million-row tabs.
@@ -704,6 +752,11 @@ fun LogViewer(
                                 return@onPreviewKeyEvent true
                             }
                         }
+                        val actionPressed = if (isMacOs) ev.isMetaPressed else ev.isCtrlPressed
+                        if (ev.type == KeyEventType.KeyDown && actionPressed && ev.key == Key.C && selectedTextForCopy.isNotBlank()) {
+                            onCopyText(keyboardCopyTextForLogPanel(selectedTextForCopy, selectedRowsText = { "" }))
+                            return@onPreviewKeyEvent true
+                        }
                         if (handleNavKey(ev, listItems, effectiveTab, lazyState, navScope, navScrollMargin,
                                 selCursor, onSelectRow = { id -> itemOnSelRowRange(listOf(id)) }))
                             return@onPreviewKeyEvent true
@@ -720,26 +773,66 @@ fun LogViewer(
                 Column(Modifier.fillMaxSize()) {
                     // Content area: horizontal scroll wraps LazyColumn
                     BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                        LazyColumn(
-                            state = lazyState,
-                            modifier = Modifier.fillMaxSize(),
-                        ) {
-                            items(
-                                items = listItems,
-                                key = { item -> logItemStableKey(effectiveTab.id, item) }
-                            ) { item ->
-                                when (item) {
-                                    is LogItem.Row       -> LogRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, boundsMap)
-                                    is LogItem.SeqHeader ->
-                                        SeqHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
-                                    is LogItem.ManualHeader ->
-                                        ManualHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
-                                    is LogItem.StackTraceHeader ->
-                                        StackTraceHeaderRow(item, effectiveTab, mono, tc, hScroll, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
+                        val tailSpaceHeight = maxHeight * 0.5f
+                        val fontSizeSp = baseSp().value
+                        val effectiveWrapLimitChars = effectiveLogWrapLimitChars(
+                            auto = settings.autoLogRowWrap,
+                            configuredLimitChars = settings.logRowWrapLimitChars,
+                            visibleWidthDp = maxWidth.value,
+                            fontSizeSp = fontSizeSp,
+                        )
+                        val rowContentWidth = if (settings.autoLogRowWrap) {
+                            maxWidth
+                        } else {
+                            logContentWidthDp(effectiveWrapLimitChars, fontSizeSp)
+                        }
+                        val contentModifier = if (settings.autoLogRowWrap) {
+                            Modifier.fillMaxSize()
+                        } else {
+                            Modifier.fillMaxSize()
+                                .horizontalScroll(hScroll)
+                                .onPointerEvent(PointerEventType.Scroll) { event ->
+                                    val scrollDelta = event.changes.firstOrNull()?.scrollDelta ?: Offset.Zero
+                                    if (kotlin.math.abs(scrollDelta.x) > kotlin.math.abs(scrollDelta.y) && scrollDelta.x != 0f) {
+                                        hScroll.dispatchRawDelta(scrollDelta.x)
+                                    }
                                 }
-                            }
-                            item(key = "tail-space") {
-                                Spacer(Modifier.height(maxHeight * 0.5f))
+                        }
+                        LaunchedEffect(settings.autoLogRowWrap, hScroll) {
+                            if (settings.autoLogRowWrap && hScroll.value != 0) hScroll.scrollTo(0)
+                        }
+                        Box(contentModifier) {
+                            LazyColumn(
+                                state = lazyState,
+                                modifier = Modifier.width(rowContentWidth).fillMaxHeight(),
+                            ) {
+                                items(
+                                    items = listItems,
+                                    key = { item -> logItemStableKey(effectiveTab.id, item) }
+                                ) { item ->
+                                    when (item) {
+                                        is LogItem.Row -> LogRow(
+                                            item = item,
+                                            tab = effectiveTab,
+                                            mono = mono,
+                                            tc = tc,
+                                            wrapLimitChars = effectiveWrapLimitChars,
+                                            onSelRow = itemOnSelRow,
+                                            onCtxMenu = itemOnCtxMenu,
+                                            onSelectedTextChange = { selectedTextForCopy = it },
+                                            rowBoundsAbs = boundsMap,
+                                        )
+                                        is LogItem.SeqHeader ->
+                                            SeqHeaderRow(item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
+                                        is LogItem.ManualHeader ->
+                                            ManualHeaderRow(item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
+                                        is LogItem.StackTraceHeader ->
+                                            StackTraceHeaderRow(item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
+                                    }
+                                }
+                                item(key = "tail-space") {
+                                    Spacer(Modifier.height(tailSpaceHeight))
+                                }
                             }
                         }
                         VerticalScrollbar(
@@ -748,11 +841,13 @@ fun LogViewer(
                             style = scrollbarStyle,
                         )
                     }
-                    HorizontalScrollbar(
-                        adapter = rememberScrollbarAdapter(hScroll),
-                        modifier = Modifier.fillMaxWidth().padding(end = 8.dp),
-                        style = scrollbarStyle,
-                    )
+                    if (!settings.autoLogRowWrap) {
+                        HorizontalScrollbar(
+                            adapter = rememberScrollbarAdapter(hScroll),
+                            modifier = Modifier.fillMaxWidth().padding(end = 8.dp),
+                            style = scrollbarStyle,
+                        )
+                    }
                     Box(Modifier.fillMaxWidth().height(3.dp)) {
                         if (itemsLoading) IndeterminateLoadingLine(Modifier.fillMaxWidth())
                     }
@@ -1162,9 +1257,10 @@ private fun LogRow(
     tab: LogTab,
     mono: FontFamily,
     tc: ThemeColors,
-    hScroll: ScrollState,
+    wrapLimitChars: Int,
     onSelRow: (Int, Boolean, Boolean) -> Unit,
     onCtxMenu: (Int, Float, Float, String) -> Unit,
+    onSelectedTextChange: (String) -> Unit,
     rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
 ) {
     val density  = LocalDensity.current.density
@@ -1178,8 +1274,9 @@ private fun LogRow(
         onDispose { rowBoundsAbs.remove(entry.id) }
     }
 
-    val annoLine = remember(tab.id, entry, tab.filter.highlighters, tc.td, tc.ts, tc.tx) {
+    val annoLine = remember(tab.id, entry, tab.filter.highlighters, tc.td, tc.ts, tc.tx, wrapLimitChars) {
         buildFullLineAnnotation(entry, tab.filter.highlighters, tc.td, tc.td.copy(0.5f), tc.ts, tc.tx)
+            .let { visualLogLineForWrapLimit(it, wrapLimitChars) }
     }
 
     val levelColor = entry.level.defaultColor
@@ -1212,7 +1309,9 @@ private fun LogRow(
                                 if (ev.buttons.isSecondaryPressed) {
                                     ev.changes.forEach { it.consume() }
                                     val selText = if (!sel.collapsed)
-                                        runCatching { annoLine.text.substring(sel.min, sel.max) }.getOrElse { "" }
+                                        runCatching {
+                                            stripVisualWrapBreaks(annoLine.text.substring(sel.min, sel.max))
+                                        }.getOrElse { "" }
                                     else ""
                                     val ch = ev.changes.firstOrNull() ?: continue
                                     onCtxMenu(
@@ -1282,17 +1381,25 @@ private fun LogRow(
                 modifier = Modifier.widthIn(max = 70.dp).padding(end = 4.dp),
             )
         }
-        Box(Modifier.fillMaxWidth().horizontalScroll(hScroll)) {
-            BasicTextField(
-                value         = TextFieldValue(annotatedString = annoLine, selection = sel),
-                onValueChange = { new -> sel = new.selection },
-                readOnly      = true,
-                singleLine    = true,
-                textStyle     = TextStyle(color = tc.tx, fontFamily = mono, fontSize = fontSize, lineHeight = (fontSize.value + 4).sp),
-                cursorBrush   = SolidColor(Color.Transparent),
-                modifier      = Modifier.widthIn(min = 2000.dp).heightIn(min = 18.dp),
-            )
-        }
+        BasicTextField(
+            value = TextFieldValue(annotatedString = annoLine, selection = sel),
+            onValueChange = { new ->
+                sel = new.selection
+                val selectedText = if (!new.selection.collapsed) {
+                    runCatching {
+                        stripVisualWrapBreaks(annoLine.text.substring(new.selection.min, new.selection.max))
+                    }.getOrElse { "" }
+                } else {
+                    ""
+                }
+                onSelectedTextChange(selectedText)
+            },
+            readOnly = true,
+            singleLine = false,
+            textStyle = TextStyle(color = tc.tx, fontFamily = mono, fontSize = fontSize, lineHeight = (fontSize.value + 4).sp),
+            cursorBrush = SolidColor(Color.Transparent),
+            modifier = Modifier.weight(1f).heightIn(min = 18.dp),
+        )
     }
 }
 
@@ -1302,7 +1409,6 @@ private fun SeqHeaderRow(
     tab: LogTab,
     mono: FontFamily,
     tc: ThemeColors,
-    hScroll: ScrollState,
     onSelRow: (Int, Boolean, Boolean) -> Unit,
     onCtxMenu: (Int, Float, Float, String) -> Unit,
     onToggleGroup: (String) -> Unit,
@@ -1371,8 +1477,6 @@ private fun SeqHeaderRow(
                     }
                 }
             }
-            .horizontalScroll(hScroll)
-            .widthIn(min = 2000.dp)
             .padding(start = ROW_START_PAD + INDENT_STEP * item.indent, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1398,7 +1502,6 @@ private fun ManualHeaderRow(
     tab: LogTab,
     mono: FontFamily,
     tc: ThemeColors,
-    hScroll: ScrollState,
     onSelRow: (Int, Boolean, Boolean) -> Unit,
     onCtxMenu: (Int, Float, Float, String) -> Unit,
     onToggleGroup: (String) -> Unit,
@@ -1459,8 +1562,6 @@ private fun ManualHeaderRow(
                     }
                 }
             }
-            .horizontalScroll(hScroll)
-            .widthIn(min = 2000.dp)
             .padding(start = ROW_START_PAD, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1490,7 +1591,6 @@ private fun StackTraceHeaderRow(
     tab: LogTab,
     mono: FontFamily,
     tc: ThemeColors,
-    hScroll: ScrollState,
     onSelRow: (Int, Boolean, Boolean) -> Unit,
     onCtxMenu: (Int, Float, Float, String) -> Unit,
     onToggleGroup: (String) -> Unit,
@@ -1559,8 +1659,6 @@ private fun StackTraceHeaderRow(
                     }
                 }
             }
-            .horizontalScroll(hScroll)
-            .widthIn(min = 2000.dp)
             .padding(start = ROW_START_PAD + INDENT_STEP * item.indent, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),

@@ -637,7 +637,7 @@ fun AnnotationPanel(
                             Modifier.fillMaxWidth()
                                 .focusRequester(suffixFr)
                                 .onFocusChanged { suffixFocused = it.isFocused },
-                            fontSize = 11.sp,
+                            fontSize = 12.sp,
                             singleLine = false,
                         )
                     }

@@ -2170,6 +2170,8 @@ class AppStateBehaviorTest {
                 autoSaveFilters = false,
                 annotationLogBlockStyle = AnnotationLogBlockStyle.JIRA_JAVA,
                 numberAnnotationBlocks = true,
+                logRowWrapLimitChars = 1200,
+                autoLogRowWrap = false,
             )
         }
 
@@ -2182,6 +2184,8 @@ class AppStateBehaviorTest {
         assertEquals(false, restored.settings.autoSaveFilters)
         assertEquals(AnnotationLogBlockStyle.JIRA_JAVA, restored.settings.annotationLogBlockStyle)
         assertEquals(true, restored.settings.numberAnnotationBlocks)
+        assertEquals(1200, restored.settings.logRowWrapLimitChars)
+        assertEquals(false, restored.settings.autoLogRowWrap)
     }
 
     @Test

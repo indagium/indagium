@@ -970,7 +970,8 @@ fun FilterPanel(
                         .onFocusChanged { msgRuleFieldFocused = it.isFocused }
                         .onPreviewKeyEvent { ev ->
                             if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                            if (!messageRuleInputConsumesKey(ev.key)) return@onPreviewKeyEvent false
+                            val hasActionCandidate = unifiedCandidates.getOrNull(msgRuleSelectedIdx) != null
+                            if (!messageRuleInputConsumesKey(ev.key, hasActionCandidate)) return@onPreviewKeyEvent false
                             when (ev.key) {
                                 Key.Tab -> { runCatching { hlFr.requestFocus() }; true }
                                 Key.DirectionDown -> { msgRuleSelectedIdx = (msgRuleSelectedIdx + 1).coerceAtMost(unifiedCandidates.lastIndex); true }
@@ -1974,12 +1975,11 @@ fun messageRuleInputSpec(input: String, regexMode: Boolean): MessageRuleInputSpe
     return MessageRuleInputSpec(trimmed, regex = regexMode, target = RuleTarget.MESSAGE)
 }
 
-internal fun messageRuleInputConsumesKey(key: Key): Boolean =
+internal fun messageRuleInputConsumesKey(key: Key, hasActionCandidate: Boolean = false): Boolean =
     key == Key.Tab ||
         key == Key.DirectionDown ||
         key == Key.DirectionUp ||
-        key == Key.DirectionLeft ||
-        key == Key.DirectionRight ||
+        (hasActionCandidate && (key == Key.DirectionLeft || key == Key.DirectionRight)) ||
         key == Key.Escape ||
         key == Key.Enter ||
         key == Key.NumPadEnter

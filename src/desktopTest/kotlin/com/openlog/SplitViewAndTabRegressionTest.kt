@@ -12,21 +12,26 @@ import com.openlog.ui.annotationNavigationTarget
 import com.openlog.ui.browserTabOrderDuringDrag
 import com.openlog.ui.centerAnchorIndex
 import com.openlog.ui.comparePickerOrderAfterOverflowSelection
+import com.openlog.ui.effectiveLogWrapLimitChars
 import com.openlog.ui.expansionAndIndexForEntry
 import com.openlog.ui.logItemStableKey
+import com.openlog.ui.keyboardCopyTextForLogPanel
 import com.openlog.ui.mkTab
 import com.openlog.ui.nextOriginalSelectionAfterFilteredSelection
 import com.openlog.ui.orderedTabsForComparePicker
 import com.openlog.ui.panelCopySelectionIds
 import com.openlog.ui.splitTabsForVisibility
+import com.openlog.ui.stripVisualWrapBreaks
 import com.openlog.ui.tabOrderAfterVisibleReorder
 import com.openlog.ui.tabRenderX
+import com.openlog.ui.visualLogLineForWrapLimit
 import com.openlog.ui.visibleRowRangeIds
 import com.openlog.utils.computeItems
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotSame
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 class SplitViewAndTabRegressionTest {
     @Test
@@ -83,6 +88,52 @@ class SplitViewAndTabRegressionTest {
         )
 
         assertEquals(setOf(1, 2), panelCopySelectionIds(tab.copy(selected = setOf(1, 2))))
+    }
+
+    @Test
+    fun keyboardCopyPrefersSelectedTextOverSelectedRows() {
+        val copied = keyboardCopyTextForLogPanel(
+            selectedText = "only this substring",
+            selectedRowsText = { "10:00:00.000  I  App: whole row" },
+        )
+
+        assertEquals("only this substring", copied)
+    }
+
+    @Test
+    fun visualLogLineWrappingOnlyAddsBreaks() {
+        val original = "1234567890ABCDEFGHIJ"
+        val wrapped = visualLogLineForWrapLimit(original, limitChars = 8)
+
+        assertEquals("12345678\n90ABCDEF\nGHIJ", wrapped)
+        assertEquals(original, stripVisualWrapBreaks(wrapped))
+    }
+
+    @Test
+    fun autoLogWrapLimitFollowsVisibleWidth() {
+        val narrow = effectiveLogWrapLimitChars(
+            auto = true,
+            configuredLimitChars = 480,
+            visibleWidthDp = 500f,
+            fontSizeSp = 12f,
+        )
+        val wide = effectiveLogWrapLimitChars(
+            auto = true,
+            configuredLimitChars = 480,
+            visibleWidthDp = 1000f,
+            fontSizeSp = 12f,
+        )
+        val enoughForContext = effectiveLogWrapLimitChars(
+            auto = true,
+            configuredLimitChars = 480,
+            visibleWidthDp = 760f,
+            fontSizeSp = 12f,
+        )
+
+        assertEquals(480, effectiveLogWrapLimitChars(false, 480, visibleWidthDp = 500f, fontSizeSp = 12f))
+        assertTrue(narrow < wide)
+        assertTrue(narrow in 80 until 480)
+        assertTrue(enoughForContext >= 100)
     }
 
     @Test

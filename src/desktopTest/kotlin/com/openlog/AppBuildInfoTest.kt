@@ -1,7 +1,9 @@
 package com.openlog
 
 import com.openlog.generated.BuildInfo
+import java.io.File
 import kotlin.test.Test
+import kotlin.test.assertContains
 import kotlin.test.assertTrue
 
 class AppBuildInfoTest {
@@ -18,5 +20,14 @@ class AppBuildInfoTest {
     @Test
     fun exposesAppAuthorToRuntime() {
         assertTrue(BuildInfo.APP_AUTHOR.isNotBlank())
+    }
+
+    @Test
+    fun packagedBuildDeclaresTextLogFileAssociations() {
+        val gradleFile = File("build.gradle.kts").readText()
+
+        listOf("log", "txt", "logcat", "trace", "out").forEach { ext ->
+            assertContains(gradleFile, """fileAssociation("text/plain", "$ext"""")
+        }
     }
 }
