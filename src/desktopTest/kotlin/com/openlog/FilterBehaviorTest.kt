@@ -1,6 +1,7 @@
 package com.openlog
 
 import androidx.compose.ui.graphics.Color
+import com.openlog.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.Highlighter
@@ -11,14 +12,91 @@ import com.openlog.model.LogTab
 import com.openlog.model.MessageRule
 import com.openlog.model.SequenceDef
 import com.openlog.ui.buildFullLineAnnotation
+import com.openlog.ui.keywordRegexHighlightRanges
 import com.openlog.utils.computeItems
 import com.openlog.utils.passesFilter
+import com.openlog.utils.visibleLogLineText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class FilterBehaviorTest {
+    @Test
+    fun regexSearchAndHighlightUseTheSameVisibleLogRowText() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "Receiver", "receive : message after 42 ms")
+        val lineText = visibleLogLineText(entry)
+        val filter = Filter(
+            mode = FilterMode.KEYWORD,
+            kwText = """receive : message.*\d+""",
+            kwRegex = true,
+            kwHighlightColor = Color.Cyan,
+        )
+
+        val ranges = keywordRegexHighlightRanges(lineText, filter)
+
+        assertTrue(passesFilter(entry, filter))
+        assertEquals(listOf(lineText.indexOf("receive") to lineText.indexOf(" ms")), ranges)
+        val annotation = buildFullLineAnnotation(entry, emptyList(), Color.Gray, Color.Gray, Color.Gray, Color.Gray, filter)
+        assertEquals(ranges.single().first, annotation.spanStyles.last().start)
+        assertEquals(ranges.single().second, annotation.spanStyles.last().end)
+    }
+
+    @Test
+    fun regexSearchMatchesTheVisibleTagMessagePunctuation() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "Receiver", "message")
+        val filter = Filter(mode = FilterMode.KEYWORD, kwText = """Receiver:\s+message""", kwRegex = true)
+
+        assertTrue(passesFilter(entry, filter))
+        assertEquals(
+            listOf("Receiver: message".let { visibleLogLineText(entry).indexOf(it) to visibleLogLineText(entry).indexOf(it) + it.length }),
+            keywordRegexHighlightRanges(visibleLogLineText(entry), filter),
+        )
+    }
+
+    @Test
+    fun regexSearchHighlightRangesAreEmptyForInvalidPlainOrDisabledRegexSearch() {
+        val lineText = "10:00:00.000  I  App: timeout after 42 ms"
+
+        assertTrue(
+            keywordRegexHighlightRanges(
+                lineText,
+                Filter(mode = FilterMode.KEYWORD, kwText = "[broken", kwRegex = true),
+            ).isEmpty(),
+        )
+        assertTrue(
+            keywordRegexHighlightRanges(
+                lineText,
+                Filter(mode = FilterMode.KEYWORD, kwText = "timeout", kwRegex = false),
+            ).isEmpty(),
+        )
+        assertTrue(
+            keywordRegexHighlightRanges(
+                lineText,
+                Filter(mode = FilterMode.KEYWORD, kwText = "timeout", kwRegex = true, kwHighlightEnabled = false),
+            ).isEmpty(),
+        )
+    }
+
+    @Test
+    fun disablingRegexHighlightDoesNotChangeRegexFiltering() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "App", "timeout after 42 ms")
+        val enabled = Filter(mode = FilterMode.KEYWORD, kwText = """timeout.*\d+""", kwRegex = true)
+        val disabled = enabled.copy(kwHighlightEnabled = false, kwHighlightColor = Color.Cyan)
+
+        assertTrue(passesFilter(entry, enabled))
+        assertTrue(passesFilter(entry, disabled))
+        assertTrue(keywordRegexHighlightRanges(visibleLogLineText(entry), disabled).isEmpty())
+    }
+
+    @Test
+    fun regexSearchHighlightDefaultsToEnabledStableColor() {
+        val filter = Filter(mode = FilterMode.KEYWORD, kwText = "timeout", kwRegex = true)
+
+        assertTrue(filter.kwHighlightEnabled)
+        assertEquals(DEFAULT_KEYWORD_HIGHLIGHT_COLOR, filter.kwHighlightColor)
+    }
+
     @Test
     fun activeTagsRefineMatchingPackagePrefixAndAddExternalTags() {
         val selectedInsidePackage = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.design.Example", "shown")

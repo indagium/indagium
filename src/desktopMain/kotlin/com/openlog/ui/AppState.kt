@@ -120,6 +120,52 @@ data class PendingFilterRename(val id: String, val currentName: String, val isDr
 
 enum class ImportFilterAction { RENAME, REPLACE, SKIP, ADD }
 
+private fun isTransientRegexOnlyChange(before: Filter, after: Filter): Boolean {
+    fun Filter.withoutTransientRegexSearch() = copy(
+        mode = FilterMode.TAGS,
+        kwText = "",
+        kwRegex = false,
+        kwHighlightEnabled = true,
+        kwHighlightColor = DEFAULT_KEYWORD_HIGHLIGHT_COLOR,
+    )
+    return before.withoutTransientRegexSearch() == after.withoutTransientRegexSearch()
+}
+
+enum class ManualCollapseAvailability { AVAILABLE, MISSING_ROW, NOOP_RANGE, OVERLAPS_EXISTING }
+
+private fun manualCollapseRange(tab: LogTab, anchorId: Int, direction: ManualCollapseDirection, endId: Int? = null): IntRange? {
+    val dataIds = tab.logData.map { it.id }
+    val anchor = dataIds.indexOf(anchorId).takeIf { it >= 0 } ?: return null
+    return when (direction) {
+        ManualCollapseDirection.TO_START -> 0..anchor
+        ManualCollapseDirection.TO_END -> anchor..dataIds.lastIndex
+        ManualCollapseDirection.RANGE -> {
+            val end = endId?.let { dataIds.indexOf(it) }?.takeIf { it >= 0 } ?: return null
+            minOf(anchor, end)..maxOf(anchor, end)
+        }
+    }
+}
+
+private fun rangesOverlap(a: IntRange, b: IntRange): Boolean =
+    a.first <= b.last && b.first <= a.last
+
+internal fun manualCollapseAvailability(
+    tab: LogTab,
+    anchorId: Int,
+    direction: ManualCollapseDirection,
+    endId: Int? = null,
+): ManualCollapseAvailability {
+    val range = manualCollapseRange(tab, anchorId, direction, endId)
+        ?: return ManualCollapseAvailability.MISSING_ROW
+    if (range.first == range.last) return ManualCollapseAvailability.NOOP_RANGE
+    // Disabled blocks remain part of the document and may be re-enabled later, so allowing a
+    // new overlapping range here would create an invalid block layout on the next toggle.
+    val overlapsExisting = tab.manualBlocks
+        .mapNotNull { manualCollapseRange(tab, it.anchorId, it.direction, it.endId) }
+        .any { existing -> rangesOverlap(existing, range) }
+    return if (overlapsExisting) ManualCollapseAvailability.OVERLAPS_EXISTING else ManualCollapseAvailability.AVAILABLE
+}
+
 data class ImportFilterReviewRow(
     val rowId: String,
     val incoming: SavedFilter,
@@ -280,6 +326,9 @@ class AppState(
     var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
     var filterDraftsByTab by mutableStateOf<Map<String, SavedFilter>>(emptyMap())
     var activeFilterDraftTabIds by mutableStateOf<Set<String>>(emptySet())
+    // Regex search is deliberately transient: it keeps the current saved-filter marker visible,
+    // without becoming a draft or blocking a later click on a saved preset.
+    private var transientRegexSearchTabIds by mutableStateOf<Set<String>>(emptySet())
     var pendingAnnotationNavigation by mutableStateOf<AnnotationNavigationRequest?>(null)
         private set
     var pendingZipPicker by mutableStateOf<PendingZipPicker?>(null)
@@ -542,7 +591,15 @@ class AppState(
     private fun upFlt(tabId: String, trackDraft: Boolean, fn: (Filter) -> Filter) {
         val before = tab(tabId)?.filter
         upTab(tabId) { it.copy(filter = fn(it.filter)) }
-        if (trackDraft && before != null && before != tab(tabId)?.filter) updateFilterDraftAfterEdit(tabId)
+        val after = tab(tabId)?.filter
+        if (before != null && before != after) {
+            val transientOnlyChange =
+                tabId in transientRegexSearchTabIds && after != null && isTransientRegexOnlyChange(before, after)
+            if (tabId in transientRegexSearchTabIds && !transientOnlyChange) {
+                transientRegexSearchTabIds = transientRegexSearchTabIds - tabId
+            }
+            if (trackDraft && !transientOnlyChange) updateFilterDraftAfterEdit(tabId)
+        }
     }
 
     fun activeTab() = tabs.find { it.id == activeTabId } ?: tabs.firstOrNull()
@@ -556,6 +613,17 @@ class AppState(
 
     fun setFilterMode(tabId: String, mode: FilterMode) = upFlt(tabId) { it.copy(mode = mode) }
 
+    // Regex is primarily a transient search surface. Entering it from another filter mode keeps
+    // the current preset selected and avoids an automatic "unsaved" draft; the user can still
+    // explicitly save the resulting regex from Saved filters when it should become a preset.
+    fun startRegexSearch(tabId: String) {
+        val enteringRegex = tab(tabId)?.filter?.mode != FilterMode.KEYWORD
+        upFlt(tabId, trackDraft = false) { it.copy(mode = FilterMode.KEYWORD, kwRegex = true) }
+        if (enteringRegex) {
+            transientRegexSearchTabIds = transientRegexSearchTabIds + tabId
+        }
+    }
+
     fun toggleTag(tabId: String, tag: String) {
         upFlt(tabId) { f -> f.copy(activeTags = if (tag in f.activeTags) f.activeTags - tag else f.activeTags + tag) }
         tagUsage = tagUsage + (tag to ((tagUsage[tag] ?: 0) + 1))
@@ -567,12 +635,19 @@ class AppState(
 
     fun toggleKwRx(tabId: String) = upFlt(tabId) { it.copy(kwRegex = !it.kwRegex) }
 
+    fun setKwHighlightEnabled(tabId: String, enabled: Boolean) =
+        upFlt(tabId) { it.copy(kwHighlightEnabled = enabled) }
+
+    fun setKwHighlightColor(tabId: String, color: Color) =
+        upFlt(tabId) { it.copy(kwHighlightColor = color) }
+
     fun toggleSeq(tabId: String) = upFlt(tabId) { it.copy(seqOn = !it.seqOn) }
 
     fun clearFilter(tabId: String) {
         upFlt(tabId, trackDraft = false) { Filter() }
         activeSavedFilterIds = activeSavedFilterIds - tabId
         clearDraftForTab(tabId)
+        transientRegexSearchTabIds = transientRegexSearchTabIds - tabId
     }
 
     fun requestClearFilter(tabId: String) {
@@ -875,6 +950,7 @@ class AppState(
         savedFilters = savedFilters + sf
         activeSavedFilterIds = activeSavedFilterIds + (tabId to sf.id)
         clearDraftForTab(tabId)
+        transientRegexSearchTabIds = transientRegexSearchTabIds - tabId
         sfDialog = false; sfName = ""
         writeFilterBackup()
         loadPendingFilterAfterSaving(tabId)
@@ -886,6 +962,7 @@ class AppState(
         savedFilters = savedFilters.map { if (it.id == pending.existingId) updated else it }
         activeSavedFilterIds = activeSavedFilterIds + (pending.tabId to pending.existingId)
         clearDraftForTab(pending.tabId)
+        transientRegexSearchTabIds = transientRegexSearchTabIds - pending.tabId
         pendingDuplicateFilterSave = null
         sfDialog = false
         sfName = ""
@@ -898,6 +975,10 @@ class AppState(
     }
 
     fun requestLoadFilter(tabId: String, sf: SavedFilter) {
+        if (tabId in transientRegexSearchTabIds) {
+            loadFilter(tabId, sf)
+            return
+        }
         if (sf.id == filterDraftsByTab[tabId]?.id) {
             upFlt(tabId, trackDraft = false) { _ -> sf.toFilter() }
             activeSavedFilterIds = activeSavedFilterIds - tabId
@@ -966,7 +1047,7 @@ class AppState(
             id, name, f.levels, f.activeTags, f.kwText, f.kwRegex,
             f.mode, f.excludeTags, f.excludeKw, f.excludeKwRegex, f.highlighters, f.seqOn,
             f.kwInTag, f.kwInTagRegex, f.pkgPrefixes, f.pidTidFilter, f.sequences, f.messageRules,
-            f.excludePkgPrefixes,
+            f.excludePkgPrefixes, f.kwHighlightEnabled, f.kwHighlightColor,
         )
     }
 
@@ -1000,6 +1081,7 @@ class AppState(
         // Loading a different preset abandons this tab's in-progress unsaved draft (if any) —
         // otherwise it lingers forever in savedFiltersForTab()'s list, never active but never gone.
         clearDraftForTab(tabId)
+        transientRegexSearchTabIds = transientRegexSearchTabIds - tabId
     }
 
     fun loadFilterById(tabId: String, presetId: String): Boolean {
@@ -1116,6 +1198,8 @@ class AppState(
             appendLine("    \"excludeTags\": [${sf.excludeTags.joinToString(",") { it.jsonStr() }}],")
             appendLine("    \"kwText\": ${sf.kwText.jsonStr()},")
             appendLine("    \"kwRegex\": ${sf.kwRegex},")
+            appendLine("    \"kwHighlightEnabled\": ${sf.kwHighlightEnabled},")
+            appendLine("    \"kwHighlightColor\": ${sf.kwHighlightColor.value.toString().jsonStr()},")
             appendLine("    \"excludeKw\": ${sf.excludeKw.jsonStr()},")
             appendLine("    \"excludeKwRegex\": ${sf.excludeKwRegex},")
             appendLine(
@@ -1230,6 +1314,11 @@ class AppState(
             val excludeTags = obj.stringArrayField("excludeTags").toSet()
             val kwText = obj.stringField("kwText") ?: ""
             val kwRegex = obj.booleanField("kwRegex")
+            val kwHighlightEnabled = obj["kwHighlightEnabled"] != false
+            val kwHighlightColor = obj.stringField("kwHighlightColor")
+                ?.toULongOrNull()
+                ?.let(::Color)
+                ?: DEFAULT_KEYWORD_HIGHLIGHT_COLOR
             val excludeKw = obj.stringField("excludeKw") ?: ""
             val excludeKwRegex = obj.booleanField("excludeKwRegex")
             val highlighters = obj.stringArrayField("highlighters").mapNotNull { it.highlighterFromToken() }
@@ -1246,7 +1335,7 @@ class AppState(
                 levels.ifEmpty { LogLevel.entries.toSet() }, activeTags, kwText, kwRegex, mode,
                 excludeTags, excludeKw, excludeKwRegex, highlighters, seqOn,
                 kwInTag, kwInTagRegex, pkgPrefixes, pidTidFilter, sequences, messageRules,
-                excludePkgPrefixes,
+                excludePkgPrefixes, kwHighlightEnabled, kwHighlightColor,
             )
         }
     }
@@ -1716,11 +1805,15 @@ class AppState(
         ctx = null
     }
 
-    private fun addManualCollapse(tabId: String, anchorId: Int, direction: ManualCollapseDirection, endId: Int? = null) =
+    private fun addManualCollapse(tabId: String, anchorId: Int, direction: ManualCollapseDirection, endId: Int? = null): Boolean {
+        val tab = tab(tabId) ?: return false
+        if (manualCollapseAvailability(tab, anchorId, direction, endId) != ManualCollapseAvailability.AVAILABLE) return false
         upTab(tabId) { t ->
             val id = "mc${System.currentTimeMillis()}_${anchorId}_${direction.name}"
             t.copy(manualBlocks = t.manualBlocks + ManualCollapseBlock(id, anchorId, direction, endId = endId))
         }
+        return true
+    }
 
     // Collapses an arbitrary multi-line selection into one block — unlike collapseTo{Start,End}Ctx
     // (anchored to a file edge), this covers exactly [min(ids), max(ids)] regardless of which of
@@ -1928,6 +2021,7 @@ class AppState(
         activeSavedFilterIds = activeSavedFilterIds - tabIds
         filterDraftsByTab = filterDraftsByTab - tabIds
         activeFilterDraftTabIds = activeFilterDraftTabIds - tabIds
+        transientRegexSearchTabIds = transientRegexSearchTabIds - tabIds
     }
 
     // Ships "merge already-open tabs" (v1) — data's already in memory, no re-parsing needed.
@@ -2110,6 +2204,7 @@ class AppState(
                         sourcePath = path,
                         annotations = Annotations(prefix = "$prefixLabel ${file.name}"),
                         largeFileMode = largeFile,
+                        showUnfiltered = settings.openNewFilesWithUnfiltered,
                     )
                 synchronized(stateLock) {
                     ensureActive()
@@ -2266,6 +2361,7 @@ class AppState(
                         sourcePath = path,
                         annotations = Annotations(prefix = "$prefixLabel $prefixName"),
                         largeFileMode = largeFile,
+                        showUnfiltered = settings.openNewFilesWithUnfiltered,
                     )
                 synchronized(stateLock) {
                     ensureActive()
@@ -2387,6 +2483,7 @@ class AppState(
                 sourcePath = path,
                 annotations = Annotations(prefix = "$prefixLabel ${file.name}"),
                 largeFileMode = file.length() >= LARGE_FILE_MODE_BYTES,
+                showUnfiltered = settings.openNewFilesWithUnfiltered,
             )
         synchronized(stateLock) {
             tabs = tabs + t
@@ -2779,6 +2876,7 @@ class AppState(
             "saved" -> importFilters(value.unb64())
             "activeFilters" -> activeSavedFilterIds = activeFilterMapFromToken(value.unb64())
             "drafts" -> restoreDraftsFromToken(value.unb64())
+            "transientRegex" -> transientRegexSearchTabIds = value.pathTokenList().toSet()
             "recent" -> recentFiles = value.pathTokenList()
             "recentNotes" -> recentNotes = value.pathTokenList()
             "filterPanel" -> fpState.restoreFilterPanelToken(value.unb64())
@@ -2846,6 +2944,7 @@ class AppState(
         appendLine("saved\t${exportFilters().b64()}")
         appendLine("activeFilters\t${activeFilterMapToken().b64()}")
         appendLine("drafts\t${draftsToken().b64()}")
+        appendLine("transientRegex\t${transientRegexSearchTabIds.joinToString(",") { it.b64() }.b64()}")
         appendLine("recent\t${recentFiles.joinToString(",") { it.b64() }.b64()}")
         appendLine("recentNotes\t${recentNotes.joinToString(",") { it.b64() }.b64()}")
         appendLine("filterPanel\t${fpState.filterPanelToken().b64()}")
@@ -3158,6 +3257,7 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     maskWordReplacement,
     highlightEntireCrashGroup.toString(),
     ctrlFTarget.name,
+    openNewFilesWithUnfiltered.toString(),
 )
 
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
@@ -3203,6 +3303,7 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         ctrlFTarget = p.getOrNull(mcpIndex + 6)
             ?.let { runCatching { CtrlFTarget.valueOf(it) }.getOrNull() }
             ?: CtrlFTarget.KEYWORD_REGEX,
+        openNewFilesWithUnfiltered = p.getOrNull(mcpIndex + 7)?.toBooleanStrictOrNull() ?: false,
     )
 }.getOrNull()
 
@@ -3306,6 +3407,8 @@ private fun SavedFilter.savedFilterToken(): String = tokenFields(
     sequences.joinToString(",") { it.sequenceToken().b64() },
     messageRules.joinToString(",") { it.messageRuleToken().b64() },
     excludePkgPrefixes.joinToString(",") { it.b64() },
+    kwHighlightEnabled.toString(),
+    kwHighlightColor.value.toString(),
 )
 
 private fun String.savedFilterFromToken(): SavedFilter? = runCatching {
@@ -3332,6 +3435,8 @@ private fun String.savedFilterFromToken(): SavedFilter? = runCatching {
         sequences = p[16].encodedList().mapNotNull { it.sequenceFromToken() },
         messageRules = p[17].encodedList().mapNotNull { it.messageRuleFromToken() },
         excludePkgPrefixes = p.getOrNull(18)?.encodedSet() ?: emptySet(),
+        kwHighlightEnabled = p.getOrNull(19)?.toBooleanStrictOrNull() ?: true,
+        kwHighlightColor = p.getOrNull(20)?.toULongOrNull()?.let(::Color) ?: DEFAULT_KEYWORD_HIGHLIGHT_COLOR,
     )
 }.getOrNull()
 
@@ -3346,6 +3451,8 @@ private fun SavedFilter.toFilter(): Filter = Filter(
     excludeKwRegex = excludeKwRegex,
     highlighters = highlighters,
     messageRules = messageRules,
+    kwHighlightEnabled = kwHighlightEnabled,
+    kwHighlightColor = kwHighlightColor,
     seqOn = seqOn,
     kwInTag = kwInTag,
     kwInTagRegex = kwInTagRegex,
@@ -3459,7 +3566,7 @@ private fun LogTab.tabToken(): String {
         "tab", "tab", filter.levels, filter.activeTags, filter.kwText, filter.kwRegex,
         filter.mode, filter.excludeTags, filter.excludeKw, filter.excludeKwRegex, filter.highlighters, filter.seqOn,
         filter.kwInTag, filter.kwInTagRegex, filter.pkgPrefixes, filter.pidTidFilter, filter.sequences,
-        filter.messageRules, filter.excludePkgPrefixes,
+        filter.messageRules, filter.excludePkgPrefixes, filter.kwHighlightEnabled, filter.kwHighlightColor,
     )
     return tokenFields(
         id,

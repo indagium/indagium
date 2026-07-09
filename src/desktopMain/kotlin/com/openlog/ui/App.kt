@@ -247,6 +247,23 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                         // with its own local selection (e.g. the "Original" unfiltered panel).
                         val selectedIds = ctx.panelSelectedIds.ifEmpty { ctxTab.selected }
                         val selCount = selectedIds.size
+                        val canCollapseToStart = ctxTab.let {
+                            manualCollapseAvailability(it, ctx.entryId, ManualCollapseDirection.TO_START) ==
+                                ManualCollapseAvailability.AVAILABLE
+                        }
+                        val canCollapseToEnd = ctxTab.let {
+                            manualCollapseAvailability(it, ctx.entryId, ManualCollapseDirection.TO_END) ==
+                                ManualCollapseAvailability.AVAILABLE
+                        }
+                        val canCollapseSelection = ctxTab.let { tab ->
+                            selectedIds.size > 1 &&
+                                manualCollapseAvailability(
+                                    tab,
+                                    selectedIds.minOrNull() ?: ctx.entryId,
+                                    ManualCollapseDirection.RANGE,
+                                    selectedIds.maxOrNull(),
+                                ) == ManualCollapseAvailability.AVAILABLE
+                        }
                         val matchingHlId = ctx.selText.takeIf { it.isNotBlank() }
                             ?.let { state.matchingHighlighterId(ctx.tabId, it) }
                         // Estimate full menu height from items that will actually render:
@@ -299,15 +316,19 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                 add(CtxMenuEntry.Action(Icons.Outlined.Flag, "Complete sequence end") { state.completeSequenceEndFromCtx() })
                             }
                             add(CtxMenuEntry.Action(Icons.Outlined.PlayArrow, "Set sequence start") { state.setSequenceStartFromCtx() })
-                            if (selCount > 1) {
+                            if (canCollapseSelection) {
                                 add(
                                     CtxMenuEntry.Action(Icons.Outlined.Layers, "Collapse $selCount selected lines") {
                                         state.collapseSelectedLinesFromCtx(ctx.tabId, selectedIds)
                                     },
                                 )
                             }
-                            add(CtxMenuEntry.Action(Icons.Outlined.ArrowUpward, "Collapse to file start") { state.collapseToStartFromCtx() })
-                            add(CtxMenuEntry.Action(Icons.Outlined.ArrowDownward, "Collapse to file end") { state.collapseToEndFromCtx() })
+                            if (canCollapseToStart) {
+                                add(CtxMenuEntry.Action(Icons.Outlined.ArrowUpward, "Collapse to file start") { state.collapseToStartFromCtx() })
+                            }
+                            if (canCollapseToEnd) {
+                                add(CtxMenuEntry.Action(Icons.Outlined.ArrowDownward, "Collapse to file end") { state.collapseToEndFromCtx() })
+                            }
                             add(
                                 CtxMenuEntry.ActionWithSubmenu(
                                     Icons.Outlined.VisibilityOff,
@@ -1827,7 +1848,9 @@ private fun BoundFilterPanel(
         onToggleTag = { state.toggleTag(tab.id, it) },
         onToggleExcludeTag = { state.toggleExcludeTag(tab.id, it) },
         onSetKw = { state.setKw(tab.id, it) },
-        onToggleKwRx = { state.toggleKwRx(tab.id) },
+        onStartRegexSearch = { state.startRegexSearch(tab.id) },
+        onSetKwHighlightEnabled = { state.setKwHighlightEnabled(tab.id, it) },
+        onSetKwHighlightColor = { state.setKwHighlightColor(tab.id, it) },
         onToggleSeq = { state.toggleSeq(tab.id) },
         onAddSeq = { t, r, c, st, et, er, eg -> state.addSequence(t, r, c, st, et, er, eg) },
         onRemoveSeq = { state.removeSequence(it) },
@@ -3078,6 +3101,16 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                         onToggle = { idx -> state.updateSettings { it.copy(ctrlFTarget = targets[idx]) } },
                     )
                 }
+            }
+            CompactSettingWithTooltip(
+                label = "Original panel for new files",
+                tooltip = "Controls whether newly opened files start with the unfiltered Original panel visible.",
+            ) {
+                SegmentedControl(
+                    options = listOf("Off", "On"),
+                    selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 1 else 0),
+                    onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 1) } },
+                )
             }
 
             SettingsSectionHeader("Export & annotations")

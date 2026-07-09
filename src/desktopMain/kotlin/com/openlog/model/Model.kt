@@ -3,6 +3,7 @@ package com.openlog.model
 import androidx.compose.ui.graphics.Color
 
 private val MANUAL_COLLAPSE_DEFAULT_COLOR = Color(0xFF06b6d4)
+val DEFAULT_KEYWORD_HIGHLIGHT_COLOR = Color(0xFFfacc15)
 
 enum class LogLevel(val key: Char, val label: String, val defaultColor: Color) {
     V('V', "Verbose", Color(0xFF6e7681)),
@@ -117,6 +118,8 @@ data class Filter(
     val excludeKwRegex: Boolean = false,
     val highlighters: List<Highlighter> = emptyList(),
     val messageRules: List<MessageRule> = emptyList(),
+    val kwHighlightEnabled: Boolean = true,
+    val kwHighlightColor: Color = DEFAULT_KEYWORD_HIGHLIGHT_COLOR,
     val seqOn: Boolean = true,
     // TAGS-mode secondary filters
     // message text filter applied within tag result set
@@ -213,6 +216,8 @@ data class SavedFilter(
     val sequences: List<SequenceDef> = emptyList(),
     val messageRules: List<MessageRule> = emptyList(),
     val excludePkgPrefixes: Set<String> = emptySet(),
+    val kwHighlightEnabled: Boolean = true,
+    val kwHighlightColor: Color = DEFAULT_KEYWORD_HIGHLIGHT_COLOR,
 )
 
 // ── Settings ───────────────────────────────────────────────────────
@@ -253,6 +258,7 @@ data class AppSettings(
     // background+text tint. Enabling this extends that full tint to every row in the group.
     val highlightEntireCrashGroup: Boolean = false,
     val ctrlFTarget: CtrlFTarget = CtrlFTarget.KEYWORD_REGEX,
+    val openNewFilesWithUnfiltered: Boolean = false,
 )
 
 enum class ThemePreset(val label: String) {
