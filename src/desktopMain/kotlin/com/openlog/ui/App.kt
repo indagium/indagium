@@ -295,6 +295,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             )
                             add(CtxMenuEntry.Divider)
                             add(CtxMenuEntry.Preview)
+                            // Block order: highlight, hide/show, tags, sequence, collapse, copy.
                             run {
                                 // Selecting an already-fully-highlighted span offers only "Remove
                                 // highlight" — "Highlight selection" would just be a same-color
@@ -305,45 +306,6 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                     add(CtxMenuEntry.Action(Icons.Outlined.Bookmark, "Highlight selection") { state.addHlFromCtx() })
                                 }
                                 add(CtxMenuEntry.Divider)
-                            }
-                            // Sequence actions — own block, "Add as sequence" pulled out of the
-                            // highlight block above to sit next to the rest of the sequence
-                            // workflow instead of next to an unrelated highlight toggle.
-                            run {
-                                add(
-                                    CtxMenuEntry.ActionWithSubmenu(
-                                        Icons.Outlined.Layers,
-                                        "Add as sequence",
-                                        onClick = { state.addSeqFromCtx() },
-                                        submenu = ruleVariants.map { v -> v.label to { state.addSequenceVariant(v) } },
-                                    ),
-                                )
-                                if (state.pendingSequenceStart != null) {
-                                    add(CtxMenuEntry.Action(Icons.Outlined.Flag, "Complete sequence end") { state.completeSequenceEndFromCtx() })
-                                }
-                                add(CtxMenuEntry.Action(Icons.Outlined.PlayArrow, "Set sequence start") { state.setSequenceStartFromCtx() })
-                                add(CtxMenuEntry.Divider)
-                            }
-                            // Collapse actions — own block. Every entry is conditional on
-                            // availability, so the divider after is guarded on at least one
-                            // having rendered (an empty block would otherwise leave two dividers
-                            // back to back with nothing between them).
-                            run {
-                                val hasCollapseAction = canCollapseSelection || canCollapseToStart || canCollapseToEnd
-                                if (canCollapseSelection) {
-                                    add(
-                                        CtxMenuEntry.Action(Icons.Outlined.Layers, "Collapse $selCount selected lines") {
-                                            state.collapseSelectedLinesFromCtx(ctx.tabId, selectedIds)
-                                        },
-                                    )
-                                }
-                                if (canCollapseToStart) {
-                                    add(CtxMenuEntry.Action(Icons.Outlined.ArrowUpward, "Collapse to file start") { state.collapseToStartFromCtx() })
-                                }
-                                if (canCollapseToEnd) {
-                                    add(CtxMenuEntry.Action(Icons.Outlined.ArrowDownward, "Collapse to file end") { state.collapseToEndFromCtx() })
-                                }
-                                if (hasCollapseAction) add(CtxMenuEntry.Divider)
                             }
                             add(
                                 CtxMenuEntry.ActionWithSubmenu(
@@ -366,6 +328,45 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             add(CtxMenuEntry.Action(Icons.AutoMirrored.Outlined.LabelOff, "Exclude tag") { state.addExcludeTagFromCtx() })
                             add(CtxMenuEntry.Action(Icons.Outlined.Bookmark, "Highlight tag") { state.addHlTagFromCtx() })
                             add(CtxMenuEntry.Divider)
+                            // Sequence actions — own block, "Add as sequence" pulled out of the
+                            // highlight block above to sit next to the rest of the sequence
+                            // workflow instead of next to an unrelated highlight toggle.
+                            run {
+                                add(
+                                    CtxMenuEntry.ActionWithSubmenu(
+                                        Icons.Outlined.Layers,
+                                        "Add as sequence",
+                                        onClick = { state.addSeqFromCtx() },
+                                        submenu = ruleVariants.map { v -> v.label to { state.addSequenceVariant(v) } },
+                                    ),
+                                )
+                                if (state.pendingSequenceStart != null) {
+                                    add(CtxMenuEntry.Action(Icons.Outlined.Flag, "Complete sequence end") { state.completeSequenceEndFromCtx() })
+                                }
+                                add(CtxMenuEntry.Action(Icons.Outlined.PlayArrow, "Set sequence start") { state.setSequenceStartFromCtx() })
+                                add(CtxMenuEntry.Divider)
+                            }
+                            // Collapse actions — own block. Every entry is conditional on
+                            // availability, so the divider after is guarded on at least one
+                            // having rendered (an empty block would otherwise leave two dividers
+                            // back to back with nothing between them, here right before Copy).
+                            run {
+                                val hasCollapseAction = canCollapseSelection || canCollapseToStart || canCollapseToEnd
+                                if (canCollapseSelection) {
+                                    add(
+                                        CtxMenuEntry.Action(Icons.Outlined.Layers, "Collapse $selCount selected lines") {
+                                            state.collapseSelectedLinesFromCtx(ctx.tabId, selectedIds)
+                                        },
+                                    )
+                                }
+                                if (canCollapseToStart) {
+                                    add(CtxMenuEntry.Action(Icons.Outlined.ArrowUpward, "Collapse to file start") { state.collapseToStartFromCtx() })
+                                }
+                                if (canCollapseToEnd) {
+                                    add(CtxMenuEntry.Action(Icons.Outlined.ArrowDownward, "Collapse to file end") { state.collapseToEndFromCtx() })
+                                }
+                                if (hasCollapseAction) add(CtxMenuEntry.Divider)
+                            }
                             if (selCount > 1) {
                                 add(
                                     CtxMenuEntry.Action(Icons.Outlined.ContentCopy, "Copy $selCount selected lines") {
