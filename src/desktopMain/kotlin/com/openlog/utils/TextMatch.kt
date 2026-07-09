@@ -1,10 +1,30 @@
 package com.openlog.utils
 
+import com.openlog.model.LogEntry
 import java.util.concurrent.ConcurrentHashMap
 
 private data class RegexKey(val pattern: String, val ignoreCase: Boolean)
 
 private val regexCache = ConcurrentHashMap<RegexKey, Result<Regex>>()
+
+// This is the exact text presented by LogViewer. Keyword-regex filtering and its visual
+// highlight must use one representation so punctuation at the tag/message boundary cannot make
+// a row match without highlighting it (or vice versa).
+internal fun visibleLogLineText(entry: LogEntry): String = buildString {
+    append(entry.ts)
+    if (entry.pid > 0) {
+        append("  ")
+        append(entry.pid.toString().padStart(5))
+        append(" ")
+        append(entry.tid.toString().padStart(5))
+    }
+    append("  ")
+    append(entry.level.key)
+    append("  ")
+    append(entry.tag)
+    append(": ")
+    append(entry.msg)
+}
 
 internal fun containsPattern(
     haystack: String,

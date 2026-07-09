@@ -5,6 +5,7 @@ import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
 
 val isMacOs: Boolean = System.getProperty("os.name").lowercase().startsWith("mac")
+val isLinuxOs: Boolean = System.getProperty("os.name").orEmpty().lowercase().contains("linux")
 
 val KeyEvent.isActionKey: Boolean get() = if (isMacOs) isMetaPressed else isCtrlPressed
 

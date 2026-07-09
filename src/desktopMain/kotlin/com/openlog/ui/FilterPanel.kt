@@ -42,6 +42,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
@@ -158,7 +159,9 @@ fun FilterPanel(
     onToggleTag: (String) -> Unit,
     onToggleExcludeTag: (String) -> Unit,
     onSetKw: (String) -> Unit,
-    onToggleKwRx: () -> Unit,
+    onStartRegexSearch: () -> Unit,
+    onSetKwHighlightEnabled: (Boolean) -> Unit,
+    onSetKwHighlightColor: (Color) -> Unit,
     onToggleSeq: () -> Unit,
     onAddSeq: (String, Boolean, Color, String?, String?, Boolean, String?) -> Unit,
     onRemoveSeq: (String) -> Unit,
@@ -253,6 +256,9 @@ fun FilterPanel(
     var tagSelectedAction by remember { mutableStateOf(0) } // 0 = include, 1 = exclude
     var colorPickerSeqId by remember { mutableStateOf<String?>(null) }
     var colorPickerHlId by remember { mutableStateOf<String?>(null) }
+    var kwHighlightColorPickerOpen by remember { mutableStateOf(false) }
+    var regexEditorOpen by remember { mutableStateOf(false) }
+    var regexEditorText by remember { mutableStateOf("") }
     var colorPickerManualId by remember { mutableStateOf<String?>(null) }
     var editingSeqId by remember { mutableStateOf<String?>(null) }
 
@@ -368,8 +374,7 @@ fun FilterPanel(
         when (target.kind) {
             KeyboardTargetKind.FilterModeTags -> onSetFilterMode(FilterMode.TAGS)
             KeyboardTargetKind.FilterModeRegex -> {
-                onSetFilterMode(FilterMode.KEYWORD)
-                if (!filter.kwRegex) onToggleKwRx()
+                onStartRegexSearch()
                 runCatching { kwFr.requestFocus() }
             }
             KeyboardTargetKind.FilterTagInput -> runCatching { tagFr.requestFocus() }
@@ -437,7 +442,7 @@ fun FilterPanel(
                 CtrlFTarget.KEYWORD_REGEX -> {
                     if (filter.mode != FilterMode.KEYWORD) {
                         pendingSearchFocusTarget = CtrlFTarget.KEYWORD_REGEX
-                        onSetFilterMode(FilterMode.KEYWORD)
+                        onStartRegexSearch()
                     } else {
                         runCatching { kwFr.requestFocus() }
                     }
@@ -692,8 +697,7 @@ fun FilterPanel(
                 val active = filter.mode == mode
                 Column(
                     Modifier.weight(1f).clickable {
-                        onSetFilterMode(mode)
-                        if (mode == FilterMode.KEYWORD && !filter.kwRegex) onToggleKwRx()
+                        if (mode == FilterMode.KEYWORD) onStartRegexSearch() else onSetFilterMode(mode)
                     },
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
@@ -944,10 +948,19 @@ fun FilterPanel(
                 InlineField(
                     kwDisplay,
                     { kwDisplay = it },
-                    "tag or message regex…",
+                    "visible log row regex…",
                     Modifier.weight(1f)
                         .focusRequester(kwFr)
                         .onFocusChanged { kwFieldFocused = it.isFocused },
+                )
+                SquareIconButton(
+                    "⤢",
+                    fontSize = 12.sp,
+                    onClick = {
+                        regexEditorText = kwDisplay
+                        regexEditorOpen = true
+                    },
+                    size = 16.dp,
                 )
                 if (kwDisplay.isNotBlank())
                     SquareIconButton("×", fontSize = 12.sp, onClick = { kwDisplay = ""; onSetKw("") }, size = 16.dp)
@@ -1282,9 +1295,14 @@ fun FilterPanel(
         // ── Highlighters ──────────────────────────────────────────
         // Trailing shows colored dots for each highlighter; clicking collapses/expands the list.
         // The add form is always visible, matching the TAGS section pattern.
+        val regexHighlightAvailable =
+            filter.mode == FilterMode.KEYWORD && filter.kwRegex && filter.kwText.isNotBlank()
+        val displayedHighlighterCount = filter.highlighters.size + if (regexHighlightAvailable) 1 else 0
+        val enabledHighlighterCount = filter.highlighters.count { it.on } +
+            if (regexHighlightAvailable && filter.kwHighlightEnabled) 1 else 0
         SectionHeader(
             "Highlighters",
-            trailing = if (filter.highlighters.isNotEmpty()) ({
+            trailing = if (displayedHighlighterCount > 0) ({
                 Row(
                     Modifier.hoverPill().clickable {
                         fpState.hlListExpanded = !fpState.hlListExpanded
@@ -1294,18 +1312,59 @@ fun FilterPanel(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(3.dp),
                 ) {
-                    val onCount = filter.highlighters.count { it.on }
-                    if (onCount > 0)
-                        AppText("$onCount active", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                    val offCount = filter.highlighters.size - onCount
+                    if (enabledHighlighterCount > 0)
+                        AppText("$enabledHighlighterCount active", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                    val offCount = displayedHighlighterCount - enabledHighlighterCount
                     if (offCount > 0)
                         AppText("$offCount off", color = tc.td, fontSize = 10.sp, fontFamily = UI)
                     AppText(if (fpState.hlListExpanded) "▾" else "▸", color = tc.ts, fontSize = 10.sp)
                 }
             }) else null,
         )
-        if (filter.highlighters.isNotEmpty() && fpState.hlListExpanded) {
-            BoundedScrollBox(minOf(filter.highlighters.size, filterListRows), rowDp = 30) {
+        if (displayedHighlighterCount > 0 && fpState.hlListExpanded) {
+            BoundedScrollBox(minOf(displayedHighlighterCount, filterListRows), rowDp = 30) {
+                if (regexHighlightAvailable) {
+                    Column {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            ColorPickerSwatch(
+                                color = filter.kwHighlightColor,
+                                pickerOpen = kwHighlightColorPickerOpen,
+                                onClick = { kwHighlightColorPickerOpen = !kwHighlightColorPickerOpen },
+                            )
+                            AppText(
+                                "/${filter.kwText}/i",
+                                color = if (filter.kwHighlightEnabled) tc.tx else tc.td,
+                                fontSize = 11.sp,
+                                fontFamily = MONO,
+                                modifier = Modifier.weight(1f),
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            RoundIndicator(
+                                active = filter.kwHighlightEnabled,
+                                color = filter.kwHighlightColor,
+                                onClick = { onSetKwHighlightEnabled(!filter.kwHighlightEnabled) },
+                            )
+                        }
+                        if (kwHighlightColorPickerOpen) {
+                            FlowRow(
+                                Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp),
+                            ) {
+                                HL_COLORS.forEach { color ->
+                                    ColorSwatch(color, color == filter.kwHighlightColor) {
+                                        onSetKwHighlightColor(color)
+                                        kwHighlightColorPickerOpen = false
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 filter.highlighters.forEach { hl ->
                     Column {
                         Row(
@@ -1805,6 +1864,46 @@ fun FilterPanel(
                 }
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                     AppText("Drop filter .json here to import", color = tc.td, fontSize = 10.sp)
+                }
+            }
+        }
+    }
+
+    if (regexEditorOpen) {
+        Dialog(onDismissRequest = { regexEditorOpen = false }) {
+            val dialogTheme = tc()
+            Column(
+                Modifier.width(640.dp)
+                    .background(dialogTheme.p, RoundedCornerShape(8.dp))
+                    .border(1.dp, dialogTheme.br, RoundedCornerShape(8.dp))
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                AppText("Edit regex search", color = dialogTheme.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                AppText(
+                    "Searches the exact text shown in a log row. Apply keeps this as a transient search; save it manually from Saved filters when needed.",
+                    color = dialogTheme.td,
+                    fontSize = 11.sp,
+                    maxLines = 2,
+                )
+                InlineField(
+                    value = regexEditorText,
+                    onValue = { regexEditorText = it },
+                    placeholder = "regex…",
+                    modifier = Modifier.fillMaxWidth().height(220.dp),
+                    fontSize = 12.sp,
+                    singleLine = false,
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                ) {
+                    AppButton("Apply", onClick = {
+                        kwDisplay = regexEditorText
+                        onSetKw(regexEditorText)
+                        regexEditorOpen = false
+                    }, variant = ButtonVariant.Primary)
+                    AppButton("Cancel", onClick = { regexEditorOpen = false }, variant = ButtonVariant.Secondary)
                 }
             }
         }

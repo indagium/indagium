@@ -2,7 +2,7 @@
 
 A desktop log viewer for Android logcat files, built with Kotlin and Compose Multiplatform.
 
-![Version](https://img.shields.io/badge/version-1.1.8-blue)
+![Version](https://img.shields.io/badge/version-1.1.9-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
 ## Features
@@ -42,6 +42,20 @@ they never get the quarantine flag a browser download adds). To open it anyway, 
 - Terminal: `xattr -cr /Applications/openLog.app`, or
 - System Settings → Privacy & Security → scroll to the "openLog was blocked" notice → **Open Anyway**
 
+### Linux
+
+Install with `sudo dpkg -i openLog_x.y.z_amd64.deb` (or your package manager's equivalent). The
+package registers openLog as a candidate handler for `.log`/`.txt`/`.logcat`/`.trace`/`.out`
+files, but does **not** make itself the system default — a package has no business silently
+rewriting another user's `mimeapps.list`. To open `.log`/`.txt` files with openLog by default,
+opt in yourself:
+
+```bash
+xdg-mime default openlog-openLog.desktop text/plain text/x-log
+```
+
+or right-click a file in your file manager → **Open With** → **openLog** → set as default.
+
 ## Building from source
 
 **Requirements:** JDK 17+
@@ -64,7 +78,7 @@ they never get the quarantine flag a browser download adds). To open it anyway, 
 Push a version tag to trigger the GitHub Actions build, which produces Linux, Windows, and macOS packages and creates a GitHub Release automatically:
 
 ```bash
-git tag v1.1.8 && git push --tags
+git tag v1.1.9 && git push --tags
 ```
 
 The macOS build is unsigned (no Apple Developer certificate in CI) — see the Installation section above for the Gatekeeper workaround.

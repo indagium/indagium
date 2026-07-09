@@ -8,6 +8,7 @@ import com.openlog.model.Annotations
 import com.openlog.model.AppSettings
 import com.openlog.model.CrashCategory
 import com.openlog.model.CtxMenuState
+import com.openlog.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.LogEntry
@@ -20,10 +21,12 @@ import com.openlog.model.ThemePreset
 import com.openlog.ui.AppState
 import com.openlog.ui.DesktopStorage
 import com.openlog.ui.ImportFilterAction
+import com.openlog.ui.ManualCollapseAvailability
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitMode
 import com.openlog.ui.blockOrderDuringDrag
 import com.openlog.ui.cumulativeBlockOffsets
+import com.openlog.ui.manualCollapseAvailability
 import com.openlog.ui.maskWordForCopy
 import com.openlog.ui.mkTab
 import com.openlog.ui.sequenceOrderDuringDrag
@@ -870,6 +873,81 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun startingRegexSearchDoesNotCreateDraftButCanStillBeSavedExplicitly() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addPkgPrefix(tabId, "com.example")
+        state.saveFilter(tabId, "example logs")
+
+        state.startRegexSearch(tabId)
+        state.setKw(tabId, """receive.*message""")
+
+        assertEquals(FilterMode.KEYWORD, state.tab(tabId)!!.filter.mode)
+        assertTrue(state.tab(tabId)!!.filter.kwRegex)
+        assertEquals(state.savedFilters.single().id, state.activeSavedFilterId(tabId))
+        assertEquals(null, state.filterDraftForTab(tabId))
+        assertEquals(state.savedFilters.single().id, state.activeFilterItemId(tabId))
+        assertEquals(1, state.savedFilters.size)
+
+        state.saveFilter(tabId, "receive message")
+
+        assertEquals(2, state.savedFilters.size)
+        assertEquals("receive message", state.savedFilters.last().name)
+        assertEquals(state.savedFilters.last().id, state.activeSavedFilterId(tabId))
+    }
+
+    @Test
+    fun returningFromTransientRegexSearchLoadsSavedFilterWithoutSaveChangesPrompt() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addPkgPrefix(tabId, "com.example")
+        state.saveFilter(tabId, "example logs")
+        val saved = state.savedFilters.single()
+
+        state.startRegexSearch(tabId)
+        state.setKw(tabId, """receive.*message""")
+        state.setFilterMode(tabId, FilterMode.TAGS)
+        state.requestLoadFilter(tabId, saved)
+
+        assertEquals(null, state.pendingFilterLoad)
+        assertEquals(saved.id, state.activeSavedFilterId(tabId))
+        assertEquals(FilterMode.TAGS, state.tab(tabId)!!.filter.mode)
+        assertEquals(setOf("com.example"), state.tab(tabId)!!.filter.pkgPrefixes)
+        assertEquals("", state.tab(tabId)!!.filter.kwText)
+    }
+
+    @Test
+    fun autosaveRestoresTransientRegexSearchWithoutBlockingSavedFilterReload() {
+        val dir = createTempDirectory("openlog-transient-regex-restore").toFile()
+        val logFile = File(dir, "restore.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I App: receive message\n")
+        }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.tabs = listOf(
+            mkTab("log", "restore.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "receive message")))
+                .copy(sourcePath = logFile.absolutePath),
+        )
+        state.activeTabId = "log"
+        state.addPkgPrefix("log", "com.example")
+        state.saveFilter("log", "example logs")
+        state.startRegexSearch("log")
+        state.setKw("log", """receive.*message""")
+        state.setFilterMode("log", FilterMode.TAGS)
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        val restoredTabId = restored.tabs.single().id
+        val saved = restored.savedFilters.single()
+        restored.requestLoadFilter(restoredTabId, saved)
+
+        assertEquals(null, restored.pendingFilterLoad)
+        assertEquals(saved.id, restored.activeSavedFilterId(restoredTabId))
+    }
+
+    @Test
     fun editingActiveSavedFilterCreatesTabLocalDraftOnly() {
         val state = AppState()
         state.tabs = listOf(
@@ -1086,6 +1164,50 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun regexHighlightSettingsRoundTripViaFilterSaveAndLoad() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.setFilterMode(tabId, FilterMode.KEYWORD)
+        state.setKw(tabId, "timeout")
+        state.toggleKwRx(tabId)
+        state.setKwHighlightEnabled(tabId, false)
+        state.setKwHighlightColor(tabId, Color.Cyan)
+
+        state.saveFilter(tabId, "regex-highlight")
+        state.clearFilter(tabId)
+        state.loadFilter(tabId, state.savedFilters.single())
+
+        val filter = state.tabs.single().filter
+        assertEquals(false, filter.kwHighlightEnabled)
+        assertEquals(Color.Cyan, filter.kwHighlightColor)
+    }
+
+    @Test
+    fun importedOlderFilterDefaultsRegexHighlightSettings() {
+        val state = AppState()
+
+        state.importFilters(
+            """
+            [
+              {
+                "id": "old",
+                "name": "old regex",
+                "levels": ["I"],
+                "mode": "KEYWORD",
+                "kwText": "timeout",
+                "kwRegex": true
+              }
+            ]
+            """.trimIndent(),
+        )
+
+        val saved = state.savedFilters.single()
+        assertTrue(saved.kwHighlightEnabled)
+        assertEquals(DEFAULT_KEYWORD_HIGHLIGHT_COLOR, saved.kwHighlightColor)
+    }
+
+    @Test
     fun autosaveRestoresOpenTabNotesAndFilters() {
         val dir = createTempDirectory("openlog-cache").toFile()
         val logFile = File(dir, "test.log").apply {
@@ -1218,6 +1340,57 @@ class AppStateBehaviorTest {
         assertEquals("restart.log", restoredTab.filename)
         assertEquals(logFile.absolutePath, restoredTab.sourcePath)
         assertEquals("hello after restart", restoredTab.logData.single().msg)
+    }
+
+    @Test
+    fun newlyOpenedFileUsesUnfilteredDefaultSetting() {
+        val dir = createTempDirectory("openlog-open-unfiltered-default").toFile()
+        val logFile = File(dir, "default-original.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I App: hello\n")
+        }
+        val state = AppState()
+        state.settings = state.settings.copy(openNewFilesWithUnfiltered = true)
+
+        state.openFile(logFile)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+
+        assertTrue(state.tabs.single().showUnfiltered)
+    }
+
+    @Test
+    fun newlyOpenedFileKeepsOriginalPanelHiddenByDefault() {
+        val dir = createTempDirectory("openlog-open-unfiltered-off-default").toFile()
+        val logFile = File(dir, "default-filtered.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I App: hello\n")
+        }
+        val state = AppState()
+
+        state.openFile(logFile)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+
+        assertFalse(state.tabs.single().showUnfiltered)
+    }
+
+    @Test
+    fun autosaveRestoredTabKeepsSavedUnfilteredStateDespiteCurrentDefault() {
+        val dir = createTempDirectory("openlog-restore-unfiltered-default").toFile()
+        val logFile = File(dir, "restore-original.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I App: hello\n")
+        }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.settings = state.settings.copy(openNewFilesWithUnfiltered = true)
+        state.tabs = listOf(
+            mkTab("log", "restore-original.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = logFile.absolutePath, showUnfiltered = false),
+        )
+        state.activeTabId = "log"
+
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        assertEquals(true, restored.settings.openNewFilesWithUnfiltered)
+        assertEquals(false, restored.tabs.single().showUnfiltered)
     }
 
     @Test
@@ -1897,6 +2070,7 @@ class AppStateBehaviorTest {
             autosaveFile = File(dir, "state.cache"),
             parser = { listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "loaded")) },
         )
+        state.settings = state.settings.copy(openNewFilesWithUnfiltered = true)
         state.openFile(file)
         val sourceId = state.pendingSplitPrompt!!.sources.single().id
 
@@ -1912,6 +2086,7 @@ class AppStateBehaviorTest {
         assertEquals("large.log", tab.filename)
         assertEquals(file.absolutePath, tab.sourcePath)
         assertTrue(tab.largeFileMode)
+        assertTrue(tab.showUnfiltered)
     }
 
     @Test
@@ -2003,6 +2178,23 @@ class AppStateBehaviorTest {
 
         assertEquals(listOf("large_log.txt"), state.pendingSplitPrompt?.sources?.map { it.displayName })
         assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
+    fun newlyOpenedArchiveEntryUsesUnfilteredDefaultSetting() {
+        val dir = createTempDirectory("openlog-archive-unfiltered-default").toFile()
+        val archive = buildZipFixture(
+            dir,
+            "bugreport.zip",
+            mapOf("logcat.txt" to "06-26 10:00:00.000  100  100 I App: hello\n"),
+        )
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.settings = state.settings.copy(openNewFilesWithUnfiltered = true)
+
+        state.openZipEntries(archive, com.openlog.utils.listArchiveLogCandidates(archive))
+
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        assertTrue(state.tabs.single().showUnfiltered)
     }
 
     @Test
@@ -2356,9 +2548,137 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun manualCollapseAvailabilityRejectsFileEdgeNoOps() {
+        val entries = (1..3).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        val tab = mkTab("log", "test.log", entries)
+
+        assertEquals(
+            ManualCollapseAvailability.NOOP_RANGE,
+            manualCollapseAvailability(tab, anchorId = 1, direction = ManualCollapseDirection.TO_START),
+        )
+        assertEquals(
+            ManualCollapseAvailability.NOOP_RANGE,
+            manualCollapseAvailability(tab, anchorId = 3, direction = ManualCollapseDirection.TO_END),
+        )
+        assertEquals(
+            ManualCollapseAvailability.NOOP_RANGE,
+            manualCollapseAvailability(tab, anchorId = 2, direction = ManualCollapseDirection.RANGE, endId = 2),
+        )
+        assertEquals(
+            ManualCollapseAvailability.MISSING_ROW,
+            manualCollapseAvailability(tab, anchorId = 99, direction = ManualCollapseDirection.TO_END),
+        )
+    }
+
+    @Test
+    fun manualCollapseAvailabilityAllowsUnlimitedAdjacentBlocksButRejectsOverlapsEvenWhenDisabled() {
+        val entries = (1..6).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        val tab = mkTab("log", "test.log", entries).copy(
+            manualBlocks = listOf(
+                ManualCollapseBlock("start", 1, ManualCollapseDirection.RANGE, endId = 2),
+                ManualCollapseBlock("end", 5, ManualCollapseDirection.RANGE, enabled = false, endId = 6),
+            ),
+        )
+
+        assertEquals(
+            ManualCollapseAvailability.AVAILABLE,
+            manualCollapseAvailability(tab, anchorId = 3, direction = ManualCollapseDirection.RANGE, endId = 4),
+        )
+        assertEquals(
+            ManualCollapseAvailability.OVERLAPS_EXISTING,
+            manualCollapseAvailability(tab, anchorId = 2, direction = ManualCollapseDirection.RANGE, endId = 4),
+        )
+    }
+
+    @Test
+    fun manualCollapseAvailabilityAllowsRangeInsideSequence() {
+        val entries = (1..5).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        val sequence = SequenceDef(
+            id = "seq",
+            matchText = "msg 2",
+            priority = 1,
+            color = SEQ_COLORS[0],
+            endMatchText = "msg 5",
+        )
+        val tab = mkTab("log", "test.log", entries).copy(
+            filter = Filter(sequences = listOf(sequence)),
+            expanded = setOf("seq"),
+        )
+
+        assertEquals(
+            ManualCollapseAvailability.AVAILABLE,
+            manualCollapseAvailability(tab, anchorId = 3, direction = ManualCollapseDirection.RANGE, endId = 4),
+        )
+        assertEquals(
+            ManualCollapseAvailability.AVAILABLE,
+            manualCollapseAvailability(tab, anchorId = 3, direction = ManualCollapseDirection.TO_START),
+        )
+        assertEquals(
+            ManualCollapseAvailability.AVAILABLE,
+            manualCollapseAvailability(tab, anchorId = 3, direction = ManualCollapseDirection.TO_END),
+        )
+    }
+
+    @Test
+    fun collapseToFileEdgesFromInsideSequenceUsesSourceRangesAndStillSupportsExpandAll() {
+        val entries = (1..5).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        val sequence = SequenceDef(
+            id = "seq",
+            matchText = "msg 2",
+            priority = 1,
+            color = SEQ_COLORS[0],
+            endMatchText = "msg 5",
+        )
+
+        fun stateInsideSequence() = AppState().also { state ->
+            state.tabs = listOf(mkTab("log", "test.log", entries).copy(filter = Filter(sequences = listOf(sequence))))
+            state.activeTabId = "log"
+        }
+
+        val startState = stateInsideSequence()
+        startState.ctx = CtxMenuState("log", 3, 0f, 0f, "")
+        startState.collapseToStartFromCtx()
+        assertEquals(ManualCollapseDirection.TO_START, startState.tabs.single().manualBlocks.single().direction)
+        startState.expandAll("log")
+        assertTrue(startState.tabs.single().expanded.isNotEmpty())
+        startState.collapseAll("log")
+        assertTrue(startState.tabs.single().expanded.isEmpty())
+
+        val endState = stateInsideSequence()
+        endState.ctx = CtxMenuState("log", 3, 0f, 0f, "")
+        endState.collapseToEndFromCtx()
+        assertEquals(ManualCollapseDirection.TO_END, endState.tabs.single().manualBlocks.single().direction)
+    }
+
+    @Test
+    fun collapseActionsDoNotCreateOverlappingManualBlocks() {
+        val state = AppState()
+        val entries = (1..5).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        state.tabs = listOf(
+            mkTab("log", "test.log", entries).copy(
+                manualBlocks = listOf(ManualCollapseBlock("existing", 2, ManualCollapseDirection.RANGE, endId = 4)),
+            ),
+        )
+        state.ctx = CtxMenuState("log", 3, 0f, 0f, "")
+
+        state.collapseToEndFromCtx()
+
+        assertEquals(listOf("existing"), state.tabs.single().manualBlocks.map { it.id })
+    }
+
+    @Test
     fun canDisableAndRemoveManualCollapseBlocks() {
         val state = AppState()
-        state.tabs = listOf(mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "Boom"))))
+        state.tabs = listOf(
+            mkTab(
+                "log",
+                "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "Boom"),
+                    LogEntry(2, "10:00:00.001", LogLevel.I, "App", "After"),
+                ),
+            ),
+        )
         state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
         state.collapseToEndFromCtx()
         val blockId = state.tabs.single().manualBlocks.single().id
@@ -2512,6 +2832,7 @@ class AppStateBehaviorTest {
                 maskWordTarget = "kotlin",
                 maskWordReplacement = "k*otlin",
                 highlightEntireCrashGroup = true,
+                openNewFilesWithUnfiltered = true,
             )
         }
 
@@ -2530,6 +2851,7 @@ class AppStateBehaviorTest {
         assertEquals("kotlin", restored.settings.maskWordTarget)
         assertEquals("k*otlin", restored.settings.maskWordReplacement)
         assertEquals(true, restored.settings.highlightEntireCrashGroup)
+        assertEquals(true, restored.settings.openNewFilesWithUnfiltered)
     }
 
     @Test

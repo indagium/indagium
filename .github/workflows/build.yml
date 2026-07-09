@@ -75,6 +75,17 @@ jobs:
       # xdg-desktop-menu install may already trigger this internally on most distros, but jpackage
       # gives no guarantee of it (same class of gap as StartupWMClass above), so append an
       # idempotent call as a safety net rather than relying on unverified distro behavior.
+      #
+      # Three further defects in the same generated artifacts, per the Desktop Entry Spec
+      # (https://specifications.freedesktop.org/desktop-entry/latest/exec-variables.html): an
+      # entry that declares MimeType must carry a field code in Exec or it can never receive a
+      # file at all — jpackage emits Exec with none, so "Open With openLog" silently no-ops.
+      # Append %F (not %f: Main.kt/AppState.openPaths takes a List<File>, and the single-instance
+      # handoff wants to forward every path from one launch in one shot). Second, jpackage repeats
+      # MimeType=text/plain once per fileAssociation() call — dedupe preserving first-seen order.
+      # Third, replace the generated MimeInfo XML (duplicate text/plain blocks, each overriding
+      # the system's own <comment>) with the hand-authored packaging/linux/openlog-mimeinfo.xml,
+      # which only declares globs for extensions the system doesn't already type.
       - name: Add StartupWMClass and desktop-database refresh to Linux .desktop/postinst
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -90,7 +101,40 @@ jobs:
           if [ -f "$postinst" ] && ! grep -q 'update-desktop-database' "$postinst"; then
             echo 'update-desktop-database -q /usr/share/applications 2>/dev/null || true' >> "$postinst"
           fi
+          if ! grep -q '^Exec=.* %F$' "$desktop_file"; then
+            sed -i 's|^\(Exec=.*\)$|\1 %F|' "$desktop_file"
+          fi
+          mime_line=$(grep '^MimeType=' "$desktop_file" || true)
+          if [ -n "$mime_line" ]; then
+            deduped=$(echo "${mime_line#MimeType=}" | tr ';' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ';')
+            sed -i "s|^MimeType=.*|MimeType=${deduped}|" "$desktop_file"
+          fi
+          # jpackage renders Categories= from menuGroup with no trailing separator, but the spec
+          # types it as a list, and desktop-file-validate rejects a list key without one — that
+          # would fail the gate below on an otherwise correct entry.
+          if grep -q '^Categories=[^;]*$' "$desktop_file"; then
+            sed -i 's|^\(Categories=.*\)$|\1;|' "$desktop_file"
+          fi
+          mimeinfo_file=$(find "$workdir/opt" -name '*-MimeInfo.xml')
+          if [ -n "$mimeinfo_file" ]; then
+            cp packaging/linux/openlog-mimeinfo.xml "$mimeinfo_file"
+          fi
           dpkg-deb -b "$workdir" "$deb"
+          rm -rf "$workdir"
+
+      # desktop-file-validate is exactly the tool that flags "declares MimeType but Exec takes no
+      # arguments" — this gate would have caught the original %F-less Exec regressing silently.
+      - name: Validate generated .desktop entry
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y desktop-file-utils
+          deb=$(find build/compose/binaries/main/deb -name '*.deb')
+          workdir=$(mktemp -d)
+          dpkg-deb -R "$deb" "$workdir"
+          desktop_file=$(find "$workdir/opt" -maxdepth 3 -type f -name '*.desktop')
+          desktop-file-validate "$desktop_file"
+          grep -q '^Exec=.* %F$' "$desktop_file"
           rm -rf "$workdir"
 
       - name: Upload artifact

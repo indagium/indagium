@@ -86,6 +86,8 @@ private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter): Boolean =
         FilterMode.KEYWORD -> {
             if (filter.kwText.isBlank()) {
                 true
+            } else if (filter.kwRegex) {
+                containsPattern(visibleLogLineText(entry), filter.kwText, regex = true)
             } else {
                 tagMsgContainsPattern(entry.tag, entry.msg, filter.kwText, filter.kwRegex)
             }
