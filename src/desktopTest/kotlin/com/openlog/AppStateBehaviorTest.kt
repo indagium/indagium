@@ -2476,6 +2476,7 @@ class AppStateBehaviorTest {
         val state = AppState()
         state.addTab()
         val tabId = state.tabs.single().id
+        state.setFilterMode(tabId, FilterMode.KEYWORD)
         state.addMessageRule(tabId, include = true, pattern = "timeout", regex = true, tag = "NetTag", packagePrefix = null)
 
         state.saveFilter(tabId, "rule-filter")
@@ -2487,6 +2488,9 @@ class AppStateBehaviorTest {
         assertEquals(true, rule.include)
         assertEquals(true, rule.regex)
         assertEquals("NetTag", rule.tag)
+        // The rule was created while in KEYWORD mode — the save/load token round-trip must
+        // preserve that, not silently default it back to TAGS.
+        assertEquals(FilterMode.KEYWORD, rule.mode)
     }
 
     @Test
@@ -2647,6 +2651,22 @@ class AppStateBehaviorTest {
         val rules = state.tabs.single().filter.messageRules
         assertEquals(2, rules.size)
         assertFalse(rules[0].id == rules[1].id)
+    }
+
+    @Test
+    fun addMessageRuleStampsRuleWithTheTabsCurrentFilterMode() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+
+        state.addMessageRule(tabId, include = true, pattern = "error", regex = false, tag = null, packagePrefix = null)
+        assertEquals(FilterMode.TAGS, state.tabs.single().filter.messageRules.single().mode)
+
+        state.setFilterMode(tabId, FilterMode.KEYWORD)
+        state.addMessageRule(tabId, include = true, pattern = "warn", regex = false, tag = null, packagePrefix = null)
+        val rules = state.tabs.single().filter.messageRules
+        assertEquals(FilterMode.TAGS, rules.first { it.pattern == "error" }.mode)
+        assertEquals(FilterMode.KEYWORD, rules.first { it.pattern == "warn" }.mode)
     }
 
     @Test

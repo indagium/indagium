@@ -12,10 +12,13 @@ import com.openlog.ui.SEQ_COLORS
 // entry, defeating whatever positive selectors are active.
 // Negative rules and exclusions always apply regardless.
 fun passesFilter(entry: LogEntry, filter: Filter): Boolean {
-    val enabledRules = filter.messageRules.filter { it.enabled && it.pattern.isNotBlank() }
+    // Tags and Regex/Keyword modes each have their own independent message-rule set (see
+    // MessageRule.mode) — scoping it here, at the one place enabledRules is derived, is what
+    // keeps both include and exclude rules from leaking across a mode switch.
+    val enabledRules = filter.messageRules.filter { it.enabled && it.pattern.isNotBlank() && it.mode == filter.mode }
     if (!passesExclusions(entry, filter, enabledRules.filter { !it.include })) return false
     val posRules = enabledRules.filter { it.include }
-    val hasKwInTag = filter.kwInTag.isNotBlank()
+    val hasKwInTag = filter.mode == FilterMode.TAGS && filter.kwInTag.isNotBlank()
     val hasPosPidTid = filter.pidTidFilter.isNotBlank()
     if (posRules.isNotEmpty() || hasKwInTag || hasPosPidTid) {
         return matchesPositiveSelectors(entry, posRules, hasKwInTag, hasPosPidTid, filter)
@@ -25,8 +28,12 @@ fun passesFilter(entry: LogEntry, filter: Filter): Boolean {
 
 private fun passesExclusions(entry: LogEntry, filter: Filter, negativeRules: List<MessageRule>): Boolean {
     if (entry.level !in filter.levels) return false
-    if (entry.tag in filter.excludeTags) return false
-    if (filter.excludePkgPrefixes.any { pfx -> tagMatchesPrefix(entry.tag, pfx) }) return false
+    // Tag/package exclusion is a Tags-mode-flavored concept — kept out of Regex/Keyword mode so
+    // it can't silently narrow results there, matching the same independence as message rules.
+    if (filter.mode == FilterMode.TAGS) {
+        if (entry.tag in filter.excludeTags) return false
+        if (filter.excludePkgPrefixes.any { pfx -> tagMatchesPrefix(entry.tag, pfx) }) return false
+    }
     if (filter.excludeKw.isNotBlank() &&
         tagMsgContainsPattern(entry.tag, entry.msg, filter.excludeKw, filter.excludeKwRegex)) return false
     return negativeRules.none { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule) }

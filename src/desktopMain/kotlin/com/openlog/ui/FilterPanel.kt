@@ -208,6 +208,7 @@ fun FilterPanel(
     width: Float,
     focusRequester: FocusRequester? = null,
     focusSearchRequest: Int = 0,
+    ctrlFTarget: CtrlFTarget = CtrlFTarget.KEYWORD_REGEX,
     onPanelFocusChanged: (Boolean) -> Unit = {},
     keyboardFocusVisible: Boolean = false,
 ) {
@@ -318,7 +319,10 @@ fun FilterPanel(
         if (snap == msgRuleInput) {
             msgRuleSearch = msgRuleInput
             msgRuleLastSent = msgRuleInput
-            onSetKwInTag(msgRuleInput)
+            // kwInTag is a Tags-mode-only secondary filter (see Filter.kt) — this field is also
+            // used to add message rules in Regex/Keyword mode, but typing there must not leak
+            // into kwInTag and silently affect Tags-mode results later.
+            if (filter.mode == FilterMode.TAGS) onSetKwInTag(msgRuleInput)
         }
     }
     LaunchedEffect(filter.kwInTag) { if (filter.kwInTag != msgRuleLastSent) msgRuleInput = filter.kwInTag }
@@ -421,8 +425,19 @@ fun FilterPanel(
 
     LaunchedEffect(focusSearchRequest) {
         if (focusSearchRequest > 0) {
-            if (filter.mode == FilterMode.KEYWORD) runCatching { kwFr.requestFocus() }
-            else runCatching { tagFr.requestFocus() }
+            // Tags/Regex targets only make sense once the matching mode is active — Message Rules
+            // is reachable from either mode, so it never needs a mode switch.
+            when (ctrlFTarget) {
+                CtrlFTarget.TAGS -> {
+                    if (filter.mode != FilterMode.TAGS) onSetFilterMode(FilterMode.TAGS)
+                    runCatching { tagFr.requestFocus() }
+                }
+                CtrlFTarget.KEYWORD_REGEX -> {
+                    if (filter.mode != FilterMode.KEYWORD) onSetFilterMode(FilterMode.KEYWORD)
+                    runCatching { kwFr.requestFocus() }
+                }
+                CtrlFTarget.MESSAGE_RULE -> runCatching { msgRuleFr.requestFocus() }
+            }
         }
     }
 
@@ -604,6 +619,10 @@ fun FilterPanel(
                             clearTagSearch()
                         } else if (msgRuleFieldFocused || msgRuleScopeFieldFocused) {
                             cancelPendingMessageRule()
+                        } else if (kwFieldFocused) {
+                            kwDisplay = ""; onSetKw("")
+                        } else if (hlFieldFocused) {
+                            onSetNewHlPat("")
                         } else {
                             runCatching { focusRequester?.requestFocus() }
                         }
@@ -906,11 +925,14 @@ fun FilterPanel(
             Divider()
         }
 
-        if (filter.mode == FilterMode.TAGS) {
+        run {
             // ── Message Rules (combined search + include/exclude) ─────────────
+            // Tags and Regex/Keyword modes each have their own independent rule set (see
+            // MessageRule.mode) — shown/editable in both modes now, filtered to the current one,
+            // instead of being hidden (and silently still active) whenever mode != TAGS.
             val msgExNeg = DANGER_RED
-            val msgInc = filter.messageRules.filter { it.include }
-            val msgExc = filter.messageRules.filter { !it.include }
+            val msgInc = filter.messageRules.filter { it.include && it.mode == filter.mode }
+            val msgExc = filter.messageRules.filter { !it.include && it.mode == filter.mode }
             SectionHeader(
                 "Message rules",
                 trailing = if (msgInc.isNotEmpty() || msgExc.isNotEmpty()) ({
@@ -1226,7 +1248,7 @@ fun FilterPanel(
                 }
             }
             Divider()
-        } // end TAGS-only MESSAGE RULES block
+        } // end MESSAGE RULES block (shown in both Tags and Regex/Keyword mode)
 
         // ── Highlighters ──────────────────────────────────────────
         // Trailing shows colored dots for each highlighter; clicking collapses/expands the list.

@@ -80,6 +80,51 @@ class FilterBehaviorTest {
         assertFalse(passesFilter(otherTag, filter))
     }
 
+    // Regression test: Tags and Regex/Keyword modes must be fully independent — a message rule
+    // created in one mode must not narrow or exclude entries while the other mode is active.
+    @Test
+    fun messageRuleIsScopedToItsOwnModeAndDoesNotLeakToTheOtherMode() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "request complete")
+        val tagsOnlyRule = MessageRule(id = "r1", include = true, pattern = "request", mode = FilterMode.TAGS)
+        val keywordOnlyExclude = MessageRule(id = "r2", include = false, pattern = "request", mode = FilterMode.KEYWORD)
+
+        val tagsFilter = Filter(mode = FilterMode.TAGS, messageRules = listOf(tagsOnlyRule, keywordOnlyExclude))
+        val keywordFilter = Filter(mode = FilterMode.KEYWORD, messageRules = listOf(tagsOnlyRule, keywordOnlyExclude))
+
+        // In TAGS mode: the TAGS-scoped positive rule is the sole active selector, so it matches;
+        // the KEYWORD-scoped exclude rule must be inert here despite being present on the Filter.
+        assertTrue(passesFilter(entry, tagsFilter))
+        // In KEYWORD mode: the TAGS-scoped positive rule is inert, but the KEYWORD-scoped exclude
+        // rule IS active and must exclude the entry.
+        assertFalse(passesFilter(entry, keywordFilter))
+    }
+
+    @Test
+    fun kwInTagOnlyAppliesInTagsMode() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "request complete")
+        val tagsFilter = Filter(mode = FilterMode.TAGS, kwInTag = "request")
+        val keywordFilter = Filter(mode = FilterMode.KEYWORD, kwInTag = "request")
+
+        assertTrue(passesFilter(entry, tagsFilter))
+        // kwInTag must not act as a positive selector while in KEYWORD mode — with no other
+        // filter configured, an unfiltered entry still passes via the (empty) base filter, but
+        // kwInTag itself must not be the reason it does.
+        assertTrue(passesFilter(entry, keywordFilter))
+        val nonMatching = LogEntry(2, "10:00:00.001", LogLevel.I, "com.app.Network", "unrelated")
+        assertFalse(passesFilter(nonMatching, tagsFilter)) // kwInTag correctly excludes in TAGS mode
+        assertTrue(passesFilter(nonMatching, keywordFilter)) // but has no effect at all in KEYWORD mode
+    }
+
+    @Test
+    fun excludeTagsOnlyApplyInTagsMode() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "heartbeat")
+        val tagsFilter = Filter(mode = FilterMode.TAGS, excludeTags = setOf("com.app.Network"))
+        val keywordFilter = Filter(mode = FilterMode.KEYWORD, excludeTags = setOf("com.app.Network"))
+
+        assertFalse(passesFilter(entry, tagsFilter))
+        assertTrue(passesFilter(entry, keywordFilter))
+    }
+
     @Test
     fun positiveRuleAddsToActiveBaseFilterInsteadOfReplacingIt() {
         // Regression test: adding an unscoped message rule unrelated to an already-active

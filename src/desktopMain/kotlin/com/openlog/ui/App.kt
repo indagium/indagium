@@ -1881,6 +1881,7 @@ private fun BoundFilterPanel(
         width = state.filterPanelWidth,
         focusRequester = focusRequester,
         focusSearchRequest = focusSearchRequest,
+        ctrlFTarget = state.settings.ctrlFTarget,
         onPanelFocusChanged = onPanelFocusChanged,
         keyboardFocusVisible = state.keyboardFocusVisible,
     )
@@ -3007,7 +3008,15 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 horizontalArrangement = Arrangement.spacedBy(18.dp),
                 verticalAlignment = Alignment.Top,
             ) {
-                CompactSetting("Row wrapping") {
+                CompactSettingWithTooltip(
+                    label = "Row wrapping",
+                    // Native two-finger trackpad horizontal-swipe deltas aren't reliably
+                    // delivered to Compose Desktop on Linux (upstream JBR/Skiko limitation,
+                    // still open as of this writing) — Shift+wheel is a reliable fallback that
+                    // doesn't depend on that.
+                    tooltip = "Manual mode scrolls long lines horizontally. " +
+                        "Tip: hold Shift while scrolling if two-finger trackpad swipe doesn't scroll horizontally.",
+                ) {
                     SegmentedControl(
                         options = listOf("Auto", "Manual"),
                         selectedIndices = setOf(if (state.settings.autoLogRowWrap) 0 else 1),
@@ -3056,6 +3065,17 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                         options = listOf("Header only", "Full group"),
                         selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 1 else 0),
                         onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 1) } },
+                    )
+                }
+                CompactSettingWithTooltip(
+                    label = "Ctrl+F focuses",
+                    tooltip = "Which filter input Ctrl/Cmd+F jumps to.",
+                ) {
+                    val targets = CtrlFTarget.entries
+                    SegmentedControl(
+                        options = listOf("Tags", "Rules", "Regex"),
+                        selectedIndices = setOf(targets.indexOf(state.settings.ctrlFTarget)),
+                        onToggle = { idx -> state.updateSettings { it.copy(ctrlFTarget = targets[idx]) } },
                     )
                 }
             }

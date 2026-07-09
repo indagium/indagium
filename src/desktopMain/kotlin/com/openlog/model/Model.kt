@@ -145,6 +145,11 @@ data class MessageRule(
     val packagePrefix: String? = null,
     val enabled: Boolean = true,
     val target: RuleTarget = RuleTarget.MESSAGE,
+    // Which FilterMode this rule is active in — Tags and Regex/Keyword mode each get their own
+    // independent rule set, so switching modes doesn't leave one mode silently narrowed by rules
+    // created in the other. Defaults to TAGS since that's the only mode the UI ever exposed rule
+    // creation in before this field existed.
+    val mode: FilterMode = FilterMode.TAGS,
 )
 
 // ── Annotations (block model) ──────────────────────────────────────
@@ -215,6 +220,9 @@ data class SavedFilter(
 // ── Settings ───────────────────────────────────────────────────────
 enum class AnnotationLogBlockStyle { INDENTED, JIRA_JAVA }
 
+// Which filter input Ctrl/Cmd+F focuses (see FilterPanel's focusSearchRequest LaunchedEffect).
+enum class CtrlFTarget { TAGS, MESSAGE_RULE, KEYWORD_REGEX }
+
 data class AppSettings(
     val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
@@ -246,6 +254,7 @@ data class AppSettings(
     // default (see LogRow's groupColor drawBehind) — the header alone gets the full red
     // background+text tint. Enabling this extends that full tint to every row in the group.
     val highlightEntireCrashGroup: Boolean = false,
+    val ctrlFTarget: CtrlFTarget = CtrlFTarget.KEYWORD_REGEX,
 )
 
 enum class ThemePreset(val label: String) {

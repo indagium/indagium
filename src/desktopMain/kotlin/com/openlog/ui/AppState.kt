@@ -632,16 +632,19 @@ class AppState(
         target: RuleTarget = RuleTarget.MESSAGE,
     ) {
         if (pattern.isBlank()) return
-        val rule = MessageRule(
-            id = "mr${System.currentTimeMillis()}_${pattern.hashCode()}",
-            include = include,
-            pattern = pattern,
-            regex = regex,
-            tag = tag?.trim()?.takeIf { it.isNotBlank() },
-            packagePrefix = packagePrefix?.trim()?.takeIf { it.isNotBlank() },
-            target = target,
-        )
-        upFlt(tabId) { it.copy(messageRules = it.messageRules + rule) }
+        upFlt(tabId) { f ->
+            val rule = MessageRule(
+                id = "mr${System.currentTimeMillis()}_${pattern.hashCode()}",
+                include = include,
+                pattern = pattern,
+                regex = regex,
+                tag = tag?.trim()?.takeIf { it.isNotBlank() },
+                packagePrefix = packagePrefix?.trim()?.takeIf { it.isNotBlank() },
+                target = target,
+                mode = f.mode,
+            )
+            f.copy(messageRules = f.messageRules + rule)
+        }
     }
 
     fun toggleMessageRule(tabId: String, id: String) = upFlt(tabId) { f ->
@@ -3079,6 +3082,7 @@ private fun MessageRule.messageRuleToken(): String =
         packagePrefix.orEmpty(),
         enabled.toString(),
         target.name,
+        mode.name,
     ).joinToString("|") { it.b64() }
 
 private fun String.messageRuleFromToken(): MessageRule? = runCatching {
@@ -3093,6 +3097,7 @@ private fun String.messageRuleFromToken(): MessageRule? = runCatching {
         packagePrefix = parts[5].takeIf { it.isNotBlank() },
         enabled = parts[6].toBoolean(),
         target = if (parts.size > 7) runCatching { RuleTarget.valueOf(parts[7]) }.getOrElse { RuleTarget.MESSAGE } else RuleTarget.MESSAGE,
+        mode = if (parts.size > 8) runCatching { FilterMode.valueOf(parts[8]) }.getOrElse { FilterMode.TAGS } else FilterMode.TAGS,
     )
 }.getOrNull()
 
@@ -3152,6 +3157,7 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     maskWordTarget,
     maskWordReplacement,
     highlightEntireCrashGroup.toString(),
+    ctrlFTarget.name,
 )
 
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
@@ -3194,6 +3200,9 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         maskWordTarget = p.getOrNull(mcpIndex + 3)?.takeIf { it.isNotBlank() } ?: "java",
         maskWordReplacement = p.getOrNull(mcpIndex + 4)?.takeIf { it.isNotBlank() } ?: "j*ava",
         highlightEntireCrashGroup = p.getOrNull(mcpIndex + 5)?.toBooleanStrictOrNull() ?: false,
+        ctrlFTarget = p.getOrNull(mcpIndex + 6)
+            ?.let { runCatching { CtrlFTarget.valueOf(it) }.getOrNull() }
+            ?: CtrlFTarget.KEYWORD_REGEX,
     )
 }.getOrNull()
 
