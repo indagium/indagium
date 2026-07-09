@@ -167,6 +167,7 @@ fun FilterPanel(
     onUpdateSeq: (String, String, Boolean, String?, String?, Boolean, String?) -> Unit,
     onToggleManualCollapse: (String) -> Unit,
     onRemoveManualCollapse: (String) -> Unit,
+    onSetManualBlockColor: (String, Color) -> Unit,
     onAddMessageRule: (Boolean, String, Boolean, String?, String?, RuleTarget) -> Unit,
     onRemoveMessageRule: (String) -> Unit,
     onToggleMessageRuleRegex: () -> Unit,
@@ -251,6 +252,7 @@ fun FilterPanel(
     var tagSelectedAction by remember { mutableStateOf(0) } // 0 = include, 1 = exclude
     var colorPickerSeqId by remember { mutableStateOf<String?>(null) }
     var colorPickerHlId by remember { mutableStateOf<String?>(null) }
+    var colorPickerManualId by remember { mutableStateOf<String?>(null) }
     var editingSeqId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(tagInput) {
@@ -623,6 +625,7 @@ fun FilterPanel(
                         ev.key == Key.Escape -> {
                             colorPickerSeqId = null
                             colorPickerHlId = null
+                            colorPickerManualId = null
                             hlColorPickerOpen = false
                             seqColorPickerOpen = false
                             editingSeqId = null
@@ -1546,7 +1549,11 @@ fun FilterPanel(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(5.dp),
                         ) {
-                            Box(Modifier.size(10.dp).background(if (block.enabled) block.color else tc.br, RoundedCornerShape(2.dp)))
+                            ColorPickerSwatch(
+                                color = if (block.enabled) block.color else tc.br, size = 10.dp,
+                                pickerOpen = colorPickerManualId == block.id,
+                                onClick = { colorPickerManualId = if (colorPickerManualId == block.id) null else block.id },
+                            )
                             val direction = when (block.direction) {
                                 ManualCollapseDirection.TO_START -> "to start"
                                 ManualCollapseDirection.TO_END -> "to end"
@@ -1561,6 +1568,21 @@ fun FilterPanel(
                             }
                             RoundIndicator(active = block.enabled, color = block.color, onClick = { onToggleManualCollapse(block.id) })
                             SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveManualCollapse(block.id) })
+                        }
+                    }
+                }
+                tab.manualBlocks.firstOrNull { it.id == colorPickerManualId }?.let { block ->
+                    FlowRow(
+                        Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        SEQ_COLORS.forEach { c ->
+                            Box(
+                                Modifier.size(14.dp).background(c, CORNER_SM)
+                                    .border(2.dp, if (c == block.color) tc.tx else Color.Transparent, CORNER_SM)
+                                    .clickable { onSetManualBlockColor(block.id, c); colorPickerManualId = null },
+                            )
                         }
                     }
                 }

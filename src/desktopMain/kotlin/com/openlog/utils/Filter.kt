@@ -198,8 +198,59 @@ private fun spliceStackToggle(tab: LogTab, prior: TabComputeCache): List<LogItem
     return result
 }
 
-// Complexity is inherent: sequence detection, manual-collapse interleaving, and segment
-// iteration are all coupled — splitting them would require passing shared mutable state.
+// A child container to render within some range of `data`: either a top-level auto-detected
+// sequence, a nested sub-sequence within one, or a user-created manual collapse range. All three
+// resolve to an index range into `data`, which is what makes it possible to nest a manual block
+// inside a sequence (or vice versa) without ever re-running sequence detection on a sub-list —
+// see the long comment above the hosting-resolution block in computeItems for why that matters.
+private sealed class ChildRef {
+    abstract val start: Int
+
+    // Upper bound used both to advance past this child in the parent's pointer walk and, when
+    // this child is expanded, as the jump target after rendering it in full. For a manual range
+    // that hosts a "crossing" sequence extending past its own declared end, this is that
+    // sequence's endExclusive, not the manual block's own range — see ManualC.declaredEnd for the
+    // manual block's own (unextended) bound, used when it's collapsed rather than expanded.
+    abstract val end: Int
+
+    data class SeqC(val sg: SeqGroup, override val start: Int) : ChildRef() {
+        override val end get() = sg.endExclusive
+    }
+
+    data class NestedC(val ng: NestedSeqGroup, override val start: Int) : ChildRef() {
+        override val end get() = ng.endExclusive
+    }
+
+    data class ManualC(val mr: ManualRange, val declaredEnd: Int, override val end: Int) : ChildRef() {
+        override val start get() = mr.range.first
+    }
+}
+
+private data class ManualRange(val block: ManualCollapseBlock, val range: IntRange)
+
+// Reproduces, exactly, the selection rule the old per-index walk used: scanning left to right,
+// the first (widest, per the sort below) range starting at each index wins; any other range whose
+// start falls inside an already-selected range is silently dropped. `ranges` must already be
+// sorted by `range.first` ascending, `range.last` descending, so the first entry recorded per
+// start index in `byStart` is the widest one — matching the old `firstOrNull` tie-break. This is a
+// pre-existing, out-of-scope limitation (overlapping manual blocks aren't reconciled) — preserved
+// unchanged, just computed in O(n + m) instead of the old O(n * m).
+private fun selectTopLevelManualRanges(dataSize: Int, ranges: List<ManualRange>): List<ManualRange> {
+    val byStart = HashMap<Int, ManualRange>()
+    for (r in ranges) byStart.putIfAbsent(r.range.first, r)
+    val result = mutableListOf<ManualRange>()
+    var i = 0
+    while (i < dataSize) {
+        val r = byStart[i]
+        if (r == null) {
+            i += 1
+        } else { result += r; i = r.range.last + 1 }
+    }
+    return result
+}
+
+// Complexity is inherent: sequence detection, manual-collapse interleaving, and recursive
+// container rendering are all coupled — splitting them would require passing shared mutable state.
 @Suppress("CyclomaticComplexMethod", "LongMethod")
 fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
     val sequences = tab.filter.sequences
@@ -238,74 +289,79 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
         }
     }
 
-    fun cachedStackGroupsFor(segment: List<LogEntry>): List<StackTraceGroup> {
+    // Sequence groups are always computed exactly once, against the full filtered `data` — never
+    // against a manual-collapse sub-range. A manual block's boundary must never truncate or split
+    // an auto-detected sequence that spans across it; manual-block interleaving is handled purely
+    // as a rendering/nesting concern below, layered on top of this single ground-truth pass.
+    val seqGroups: List<SeqGroup> = if (tab.filter.seqOn && sequences.any { it.enabled }) {
+        fullSeqGroups ?: computeSeqGroups(data, sequences).also { fullSeqGroups = it }
+    } else {
+        emptyList()
+    }
+
+    // Stack-trace folding is always-on, independent of user-defined sequences and of manual
+    // blocks. Also always computed against the full `data` now, for the same reason as seqGroups
+    // above — this incidentally fixes the same class of truncation bug for a stack trace that
+    // straddles a manual-block boundary.
+    val allStackGroups: List<StackTraceGroup> = run {
         val cached = tab.analysis.stackTraceGroups
-        // Analysis still computing in the background after a load: render unfolded rather than
-        // blocking this compute on a full multi-second stack-trace scan. When the analysis
-        // lands, tab.analysis is replaced and the item list recomputes with folding.
-        if (tab.analysis.pending) return emptyList()
-        if (cached.isEmpty()) return computeStackTraceGroups(segment)
-        // Nothing filtered out and the segment spans the whole tab: cached groups apply as-is.
-        if (segment.size == tab.logData.size) return cached
-        if (segment === data) fullFilteredStackGroups?.let { return it }
-        val segmentIds = idBitSet(segment)
-        val result = cached.mapNotNull { group ->
-            if (!segmentIds.get(group.rid)) {
-                null
-            } else {
-                val visibleMembers = group.memberIds.filter { segmentIds.get(it) }
-                group.copy(memberIds = visibleMembers).takeIf { visibleMembers.isNotEmpty() }
+        when {
+            // Analysis still computing in the background after a load: render unfolded rather
+            // than blocking this compute on a full multi-second stack-trace scan. When the
+            // analysis lands, tab.analysis is replaced and the item list recomputes with folding.
+            tab.analysis.pending -> emptyList()
+            cached.isEmpty() -> computeStackTraceGroups(data)
+            data.size == tab.logData.size -> cached
+            else -> fullFilteredStackGroups ?: run {
+                val dataIdBits = idBitSet(data)
+                cached.mapNotNull { group ->
+                    if (!dataIdBits.get(group.rid)) {
+                        null
+                    } else {
+                        val visibleMembers = group.memberIds.filter { dataIdBits.get(it) }
+                        group.copy(memberIds = visibleMembers).takeIf { visibleMembers.isNotEmpty() }
+                    }
+                }.also { fullFilteredStackGroups = it }
             }
         }
-        if (segment === data) fullFilteredStackGroups = result
-        return result
     }
 
-    fun seqGroupsFor(segment: List<LogEntry>): List<SeqGroup> {
-        if (!(tab.filter.seqOn && sequences.any { it.enabled })) return emptyList()
-        if (segment === data) fullSeqGroups?.let { return it }
-        val result = computeSeqGroups(segment, sequences)
-        if (segment === data) fullSeqGroups = result
-        return result
+    val manualBlocksEnabled = tab.manualBlocks.filter { it.enabled }
+    if (seqGroups.isEmpty() && allStackGroups.isEmpty() && manualBlocksEnabled.isEmpty()) {
+        return data.map { LogItem.Row(it, 0) }.also { storeCache(it) }
     }
 
-    fun sequenceItems(segment: List<LogEntry>): List<LogItem> {
-        val seqGroups = seqGroupsFor(segment)
+    val defMap = sequences.associateBy { it.id }
 
-        // Stack-trace folding is always-on, independent of user-defined sequences. A sequence with
-        // no explicit end pattern can swallow everything up to the next start match (or
-        // end-of-log) as unstructured "plain" children — including an exception/ANR block that
-        // has nothing to do with the sequence. Render it nested one level inside the sequence's
-        // plain children *only while that sequence is already expanded* (a nice "this crash
-        // happened during X" grouping); otherwise render it as its own independent, always-visible
-        // collapsible block at the top level. Either way it's always present in the current item
-        // list without needing to expand anything new to reveal it — crash navigation never has
-        // to search for or blindly expand a group, which is what made it slow (and occasionally
-        // expand the wrong one) on a real log.
-        val allStackGroups = cachedStackGroupsFor(segment)
-        val cachedOwner = if (segment === data) fullSeqOwner else null
-        val seqOwnerGidBySwallowedId = cachedOwner ?: buildMap<Int, String> {
-            seqGroups.forEach { sg -> sg.plain.forEach { id -> put(id, sg.gid) } }
-        }.also { if (segment === data) fullSeqOwner = it }
-        val stackGroups = allStackGroups.filter { g ->
-            val ownerGid = seqOwnerGidBySwallowedId[g.rid]
-            ownerGid == null || ownerGid !in tab.expanded
+    // A sequence with no explicit end pattern can swallow everything up to the next start match
+    // (or end-of-log) as unstructured "plain" children — including an exception/ANR block that has
+    // nothing to do with the sequence. Render it nested one level inside the sequence's plain
+    // children *only while that sequence is already expanded* (a nice "this crash happened during
+    // X" grouping); otherwise render it as its own independent, always-visible collapsible block —
+    // crash navigation never has to search for or blindly expand a group to find it.
+    val seqOwnerGidBySwallowedId = fullSeqOwner ?: buildMap<Int, String> {
+        seqGroups.forEach { sg -> sg.plain.forEach { id -> put(id, sg.gid) } }
+    }.also { fullSeqOwner = it }
+    val stackGroups = allStackGroups.filter { g ->
+        val ownerGid = seqOwnerGidBySwallowedId[g.rid]
+        ownerGid == null || ownerGid !in tab.expanded
+    }
+    val stackGroupByRid = stackGroups.associateBy { it.rid }
+    val nestedStackGroupByRid = (allStackGroups - stackGroups.toSet()).associateBy { it.rid }
+    val stackClaimedIds = java.util.BitSet().also { bits ->
+        allStackGroups.forEach { g ->
+            bits.set(g.rid)
+            g.memberIds.forEach(bits::set)
         }
-        val nestedStackGroupByRid = (allStackGroups - stackGroups.toSet()).associateBy { it.rid }
-        val stackClaimedIds = java.util.BitSet().also { bits ->
-            allStackGroups.forEach { g ->
-                bits.set(g.rid)
-                g.memberIds.forEach(bits::set)
-            }
-        }
+    }
 
-        if (seqGroups.isEmpty() && stackGroups.isEmpty()) return segment.map { LogItem.Row(it, 0) }
-
-        val defMap = sequences.associateBy { it.id }
-        // The sequence-child half of skipIds is invariant under `expanded` (memoized); only the
-        // stack-member half depends on which owners are expanded, and that part is tiny.
-        val cachedChildBits = if (segment === data) fullSeqChildBits else null
-        val seqChildBits = cachedChildBits ?: java.util.BitSet().also { bits ->
+    // Kept in the memoization cache for TabComputeCache's shape/downstream tooling, though the
+    // recursive renderer below no longer needs a global "is this id swallowed by some sequence"
+    // bitset — coverage is resolved per recursion level instead (see renderRange), which correctly
+    // distinguishes "covered by the sequence I'm currently rendering" from "covered by some other
+    // sequence entirely," something a single global bitset could not.
+    if (fullSeqChildBits == null) {
+        fullSeqChildBits = java.util.BitSet().also { bits ->
             seqGroups.forEach { g ->
                 g.plain.forEach(bits::set)
                 g.nested.forEach { ng ->
@@ -313,101 +369,17 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
                     ng.ch.forEach(bits::set)
                 }
             }
-            if (segment === data) fullSeqChildBits = bits
         }
-        val skipIds = (seqChildBits.clone() as java.util.BitSet).also { bits ->
-            stackGroups.forEach { g -> g.memberIds.forEach(bits::set) }
-        }
-        val items = ArrayList<LogItem>(segment.size)
-
-        // A "plain" (unstructured) child of a sequence's swallowed range: usually just a bare Row,
-        // but if it's the root of a stack-trace group nested inside this (already-expanded)
-        // sequence, fold it as a nested StackTraceHeader instead — skipping its other member
-        // lines entirely, since they render inside that header's own expansion.
-        fun appendPlainChild(inner: LogEntry, outerColor: Color) {
-            val nestedStack = nestedStackGroupByRid[inner.id]
-            if (nestedStack != null) {
-                val nsExp = nestedStack.gid in tab.expanded
-                items += LogItem.StackTraceHeader(inner, nestedStack.gid, 1, nsExp, nestedStack.memberIds.size)
-                if (nsExp) {
-                    nestedStack.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 2, DANGER_RED) } }
-                }
-            } else if (!stackClaimedIds.get(inner.id)) {
-                items += LogItem.Row(inner, 1, outerColor)
-            }
-        }
-
-        // An explicit nested sub-sequence within an expanded outer sequence's plain range —
-        // renders its own header, plus its children if it's also expanded (skipping any that
-        // belong to a stack-trace group, which renders independently elsewhere).
-        fun appendNestedSubSequence(entry: LogEntry, ng: NestedSeqGroup, outerColor: Color) {
-            val nestedColor = defMap[ng.defId]?.color ?: outerColor
-            val nexp = ng.gid in tab.expanded
-            items += LogItem.SeqHeader(entry, ng.gid, 1, nexp, ng.ch.size, nestedColor)
-            if (nexp) {
-                ng.ch.forEach { id -> if (!stackClaimedIds.get(id)) tab.rmap[id]?.let { items += LogItem.Row(it, 2, nestedColor) } }
-            }
-        }
-
-        // Group roots are sorted by rid and the segment's ids ascend, so a pointer walk replaces
-        // two hash lookups per entry (tens of millions of them on a large file).
-        var seqPtr = 0
-        var stackPtr = 0
-        for (entry in segment) {
-            while (seqPtr < seqGroups.size && seqGroups[seqPtr].rid < entry.id) seqPtr++
-            val sg = seqGroups.getOrNull(seqPtr)?.takeIf { it.rid == entry.id }
-            val stg = if (sg == null) {
-                while (stackPtr < stackGroups.size && stackGroups[stackPtr].rid < entry.id) stackPtr++
-                stackGroups.getOrNull(stackPtr)?.takeIf { it.rid == entry.id }
-            } else {
-                null
-            }
-            when {
-                sg != null -> {
-                    val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
-                    val exp = sg.gid in tab.expanded
-                    val outerColor = defMap[sg.defId]?.color ?: SEQ_COLORS.first()
-                    items += LogItem.SeqHeader(entry, sg.gid, 0, exp, totalCh, outerColor)
-                    if (exp) {
-                        val plainIds = java.util.BitSet().also { bits -> sg.plain.forEach(bits::set) }
-                        val nestedByRoot = sg.nested.associateBy { it.rid }
-                        for (inner in segment) {
-                            if (plainIds.get(inner.id)) {
-                                appendPlainChild(inner, outerColor)
-                                continue
-                            }
-                            val ng = nestedByRoot[inner.id] ?: continue
-                            appendNestedSubSequence(inner, ng, outerColor)
-                        }
-                    }
-                }
-
-                stg != null -> {
-                    val exp = stg.gid in tab.expanded
-                    items += LogItem.StackTraceHeader(entry, stg.gid, 0, exp, stg.memberIds.size)
-                    if (exp) {
-                        stg.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, 1, DANGER_RED) } }
-                    }
-                }
-
-                skipIds.get(entry.id) -> Unit
-                else -> items += LogItem.Row(entry, 0)
-            }
-        }
-        return items
     }
 
-    val manualBlocks = tab.manualBlocks.filter { it.enabled }
-    if (manualBlocks.isEmpty()) return sequenceItems(data).also { storeCache(it) }
-
-    // Ids ascend within data, so anchor lookup is a binary search instead of a boxed id->index map.
+    // Ids ascend within data, so id->index lookup is a binary search instead of a boxed map.
     val dataIds = IntArray(data.size) { data[it].id }
 
     fun indexOfId(id: Int): Int? = java.util.Arrays.binarySearch(dataIds, id).takeIf { it >= 0 }
 
-    data class ManualRange(val block: ManualCollapseBlock, val range: IntRange)
+    fun rootIdxOf(rid: Int): Int = indexOfId(rid) ?: -1
 
-    val ranges = manualBlocks.mapNotNull { block ->
+    val allManualRanges = manualBlocksEnabled.mapNotNull { block ->
         val anchor = indexOfId(block.anchorId) ?: return@mapNotNull null
         val range = when (block.direction) {
             ManualCollapseDirection.TO_START -> 0..anchor
@@ -420,58 +392,191 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
         ManualRange(block, range)
     }.sortedWith(compareBy<ManualRange> { it.range.first }.thenByDescending { it.range.last })
 
-    val result = mutableListOf<LogItem>()
-    val segment = mutableListOf<LogEntry>()
+    val topLevelManualCandidates = selectTopLevelManualRanges(data.size, allManualRanges)
 
-    fun flushSegment() {
-        if (segment.isNotEmpty()) {
-            result += sequenceItems(segment.toList())
-            segment.clear()
-        }
-    }
+    // ── Resolve sequence-vs-manual-block hosting ──────────────────────────────────────────────
+    // Top-level SeqGroups never contain one another (SeqComputer only exposes roots at this
+    // level), and topLevelManualCandidates never overlap each other (by construction above) — so
+    // the only containment/crossing relationships left to resolve are sequence-vs-manual pairs, at
+    // two possible depths: directly under a top-level SeqGroup's own plain area, or one level
+    // deeper under one of its NestedSeqGroups. On a straddling ("crossing") pair — neither fully
+    // contains the other — whichever starts first hosts the other's full extent, nested one level
+    // in even past the host's own declared end; on an exact range tie, the manual block hosts (a
+    // manual block deliberately wrapping a whole sequence reads as "sequence lives inside my
+    // selection," matching pre-existing behavior for that case). This never changes either side's
+    // own reported header count, it only changes where its content renders.
+    val seqHostsManualDirect = HashMap<String, MutableList<ManualRange>>()
+    val nestedHostsManual = HashMap<String, MutableList<ManualRange>>()
+    val manualHostsSeq = HashMap<String, MutableList<SeqGroup>>()
+    val seqHostedByManualGid = HashSet<String>()
+    val manualHostedGid = HashSet<String>()
 
-    fun nestedManualItems(items: List<LogItem>, manualColor: Color): List<LogItem> =
-        items.map { item ->
-            when (item) {
-                is LogItem.Row -> item.copy(
-                    indent = item.indent + 1,
-                    groupColor = item.groupColor ?: manualColor,
-                )
+    for (m in topLevelManualCandidates) {
+        val m0 = m.range.first
+        val m1 = m.range.last + 1
+        for (sg in seqGroups) {
+            val s0 = rootIdxOf(sg.rid)
+            val s1 = sg.endExclusive
+            if (s1 <= m0 || m1 <= s0) continue
+            when {
+                m0 <= s0 && s1 <= m1 -> {
+                    manualHostsSeq.getOrPut(m.block.id) { mutableListOf() } += sg
+                    seqHostedByManualGid += sg.gid
+                }
 
-                is LogItem.SeqHeader -> item.copy(indent = item.indent + 1)
-                is LogItem.StackTraceHeader -> item.copy(indent = item.indent + 1)
-                is LogItem.ManualHeader -> item
+                s0 <= m0 && m1 <= s1 -> {
+                    val ng = sg.nested.firstOrNull { n -> val n0 = rootIdxOf(n.rid); n0 <= m0 && m1 <= n.endExclusive }
+                    if (ng != null) nestedHostsManual.getOrPut(ng.gid) { mutableListOf() } += m
+                    else seqHostsManualDirect.getOrPut(sg.gid) { mutableListOf() } += m
+                    manualHostedGid += m.block.id
+                }
+
+                m0 < s0 -> {
+                    manualHostsSeq.getOrPut(m.block.id) { mutableListOf() } += sg
+                    seqHostedByManualGid += sg.gid
+                }
+
+                else -> {
+                    seqHostsManualDirect.getOrPut(sg.gid) { mutableListOf() } += m
+                    manualHostedGid += m.block.id
+                }
             }
         }
-
-    var i = 0
-    while (i < data.size) {
-        val manual = ranges.firstOrNull { it.range.first == i }
-        if (manual == null) {
-            segment += data[i]
-            i += 1
-            continue
-        }
-        flushSegment()
-        val block = manual.block
-        val headerEntry = data[indexOfId(block.anchorId) ?: manual.range.first]
-        val expanded = block.id in tab.expanded
-        result += LogItem.ManualHeader(
-            headerEntry,
-            block.id,
-            block.direction,
-            expanded,
-            manual.range.count(),
-            block.color
-        )
-        if (expanded) {
-            val expandedItems = sequenceItems(manual.range.map { data[it] })
-                .filterNot { item -> item is LogItem.Row && item.entry.id == block.anchorId }
-            result += nestedManualItems(expandedItems, block.color)
-        }
-        i = manual.range.last + 1
     }
-    flushSegment()
+
+    val topLevelManual = topLevelManualCandidates.filterNot { it.block.id in manualHostedGid }
+    val topLevelSeqGroups = seqGroups.filterNot { it.gid in seqHostedByManualGid }
+
+    fun seqEffectiveEnd(sg: SeqGroup): Int =
+        maxOf(sg.endExclusive, seqHostsManualDirect[sg.gid]?.maxOfOrNull { it.range.last + 1 } ?: 0)
+
+    fun manualEffectiveEnd(m: ManualRange): Int =
+        maxOf(m.range.last + 1, manualHostsSeq[m.block.id]?.maxOfOrNull { it.endExclusive } ?: 0)
+
+    // ── Unified recursive renderer ────────────────────────────────────────────────────────────
+    // Walks index range [lo, hi) into `data`, rendering `children` (sorted by start, non-
+    // overlapping at this level) wherever their start position falls, and plain/stack-header rows
+    // everywhere else. `hi` is a soft bound: if an expanded child's own true end extends past it
+    // (the crossing case resolved above), that child is still rendered in full via recursion and
+    // the cursor simply jumps to its true end, which is >= hi — the `while (idx < hi)` loop then
+    // exits on its own next check, no special-casing needed.
+    //
+    // A collapsed SeqHeader/NestedSeqHeader still walks its interior position-by-position (does
+    // NOT jump) so an escaped stack-trace header inside it can still surface, matching pre-existing
+    // sequence behavior. A collapsed ManualHeader, by contrast, always jumps straight to its own
+    // declared end — manual blocks are a deliberate, harder collapse than sequences and already
+    // fully hid their interior (including any escaped stack trace within it) before this change;
+    // preserved as-is rather than changed as a side effect of this fix.
+    fun renderRange(lo: Int, hi: Int, indent: Int, ambientColor: Color?, children: List<ChildRef>): List<LogItem> {
+        val items = ArrayList<LogItem>(hi - lo)
+        var childPtr = 0
+        var idx = lo
+        while (idx < hi) {
+            while (childPtr < children.size && children[childPtr].end <= idx) childPtr++
+            val child = children.getOrNull(childPtr)?.takeIf { it.start == idx }
+            val entry = data[idx]
+            when {
+                child is ChildRef.SeqC -> {
+                    val sg = child.sg
+                    val exp = sg.gid in tab.expanded
+                    val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
+                    val color = defMap[sg.defId]?.color ?: SEQ_COLORS.first()
+                    items += LogItem.SeqHeader(entry, sg.gid, indent, exp, totalCh, color)
+                    if (exp) {
+                        val kids = (
+                            sg.nested.map { ng -> ChildRef.NestedC(ng, rootIdxOf(ng.rid)) } +
+                                (seqHostsManualDirect[sg.gid].orEmpty()).map { m ->
+                                    ChildRef.ManualC(m, m.range.last + 1, manualEffectiveEnd(m))
+                                }
+                        ).sortedBy { it.start }
+                        items += renderRange(idx + 1, sg.endExclusive, indent + 1, color, kids)
+                        idx = seqEffectiveEnd(sg)
+                    } else {
+                        idx += 1
+                    }
+                }
+
+                child is ChildRef.NestedC -> {
+                    val ng = child.ng
+                    val exp = ng.gid in tab.expanded
+                    val color = defMap[ng.defId]?.color ?: ambientColor ?: SEQ_COLORS.first()
+                    items += LogItem.SeqHeader(entry, ng.gid, indent, exp, ng.ch.size, color)
+                    if (exp) {
+                        val kids = nestedHostsManual[ng.gid].orEmpty()
+                            .map { m -> ChildRef.ManualC(m, m.range.last + 1, m.range.last + 1) }
+                            .sortedBy { it.start }
+                        items += renderRange(idx + 1, ng.endExclusive, indent + 1, color, kids)
+                        idx = ng.endExclusive
+                    } else {
+                        idx += 1
+                    }
+                }
+
+                child is ChildRef.ManualC -> {
+                    val mr = child.mr
+                    val block = mr.block
+                    val exp = block.id in tab.expanded
+                    // The anchor entry (what the header displays) isn't necessarily at
+                    // range.first — TO_END and some RANGE blocks anchor at the other end.
+                    val headerEntry = indexOfId(block.anchorId)?.let { data[it] } ?: entry
+                    items += LogItem.ManualHeader(headerEntry, block.id, block.direction, exp, mr.range.count(), block.color)
+                    if (exp) {
+                        val kids = manualHostsSeq[block.id].orEmpty()
+                            .map { sg -> ChildRef.SeqC(sg, rootIdxOf(sg.rid)) }
+                            .sortedBy { it.start }
+                        // Render the manual block's full range (the anchor entry may sit at
+                        // either end of it — TO_START/TO_END/RANGE all place it differently) and
+                        // filter the anchor's own row out afterward, matching the header, which
+                        // already displays that entry.
+                        val inner = renderRange(mr.range.first, mr.range.last + 1, indent + 1, block.color, kids)
+                        items += inner.filterNot { it is LogItem.Row && it.entry.id == block.anchorId }
+                        idx = child.declaredEnd
+                    } else {
+                        idx = child.declaredEnd
+                    }
+                }
+
+                stackGroupByRid[entry.id] != null -> {
+                    val stg = stackGroupByRid.getValue(entry.id)
+                    val exp = stg.gid in tab.expanded
+                    items += LogItem.StackTraceHeader(entry, stg.gid, indent, exp, stg.memberIds.size)
+                    if (exp) {
+                        stg.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, indent + 1, DANGER_RED) } }
+                    }
+                    idx += 1
+                }
+
+                nestedStackGroupByRid[entry.id] != null -> {
+                    val stg = nestedStackGroupByRid.getValue(entry.id)
+                    val exp = stg.gid in tab.expanded
+                    items += LogItem.StackTraceHeader(entry, stg.gid, indent, exp, stg.memberIds.size)
+                    if (exp) {
+                        stg.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, indent + 1, DANGER_RED) } }
+                    }
+                    idx += 1
+                }
+
+                childPtr < children.size && idx >= children[childPtr].start && idx < children[childPtr].end -> {
+                    idx += 1 // covered by the current child's interior (collapsed, not yet reached its end)
+                }
+
+                stackClaimedIds.get(entry.id) -> idx += 1 // stack-trace member row, shown only under its header
+
+                else -> {
+                    items += LogItem.Row(entry, indent, ambientColor)
+                    idx += 1
+                }
+            }
+        }
+        return items
+    }
+
+    val topChildren = (
+        topLevelSeqGroups.map { sg -> ChildRef.SeqC(sg, rootIdxOf(sg.rid)) } +
+            topLevelManual.map { m -> ChildRef.ManualC(m, m.range.last + 1, manualEffectiveEnd(m)) }
+    ).sortedBy { it.start }
+
+    val result = renderRange(0, data.size, indent = 0, ambientColor = null, children = topChildren)
     storeCache(result)
     return result
 }

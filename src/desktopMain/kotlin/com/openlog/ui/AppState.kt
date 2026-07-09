@@ -1737,6 +1737,10 @@ class AppState(
         t.copy(manualBlocks = t.manualBlocks.filterNot { it.id == id }, expanded = t.expanded - id)
     }
 
+    fun setManualBlockColor(tabId: String, id: String, color: Color) = upTab(tabId) { t ->
+        t.copy(manualBlocks = t.manualBlocks.map { if (it.id == id) it.copy(color = color) else it })
+    }
+
     fun setSequenceStartFromCtx() {
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return

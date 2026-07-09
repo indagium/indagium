@@ -46,14 +46,18 @@ data class SequenceDef(
     val endTag: String? = null,
 )
 
-data class NestedSeqGroup(val gid: String, val rid: Int, val ch: List<Int>, val defId: String = "")
+// endExclusive is the index (into the full logData list SeqComputer was run against) one past
+// this group's last swallowed entry — exposed so Filter.kt can classify containment against
+// manual-collapse-block index ranges without rescanning plain/nested for a max id.
+data class NestedSeqGroup(val gid: String, val rid: Int, val ch: List<Int>, val defId: String = "", val endExclusive: Int)
 
 data class SeqGroup(
     val gid: String,
     val rid: Int,
     val plain: List<Int>,
     val nested: List<NestedSeqGroup>,
-    val defId: String
+    val defId: String,
+    val endExclusive: Int,
 )
 
 data class StackTraceGroup(val gid: String, val rid: Int, val memberIds: List<Int>, val isFatal: Boolean = false)

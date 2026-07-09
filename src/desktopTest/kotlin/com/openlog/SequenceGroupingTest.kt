@@ -14,6 +14,7 @@ import com.openlog.utils.computeItems
 import com.openlog.utils.computeSeqGroups
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class SequenceGroupingTest {
@@ -308,7 +309,10 @@ class SequenceGroupingTest {
         val sequenceHeader = items.filterIsInstance<LogItem.SeqHeader>().single()
         assertEquals(1, sequenceHeader.entry.id)
         assertTrue(sequenceHeader.expanded)
-        assertEquals(listOf(2), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+        assertEquals(2, sequenceHeader.count) // swallows both id 2 and id 3, unaffected by the manual block
+        val row2 = items.filterIsInstance<LogItem.Row>().single()
+        assertEquals(2, row2.entry.id)
+        assertEquals(2, row2.indent) // nested inside both the manual header and the sequence header
     }
 
     @Test
@@ -335,7 +339,130 @@ class SequenceGroupingTest {
         val sequenceHeader = items.filterIsInstance<LogItem.SeqHeader>().single()
         assertEquals(2, sequenceHeader.entry.id)
         assertTrue(sequenceHeader.expanded)
-        assertEquals(listOf(1, 3), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+        // The sequence's true end (id 3) lies past the manual block's own declared end (which
+        // covers only ids 1-2) — before the fix this got truncated to a count of 0 and id 3
+        // rendered as an orphaned top-level row instead of nesting under the sequence.
+        assertEquals(1, sequenceHeader.count)
+        val rows = items.filterIsInstance<LogItem.Row>().associateBy { it.entry.id }
+        assertEquals(listOf(1, 3), rows.keys.sorted())
+        assertEquals(1, rows.getValue(1).indent) // directly under the manual header
+        assertEquals(2, rows.getValue(3).indent) // nested one level deeper, under the sequence
+    }
+
+    @Test
+    fun manualBlockStraddlingASequenceDoesNotTruncateItWhenBothEndsAreUnaffected() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "before"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Seq", "flow start"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Seq", "middle"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "Seq", "flow end"),
+            LogEntry(5, "10:00:00.400", LogLevel.I, "App", "after"),
+        )
+        // Manual range strictly inside the sequence's true range [id2, id4] — entries before (id1)
+        // and after (id5) the sequence are both untouched by the manual block.
+        val block = ManualCollapseBlock("m1", 3, ManualCollapseDirection.RANGE, color = Color.Red, endId = 3)
+        val sequence = SequenceDef(
+            "flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq",
+            endMatchText = "flow end", endTag = "Seq",
+        )
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = listOf(sequence)),
+            // Sequence expanded, manual block left collapsed.
+            expanded = setOf("sg_flow_2"),
+            manualBlocks = listOf(block),
+        )
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val sequenceHeader = items.filterIsInstance<LogItem.SeqHeader>().single()
+        assertEquals(2, sequenceHeader.entry.id)
+        assertEquals(2, sequenceHeader.count) // ids 3 and 4, both still swallowed — not truncated
+        // Nested inside the expanded sequence's children (not a disjoint top-level chunk) — proven
+        // by the manual header only appearing between the sequence header and its id-4 child.
+        val seqIdx = items.indexOf(sequenceHeader)
+        val manualHeader = items.filterIsInstance<LogItem.ManualHeader>().single()
+        assertFalse(manualHeader.expanded)
+        val manualIdx = items.indexOf(manualHeader)
+        assertTrue(manualIdx > seqIdx)
+        val rows = items.filterIsInstance<LogItem.Row>().map { it.entry.id }.sorted()
+        assertEquals(listOf(1, 4, 5), rows) // id3 is inside the collapsed manual block, hidden
+    }
+
+    @Test
+    fun manualBlockFullyContainingASequenceNestsItInside() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Seq", "flow start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Seq", "middle"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Seq", "flow end"),
+        )
+        val block = ManualCollapseBlock("m1", 1, ManualCollapseDirection.RANGE, color = Color.Red, endId = 3)
+        val sequence = SequenceDef(
+            "flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq",
+            endMatchText = "flow end", endTag = "Seq",
+        )
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = listOf(sequence)),
+            expanded = setOf(block.id, "sg_flow_1"),
+            manualBlocks = listOf(block),
+        )
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val manualHeader = items.filterIsInstance<LogItem.ManualHeader>().single()
+        assertEquals(3, manualHeader.count) // ids 1-3, the block's own declared range
+        val sequenceHeader = items.filterIsInstance<LogItem.SeqHeader>().single()
+        assertEquals(1, sequenceHeader.indent) // nested one level inside the manual header
+        assertEquals(2, sequenceHeader.count) // ids 2 and 3, both swallowed — not truncated
+        assertTrue(items.indexOf(sequenceHeader) > items.indexOf(manualHeader))
+        val rows = items.filterIsInstance<LogItem.Row>().map { it.entry.id }.sorted()
+        assertEquals(listOf(2, 3), rows) // id1 renders as the sequence header, not a separate row
+    }
+
+    // Mirror of expandedManualCollapseCanShowSequenceStartedByAnchor's crossing case, but with the
+    // sequence starting first and the manual block's range extending past the sequence's own end —
+    // the sequence should still host the manual block, nested one level in, past its own boundary.
+    @Test
+    fun manualBlockCrossingPastASequencesEndNestsUnderTheSequence() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Seq", "flow start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Seq", "middle"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Seq", "flow end"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "App", "after"),
+        )
+        // Sequence's true range is [id1, id3]. The manual range [id3, id4] starts on the
+        // sequence's own last entry but extends one entry past the sequence's end.
+        val block = ManualCollapseBlock("m1", 3, ManualCollapseDirection.RANGE, color = Color.Red, endId = 4)
+        val sequence = SequenceDef(
+            "flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq",
+            endMatchText = "flow end", endTag = "Seq",
+        )
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = listOf(sequence)),
+            expanded = setOf("sg_flow_1", block.id),
+            manualBlocks = listOf(block),
+        )
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val sequenceHeader = items.filterIsInstance<LogItem.SeqHeader>().single()
+        assertEquals(1, sequenceHeader.entry.id)
+        assertEquals(2, sequenceHeader.count) // ids 2 and 3, both still swallowed — not truncated
+        val manualHeader = items.filterIsInstance<LogItem.ManualHeader>().single()
+        assertTrue(items.indexOf(manualHeader) > items.indexOf(sequenceHeader))
+        val rows = items.filterIsInstance<LogItem.Row>().map { it.entry.id }.sorted()
+        assertEquals(listOf(2, 4), rows) // id3 is the manual block's own anchor, filtered from its body
     }
 
     // ── SeqComputer gap coverage ──────────────────────────────────────────────

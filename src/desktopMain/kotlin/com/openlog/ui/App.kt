@@ -1838,6 +1838,7 @@ private fun BoundFilterPanel(
         },
         onToggleManualCollapse = { state.toggleManualCollapse(tab.id, it) },
         onRemoveManualCollapse = { state.removeManualCollapse(tab.id, it) },
+        onSetManualBlockColor = { id, c -> state.setManualBlockColor(tab.id, id, c) },
         onAddMessageRule = { include, pattern, regex, tag, prefix, target ->
             state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
         },

@@ -124,9 +124,11 @@ fun computeSeqGroups(logData: List<LogEntry>, defs: List<SequenceDef>): List<Seq
                         rid = logData[child.idx].id,
                         ch = childIds(childCi),
                         defId = child.def.id,
+                        endExclusive = child.endExclusive,
                     )
                 },
                 defId = root.def.id,
+                endExclusive = root.endExclusive,
             )
         }
 }

@@ -67,7 +67,15 @@ jobs:
       # a generic icon and the raw class name. Patch it in post-build since the .deb is just an
       # archive. The .desktop file ships at opt/<packageName>/lib/, not usr/share/applications —
       # postinst runs `xdg-desktop-menu install` on it at install time to put it there.
-      - name: Add StartupWMClass to Linux .desktop file
+      #
+      # Also defensively ensure postinst rebuilds the desktop/MIME cache after that install: the
+      # fileAssociation() entries in build.gradle.kts land as MimeType= in the generated .desktop
+      # file, but file managers resolve "Open With" candidates from the cached
+      # /usr/share/applications/mimeinfo.cache, which is only rebuilt by update-desktop-database.
+      # xdg-desktop-menu install may already trigger this internally on most distros, but jpackage
+      # gives no guarantee of it (same class of gap as StartupWMClass above), so append an
+      # idempotent call as a safety net rather than relying on unverified distro behavior.
+      - name: Add StartupWMClass and desktop-database refresh to Linux .desktop/postinst
         if: matrix.os == 'ubuntu-latest'
         run: |
           set -euo pipefail
@@ -77,6 +85,10 @@ jobs:
           desktop_file=$(find "$workdir/opt" -maxdepth 3 -type f -name '*.desktop')
           if ! grep -q '^StartupWMClass=' "$desktop_file"; then
             echo "StartupWMClass=openLog" >> "$desktop_file"
+          fi
+          postinst="$workdir/DEBIAN/postinst"
+          if [ -f "$postinst" ] && ! grep -q 'update-desktop-database' "$postinst"; then
+            echo 'update-desktop-database -q /usr/share/applications 2>/dev/null || true' >> "$postinst"
           fi
           dpkg-deb -b "$workdir" "$deb"
           rm -rf "$workdir"
