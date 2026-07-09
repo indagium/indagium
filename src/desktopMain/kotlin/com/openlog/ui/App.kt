@@ -267,10 +267,12 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                         val matchingHlId = ctx.selText.takeIf { it.isNotBlank() }
                             ?.let { state.matchingHighlighterId(ctx.tabId, it) }
                         // Estimate full menu height from items that will actually render:
-                        //   header(37) + divider(9) + preview(63) + 2 items(64) + divider(9)
-                        //   + 5 items(160) + divider(9) + 3 items(96) + divider(9) + 2 items(64) = 520
+                        //   header(37) + divider(9) + preview(63) + 1 item(32) + divider(9)
+                        //   + 2 items(64) [sequence] + divider(9) + 2 items(64) [collapse-to-start/end]
+                        //   + divider(9) + 2 items(64) [hide/show] + divider(9) + 3 items(96) [tags]
+                        //   + divider(9) + 2 items(64) = 538
                         // Selection text adds a preview extension line(15) on top of that.
-                        val estimatedMenuHeight = (520 +
+                        val estimatedMenuHeight = (538 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (state.pendingSequenceStart != null) 32 else 0) +
                             (if (selCount > 1) 64 else 0)).dp
@@ -302,6 +304,12 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                 } else {
                                     add(CtxMenuEntry.Action(Icons.Outlined.Bookmark, "Highlight selection") { state.addHlFromCtx() })
                                 }
+                                add(CtxMenuEntry.Divider)
+                            }
+                            // Sequence actions — own block, "Add as sequence" pulled out of the
+                            // highlight block above to sit next to the rest of the sequence
+                            // workflow instead of next to an unrelated highlight toggle.
+                            run {
                                 add(
                                     CtxMenuEntry.ActionWithSubmenu(
                                         Icons.Outlined.Layers,
@@ -310,24 +318,32 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                         submenu = ruleVariants.map { v -> v.label to { state.addSequenceVariant(v) } },
                                     ),
                                 )
+                                if (state.pendingSequenceStart != null) {
+                                    add(CtxMenuEntry.Action(Icons.Outlined.Flag, "Complete sequence end") { state.completeSequenceEndFromCtx() })
+                                }
+                                add(CtxMenuEntry.Action(Icons.Outlined.PlayArrow, "Set sequence start") { state.setSequenceStartFromCtx() })
                                 add(CtxMenuEntry.Divider)
                             }
-                            if (state.pendingSequenceStart != null) {
-                                add(CtxMenuEntry.Action(Icons.Outlined.Flag, "Complete sequence end") { state.completeSequenceEndFromCtx() })
-                            }
-                            add(CtxMenuEntry.Action(Icons.Outlined.PlayArrow, "Set sequence start") { state.setSequenceStartFromCtx() })
-                            if (canCollapseSelection) {
-                                add(
-                                    CtxMenuEntry.Action(Icons.Outlined.Layers, "Collapse $selCount selected lines") {
-                                        state.collapseSelectedLinesFromCtx(ctx.tabId, selectedIds)
-                                    },
-                                )
-                            }
-                            if (canCollapseToStart) {
-                                add(CtxMenuEntry.Action(Icons.Outlined.ArrowUpward, "Collapse to file start") { state.collapseToStartFromCtx() })
-                            }
-                            if (canCollapseToEnd) {
-                                add(CtxMenuEntry.Action(Icons.Outlined.ArrowDownward, "Collapse to file end") { state.collapseToEndFromCtx() })
+                            // Collapse actions — own block. Every entry is conditional on
+                            // availability, so the divider after is guarded on at least one
+                            // having rendered (an empty block would otherwise leave two dividers
+                            // back to back with nothing between them).
+                            run {
+                                val hasCollapseAction = canCollapseSelection || canCollapseToStart || canCollapseToEnd
+                                if (canCollapseSelection) {
+                                    add(
+                                        CtxMenuEntry.Action(Icons.Outlined.Layers, "Collapse $selCount selected lines") {
+                                            state.collapseSelectedLinesFromCtx(ctx.tabId, selectedIds)
+                                        },
+                                    )
+                                }
+                                if (canCollapseToStart) {
+                                    add(CtxMenuEntry.Action(Icons.Outlined.ArrowUpward, "Collapse to file start") { state.collapseToStartFromCtx() })
+                                }
+                                if (canCollapseToEnd) {
+                                    add(CtxMenuEntry.Action(Icons.Outlined.ArrowDownward, "Collapse to file end") { state.collapseToEndFromCtx() })
+                                }
+                                if (hasCollapseAction) add(CtxMenuEntry.Divider)
                             }
                             add(
                                 CtxMenuEntry.ActionWithSubmenu(
@@ -3029,11 +3045,15 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                     )
                 }
             }
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(18.dp),
-                verticalAlignment = Alignment.Top,
-            ) {
+            // Plain SpaceBetween, no weight()/forced alignment: with weighted equal-width columns
+            // and the last item End-aligned, that item's own leading slack (columnWidth minus its
+            // content width) piled onto the third gap on top of the third column's own trailing
+            // slack, visibly doubling it. Left tightly wrapped (each item's width = its own
+            // content, per CompactSettingWithTooltip's plain Column), SpaceBetween's
+            // (available − Σwidths)/(n−1) split gives a numerically equal gap between every pair
+            // of adjacent items regardless of how their label/control widths differ, and pins the
+            // last item flush to the row's right edge for free — no explicit End alignment needed.
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 CompactSettingWithTooltip(
                     label = "Row wrapping",
                     // AWT has no horizontal mouse-wheel axis at all (confirmed via
@@ -3045,80 +3065,52 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                     // Linux; see ui/LinuxHorizontalScroll.kt for the X11-button bridge that
                     // targets that gap directly. Shift+wheel works everywhere regardless, hence
                     // the tooltip below.
-                    tooltip = "Manual mode scrolls long lines horizontally. " +
-                        "Tip: hold Shift while scrolling if two-finger trackpad swipe doesn't scroll horizontally.",
+                    tooltip = "Auto wraps long lines to fit the panel width; toggle off to set a fixed " +
+                        "wrap column and scroll horizontally instead. Tip: hold Shift while scrolling if " +
+                        "two-finger trackpad swipe doesn't scroll horizontally.",
                 ) {
-                    SegmentedControl(
-                        options = listOf("Auto", "Manual"),
-                        selectedIndices = setOf(if (state.settings.autoLogRowWrap) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(autoLogRowWrap = idx == 0) } },
+                    RowWrapControl(
+                        auto = state.settings.autoLogRowWrap,
+                        wrapChars = state.settings.logRowWrapLimitChars,
+                        onToggleAuto = { state.updateSettings { it.copy(autoLogRowWrap = !it.autoLogRowWrap) } },
+                        onWrapCharsChange = { limit -> state.updateSettings { it.copy(logRowWrapLimitChars = limit) } },
                     )
                 }
-                CompactSetting("Row wrap chars") {
-                    var wrapLimitText by remember(state.settings.logRowWrapLimitChars) {
-                        mutableStateOf(state.settings.logRowWrapLimitChars.toString())
-                    }
-                    if (state.settings.autoLogRowWrap) {
-                        Box(
-                            Modifier.width(76.dp)
-                                .height(28.dp)
-                                .background(tc.bg.copy(alpha = 0.35f), CORNER_SM)
-                                .border(1.dp, tc.br.copy(alpha = 0.45f), CORNER_SM)
-                                .padding(horizontal = 7.dp, vertical = 4.dp),
-                            contentAlignment = Alignment.CenterStart,
-                        ) {
-                            AppText(wrapLimitText, color = tc.td.copy(alpha = 0.65f), fontSize = 12.sp)
-                        }
-                    } else {
-                        InlineField(
-                            wrapLimitText,
-                            { value ->
-                                val digits = value.filter { it.isDigit() }.take(5)
-                                wrapLimitText = digits
-                                digits.toIntOrNull()?.let { limit ->
-                                    state.updateSettings { it.copy(logRowWrapLimitChars = limit.coerceIn(80, 20_000)) }
-                                }
-                            },
-                            "480",
-                            Modifier.width(76.dp).height(28.dp),
-                            fontSize = 12.sp,
-                            centerTextVertically = true,
-                        )
-                    }
-                }
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 CompactSettingWithTooltip(
-                    label = "Crash group rows highlight",
+                    label = "Crash rows",
                     tooltip = "Colors every row in an expanded crash/stack-trace group, not just the header.",
                 ) {
                     SegmentedControl(
-                        options = listOf("Header only", "Full group"),
-                        selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 1 else 0),
-                        onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 1) } },
+                        options = listOf("On", "Off"),
+                        selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 0 else 1),
+                        onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 0) } },
+                    )
+                }
+                CompactSettingWithTooltip(
+                    label = "Original panel",
+                    tooltip = "Controls whether newly opened files start with the unfiltered Original panel visible.",
+                ) {
+                    SegmentedControl(
+                        options = listOf("On", "Off"),
+                        selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
+                        onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 0) } },
                     )
                 }
                 CompactSettingWithTooltip(
                     label = "Ctrl+F focuses",
                     tooltip = "Which filter input Ctrl/Cmd+F jumps to.",
                 ) {
-                    val targets = CtrlFTarget.entries
+                    // Rules (CtrlFTarget.MESSAGE_RULE) dropped from the selector, not the enum —
+                    // a settings token saved before this change can still hold it, so indexOf
+                    // falling through to -1 (nothing highlighted, existing behavior unaffected)
+                    // is the correct degrade rather than a crash.
+                    val targets = listOf(CtrlFTarget.TAGS, CtrlFTarget.KEYWORD_REGEX)
                     SegmentedControl(
-                        options = listOf("Tags", "Rules", "Regex"),
+                        options = listOf("Tags", "Regex"),
                         selectedIndices = setOf(targets.indexOf(state.settings.ctrlFTarget)),
                         onToggle = { idx -> state.updateSettings { it.copy(ctrlFTarget = targets[idx]) } },
                     )
                 }
-            }
-            CompactSettingWithTooltip(
-                label = "Original panel for new files",
-                tooltip = "Controls whether newly opened files start with the unfiltered Original panel visible.",
-            ) {
-                SegmentedControl(
-                    options = listOf("Off", "On"),
-                    selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 1 else 0),
-                    onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 1) } },
-                )
             }
 
             SettingsSectionHeader("Export & annotations")
@@ -3584,6 +3576,58 @@ private fun StepperButton(symbol: String, enabled: Boolean, onClick: () -> Unit)
         contentAlignment = Alignment.Center,
     ) {
         AppText(symbol, color = if (enabled) tc.tx else tc.td.copy(alpha = .4f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+// Merges the Auto/Manual toggle and the wrap-column number into one bordered pill (matching
+// ListStepper's single-border, divider-between-segments look) instead of two separate controls —
+// "Auto" is a plain on/off chip, not a two-way select, so the field beside it is reachable by
+// toggling it off rather than by picking "Manual" from a second option.
+@Composable
+private fun RowWrapControl(auto: Boolean, wrapChars: Int, onToggleAuto: () -> Unit, onWrapCharsChange: (Int) -> Unit) {
+    val tc = tc()
+    var wrapLimitText by remember(wrapChars) { mutableStateOf(wrapChars.toString()) }
+    Row(
+        Modifier
+            .border(0.5.dp, tc.br, RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(6.dp)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .height(28.dp)
+                .background(if (auto) tc.ac.copy(alpha = .2f) else Color.Transparent)
+                .clickable(onClick = onToggleAuto)
+                .padding(horizontal = 10.dp),
+        ) {
+            AppText(
+                "Auto",
+                color = if (auto) tc.ac else tc.ts,
+                fontSize = 12.sp,
+                fontWeight = if (auto) FontWeight.Medium else FontWeight.Normal,
+            )
+        }
+        Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
+        if (auto) {
+            Box(Modifier.width(60.dp).height(28.dp).padding(horizontal = 8.dp), contentAlignment = Alignment.CenterStart) {
+                AppText(wrapLimitText, color = tc.td.copy(alpha = 0.5f), fontSize = 12.sp, fontFamily = MONO)
+            }
+        } else {
+            BasicTextField(
+                value = wrapLimitText,
+                onValueChange = { value ->
+                    val digits = value.filter { it.isDigit() }.take(5)
+                    wrapLimitText = digits
+                    digits.toIntOrNull()?.let { onWrapCharsChange(it.coerceIn(80, 20_000)) }
+                },
+                textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = MONO),
+                cursorBrush = SolidColor(tc.ac),
+                singleLine = true,
+                modifier = Modifier.width(60.dp).height(28.dp).padding(horizontal = 8.dp),
+                decorationBox = { inner -> Box(contentAlignment = Alignment.CenterStart) { inner() } },
+            )
+        }
     }
 }
 
