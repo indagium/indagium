@@ -145,10 +145,8 @@ data class MessageRule(
     val packagePrefix: String? = null,
     val enabled: Boolean = true,
     val target: RuleTarget = RuleTarget.MESSAGE,
-    // Which FilterMode this rule is active in — Tags and Regex/Keyword mode each get their own
-    // independent rule set, so switching modes doesn't leave one mode silently narrowed by rules
-    // created in the other. Defaults to TAGS since that's the only mode the UI ever exposed rule
-    // creation in before this field existed.
+    // Which FilterMode this rule was created in. Only TAGS-mode rules are active; KEYWORD values
+    // are preserved for compatibility with older autosave/filter data but are ignored by filtering.
     val mode: FilterMode = FilterMode.TAGS,
 )
 

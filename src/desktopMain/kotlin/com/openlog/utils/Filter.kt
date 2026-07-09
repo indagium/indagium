@@ -5,17 +5,17 @@ import com.openlog.model.*
 import com.openlog.ui.DANGER_RED
 import com.openlog.ui.SEQ_COLORS
 
-// Positive message/PID rules and the kwInTag live-search ADD matches on top of the base
-// tag/keyword filter rather than replacing it — an entry passes if it satisfies a positive
-// selector OR the base tag/keyword filter. The base filter only contributes when it's actually
-// configured (non-empty); an unconfigured base filter would otherwise vacuously pass every
-// entry, defeating whatever positive selectors are active.
-// Negative rules and exclusions always apply regardless.
+// Tags-mode message/PID rules and the kwInTag live-search add matches on top of the base tag
+// filter rather than replacing it — an entry passes if it satisfies a positive selector OR the
+// base tag filter. Regex/Keyword mode is intentionally just kwText + kwRegex; persisted
+// KEYWORD-mode rules are ignored so hidden rules cannot silently affect results.
+// Negative rules and exclusions apply only when their owning feature is active.
 fun passesFilter(entry: LogEntry, filter: Filter): Boolean {
-    // Tags and Regex/Keyword modes each have their own independent message-rule set (see
-    // MessageRule.mode) — scoping it here, at the one place enabledRules is derived, is what
-    // keeps both include and exclude rules from leaking across a mode switch.
-    val enabledRules = filter.messageRules.filter { it.enabled && it.pattern.isNotBlank() && it.mode == filter.mode }
+    val enabledRules = if (filter.mode == FilterMode.TAGS) {
+        filter.messageRules.filter { it.enabled && it.pattern.isNotBlank() && it.mode == FilterMode.TAGS }
+    } else {
+        emptyList()
+    }
     if (!passesExclusions(entry, filter, enabledRules.filter { !it.include })) return false
     val posRules = enabledRules.filter { it.include }
     val hasKwInTag = filter.mode == FilterMode.TAGS && filter.kwInTag.isNotBlank()

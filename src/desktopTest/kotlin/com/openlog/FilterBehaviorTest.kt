@@ -80,10 +80,10 @@ class FilterBehaviorTest {
         assertFalse(passesFilter(otherTag, filter))
     }
 
-    // Regression test: Tags and Regex/Keyword modes must be fully independent — a message rule
-    // created in one mode must not narrow or exclude entries while the other mode is active.
+    // Regression test: Message rules are a Tags-mode tool. Regex/Keyword mode keeps any persisted
+    // rules for compatibility, but they must be inert there so hidden rules cannot affect results.
     @Test
-    fun messageRuleIsScopedToItsOwnModeAndDoesNotLeakToTheOtherMode() {
+    fun messageRuleOnlyAppliesInTagsModeAndDoesNotAffectRegexMode() {
         val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "request complete")
         val tagsOnlyRule = MessageRule(id = "r1", include = true, pattern = "request", mode = FilterMode.TAGS)
         val keywordOnlyExclude = MessageRule(id = "r2", include = false, pattern = "request", mode = FilterMode.KEYWORD)
@@ -94,9 +94,29 @@ class FilterBehaviorTest {
         // In TAGS mode: the TAGS-scoped positive rule is the sole active selector, so it matches;
         // the KEYWORD-scoped exclude rule must be inert here despite being present on the Filter.
         assertTrue(passesFilter(entry, tagsFilter))
-        // In KEYWORD mode: the TAGS-scoped positive rule is inert, but the KEYWORD-scoped exclude
-        // rule IS active and must exclude the entry.
-        assertFalse(passesFilter(entry, keywordFilter))
+        // In KEYWORD mode: both message rules are inert. With no keyword text configured, the row
+        // passes through the empty Regex-mode base filter instead of being excluded by the hidden rule.
+        assertTrue(passesFilter(entry, keywordFilter))
+    }
+
+    @Test
+    fun regexModeUsesOnlyKeywordPatternAndIgnoresMessageRules() {
+        val matchesRegex = LogEntry(1, "10:00:00.000", LogLevel.I, "App", "timeout after 42 ms")
+        val matchesHiddenPositiveRule = LogEntry(2, "10:00:00.001", LogLevel.I, "App", "hidden rule only")
+        val matchesHiddenNegativeRule = LogEntry(3, "10:00:00.002", LogLevel.I, "App", "timeout blocked by rule 7")
+        val filter = Filter(
+            mode = FilterMode.KEYWORD,
+            kwText = """timeout .* \d+""",
+            kwRegex = true,
+            messageRules = listOf(
+                MessageRule(id = "inc", include = true, pattern = "hidden rule", mode = FilterMode.KEYWORD),
+                MessageRule(id = "exc", include = false, pattern = "blocked", mode = FilterMode.KEYWORD),
+            ),
+        )
+
+        assertTrue(passesFilter(matchesRegex, filter))
+        assertFalse(passesFilter(matchesHiddenPositiveRule, filter))
+        assertTrue(passesFilter(matchesHiddenNegativeRule, filter))
     }
 
     @Test
