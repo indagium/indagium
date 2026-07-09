@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Replaces jpackage's generated *-MimeInfo.xml wholesale (see build.yml's Linux .deb patch step).
+  jpackage emits one <mime-type type="text/plain"> block per fileAssociation() call in
+  build.gradle.kts — five duplicates, each re-declaring the *system* text/plain type with its own
+  <comment>, which `xdg-mime install` writes into /usr/share/mime/packages and which clobbers the
+  system's own description of text/plain. text/x-log is a real shared-mime-info type already
+  declared system-wide (that's what associates *.log), so it must NOT be re-declared here either
+  — only extensions the system doesn't already type (via a text/plain glob) need a glob added.
+-->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="text/plain">
+    <glob pattern="*.logcat"/>
+    <glob pattern="*.trace"/>
+    <glob pattern="*.out"/>
+  </mime-type>
+</mime-info>

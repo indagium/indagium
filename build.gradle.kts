@@ -106,6 +106,15 @@ compose.desktop {
             fileAssociation("text/plain", "logcat", "Android logcat file")
             fileAssociation("text/plain", "trace", "Trace log file")
             fileAssociation("text/plain", "out", "Output log file")
+            // shared-mime-info (the freedesktop.org MIME database Linux distros ship) types
+            // *.log as text/x-log, not text/plain — without this, .log (the app's primary
+            // format) never matches on Linux even after the Exec %F / MimeType .deb fixes.
+            // Linux-gated (jpackage always targets the host OS): the type means nothing on the
+            // other two, and a second association claiming ".log" would hand the Windows MSI two
+            // WiX Extension elements for one extension.
+            if (org.gradle.internal.os.OperatingSystem.current().isLinux) {
+                fileAssociation("text/x-log", "log", "Log file")
+            }
             // Packaged builds ship a jlink-trimmed JVM, sized from jdeps' static analysis of our
             // jars. jdeps doesn't detect com.sun.net.httpserver.* (used by ControlServer.kt) as
             // a real dependency — it's a JDK-internal-looking package, not a public java.* API —

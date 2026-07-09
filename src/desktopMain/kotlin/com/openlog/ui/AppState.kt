@@ -236,6 +236,13 @@ class AppState(
     var isLoading by mutableStateOf(false)
     val logViewerScrollStateStore = LogViewerScrollStateStore()
 
+    // Which log panel (by panelKey, e.g. "<tabId>:main") the pointer is currently over, read by
+    // the Linux X11 horizontal-scroll AWT bridge (see ui/LinuxHorizontalScroll.kt, installed from
+    // Main.kt) to resolve which ScrollState a button-6/7 press should scroll. Deliberately a plain
+    // var, NOT mutableStateOf — this updates on every pointer Enter/Exit and must never trigger a
+    // recomposition.
+    var hoveredLogPanelKey: String? = null
+
     private val ioJob = SupervisorJob()
     private val ioScope = CoroutineScope(ioJob + Dispatchers.IO)
     private val stateLock = Any()

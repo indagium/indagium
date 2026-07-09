@@ -551,6 +551,11 @@ fun LogViewer(
     // Pushes each freshly computed filtered item summary up to AppState so selection ops
     // (shift-click range, select-all) can reuse it instead of recomputing on the UI thread.
     onVisibleItems: ((ItemsSummary) -> Unit)? = null,
+    // Tracks AppState.hoveredLogPanelKey (by the panel's panelKey, e.g. "<tabId>:main") for the
+    // Linux X11 horizontal-scroll AWT bridge in Main.kt, which has no Compose pointer position of
+    // its own to resolve which panel a button-6/7 press should scroll. Default no-op keeps every
+    // other LogViewer call site (previews, other tests) unaffected.
+    onHoverPanelKey: (String?) -> Unit = {},
 ) {
     val tc        = tc()
     val mono      = monoFont()
@@ -864,14 +869,22 @@ fun LogViewer(
                         val contentModifier = if (settings.autoLogRowWrap) {
                             Modifier.fillMaxSize()
                         } else {
+                            // horizontalScroll(hScroll) already reacts to PointerEventType.Scroll
+                            // itself (that's how mouse-wheel scrolling works for any Compose
+                            // Desktop scrollable, no extra code needed) — including Shift+wheel,
+                            // which arrives here pre-converted to a horizontal Offset.x by
+                            // Compose's own AWT bridge (see the Row wrapping tooltip below). A
+                            // formerly-present onPointerEvent(Scroll) handler here duplicated that
+                            // exact dispatch on the same unconsumed event, doubling Shift+wheel
+                            // scroll speed; removed rather than left as dead/harmful code. Native
+                            // Linux touchpad horizontal-swipe deltas never reach this handler at
+                            // all (AWT has no horizontal wheel axis to deliver them on) — that
+                            // path is bridged separately in ui/LinuxHorizontalScroll.kt via
+                            // hoveredLogPanelKey below, not through Compose pointer events.
                             Modifier.fillMaxSize()
                                 .horizontalScroll(hScroll)
-                                .onPointerEvent(PointerEventType.Scroll) { event ->
-                                    val scrollDelta = event.changes.firstOrNull()?.scrollDelta ?: Offset.Zero
-                                    if (kotlin.math.abs(scrollDelta.x) > kotlin.math.abs(scrollDelta.y) && scrollDelta.x != 0f) {
-                                        hScroll.dispatchRawDelta(scrollDelta.x)
-                                    }
-                                }
+                                .onPointerEvent(PointerEventType.Enter) { onHoverPanelKey(panelKey) }
+                                .onPointerEvent(PointerEventType.Exit) { onHoverPanelKey(null) }
                         }
                         LaunchedEffect(settings.autoLogRowWrap, hScroll) {
                             if (settings.autoLogRowWrap && hScroll.value != 0) hScroll.scrollTo(0)

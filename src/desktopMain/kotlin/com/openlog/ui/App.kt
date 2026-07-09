@@ -1989,6 +1989,7 @@ private fun FileView(
             },
             keyboardFocusVisible = state.keyboardFocusVisible,
             onVisibleItems = { summary -> state.noteVisibleItems(tab.id, summary) },
+            onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
         )
         if (state.annotationVisible) {
             HDivider { delta ->
@@ -2140,6 +2141,7 @@ private fun CompareView(
                         },
                         keyboardFocusVisible = state.keyboardFocusVisible,
                         onVisibleItems = { summary -> state.noteVisibleItems(leftTab.id, summary) },
+                        onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
                     )
                 }
             }
@@ -2203,6 +2205,7 @@ private fun CompareView(
                         // Keyed by rightTab (not effectiveRightTab): the summary reflects what
                         // this pane displays, which is what selRow/selectAll on rightTab.id need.
                         onVisibleItems = { summary -> state.noteVisibleItems(rightTab.id, summary) },
+                        onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
                     )
                     if (state.annotationVisible) {
                         HDivider { d ->
@@ -3033,10 +3036,15 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
             ) {
                 CompactSettingWithTooltip(
                     label = "Row wrapping",
-                    // Native two-finger trackpad horizontal-swipe deltas aren't reliably
-                    // delivered to Compose Desktop on Linux (upstream JBR/Skiko limitation,
-                    // still open as of this writing) — Shift+wheel is a reliable fallback that
-                    // doesn't depend on that.
+                    // AWT has no horizontal mouse-wheel axis at all (confirmed via
+                    // java.awt.event.MouseWheelEvent — there's no getWheelRotationX() or
+                    // equivalent), so Compose Desktop only ever produces a horizontal scroll
+                    // delta when Shift is held down (its AWT bridge maps the wheel rotation into
+                    // Offset.x specifically for that case). A genuine two-finger trackpad
+                    // horizontal swipe never reaches Compose as a horizontal delta at all on
+                    // Linux; see ui/LinuxHorizontalScroll.kt for the X11-button bridge that
+                    // targets that gap directly. Shift+wheel works everywhere regardless, hence
+                    // the tooltip below.
                     tooltip = "Manual mode scrolls long lines horizontally. " +
                         "Tip: hold Shift while scrolling if two-finger trackpad swipe doesn't scroll horizontally.",
                 ) {
