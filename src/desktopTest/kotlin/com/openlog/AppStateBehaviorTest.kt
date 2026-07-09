@@ -26,8 +26,8 @@ import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitMode
 import com.openlog.ui.blockOrderDuringDrag
 import com.openlog.ui.cumulativeBlockOffsets
-import com.openlog.ui.maskWordForCopy
 import com.openlog.ui.manualCollapseAvailability
+import com.openlog.ui.maskWordForCopy
 import com.openlog.ui.mkTab
 import com.openlog.ui.sequenceOrderDuringDrag
 import com.openlog.ui.sequenceRenderY
@@ -2629,6 +2629,7 @@ class AppStateBehaviorTest {
             color = SEQ_COLORS[0],
             endMatchText = "msg 5",
         )
+
         fun stateInsideSequence() = AppState().also { state ->
             state.tabs = listOf(mkTab("log", "test.log", entries).copy(filter = Filter(sequences = listOf(sequence))))
             state.activeTabId = "log"

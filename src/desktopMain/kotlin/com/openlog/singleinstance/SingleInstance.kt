@@ -40,6 +40,7 @@ private const val PORT_FILE_RETRY_DELAY_MS = 100L
 
 private const val SOCKET_TIMEOUT_MS = 3000
 private const val CONNECT_TIMEOUT_MS = 500
+private const val SERVER_SOCKET_BACKLOG = 50
 
 object SingleInstance {
     /**
@@ -63,7 +64,7 @@ object SingleInstance {
         // into a false "degraded" read before we've even tried to forward.
         val lock: FileLock? = try {
             channel.tryLock()
-        } catch (e: OverlappingFileLockException) {
+        } catch (_: OverlappingFileLockException) {
             null
         }
         if (lock == null) {
@@ -81,7 +82,7 @@ object SingleInstance {
     }
 
     private fun becomePrimary(baseDir: File, raf: RandomAccessFile, channel: FileChannel, lock: FileLock): SingleInstanceHandle {
-        val serverSocket = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
+        val serverSocket = ServerSocket(0, SERVER_SOCKET_BACKLOG, InetAddress.getLoopbackAddress())
         val token = generateToken()
         val portFile = File(baseDir, PORT_FILE_NAME)
         portFile.writeText("${serverSocket.localPort} $token")
@@ -103,10 +104,13 @@ object SingleInstance {
     private fun tryForward(baseDir: File, args: Array<String>): Boolean {
         val portFile = File(baseDir, PORT_FILE_NAME)
         var portToken: Pair<Int, String>? = null
-        for (attempt in 0 until PORT_FILE_RETRY_COUNT) {
+        var retriesLeft = PORT_FILE_RETRY_COUNT
+        while (portToken == null && retriesLeft > 0) {
             portToken = readPortToken(portFile)
-            if (portToken != null) break
-            Thread.sleep(PORT_FILE_RETRY_DELAY_MS)
+            if (portToken == null) {
+                Thread.sleep(PORT_FILE_RETRY_DELAY_MS)
+                retriesLeft--
+            }
         }
         val (port, token) = portToken ?: return false
         // Mirror Main.kt's own startup-args filtering (args.map(::File).filter { it.exists() })
@@ -163,7 +167,6 @@ class SingleInstanceHandle internal constructor(
     private val lock: FileLock?,
     private val portFile: File?,
 ) : AutoCloseable {
-
     private val closed = AtomicBoolean(false)
     private val accepting = AtomicBoolean(false)
     private var acceptThread: Thread? = null
@@ -176,7 +179,10 @@ class SingleInstanceHandle internal constructor(
             while (!closed.get()) {
                 val conn = try {
                     socket.accept()
-                } catch (e: Exception) {
+                } catch (_: java.io.IOException) {
+                    // close() interrupts a blocked accept() by closing the socket underneath it,
+                    // which surfaces here as an IOException — the only signal this loop needs to
+                    // tell "shutting down" apart from "one bad connection attempt."
                     if (closed.get()) return@Thread else continue
                 }
                 // Each connection is isolated in its own runCatching so one malformed/garbage
@@ -189,13 +195,15 @@ class SingleInstanceHandle internal constructor(
         }
     }
 
+    private fun isValidHeader(parts: List<String>?): Boolean =
+        parts != null && parts.size >= 3 && parts[0] == PROTOCOL_MAGIC && parts[1] == PROTOCOL_VERSION && parts[2] == token
+
     private fun handleConnection(conn: Socket, onOpenFiles: (List<File>) -> Unit, onRaise: () -> Unit) {
         conn.use {
             conn.soTimeout = SOCKET_TIMEOUT_MS
             val reader = conn.getInputStream().bufferedReader(StandardCharsets.UTF_8)
-            val header = reader.readLine()
-            val parts = header?.split(" ")
-            if (parts == null || parts.size < 3 || parts[0] != PROTOCOL_MAGIC || parts[1] != PROTOCOL_VERSION || parts[2] != token) {
+            val parts = reader.readLine()?.split(" ")
+            if (!isValidHeader(parts)) {
                 reply(conn, ok = false)
                 return
             }

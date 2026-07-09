@@ -333,6 +333,7 @@ class AppState(
     var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
     var filterDraftsByTab by mutableStateOf<Map<String, SavedFilter>>(emptyMap())
     var activeFilterDraftTabIds by mutableStateOf<Set<String>>(emptySet())
+
     // Regex search is deliberately transient: it keeps the current saved-filter marker visible,
     // without becoming a draft or blocking a later click on a saved preset.
     private var transientRegexSearchTabIds by mutableStateOf<Set<String>>(emptySet())

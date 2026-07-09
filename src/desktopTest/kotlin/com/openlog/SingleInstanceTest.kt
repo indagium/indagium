@@ -15,6 +15,8 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+private const val NANOS_PER_MILLI = 1_000_000L
+
 class SingleInstanceTest {
     @Test
     fun forwardRoundTripOpensAndRaisesThenSecondProcessExits() {
@@ -118,7 +120,7 @@ class SingleInstanceTest {
     }
 
     private fun waitUntil(timeoutMs: Long = 2_000, condition: () -> Boolean) {
-        val deadline = System.nanoTime() + timeoutMs * 1_000_000
+        val deadline = System.nanoTime() + timeoutMs * NANOS_PER_MILLI
         while (System.nanoTime() < deadline) {
             if (condition()) return
             Thread.sleep(10)
