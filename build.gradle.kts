@@ -184,12 +184,38 @@ tasks.withType<Test>().configureEach {
     }
 }
 
+// ── Dependency locking ─────────────────────────────────────────────
+// Locks only the desktop target's own compile/runtime/test classpaths, not
+// dependencyLocking { lockAllConfigurations() }. compose.desktop.currentOs
+// (desktopMain dependencies above) resolves to a different platform-specific native Compose
+// Desktop artifact depending on which OS Gradle runs on — packaging-related configurations
+// (packageDeb/packageMsi/packageDmg's own resolution) would need Windows/Linux/macOS runs to
+// generate correct lockfile entries for all three, which this macOS-only session can't produce
+// or verify. Locking is scoped to what's actually resolved (and verified) here: `./gradlew
+// build`'s own compile/test classpaths. Regenerate with `./gradlew build --write-locks` after
+// a dependency version bump.
+configurations.matching {
+    it.name in
+        setOf(
+            "desktopCompileClasspath",
+            "desktopRuntimeClasspath",
+            "desktopTestCompileClasspath",
+            "desktopTestRuntimeClasspath",
+        )
+}.configureEach {
+    resolutionStrategy.activateDependencyLocking()
+}
+
 // ── Detekt ──────────────────────────────────────────────────────────
+// Baselined (not ignoreFailures): pre-existing findings captured in config/detekt-baseline.xml
+// stay suppressed, but any *new* finding not already in that baseline fails the build — this is
+// what actually lets CI's `verify` job catch new debt instead of detekt findings being silently
+// invisible to every build, local and CI, regardless of severity.
 detekt {
     buildUponDefaultConfig = true
     config.setFrom(files("config/detekt.yml"))
+    baseline = file("config/detekt-baseline.xml")
     source.setFrom("src/desktopMain/kotlin", "src/desktopTest/kotlin")
-    ignoreFailures = true
 }
 
 tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
@@ -199,10 +225,6 @@ tasks.withType<io.gitlab.arturbosch.detekt.Detekt>().configureEach {
         txt.required.set(false)
         sarif.required.set(false)
     }
-}
-
-tasks.withType<io.gitlab.arturbosch.detekt.DetektCreateBaselineTask>().configureEach {
-    ignoreFailures = true
 }
 
 // ── ktlint ──────────────────────────────────────────────────────────

@@ -1,9 +1,6 @@
 # Detekt configuration for openLog2 — Compose Multiplatform Desktop
 # buildUponDefaultConfig = true, so all rules not listed here use detekt defaults.
 
-build:
-  maxIssues: 9999  # never fail the build; reports are for review only
-
 # ── Naming ──────────────────────────────────────────────────────────────────
 naming:
   FunctionNaming:

@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Gradle version catalogs / build.gradle.kts plugin & dependency versions.
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Keeps the SHA-pinned Actions in build.yml current — Dependabot resolves the trailing
+  # "# vX" comment back to the tag and opens a PR updating both the SHA and the comment.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
