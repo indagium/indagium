@@ -114,6 +114,32 @@ class ItemsSummary(
     val visibleEntryCount: Int get() = rowCount + collapsedGroupCount + expandedGroupCount
 }
 
+// O(1) dense-guess fast path / O(log n) binary-search fallback for an entry id's position within
+// a strictly-ascending-by-id IntArray (P-05) — the same technique utils/EntryIdMap.kt already
+// uses for id->LogEntry over the raw, unfiltered logData. Valid here for the same reason:
+// allIds/rowIds are built by walking `items` in display order (summarizeItems/spliceSummarize
+// above), which preserves the original file's ascending-id order even after filtering/folding —
+// it just isn't necessarily dense (filtering/folding can remove ids), so the dense guess is a
+// cheap opportunistic check, not a guarantee; binary search is what actually does the work.
+// Keyboard navigation and drag-selection used to re-scan the full array with .indexOf/
+// .indexOfFirst on every keypress/pointer-move instead of using this.
+internal fun IntArray.indexOfId(id: Int): Int {
+    if (isEmpty()) return -1
+    val guess = id - this[0]
+    if (guess in indices && this[guess] == id) return guess
+    var lo = 0
+    var hi = lastIndex
+    while (lo <= hi) {
+        val mid = (lo + hi) ushr 1
+        when {
+            this[mid] < id -> lo = mid + 1
+            this[mid] > id -> hi = mid - 1
+            else -> return mid
+        }
+    }
+    return -1
+}
+
 internal fun summarizeItems(items: List<LogItem>): ItemsSummary {
     val allIds = IntArray(items.size)
     val idBits = java.util.BitSet()
@@ -312,10 +338,11 @@ internal fun visibleRowRangeIds(fromId: Int, toId: Int, visibleIds: List<Int>): 
     return if (a >= 0 && b >= 0) visibleIds.subList(minOf(a, b), maxOf(a, b) + 1) else emptyList()
 }
 
-// IntArray twin of the above for the drag-select hot path — no per-element boxing.
+// IntArray twin of the above for the drag-select hot path — no per-element boxing, and (P-05)
+// an O(log n) indexOfId lookup instead of an O(n) .indexOf scan on every drag pointer-move event.
 internal fun visibleRowRangeIds(fromId: Int, toId: Int, visibleIds: IntArray): List<Int> {
-    val a = visibleIds.indexOf(fromId)
-    val b = visibleIds.indexOf(toId)
+    val a = visibleIds.indexOfId(fromId)
+    val b = visibleIds.indexOfId(toId)
     return if (a >= 0 && b >= 0) (minOf(a, b)..maxOf(a, b)).map { visibleIds[it] } else emptyList()
 }
 
@@ -571,7 +598,13 @@ fun LogViewer(
     val itemsVersion = items.size to items.lastOrNull()?.let(::logItemEntryId)
     val visCnt = computedItems.summary.visibleEntryCount
     val totalCnt  = tab.logData.size
-    val hasPidTid = remember(tab.id) { tab.logData.any { it.pid > 0 } }
+    // P-07: keyed on tab.id alone, this never recomputed once tailing appended lines that
+    // introduced pid/tid data to a file that initially had none — the PID/TID column headers
+    // stayed hidden until the tab was closed and reopened. totalCnt (already tracked here) lets
+    // this recompute whenever new data arrives, same as the other remember/LaunchedEffect calls
+    // in this file that key on the tailed-growth size. any{} short-circuits on the first match,
+    // so this only re-pays a full scan repeatedly for tabs that genuinely have zero pid/tid data.
+    val hasPidTid = remember(tab.id, totalCnt) { tab.logData.any { it.pid > 0 } }
     LaunchedEffect(computedItems) {
         if (!computedItems.loading) onVisibleItems?.invoke(computedItems.summary)
     }
@@ -829,10 +862,10 @@ fun LogViewer(
                             return@onPreviewKeyEvent true
                         }
                         if (handleNavKey(ev, listItems, effectiveTab, lazyState, navScope, navScrollMargin,
-                                selCursor, onSelectRow = { id -> itemOnSelRowRange(listOf(id)) }))
+                                selCursor, listSummary, onSelectRow = { id -> itemOnSelRowRange(listOf(id)) }))
                             return@onPreviewKeyEvent true
                         handleSelKey(ev, listItems, effectiveTab, lazyState, navScope, navScrollMargin,
-                            itemOnSelRowRange, selCursor,
+                            itemOnSelRowRange, selCursor, listSummary,
                             actions = SelKeyActions(
                                 itemOnSelectAll,
                                 itemOnClearSelection,
@@ -989,7 +1022,7 @@ fun LogViewer(
                         if (last == null) {
                             setOf(id)
                         } else {
-                            val a = visIds.indexOf(last); val b = visIds.indexOf(id)
+                            val a = visIds.indexOfId(last); val b = visIds.indexOfId(id)
                             if (a >= 0 && b >= 0) (minOf(a, b)..maxOf(a, b)).map { visIds[it] }.toSet()
                             else localAllSelected + id
                         }
@@ -1241,6 +1274,18 @@ private class SelectionCursor(
     }
 }
 
+// P-05: id->position via ItemsSummary's sorted id arrays (O(log n)) instead of re-scanning
+// rows/items on every keypress (previously O(n), O(n^2) in the no-prior-cursor fallback).
+// Extracted as a pure, internal function — shared by handleNavKey/handleSelKey (previously two
+// near-identical copies of this same logic) and directly unit-testable without needing to
+// construct a Compose KeyEvent/LazyListState/CoroutineScope.
+internal fun cursorRowIndex(cursorEntryId: Int?, firstVisibleItemIndex: Int, items: List<LogItem>, summary: ItemsSummary): Int {
+    if (cursorEntryId != null) return summary.rowIds.indexOfId(cursorEntryId).coerceAtLeast(0)
+    val firstRowId = (firstVisibleItemIndex until items.size).asSequence()
+        .map { items[it] }.filterIsInstance<LogItem.Row>().firstOrNull()?.entry?.id
+    return firstRowId?.let { summary.rowIds.indexOfId(it) }?.coerceAtLeast(0) ?: 0
+}
+
 private fun handleNavKey(
     ev: KeyEvent,
     items: List<LogItem>,
@@ -1249,21 +1294,14 @@ private fun handleNavKey(
     scope: CoroutineScope,
     scrollMargin: Int,
     cursor: SelectionCursor,
+    summary: ItemsSummary,
     onSelectRow: (Int) -> Unit,
 ): Boolean {
     if (ev.type != KeyEventType.KeyDown) return false
     val rows = items.filterIsInstance<LogItem.Row>()
     if (rows.isEmpty()) return false
 
-    fun cursorIdx(): Int {
-        val cur = cursor.effectiveCursorId(tab)
-        return if (cur != null) {
-            rows.indexOfFirst { it.entry.id == cur }.coerceAtLeast(0)
-        } else {
-            val vis = lazyState.firstVisibleItemIndex
-            rows.indexOfFirst { r -> items.indexOf(r) >= vis }.coerceAtLeast(0)
-        }
-    }
+    fun cursorIdx(): Int = cursorRowIndex(cursor.effectiveCursorId(tab), lazyState.firstVisibleItemIndex, items, summary)
 
     fun moveTo(rowIdx: Int) {
         val i = rowIdx.coerceIn(0, rows.lastIndex)
@@ -1272,7 +1310,7 @@ private fun handleNavKey(
         // idempotent even if the same target row is selected again by a duplicate key event.
         onSelectRow(rows[i].entry.id)
         cursor.onCursorChange(rows[i].entry.id)
-        scrollForCursor(lazyState, scope, items.indexOf(rows[i]), scrollMargin)
+        scrollForCursor(lazyState, scope, summary.allIds.indexOfId(rows[i].entry.id), scrollMargin)
     }
 
     return when {
@@ -1305,21 +1343,14 @@ private fun handleSelKey(
     scrollMargin: Int,
     onSelRowRange: (List<Int>) -> Unit,
     cursor: SelectionCursor,
+    summary: ItemsSummary,
     actions: SelKeyActions,
 ): Boolean {
     if (ev.type != KeyEventType.KeyDown) return false
     val rows = items.filterIsInstance<LogItem.Row>()
     val isAction = if (isMacOs) ev.isMetaPressed else ev.isCtrlPressed
 
-    fun cursorIdx(): Int {
-        val cur = cursor.effectiveCursorId(tab)
-        return if (cur != null) {
-            rows.indexOfFirst { it.entry.id == cur }.coerceAtLeast(0)
-        } else {
-            val vis = lazyState.firstVisibleItemIndex
-            rows.indexOfFirst { r -> items.indexOf(r) >= vis }.coerceAtLeast(0)
-        }
-    }
+    fun cursorIdx(): Int = cursorRowIndex(cursor.effectiveCursorId(tab), lazyState.firstVisibleItemIndex, items, summary)
 
     fun extendTo(newRowIdx: Int) {
         if (rows.isEmpty()) return
@@ -1328,11 +1359,11 @@ private fun handleSelKey(
         val anchor = cursor.anchorId ?: tab.selected.minOrNull() ?: target
         cursor.onAnchorChange(anchor)
         cursor.onCursorChange(target)
-        val anchorIdx = rows.indexOfFirst { it.entry.id == anchor }.coerceAtLeast(0)
+        val anchorIdx = summary.rowIds.indexOfId(anchor).coerceAtLeast(0)
         val lo = minOf(anchorIdx, clamped)
         val hi = maxOf(anchorIdx, clamped)
         onSelRowRange(rows.subList(lo, hi + 1).map { it.entry.id })
-        scrollForCursor(lazyState, scope, items.indexOf(rows[clamped]), scrollMargin)
+        scrollForCursor(lazyState, scope, summary.allIds.indexOfId(rows[clamped].entry.id), scrollMargin)
     }
 
     return when {
