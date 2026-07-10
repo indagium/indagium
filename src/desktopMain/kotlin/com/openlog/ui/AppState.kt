@@ -124,6 +124,13 @@ private const val LARGE_FILE_MODE_BYTES = 64L * 1024L * 1024L
 // immediate, matching the feel of the existing keyword-input debounce (150/350ms).
 private const val BACKGROUND_AUTOSAVE_DEBOUNCE_MS = 150L
 
+// Debounce for the tailing-triggered full analysis refresh (P-04) — buildLogAnalysis costs as
+// much as the initial parse on a large file, so re-running it on every ~500ms FileTailer batch
+// would make a long tail session progressively more expensive. 1.5s comfortably outlasts
+// FileTailer's default 500ms poll interval, so a sustained burst of batches collapses into one
+// refresh shortly after the burst quiets down instead of one per batch.
+private const val TAIL_ANALYSIS_DEBOUNCE_MS = 1_500L
+
 data class PendingSequenceStart(val text: String, val tag: String)
 
 data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val currentFilterId: String?)
@@ -286,6 +293,10 @@ class AppState(
     private data class ActiveLoad(val job: Job, val countsAsLoading: AtomicBoolean = AtomicBoolean(true))
 
     private val activeTails = mutableMapOf<String, ActiveTail>()
+
+    // Debounce jobs backing appendTailedLines' throttled analysis refresh — keyed by tabId, same
+    // cancel-and-relaunch shape as autosaveInBackground's backgroundAutosaveJob.
+    private val tailAnalysisJobs = mutableMapOf<String, Job>()
     private val activeLoads = ConcurrentHashMap<String, ActiveLoad>()
     private val pendingRestoredLoads = mutableListOf<RestoredTabShell>()
 
@@ -2096,6 +2107,7 @@ class AppState(
         tabIds.forEach { tabId ->
             cancelActiveLoad(tabId)
             activeTails.remove(tabId)?.job?.cancel()
+            tailAnalysisJobs.remove(tabId)?.cancel()
             visibleItemsByTab.remove(tabId)
             invalidateComputeCache(tabId)
             logViewerScrollStateStore.removeTab(tabId)
@@ -2184,15 +2196,37 @@ class AppState(
             tabs = tabs.map { cur ->
                 if (cur.id == tabId) {
                     val nextData = cur.logData + newEntries
+                    // logData/rmap/tagCounts stay immediate — cheap, and needed right away for
+                    // correct display. The expensive crash/stack-trace scan is debounced below
+                    // instead of re-running on every single tail batch (P-04); pending = true
+                    // reuses the same "still analyzing" rendering FilterPanel/Filter.kt already
+                    // have for a freshly-opened file (see buildLogAnalysis/pendingAnalysis).
                     cur.copy(
                         logData = nextData,
                         rmap = mkRmap(nextData),
-                        analysis = buildLogAnalysis(nextData),
+                        analysis = cur.analysis.copy(tagCounts = nextData.groupingBy { it.tag }.eachCount(), pending = true),
                     )
                 } else {
                     cur
                 }
             }
+        }
+        scheduleTailAnalysisRefresh(tabId)
+    }
+
+    // Cancel-and-relaunch, same shape as autosaveInBackground's backgroundAutosaveJob: every new
+    // batch supersedes the previous refresh before it runs, so a sustained burst collapses into
+    // one full buildLogAnalysis() shortly after it quiets down rather than one per batch. Reads
+    // logData fresh (not a captured snapshot) so it reflects everything appended by the time this
+    // job actually runs, even across several superseded batches.
+    private fun scheduleTailAnalysisRefresh(tabId: String) {
+        tailAnalysisJobs[tabId]?.cancel()
+        tailAnalysisJobs[tabId] = ioScope.launch {
+            delay(TAIL_ANALYSIS_DEBOUNCE_MS)
+            val logData = synchronized(stateLock) { tab(tabId)?.logData } ?: return@launch
+            val full = buildLogAnalysis(logData)
+            ensureActive()
+            upTab(tabId) { it.copy(analysis = full) }
         }
     }
 

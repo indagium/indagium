@@ -110,6 +110,56 @@ class FileTailerTest {
         }
     }
 
+    // P-04: readNewLines() caps a single read at a few MB instead of allocating one buffer sized
+    // to the whole unread delta. A burst bigger than that cap must still be drained completely,
+    // in order, without loss or duplication — start()'s inner drain loop must keep re-reading
+    // within one poll tick rather than only picking up one chunk per tick.
+    @Test
+    fun deliversEveryLineOfABurstLargerThanTheReadChunkCap() {
+        val dir = createTempDirectory("openlog-tail-burst").toFile()
+        val file = File(dir, "out.log").apply { writeText("") }
+        val received = CopyOnWriteArrayList<String>()
+        val tailer = FileTailer(file, onNewLines = { lines -> received.addAll(lines) }, pollIntervalMs = 100)
+        val scope = newScope()
+        val job = tailer.start(scope)
+        try {
+            // ~200 bytes/line * 40_000 lines ≈ 8MB, comfortably past the (currently 4MB) chunk cap.
+            val lineCount = 40_000
+            val expected = (1..lineCount).map { "line $it ${"x".repeat(150)}" }
+            file.appendText(expected.joinToString("\n", postfix = "\n"))
+
+            waitUntil(timeoutMs = TimeUnit.SECONDS.toMillis(AWAIT_SECONDS)) { received.size >= lineCount }
+            assertEquals(expected, received.toList())
+        } finally {
+            job.cancel()
+            scope.cancel()
+        }
+    }
+
+    // The rare edge case the chunking fallback exists for: a single line longer than the read
+    // chunk cap must still complete once its newline arrives, not stall forever because the chunk
+    // boundary landed mid-line.
+    @Test
+    fun deliversASingleLineLongerThanTheReadChunkCap() {
+        val dir = createTempDirectory("openlog-tail-longline").toFile()
+        val file = File(dir, "out.log").apply { writeText("") }
+        val received = CopyOnWriteArrayList<String>()
+        val tailer = FileTailer(file, onNewLines = { lines -> received.addAll(lines) }, pollIntervalMs = 100)
+        val scope = newScope()
+        val job = tailer.start(scope)
+        try {
+            // ~6MB single line, past the (currently 4MB) chunk cap.
+            val longLine = "x".repeat(6 * 1024 * 1024)
+            file.appendText("$longLine\n")
+
+            waitUntil(timeoutMs = TimeUnit.SECONDS.toMillis(AWAIT_SECONDS)) { received.isNotEmpty() }
+            assertEquals(listOf(longLine), received.toList())
+        } finally {
+            job.cancel()
+            scope.cancel()
+        }
+    }
+
     // Empirical check for the plan's flagged risk, not an assumption: prints real observed
     // append-to-flush latency on this dev machine. A generous ceiling catches a genuinely broken
     // watch registration without asserting a specific sub-second number that may not hold on

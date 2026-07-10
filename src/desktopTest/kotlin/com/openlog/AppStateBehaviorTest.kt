@@ -2366,6 +2366,36 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun tailedCrashDataStaysPendingDuringABurstThenResolvesOnceItSettles() {
+        // P-04: appendTailedLines used to call buildLogAnalysis() — the full crash/stack-trace
+        // scan — on every single tail batch. It's now debounced instead, reusing the same
+        // pending=true "still analyzing" state Task 04 already wired FilterPanel/Filter.kt to
+        // render correctly, so a batch landing must not immediately show a stale/empty crash-site
+        // list that looks indistinguishable from "analyzed, found nothing."
+        val dir = createTempDirectory("openlog-tailing-analysis").toFile()
+        val file = File(dir, "tail.log").apply { writeText("06-26 10:00:00.000  100  100 I App: first\n") }
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.openFile(file)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        val tabId = state.tabs.single().id
+        assertFalse(state.tab(tabId)!!.analysis.pending)
+
+        state.startTailing(tabId)
+        file.appendText(
+            "06-26 10:00:01.000  100  100 E AndroidRuntime: FATAL EXCEPTION: main\n" +
+                "06-26 10:00:01.001  100  100 E AndroidRuntime:     at com.app.Main.onCreate(Main.java:10)\n",
+        )
+        waitUntil { state.tab(tabId)!!.logData.size == 3 }
+
+        assertTrue(state.tab(tabId)!!.analysis.pending, "analysis must stay pending until the debounced refresh fires")
+
+        waitUntil(timeoutMs = 5_000) { !state.tab(tabId)!!.analysis.pending }
+        assertTrue(state.tab(tabId)!!.analysis.crashSites.isNotEmpty(), "the debounced refresh must eventually pick up the crash")
+
+        state.stopTailing(tabId)
+    }
+
+    @Test
     fun startTailingIsANoOpForATabWithNoBackingFile() {
         val dir = createTempDirectory("openlog-tailing").toFile()
         val state = AppState(autosaveFile = File(dir, "state.cache"))
