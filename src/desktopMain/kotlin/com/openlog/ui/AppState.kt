@@ -43,6 +43,7 @@ import java.io.File
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 private fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = EntryIdMap(data)
 
@@ -98,7 +99,13 @@ fun emptyWorkspaceTab() = LogTab(
     analysis = LogAnalysis(pending = false),
 )
 
-private var tabCounter = 1
+// AtomicInteger, not a plain var (A-01): openFileInternal/openZipEntry/mergeTabs/addTab/
+// loadSplitPartAsTab each capture one id via getAndIncrement() on whichever thread calls them —
+// the Compose/AWT UI thread, the single-instance accept thread, a Ktor/ControlServer request
+// thread, or an ioScope coroutine — with no coordination between those callers otherwise. A plain
+// `tabCounter++` (a non-atomic read-increment-write) let two callers on different threads read the
+// same value before either wrote back, allocating the same tab id twice.
+private val tabCounter = AtomicInteger(1)
 
 private fun defaultAutosaveFile(): File =
     DesktopStorage.autosaveFile()
@@ -292,11 +299,17 @@ class AppState(
 
     private data class ActiveLoad(val job: Job, val countsAsLoading: AtomicBoolean = AtomicBoolean(true))
 
-    private val activeTails = mutableMapOf<String, ActiveTail>()
+    // ConcurrentHashMap, not a plain HashMap (A-01): mutated from closeTabsById/startTailing/
+    // stopTailing (UI or ControlServer/Ktor threads) and read/written by FileTailer's own ioScope
+    // flush coroutine — a plain HashMap has no thread-safety guarantee for concurrent get/put/
+    // remove across those callers.
+    private val activeTails = ConcurrentHashMap<String, ActiveTail>()
 
     // Debounce jobs backing appendTailedLines' throttled analysis refresh — keyed by tabId, same
-    // cancel-and-relaunch shape as autosaveInBackground's backgroundAutosaveJob.
-    private val tailAnalysisJobs = mutableMapOf<String, Job>()
+    // cancel-and-relaunch shape as autosaveInBackground's backgroundAutosaveJob. ConcurrentHashMap
+    // for the same cross-thread reason as activeTails above: scheduleTailAnalysisRefresh writes it
+    // from FileTailer's ioScope coroutine, closeTabsById removes from it from the caller's thread.
+    private val tailAnalysisJobs = ConcurrentHashMap<String, Job>()
     private val activeLoads = ConcurrentHashMap<String, ActiveLoad>()
     private val pendingRestoredLoads = mutableListOf<RestoredTabShell>()
 
@@ -312,7 +325,11 @@ class AppState(
     }
 
     // MCP/debug control server (see debug/ControlServer.kt) — same "private resource handle,
-    // guarded start, idempotent stop" shape as activeTails above.
+    // guarded start, idempotent stop" shape as activeTails above. @Volatile (A-01): published by
+    // applyControlServerState's ioScope completion handler, read by the calling thread (UI or
+    // otherwise) elsewhere in this class — @Volatile guarantees the reader sees the latest write
+    // rather than a stale cached value.
+    @Volatile
     private var controlServer: ControlServer? = null
 
     // Guards applyControlServerState's async enable path (S-02): every call — enable or disable —
@@ -321,8 +338,12 @@ class AppState(
     // still current; otherwise it stops the now-unwanted server itself. controlServerStartJob is
     // tracked purely so stopControlServerForShutdown() can cancel a still-binding start rather than
     // let it complete after shutdown began — the generation check is what actually prevents a stale
-    // publish even if cancellation doesn't interrupt a synchronous bind in progress.
-    private var controlServerStartGeneration = 0
+    // publish even if cancellation doesn't interrupt a synchronous bind in progress. AtomicInteger,
+    // not a plain Int (A-01): the increment/compare happens across the calling thread and an
+    // ioScope completion callback with no other memory barrier between them.
+    private val controlServerStartGeneration = AtomicInteger(0)
+
+    @Volatile
     private var controlServerStartJob: Job? = null
 
     // ── Sequences (per-tab, stored in Filter) ────────────────────────
@@ -477,7 +498,7 @@ class AppState(
             running?.stop()
             controlServer = null
             mcpControlError = null
-            val myGeneration = ++controlServerStartGeneration
+            val myGeneration = controlServerStartGeneration.incrementAndGet()
             controlServerStartJob = ioScope.launch {
                 val started = runCatching { controlServerFactory(this@AppState, port) }
                 started.fold(
@@ -486,7 +507,7 @@ class AppState(
                         // was in flight — this start lost the race, so publishing it now would
                         // resurrect a server the caller believes is stopped or superseded. Close it
                         // instead of leaking a live listener nobody references anymore.
-                        if (myGeneration == controlServerStartGeneration) {
+                        if (myGeneration == controlServerStartGeneration.get()) {
                             controlServer = server
                             mcpControlError = null
                         } else {
@@ -494,7 +515,7 @@ class AppState(
                         }
                     },
                     onFailure = { error ->
-                        if (myGeneration != controlServerStartGeneration) return@fold
+                        if (myGeneration != controlServerStartGeneration.get()) return@fold
                         mcpControlError = "Could not start automation server on port $port: " +
                             (error.message ?: error::class.simpleName.orEmpty().ifBlank { "unknown error" })
                         // Only the persisted (Settings-toggle) path needs undoing — the ephemeral
@@ -508,7 +529,7 @@ class AppState(
                 )
             }
         } else {
-            controlServerStartGeneration++ // invalidate any start still in flight from a prior enable
+            controlServerStartGeneration.incrementAndGet() // invalidate any start still in flight from a prior enable
             controlServerStartJob?.cancel()
             controlServerStartJob = null
             controlServer?.stop()
@@ -689,7 +710,12 @@ class AppState(
     // wise, but upFlt used to treat any call as an edit regardless, demoting an untouched tab's
     // active saved preset to an unsaved draft just from revisiting it. Only actual content
     // changes should count as an edit.
-    private fun upFlt(tabId: String, trackDraft: Boolean, fn: (Filter) -> Filter) {
+    // The before/upTab/after sequence is wrapped in one synchronized(stateLock) block (A-01): read
+    // outside a lock, a concurrent tabs mutation landing between the "before" read and upTab's own
+    // write (or between that write and the "after" read) could make the before/after comparison
+    // below stale, mis-deciding whether this edit should demote an active saved preset to a draft.
+    // upTab's own synchronized(stateLock) is safe to nest here (reentrant monitor).
+    private fun upFlt(tabId: String, trackDraft: Boolean, fn: (Filter) -> Filter) = synchronized(stateLock) {
         val before = tab(tabId)?.filter
         upTab(tabId) { it.copy(filter = fn(it.filter)) }
         val after = tab(tabId)?.filter
@@ -2051,7 +2077,7 @@ class AppState(
     // Structural tabs-list edits synchronize on stateLock for the same reason upTab does: a
     // background fill landing in the same instant must not lose (or be lost to) this write.
     fun addTab() {
-        val n = tabCounter++
+        val n = tabCounter.getAndIncrement()
         val t = emptyWorkspaceTab().copy(id = "t$n")
         synchronized(stateLock) {
             tabs = tabs + t
@@ -2102,17 +2128,24 @@ class AppState(
         cancelAllLoads()
     }
 
+    // Resource cleanup and the tabs-list removal used to be two separate phases — cleanup
+    // unguarded, then a synchronized(stateLock) block removing the tab — leaving a window where a
+    // concurrent FileTailer flush (appendTailedLines, itself synchronized(stateLock)) could land
+    // in between and re-append data to (or leave a stale visibleItemsByTab entry for) a tab that's
+    // mid-close (A-01). One synchronized block makes "cancel this tab's resources" and "remove it
+    // from tabs" atomic together; cancelActiveLoad's own nested synchronized(stateLock) call is
+    // safe here since the monitor is reentrant.
     private fun closeTabsById(tabIds: Set<String>, preferredActiveId: String?) {
         if (tabIds.isEmpty()) return
-        tabIds.forEach { tabId ->
-            cancelActiveLoad(tabId)
-            activeTails.remove(tabId)?.job?.cancel()
-            tailAnalysisJobs.remove(tabId)?.cancel()
-            visibleItemsByTab.remove(tabId)
-            invalidateComputeCache(tabId)
-            logViewerScrollStateStore.removeTab(tabId)
-        }
         synchronized(stateLock) {
+            tabIds.forEach { tabId ->
+                cancelActiveLoad(tabId)
+                activeTails.remove(tabId)?.job?.cancel()
+                tailAnalysisJobs.remove(tabId)?.cancel()
+                visibleItemsByTab.remove(tabId)
+                invalidateComputeCache(tabId)
+                logViewerScrollStateStore.removeTab(tabId)
+            }
             pendingRestoredLoads.removeAll { it.tab.id in tabIds }
             val next = tabs.filter { it.id !in tabIds }
             if (activeTabId in tabIds) activeTabId = preferredActiveId?.takeIf { id -> next.any { it.id == id } } ?: next.lastOrNull()?.id ?: ""
@@ -2132,7 +2165,7 @@ class AppState(
     fun mergeTabs(tabIds: List<String>, newTabName: String = "Merged") {
         val sources = tabIds.mapNotNull { id -> tab(id)?.let { MergeSourceFile(it.filename, it.logData) } }
         if (sources.size < 2) return
-        val n = tabCounter++
+        val n = tabCounter.getAndIncrement()
         beginLoading("Merging logs...")
         ioScope.launch {
             var published = false
@@ -2181,12 +2214,10 @@ class AppState(
     }
 
     // Runs on whichever thread FileTailer's coroutine flushes from (ioScope / Dispatchers.IO),
-    // unlike most upTab callers which are UI-thread-only — wrapped in stateLock so a tailing
-    // flush can't race and lose an update against another concurrent background mutation
-    // (another tab's tailing flush, or an in-flight openFile/mergeTabs). This does NOT protect
-    // against racing a same-instant UI-thread mutation (toggleGroup, selRow, ...) — those already
-    // aren't stateLock-guarded anywhere in this class; tailing only closes the background-vs-
-    // background gap, matching the existing openFile/mergeTabs precedent.
+    // unlike most upTab callers which are UI-thread-only — wrapped in stateLock so a tailing flush
+    // can't race and lose an update against any other stateLock-guarded tabs mutation, whether
+    // background (another tab's tailing flush, an in-flight openFile/mergeTabs) or UI-thread
+    // (toggleGroup, selRow, ... — all upTab callers, and upTab itself is stateLock-guarded).
     private fun appendTailedLines(tabId: String, newRawLines: List<String>) {
         if (newRawLines.isEmpty()) return
         synchronized(stateLock) {
@@ -2302,7 +2333,7 @@ class AppState(
             pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.RealFile(file)))
             return null
         }
-        val n = tabCounter++  // capture on calling thread before launching
+        val n = tabCounter.getAndIncrement() // capture on calling thread before launching
         val tabId = "t$n"
         val largeFile = file.length() >= LARGE_FILE_MODE_BYTES
         beginLoading()
@@ -2467,7 +2498,7 @@ class AppState(
             pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.ArchiveEntry(zipFile, candidate)))
             return
         }
-        val n = tabCounter++
+        val n = tabCounter.getAndIncrement()
         val tabId = "t$n"
         val largeFile = candidate.sizeBytes >= LARGE_FILE_MODE_BYTES
         beginLoading()
@@ -2605,7 +2636,7 @@ class AppState(
         }
         rememberRecentFile(file)
         rememberAutoExportedNoteFor(file.name)
-        val n = tabCounter++
+        val n = tabCounter.getAndIncrement()
         val tabId = "t$n"
         val logData = runCatching { parser(file) }.getOrElse { error ->
             showOpenError(
@@ -3057,21 +3088,23 @@ class AppState(
         activeFilterDraftTabIds = filterDraftsByTab.keys.toSet()
     }
 
-    private fun restoreTabsFromAutosave(tabLines: List<String>) {
+    // Runs during init{}, before this instance is shared with any other thread — the stateLock
+    // wrap here is defense-in-depth (A-01), not a fix for an observed race: it removes the one
+    // exception to "every read-modify-write of tabs goes through stateLock" documented on upTab
+    // above, so that invariant holds unconditionally rather than by construction-order accident.
+    private fun restoreTabsFromAutosave(tabLines: List<String>) = synchronized(stateLock) {
         val shells = tabLines.mapNotNull { it.removePrefix("tab\t").tabShellFromToken() }
         tabs = shells.map { it.tab }
         if (tabs.none { it.id == activeTabId }) activeTabId = tabs.firstOrNull()?.id ?: ""
         if (tabs.none { it.id == compareTabId }) compareTabId =
             tabs.getOrNull(1)?.id ?: tabs.firstOrNull()?.id ?: ""
-        tabCounter = (tabs.mapNotNull { it.id.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1
+        tabCounter.set((tabs.mapNotNull { it.id.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1)
         // Shells restore synchronously with every user-visible piece of metadata (filter,
         // annotations, expanded/manual blocks). The file contents are queued and started by App()
         // after first composition; starting them inside AppState construction can race Compose's
         // initial snapshot apply and leave the UI stuck on the empty shell/loading state.
-        synchronized(stateLock) {
-            pendingRestoredLoads.clear()
-            pendingRestoredLoads += shells
-        }
+        pendingRestoredLoads.clear()
+        pendingRestoredLoads += shells
     }
 
     private fun scheduleRestoredTabLoad(tabId: String, source: RestoredTabSource) {
