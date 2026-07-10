@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 
 package com.openlog.ui
 
@@ -18,14 +18,18 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
@@ -34,10 +38,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.LogLevel
+import kotlinx.coroutines.delay
 import java.awt.KeyboardFocusManager
 import java.awt.Cursor as AwtCursor
 
@@ -600,4 +608,258 @@ fun AppButton(
             fontWeight = if (variant == ButtonVariant.Primary) FontWeight.Medium else FontWeight.Normal,
         )
     }
+}
+
+internal fun truncatePathForDisplay(path: String, maxChars: Int = 42): String {
+    if (path.length <= maxChars) return path
+    val segments = path.trimEnd('/').split('/').filter { it.isNotEmpty() }
+    var best = ""
+    for (i in segments.indices.reversed()) {
+        val candidate = segments.subList(i, segments.size).joinToString("/", prefix = "…/")
+        if (candidate.length > maxChars) break
+        best = candidate
+    }
+    return best.ifEmpty { "…" + path.takeLast(maxChars - 1) }
+}
+
+internal fun zipEntryPathForDisplay(path: String, maxChars: Int = 40): String {
+    if (path.length <= maxChars) return path
+    if (maxChars <= 3) return path.takeLast(maxChars.coerceAtLeast(0))
+    return "..." + path.takeLast(maxChars - 3)
+}
+
+internal fun formatByteSize(bytes: Long): String {
+    val units = listOf("B", "KB", "MB", "GB", "TB")
+    var value = bytes.coerceAtLeast(0).toDouble()
+    var unitIndex = 0
+    while (value >= BYTES_PER_SIZE_UNIT && unitIndex < units.lastIndex) {
+        value /= BYTES_PER_SIZE_UNIT
+        unitIndex++
+    }
+    return if (unitIndex == 0) {
+        "${value.toLong()} ${units[unitIndex]}"
+    } else {
+        "${java.lang.String.format(java.util.Locale.US, "%.1f", value)} ${units[unitIndex]}"
+    }
+}
+
+@Composable
+internal fun ListStepper(options: List<Int>, value: Int, onChange: (Int) -> Unit, modifier: Modifier = Modifier) {
+    val tc = tc()
+    val index = options.indexOf(value).coerceAtLeast(0)
+    Row(
+        modifier
+            .border(0.5.dp, tc.br, RoundedCornerShape(6.dp))
+            .clip(RoundedCornerShape(6.dp)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        StepperButton("−", enabled = index > 0, onClick = { onChange(options[(index - 1).coerceAtLeast(0)]) })
+        Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
+        Box(Modifier.width(44.dp).height(28.dp), contentAlignment = Alignment.Center) {
+            AppText("$value", color = tc.tx, fontSize = 12.sp, fontFamily = MONO, fontWeight = FontWeight.Medium)
+        }
+        Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
+        StepperButton("+", enabled = index < options.lastIndex, onClick = { onChange(options[(index + 1).coerceAtMost(options.lastIndex)]) })
+    }
+}
+
+@Composable
+internal fun StepperButton(symbol: String, enabled: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    Box(
+        Modifier
+            .width(28.dp).height(28.dp)
+            .background(if (hovered && enabled) tc.hv else Color.Transparent)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
+        contentAlignment = Alignment.Center,
+    ) {
+        AppText(symbol, color = if (enabled) tc.tx else tc.td.copy(alpha = .4f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+// Merges the Auto/Manual toggle and the wrap-column number into one bordered pill (matching
+// ListStepper's single-border, divider-between-segments look) instead of two separate controls —
+// "Auto" is a plain on/off chip, not a two-way select, so the field beside it is reachable by
+// toggling it off rather than by picking "Manual" from a second option.
+@Composable
+internal fun CtxItem(icon: ImageVector, label: String, highlighted: Boolean = false, onClick: () -> Unit) {
+    val tc = tc()
+    HoverBox(modifier = Modifier.fillMaxWidth(), forceHover = highlighted, onClick = onClick) {
+        Row(
+            Modifier.fillMaxWidth().height(32.dp).padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp), tint = tc.td.copy(alpha = 0.65f))
+            }
+            Spacer(Modifier.width(8.dp))
+            AppText(label, color = tc.tx, fontSize = 12.sp, modifier = Modifier.weight(1f))
+        }
+    }
+}
+
+// Same row as CtxItem plus a trailing ▶ hit target: hovering/pressing that arrow specifically
+// opens a flyout of narrower match-scope choices without triggering the row's own default
+// onClick, which still fires from anywhere else on the row (matching today's one-click behavior).
+internal val CTX_SUBMENU_WIDTH = 240.dp
+
+// Grace period between the pointer leaving both the ▶ trigger and the popup, and the popup
+// actually closing — without it, crossing the (small) visual gap between trigger and popup would
+// close the menu before the pointer ever reaches it.
+internal const val CTX_SUBMENU_CLOSE_DELAY_MS = 200L
+
+@Composable
+internal fun CtxItemWithSubmenu(
+    icon: ImageVector,
+    label: String,
+    submenu: List<Pair<String, () -> Unit>>,
+    highlighted: Boolean = false,
+    preferLeft: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var hoveringTrigger by remember { mutableStateOf(false) }
+    var hoveringPopup by remember { mutableStateOf(false) }
+    var submenuOpen by remember { mutableStateOf(false) }
+    var rowWidthPx by remember { mutableStateOf(0) }
+    // Opens instantly on hover/press; closes only after a grace period with the pointer outside
+    // BOTH the trigger and the popup, so moving the mouse out doesn't leave it stuck open forever
+    // (the old behavior) nor close it while crossing the gap to reach the popup.
+    LaunchedEffect(hoveringTrigger, hoveringPopup) {
+        if (hoveringTrigger || hoveringPopup) {
+            submenuOpen = true
+        } else if (submenuOpen) {
+            delay(CTX_SUBMENU_CLOSE_DELAY_MS)
+            submenuOpen = false
+        }
+    }
+    Box(Modifier.onGloballyPositioned { coords -> rowWidthPx = coords.size.width }) {
+        HoverBox(modifier = Modifier.fillMaxWidth(), forceHover = highlighted, onClick = onClick) {
+            Row(
+                Modifier.fillMaxWidth().height(32.dp).padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                    Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp), tint = tc.td.copy(alpha = 0.65f))
+                }
+                Spacer(Modifier.width(8.dp))
+                AppText(label, color = tc.tx, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                // Same rounded-hover affordance as the log row collapse chevron (CollapseChevron
+                // in LogViewer.kt) — a plain unstyled glyph gave no feedback that this was a
+                // separate, more-specific hit target than the rest of the row.
+                HoverBox(
+                    modifier = Modifier.size(24.dp).clip(RoundedCornerShape(6.dp))
+                        .onPointerEvent(PointerEventType.Enter) { hoveringTrigger = true }
+                        .onPointerEvent(PointerEventType.Exit) { hoveringTrigger = false },
+                    onClick = { submenuOpen = true },
+                ) {
+                    AppText(
+                        "▶", color = tc.td.copy(alpha = 0.65f), fontSize = 10.sp,
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+                }
+            }
+        }
+        if (submenuOpen) {
+            Popup(
+                // Popup's alignment describes where the popup's OWN alignment point lands within
+                // the anchor's bounds — TopStart with zero offset overlaps the anchor exactly
+                // (popup's top-left = anchor's top-left). To sit the popup beside the anchor with
+                // no overlap, keep alignment fixed at TopStart and shift by a real measured
+                // distance instead: +rowWidth pushes it past the anchor's right edge (submenu
+                // appears to the right); -popupWidth pushes it past the anchor's own left edge
+                // (submenu appears to the left) when there isn't enough window space on the right.
+                alignment = Alignment.TopStart,
+                offset = IntOffset(
+                    if (preferLeft) -with(density) { CTX_SUBMENU_WIDTH.roundToPx() } else rowWidthPx,
+                    0,
+                ),
+                onDismissRequest = { submenuOpen = false },
+                properties = PopupProperties(focusable = false),
+            ) {
+                Column(
+                    Modifier.width(CTX_SUBMENU_WIDTH)
+                        .shadow(8.dp, RoundedCornerShape(7.dp))
+                        .background(tc.p, RoundedCornerShape(7.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                        .padding(vertical = 4.dp)
+                        .onPointerEvent(PointerEventType.Enter) { hoveringPopup = true }
+                        .onPointerEvent(PointerEventType.Exit) { hoveringPopup = false },
+                ) {
+                    submenu.forEach { (optLabel, optOnClick) ->
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { submenuOpen = false; optOnClick() },
+                        ) {
+                            // Only long variant labels (a long tag/package prefix, or an
+                            // untruncated message) actually get ellipsized in this fixed-width
+                            // popup — onTextLayout reports whether *this* label did, so short
+                            // labels that already fit in full don't get a redundant tooltip.
+                            var isTruncated by remember(optLabel) { mutableStateOf(false) }
+                            val labelText: @Composable () -> Unit = {
+                                Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                    AppText(
+                                        optLabel, color = tc.tx, fontSize = 12.sp, maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        onTextLayout = { result -> isTruncated = result.hasVisualOverflow },
+                                    )
+                                }
+                            }
+                            if (isTruncated) {
+                                TooltipArea(
+                                    tooltip = {
+                                        Box(
+                                            Modifier.background(tc.p2, RoundedCornerShape(4.dp))
+                                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                                                .widthIn(max = 320.dp),
+                                        ) {
+                                            AppText(optLabel, color = tc.tx, fontSize = 11.sp, maxLines = 4)
+                                        }
+                                    },
+                                ) {
+                                    labelText()
+                                }
+                            } else {
+                                labelText()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun CtxDivider() {
+    val tc = tc()
+    Spacer(Modifier.height(4.dp))
+    Box(Modifier.fillMaxWidth().height(0.5.dp).background(tc.br))
+    Spacer(Modifier.height(4.dp))
+}
+
+// Data-driven context menu entries so keyboard nav (arrow keys) can walk the selectable ones
+// without duplicating the conditional logic that decides which items render.
+internal sealed class CtxMenuEntry {
+    data class ActionHeader(val label: String, val onClick: () -> Unit) : CtxMenuEntry()
+
+    data class Action(val icon: ImageVector, val label: String, val onClick: () -> Unit) : CtxMenuEntry()
+
+    // The main row keeps today's default onClick; hovering/pressing the trailing ▶ opens a
+    // flyout with up to 4 narrower match-scope choices instead (see messageRuleVariantsFromCtx).
+    data class ActionWithSubmenu(
+        val icon: ImageVector,
+        val label: String,
+        val onClick: () -> Unit,
+        val submenu: List<Pair<String, () -> Unit>>,
+    ) : CtxMenuEntry()
+
+    object Divider : CtxMenuEntry()
+
+    object Preview : CtxMenuEntry()
 }
