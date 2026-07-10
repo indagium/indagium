@@ -47,6 +47,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -249,7 +250,12 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
         val previous = computed
         coroutineScope {
             val deferred = async(Dispatchers.Default) {
-                val items = computeItems(snapshot, applyFilter)
+                // P-01: without this, a superseded computation (this LaunchedEffect's own
+                // coroutineScope already gets cancelled the instant a newer filter/expand/etc.
+                // change lands — see the LaunchedEffect keys above) keeps running to full
+                // completion on its thread instead of actually stopping, wasting CPU under rapid
+                // filter edits even though the result was always going to be thrown away.
+                val items = computeItems(snapshot, applyFilter, cancellationCheck = { ensureActive() })
                 val summary = spliceSummarize(previous.items, previous.summary, items)
                     ?: summarizeItems(items)
                 ComputedLogItems(items, summary, loading = false)

@@ -8,14 +8,26 @@ import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.extractCandidate
+import com.openlog.utils.invalidateComputeCache
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.parseLogcat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.test.Test
 
 private const val BYTES_PER_MB = 1024L * 1024L
 private const val GC_PASSES = 3
 private const val NANOS_PER_MILLI = 1_000_000L
+
+// How long the cancellation-response scenario lets computeItems run before cancelling it — long
+// enough that it's genuinely mid-computation on a multi-GB fixture, short relative to the full
+// uncancelled run measured just above it.
+private const val CANCEL_AFTER_MS = 5L
 
 // Manual performance harness — skipped unless -Dopenlog.perf.file=<path> points at a fixture
 // (see docs/perf-large-files.md for how the ~1.5GB fixture is generated). Deliberately not part
@@ -75,6 +87,25 @@ class LargeFilePerfHarness {
         timed("computeItems warmup") { computeItems(tab, applyFilter = true) }
         val baseItems = timed("computeItems noFilter") { computeItems(tab, applyFilter = true) }
         val baseSummary = timed("summarizeItems full") { com.openlog.ui.summarizeItems(baseItems) }
+
+        // P-01 evidence: a cancelled computeItems call must stop promptly instead of running the
+        // full computation to completion on its Dispatchers.Default thread. invalidateComputeCache
+        // forces a genuine fresh full computation — reusing the warmed-up tab/filter combo above
+        // would just hit the per-tab memoization cache and prove nothing about the hot loop.
+        // Compare this printed value against "computeItems noFilter" above: it must be small and
+        // bounded, not comparable to the full uncancelled run.
+        invalidateComputeCache(tab.id)
+        runBlocking {
+            val job = launch(Dispatchers.Default) {
+                computeItems(tab, applyFilter = true, cancellationCheck = { ensureActive() })
+            }
+            delay(CANCEL_AFTER_MS)
+            val cancelStart = System.nanoTime()
+            job.cancelAndJoin()
+            val stopMs = (System.nanoTime() - cancelStart) / NANOS_PER_MILLI
+            println("PERF computeItems cancelResponseTime: ${stopMs}ms")
+        }
+        invalidateComputeCache(tab.id) // leave the cache clean for the measurements that follow
         val firstGid = tab.analysis.stackTraceGroups.first().gid
         val expandedItems =
             timed("computeItems expandOneGroup") { computeItems(tab.copy(expanded = setOf(firstGid)), applyFilter = true) }

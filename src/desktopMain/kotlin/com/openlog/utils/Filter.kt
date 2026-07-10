@@ -258,10 +258,32 @@ private fun selectTopLevelManualRanges(dataSize: Int, ranges: List<ManualRange>)
     return result
 }
 
+// Cooperative-cancellation hook for computeItems/computeSeqGroups (P-01). Both are plain,
+// non-suspend functions called from several contexts with no CoroutineScope at all — the
+// synchronous small-file render path, ControlServer.kt's get_visible_lines route, and every
+// existing test — so cancellation can't just be a suspend-function/ensureActive() call baked in
+// directly. Instead the caller that actually runs on a cancellable coroutine (LogViewer.kt's
+// large-file async path) supplies a check; everyone else uses the no-op default, so this changes
+// nothing for any call site that doesn't opt in. Invoked periodically (not every loop iteration)
+// from the hot loops below so the no-op case stays negligible overhead.
+fun interface CancellationCheck {
+    operator fun invoke()
+}
+
+private val NoCancellationCheck = CancellationCheck {}
+
+// How often (in loop iterations) the hot loops below — and SeqComputer.kt's own scan — poll the
+// cancellation check — frequent enough that a cancelled computation stops promptly, infrequent
+// enough that the check call itself (a no-op in the common case, ensureActive() in the
+// cancellable case) never shows up as measurable overhead. internal, not private: SeqComputer.kt
+// is a different file in the same package, and Kotlin's top-level `private` is file-scoped, not
+// package-scoped.
+internal const val CANCELLATION_CHECK_INTERVAL = 4096
+
 // Complexity is inherent: sequence detection, manual-collapse interleaving, and recursive
 // container rendering are all coupled — splitting them would require passing shared mutable state.
 @Suppress("CyclomaticComplexMethod", "LongMethod")
-fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
+fun computeItems(tab: LogTab, applyFilter: Boolean, cancellationCheck: CancellationCheck = NoCancellationCheck): List<LogItem> {
     val sequences = tab.filter.sequences
     val cacheKey = "${tab.id}#$applyFilter"
     val prior = computeCacheByTab[cacheKey]?.takeIf {
@@ -303,7 +325,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
     // an auto-detected sequence that spans across it; manual-block interleaving is handled purely
     // as a rendering/nesting concern below, layered on top of this single ground-truth pass.
     val seqGroups: List<SeqGroup> = if (tab.filter.seqOn && sequences.any { it.enabled }) {
-        fullSeqGroups ?: computeSeqGroups(data, sequences).also { fullSeqGroups = it }
+        fullSeqGroups ?: computeSeqGroups(data, sequences, cancellationCheck).also { fullSeqGroups = it }
     } else {
         emptyList()
     }
@@ -483,7 +505,16 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
         val items = ArrayList<LogItem>(hi - lo)
         var childPtr = 0
         var idx = lo
+        var sinceCancellationCheck = 0
         while (idx < hi) {
+            // The dominant hot loop in computeItems (P-01) — periodically give a cancelled caller
+            // a chance to stop instead of running this whole range (potentially the whole file)
+            // to completion on a superseded computation. Re-entered per recursion level, so a
+            // deeply nested render still gets checked, just against each level's own local count.
+            if (++sinceCancellationCheck >= CANCELLATION_CHECK_INTERVAL) {
+                sinceCancellationCheck = 0
+                cancellationCheck()
+            }
             while (childPtr < children.size && children[childPtr].end <= idx) childPtr++
             val child = children.getOrNull(childPtr)?.takeIf { it.start == idx }
             val entry = data[idx]

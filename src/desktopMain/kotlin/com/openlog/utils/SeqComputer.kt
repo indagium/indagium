@@ -15,7 +15,7 @@ private class SeqCandidate(val idx: Int, val def: SequenceDef) {
     var parent: Int = -1
 }
 
-private class SeqScan(logData: List<LogEntry>, enabled: List<SequenceDef>) {
+private class SeqScan(logData: List<LogEntry>, enabled: List<SequenceDef>, cancellationCheck: CancellationCheck) {
     val candidates = ArrayList<SeqCandidate>()
 
     // def.id -> ascending indices of entries matching that def's end pattern
@@ -23,7 +23,15 @@ private class SeqScan(logData: List<LogEntry>, enabled: List<SequenceDef>) {
 
     init {
         val endDefs = enabled.filter { !it.endMatchText.isNullOrBlank() }
+        var sinceCancellationCheck = 0
         for (idx in logData.indices) {
+            // The dominant O(n·d) scan in computeSeqGroups (P-01) — see the class doc above.
+            // Periodically give a cancelled caller a chance to stop instead of scanning the whole
+            // file on a superseded computation.
+            if (++sinceCancellationCheck >= CANCELLATION_CHECK_INTERVAL) {
+                sinceCancellationCheck = 0
+                cancellationCheck()
+            }
             val entry = logData[idx]
             val hay = "${entry.tag} ${entry.msg}"
             val startDef = enabled.firstOrNull { matchesSeqText(entry, hay, it.matchText, it.isRegex, it.tag) }
@@ -54,11 +62,15 @@ private fun List<Int>.firstAfter(idx: Int): Int? {
     return getOrNull(lo)
 }
 
-fun computeSeqGroups(logData: List<LogEntry>, defs: List<SequenceDef>): List<SeqGroup> {
+fun computeSeqGroups(
+    logData: List<LogEntry>,
+    defs: List<SequenceDef>,
+    cancellationCheck: CancellationCheck = CancellationCheck {},
+): List<SeqGroup> {
     val enabled = defs.filter { it.enabled }.sortedBy { it.priority }
     if (enabled.isEmpty()) return emptyList()
 
-    val scan = SeqScan(logData, enabled)
+    val scan = SeqScan(logData, enabled, cancellationCheck)
     val candidates = scan.candidates
     if (candidates.isEmpty()) return emptyList()
 
