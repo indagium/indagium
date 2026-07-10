@@ -10,6 +10,7 @@ import com.openlog.model.ManualCollapseBlock
 import com.openlog.model.ManualCollapseDirection
 import com.openlog.model.SequenceDef
 import com.openlog.ui.DANGER_RED
+import com.openlog.ui.mkTab
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeSeqGroups
 import kotlin.test.Test
@@ -572,14 +573,9 @@ class SequenceGroupingTest {
             LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 100),
             LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 100),
         )
-        val tab = LogTab(
-            id = "log",
-            filename = "test.log",
-            logData = logs,
-            rmap = logs.associateBy { it.id },
-            filter = Filter(),
-            expanded = setOf("st_1"),
-        )
+        // mkTab computes real analysis (stackTraceGroups) synchronously, unlike a bare LogTab(...)
+        // whose analysis now defaults to pending — this test needs the fold already resolved.
+        val tab = mkTab("log", "test.log", logs).copy(expanded = setOf("st_1"))
 
         val items = computeItems(tab, applyFilter = true)
 
@@ -605,13 +601,7 @@ class SequenceGroupingTest {
             LogEntry(4, "10:00:00.300", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 1),
         )
         val seq = SequenceDef("burst", "burst start", priority = 1, color = Color.Blue, tag = "App")
-        val tab = LogTab(
-            id = "log",
-            filename = "test.log",
-            logData = logs,
-            rmap = logs.associateBy { it.id },
-            filter = Filter(sequences = listOf(seq)),
-        )
+        val tab = mkTab("log", "test.log", logs).copy(filter = Filter(sequences = listOf(seq)))
 
         val items = computeItems(tab, applyFilter = true)
 
@@ -639,14 +629,8 @@ class SequenceGroupingTest {
             LogEntry(4, "10:00:00.300", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 1),
         )
         val seq = SequenceDef("burst", "burst start", priority = 1, color = Color.Blue, tag = "App")
-        val tab = LogTab(
-            id = "log",
-            filename = "test.log",
-            logData = logs,
-            rmap = logs.associateBy { it.id },
-            filter = Filter(sequences = listOf(seq)),
-            expanded = setOf("sg_burst_1", "st_3"),
-        )
+        val tab = mkTab("log", "test.log", logs)
+            .copy(filter = Filter(sequences = listOf(seq)), expanded = setOf("sg_burst_1", "st_3"))
 
         val items = computeItems(tab, applyFilter = true)
 
@@ -673,11 +657,7 @@ class SequenceGroupingTest {
             LogEntry(4, "10:00:00.300", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 1),
         )
         val seq = SequenceDef("burst", "burst start", priority = 1, color = Color.Blue, tag = "App")
-        val tab = LogTab(
-            id = "log",
-            filename = "test.log",
-            logData = logs,
-            rmap = logs.associateBy { it.id },
+        val tab = mkTab("log", "test.log", logs).copy(
             filter = Filter(sequences = listOf(seq)),
             // Sequence collapsed again, but the crash's own gid is still marked expanded from
             // before — it must still show as a top-level, expanded StackTraceHeader.
@@ -704,13 +684,7 @@ class SequenceGroupingTest {
             LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 1),
         )
         val seq = SequenceDef("burst", "burst start", priority = 1, color = Color.Blue, tag = "App")
-        val tab = LogTab(
-            id = "log",
-            filename = "test.log",
-            logData = logs,
-            rmap = logs.associateBy { it.id },
-            filter = Filter(sequences = listOf(seq), seqOn = false),
-        )
+        val tab = mkTab("log", "test.log", logs).copy(filter = Filter(sequences = listOf(seq), seqOn = false))
 
         val items = computeItems(tab, applyFilter = true)
 

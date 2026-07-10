@@ -6,6 +6,7 @@ import com.openlog.debug.loadOrCreateControlToken
 import com.openlog.debug.regenerateControlToken
 import com.openlog.model.AnnBlock
 import com.openlog.model.FilterMode
+import com.openlog.model.LogAnalysis
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
 import com.openlog.ui.AppState
@@ -426,6 +427,36 @@ class ControlServerTest {
         assertTrue(body.contains("\"kind\":\"ANR\""))
         assertTrue(body.contains("\"logId\":1"))
         assertTrue(body.contains("\"logId\":3"))
+    }
+
+    @Test
+    fun getCrashSitesReportsPendingInsteadOfRecomputingFromRawLogData() {
+        // P-02: while analysis is still pending, get_crash_sites must not eagerly recompute from
+        // tab.logData (that's the same expensive scan the background analysis is already doing) —
+        // it must report pending:true so a polling client can tell "still analyzing" apart from
+        // "analyzed, found nothing," and it must not do the scan itself just to answer this call.
+        val crashEntries = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 100),
+            LogEntry(2, "10:00:00.001", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 100),
+        )
+        state.tabs = listOf(mkTab("t1", "test.log", crashEntries, analysis = LogAnalysis(pending = true)))
+
+        val body = get("/crashes?tabId=t1")
+
+        assertTrue(body.contains("\"pending\":true"), body)
+        assertTrue(body.contains("\"sites\":[]"), body)
+    }
+
+    @Test
+    fun getCrashSitesReturnsTheCachedResultOnceAnalysisIsComplete() {
+        // Complements the pending test above: once complete, the cached (possibly empty) result
+        // is trusted directly rather than recomputed on every call.
+        state.tabs = listOf(mkTab("t1", "clean.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "all quiet"))))
+
+        val body = get("/crashes?tabId=t1")
+
+        assertTrue(body.contains("\"sites\":[]"), body)
+        assertTrue(!body.contains("\"pending\""), "a completed analysis response should not claim pending")
     }
 
     @Test

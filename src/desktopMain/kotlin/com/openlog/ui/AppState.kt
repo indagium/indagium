@@ -13,12 +13,11 @@ import com.openlog.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.openlog.utils.MergeSourceFile
 import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.ZipLogCandidate
-import com.openlog.utils.buildFilteredCsv
-import com.openlog.utils.buildFilteredTxt
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeStackTraceGroups
+import com.openlog.utils.exportFilteredToFile
 import com.openlog.utils.extractCandidate
 import com.openlog.utils.invalidateComputeCache
 import com.openlog.utils.isLikelyTextFile
@@ -63,6 +62,7 @@ private fun buildLogAnalysis(data: List<LogEntry>): LogAnalysis {
         tagCounts = data.groupingBy { it.tag }.eachCount(),
         stackTraceGroups = stackGroups,
         crashSites = computeCrashSites(data, stackGroups),
+        pending = false,
     )
 }
 
@@ -91,6 +91,10 @@ fun emptyWorkspaceTab() = LogTab(
     logData = emptyList(),
     rmap = emptyMap(),
     annotations = Annotations(),
+    // Explicit rather than relying on LogAnalysis's pending-by-default: logData is always empty
+    // here, so a genuinely-computed analysis would be empty too — this is vacuously complete,
+    // not "not yet analyzed," and shouldn't show an "Analyzing…" hint that will never resolve.
+    analysis = LogAnalysis(pending = false),
 )
 
 private var tabCounter = 1
@@ -2617,10 +2621,7 @@ class AppState(
 
     fun exportFilteredTo(tabId: String, file: File, csv: Boolean): Boolean {
         val t = tab(tabId) ?: return false
-        return runCatching {
-            file.parentFile?.mkdirs()
-            file.writeText(if (csv) buildFilteredCsv(t) else buildFilteredTxt(t))
-        }.isSuccess
+        return runCatching { exportFilteredToFile(t, file, csv) }.isSuccess
     }
 
     fun saveAnnotationsTo(tabId: String, file: File): Boolean {
@@ -2668,7 +2669,7 @@ class AppState(
         val dir = dlg.directory ?: return
         settings = settings.copy(defaultSaveDir = dir)
         val saved = File(dir, path)
-        ioScope.launch { runCatching { saved.writeText(buildFilteredTxt(t)) } }
+        ioScope.launch { runCatching { exportFilteredToFile(t, saved, csv = false) } }
     }
 
     fun exportFilteredCsv(tabId: String) {
@@ -2682,7 +2683,7 @@ class AppState(
         val dir = dlg.directory ?: return
         settings = settings.copy(defaultSaveDir = dir)
         val saved = File(dir, path)
-        ioScope.launch { runCatching { saved.writeText(buildFilteredCsv(t)) } }
+        ioScope.launch { runCatching { exportFilteredToFile(t, saved, csv = true) } }
     }
 
     fun openNoteFile(tabId: String, file: File) {

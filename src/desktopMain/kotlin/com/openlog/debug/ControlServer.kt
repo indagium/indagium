@@ -14,9 +14,7 @@ import com.openlog.ui.AppState
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitSource
 import com.openlog.utils.ZipLogCandidate
-import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
-import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import io.ktor.http.HttpMethod
@@ -928,11 +926,15 @@ class ControlServer(
     }
 
     // Detected on the whole (unfiltered) file, matching CrashPanel's own "complete inventory"
-    // behavior — see ui/CrashPanel.kt.
+    // behavior — see ui/CrashPanel.kt. Reads the cached tab.analysis.crashSites instead of
+    // recomputing on every call (P-02) — analysis costs as much as the parse itself on
+    // multi-GB files, and repeated polling reads (a client waiting for analysis to land) must
+    // not pay that cost again on each request. While still pending, `pending: true` lets a
+    // client distinguish "still analyzing" from "analyzed, found nothing."
     private fun getCrashSites(tabId: String): Map<String, Any?> {
         val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
-        val sites = computeCrashSites(tab.logData, computeStackTraceGroups(tab.logData))
-        return mapOf("sites" to sites.map { crashSiteToMap(it) })
+        if (tab.analysis.pending) return mapOf("sites" to emptyList<Map<String, Any?>>(), "pending" to true)
+        return mapOf("sites" to tab.analysis.crashSites.map { crashSiteToMap(it) })
     }
 
     // ── DTO helpers ───────────────────────────────────────────────────

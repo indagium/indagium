@@ -47,8 +47,6 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.openlog.model.*
-import com.openlog.utils.computeCrashSites
-import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.containsPattern
 import com.openlog.utils.crashSitesForCategory
 import com.openlog.utils.firstRegexMatch
@@ -221,24 +219,19 @@ fun FilterPanel(
 
     // While the background analysis is pending this must NOT fall through to the synchronous
     // computation — that's a multi-second full-file scan and this runs during composition.
-    val allCrashSites = remember(tab.id, tab.analysis.crashSites, tab.analysis.pending, tab.logData) {
-        when {
-            tab.analysis.pending -> emptyList()
-            tab.analysis.crashSites.isNotEmpty() -> tab.analysis.crashSites
-            else -> {
-                val stackGroups = computeStackTraceGroups(tab.logData)
-                computeCrashSites(tab.logData, stackGroups)
-            }
-        }
+    // Once complete (pending == false), tab.analysis.crashSites is trusted directly, even when
+    // empty — LogAnalysis.pending defaults to true precisely so "genuinely zero crash sites"
+    // can never be mistaken for "not yet analyzed" here (see the field's doc in Model.kt / P-02).
+    val allCrashSites = remember(tab.id, tab.analysis.crashSites, tab.analysis.pending) {
+        if (tab.analysis.pending) emptyList() else tab.analysis.crashSites
     }
     val crashSites = remember(allCrashSites, fpState.crashCategory) {
         crashSitesForCategory(allCrashSites, fpState.crashCategory)
     }
 
-    // Tags sorted by frequency in log data; default suggestions come from user tag usage.
-    val tagCounts = remember(tab.id, tab.analysis.tagCounts, tab.logData) {
-        tab.analysis.tagCounts.ifEmpty { tab.logData.groupingBy { it.tag }.eachCount() }
-    }
+    // Tags sorted by frequency in log data. tagCounts is populated by both pendingAnalysis() and
+    // buildLogAnalysis() (cheap, computed immediately either way), so it's trusted directly.
+    val tagCounts = remember(tab.id, tab.analysis.tagCounts) { tab.analysis.tagCounts }
     val sortedTags = remember(tab.id, tagCounts) { tagCounts.entries.sortedByDescending { it.value }.map { it.key } }
 
     val tagFr = remember { FocusRequester() }

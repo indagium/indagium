@@ -7,6 +7,9 @@ import com.openlog.model.LogLevel
 import com.openlog.model.LogTab
 import com.openlog.utils.buildFilteredCsv
 import com.openlog.utils.buildFilteredTxt
+import com.openlog.utils.exportFilteredToFile
+import java.io.File
+import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -94,5 +97,86 @@ class ExportFilteredLogTest {
         // The embedded newline splits the quoted field across two physical lines, so check the
         // joined content rather than a single `lines()` entry.
         assertTrue(csv.contains("\"has\na newline\""))
+    }
+
+    // ── Streaming export parity (P-03) ──────────────────────────────────
+    // exportFilteredToFile must never diverge from buildFilteredTxt/buildFilteredCsv — those
+    // string builders are the oracle every parity case below is checked against.
+
+    private fun exportToTempFile(t: LogTab, csv: Boolean): String {
+        val dest = File(createTempDirectory("openlog-export-parity").toFile(), "out")
+        exportFilteredToFile(t, dest, csv)
+        return dest.readText()
+    }
+
+    @Test
+    fun streamedTxtExportMatchesBuiltStringForEmptyLog() {
+        val t = tab(emptyList())
+        assertEquals(buildFilteredTxt(t), exportToTempFile(t, csv = false))
+    }
+
+    @Test
+    fun streamedTxtExportMatchesBuiltStringForASmallLog() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"),
+            LogEntry(2, "10:00:00.100", LogLevel.E, "App", "boom"),
+        )
+        val t = tab(logs)
+        assertEquals(buildFilteredTxt(t), exportToTempFile(t, csv = false))
+    }
+
+    @Test
+    fun streamedTxtExportMatchesBuiltStringForUnicodeContent() {
+        val logs = listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "héllo wörld 日本語 🎉"))
+        val t = tab(logs)
+        assertEquals(buildFilteredTxt(t), exportToTempFile(t, csv = false))
+    }
+
+    @Test
+    fun streamedTxtExportMatchesBuiltStringForMultilineRawContent() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main"),
+            LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)"),
+        )
+        val t = tab(logs)
+        assertEquals(buildFilteredTxt(t), exportToTempFile(t, csv = false))
+    }
+
+    @Test
+    fun streamedTxtExportMatchesBuiltStringWhenFiltered() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "keep me"),
+            LogEntry(2, "10:00:00.100", LogLevel.D, "App", "drop me"),
+        )
+        val t = tab(logs, Filter(levels = setOf(LogLevel.I)))
+        assertEquals(buildFilteredTxt(t), exportToTempFile(t, csv = false))
+    }
+
+    @Test
+    fun streamedCsvExportMatchesBuiltStringForEmptyLog() {
+        val t = tab(emptyList())
+        assertEquals(buildFilteredCsv(t), exportToTempFile(t, csv = true))
+    }
+
+    @Test
+    fun streamedCsvExportMatchesBuiltStringForQuotedFields() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "has, a comma"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "App", "has \"quotes\""),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "App", "has\na newline"),
+        )
+        val t = tab(logs)
+        assertEquals(buildFilteredCsv(t), exportToTempFile(t, csv = true))
+    }
+
+    @Test
+    fun streamedExportEndsWithATrailingNewlineJustLikeTheBuiltString() {
+        val logs = listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))
+        val t = tab(logs)
+        val built = buildFilteredTxt(t)
+        val streamed = exportToTempFile(t, csv = false)
+        assertTrue(built.endsWith("\n"))
+        assertTrue(streamed.endsWith("\n"))
+        assertEquals(built, streamed)
     }
 }

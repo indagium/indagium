@@ -11,6 +11,7 @@ import com.openlog.model.CtxMenuState
 import com.openlog.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
+import com.openlog.model.LogAnalysis
 import com.openlog.model.LogEntry
 import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
@@ -26,6 +27,7 @@ import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitMode
 import com.openlog.ui.blockOrderDuringDrag
 import com.openlog.ui.cumulativeBlockOffsets
+import com.openlog.ui.emptyWorkspaceTab
 import com.openlog.ui.manualCollapseAvailability
 import com.openlog.ui.maskWordForCopy
 import com.openlog.ui.mkTab
@@ -3727,6 +3729,41 @@ class AppStateBehaviorTest {
         waitUntil { !state.tabs.single().analysis.pending }
         assertEquals(listOf(2), state.tabs.single().analysis.stackTraceGroups.map { it.rid })
         assertTrue(state.tabs.single().analysis.crashSites.isNotEmpty())
+    }
+
+    // ── Analysis completion is explicit, not inferred from emptiness (P-02) ─────
+
+    @Test
+    fun bareLogAnalysisDefaultsToPendingNotToSilentlyCompleteAndEmpty() {
+        // Root cause of P-02: LogAnalysis's default used to be pending=false, so any LogTab built
+        // without an explicit analysis (a bug, a new construction site, a test fixture) silently
+        // claimed "analyzed, nothing found" instead of "never analyzed." Flipping the default is
+        // the actual fix; every real completion path (buildLogAnalysis, via mkTab) must still land
+        // on pending=false explicitly.
+        assertTrue(LogAnalysis().pending, "a bare LogAnalysis() must read as not-yet-analyzed")
+        assertFalse(mkTab("t1", "a.log", emptyList()).analysis.pending, "mkTab computes real analysis and must mark it complete")
+    }
+
+    @Test
+    fun emptyWorkspaceTabIsExplicitlyCompleteNotPending() {
+        // logData is always empty here, so a real analysis would also be empty — this is
+        // vacuously complete, not "not yet analyzed," and must not show an "Analyzing…" hint
+        // that would never resolve (there is nothing that will ever complete it).
+        assertFalse(emptyWorkspaceTab().analysis.pending)
+    }
+
+    @Test
+    fun crashFreeCompletedAnalysisIsTrustedWithoutRecomputing() {
+        // A tab whose real analysis genuinely found zero crash sites/stack traces must render as
+        // "done, nothing found" — computeItems must not fall back to recomputing from raw logData
+        // just because the cached result happens to be empty (the exact P-02 bug).
+        val tab = mkTab("t1", "clean.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "all quiet")))
+        assertFalse(tab.analysis.pending)
+        assertTrue(tab.analysis.crashSites.isEmpty())
+        assertTrue(tab.analysis.stackTraceGroups.isEmpty())
+
+        val items = computeItems(tab, applyFilter = true)
+        assertTrue(items.none { it is LogItem.StackTraceHeader }, "no stack trace groups exist; none should be rendered")
     }
 
     @Test

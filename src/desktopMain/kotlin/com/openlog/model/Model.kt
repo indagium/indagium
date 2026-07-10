@@ -87,7 +87,15 @@ data class LogAnalysis(
     // doesn't need it. Rows render unfolded and the crash panel shows an "analyzing" hint until
     // the full analysis replaces this instance. tagCounts is always populated regardless:
     // it's cheap and the filter panel needs it immediately.
-    val pending: Boolean = false,
+    //
+    // Defaults to true (not false) deliberately: any LogTab built without an explicit `analysis`
+    // (e.g. a bare LogTab(...) construction that forgets the field) must read as "not analyzed
+    // yet," never as "analyzed, found nothing." With false as the default, that ambiguity was
+    // exactly why FilterPanel.kt/Filter.kt/ControlServer.kt each grew a defensive "empty cached
+    // result -> recompute anyway" fallback instead of trusting an empty completed result — see
+    // P-02 in artifacts/review/. Every real completion path (buildLogAnalysis in AppState.kt)
+    // sets this to false explicitly, so flipping the default doesn't change any intentional case.
+    val pending: Boolean = true,
 )
 
 // RANGE covers exactly [anchorId, endId] (order-independent — Filter.kt takes min/max of the two

@@ -319,7 +319,10 @@ fun computeItems(tab: LogTab, applyFilter: Boolean): List<LogItem> {
             // than blocking this compute on a full multi-second stack-trace scan. When the
             // analysis lands, tab.analysis is replaced and the item list recomputes with folding.
             tab.analysis.pending -> emptyList()
-            cached.isEmpty() -> computeStackTraceGroups(data)
+            // Analysis is complete — cached is trusted as ground truth even when empty. P-02: a
+            // completed analysis that genuinely found no stack traces used to be indistinguishable
+            // from "never analyzed," so this branch used to recompute from `data` unconditionally
+            // every time cached happened to be empty, on every composition.
             data.size == tab.logData.size -> cached
             else -> fullFilteredStackGroups ?: run {
                 val dataIdBits = idBitSet(data)
