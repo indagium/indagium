@@ -45,8 +45,17 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Cache Gradle
-        uses: actions/cache@v4
+      # Restore-only: this workflow triggers on tag pushes, and GitHub scopes a *saved* cache to
+      # its creating ref — tags aren't branches, so a cache saved under refs/tags/v1.1.x can only
+      # ever be restored by that exact tag again, which never happens (each tag runs once). Every
+      # prior release was therefore writing a full, permanent, never-reused ~1GB-per-OS cache that
+      # just accumulated (18 of them ate ~9.4GB of the account's 500MB Actions storage quota).
+      # actions/cache/restore@v4 only reads — falling back to whatever's cached under the default
+      # branch (master) if present, or a clean cache-miss otherwise — so tag builds stop writing
+      # new dead caches. Restore-keys prefix is unversioned so any master-branch Gradle cache still
+      # gives a useful partial hit even when the exact dependency hash has since moved on.
+      - name: Restore Gradle cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.gradle/caches
@@ -142,6 +151,11 @@ jobs:
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_path }}
+          # Default retention is 90 days; these only need to survive long enough for the release
+          # job below to download and republish them as GitHub Release assets (minutes, not
+          # months) — the prior default was the other half of what exhausted the account's 500MB
+          # Actions storage quota, alongside the per-tag Gradle caches fixed above.
+          retention-days: 7
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
