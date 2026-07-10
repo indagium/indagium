@@ -294,6 +294,15 @@ class AppState(
 
     val autosaveError: String? get() = autosaveScheduler.autosaveError
 
+    // See AnnotationManager's own doc comment for what it owns vs. what stays on AppState.
+    private val annotationManager = AnnotationManager(this)
+
+    // App.kt writes this directly (dialog dismiss/confirm), not just reads it, so it needs a
+    // full get/set forwarding var rather than a read-only getter like mcpControlError above.
+    var addAnnRequest: AddAnnRequest?
+        get() = annotationManager.addAnnRequest
+        set(value) { annotationManager.addAnnRequest = value }
+
     // Live tailing (utils/FileTailer.kt) — owned by TailCoordinator (Task 12 slice 2), not
     // AppState itself; ioJob.cancel() in close() still cancels every tailer's Job for free, since
     // each is started on ioScope.
@@ -334,7 +343,6 @@ class AppState(
     var keyboardFocusVisible by mutableStateOf(false)
     var ctx by mutableStateOf<CtxMenuState?>(null)
     var tabCtx by mutableStateOf<TabCtxMenuState?>(null)
-    var addAnnRequest by mutableStateOf<AddAnnRequest?>(null)   // dialog to add annotation
     var sfDialog by mutableStateOf(false)
     var sfName by mutableStateOf("")
     var sfTabId by mutableStateOf<String?>(null)
@@ -1426,7 +1434,7 @@ class AppState(
     // another open tab). A plain file only gets its parent folder prefixed when its filename
     // actually collides with otherFilename (e.g. comparing two same-named files from different
     // folders) — otherwise the bare filename stays the simple, unqualified default.
-    private fun displaySourceLabel(sourcePath: String?, filename: String, otherFilename: String?): String {
+    internal fun displaySourceLabel(sourcePath: String?, filename: String, otherFilename: String?): String {
         archiveQualifiedLabel(sourcePath)?.let { return it }
         if (sourcePath != null && filename == otherFilename) {
             File(sourcePath).parentFile?.name?.let { return "$it/$filename" }
@@ -1434,119 +1442,34 @@ class AppState(
         return filename
     }
 
-    fun requestAddAnn(sourceTabId: String, logIds: List<Int>) {
-        val targetTabId = if (compareMode && sourceTabId != activeTabId) activeTabId else sourceTabId
-        val crossFile = targetTabId != sourceTabId
-        val sourceTab = tab(sourceTabId)
-        addAnnRequest = AddAnnRequest(
-            targetTabId = targetTabId,
-            sourceTabId = sourceTabId,
-            logIds = logIds,
-            sourceFilename = if (crossFile && sourceTab != null) {
-                displaySourceLabel(sourceTab.sourcePath, sourceTab.filename, tab(targetTabId)?.filename)
-            } else {
-                null
-            },
-        )
-        ctx = null
-    }
+    // Annotation block-model mutations are owned by AnnotationManager (Task 12 slice 5) — see
+    // its doc comment for the auto-export-on-change rationale these forward to unchanged.
+    fun requestAddAnn(sourceTabId: String, logIds: List<Int>) = annotationManager.requestAddAnn(sourceTabId, logIds)
 
-    fun confirmAddAnn(
-        targetTabId: String,
-        sourceTabId: String,
-        logIds: List<Int>,
-        caption: String,
-        sourceFilename: String?
-    ) {
-        val crossFile = sourceTabId != targetTabId
-        val sourceEntries = if (crossFile) {
-            val rmap = tab(sourceTabId)?.rmap ?: emptyMap()
-            logIds.sorted().mapNotNull { rmap[it] }
-        } else {
-            null
-        }
-        upAnn(targetTabId) { t ->
-            val block = AnnBlock.LogRef(
-                id = "r${System.nanoTime()}",
-                logIds = logIds.sorted(),
-                caption = caption,
-                sourceTabId = if (crossFile) sourceTabId else null,
-                sourceFilename = if (crossFile) sourceFilename else null,
-                sourceEntries = sourceEntries,
-            )
-            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block))
-        }
-        addAnnRequest = null
-    }
+    fun confirmAddAnn(targetTabId: String, sourceTabId: String, logIds: List<Int>, caption: String, sourceFilename: String?) =
+        annotationManager.confirmAddAnn(targetTabId, sourceTabId, logIds, caption, sourceFilename)
 
-    fun addNoteBlock(tabId: String, afterId: String? = null) {
-        addNoteBlock(tabId, "", afterId)
-    }
+    fun addNoteBlock(tabId: String, afterId: String? = null) = annotationManager.addNoteBlock(tabId, afterId)
 
-    fun addNoteBlock(tabId: String, text: String, afterId: String? = null): String? {
-        val id = "n${System.nanoTime()}"
-        upAnn(tabId) { t ->
-            val note = AnnBlock.Note(id, text)
-            val blocks = t.annotations.blocks.toMutableList()
-            val idx =
-                if (afterId != null) (blocks.indexOfFirst { it.id == afterId } + 1).coerceAtLeast(0) else blocks.size
-            blocks.add(idx, note)
-            t.copy(annotations = t.annotations.copy(blocks = blocks))
-        }
-        return id.takeIf { tab(tabId)?.annotations?.blocks?.any { block -> block.id == id } == true }
-    }
+    fun addNoteBlock(tabId: String, text: String, afterId: String? = null): String? =
+        annotationManager.addNoteBlock(tabId, text, afterId)
 
-    fun addLogRefBlock(tabId: String, logIds: List<Int>, caption: String = ""): String? {
-        val t = tab(tabId) ?: return null
-        val cleanIds = logIds.distinct().sorted().filter { it in t.rmap }
-        if (cleanIds.isEmpty()) return null
-        val id = "r${System.nanoTime()}"
-        upAnn(tabId) { tab ->
-            val block = AnnBlock.LogRef(id = id, logIds = cleanIds, caption = caption)
-            tab.copy(annotations = tab.annotations.copy(blocks = tab.annotations.blocks + block))
-        }
-        return id
-    }
+    fun addLogRefBlock(tabId: String, logIds: List<Int>, caption: String = ""): String? =
+        annotationManager.addLogRefBlock(tabId, logIds, caption)
 
-    fun updateBlock(tabId: String, blockId: String, newText: String) = upAnn(tabId) { t ->
-        t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks.map { b ->
-            when {
-                b.id != blockId -> b
-                b is AnnBlock.Note -> b.copy(text = newText)
-                b is AnnBlock.LogRef -> b.copy(caption = newText)
-                else -> b
-            }
-        }))
-    }
+    fun updateBlock(tabId: String, blockId: String, newText: String) = annotationManager.updateBlock(tabId, blockId, newText)
 
-    fun removeBlock(tabId: String, blockId: String) = upAnn(tabId) { t ->
-        t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks.filter { it.id != blockId }))
-    }
+    fun removeBlock(tabId: String, blockId: String) = annotationManager.removeBlock(tabId, blockId)
 
-    fun moveBlock(tabId: String, blockId: String, delta: Int) = upAnn(tabId) { t ->
-        val list = t.annotations.blocks.toMutableList()
-        val idx = list.indexOfFirst { it.id == blockId }.takeIf { it >= 0 } ?: return@upAnn t
-        val to = (idx + delta).coerceIn(0, list.lastIndex)
-        val item = list.removeAt(idx); list.add(to, item)
-        t.copy(annotations = t.annotations.copy(blocks = list))
-    }
+    fun moveBlock(tabId: String, blockId: String, delta: Int) = annotationManager.moveBlock(tabId, blockId, delta)
 
-    // Drag-and-drop counterpart to moveBlock's ±1 buttons — moves a block to an arbitrary index,
-    // mirroring reorderSequence.
-    fun reorderBlock(tabId: String, blockId: String, toIdx: Int) = upAnn(tabId) { t ->
-        val list = t.annotations.blocks.toMutableList()
-        val fromIdx = list.indexOfFirst { it.id == blockId }.takeIf { it >= 0 } ?: return@upAnn t
-        val item = list.removeAt(fromIdx)
-        list.add(toIdx.coerceIn(0, list.size), item)
-        t.copy(annotations = t.annotations.copy(blocks = list))
-    }
+    fun reorderBlock(tabId: String, blockId: String, toIdx: Int) = annotationManager.reorderBlock(tabId, blockId, toIdx)
 
-    fun setPrefix(tabId: String, v: String) = upAnn(tabId) { t -> t.copy(annotations = t.annotations.copy(prefix = v)) }
+    fun setPrefix(tabId: String, v: String) = annotationManager.setPrefix(tabId, v)
 
-    fun setSuffix(tabId: String, v: String) = upAnn(tabId) { t -> t.copy(annotations = t.annotations.copy(suffix = v)) }
+    fun setSuffix(tabId: String, v: String) = annotationManager.setSuffix(tabId, v)
 
-    fun setIssueDescription(tabId: String, v: String) =
-        upAnn(tabId) { t -> t.copy(annotations = t.annotations.copy(issueDescription = v)) }
+    fun setIssueDescription(tabId: String, v: String) = annotationManager.setIssueDescription(tabId, v)
 
     fun toggleMd(tabId: String) = upTab(tabId) { it.copy(showAnnMd = !it.showAnnMd) }
 
@@ -2562,8 +2485,10 @@ class AppState(
         return File(targetDir, candidateName)
     }
 
-    // Annotation-aware tab updater — auto-exports after any annotation change.
-    private fun upAnn(tabId: String, fn: (LogTab) -> LogTab) {
+    // Annotation-aware tab updater — auto-exports after any annotation change. internal, not
+    // private: AnnotationManager (Task 12 slice 5) routes its block mutations through this too,
+    // so auto-export keeps firing regardless of which class made the edit.
+    internal fun upAnn(tabId: String, fn: (LogTab) -> LogTab) {
         upTab(tabId, fn)
         tab(tabId)?.let { autoExportAnnotations(it) }
     }
