@@ -7,7 +7,6 @@ import com.openlog.debug.loadOrCreateControlToken
 import com.openlog.model.*
 import com.openlog.utils.ArchiveBudgetExceededException
 import com.openlog.utils.EntryIdMap
-import com.openlog.utils.FileTailer
 import com.openlog.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.openlog.utils.MergeSourceFile
 import com.openlog.utils.SPLIT_PROMPT_BYTES
@@ -25,7 +24,6 @@ import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.mergeLogs
 import com.openlog.utils.openArchiveCandidateStream
 import com.openlog.utils.parseLogcat
-import com.openlog.utils.parseLogcatLines
 import com.openlog.utils.passesFilter
 import com.openlog.utils.planSplitOutputs
 import com.openlog.utils.requiresSplitPrompt
@@ -44,7 +42,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
-private fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = EntryIdMap(data)
+internal fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = EntryIdMap(data)
 
 // Separators the "Hide/Show messages like this" (and "Add as sequence") flyout truncates a
 // message at — the same rough set a human skimming logcat output uses to separate a message's
@@ -57,7 +55,7 @@ private val MESSAGE_RULE_SEPARATORS = charArrayOf('-', '/', '\\', ',', '.', ':',
 // hard stop against an unbounded loop.
 private const val MAX_NOTE_TARGET_SUFFIX = 1000
 
-private fun buildLogAnalysis(data: List<LogEntry>): LogAnalysis {
+internal fun buildLogAnalysis(data: List<LogEntry>): LogAnalysis {
     val stackGroups = computeStackTraceGroups(data)
     return LogAnalysis(
         tagCounts = data.groupingBy { it.tag }.eachCount(),
@@ -129,13 +127,6 @@ private const val LARGE_FILE_MODE_BYTES = 64L * 1024L * 1024L
 // pointer-move events per second) into one write, short enough that the save still feels
 // immediate, matching the feel of the existing keyword-input debounce (150/350ms).
 private const val BACKGROUND_AUTOSAVE_DEBOUNCE_MS = 150L
-
-// Debounce for the tailing-triggered full analysis refresh (P-04) — buildLogAnalysis costs as
-// much as the initial parse on a large file, so re-running it on every ~500ms FileTailer batch
-// would make a long tail session progressively more expensive. 1.5s comfortably outlasts
-// FileTailer's default 500ms poll interval, so a sustained burst of batches collapses into one
-// refresh shortly after the burst quiets down instead of one per batch.
-private const val TAIL_ANALYSIS_DEBOUNCE_MS = 1_500L
 
 data class PendingSequenceStart(val text: String, val tag: String)
 
@@ -288,7 +279,10 @@ class AppState(
 
     private val ioJob = SupervisorJob()
     private val ioScope = CoroutineScope(ioJob + Dispatchers.IO)
-    private val stateLock = Any()
+
+    // internal, not private: TailCoordinator (Task 12 slice 2) synchronizes on this exact monitor
+    // object so its tabs-list writes stay atomic with AppState's own — see upTab's doc comment.
+    internal val stateLock = Any()
     private var pendingLoads = 0
 
     // See ControlServerManager's own doc comment for what it owns and why it still takes `this`.
@@ -298,24 +292,13 @@ class AppState(
     // regardless of which class instance actually declares the underlying State object.
     val mcpControlError: String? get() = controlServerManager.mcpControlError
 
-    // Live tailing (utils/FileTailer.kt) — keyed by tabId. Lives here, not on LogTab, since a
-    // running FileTailer/Job isn't data-class-friendly. ioJob.cancel() in close() already cancels
-    // every tailer's Job for free, since each is started on ioScope.
-    private data class ActiveTail(val tailer: FileTailer, val job: Job)
+    // Live tailing (utils/FileTailer.kt) — owned by TailCoordinator (Task 12 slice 2), not
+    // AppState itself; ioJob.cancel() in close() still cancels every tailer's Job for free, since
+    // each is started on ioScope.
+    private val tailCoordinator = TailCoordinator(this, ioScope)
 
     private data class ActiveLoad(val job: Job, val countsAsLoading: AtomicBoolean = AtomicBoolean(true))
 
-    // ConcurrentHashMap, not a plain HashMap (A-01): mutated from closeTabsById/startTailing/
-    // stopTailing (UI or ControlServer/Ktor threads) and read/written by FileTailer's own ioScope
-    // flush coroutine — a plain HashMap has no thread-safety guarantee for concurrent get/put/
-    // remove across those callers.
-    private val activeTails = ConcurrentHashMap<String, ActiveTail>()
-
-    // Debounce jobs backing appendTailedLines' throttled analysis refresh — keyed by tabId, same
-    // cancel-and-relaunch shape as autosaveInBackground's backgroundAutosaveJob. ConcurrentHashMap
-    // for the same cross-thread reason as activeTails above: scheduleTailAnalysisRefresh writes it
-    // from FileTailer's ioScope coroutine, closeTabsById removes from it from the caller's thread.
-    private val tailAnalysisJobs = ConcurrentHashMap<String, Job>()
     private val activeLoads = ConcurrentHashMap<String, ActiveLoad>()
     private val pendingRestoredLoads = mutableListOf<RestoredTabShell>()
 
@@ -430,7 +413,7 @@ class AppState(
 
     fun close() {
         ioJob.cancel() // also cancels every active FileTailer's Job — each is started on ioScope
-        activeTails.clear()
+        tailCoordinator.clear()
         activeLoads.clear()
         controlServerManager.applyControlServerState(enabled = false, port = 0)
         synchronized(stateLock) {
@@ -2029,8 +2012,7 @@ class AppState(
         synchronized(stateLock) {
             tabIds.forEach { tabId ->
                 cancelActiveLoad(tabId)
-                activeTails.remove(tabId)?.job?.cancel()
-                tailAnalysisJobs.remove(tabId)?.cancel()
+                tailCoordinator.cancelTailingFor(tabId)
                 visibleItemsByTab.remove(tabId)
                 invalidateComputeCache(tabId)
                 logViewerScrollStateStore.removeTab(tabId)
@@ -2078,77 +2060,11 @@ class AppState(
         }
     }
 
-    // Session-only (confirmed): tailing state never persists across a restart — tab.tailing
-    // simply isn't written to the autosave token, so it always comes back false. Only tabs backed
-    // by a real, currently-existing file path can be tailed (not a zip-extracted or merged tab).
-    fun startTailing(tabId: String) {
-        if (activeTails.containsKey(tabId)) return
-        val t = tab(tabId) ?: return
-        val path = t.sourcePath ?: return
-        val file = File(path)
-        if (!file.isFile) return
-        val tailer = FileTailer(file, onNewLines = { newLines -> appendTailedLines(tabId, newLines) })
-        val job = tailer.start(ioScope)
-        activeTails[tabId] = ActiveTail(tailer, job)
-        upTab(tabId) { it.copy(tailing = true) }
-    }
+    // Live tailing is owned by TailCoordinator (Task 12 slice 2) — see its doc comments for the
+    // stateLock/A-01 rationale these forward to unchanged.
+    fun startTailing(tabId: String) = tailCoordinator.startTailing(tabId)
 
-    fun stopTailing(tabId: String) {
-        activeTails.remove(tabId)?.job?.cancel()
-        upTab(tabId) { it.copy(tailing = false) }
-        // Content-triggered autosave is suppressed while any tab is actively tailing (see the
-        // LaunchedEffect in App.kt) to avoid rewriting a fast-growing logData every ~400ms —
-        // explicitly save now that this tab has settled.
-        autosaveNow()
-    }
-
-    // Runs on whichever thread FileTailer's coroutine flushes from (ioScope / Dispatchers.IO),
-    // unlike most upTab callers which are UI-thread-only — wrapped in stateLock so a tailing flush
-    // can't race and lose an update against any other stateLock-guarded tabs mutation, whether
-    // background (another tab's tailing flush, an in-flight openFile/mergeTabs) or UI-thread
-    // (toggleGroup, selRow, ... — all upTab callers, and upTab itself is stateLock-guarded).
-    private fun appendTailedLines(tabId: String, newRawLines: List<String>) {
-        if (newRawLines.isEmpty()) return
-        synchronized(stateLock) {
-            val t = tab(tabId) ?: return
-            val nextId = (t.logData.maxOfOrNull { it.id } ?: 0) + 1
-            val newEntries = parseLogcatLines(newRawLines.asSequence(), startId = nextId)
-            tabs = tabs.map { cur ->
-                if (cur.id == tabId) {
-                    val nextData = cur.logData + newEntries
-                    // logData/rmap/tagCounts stay immediate — cheap, and needed right away for
-                    // correct display. The expensive crash/stack-trace scan is debounced below
-                    // instead of re-running on every single tail batch (P-04); pending = true
-                    // reuses the same "still analyzing" rendering FilterPanel/Filter.kt already
-                    // have for a freshly-opened file (see buildLogAnalysis/pendingAnalysis).
-                    cur.copy(
-                        logData = nextData,
-                        rmap = mkRmap(nextData),
-                        analysis = cur.analysis.copy(tagCounts = nextData.groupingBy { it.tag }.eachCount(), pending = true),
-                    )
-                } else {
-                    cur
-                }
-            }
-        }
-        scheduleTailAnalysisRefresh(tabId)
-    }
-
-    // Cancel-and-relaunch, same shape as autosaveInBackground's backgroundAutosaveJob: every new
-    // batch supersedes the previous refresh before it runs, so a sustained burst collapses into
-    // one full buildLogAnalysis() shortly after it quiets down rather than one per batch. Reads
-    // logData fresh (not a captured snapshot) so it reflects everything appended by the time this
-    // job actually runs, even across several superseded batches.
-    private fun scheduleTailAnalysisRefresh(tabId: String) {
-        tailAnalysisJobs[tabId]?.cancel()
-        tailAnalysisJobs[tabId] = ioScope.launch {
-            delay(TAIL_ANALYSIS_DEBOUNCE_MS)
-            val logData = synchronized(stateLock) { tab(tabId)?.logData } ?: return@launch
-            val full = buildLogAnalysis(logData)
-            ensureActive()
-            upTab(tabId) { it.copy(analysis = full) }
-        }
-    }
+    fun stopTailing(tabId: String) = tailCoordinator.stopTailing(tabId)
 
     fun openFile(file: File): String? = openFileInternal(file, bypassSplitPrompt = false)
 
