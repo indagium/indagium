@@ -1181,49 +1181,6 @@ class AppState(
         return exportFiltersList(filters)
     }
 
-    private fun exportFiltersList(filters: List<SavedFilter>): String = buildString {
-        appendLine("[")
-        filters.forEachIndexed { i, sf ->
-            appendLine("  {")
-            appendLine("    \"id\": \"${sf.id}\",")
-            appendLine("    \"name\": ${sf.name.jsonStr()},")
-            appendLine("    \"levels\": [${sf.levels.joinToString(",") { "\"${it.key}\"" }}],")
-            appendLine("    \"mode\": \"${sf.mode.name}\",")
-            appendLine("    \"activeTags\": [${sf.activeTags.joinToString(",") { it.jsonStr() }}],")
-            appendLine("    \"excludeTags\": [${sf.excludeTags.joinToString(",") { it.jsonStr() }}],")
-            appendLine("    \"kwText\": ${sf.kwText.jsonStr()},")
-            appendLine("    \"kwRegex\": ${sf.kwRegex},")
-            appendLine("    \"kwHighlightEnabled\": ${sf.kwHighlightEnabled},")
-            appendLine("    \"kwHighlightColor\": ${sf.kwHighlightColor.value.toString().jsonStr()},")
-            appendLine("    \"excludeKw\": ${sf.excludeKw.jsonStr()},")
-            appendLine("    \"excludeKwRegex\": ${sf.excludeKwRegex},")
-            appendLine(
-                "    \"highlighters\": [${
-                    sf.highlighters.joinToString(",") {
-                        it.highlighterToken().jsonStr()
-                    }
-                }],"
-            )
-            appendLine("    \"seqOn\": ${sf.seqOn},")
-            appendLine("    \"kwInTag\": ${sf.kwInTag.jsonStr()},")
-            appendLine("    \"kwInTagRegex\": ${sf.kwInTagRegex},")
-            appendLine("    \"pkgPrefixes\": [${sf.pkgPrefixes.joinToString(",") { it.jsonStr() }}],")
-            appendLine("    \"excludePkgPrefixes\": [${sf.excludePkgPrefixes.joinToString(",") { it.jsonStr() }}],")
-            appendLine("    \"pidTidFilter\": ${sf.pidTidFilter.jsonStr()},")
-            appendLine("    \"sequences\": [${sf.sequences.joinToString(",") { it.sequenceToken().jsonStr() }}],")
-            appendLine(
-                "    \"messageRules\": [${
-                    sf.messageRules.joinToString(",") {
-                        it.messageRuleToken().jsonStr()
-                    }
-                }]"
-            )
-            append("  }")
-            if (i < filters.lastIndex) appendLine(",") else appendLine()
-        }
-        append("]")
-    }
-
     fun importFilters(json: String) {
         val imported = decodeFilters(json).getOrElse { return }
         if (imported.isEmpty()) return
@@ -1245,7 +1202,7 @@ class AppState(
             pendingImportReview = null
             return
         }
-        val rows = buildImportRows(imported)
+        val rows = buildImportRows(savedFilters, imported)
         pendingImportReview = PendingImportReview(rows, sourceName)
         importError = null
     }
@@ -1257,14 +1214,14 @@ class AppState(
     fun setImportFilterAction(rowId: String, action: ImportFilterAction) {
         val review = pendingImportReview ?: return
         pendingImportReview = review.copy(rows = review.rows.map { row ->
-            if (row.rowId != rowId) row else row.withImportAction(action)
+            if (row.rowId != rowId) row else row.withImportAction(savedFilters, action)
         })
     }
 
     fun setImportFilterRename(rowId: String, name: String) {
         val review = pendingImportReview ?: return
         pendingImportReview = review.copy(rows = review.rows.map { row ->
-            if (row.rowId != rowId) row else row.copy(action = ImportFilterAction.RENAME, resolvedName = uniqueFilterName(name, row.targetId))
+            if (row.rowId != rowId) row else row.copy(action = ImportFilterAction.RENAME, resolvedName = uniqueFilterName(savedFilters, name, row.targetId))
         })
     }
 
@@ -1275,7 +1232,7 @@ class AppState(
         review.rows.forEach { row ->
             when (row.action) {
                 ImportFilterAction.ADD, ImportFilterAction.RENAME -> {
-                    next = next + row.incoming.copy(id = freshSavedFilterId(), name = uniqueNameAgainst(row.resolvedName, next))
+                    next = next + row.incoming.copy(id = freshSavedFilterId(savedFilters), name = uniqueNameAgainst(row.resolvedName, next))
                     changed = true
                 }
 
@@ -1294,120 +1251,6 @@ class AppState(
         pendingImportReview = null
         if (changed) writeFilterBackup()
     }
-
-    private fun decodeFilters(json: String): Result<List<SavedFilter>> = runCatching {
-        val entries = json.jsonObjectArray().getOrThrow()
-        entries.mapNotNull { obj ->
-            val name = obj.stringField("name") ?: return@mapNotNull null
-            val id = obj.stringField("id")?.takeIf { it.isNotBlank() } ?: "sf${System.currentTimeMillis()}_${name.hashCode()}"
-            val levels =
-                obj.stringArrayField("levels").mapNotNull { c -> LogLevel.entries.find { it.key.toString() == c } }
-                    .toSet()
-            val mode =
-                runCatching { FilterMode.valueOf(obj.stringField("mode") ?: "TAGS") }.getOrElse { FilterMode.TAGS }
-            val activeTags = obj.stringArrayField("activeTags").toSet()
-            val excludeTags = obj.stringArrayField("excludeTags").toSet()
-            val kwText = obj.stringField("kwText") ?: ""
-            val kwRegex = obj.booleanField("kwRegex")
-            val kwHighlightEnabled = obj["kwHighlightEnabled"] != false
-            val kwHighlightColor = obj.stringField("kwHighlightColor")
-                ?.toULongOrNull()
-                ?.let(::Color)
-                ?: DEFAULT_KEYWORD_HIGHLIGHT_COLOR
-            val excludeKw = obj.stringField("excludeKw") ?: ""
-            val excludeKwRegex = obj.booleanField("excludeKwRegex")
-            val highlighters = obj.stringArrayField("highlighters").mapNotNull { it.highlighterFromToken() }
-            val seqOn = obj["seqOn"] != false
-            val kwInTag = obj.stringField("kwInTag") ?: ""
-            val kwInTagRegex = obj.booleanField("kwInTagRegex")
-            val pkgPrefixes = obj.stringArrayField("pkgPrefixes").toSet()
-            val excludePkgPrefixes = obj.stringArrayField("excludePkgPrefixes").toSet()
-            val pidTidFilter = obj.stringField("pidTidFilter") ?: ""
-            val sequences = obj.stringArrayField("sequences").mapNotNull { it.sequenceFromToken() }
-            val messageRules = obj.stringArrayField("messageRules").mapNotNull { it.messageRuleFromToken() }
-            SavedFilter(
-                id, name,
-                levels.ifEmpty { LogLevel.entries.toSet() }, activeTags, kwText, kwRegex, mode,
-                excludeTags, excludeKw, excludeKwRegex, highlighters, seqOn,
-                kwInTag, kwInTagRegex, pkgPrefixes, pidTidFilter, sequences, messageRules,
-                excludePkgPrefixes, kwHighlightEnabled, kwHighlightColor,
-            )
-        }
-    }
-
-    private fun buildImportRows(imported: List<SavedFilter>): List<ImportFilterReviewRow> {
-        var usedNames = savedFilters.map { it.name.normalizedFilterName() }.toMutableSet()
-        return imported.mapIndexed { idx, incoming ->
-            val existing = savedFilters.firstOrNull { it.name.normalizedFilterName() == incoming.name.normalizedFilterName() }
-            val rowId = "import_${System.nanoTime()}_$idx"
-            when {
-                existing != null && existing.sameFilterPayloadAs(incoming) ->
-                    ImportFilterReviewRow(
-                        rowId = rowId,
-                        incoming = incoming,
-                        action = ImportFilterAction.SKIP,
-                        resolvedName = existing.name,
-                        targetId = existing.id,
-                        skippedReason = "identical",
-                    )
-
-                existing != null -> {
-                    val renamed = uniqueName(incoming.name + " (imported)", usedNames)
-                    usedNames += renamed.normalizedFilterName()
-                    ImportFilterReviewRow(
-                        rowId = rowId,
-                        incoming = incoming,
-                        action = ImportFilterAction.RENAME,
-                        resolvedName = renamed,
-                        targetId = existing.id,
-                    )
-                }
-
-                else -> {
-                    val name = uniqueName(incoming.name, usedNames)
-                    usedNames += name.normalizedFilterName()
-                    ImportFilterReviewRow(
-                        rowId = rowId,
-                        incoming = incoming,
-                        action = ImportFilterAction.ADD,
-                        resolvedName = name,
-                    )
-                }
-            }
-        }
-    }
-
-    private fun ImportFilterReviewRow.withImportAction(action: ImportFilterAction): ImportFilterReviewRow =
-        when (action) {
-            ImportFilterAction.REPLACE -> if (targetId != null) copy(action = action) else this
-            ImportFilterAction.SKIP -> copy(action = action)
-            ImportFilterAction.RENAME -> copy(action = action, resolvedName = uniqueFilterName(incoming.name + " (imported)", targetId))
-            ImportFilterAction.ADD -> if (targetId == null) copy(action = action) else this
-        }
-
-    private fun uniqueFilterName(baseName: String, targetId: String? = null): String {
-        val used = savedFilters
-            .filter { it.id != targetId }
-            .map { it.name.normalizedFilterName() }
-            .toMutableSet()
-        return uniqueName(baseName.trim().ifBlank { "Imported filter" }, used)
-    }
-
-    private fun uniqueNameAgainst(baseName: String, filters: List<SavedFilter>): String =
-        uniqueName(baseName.trim().ifBlank { "Imported filter" }, filters.map { it.name.normalizedFilterName() }.toMutableSet())
-
-    private fun uniqueName(baseName: String, usedNormalizedNames: MutableSet<String>): String {
-        val cleanBase = baseName.trim().ifBlank { "Imported filter" }
-        if (cleanBase.normalizedFilterName() !in usedNormalizedNames) return cleanBase
-        var idx = 2
-        while (true) {
-            val candidate = "$cleanBase $idx"
-            if (candidate.normalizedFilterName() !in usedNormalizedNames) return candidate
-            idx += 1
-        }
-    }
-
-    private fun freshSavedFilterId(): String = "sf${System.nanoTime()}_${savedFilters.size}"
 
     private fun writeFilterBackup() {
         if (!settings.autoSaveFilters) return
@@ -2924,7 +2767,7 @@ class AppState(
 }
 
 // ── JSON helpers (small reader for exported filter files) ─────────────
-private fun String.jsonStr(): String = buildString {
+internal fun String.jsonStr(): String = buildString {
     append('"')
     this@jsonStr.forEach { ch ->
         when (ch) {
@@ -2940,14 +2783,14 @@ private fun String.jsonStr(): String = buildString {
     append('"')
 }
 
-private fun Map<String, Any?>.stringField(key: String): String? = this[key] as? String
+internal fun Map<String, Any?>.stringField(key: String): String? = this[key] as? String
 
-private fun Map<String, Any?>.booleanField(key: String): Boolean = this[key] == true
+internal fun Map<String, Any?>.booleanField(key: String): Boolean = this[key] == true
 
-private fun Map<String, Any?>.stringArrayField(key: String): List<String> =
+internal fun Map<String, Any?>.stringArrayField(key: String): List<String> =
     (this[key] as? List<*>)?.filterIsInstance<String>() ?: emptyList()
 
-private fun String.jsonObjectArray(): Result<List<Map<String, Any?>>> =
+internal fun String.jsonObjectArray(): Result<List<Map<String, Any?>>> =
     runCatching { JsonReader(this).readObjectArray() }
 
 private class JsonReader(private val text: String) {
@@ -3110,7 +2953,7 @@ private class JsonReader(private val text: String) {
     }
 }
 
-private fun SequenceDef.sequenceToken(): String =
+internal fun SequenceDef.sequenceToken(): String =
     listOf(
         id,
         matchText,
@@ -3124,7 +2967,7 @@ private fun SequenceDef.sequenceToken(): String =
         endTag.orEmpty(),
     ).joinToString("|") { it.b64() }
 
-private fun String.sequenceFromToken(): SequenceDef? = runCatching {
+internal fun String.sequenceFromToken(): SequenceDef? = runCatching {
     val parts = split("|").map { it.unb64() }
     if (parts.size < 10) return@runCatching null
     SequenceDef(
@@ -3141,7 +2984,7 @@ private fun String.sequenceFromToken(): SequenceDef? = runCatching {
     )
 }.getOrNull()
 
-private fun MessageRule.messageRuleToken(): String =
+internal fun MessageRule.messageRuleToken(): String =
     listOf(
         id,
         include.toString(),
@@ -3154,7 +2997,7 @@ private fun MessageRule.messageRuleToken(): String =
         mode.name,
     ).joinToString("|") { it.b64() }
 
-private fun String.messageRuleFromToken(): MessageRule? = runCatching {
+internal fun String.messageRuleFromToken(): MessageRule? = runCatching {
     val parts = split("|").map { it.unb64() }
     if (parts.size < 7) return@runCatching null
     MessageRule(
@@ -3337,7 +3180,7 @@ private fun activeFilterMapFromToken(token: String): Map<String, String> =
         if (p.size >= 2) p[0] to p[1] else null
     }.toMap()
 
-private fun Highlighter.highlighterToken(): String = tokenFields(
+internal fun Highlighter.highlighterToken(): String = tokenFields(
     id,
     pattern,
     regex.toString(),
@@ -3345,7 +3188,7 @@ private fun Highlighter.highlighterToken(): String = tokenFields(
     on.toString(),
 )
 
-private fun String.highlighterFromToken(): Highlighter? = runCatching {
+internal fun String.highlighterFromToken(): Highlighter? = runCatching {
     val p = tokenFields()
     if (p.size < 5) return@runCatching null
     Highlighter(
@@ -3431,11 +3274,6 @@ private fun SavedFilter.toFilter(): Filter = Filter(
     pidTidFilter = pidTidFilter,
     sequences = sequences,
 )
-
-private fun String.normalizedFilterName(): String = trim().lowercase()
-
-private fun SavedFilter.sameFilterPayloadAs(other: SavedFilter): Boolean =
-    copy(id = "", name = "") == other.copy(id = "", name = "")
 
 private fun String.encodedList(): List<String> =
     if (isBlank()) emptyList() else split(",").filter { it.isNotBlank() }.map { it.unb64() }
