@@ -21,11 +21,14 @@ import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.ApplicationCallPipeline
+import io.ktor.server.application.call
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.cors.routing.CORS
+import io.ktor.server.request.header
 import io.ktor.server.request.receiveText
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.RoutingContext
@@ -59,6 +62,8 @@ import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.io.File
+import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 
 private const val DEFAULT_VISIBLE_LIMIT = 200
@@ -112,6 +117,68 @@ private const val CLIENT_ID_HEADER = "X-OpenLog-Client-Id"
 private const val CLIENT_NAME_HEADER = "X-OpenLog-Client-Name"
 private const val DEFAULT_CLIENT_NAME = "MCP client"
 
+// Every request (REST and native MCP alike) must present this exact token, or the server is
+// reachable by any local process/web page that can hit 127.0.0.1:<port> — see the "intercept"
+// block in start() below. Same shape as SingleInstance's per-launch token (SingleInstance.kt:
+// generateToken): 128 bits of SecureRandom. AppState's real usage persists this across restarts
+// via loadOrCreateControlToken() below, so the user doesn't have to re-copy the MCP client config
+// on every launch; a bare `ControlServer(appState, port)` (as most tests construct it) still gets
+// a fresh in-memory-only token with no disk I/O, via the constructor default.
+private const val AUTH_HEADER = "Authorization"
+private const val AUTH_SCHEME_PREFIX = "Bearer "
+private val LOOPBACK_HOSTNAMES = setOf("127.0.0.1", "localhost", "[::1]", "::1")
+private const val TOKEN_HEX_LENGTH = 32 // 16 bytes, hex-encoded
+
+private fun generateAuthToken(): String {
+    val bytes = ByteArray(16)
+    SecureRandom().nextBytes(bytes)
+    return bytes.joinToString("") { "%02x".format(it) }
+}
+
+// Reuses the token already on disk if it looks like one of ours; otherwise generates and persists
+// a fresh one. Mirrors SingleInstance's port-file handling: written with owner-only permissions
+// (best-effort — java.nio's POSIX permission API throws on Windows, which has no such model, so
+// the whole write is wrapped in runCatching the same way SingleInstance.restrictToOwner is). If the
+// write fails (read-only filesystem, permissions issue), the freshly generated token is still
+// returned and used for this run — degrading to "not persisted this time," never to a crash or an
+// unauthenticated server.
+fun loadOrCreateControlToken(file: File): String {
+    val existing = runCatching { file.takeIf { it.isFile }?.readText()?.trim() }.getOrNull()
+    if (existing != null && existing.length == TOKEN_HEX_LENGTH && existing.all { it in '0'..'9' || it in 'a'..'f' }) {
+        return existing
+    }
+    return regenerateControlToken(file)
+}
+
+// Always generates and persists a brand-new token, discarding whatever was there before — backs the
+// Settings "Regenerate token" action, so a user who suspects the token leaked (or just wants to
+// invalidate every previously-copied MCP client config) can force a clean credential on demand.
+// loadOrCreateControlToken's "no valid token yet" branch delegates here so the two never drift on
+// how a token is written/permissioned.
+fun regenerateControlToken(file: File): String {
+    val fresh = generateAuthToken()
+    runCatching {
+        file.parentFile?.mkdirs()
+        file.writeText(fresh)
+        java.nio.file.Files.setPosixFilePermissions(
+            file.toPath(),
+            setOf(java.nio.file.attribute.PosixFilePermission.OWNER_READ, java.nio.file.attribute.PosixFilePermission.OWNER_WRITE),
+        )
+    }
+    return fresh
+}
+
+// Constant-time comparison so response timing can't be used to guess the token byte-by-byte —
+// cheap insurance for a check that runs on every request.
+private fun constantTimeEquals(a: String, b: String): Boolean =
+    MessageDigest.isEqual(a.toByteArray(Charsets.UTF_8), b.toByteArray(Charsets.UTF_8))
+
+// Every open/read/export route takes an absolute filesystem path from an already-authenticated
+// caller by design (this tool's whole purpose is opening arbitrary local log files), so there is
+// no "approved root" to enforce path traversal against. The one defensive check worth making is
+// rejecting an embedded NUL, which some OS/JDK path APIs silently truncate at rather than reject.
+private fun invalidPath(path: String): Boolean = path.isBlank() || path.any { it.code == 0 }
+
 // Unlike REST clients (stateless HTTP, staleness is just "stop displaying"), an MCP session is a
 // live transport connection with nothing to time it out on its own — a client that vanishes
 // without a clean shutdown (killed process, closed chat the client library doesn't tear down)
@@ -154,6 +221,13 @@ class ControlServer(
     private val port: Int,
     private val mcpReapIntervalMs: Long = MCP_SESSION_REAP_INTERVAL_MS,
     private val mcpPingTimeoutMs: Long = MCP_SESSION_PING_TIMEOUT_MS,
+    // Credential every caller (REST or native MCP) must present via `Authorization: Bearer
+    // <token>` — see start()'s intercept. Public so the Settings UI can hand it to
+    // mcpConfigSnippet()/the curl escape hatch, and so tests can authenticate their requests.
+    // Defaults to a fresh in-memory-only token (no disk I/O) so every existing/plain
+    // `ControlServer(appState, port)` construction — mainly tests — is unaffected. AppState's real
+    // usage passes an explicit token loaded via loadOrCreateControlToken() so it survives restarts.
+    val token: String = generateAuthToken(),
 ) {
     private var engine: EmbeddedServer<*, *>? = null
     private var mcpServer: Server? = null
@@ -232,8 +306,34 @@ class ControlServer(
             // Native MCP over Streamable HTTP at /mcp — what LM Studio, Claude Code, and Codex
             // connect to by URL with nothing to install. Same shared server for every connection;
             // its tools are stateless (they read live appState).
-            mcpStreamableHttp { mcp }
-            routing { registerRestRoutes() }
+            // Runs for every real request (REST and /mcp alike) but never for the CORS plugin's own
+            // OPTIONS preflight handling, which completes at the Plugins phase above before routing
+            // is reached — browsers can still preflight without a token, exactly as required, while
+            // every actual request is rejected before any route/tool logic runs. Host is checked
+            // first and fails closed even for a well-formed token reached via DNS rebinding.
+            routing {
+                intercept(ApplicationCallPipeline.Call) {
+                    val host = call.request.header("Host")?.substringBefore(":")?.lowercase()
+                    if (host !in LOOPBACK_HOSTNAMES) {
+                        call.respondText("{\"error\":\"forbidden\"}", io.ktor.http.ContentType.Application.Json, HttpStatusCode.Forbidden)
+                        finish()
+                        return@intercept
+                    }
+                    // takeIf, not removePrefix alone: removePrefix is a no-op (not a rejection) on a
+                    // header that lacks the "Bearer " scheme, which would let a bare raw-token header
+                    // slip through unchanged and still compare equal.
+                    val provided = call.request.header(AUTH_HEADER)
+                        ?.takeIf { it.startsWith(AUTH_SCHEME_PREFIX) }
+                        ?.removePrefix(AUTH_SCHEME_PREFIX)
+                    if (provided == null || !constantTimeEquals(provided, token)) {
+                        call.respondText("{\"error\":\"unauthorized\"}", io.ktor.http.ContentType.Application.Json, HttpStatusCode.Unauthorized)
+                        finish()
+                        return@intercept
+                    }
+                }
+                mcpStreamableHttp { mcp }
+                registerRestRoutes()
+            }
             // Application is itself a CoroutineScope tied to the server's lifecycle, so this loop
             // is cancelled for free when stop() calls engine.stop() — no separate Job to track.
             reapStaleMcpSessions(mcp)
@@ -382,7 +482,7 @@ class ControlServer(
         postfix: String,
         partCount: Int?,
     ): Map<String, Any?> {
-        if (path.isBlank()) return mapOf("error" to "missing path")
+        if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
         val file = File(path)
         if (!file.exists()) return mapOf("error" to "file not found: $path")
         if (isSupportedArchiveFile(file)) return openZipRoute(file, entryPath, splitMode, destinationDir, postfix, partCount)
@@ -451,7 +551,7 @@ class ControlServer(
         postfix: String,
         partCount: Int?,
     ): Map<String, Any?> {
-        if (path.isBlank()) return mapOf("error" to "missing path")
+        if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
         val source = appState.splitSourceForPath(path, entryPath) ?: return mapOf("error" to "source not found: $path")
         val destination = destinationDir?.takeIf { it.isNotBlank() }?.let(::File) ?: appState.defaultSplitDestination(source)
         val count = (partCount ?: appState.defaultSplitPartCount(source)).coerceAtLeast(1)
@@ -472,7 +572,7 @@ class ControlServer(
     }
 
     private fun splitPreviewRoute(path: String, entryPath: String?): Map<String, Any?> {
-        if (path.isBlank()) return mapOf("error" to "missing path")
+        if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
         val source = appState.splitSourceForPath(path, entryPath) ?: return mapOf("error" to "source not found: $path")
         return splitSourceToMap(source)
     }
@@ -783,25 +883,25 @@ class ControlServer(
     }
 
     private fun saveAnnotationsRoute(tabId: String, path: String): Map<String, Any?> {
-        if (path.isBlank()) return mapOf("error" to "missing path")
+        if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
         val ok = appState.saveAnnotationsTo(tabId, File(path))
         return if (ok) mapOf("ok" to true, "path" to path) else mapOf("error" to "annotations were not saved")
     }
 
     private fun loadAnnotationsRoute(tabId: String, path: String): Map<String, Any?> {
-        if (path.isBlank()) return mapOf("error" to "missing path")
+        if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
         val ok = appState.loadAnnotationsFrom(tabId, File(path))
         return if (ok) mapOf("ok" to true, "path" to path) else mapOf("error" to "annotations were not loaded")
     }
 
     private fun exportAnalysisRoute(tabId: String, path: String): Map<String, Any?> {
-        if (path.isBlank()) return mapOf("error" to "missing path")
+        if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
         val ok = appState.exportAnalysisTo(tabId, File(path))
         return if (ok) mapOf("ok" to true, "path" to path) else mapOf("error" to "analysis was not exported")
     }
 
     private fun exportFilteredRoute(tabId: String, path: String, format: String): Map<String, Any?> {
-        if (path.isBlank()) return mapOf("error" to "missing path")
+        if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
         val csv = format.equals("csv", ignoreCase = true)
         val ok = appState.exportFilteredTo(tabId, File(path), csv)
         return if (ok) mapOf("ok" to true, "path" to path, "format" to if (csv) "csv" else "txt")

@@ -42,23 +42,24 @@ class ControlServerMcpTest {
         state.close()
     }
 
-    private fun mcp(json: String, sessionId: String? = null, port: Int = server.boundPort): HttpResponse<String> {
+    private fun mcp(json: String, sessionId: String? = null, port: Int = server.boundPort, token: String = server.token): HttpResponse<String> {
         var b = HttpRequest.newBuilder(URI.create("http://127.0.0.1:$port/mcp"))
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream")
+            .header("Authorization", "Bearer $token")
             .POST(HttpRequest.BodyPublishers.ofString(json))
         if (sessionId != null) b = b.header("Mcp-Session-Id", sessionId)
         return client.send(b.build(), HttpResponse.BodyHandlers.ofString())
     }
 
-    private fun initSession(port: Int = server.boundPort): String {
-        val init = mcp(INITIALIZE_REQUEST, port = port)
+    private fun initSession(port: Int = server.boundPort, token: String = server.token): String {
+        val init = mcp(INITIALIZE_REQUEST, port = port, token = token)
         assertTrue(init.statusCode() in 200..299, "initialize failed: ${init.statusCode()} ${init.body()}")
         val session = init.headers().firstValue("mcp-session-id")
             .orElseThrow { AssertionError("no Mcp-Session-Id:\n${init.body()}") }
         // Real MCP clients must send notifications/initialized before issuing requests; skipping it
         // leaves the server in a pre-ready state where tool calls behave inconsistently.
-        mcp("""{"jsonrpc":"2.0","method":"notifications/initialized"}""", session, port = port)
+        mcp("""{"jsonrpc":"2.0","method":"notifications/initialized"}""", session, port = port, token = token)
         return session
     }
 
@@ -188,7 +189,7 @@ class ControlServerMcpTest {
         val reaping = ControlServer(state, 0, mcpReapIntervalMs = 30, mcpPingTimeoutMs = 200)
         reaping.start()
         try {
-            initSession(port = reaping.boundPort)
+            initSession(port = reaping.boundPort, token = reaping.token)
             assertEquals(1, reaping.mcpSessions().size)
 
             waitUntil(timeoutMs = 5_000) { reaping.mcpSessions().isEmpty() }
@@ -203,5 +204,24 @@ class ControlServerMcpTest {
             if (System.currentTimeMillis() > deadline) error("condition not met within ${timeoutMs}ms")
             Thread.sleep(10)
         }
+    }
+
+    @Test
+    fun mcpEndpointRejectsInitializeWithoutToken() {
+        // Proves the auth gate covers the native MCP transport too, not just the REST routes —
+        // ControlServerTest covers the REST side.
+        val req = HttpRequest.newBuilder(URI.create("http://127.0.0.1:${server.boundPort}/mcp"))
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .POST(HttpRequest.BodyPublishers.ofString(INITIALIZE_REQUEST))
+            .build()
+        val resp = client.send(req, HttpResponse.BodyHandlers.ofString())
+        assertEquals(401, resp.statusCode())
+    }
+
+    @Test
+    fun mcpEndpointRejectsInitializeWithWrongToken() {
+        val resp = mcp(INITIALIZE_REQUEST, token = "not-the-real-token")
+        assertEquals(401, resp.statusCode())
     }
 }

@@ -3,9 +3,13 @@ package com.openlog.ui
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
 import com.openlog.debug.ControlServer
+import com.openlog.debug.loadOrCreateControlToken
+import com.openlog.debug.regenerateControlToken
 import com.openlog.model.*
+import com.openlog.utils.ArchiveBudgetExceededException
 import com.openlog.utils.EntryIdMap
 import com.openlog.utils.FileTailer
+import com.openlog.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.openlog.utils.MergeSourceFile
 import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.ZipLogCandidate
@@ -222,6 +226,22 @@ class AppState(
     private val archiveCacheDir: File = DesktopStorage.archiveCacheDir(),
     private val filterBackupsDir: File? = null,
     private val autoExportNotes: Boolean = true,
+    // Test seam for the S-03 archive extraction budget (openZipEntry): production uses the real
+    // 500MB default so tests can exercise the ArchiveBudgetExceededException/showOpenError path
+    // with small fixtures instead of needing multi-hundred-MB archives.
+    private val archiveEntryByteBudget: Long = MAX_ARCHIVE_ENTRY_BYTES,
+    // Where the control-server auth token is persisted across restarts (loadOrCreateControlToken)
+    // so the user doesn't have to re-copy the MCP client config after every launch. Injectable so
+    // tests that actually start a control server via the default factory below don't touch the
+    // real ~/.openlog2 — same reasoning as autosaveFile.
+    private val controlTokenFile: File = DesktopStorage.controlTokenFile(),
+    // Test seam for the S-02 lifecycle race (applyControlServerState): production always
+    // constructs-and-starts a real ControlServer synchronously; tests can substitute a slower
+    // suspend factory (e.g. one that delays before starting) to exercise enable/disable ordering
+    // without needing a fake ControlServer subclass.
+    private val controlServerFactory: suspend (AppState, Int) -> ControlServer = { s, p ->
+        ControlServer(s, p, token = loadOrCreateControlToken(controlTokenFile)).also { it.start() }
+    },
 ) {
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
@@ -273,6 +293,16 @@ class AppState(
     // MCP/debug control server (see debug/ControlServer.kt) — same "private resource handle,
     // guarded start, idempotent stop" shape as activeTails above.
     private var controlServer: ControlServer? = null
+
+    // Guards applyControlServerState's async enable path (S-02): every call — enable or disable —
+    // bumps this before doing anything else, so a start that was already in flight becomes provably
+    // stale. Its completion handler only publishes/keeps the server if the generation it captured is
+    // still current; otherwise it stops the now-unwanted server itself. controlServerStartJob is
+    // tracked purely so stopControlServerForShutdown() can cancel a still-binding start rather than
+    // let it complete after shutdown began — the generation check is what actually prevents a stale
+    // publish even if cancellation doesn't interrupt a synchronous bind in progress.
+    private var controlServerStartGeneration = 0
+    private var controlServerStartJob: Job? = null
 
     // ── Sequences (per-tab, stored in Filter) ────────────────────────
     var sequences: List<SequenceDef>
@@ -419,11 +449,24 @@ class AppState(
             running?.stop()
             controlServer = null
             mcpControlError = null
-            ioScope.launch {
-                val started = runCatching { ControlServer(this@AppState, port).also { it.start() } }
+            val myGeneration = ++controlServerStartGeneration
+            controlServerStartJob = ioScope.launch {
+                val started = runCatching { controlServerFactory(this@AppState, port) }
                 started.fold(
-                    onSuccess = { controlServer = it; mcpControlError = null },
+                    onSuccess = { server ->
+                        // A later enable/disable call already bumped the generation while this bind
+                        // was in flight — this start lost the race, so publishing it now would
+                        // resurrect a server the caller believes is stopped or superseded. Close it
+                        // instead of leaking a live listener nobody references anymore.
+                        if (myGeneration == controlServerStartGeneration) {
+                            controlServer = server
+                            mcpControlError = null
+                        } else {
+                            server.stop()
+                        }
+                    },
                     onFailure = { error ->
+                        if (myGeneration != controlServerStartGeneration) return@fold
                         mcpControlError = "Could not start automation server on port $port: " +
                             (error.message ?: error::class.simpleName.orEmpty().ifBlank { "unknown error" })
                         // Only the persisted (Settings-toggle) path needs undoing — the ephemeral
@@ -437,6 +480,9 @@ class AppState(
                 )
             }
         } else {
+            controlServerStartGeneration++ // invalidate any start still in flight from a prior enable
+            controlServerStartJob?.cancel()
+            controlServerStartJob = null
             controlServer?.stop()
             controlServer = null
         }
@@ -476,6 +522,25 @@ class AppState(
     fun mcpSessions() = controlServer?.mcpSessions() ?: emptyList()
 
     fun disconnectMcpSession(id: String) = controlServer?.disconnectMcpSession(id)
+
+    // Null while the server isn't running (including mid-start) — the Connection Info dialog only
+    // has something to show once this is non-null.
+    fun controlServerToken(): String? = controlServer?.token
+
+    // Settings "Regenerate token" action: writes a brand-new persisted token (invalidating every
+    // previously-copied MCP client config), then restarts the live server so it actually starts
+    // enforcing the new token immediately — otherwise the old one would stay valid until the next
+    // natural restart, defeating the point of a user-triggered rotation. A plain re-enable on the
+    // same port is a no-op in applyControlServerState (it already treats "same port, already bound"
+    // as nothing to do), so this disables first to force the restart through.
+    fun rotateControlToken() {
+        regenerateControlToken(controlTokenFile)
+        if (controlServer != null) {
+            val port = settings.mcpControlPort
+            applyControlServerState(enabled = false, port = 0)
+            applyControlServerState(enabled = true, port = port)
+        }
+    }
 
     fun startPendingRestoredTabLoads() {
         val loads = synchronized(stateLock) {
@@ -2358,7 +2423,21 @@ class AppState(
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
             var published = false
             try {
-                val logData = runCatching { extractCandidate(zipFile, candidate) }.getOrElse { emptyList() }
+                val logData = runCatching { extractCandidate(zipFile, candidate, archiveEntryByteBudget) }.getOrElse { error ->
+                    // A budget breach (S-03: bounded archive extraction) is a real, actionable
+                    // failure — surface it instead of silently opening an empty tab, which used to
+                    // look indistinguishable from "this entry legitimately has nothing in it."
+                    // Every other extraction failure keeps the prior silent-empty-tab behavior.
+                    if (error is ArchiveBudgetExceededException) {
+                        showOpenError(
+                            title = "Archive entry too large to open",
+                            path = path,
+                            message = error.message ?: "This entry exceeded the extraction safety limit.",
+                        )
+                        return@launch
+                    }
+                    emptyList()
+                }
                 ensureActive()
                 val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
                 // Archive-sourced tabs always get an archive-qualified prefix ("archive.zip/entry/

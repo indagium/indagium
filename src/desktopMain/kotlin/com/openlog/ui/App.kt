@@ -1457,9 +1457,14 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
             }
 
             // ── MCP connection info dialog ────────────────────────────
+            // Only openable while the server is actually running (see the menu/settings entry point
+            // that sets mcpInfoOpen), so a token is always available here.
             if (state.mcpInfoOpen) {
-                Dialog(onDismissRequest = { state.mcpInfoOpen = false }) {
-                    McpInfoDialog(state = state, port = state.settings.mcpControlPort) { state.mcpInfoOpen = false }
+                val token = state.controlServerToken()
+                if (token != null) {
+                    Dialog(onDismissRequest = { state.mcpInfoOpen = false }) {
+                        McpInfoDialog(state = state, port = state.settings.mcpControlPort, token = token) { state.mcpInfoOpen = false }
+                    }
                 }
             }
         }
@@ -3285,13 +3290,18 @@ private fun SettingsSectionHeader(title: String) {
 // dev-only path — and there user.dir is whatever the OS handed the launched app (often "/" for a
 // openLog serves MCP natively over Streamable HTTP at /mcp — any MCP client (LM Studio, Claude
 // Code, Codex) connects with just this URL, no Node bridge / npm / repo checkout to install. The
-// snippet is the standard mcpServers-with-url form those clients accept.
-internal fun mcpConfigSnippet(port: Int): String =
+// snippet is the standard mcpServers-with-url form those clients accept. `token` is required on
+// every request (see debug/ControlServer.kt's start()); it rides along as a `headers` block the
+// same way any bearer-token MCP server config does, so "paste this JSON" keeps working end to end.
+internal fun mcpConfigSnippet(port: Int, token: String): String =
     """
     {
       "mcpServers": {
         "openlog-control": {
-          "url": "${mcpUrl(port)}"
+          "url": "${mcpUrl(port)}",
+          "headers": {
+            "Authorization": "Bearer $token"
+          }
         }
       }
     }
@@ -3299,7 +3309,8 @@ internal fun mcpConfigSnippet(port: Int): String =
 
 internal fun mcpUrl(port: Int): String = "http://127.0.0.1:$port/mcp"
 
-private fun mcpCurlCommand(port: Int): String = "curl http://127.0.0.1:$port/tabs"
+private fun mcpCurlCommand(port: Int, token: String): String =
+    "curl -H \"Authorization: Bearer $token\" http://127.0.0.1:$port/tabs"
 
 private const val COPIED_FEEDBACK_MS = 1500L
 private const val CLIENT_POLL_INTERVAL_MS = 1500L
@@ -3324,7 +3335,7 @@ private enum class McpCopiedField {
 }
 
 @Composable
-private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
+private fun McpInfoDialog(state: AppState, port: Int, token: String, onDismiss: () -> Unit) {
     val tc = tc()
     var copiedField by remember { mutableStateOf<McpCopiedField?>(null) }
     LaunchedEffect(copiedField) {
@@ -3335,10 +3346,15 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
     }
     var clients by remember { mutableStateOf<List<ConnectedClientInfo>>(state.connectedMcpClients()) }
     var mcpSessions by remember { mutableStateOf<List<McpSessionInfo>>(state.mcpSessions()) }
+    // controlServer is a plain (non-Compose-observed) field, so a rotateControlToken() call
+    // wouldn't otherwise be reflected here until some unrelated recomposition happened to re-read
+    // the `token` param — piggyback the same poll loop that already refreshes clients/sessions.
+    var liveToken by remember { mutableStateOf(token) }
     LaunchedEffect(Unit) {
         while (true) {
             clients = state.connectedMcpClients()
             mcpSessions = state.mcpSessions()
+            state.controlServerToken()?.let { liveToken = it }
             kotlinx.coroutines.delay(CLIENT_POLL_INTERVAL_MS)
         }
     }
@@ -3369,7 +3385,7 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
             AppButton(
                 "Copy config for your MCP client",
                 onClick = {
-                    state.copyToClipboard(mcpConfigSnippet(port))
+                    state.copyToClipboard(mcpConfigSnippet(port, liveToken))
                     copiedField = McpCopiedField.Config
                 },
             )
@@ -3396,13 +3412,28 @@ private fun McpInfoDialog(state: AppState, port: Int, onDismiss: () -> Unit) {
         )
         Spacer(Modifier.height(8.dp))
         CopyableCodeField(
-            text = mcpCurlCommand(port),
+            text = mcpCurlCommand(port, liveToken),
             copied = copiedField == McpCopiedField.CurlCommand,
             onCopy = {
-                state.copyToClipboard(mcpCurlCommand(port))
+                state.copyToClipboard(mcpCurlCommand(port, liveToken))
                 copiedField = McpCopiedField.CurlCommand
             },
         )
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AppButton(
+                "Regenerate token",
+                isDanger = true,
+                onClick = { state.rotateControlToken() },
+            )
+            Spacer(Modifier.width(8.dp))
+            AppText(
+                "Invalidates every client config copied so far — you'll need to re-copy it after this.",
+                color = tc.td,
+                fontSize = 10.sp,
+                maxLines = 2,
+            )
+        }
         Spacer(Modifier.height(18.dp))
         AppText("Connected clients", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(6.dp))

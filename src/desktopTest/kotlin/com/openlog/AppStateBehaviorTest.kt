@@ -37,6 +37,7 @@ import com.openlog.ui.themeColors
 import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
+import kotlinx.coroutines.delay
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.concurrent.CountDownLatch
@@ -46,6 +47,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -1518,6 +1520,27 @@ class AppStateBehaviorTest {
         waitUntil { state.tabs.size == 1 && !state.isLoading }
 
         assertEquals("From bugreport.zip/FS/data/anr/main_log.txt", state.tabs.single().annotations.prefix)
+    }
+
+    @Test
+    fun openingAnArchiveEntryOverTheExtractionBudgetShowsAClearErrorInsteadOfAnEmptyTab() {
+        // S-03: extractCandidate used to be swallowed into an empty tab on any failure, including a
+        // budget breach — indistinguishable from "this entry legitimately has nothing in it." Using
+        // the archiveEntryByteBudget test seam (tiny, instead of a real multi-hundred-MB fixture) to
+        // force the breach deterministically.
+        val dir = createTempDirectory("openlog-zip-budget-ui").toFile()
+        val zip = buildZipFixture(
+            dir,
+            "bugreport.zip",
+            mapOf("FS/data/anr/main_log.txt" to "06-26 10:00:00.000  123  456 I App: ".repeat(20)),
+        )
+        val state = AppState(File(dir, "state.cache"), archiveEntryByteBudget = 10)
+
+        state.openZipFile(zip)
+        waitUntil { state.openError != null || (state.tabs.isNotEmpty() && !state.isLoading) }
+
+        assertEquals(emptyList(), state.tabs, "an over-budget entry must not open as a (misleadingly empty) tab")
+        assertTrue(state.openError?.message?.contains("extraction limit") == true, "expected a clear budget error:\n${state.openError}")
     }
 
     @Test
@@ -3789,7 +3812,7 @@ class AppStateBehaviorTest {
         // prove non-blocking for every possible slow bind, but it does pin the regression a
         // revert-to-synchronous would reintroduce: the call must return long before any bind on
         // a real port could plausibly complete network-stack setup.
-        val state = AppState()
+        val state = AppState(controlTokenFile = File(createTempDirectory("openlog-mcp-token").toFile(), "control-token"))
         val elapsedMs = kotlin.system.measureTimeMillis {
             state.setMcpControlEnabled(true, 0)
         }
@@ -3806,7 +3829,7 @@ class AppStateBehaviorTest {
         val blocker = ControlServer(AppState(), 0)
         blocker.start()
         try {
-            val state = AppState()
+            val state = AppState(controlTokenFile = File(createTempDirectory("openlog-mcp-token").toFile(), "control-token"))
             state.settings = state.settings.copy(mcpControlPort = blocker.boundPort)
 
             // Must not throw: a past version let ControlServer.start()'s BindException escape
@@ -3828,7 +3851,7 @@ class AppStateBehaviorTest {
     fun mcpControlEnableSucceedsOnFreePortAfterEarlierFailure() {
         val blocker = ControlServer(AppState(), 0)
         blocker.start()
-        val state = AppState()
+        val state = AppState(controlTokenFile = File(createTempDirectory("openlog-mcp-token").toFile(), "control-token"))
         state.setMcpControlEnabled(true, blocker.boundPort)
         waitUntil { state.mcpControlError != null }
         blocker.stop()
@@ -3843,6 +3866,122 @@ class AppStateBehaviorTest {
         waitUntil { state.settings.mcpControlEnabled }
         assertEquals(null, state.mcpControlError)
         state.setMcpControlEnabled(false, state.settings.mcpControlPort)
+    }
+
+    @Test
+    fun controlServerTokenSurvivesARelaunchSoTheMcpClientConfigDoesNotNeedRecopying() {
+        // Users otherwise have to re-copy the MCP client config after every app launch, since a
+        // fresh random token used to be generated per ControlServer instance with nothing persisted.
+        // loadOrCreateControlToken() now reuses whatever's already on disk at controlTokenFile.
+        // setMcpControlEnabled clamps its port argument to at least MIN_PORT (1), so — unlike
+        // ControlServer's own constructor — passing 0 here would try to bind the privileged port 1
+        // instead of asking the OS for a free one; grab a real free port explicitly instead, same
+        // as mcpControlEnableSucceedsOnFreePortAfterEarlierFailure above.
+        val tokenFile = File(createTempDirectory("openlog-mcp-token-persist").toFile(), "control-token")
+
+        val first = AppState(controlTokenFile = tokenFile)
+        first.setMcpControlEnabled(true, java.net.ServerSocket(0).use { it.localPort })
+        waitUntil { first.controlServerToken() != null }
+        val firstToken = first.controlServerToken()
+        first.setMcpControlEnabled(false, first.settings.mcpControlPort)
+
+        // A second AppState with the same token file stands in for the next app launch.
+        val second = AppState(controlTokenFile = tokenFile)
+        second.setMcpControlEnabled(true, java.net.ServerSocket(0).use { it.localPort })
+        waitUntil { second.controlServerToken() != null }
+
+        assertEquals(firstToken, second.controlServerToken(), "the persisted token must survive a relaunch")
+        second.setMcpControlEnabled(false, second.settings.mcpControlPort)
+    }
+
+    @Test
+    fun rotateControlTokenChangesTheLiveTokenWhileServerIsRunning() {
+        val tokenFile = File(createTempDirectory("openlog-mcp-token-rotate").toFile(), "control-token")
+        val state = AppState(controlTokenFile = tokenFile)
+        state.setMcpControlEnabled(true, java.net.ServerSocket(0).use { it.localPort })
+        waitUntil { state.controlServerToken() != null }
+        val original = state.controlServerToken()
+
+        state.rotateControlToken()
+
+        // rotateControlToken forces a disable+re-enable of the live server, so the token briefly
+        // goes through null before the restarted server publishes the new one.
+        waitUntil { state.controlServerToken() != null && state.controlServerToken() != original }
+        val rotated = state.controlServerToken()
+        assertNotEquals(original, rotated)
+        assertEquals(rotated, tokenFile.readText().trim(), "the rotated token must also be the one persisted to disk")
+
+        state.setMcpControlEnabled(false, state.settings.mcpControlPort)
+    }
+
+    @Test
+    fun rotateControlTokenWithNoServerRunningJustPersistsANewTokenWithoutCrashing() {
+        val tokenFile = File(createTempDirectory("openlog-mcp-token-rotate-idle").toFile(), "control-token")
+        val state = AppState(controlTokenFile = tokenFile)
+
+        state.rotateControlToken()
+
+        assertTrue(tokenFile.isFile)
+        assertEquals(null, state.controlServerToken(), "no server was running, so none should have been started")
+    }
+
+    // ── Control-server lifecycle race (S-02) ────────────────────────────
+    // applyControlServerState's async enable path used to publish `controlServer = it` from an
+    // unawaited coroutine with no generation/ordering guard: a disable that landed while a slow
+    // enable was still binding saw an already-null field (its own stop() was a no-op), then the
+    // stale bind's onSuccess overwrote it later — a server the caller believed was off. These use
+    // the controlServerFactory test seam to make the bind artificially slow and observable, without
+    // faking ControlServer itself (start()/stop() are the real Ktor calls throughout).
+
+    @Test
+    fun disableBeforeSlowStartCompletesLeavesNoServerPublished() {
+        val state = AppState(controlServerFactory = { s, p -> delay(300); ControlServer(s, p).also { it.start() } })
+        state.setMcpControlEnabled(true, 0)
+        // The 300ms bind above is still in flight here — disable must invalidate it, not just no-op
+        // against a still-null controlServer field.
+        state.setMcpControlEnabled(false, state.settings.mcpControlPort)
+        // Give the delayed start's completion handler a chance to run; if the race regressed, this
+        // is exactly the window where a stale server would get published.
+        Thread.sleep(600)
+        assertEquals(null, state.controlServerToken(), "a disabled-before-bind-completed start must never publish")
+    }
+
+    @Test
+    fun rapidReenableOnlyPublishesTheLatestStart() {
+        val state = AppState(
+            controlServerFactory = { s, p -> delay(200); ControlServer(s, p).also { it.start() } },
+        )
+        state.setMcpControlEnabled(true, 0) // first start, still binding
+        val secondPort = java.net.ServerSocket(0).use { it.localPort }
+        state.setMcpControlEnabled(true, secondPort) // supersedes the first before it finishes
+
+        waitUntil(timeoutMs = 2_000) { state.controlServerToken() != null }
+        // Only the second (latest) generation's server may ever become visible; the first must have
+        // been stopped by its own stale completion handler rather than left listening unreferenced.
+        assertTrue(state.settings.mcpControlPort == secondPort || state.mcpControlError != null)
+        state.setMcpControlEnabled(false, state.settings.mcpControlPort)
+    }
+
+    @Test
+    fun disableDuringSlowStartIsIdempotentAndSafe() {
+        val state = AppState(controlServerFactory = { s, p -> delay(200); ControlServer(s, p).also { it.start() } })
+        state.setMcpControlEnabled(true, 0)
+        // Repeated disable while a start is in flight must not throw and must not crash-loop.
+        state.setMcpControlEnabled(false, state.settings.mcpControlPort)
+        state.setMcpControlEnabled(false, state.settings.mcpControlPort)
+        Thread.sleep(400)
+        assertEquals(null, state.controlServerToken())
+    }
+
+    @Test
+    fun shutdownDuringStartLeavesNoServerListening() {
+        // Main.kt's onDispose calls stopControlServerForShutdown() unconditionally on window close
+        // — it must invalidate a still-binding start exactly like an explicit disable does.
+        val state = AppState(controlServerFactory = { s, p -> delay(300); ControlServer(s, p).also { it.start() } })
+        state.startControlServerForThisSessionOnly(0)
+        state.stopControlServerForShutdown()
+        Thread.sleep(600)
+        assertEquals(null, state.controlServerToken(), "shutdown must invalidate an in-flight start")
     }
 
     private fun waitUntil(timeoutMs: Long = 2_000, condition: () -> Boolean) {

@@ -29,6 +29,8 @@ object DesktopStorage {
 
     fun filterBackupsDir(): File = File(appDataDir(), "filter-backups")
 
+    fun controlTokenFile(): File = File(appDataDir(), "control-token")
+
     fun legacyNotesDir(userHome: String = System.getProperty("user.home").orEmpty()): File =
         File(userHome, ".openlog2/notes")
 }

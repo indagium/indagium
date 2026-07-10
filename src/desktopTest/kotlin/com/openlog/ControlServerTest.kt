@@ -2,6 +2,8 @@ package com.openlog
 
 import com.openlog.debug.ControlServer
 import com.openlog.debug.Json
+import com.openlog.debug.loadOrCreateControlToken
+import com.openlog.debug.regenerateControlToken
 import com.openlog.model.AnnBlock
 import com.openlog.model.FilterMode
 import com.openlog.model.LogEntry
@@ -15,12 +17,16 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+
+private const val RAW_SOCKET_TIMEOUT_MS = 3_000
 
 class ControlServerTest {
     private lateinit var state: AppState
@@ -44,13 +50,19 @@ class ControlServerTest {
 
     private fun base() = "http://127.0.0.1:${server.boundPort}"
 
+    // Every route now requires the per-instance token (see debug/ControlServer.kt's start()
+    // intercept) — attach it here so the ~40 existing behavior tests below don't each need to know
+    // about auth. Dedicated auth-rejection tests below build requests without this helper.
     private fun get(path: String): String {
-        val req = HttpRequest.newBuilder(URI.create(base() + path)).GET().build()
+        val req = HttpRequest.newBuilder(URI.create(base() + path))
+            .header("Authorization", "Bearer ${server.token}")
+            .GET().build()
         return client.send(req, HttpResponse.BodyHandlers.ofString()).body()
     }
 
     private fun post(path: String, body: String): String {
         val req = HttpRequest.newBuilder(URI.create(base() + path))
+            .header("Authorization", "Bearer ${server.token}")
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .build()
         return client.send(req, HttpResponse.BodyHandlers.ofString()).body()
@@ -75,6 +87,7 @@ class ControlServerTest {
 
     private fun getAsClient(path: String, clientId: String, clientName: String): HttpResponse<String> {
         val req = HttpRequest.newBuilder(URI.create(base() + path))
+            .header("Authorization", "Bearer ${server.token}")
             .header("X-OpenLog-Client-Id", clientId)
             .header("X-OpenLog-Client-Name", clientName)
             .GET()
@@ -717,5 +730,128 @@ class ControlServerTest {
         assertTrue(body.contains("large_part_2.log"))
         waitUntil { state.tabs.size == 2 && !state.isLoading }
         assertEquals(listOf("large_part_1.log", "large_part_2.log"), state.tabs.map { it.filename })
+    }
+
+    // ── Authentication / origin (S-01) ──────────────────────────────────
+    // These deliberately build raw requests instead of using get()/post(), which always attach a
+    // valid token — the whole point here is proving what happens when they don't.
+
+    @Test
+    fun rejectsReadRouteWithNoAuthorizationHeader() {
+        val req = HttpRequest.newBuilder(URI.create(base() + "/tabs")).GET().build()
+        val resp = client.send(req, HttpResponse.BodyHandlers.ofString())
+        assertEquals(401, resp.statusCode())
+    }
+
+    @Test
+    fun rejectsReadRouteWithWrongToken() {
+        val req = HttpRequest.newBuilder(URI.create(base() + "/tabs"))
+            .header("Authorization", "Bearer not-the-real-token")
+            .GET().build()
+        val resp = client.send(req, HttpResponse.BodyHandlers.ofString())
+        assertEquals(401, resp.statusCode())
+    }
+
+    @Test
+    fun rejectsReadRouteWithMalformedAuthorizationScheme() {
+        // Missing the "Bearer " prefix — a client that just pastes the raw token value.
+        val req = HttpRequest.newBuilder(URI.create(base() + "/tabs"))
+            .header("Authorization", server.token)
+            .GET().build()
+        val resp = client.send(req, HttpResponse.BodyHandlers.ofString())
+        assertEquals(401, resp.statusCode())
+    }
+
+    @Test
+    fun rejectsFileOperationRouteWithoutAuth() {
+        // Prove the gate covers write/file routes too, not only reads — an unauthenticated caller
+        // must not be able to trigger open_log_file.
+        val req = HttpRequest.newBuilder(URI.create(base() + "/open"))
+            .POST(HttpRequest.BodyPublishers.ofString("""{"path":"/etc/hosts"}"""))
+            .build()
+        val resp = client.send(req, HttpResponse.BodyHandlers.ofString())
+        assertEquals(401, resp.statusCode())
+        assertTrue(state.tabs.isEmpty(), "unauthenticated request must not have opened a tab")
+    }
+
+    @Test
+    fun rejectsRequestWithForeignHostHeader() {
+        // The JDK HttpClient refuses to let callers set a custom Host header (it's a restricted
+        // header), so this goes over a raw socket the same way SingleInstance's tests drive its own
+        // wire protocol directly.
+        assertEquals(403, rawRequestStatus(host = "evil.example.com", includeAuth = true))
+    }
+
+    @Test
+    fun acceptsRequestWithLoopbackHostHeader() {
+        assertEquals(200, rawRequestStatus(host = "127.0.0.1:${server.boundPort}", includeAuth = true))
+    }
+
+    private fun rawRequestStatus(host: String, includeAuth: Boolean): Int {
+        java.net.Socket("127.0.0.1", server.boundPort).use { socket ->
+            socket.soTimeout = RAW_SOCKET_TIMEOUT_MS
+            val authLine = if (includeAuth) "Authorization: Bearer ${server.token}\r\n" else ""
+            val request = "GET /tabs HTTP/1.1\r\nHost: $host\r\n$authLine" + "Connection: close\r\n\r\n"
+            socket.getOutputStream().apply {
+                write(request.toByteArray(Charsets.UTF_8))
+                flush()
+            }
+            val statusLine = socket.getInputStream().bufferedReader(Charsets.UTF_8).readLine()
+                ?: error("no response for Host: $host")
+            return statusLine.split(" ")[1].toInt()
+        }
+    }
+
+    // ── Persisted control token (loadOrCreateControlToken) ──────────────
+    // Users otherwise had to re-copy the MCP client config after every app launch, since a fresh
+    // random token was generated per ControlServer instance with nothing persisted to disk.
+
+    @Test
+    fun loadOrCreateControlTokenCreatesAndPersistsATokenWhenNoneExists() {
+        val file = File(createTempDirectory("openlog-token-test").toFile(), "control-token")
+        assertTrue(!file.exists())
+
+        val token = loadOrCreateControlToken(file)
+
+        assertTrue(file.isFile, "token must be written to disk")
+        assertEquals(token, file.readText().trim())
+        assertEquals(32, token.length)
+    }
+
+    @Test
+    fun loadOrCreateControlTokenReusesAnExistingValidToken() {
+        val file = File(createTempDirectory("openlog-token-test").toFile(), "control-token")
+        val first = loadOrCreateControlToken(file)
+
+        val second = loadOrCreateControlToken(file)
+
+        assertEquals(first, second, "an existing valid token on disk must be reused, not replaced")
+    }
+
+    @Test
+    fun loadOrCreateControlTokenRegeneratesWhenFileContentIsMalformed() {
+        val dir = createTempDirectory("openlog-token-test").toFile()
+        val file = File(dir, "control-token").apply { writeText("not-a-valid-hex-token") }
+
+        val token = loadOrCreateControlToken(file)
+
+        assertNotEquals("not-a-valid-hex-token", token)
+        assertEquals(32, token.length)
+        assertEquals(token, file.readText().trim())
+    }
+
+    @Test
+    fun regenerateControlTokenAlwaysOverwritesEvenAValidExistingToken() {
+        // Backs the Settings "Regenerate token" action — unlike loadOrCreateControlToken, this must
+        // never reuse what's already on disk, or "Regenerate" would silently do nothing.
+        val file = File(createTempDirectory("openlog-token-test").toFile(), "control-token")
+        val original = loadOrCreateControlToken(file)
+
+        val rotated = regenerateControlToken(file)
+
+        assertNotEquals(original, rotated)
+        assertEquals(32, rotated.length)
+        assertEquals(rotated, file.readText().trim())
+        assertEquals(rotated, loadOrCreateControlToken(file), "the newly written token must now be what gets reused")
     }
 }

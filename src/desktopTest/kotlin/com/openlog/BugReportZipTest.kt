@@ -1,6 +1,7 @@
 package com.openlog
 
 import com.openlog.model.LogLevel
+import com.openlog.utils.ArchiveBudgetExceededException
 import com.openlog.utils.ZipLogCandidateKind
 import com.openlog.utils.extractCandidate
 import com.openlog.utils.isSupportedArchiveFile
@@ -16,6 +17,7 @@ import java.util.zip.ZipOutputStream
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -165,5 +167,73 @@ class BugReportZipTest {
         val notAZip = File(dir, "notes.txt").apply { writeText("hello") }
 
         assertTrue(listLogcatCandidates(notAZip).isEmpty())
+    }
+
+    // ── Bounded archive extraction (S-03) ───────────────────────────────
+
+    @Test
+    fun extractCandidateRejectsEntryOverTheByteBudget() {
+        val dir = createTempDirectory("openlog-zip-budget").toFile()
+        val zip = buildTextZip(dir, "bugreport.zip", mapOf("main_log.txt" to "x".repeat(200)))
+        val candidate = listLogcatCandidates(zip).single()
+
+        assertFailsWith<ArchiveBudgetExceededException> {
+            extractCandidate(zip, candidate, maxEntryBytes = 50)
+        }
+    }
+
+    @Test
+    fun extractCandidateAllowsEntryAtOrUnderTheByteBudget() {
+        val dir = createTempDirectory("openlog-zip-budget").toFile()
+        val content = "06-26 10:00:00.000  100  100 I App: hi"
+        val zip = buildTextZip(dir, "bugreport.zip", mapOf("main_log.txt" to content))
+        val candidate = listLogcatCandidates(zip).single()
+
+        // Exactly at the budget must still succeed — only strictly-over is rejected.
+        val entries = extractCandidate(zip, candidate, maxEntryBytes = content.length.toLong())
+
+        assertEquals(1, entries.size)
+    }
+
+    @Test
+    fun extractCandidateEnforcesBudgetAgainstActualBytesNotDeclaredSize() {
+        // Highly compressible content: a few KB of decompressed text shrinks to a tiny compressed
+        // size under DEFLATE — the same shape as a zip-bomb entry, where declared/compressed size
+        // gives no hint of the real decompressed volume. The budget must be enforced against bytes
+        // actually read off the stream, not any size metadata.
+        val dir = createTempDirectory("openlog-zip-budget").toFile()
+        val highlyCompressible = "A".repeat(50_000)
+        val zip = buildTextZip(dir, "bugreport.zip", mapOf("main_log.txt" to highlyCompressible))
+        val candidate = listLogcatCandidates(zip).single()
+
+        assertFailsWith<ArchiveBudgetExceededException> {
+            extractCandidate(zip, candidate, maxEntryBytes = 1_000)
+        }
+    }
+
+    @Test
+    fun extractCandidateBudgetAlsoAppliesToSevenZEntries() {
+        val dir = createTempDirectory("openlog-7z-budget").toFile()
+        val archive = buildSevenZ(dir, "bugreport.7z", mapOf("FS/data/anr/main_log.txt" to "x".repeat(200)))
+        val candidate = listArchiveLogCandidates(archive).single()
+
+        assertFailsWith<ArchiveBudgetExceededException> {
+            extractCandidate(archive, candidate, maxEntryBytes = 50)
+        }
+    }
+
+    @Test
+    fun listArchiveLogCandidatesCapsHowManyEntriesAreScanned() {
+        val dir = createTempDirectory("openlog-zip-entrycap").toFile()
+        val zip = buildTextZip(
+            dir, "bugreport.zip",
+            (1..10).associate { "log_$it.txt" to "06-26 10:00:00.000  100  100 I App: entry $it" },
+        )
+
+        // All 10 entries would otherwise qualify; capping the scan at 3 must bound the result to
+        // at most the first 3 entries examined, not silently scan the whole archive anyway.
+        val candidates = listArchiveLogCandidates(zip, maxEntries = 3)
+
+        assertTrue(candidates.size <= 3, "expected at most 3 candidates from a capped scan, got ${candidates.size}")
     }
 }
