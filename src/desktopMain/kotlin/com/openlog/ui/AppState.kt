@@ -33,6 +33,7 @@ import com.openlog.utils.requiresSplitPrompt
 import com.openlog.utils.splitFileToFiles
 import com.openlog.utils.splitStreamToFiles
 import com.openlog.utils.suggestedSplitPartCount
+import com.openlog.utils.writeFileAtomically
 import kotlinx.coroutines.*
 import java.awt.FileDialog
 import java.awt.Frame
@@ -117,6 +118,11 @@ internal const val DEFAULT_MCP_PORT = 8991
 // starts exceeding a frame budget by orders of magnitude; the old 512MB threshold left files in
 // the 100-512MB range freezing the UI on every filter keystroke.
 private const val LARGE_FILE_MODE_BYTES = 64L * 1024L * 1024L
+
+// Debounce for autosaveInBackground() — long enough to collapse a rapid splitter drag (many
+// pointer-move events per second) into one write, short enough that the save still feels
+// immediate, matching the feel of the existing keyword-input debounce (150/350ms).
+private const val BACKGROUND_AUTOSAVE_DEBOUNCE_MS = 150L
 
 data class PendingSequenceStart(val text: String, val tag: String)
 
@@ -340,6 +346,13 @@ class AppState(
     // Set when applyControlServerState fails to bind (e.g. port already in use); shown next to
     // the Settings toggle. Cleared on the next successful start.
     var mcpControlError by mutableStateOf<String?>(null)
+        private set
+
+    // Set when autosaveNow()/autosaveInBackground() fails to write (disk full, permissions,
+    // etc.) — surfaced the same way mcpControlError is, a small inline hint rather than a
+    // blocking dialog, since a failed autosave shouldn't interrupt the user's work. Cleared on
+    // the next successful write.
+    var autosaveError by mutableStateOf<String?>(null)
         private set
     var openError by mutableStateOf<OpenFileError?>(null)
     var recentFiles by mutableStateOf<List<String>>(emptyList())
@@ -618,21 +631,21 @@ class AppState(
         val next = width.coerceIn(FILTER_PANEL_MIN_WIDTH, FILTER_PANEL_MAX_WIDTH)
         if (filterPanelWidth == next) return
         filterPanelWidth = next
-        autosaveNow()
+        autosaveInBackground()
     }
 
     fun updateAnnotationPanelWidth(width: Float) {
         val next = width.coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
         if (annotationPanelWidth == next) return
         annotationPanelWidth = next
-        autosaveNow()
+        autosaveInBackground()
     }
 
     fun updateCompareSplit(split: Float) {
         val next = split.coerceIn(COMPARE_SPLIT_MIN, COMPARE_SPLIT_MAX)
         if (compareSplit == next) return
         compareSplit = next
-        autosaveNow()
+        autosaveInBackground()
     }
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
@@ -2927,10 +2940,36 @@ class AppState(
     }
 
     // ── Autosave ─────────────────────────────────────────────────────
+
+    // Job backing autosaveInBackground()'s debounce — cancelling and relaunching it on every
+    // call is what collapses a rapid burst (e.g. dragging a splitter) into a single write.
+    private var backgroundAutosaveJob: Job? = null
+
+    // Synchronous by design: ~35 existing tests call this then immediately construct a second
+    // AppState(restoreOnCreate = true) to assert round-trip content, and Main.kt's shutdown path
+    // needs the write to complete before exitApplication() runs. writeFileAtomically replaces
+    // the destination only once the write fully succeeds, so a failure here can never corrupt an
+    // existing autosave file — it only fails to update it, which autosaveError then surfaces.
     fun autosaveNow() {
         runCatching {
-            autosaveFile.parentFile?.mkdirs()
-            autosaveFile.writeText(serializeAutosave())
+            writeFileAtomically(autosaveFile) { writer -> writer.write(serializeAutosave()) }
+        }.fold(
+            onSuccess = { autosaveError = null },
+            onFailure = { error ->
+                autosaveError = "Could not save your session: " +
+                    (error.message ?: error::class.simpleName.orEmpty().ifBlank { "unknown error" })
+            },
+        )
+    }
+
+    // Used only by the drag-driven pane-size mutators below — unlike autosaveNow(), nothing
+    // depends on this completing synchronously, so it can debounce (cancel-and-relaunch) and run
+    // entirely off the UI thread instead of doing file I/O on every pointer-move event of a drag.
+    fun autosaveInBackground() {
+        backgroundAutosaveJob?.cancel()
+        backgroundAutosaveJob = ioScope.launch {
+            delay(BACKGROUND_AUTOSAVE_DEBOUNCE_MS)
+            autosaveNow()
         }
     }
 

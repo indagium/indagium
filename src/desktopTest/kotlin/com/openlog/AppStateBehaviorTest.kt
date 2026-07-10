@@ -1756,9 +1756,15 @@ class AppStateBehaviorTest {
         state.updateAnnotationVisible(false)
         state.updateCompareMode(true)
         state.updateCompareFilterRight(false)
+        // The pane-size updates below now debounce through autosaveInBackground() (P-06 — this
+        // used to be synchronous file I/O on every drag pointer-move event); wait past the
+        // debounce before reading back what was persisted.
         state.updateFilterPanelWidth(333f)
         state.updateAnnotationPanelWidth(444f)
         state.updateCompareSplit(0.72f)
+        // Autosave content is base64-encoded per field, so poll by restoring rather than matching
+        // raw file text.
+        waitUntil { cacheFile.exists() && AppState(cacheFile, restoreOnCreate = true).filterPanelWidth == 333f }
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
 
@@ -1767,6 +1773,79 @@ class AppStateBehaviorTest {
         assertEquals(true, restored.compareMode)
         assertEquals(false, restored.compareFilterRight)
         assertEquals(333f, restored.filterPanelWidth)
+        assertEquals(444f, restored.annotationPanelWidth)
+        assertEquals(0.72f, restored.compareSplit)
+    }
+
+    // ── Autosave hardening (P-06) ────────────────────────────────────────
+
+    @Test
+    fun autosaveNowSetsAutosaveErrorOnWriteFailureWithoutThrowing() {
+        // autosaveFile's parent is itself a plain file, not a directory — mkdirs() can't create
+        // a directory there and the subsequent write must fail. autosaveNow() must not throw;
+        // it must surface the failure via autosaveError instead.
+        val dir = createTempDirectory("openlog-autosave-fail").toFile()
+        val blocker = File(dir, "blocker").apply { writeText("not a directory") }
+        val state = AppState(File(blocker, "nested/state.cache"))
+
+        assertEquals(null, state.autosaveError)
+        state.autosaveNow()
+
+        assertTrue(state.autosaveError != null, "expected autosaveError to be set after a failed write")
+    }
+
+    @Test
+    fun autosaveNowClearsAutosaveErrorOnNextSuccessfulWrite() {
+        val dir = createTempDirectory("openlog-autosave-recover").toFile()
+        val blocker = File(dir, "blocker").apply { writeText("not a directory") }
+        val state = AppState(File(blocker, "nested/state.cache"))
+        state.autosaveNow()
+        assertTrue(state.autosaveError != null)
+
+        // Point at a real, writable location for the next save — mirrors what would happen if
+        // the underlying disk-full/permissions condition resolved itself.
+        val recovered = AppState(File(dir, "state.cache"))
+        recovered.autosaveNow()
+
+        assertEquals(null, recovered.autosaveError)
+    }
+
+    @Test
+    fun autosaveInBackgroundDoesNotWriteSynchronously() {
+        // The whole point of the background path (used by the drag-driven pane-size mutators) is
+        // to get file I/O off the calling thread — a restore immediately after the call must not
+        // yet reflect the change (autosave content is base64-encoded, so this reads back via a
+        // restored AppState rather than matching raw file text).
+        val dir = createTempDirectory("openlog-autosave-bg-timing").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+
+        state.updateFilterPanelWidth(333f)
+
+        val immediately = if (cacheFile.exists()) AppState(cacheFile, restoreOnCreate = true).filterPanelWidth else null
+        assertTrue(immediately != 333f, "background write must not be synchronous")
+        waitUntil { cacheFile.exists() && AppState(cacheFile, restoreOnCreate = true).filterPanelWidth == 333f }
+    }
+
+    @Test
+    fun autosaveInBackgroundCoalescesRapidCallsIntoOneFinalWrite() {
+        // Each call cancels the previous debounce job and restarts it — only the last one should
+        // ever complete. autosaveNow() always serializes the full current (in-memory) state
+        // regardless of which specific update triggered it, so once any surviving job fires it
+        // captures every update already applied above it.
+        val dir = createTempDirectory("openlog-autosave-coalesce").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+
+        state.updateFilterPanelWidth(100f)
+        state.updateFilterPanelWidth(200f)
+        state.updateFilterPanelWidth(333f)
+        state.updateAnnotationPanelWidth(444f)
+        state.updateCompareSplit(0.72f)
+
+        waitUntil { cacheFile.exists() && AppState(cacheFile, restoreOnCreate = true).filterPanelWidth == 333f }
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        assertEquals(333f, restored.filterPanelWidth, "only the final, coalesced value must land on disk")
         assertEquals(444f, restored.annotationPanelWidth)
         assertEquals(0.72f, restored.compareSplit)
     }

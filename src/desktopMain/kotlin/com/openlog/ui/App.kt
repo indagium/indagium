@@ -2995,6 +2995,9 @@ private fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                     AppButton("Clear cache", onClick = { state.requestClearCache() }, variant = ButtonVariant.Secondary)
                 }
             }
+            state.autosaveError?.let { message ->
+                AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+            }
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
