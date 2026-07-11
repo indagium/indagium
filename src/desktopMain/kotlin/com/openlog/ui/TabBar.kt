@@ -66,6 +66,7 @@ internal fun TabBar(state: AppState) {
         ToolbarBtn(
             if (state.compareMode) "⊟ Compare" else "⊠ Compare",
             active = state.compareMode,
+            enabled = state.canCompare,
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
         ) { state.updateCompareMode(!state.compareMode) }

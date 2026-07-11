@@ -369,6 +369,8 @@ class AppState(
     var compareTabId by mutableStateOf("")
     var loadingStatus by mutableStateOf<String?>(null)
 
+    val canCompare: Boolean get() = tabs.size > 1
+
     // ── Transient UI ─────────────────────────────────────────────────
     // True right after a keyboard-driven panel focus change (F6/Shift+F6, Cmd+1/2/3/F); set
     // false on any pointer press. Panels only draw their accent focus border while this is
@@ -552,9 +554,10 @@ class AppState(
     }
 
     fun updateCompareMode(enabled: Boolean) {
-        if (compareMode == enabled) return
-        compareMode = enabled
-        if (enabled && compareTabId == activeTabId) {
+        val next = enabled && canCompare
+        if (compareMode == next) return
+        compareMode = next
+        if (next && compareTabId == activeTabId) {
             // Left and right panes must never show the same tab — they'd share one
             // LazyListState (keyed by tab id) and silently fight over scroll ownership.
             compareTabId = tabs.firstOrNull { it.id != activeTabId }?.id ?: ""
@@ -1783,7 +1786,7 @@ class AppState(
             val next = tabs.filter { it.id !in tabIds }
             if (activeTabId in tabIds) activeTabId = preferredActiveId?.takeIf { id -> next.any { it.id == id } } ?: next.lastOrNull()?.id ?: ""
             if (compareTabId in tabIds) compareTabId = next.firstOrNull()?.id ?: ""
-            if (next.isEmpty()) compareMode = false
+            if (next.size < 2) compareMode = false
             tabs = next
         }
         activeSavedFilterIds = activeSavedFilterIds - tabIds
@@ -2642,6 +2645,7 @@ class AppState(
         if (tabs.none { it.id == activeTabId }) activeTabId = tabs.firstOrNull()?.id ?: ""
         if (tabs.none { it.id == compareTabId }) compareTabId =
             tabs.getOrNull(1)?.id ?: tabs.firstOrNull()?.id ?: ""
+        if (!canCompare) compareMode = false
         tabCounter.set((tabs.mapNotNull { it.id.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1)
         // Shells restore synchronously with every user-visible piece of metadata (filter,
         // annotations, expanded/manual blocks). The file contents are queued and started by App()

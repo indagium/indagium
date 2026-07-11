@@ -79,6 +79,37 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun compareModeRequiresAtLeastTwoOpenTabs() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("one", "one.log", emptyList()))
+        state.activeTabId = "one"
+
+        state.updateCompareMode(true)
+
+        assertFalse(state.canCompare)
+        assertFalse(state.compareMode)
+
+        state.tabs += mkTab("two", "two.log", emptyList())
+        state.updateCompareMode(true)
+
+        assertTrue(state.canCompare)
+        assertTrue(state.compareMode)
+    }
+
+    @Test
+    fun closingToOneTabExitsCompareMode() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("one", "one.log", emptyList()), mkTab("two", "two.log", emptyList()))
+        state.activeTabId = "one"
+        state.updateCompareMode(true)
+
+        state.closeTab("two")
+
+        assertFalse(state.canCompare)
+        assertFalse(state.compareMode)
+    }
+
+    @Test
     fun closeTabScopeActionsKeepExpectedTabsAndActiveTab() {
         val state = AppState()
         state.tabs = (1..5).map { idx -> mkTab("t$idx", "tab-$idx.log", emptyList()) }
@@ -1770,7 +1801,7 @@ class AppStateBehaviorTest {
 
         assertEquals(false, restored.filterVisible)
         assertEquals(false, restored.annotationVisible)
-        assertEquals(true, restored.compareMode)
+        assertEquals(false, restored.compareMode)
         assertEquals(false, restored.compareFilterRight)
         assertEquals(333f, restored.filterPanelWidth)
         assertEquals(444f, restored.annotationPanelWidth)

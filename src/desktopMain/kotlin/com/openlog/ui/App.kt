@@ -1463,7 +1463,7 @@ private fun handleGlobalKey(
     return when {
         ev.isShiftPressed && ev.key == Key.F -> { state.updateFilterVisible(!state.filterVisible); true }
         ev.isShiftPressed && ev.key == Key.A -> { state.updateAnnotationVisible(!state.annotationVisible); true }
-        ev.isShiftPressed && ev.key == Key.D -> { state.updateCompareMode(!state.compareMode); true }
+        ev.isShiftPressed && ev.key == Key.D && state.canCompare -> { state.updateCompareMode(!state.compareMode); true }
         ev.key == Key.F                      -> { onFocusFilterSearch(); true }
         ev.key == Key.One                    -> { state.updateFilterVisible(true); onFocusPanel(KeyboardPanel.FILTERS); true }
         ev.key == Key.Two                    -> { onFocusPanel(KeyboardPanel.LOG_VIEW); true }
