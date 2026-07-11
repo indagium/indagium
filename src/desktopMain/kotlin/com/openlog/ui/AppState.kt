@@ -49,6 +49,39 @@ internal fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = EntryIdMap(data)
 // truncates at ':' first ("Card stack expanded") then at '=' ("Card stack expanded: stackId").
 private val MESSAGE_RULE_SEPARATORS = charArrayOf('-', '/', '\\', ',', '.', ':', '=')
 
+// Scope + pattern for one "Hide/Show messages like this" choice. Kept outside AppState so the
+// message-rule search can offer exactly the same stable-prefix variants as the log-row flyout.
+data class MessageRuleVariant(val label: String, val pattern: String, val tag: String?)
+
+internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? = null): List<MessageRuleVariant> {
+    val selected = selectedText?.trim().orEmpty()
+    if (selected.isNotBlank()) {
+        return listOf(
+            MessageRuleVariant("${entry.tag}: $selected", selected, entry.tag),
+            MessageRuleVariant(selected, selected, null),
+        )
+    }
+
+    fun truncateAtSeparator(n: Int): String {
+        var count = 0
+        for (i in entry.msg.indices) {
+            if (entry.msg[i] in MESSAGE_RULE_SEPARATORS) {
+                count++
+                if (count == n) return entry.msg.substring(0, i).trimEnd()
+            }
+        }
+        return entry.msg
+    }
+    val toFirst = truncateAtSeparator(1)
+    val toSecond = truncateAtSeparator(2)
+    return buildList {
+        add(MessageRuleVariant("${entry.tag}: $toFirst", toFirst, entry.tag))
+        if (toSecond != toFirst) add(MessageRuleVariant("${entry.tag}: $toSecond", toSecond, entry.tag))
+        add(MessageRuleVariant(toFirst, toFirst, null))
+        if (toSecond != toFirst) add(MessageRuleVariant(toSecond, toSecond, null))
+    }.take(4)
+}
+
 // Loop safety cap for resolveNoteTarget's "_2", "_3", ... disambiguation walk — effectively
 // unreachable in practice (that many genuinely distinct files sharing one display name), just a
 // hard stop against an unbounded loop.
@@ -1407,21 +1440,6 @@ class AppState(
     // Zip-backed tabs encode sourcePath as "<absZipPath>!<entryPath>" (see openZipEntry) — the
     // bare entry filename alone doesn't say which archive it came from, so this is qualified
     // unconditionally, regardless of whether it collides with the other tab's name.
-    // Truncates `msg` right before the nth (1-indexed) separator character — the same rough
-    // "stable prefix" heuristic a human skimming a log message uses to spot its templated part
-    // before the variable tail (ids, durations, paths...). Returns the full message if there are
-    // fewer than n separators.
-    private fun truncateAtMessageSeparator(msg: String, n: Int): String {
-        var count = 0
-        for (i in msg.indices) {
-            if (msg[i] in MESSAGE_RULE_SEPARATORS) {
-                count++
-                if (count == n) return msg.substring(0, i).trimEnd()
-            }
-        }
-        return msg
-    }
-
     private fun archiveQualifiedLabel(sourcePath: String?): String? {
         val bangIdx = sourcePath?.indexOf('!') ?: return null
         if (bangIdx < 0) return null
@@ -1635,11 +1653,6 @@ class AppState(
         ctx = null
     }
 
-    // Scope + pattern for one "Hide/Show messages like this" flyout choice. tag == null means
-    // unscoped (matches the pattern in any tag), matching addMessageRule's existing tag/
-    // packagePrefix scoping fields — no separate "bake the tag into the pattern" step needed.
-    data class MessageRuleVariant(val label: String, val pattern: String, val tag: String?)
-
     // Up to 4 match-scope choices for the ▶ flyout on "Hide/Show messages like this":
     //  - with a selection: tag-scoped selection, then unscoped selection (2 choices — there's no
     //    separator truncation to vary once the user already picked the exact text).
@@ -1649,21 +1662,8 @@ class AppState(
     fun messageRuleVariantsFromCtx(): List<MessageRuleVariant> {
         val c = ctx ?: return emptyList()
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return emptyList()
-        if (c.selText.isNotBlank()) {
-            val text = extractMsgText(c.selText, entry)
-            return listOf(
-                MessageRuleVariant("${entry.tag}: $text", text, entry.tag),
-                MessageRuleVariant(text, text, null),
-            )
-        }
-        val toFirst = truncateAtMessageSeparator(entry.msg, 1)
-        val toSecond = truncateAtMessageSeparator(entry.msg, 2)
-        return buildList {
-            add(MessageRuleVariant("${entry.tag}: $toFirst", toFirst, entry.tag))
-            if (toSecond != toFirst) add(MessageRuleVariant("${entry.tag}: $toSecond", toSecond, entry.tag))
-            add(MessageRuleVariant(toFirst, toFirst, null))
-            if (toSecond != toFirst) add(MessageRuleVariant(toSecond, toSecond, null))
-        }.take(4)
+        val selectedText = c.selText.takeIf { it.isNotBlank() }?.let { extractMsgText(it, entry) }
+        return messageRuleVariantsForEntry(entry, selectedText)
     }
 
     // No requestScrollAnchor — see hideMessagesLikeCtx.

@@ -58,7 +58,41 @@ import kotlin.math.roundToInt
 // A message-rule search suggestion. inScope marks whether it's within the currently active
 // tag/package filter — out-of-scope candidates are shown after in-scope ones and dimmed, so
 // matches unrelated to the active filter are still discoverable instead of vanishing.
-private data class MsgCandidate(val pattern: String, val target: RuleTarget, val inScope: Boolean)
+private data class MsgCandidate(
+    val pattern: String,
+    val target: RuleTarget,
+    val inScope: Boolean,
+    val label: String = pattern,
+    val tag: String? = null,
+    val addsImmediately: Boolean = false,
+)
+
+internal data class ContextualMessageRuleCandidate(
+    val label: String,
+    val pattern: String,
+    val tag: String?,
+)
+
+// A tag-qualified query must not replace normal message-only suggestions. It supplements them
+// only when the query matches the tag/message boundary but not the message on its own.
+internal fun contextualMessageRuleCandidates(
+    entries: List<LogEntry>,
+    query: String,
+    regex: Boolean,
+): List<ContextualMessageRuleCandidate> = entries.asSequence()
+    .filter { entry ->
+        val matchesTagAndMessage =
+            containsPattern("${entry.tag}: ${entry.msg}", query, regex) ||
+                containsPattern("${entry.tag} : ${entry.msg}", query, regex)
+        !containsPattern(entry.msg, query, regex) && matchesTagAndMessage
+    }
+    .flatMap { entry ->
+        messageRuleVariantsForEntry(entry).asSequence().map { variant ->
+            ContextualMessageRuleCandidate(variant.label, variant.pattern, variant.tag)
+        }
+    }
+    .distinctBy { candidate -> Triple(candidate.label, candidate.pattern, candidate.tag) }
+    .toList()
 
 internal data class PendingMessageRuleDraft(
     val include: Boolean,
@@ -469,11 +503,9 @@ fun FilterPanel(
         }
     }
 
-    // Unified candidates: PIDs when field is blank, message stems + matching PIDs when not blank.
-    // In-scope results (within the active tag/package filter) come first, then out-of-scope
-    // ones (still respecting level/exclude filters, just not the tag/package restriction) —
-    // so a search unrelated to the active filter still surfaces results instead of showing
-    // nothing, making it easy to spot and then relax the filter if that's what's wanted.
+    // Unified candidates: contextual tag/message variants first, then the existing PID and
+    // message-only suggestions. In-scope results come before out-of-scope ones, while the latter
+    // still respect level/exclude filters so unrelated matches remain discoverable.
     val unifiedCandidates = remember(tab.id, tab.largeFileMode, filter, msgRuleSearch) {
         if (msgRuleSearch.isBlank()) {
             emptyList()
@@ -485,6 +517,31 @@ fun FilterPanel(
             }
             val baseFilter = filter.copy(kwInTag = "", messageRules = emptyList(), pidTidFilter = "")
             val relaxedFilter = baseFilter.copy(activeTags = emptySet(), pkgPrefixes = emptySet())
+
+            fun contextualCandidatesOf(entries: List<LogEntry>, inScope: Boolean) =
+                contextualMessageRuleCandidates(entries, msgRuleSearch, filter.kwInTagRegex)
+                    .map { candidate ->
+                        MsgCandidate(
+                            pattern = candidate.pattern,
+                            target = RuleTarget.MESSAGE,
+                            inScope = inScope,
+                            label = candidate.label,
+                            tag = candidate.tag,
+                            addsImmediately = true,
+                        )
+                    }
+
+            val inScopeContextual = contextualCandidatesOf(
+                candidateEntries.filter { passesFilter(it, baseFilter) },
+                inScope = true,
+            )
+            val contextualKeys = inScopeContextual.map { Triple(it.label, it.pattern, it.tag) }.toSet()
+            val outOfScopeContextual = contextualCandidatesOf(
+                candidateEntries.filter { !passesFilter(it, baseFilter) && passesFilter(it, relaxedFilter) },
+                inScope = false,
+            ).filter { Triple(it.label, it.pattern, it.tag) !in contextualKeys }
+            val contextualCandidates = (inScopeContextual + outOfScopeContextual).take(8)
+
             // PIDs only when the search looks like a number
             val pidCandidates = if (msgRuleSearch.any { it.isDigit() })
                 candidateEntries
@@ -526,8 +583,11 @@ fun FilterPanel(
             val outOfScopeCandidates = stemsAndFulls(outOfScopeMsgs)
                 .filter { it !in inScopePatterns }
                 .map { MsgCandidate(it, RuleTarget.MESSAGE, inScope = false) }
-            val msgCandidates = (inScopeCandidates + outOfScopeCandidates).take(8 - pidCandidates.size)
-            pidCandidates + msgCandidates
+            val remainingSlots = (8 - contextualCandidates.size).coerceAtLeast(0)
+            val visiblePidCandidates = pidCandidates.take(remainingSlots)
+            val msgCandidates = (inScopeCandidates + outOfScopeCandidates)
+                .take((remainingSlots - visiblePidCandidates.size).coerceAtLeast(0))
+            contextualCandidates + visiblePidCandidates + msgCandidates
         }
     }
     // Tags/prefixes the scope picker offers are narrowed to ones the pending rule's pattern
@@ -601,6 +661,20 @@ fun FilterPanel(
         msgRuleSelectedIdx = -1
         msgRuleSelectedAction = 0
         runCatching { msgRuleFr.requestFocus() }
+    }
+
+    fun commitContextualMessageRule(include: Boolean, candidate: MsgCandidate) {
+        onAddMessageRule(include, candidate.pattern, false, candidate.tag, null, candidate.target)
+        msgRuleInput = ""
+        msgRuleSearch = ""
+        msgRuleSelectedIdx = -1
+        msgRuleSelectedAction = 0
+        runCatching { msgRuleFr.requestFocus() }
+    }
+
+    fun addMessageRuleCandidate(include: Boolean, candidate: MsgCandidate) {
+        if (candidate.addsImmediately) commitContextualMessageRule(include, candidate)
+        else openMessageRuleScopeChooser(include, candidate.pattern, regex = false, candidate.target)
     }
 
     fun clearTagSearch() {
@@ -1053,7 +1127,7 @@ fun FilterPanel(
                                 Key.Enter, Key.NumPadEnter -> {
                                     val c = unifiedCandidates.getOrNull(msgRuleSelectedIdx)
                                     if (c != null) {
-                                        openMessageRuleScopeChooser(msgRuleSelectedAction == 0, c.pattern, false, c.target)
+                                        addMessageRuleCandidate(msgRuleSelectedAction == 0, c)
                                     } else if (msgRuleInput.isNotBlank()) {
                                         // No candidate selected — add typed text directly.
                                         // All-digit input → PID/TID rule; anything else → message rule.
@@ -1207,17 +1281,25 @@ fun FilterPanel(
                         .onPointerEvent(PointerEventType.Exit)  { msgCandidatesHovered = false }
                 ) {
                     unifiedCandidates.forEachIndexed { idx, cand ->
-                        val (pattern, target, inScope) = cand
+                        val pattern = cand.pattern
+                        val target = cand.target
+                        val inScope = cand.inScope
                         val isPid = target == RuleTarget.PID_TID
                         val isIncluded = if (isPid) {
                             msgInc.any { it.target == RuleTarget.PID_TID && it.pattern == pattern }
                         } else {
-                            msgInc.any { it.target == RuleTarget.MESSAGE && it.pattern == pattern && !it.regex }
+                            msgInc.any { rule ->
+                                rule.target == RuleTarget.MESSAGE && rule.pattern == pattern && !rule.regex &&
+                                    (!cand.addsImmediately || rule.tag == cand.tag)
+                            }
                         }
                         val isExcluded = if (isPid) {
                             msgExc.any { it.target == RuleTarget.PID_TID && it.pattern == pattern }
                         } else {
-                            msgExc.any { it.target == RuleTarget.MESSAGE && it.pattern == pattern && !it.regex }
+                            msgExc.any { rule ->
+                                rule.target == RuleTarget.MESSAGE && rule.pattern == pattern && !rule.regex &&
+                                    (!cand.addsImmediately || rule.tag == cand.tag)
+                            }
                         }
                         val isRowSelected = idx == msgRuleSelectedIdx
                         HoverBox(
@@ -1243,9 +1325,9 @@ fun FilterPanel(
                                     AppText("other", color = tc.td.copy(.7f), fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
                                         modifier = Modifier.padding(end = 2.dp))
                                 }
-                                FullTextHint(pattern, modifier = Modifier.weight(1f), forceShow = isRowSelected) { onTextLayout ->
+                                FullTextHint(cand.label, modifier = Modifier.weight(1f), forceShow = isRowSelected) { onTextLayout ->
                                     AppText(
-                                        pattern,
+                                        cand.label,
                                         color = when {
                                             isIncluded -> tc.tx
                                             isExcluded -> msgExNeg.copy(.8f)
@@ -1265,7 +1347,7 @@ fun FilterPanel(
                                     Modifier.size(20.dp)
                                         .background(if (incHighlight) tc.ac.copy(.2f) else if (incKbd) tc.ac.copy(.1f) else Color.Transparent, CORNER_SM)
                                         .border(1.dp, if (incHighlight || incKbd) tc.ac else tc.br, CORNER_SM)
-                                        .clickable { openMessageRuleScopeChooser(true, pattern, false, target) },
+                                        .clickable { addMessageRuleCandidate(true, cand) },
                                     contentAlignment = Alignment.Center,
                                 ) { AppText("+", color = if (incHighlight || incKbd) tc.ac else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
                                 val exHighlight = isExcluded
@@ -1274,7 +1356,7 @@ fun FilterPanel(
                                     Modifier.size(20.dp)
                                         .background(if (exHighlight) msgExNeg.copy(.2f) else if (exKbd) msgExNeg.copy(.1f) else Color.Transparent, CORNER_SM)
                                         .border(1.dp, if (exHighlight || exKbd) msgExNeg else tc.br, CORNER_SM)
-                                        .clickable { openMessageRuleScopeChooser(false, pattern, false, target) },
+                                        .clickable { addMessageRuleCandidate(false, cand) },
                                     contentAlignment = Alignment.Center,
                                 ) { AppText("−", color = if (exHighlight || exKbd) msgExNeg else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
                             }

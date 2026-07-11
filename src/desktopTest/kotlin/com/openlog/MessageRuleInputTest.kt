@@ -1,7 +1,10 @@
 package com.openlog
 
+import com.openlog.model.LogEntry
+import com.openlog.model.LogLevel
 import com.openlog.model.MessageRule
 import com.openlog.model.RuleTarget
+import com.openlog.ui.contextualMessageRuleCandidates
 import com.openlog.ui.messageRuleInputSpec
 import com.openlog.ui.messageRulePillLabel
 import com.openlog.ui.messageRuleScopeOptions
@@ -66,5 +69,47 @@ class MessageRuleInputTest {
         assertEquals("All", options[0].label)
         assertEquals("com.app.*", options[1].label)
         assertTrue(options.drop(1).any { it.label == "com.app.Network" })
+    }
+
+    @Test
+    fun contextualSuggestionsMatchBothTagSeparatorFormsAndMirrorFlyoutVariants() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "com.my.app", "method call: id=42")
+
+        val spaced = contextualMessageRuleCandidates(listOf(entry), "com.my.app : method", regex = false)
+        val compact = contextualMessageRuleCandidates(listOf(entry), "com.my.app: method", regex = false)
+
+        val expected = listOf(
+            Triple("com.my.app: method call", "method call", "com.my.app"),
+            Triple("com.my.app: method call: id", "method call: id", "com.my.app"),
+            Triple("method call", "method call", null),
+            Triple("method call: id", "method call: id", null),
+        )
+        assertEquals(expected, spaced.map { Triple(it.label, it.pattern, it.tag) })
+        assertEquals(expected, compact.map { Triple(it.label, it.pattern, it.tag) })
+    }
+
+    @Test
+    fun contextualSuggestionsHonorRegexAndDoNotReplaceMessageOnlySuggestions() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "com.my.app", "method call")
+
+        val regexMatches = contextualMessageRuleCandidates(listOf(entry), "com\\.my\\.app.*method", regex = true)
+
+        assertEquals(
+            listOf(
+                Triple("com.my.app: method call", "method call", "com.my.app"),
+                Triple("method call", "method call", null),
+            ),
+            regexMatches.map { Triple(it.label, it.pattern, it.tag) },
+        )
+        assertTrue(contextualMessageRuleCandidates(listOf(entry), "method", regex = false).isEmpty())
+    }
+
+    @Test
+    fun contextualSuggestionsDeDuplicateRepeatedLogRows() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "com.my.app", "method call")
+
+        val candidates = contextualMessageRuleCandidates(listOf(entry, entry.copy(id = 2)), "com.my.app.*method", regex = true)
+
+        assertEquals(2, candidates.size)
     }
 }
