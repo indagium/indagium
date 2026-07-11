@@ -384,6 +384,135 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 AppButton("Connection info…", onClick = { state.mcpInfoOpen = true }, variant = ButtonVariant.Secondary)
             }
 
+            SettingsSectionHeader("Source code")
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (state.settings.sourceFolders.isEmpty()) {
+                    AppText(
+                        "(no folders — register one to enable Show in code)",
+                        color = tc.td,
+                        fontSize = 11.sp,
+                    )
+                } else {
+                    state.settings.sourceFolders.forEach { path ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            TooltipArea(
+                                tooltip = {
+                                    Box(
+                                        Modifier
+                                            .background(tc.p2, RoundedCornerShape(4.dp))
+                                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    ) {
+                                        AppText(path, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                AppText(
+                                    truncatePathForDisplay(path),
+                                    color = tc.ts,
+                                    fontSize = 11.sp,
+                                    fontFamily = MONO,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            AppButton("Remove", onClick = { state.removeSourceFolder(path) }, variant = ButtonVariant.Secondary)
+                        }
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                TooltipArea(
+                    tooltip = {
+                        Box(
+                            Modifier
+                                .background(tc.p2, RoundedCornerShape(4.dp))
+                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        ) {
+                            AppText(
+                                "Point openLog at your project's source folder(s), then right-click a log line → " +
+                                    "\"Show in code\" to see the code that logged it.",
+                                color = tc.tx,
+                                fontSize = 11.sp,
+                                maxLines = 2,
+                            )
+                        }
+                    },
+                ) {
+                    AppButton("Register source code", onClick = { state.pickSourceFolder() })
+                }
+                AppButton(
+                    "Reindex",
+                    onClick = { state.reindexSources() },
+                    variant = ButtonVariant.Secondary,
+                    enabled = !state.isIndexingSources && state.settings.sourceFolders.isNotEmpty(),
+                )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                val sourceStatus = state.sourceIndexStatus
+                AppText(
+                    if (sourceStatus.builtAt == 0L) {
+                        "Not indexed yet"
+                    } else {
+                        "${sourceStatus.fileCount} files · ${sourceStatus.siteCount} call sites · " +
+                            "indexed ${sourceIndexAgeLabel(sourceStatus.builtAt)}"
+                    },
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    fontFamily = UI,
+                )
+                if (sourceStatus.changedFileCount > 0) {
+                    AppText(
+                        "${sourceStatus.changedFileCount} files changed — reindex recommended",
+                        color = tc.ac,
+                        fontSize = 10.sp,
+                        fontFamily = UI,
+                    )
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                TooltipArea(
+                    tooltip = {
+                        Box(
+                            Modifier
+                                .background(tc.p2, RoundedCornerShape(4.dp))
+                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        ) {
+                            AppText(
+                                "Command to open a file at a line. Use {file} and {line} placeholders, e.g. " +
+                                    "idea --line {line} {file} or code -g {file}:{line}. Leave blank to " +
+                                    "auto-detect a common editor (VS Code, IntelliJ, Cursor, Sublime) or fall " +
+                                    "back to the default app. A configured command is not replaced by that fallback.",
+                                color = tc.tx,
+                                fontSize = 11.sp,
+                                maxLines = 4,
+                            )
+                        }
+                    },
+                ) {
+                    AppText(
+                        "Open command",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        fontFamily = UI,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                InlineField(
+                    state.settings.editorCommand,
+                    { value -> state.updateSettings { it.copy(editorCommand = value) } },
+                    "idea --line {line} {file}",
+                    Modifier.fillMaxWidth(),
+                    fontSize = 12.sp,
+                )
+            }
+
             SettingsSectionHeader("About")
             Row(
                 Modifier.fillMaxWidth(),
@@ -420,6 +549,23 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
             modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
             style = appScrollbarStyle(tc),
         )
+    }
+}
+
+// Reuses MS_PER_MINUTE/MS_PER_SECOND from McpInfoDialog.kt (same package); only the hour/day/
+// absolute-date tiers below are new, since agoLabel() there only ever needs seconds/minutes for
+// "last seen" client freshness.
+internal const val MS_PER_HOUR = 60 * MS_PER_MINUTE
+internal const val MS_PER_DAY = 24 * MS_PER_HOUR
+
+internal fun sourceIndexAgeLabel(builtAt: Long): String {
+    val delta = System.currentTimeMillis() - builtAt
+    return when {
+        delta < AGO_JUST_NOW_MS -> "just now"
+        delta < MS_PER_MINUTE -> "${delta / MS_PER_SECOND}s ago"
+        delta < MS_PER_HOUR -> "${delta / MS_PER_MINUTE} min ago"
+        delta < MS_PER_DAY -> "${delta / MS_PER_HOUR} h ago"
+        else -> java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.US).format(java.util.Date(builtAt))
     }
 }
 

@@ -10,6 +10,7 @@ import com.openlog.model.MessageRule
 import com.openlog.model.RuleTarget
 import com.openlog.model.SavedFilter
 import com.openlog.model.SequenceDef
+import com.openlog.source.SourceMatch
 import com.openlog.ui.AppState
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitSource
@@ -65,6 +66,11 @@ import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 
 private const val DEFAULT_VISIBLE_LIMIT = 200
+
+// resolve_log_source's `limit`: same default as AppState.resolveLogSource/resolveForLine's own
+// default, capped well above what any caller has a legitimate reason to ask for at once.
+private const val DEFAULT_RESOLVE_LIMIT = 10
+private const val MAX_RESOLVE_LIMIT = 50
 
 // Keys kept regardless of any fields/compact projection, so projected items stay identifiable.
 private val STRUCTURAL_ITEM_KEYS = setOf("type", "id", "gid", "expanded", "count")
@@ -396,6 +402,7 @@ class ControlServer(
         "merge_tabs" -> mergeTabsRoute(a.strList("tabIds") ?: emptyList(), a.str("newTabName") ?: "Merged")
         "start_tailing" -> startTailingRoute(a.str("tabId") ?: "")
         "stop_tailing" -> stopTailingRoute(a.str("tabId") ?: "")
+        "resolve_log_source" -> resolveLogSourceRoute(a)
         else -> mapOf("error" to "unknown operation: $name")
     }
 
@@ -609,6 +616,32 @@ class ControlServer(
         if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
         appState.stopTailing(tabId)
         return mapOf("tabId" to tabId, "tailing" to (appState.tab(tabId)?.tailing ?: false))
+    }
+
+    // Resolves a log line back to the source method(s) that could have emitted it. Two input
+    // modes: tabId+lineId reads an already-open tab's row (like showSourceForLine); tag+message
+    // lets a caller resolve an arbitrary line it only has text for (e.g. pasted from elsewhere).
+    // The two "nothing configured yet" states are distinct errors (no folders vs. not indexed)
+    // so a client — or a human reading the error — knows exactly which Settings action to take;
+    // a resolve that ran but simply found nothing is NOT an error, it's `{ matches: [] }`, so a
+    // client can tell "misconfigured" apart from "configured correctly, no match for this line."
+    private fun resolveLogSourceRoute(a: Map<String, Any?>): Map<String, Any?> {
+        if (appState.settings.sourceFolders.isEmpty()) {
+            return mapOf("error" to "no source folders configured — add one in Settings → Source code")
+        }
+        if (appState.sourceIndex == null) {
+            return mapOf("error" to "source folders not indexed yet — run Reindex in Settings → Source code")
+        }
+        val limit = (a.anyInt("limit") ?: DEFAULT_RESOLVE_LIMIT).coerceIn(1, MAX_RESOLVE_LIMIT)
+        val tabId = a.str("tabId")
+        val lineId = a.anyInt("lineId")
+        val message = a.str("message")
+        val matches = when {
+            tabId != null && lineId != null -> appState.resolveForLine(tabId, lineId, limit)
+            message != null -> appState.resolveLogSource(a.str("tag"), message, limit)
+            else -> return mapOf("error" to "provide either tabId+lineId or message (+optional tag)")
+        }
+        return mapOf("matches" to matches.map { sourceMatchToMap(it) })
     }
 
     private fun closeTab(tabId: String): Map<String, Any?> {
@@ -1007,6 +1040,18 @@ class ControlServer(
         "tag" to site.entry.tag, "msg" to site.entry.msg,
     )
 
+    private fun sourceMatchToMap(match: SourceMatch): Map<String, Any?> = mapOf(
+        "filePath" to match.site.filePath,
+        "methodName" to match.site.methodName,
+        "methodStartLine" to match.site.methodStartLine,
+        "methodEndLine" to match.site.methodEndLine,
+        "callLine" to match.site.callLine,
+        "tag" to match.site.tag,
+        "confidence" to match.confidence,
+        "stale" to match.stale,
+        "code" to appState.readMethodSource(match.site),
+    )
+
     // Opt-in token-saving projection over a full item map. With neither arg the map is returned
     // unchanged (byte-for-byte identical to the pre-existing output). `fields` is a whitelist of
     // entry-derived keys to keep; `compact` drops pid/tid/indent and any empty/zero-valued key.
@@ -1358,6 +1403,30 @@ private val MCP_TOOLS: List<McpTool> = listOf(
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool("stop_tailing", "Stop watching a tab's backing file for growth.", schema("tabId" to "string", required = listOf("tabId"))),
+    McpTool(
+        "resolve_log_source",
+        "Resolve an Android log line back to the source method(s) that could have emitted it, by " +
+            "matching its tag/message against a pre-built index of Log/Timber call sites. REQUIRES " +
+            "the user to have configured one or more source folders in Settings → Source code and " +
+            "indexed them (Reindex) — returns an error naming which of those two steps is missing " +
+            "rather than an empty result. Accepts either tabId+lineId (a line in an already-open " +
+            "tab) or a raw tag+message pair (e.g. text pasted from elsewhere); exactly one of the " +
+            "two input modes must be supplied. `confidence` (0..1) reflects how specific the " +
+            "matched log message template is — a longer, more distinctive literal template scores " +
+            "higher than a short generic one like \"done\". A match is flagged `stale` when its " +
+            "source file has changed on disk since the index was built, so its line numbers may no " +
+            "longer be accurate. A resolve that finds nothing returns `{ matches: [] }`, not an error.",
+        schema(
+            "tabId" to "string", "lineId" to "integer", "tag" to "string", "message" to "string", "limit" to "integer",
+            descriptions = mapOf(
+                "tabId" to "Id of an already-open tab (input mode 1, use with lineId).",
+                "lineId" to "Log line id within tabId to resolve (input mode 1, use with tabId).",
+                "tag" to "Optional log tag to narrow the match (input mode 2, use with message).",
+                "message" to "Raw log message text to resolve (input mode 2, alternative to tabId+lineId).",
+                "limit" to "Maximum number of candidate matches to return (default 10, capped at 50).",
+            ),
+        ),
+    ),
 )
 
 // REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl
@@ -1395,4 +1464,5 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/merge", "merge_tabs"),
     Triple(HttpMethod.Post, "/tail/start", "start_tailing"),
     Triple(HttpMethod.Post, "/tail/stop", "stop_tailing"),
+    Triple(HttpMethod.Post, "/resolve_log_source", "resolve_log_source"),
 )

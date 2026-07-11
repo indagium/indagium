@@ -3,6 +3,8 @@ package com.openlog
 import com.openlog.debug.ControlServer
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
+import com.openlog.source.SourceIndexStore
+import com.openlog.source.SourceIndexer
 import com.openlog.ui.AppState
 import com.openlog.ui.mkTab
 import java.io.File
@@ -83,8 +85,9 @@ class ControlServerMcpTest {
             "add_text_note", "add_log_note", "update_note_block", "move_note_block", "delete_note_block",
             "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing",
+            "resolve_log_source",
         )
-        assertEquals(32, expected.size)
+        assertEquals(33, expected.size)
         expected.forEach { name -> assertTrue(body.contains("\"$name\""), "tools/list missing $name:\n$body") }
     }
 
@@ -161,6 +164,48 @@ class ControlServerMcpTest {
             session,
         )
         assertEquals(setOf(LogLevel.E), state.tab("t1")!!.filter.levels)
+    }
+
+    @Test
+    fun toolCallResolvesLogSourceForIndexedFixture() {
+        // resolve_log_source needs its own AppState with a real (synchronously built, so no race
+        // with the async reindexSources() path) source index — build one on the side rather than
+        // reusing the class-level state/server, which have no source folders configured.
+        val dir = kotlin.io.path.createTempDirectory("openlog-mcp-resolve").toFile()
+        val srcDir = File(dir, "src").apply { mkdirs() }
+        File(srcDir, "Widgets.kt").writeText(
+            """
+            package demo
+
+            const val TAG = "Widgets"
+
+            class WidgetHost {
+                fun attach(id: String) {
+                    Log.d(TAG, "widget attached ${'$'}id")
+                }
+            }
+            """.trimIndent(),
+        )
+        val indexFile = File(dir, "source-index")
+        SourceIndexStore.save(SourceIndexer.build(listOf(srcDir)), indexFile)
+        val indexedState = AppState(autosaveFile = File(dir, "state.cache"), sourceIndexFile = indexFile)
+        indexedState.updateSettings { it.copy(sourceFolders = listOf(srcDir.absolutePath)) }
+        waitUntil { indexedState.sourceIndex != null }
+
+        val indexedServer = ControlServer(indexedState, 0)
+        indexedServer.start()
+        try {
+            val session = initSession(port = indexedServer.boundPort, token = indexedServer.token)
+            val body = mcp(
+                """{"jsonrpc":"2.0","id":6,"method":"tools/call",""" +
+                    """"params":{"name":"resolve_log_source","arguments":{"tag":"Widgets","message":"widget attached 42"}}}""",
+                session, port = indexedServer.boundPort, token = indexedServer.token,
+            ).body()
+            assertTrue(body.contains("attach"), "resolve_log_source didn't find the fixture method:\n$body")
+        } finally {
+            indexedServer.stop()
+            indexedState.close()
+        }
     }
 
     @Test

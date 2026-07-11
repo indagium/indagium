@@ -63,7 +63,7 @@ internal fun McpInfoDialog(state: AppState, port: Int, token: String, onDismiss:
         while (true) {
             clients = state.connectedMcpClients()
             mcpSessions = state.mcpSessions()
-            state.controlServerToken()?.let { liveToken = it }
+            liveToken = state.connectionInfoToken()
             kotlinx.coroutines.delay(CLIENT_POLL_INTERVAL_MS)
         }
     }
@@ -80,6 +80,15 @@ internal fun McpInfoDialog(state: AppState, port: Int, token: String, onDismiss:
             fontSize = 11.sp,
             maxLines = 3,
         )
+        if (!state.settings.mcpControlEnabled) {
+            Spacer(Modifier.height(6.dp))
+            AppText(
+                "Automation server is off. Enable it in Settings before a client can connect.",
+                color = tc.ac,
+                fontSize = 11.sp,
+                maxLines = 2,
+            )
+        }
         Spacer(Modifier.height(8.dp))
         CopyableCodeField(
             text = mcpUrl(port),

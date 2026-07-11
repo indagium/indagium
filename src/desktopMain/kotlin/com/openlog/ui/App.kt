@@ -21,6 +21,7 @@ import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.FindInPage
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.PlayArrow
@@ -50,6 +51,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.*
+import com.openlog.source.SourceCodeView
 import kotlinx.coroutines.delay
 import java.io.File
 import java.net.URI
@@ -252,7 +254,8 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                         val estimatedMenuHeight = (538 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (state.pendingSequenceStart != null) 32 else 0) +
-                            (if (selCount > 1) 64 else 0)).dp
+                            (if (selCount > 1) 64 else 0) +
+                            (if (state.settings.sourceFolders.isNotEmpty()) 44 else 0)).dp
                         val menuScroll = rememberScrollState()
                         val x = ctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
                         val y = ctx.y.dp.coerceIn(8.dp, (maxHeight - estimatedMenuHeight - 8.dp).coerceAtLeast(8.dp))
@@ -261,6 +264,14 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                         val submenuOpensLeft = (x + menuWidth + CTX_SUBMENU_WIDTH) > maxWidth
 
                         val ruleVariants = state.messageRuleVariantsFromCtx()
+                        // Resolved once per menu open (cheap — indexed lookup) rather than per
+                        // item, so both the enabled/disabled "Show in code" item below and its
+                        // onClick agree on the same match list.
+                        val srcMatches = if (state.settings.sourceFolders.isEmpty()) {
+                            emptyList()
+                        } else {
+                            state.resolveForLine(ctx.tabId, ctx.entryId)
+                        }
                         val menuEntries = buildList {
                             add(
                                 CtxMenuEntry.ActionHeader(
@@ -370,6 +381,20 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                     state.ctx = null
                                 },
                             )
+                            // Only offered once source folders are configured; if they are but this
+                            // particular line has no resolved call site, the item still renders
+                            // (communicating the feature exists) just disabled rather than omitted.
+                            if (state.settings.sourceFolders.isNotEmpty()) {
+                                add(CtxMenuEntry.Divider)
+                                add(
+                                    CtxMenuEntry.Action(Icons.Outlined.FindInPage, "Show in code", enabled = srcMatches.isNotEmpty()) {
+                                        if (srcMatches.isNotEmpty()) {
+                                            state.sourceCodeView = SourceCodeView(srcMatches)
+                                            state.ctx = null
+                                        }
+                                    },
+                                )
+                            }
                         }
                         val selectableEntries = menuEntries.filter {
                             it is CtxMenuEntry.ActionHeader || it is CtxMenuEntry.Action || it is CtxMenuEntry.ActionWithSubmenu
@@ -434,7 +459,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                             }
                                         }
                                         is CtxMenuEntry.Action ->
-                                            CtxItem(e.icon, e.label, highlighted = e === selectedEntry, onClick = e.onClick)
+                                            CtxItem(e.icon, e.label, highlighted = e === selectedEntry, enabled = e.enabled, onClick = e.onClick)
                                         is CtxMenuEntry.ActionWithSubmenu ->
                                             CtxItemWithSubmenu(
                                                 e.icon, e.label, e.submenu,
@@ -1387,6 +1412,11 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                 }
             }
 
+            // ── Source code popup ─────────────────────────────────────
+            state.sourceCodeView?.let { view ->
+                SourceCodeDialog(state, view, onDismiss = { state.sourceCodeView = null })
+            }
+
             if (state.cacheClearConfirmOpen) {
                 Dialog(onDismissRequest = { state.cancelClearCache() }) {
                     val tc2 = tc()
@@ -1434,14 +1464,12 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
             }
 
             // ── MCP connection info dialog ────────────────────────────
-            // Only openable while the server is actually running (see the menu/settings entry point
-            // that sets mcpInfoOpen), so a token is always available here.
+            // Uses the persisted connection token when the server is off or still binding, so a
+            // click opens immediately instead of waiting for an unrelated recomposition.
             if (state.mcpInfoOpen) {
-                val token = state.controlServerToken()
-                if (token != null) {
-                    Dialog(onDismissRequest = { state.mcpInfoOpen = false }) {
-                        McpInfoDialog(state = state, port = state.settings.mcpControlPort, token = token) { state.mcpInfoOpen = false }
-                    }
+                val token = state.connectionInfoToken()
+                Dialog(onDismissRequest = { state.mcpInfoOpen = false }) {
+                    McpInfoDialog(state = state, port = state.settings.mcpControlPort, token = token) { state.mcpInfoOpen = false }
                 }
             }
         }

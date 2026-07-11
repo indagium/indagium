@@ -685,18 +685,28 @@ internal fun StepperButton(symbol: String, enabled: Boolean, onClick: () -> Unit
 // "Auto" is a plain on/off chip, not a two-way select, so the field beside it is reachable by
 // toggling it off rather than by picking "Manual" from a second option.
 @Composable
-internal fun CtxItem(icon: ImageVector, label: String, highlighted: Boolean = false, onClick: () -> Unit) {
+internal fun CtxItem(icon: ImageVector, label: String, highlighted: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
     val tc = tc()
-    HoverBox(modifier = Modifier.fillMaxWidth(), forceHover = highlighted, onClick = onClick) {
+    HoverBox(
+        modifier = Modifier.fillMaxWidth(),
+        hoverBg = if (enabled) tc.hv else Color.Transparent,
+        forceHover = highlighted && enabled,
+        onClick = if (enabled) onClick else null,
+    ) {
         Row(
             Modifier.fillMaxWidth().height(32.dp).padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
-                Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp), tint = tc.td.copy(alpha = 0.65f))
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = if (enabled) tc.td.copy(alpha = 0.65f) else tc.td.copy(alpha = 0.3f),
+                )
             }
             Spacer(Modifier.width(8.dp))
-            AppText(label, color = tc.tx, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            AppText(label, color = if (enabled) tc.tx else tc.td, fontSize = 12.sp, modifier = Modifier.weight(1f))
         }
     }
 }
@@ -848,7 +858,7 @@ internal fun CtxDivider() {
 internal sealed class CtxMenuEntry {
     data class ActionHeader(val label: String, val onClick: () -> Unit) : CtxMenuEntry()
 
-    data class Action(val icon: ImageVector, val label: String, val onClick: () -> Unit) : CtxMenuEntry()
+    data class Action(val icon: ImageVector, val label: String, val enabled: Boolean = true, val onClick: () -> Unit) : CtxMenuEntry()
 
     // The main row keeps today's default onClick; hovering/pressing the trailing ▶ opens a
     // flyout with up to 4 narrower match-scope choices instead (see messageRuleVariantsFromCtx).

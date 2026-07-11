@@ -76,6 +76,12 @@ File → LogParser.parseLogcat() → List<LogEntry>
 | `utils/LogParser.kt` | Parses 4 logcat formats: threadtime, time, brief, bare. Unrecognised lines become tag=`RAW`. |
 | `utils/Filter.kt` | `passesFilter()`, `computeItems()` (builds `List<LogItem>` with sequence/manual headers), `buildMd()` |
 | `utils/SeqComputer.kt` | `computeSeqGroups()` — nesting algorithm for sequence detection |
+| `source/SourceIndexer.kt` | Scans registered source folders (`.kt`/`.java`) for `Log.*`/Timber call sites — extracts message template, resolves `TAG`, finds enclosing method by brace-matching. Pure, no parser dep. |
+| `source/LogSourceResolver.kt` | Maps a log line's `(tag, msg)` back to source call site(s): tag-bucketed regex match, generic-literal suppression, confidence ranking. |
+| `source/SourceIndexStore.kt` | Persists the index to `appDataDir()/source-index` (`openLog2-source-index-v1` token format), separate from autosave. |
+| `source/SourceModel.kt` | Index data types: `LogCallSite`, `SourceIndex`, `SourceMatch`, `SourceIndexStatus`, `SourceCodeView`. |
+| `ui/SourceCodeDialog.kt` | "Show in code" popup — the resolved method's source with V+H scrollbars, path, line range, Open-in-default-app. |
+| `debug/ControlServer.kt` | Localhost MCP + REST control server (33 tools incl. `resolve_log_source`). Off by default; enabled via Settings. |
 
 ### AppState
 

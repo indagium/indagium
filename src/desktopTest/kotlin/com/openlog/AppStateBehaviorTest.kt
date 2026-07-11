@@ -4072,6 +4072,20 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun connectionInfoTokenIsAvailableWhileTheControlServerIsOff() {
+        val tokenFile = File(createTempDirectory("openlog-mcp-token-info").toFile(), "control-token")
+        val state = AppState(controlTokenFile = tokenFile)
+
+        assertFalse(state.settings.mcpControlEnabled)
+        assertEquals(null, state.controlServerToken())
+        val token = state.connectionInfoToken()
+
+        assertEquals(32, token.length)
+        assertEquals(token, tokenFile.readText().trim())
+        assertEquals(token, state.connectionInfoToken())
+    }
+
+    @Test
     fun rotateControlTokenChangesTheLiveTokenWhileServerIsRunning() {
         val tokenFile = File(createTempDirectory("openlog-mcp-token-rotate").toFile(), "control-token")
         val state = AppState(controlTokenFile = tokenFile)

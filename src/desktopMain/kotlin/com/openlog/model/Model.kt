@@ -267,6 +267,15 @@ data class AppSettings(
     val highlightEntireCrashGroup: Boolean = false,
     val ctrlFTarget: CtrlFTarget = CtrlFTarget.KEYWORD_REGEX,
     val openNewFilesWithUnfiltered: Boolean = false,
+    // Source roots scanned by SourceIndexer to resolve a log line back to the Log/Timber call site
+    // that could have emitted it (source/SourceIndexer.kt, AppState.reindexSources). Trailing with
+    // a default so old settings tokens (without this field) still parse — see settingsFromToken.
+    val sourceFolders: List<String> = emptyList(),
+    // Command template used by SourceCodeDialog's "Open" button to jump to the log call line in an
+    // external editor, e.g. "idea --line {line} {file}" or "code -g {file}:{line}" — see
+    // AppState.openInEditor. Blank (the default) means auto-detect a common editor CLI, falling
+    // back to Desktop.open(). Trailing with a default so old settings tokens still parse.
+    val editorCommand: String = "",
 )
 
 enum class ThemePreset(val label: String) {

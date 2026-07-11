@@ -14,6 +14,7 @@ A desktop log viewer for Android logcat files, built with Kotlin and Compose Mul
 - **Sequences** — auto-detect and collapse recurring tag patterns into collapsible groups
 - **Highlighters** — color-code lines by message pattern
 - **Annotations** — annotate log selections with notes, exported as Markdown
+- **Show in code** — register your project's source folder(s) in Settings, then right-click a log line to view the exact method that emitted it (Kotlin/Java, `Log.*` + Timber); also exposed to AI assistants via the `resolve_log_source` MCP tool
 - **Compare view** — diff two open tabs line by line
 - **Themes** — 20 built-in themes (light, dark, and paper variants)
 - **Autosave** — session is fully restored on next launch

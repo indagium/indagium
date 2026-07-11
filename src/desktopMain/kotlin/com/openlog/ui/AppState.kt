@@ -5,6 +5,15 @@ import androidx.compose.ui.graphics.Color
 import com.openlog.debug.ControlServer
 import com.openlog.debug.loadOrCreateControlToken
 import com.openlog.model.*
+import com.openlog.source.FileMeta
+import com.openlog.source.LogCallSite
+import com.openlog.source.LogSourceResolver
+import com.openlog.source.SourceCodeView
+import com.openlog.source.SourceIndex
+import com.openlog.source.SourceIndexStatus
+import com.openlog.source.SourceIndexStore
+import com.openlog.source.SourceIndexer
+import com.openlog.source.SourceMatch
 import com.openlog.utils.ArchiveBudgetExceededException
 import com.openlog.utils.EntryIdMap
 import com.openlog.utils.MAX_ARCHIVE_ENTRY_BYTES
@@ -149,6 +158,124 @@ internal const val MIN_PORT = 1
 internal const val MAX_PORT = 65535
 internal const val DEFAULT_MCP_PORT = 8991
 
+// Auto-detect fallback chain for AppState.openInEditor, tried in order when settings.editorCommand
+// is blank — the first one whose CLI is actually on PATH (i.e. ProcessBuilder.start() succeeds)
+// wins. Each template supports jumping straight to a line, unlike plain Desktop.open().
+private val AUTO_EDITOR_COMMANDS = listOf(
+    "code -g {file}:{line}",
+    "idea --line {line} {file}",
+    "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea --line {line} {file}",
+    "cursor -g {file}:{line}",
+    "subl {file}:{line}",
+)
+
+// Extra places to look for an editor CLI besides $PATH. A GUI app (and the Gradle daemon in dev)
+// doesn't inherit the user's interactive shell PATH, so `code`/`idea`/etc. are typically missing
+// from System.getenv("PATH") even though they're on the user's normal shell PATH or installed via
+// JetBrains Toolbox. Order doesn't matter much here since executableSearchDirs already puts the
+// real PATH first; these are just a fallback net.
+private val COMMON_EXECUTABLE_DIRS = listOf(
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/usr/bin",
+    "/bin",
+)
+
+private fun userHomeExecutableDirs(): List<String> {
+    val home = System.getProperty("user.home") ?: return emptyList()
+    return listOf(
+        "$home/.local/bin",
+        "$home/bin",
+        // JetBrains Toolbox shell-script launchers (where `idea` usually lives when installed via
+        // Toolbox rather than a system package manager).
+        "$home/Library/Application Support/JetBrains/Toolbox/scripts",
+        "$home/.local/share/JetBrains/Toolbox/scripts",
+    )
+}
+
+// Directories to search for an editor CLI's executable, in priority order: the inherited PATH
+// first (so an explicit user PATH entry still wins), then the common locations above. De-duped
+// and filtered to dirs that actually exist.
+internal fun executableSearchDirs(): List<File> {
+    val pathDirs = System.getenv("PATH")?.split(File.pathSeparator).orEmpty()
+    val candidates = pathDirs + COMMON_EXECUTABLE_DIRS + userHomeExecutableDirs()
+    return candidates.filter { it.isNotBlank() }.distinct().map { File(it) }.filter { it.isDirectory }
+}
+
+// Resolves the first token of an editor command template to an absolute, executable file. If
+// `command` already contains a path separator it's treated as an explicit path (checked directly,
+// not searched for); otherwise each of `dirs` is searched in order for a file named `command`.
+// Returns null (never throws) if nothing executable is found, so callers can fall through to the
+// next auto-detect candidate instead of letting ProcessBuilder.start() throw an IOException.
+// Requires a regular file (not a directory): a directory on the search path or on an explicit
+// path can return true from `canExecute()` (traversable), which would otherwise let a directory
+// prefix of a space-containing path (see splitEditorCommand below) be wrongly accepted here.
+internal fun resolveExecutable(command: String, dirs: List<File> = executableSearchDirs()): File? {
+    if (command.contains('/') || command.contains(File.separatorChar)) {
+        val file = File(command)
+        return file.takeIf { it.exists() && it.isFile && it.canExecute() }
+    }
+    return dirs.asSequence()
+        .map { File(it, command) }
+        .firstOrNull { it.exists() && it.isFile && it.canExecute() }
+}
+
+// Splits an editor command template into its executable and the remaining raw (not-yet-
+// substituted) argument tokens, correctly handling an executable path that itself contains
+// spaces (e.g. a JetBrains Toolbox script under "…/Application Support/…"). A naive whitespace
+// split would shatter such a path across multiple tokens and never find the real executable.
+//
+// Tokenizes on whitespace, then greedily grows a prefix of tokens (rejoined with single spaces)
+// until [resolveExecutable] resolves it to a real file — the smallest such prefix wins, so a bare
+// command (`idea --line {line} {file}`) resolves at the very first token, while a multi-token
+// absolute path resolves once enough tokens have been rejoined to name the actual file.
+// `resolveExecutable`'s `isFile` requirement is what makes this safe: intermediate directory
+// prefixes of a space-containing path (`/…/Application`, `/…/Application Support`) are directories
+// and so are correctly skipped rather than being greedily (and wrongly) accepted early.
+// Returns null if no prefix resolves to an executable file.
+internal fun splitEditorCommand(template: String, dirs: List<File> = executableSearchDirs()): Pair<File, List<String>>? {
+    val rawTokens = template.split(Regex("\\s+")).filter { it.isNotEmpty() }
+    if (rawTokens.isEmpty()) return null
+    // Strip a surrounding quote pair from just the first token, if present — a quoted executable
+    // path (`"idea" --line …`) is otherwise indistinguishable from a literal leading quote char.
+    val tokens = rawTokens.toMutableList().also { it[0] = it[0].trim('\'', '"') }
+    for (k in 1..tokens.size) {
+        val candidate = tokens.subList(0, k).joinToString(" ")
+        val resolved = resolveExecutable(candidate, dirs) ?: continue
+        return resolved to tokens.subList(k, tokens.size)
+    }
+    return null
+}
+
+// Resolves an editor template and substitutes its location placeholders. Keeping this separate
+// from [launchEditor] makes the exact process arguments testable, especially for the Toolbox
+// launcher path which contains spaces.
+internal fun editorCommandArguments(
+    template: String,
+    file: File,
+    line: Int,
+    dirs: List<File> = executableSearchDirs(),
+): List<String>? {
+    val (executable, argTokens) = splitEditorCommand(template, dirs) ?: return null
+    val args = argTokens.map { token ->
+        token.replace("{file}", file.absolutePath).replace("{line}", line.toString())
+    }
+    return listOf(executable.absolutePath) + args
+}
+
+// Launches the exact command assembled by [editorCommandArguments]. Doesn't waitFor() — editors
+// fork and return immediately — and discards the child's output so an editor CLI that writes to
+// stdout/stderr can't fill an unread pipe. Returns false (never throws) if the command executable
+// can't be resolved or fails to start.
+private fun launchEditor(template: String, file: File, line: Int): Boolean = runCatching {
+    val command = editorCommandArguments(template, file, line) ?: return false
+    ProcessBuilder(command)
+        .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+        .redirectError(ProcessBuilder.Redirect.DISCARD)
+        .start()
+    true
+}.getOrDefault(false)
+
 // Above this size, item computation runs on a background dispatcher with a loading line instead
 // of synchronously during composition. 64MB (~500k lines) is roughly where a computeItems pass
 // starts exceeding a frame budget by orders of magnitude; the old 512MB threshold left files in
@@ -276,6 +403,10 @@ class AppState(
     // tests that actually start a control server via the default factory below don't touch the
     // real ~/.openlog2 — same reasoning as autosaveFile.
     private val controlTokenFile: File = DesktopStorage.controlTokenFile(),
+    // Where the persisted source-call-site index (Task 2, source/SourceIndexStore.kt) lives across
+    // restarts. Injectable for the same reason as autosaveFile/controlTokenFile — tests shouldn't
+    // touch the real ~/.openlog2-equivalent location.
+    private val sourceIndexFile: File = DesktopStorage.sourceIndexFile(),
     // Test seam for the S-02 lifecycle race (applyControlServerState): production always
     // constructs-and-starts a real ControlServer synchronously; tests can substitute a slower
     // suspend factory (e.g. one that delays before starting) to exercise enable/disable ordering
@@ -286,6 +417,23 @@ class AppState(
 ) {
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
+
+    // ── Source index (Task 2) ──────────────────────────────────────────
+    // sourceIndex/sourceIndexStatus/sourceCodeView are the only pieces observed by Compose;
+    // sourceResolver is a plain cache rebuilt alongside sourceIndex (see publishSourceIndex) so a
+    // per-row lookup (resolveLogSource) never recompiles every site's matcher regex on the hot path.
+    var sourceIndex by mutableStateOf<SourceIndex?>(null)
+        private set
+    var sourceIndexStatus by mutableStateOf(SourceIndexStatus())
+        private set
+    var sourceCodeView by mutableStateOf<SourceCodeView?>(null)
+
+    // Reactive mirror of the sourceIndexing latch below, purely so the Settings "Reindex" button can
+    // disable itself while a build runs (the private AtomicBoolean isn't observable by Compose).
+    var isIndexingSources by mutableStateOf(false)
+        private set
+    private var sourceResolver: LogSourceResolver? = null
+    private val sourceIndexing = AtomicBoolean(false)
 
     // ── Layout ──────────────────────────────────────────────────────
     var filterVisible by mutableStateOf(true)
@@ -446,6 +594,7 @@ class AppState(
     init {
         refreshArchiveCacheInfo()
         if (restoreOnCreate) restoreAutosave()
+        loadPersistedSourceIndex()
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
@@ -499,6 +648,11 @@ class AppState(
     fun disconnectMcpSession(id: String) = controlServerManager.disconnectMcpSession(id)
 
     fun controlServerToken(): String? = controlServerManager.controlServerToken()
+
+    // Connection info is useful before the server is enabled too: it lets a user copy the stable
+    // client configuration first, then enable the switch. Read the running server's token when
+    // available; otherwise load the same persisted token the next server start will use.
+    fun connectionInfoToken(): String = controlServerManager.controlServerToken() ?: loadOrCreateControlToken(controlTokenFile)
 
     fun rotateControlToken() = controlServerManager.rotateControlToken()
 
@@ -2510,6 +2664,161 @@ class AppState(
         }
     }
 
+    fun pickSourceFolder() {
+        System.setProperty("apple.awt.fileDialogForDirectories", "true")
+        try {
+            val dlg = FileDialog(null as Frame?, "Choose Source Folder", FileDialog.LOAD)
+            dlg.isVisible = true
+            val dir = dlg.directory ?: return
+            val file = dlg.file ?: return
+            val chosen = java.io.File(dir, file)
+            updateSettings { it.copy(sourceFolders = (it.sourceFolders + chosen.absolutePath).distinct()) }
+        } finally {
+            System.setProperty("apple.awt.fileDialogForDirectories", "false")
+        }
+    }
+
+    fun removeSourceFolder(path: String) {
+        updateSettings { it.copy(sourceFolders = it.sourceFolders - path) }
+    }
+
+    // ── Source index (Task 2) ───────────────────────────────────────
+    // Restores whatever was persisted from a prior run, if any — a missing/stale/corrupt file is
+    // "no usable index" (see SourceIndexStore.load), simply leaving sourceIndex null so the
+    // Settings UI (Task 4) can prompt for a first index build. Runs on ioScope: computing
+    // changedFileCount below stats every indexed file, which shouldn't block the UI thread for a
+    // large source tree.
+    private fun loadPersistedSourceIndex() {
+        ioScope.launch {
+            val index = SourceIndexStore.load(sourceIndexFile) ?: return@launch
+            publishSourceIndex(index)
+        }
+    }
+
+    private fun publishSourceIndex(index: SourceIndex) {
+        val status = sourceIndexStatusFor(index)
+        synchronized(stateLock) {
+            sourceIndex = index
+            sourceResolver = LogSourceResolver(index)
+            sourceIndexStatus = status
+        }
+    }
+
+    private fun sourceIndexStatusFor(index: SourceIndex): SourceIndexStatus = SourceIndexStatus(
+        fileCount = index.fileMeta.size,
+        siteCount = index.sites.size,
+        builtAt = index.builtAt,
+        changedFileCount = index.fileMeta.count { (path, meta) -> fileChangedSince(path, meta) },
+    )
+
+    private fun fileChangedSince(path: String, meta: FileMeta): Boolean {
+        val file = File(path)
+        return !file.exists() || file.lastModified() != meta.mtime || file.length() != meta.size
+    }
+
+    // Single-flight (sourceIndexing): a second call while a build is already running is a no-op
+    // rather than queued — the settings UI's "Reindex" action can't be double-clicked into two
+    // concurrent scans racing to publish sourceIndex/write sourceIndexFile.
+    fun reindexSources() {
+        if (!sourceIndexing.compareAndSet(false, true)) return
+        isIndexingSources = true
+        beginLoading("Indexing source…")
+        ioScope.launch {
+            try {
+                val roots = settings.sourceFolders.map { File(it) }
+                val index = runCatching {
+                    SourceIndexer.build(roots) { scanned, total -> loadingStatus = "Indexing source… ($scanned/$total)" }
+                }.getOrNull()
+                if (index != null) {
+                    runCatching { SourceIndexStore.save(index, sourceIndexFile) }
+                    publishSourceIndex(index)
+                }
+            } finally {
+                sourceIndexing.set(false)
+                isIndexingSources = false
+                finishLoading()
+            }
+        }
+    }
+
+    // Delegates to the cached resolver (rebuilt only when sourceIndex changes, see
+    // publishSourceIndex) so a per-row lookup never recompiles every site's matcher regex. Matches
+    // whose source file has drifted from the FileMeta recorded at index-build time are flagged
+    // stale rather than dropped — still useful as an approximate pointer, just not to be trusted
+    // at face value.
+    //
+    // sourceResolver is a plain field (not mutableStateOf, see its declaration) rebuilt alongside
+    // sourceIndex in publishSourceIndex — reading the two together here under the same stateLock
+    // used by that write is what actually gives a cross-thread caller (a future MCP/Ktor request
+    // thread, not just Compose recomposition) a guaranteed-consistent (resolver, index) pair rather
+    // than a race where sourceIndex has already published but sourceResolver hasn't yet become
+    // visible on this thread.
+    fun resolveLogSource(tag: String?, msg: String, limit: Int = 10): List<SourceMatch> {
+        val (resolver, index) = synchronized(stateLock) {
+            val resolver = sourceResolver ?: return emptyList()
+            val index = sourceIndex ?: return emptyList()
+            resolver to index
+        }
+        return resolver.resolve(tag, msg, limit).map { match ->
+            val meta = index.fileMeta[match.site.filePath]
+            val stale = meta == null || fileChangedSince(match.site.filePath, meta)
+            if (stale) match.copy(stale = true) else match
+        }
+    }
+
+    fun resolveForLine(tabId: String, lineId: Int, limit: Int = 10): List<SourceMatch> {
+        val entry = tab(tabId)?.rmap?.get(lineId) ?: return emptyList()
+        return resolveLogSource(entry.tag, entry.msg, limit)
+    }
+
+    // Reads exactly the enclosing method's source lines (methodStartLine..methodEndLine, 1-based
+    // inclusive) rather than the whole file — used by both the source popup (Task 4) and the MCP
+    // tool (Task 5) that will display/return a call site's code.
+    fun readMethodSource(site: LogCallSite): String? {
+        val file = File(site.filePath)
+        if (!file.isFile) return null
+        return runCatching {
+            val lines = file.readLines()
+            val startIdx = site.methodStartLine - 1
+            val endIdx = site.methodEndLine
+            if (startIdx < 0 || endIdx > lines.size || startIdx >= endIdx) return@runCatching null
+            lines.subList(startIdx, endIdx).joinToString("\n")
+        }.getOrNull()
+    }
+
+    fun showSourceForLine(tabId: String, lineId: Int) {
+        val matches = resolveForLine(tabId, lineId)
+        if (matches.isNotEmpty()) sourceCodeView = SourceCodeView(matches)
+    }
+
+    // Opens filePath at line in an editor: settings.editorCommand if set, else the first working
+    // AUTO_EDITOR_COMMANDS entry. There is deliberately no Desktop.open() fallback: that can open
+    // the correct file but cannot honour the requested source line, which is worse than reporting
+    // a missing editor launcher. Runs on ioScope so editor process startup never blocks the UI.
+    fun openInEditor(filePath: String, line: Int) {
+        val file = File(filePath)
+        ioScope.launch {
+            val custom = settings.editorCommand
+            if (custom.isNotBlank()) {
+                if (launchEditor(custom, file, line)) return@launch
+                showOpenError(
+                    title = "Could not open code location",
+                    path = filePath,
+                    message = "The configured Open command could not be launched. The file was not opened without its line " +
+                        "location; check the executable path and the {file} and {line} placeholders in Settings.",
+                )
+                return@launch
+            }
+            if (AUTO_EDITOR_COMMANDS.any { launchEditor(it, file, line) }) return@launch
+            showOpenError(
+                title = "Could not open code location",
+                path = filePath,
+                message = "No supported editor launcher was found. Configure an Open command with {file} and {line} " +
+                    "placeholders in Settings.",
+            )
+        }
+    }
+
     fun exportFiltersToFile(selectedIds: Set<String>? = null) {
         val dlg = FileDialog(null as Frame?, "Export Filters", FileDialog.SAVE).apply {
             file = "openlog_filters.json"; isVisible = true
@@ -3000,6 +3309,13 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     highlightEntireCrashGroup.toString(),
     ctrlFTarget.name,
     openNewFilesWithUnfiltered.toString(),
+    // List field, not a scalar: reuses the same encoding as recentFiles/recentNotes in the
+    // top-level autosave (join each b64-encoded path with a comma, then b64 the whole blob) rather
+    // than a plain fieldToken() value — tokenFields()'s own fieldToken() wraps this blob with one
+    // more b64 layer, which is exactly the extra layer pathTokenList()/tokenList() expect to peel
+    // off on the way back in (see settingsFromToken below).
+    sourceFolders.joinToString(",") { it.b64() }.b64(),
+    editorCommand,
 )
 
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
@@ -3046,6 +3362,12 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
             ?.let { runCatching { CtrlFTarget.valueOf(it) }.getOrNull() }
             ?: CtrlFTarget.KEYWORD_REGEX,
         openNewFilesWithUnfiltered = p.getOrNull(mcpIndex + 7)?.toBooleanStrictOrNull() ?: false,
+        // Missing entirely (old token, predates this field) -> emptyList(); present-but-empty
+        // (fieldToken's "~" for an empty list) -> also emptyList() via pathTokenList()'s own blank
+        // check. See settingsToken above for why this field is pathTokenList()-shaped rather than
+        // a plain fieldToken() string.
+        sourceFolders = p.getOrNull(mcpIndex + 8)?.pathTokenList() ?: emptyList(),
+        editorCommand = p.getOrNull(mcpIndex + 9)?.takeIf { it.isNotBlank() } ?: "",
     )
 }.getOrNull()
 

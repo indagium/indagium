@@ -9,6 +9,8 @@ import com.openlog.model.FilterMode
 import com.openlog.model.LogAnalysis
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
+import com.openlog.source.SourceIndexStore
+import com.openlog.source.SourceIndexer
 import com.openlog.ui.AppState
 import com.openlog.ui.mkTab
 import com.openlog.utils.SPLIT_PROMPT_BYTES
@@ -84,6 +86,32 @@ class ControlServerTest {
             Thread.sleep(20)
         }
         assertTrue(predicate(), "condition was not met before timeout")
+    }
+
+    // Builds an AppState whose source index is already on disk (built synchronously via
+    // SourceIndexer.build, bypassing the async reindexSources() path) so resolve_log_source tests
+    // don't race a background scan — AppState's init still loads it via loadPersistedSourceIndex()
+    // on ioScope, so callers must waitUntil { state.sourceIndex != null } before resolving.
+    private fun buildIndexedAppState(dir: File): AppState {
+        val srcDir = File(dir, "src").apply { mkdirs() }
+        File(srcDir, "Widgets.kt").writeText(
+            """
+            package demo
+
+            const val TAG = "Widgets"
+
+            class WidgetHost {
+                fun attach(id: String) {
+                    Log.d(TAG, "widget attached ${'$'}id")
+                }
+            }
+            """.trimIndent(),
+        )
+        val indexFile = File(dir, "source-index")
+        SourceIndexStore.save(SourceIndexer.build(listOf(srcDir)), indexFile)
+        val indexed = AppState(autosaveFile = File(dir, "state.cache"), sourceIndexFile = indexFile)
+        indexed.updateSettings { it.copy(sourceFolders = listOf(srcDir.absolutePath)) }
+        return indexed
     }
 
     private fun getAsClient(path: String, clientId: String, clientName: String): HttpResponse<String> {
@@ -583,6 +611,68 @@ class ControlServerTest {
     @Test
     fun tailStartErrorsForUnknownTab() {
         assertTrue(post("/tail/start", """{"tabId":"nope"}""").contains("\"error\""))
+    }
+
+    // ── resolve_log_source ────────────────────────────────────────────
+
+    @Test
+    fun resolveLogSourceReturnsErrorWhenNoSourceFoldersConfigured() {
+        // Default fixture AppState has settings.sourceFolders empty — the feature isn't configured.
+        val body = post("/resolve_log_source", """{"message":"anything"}""")
+        assertTrue(body.contains("\"error\""), body)
+        assertTrue(body.contains("no source folders configured"), body)
+    }
+
+    @Test
+    fun resolveLogSourceReturnsErrorWhenFoldersConfiguredButNotYetIndexed() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-resolve-not-indexed").toFile()
+        val notIndexed = AppState(autosaveFile = File(dir, "state.cache"), sourceIndexFile = File(dir, "source-index"))
+        notIndexed.updateSettings { it.copy(sourceFolders = listOf(dir.absolutePath)) }
+        restartServerWith(notIndexed)
+
+        val body = post("/resolve_log_source", """{"message":"anything"}""")
+
+        assertTrue(body.contains("\"error\""), body)
+        assertTrue(body.contains("not indexed yet"), body)
+    }
+
+    @Test
+    fun resolveLogSourceByTagAndMessageReturnsMatchForIndexedFixture() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-resolve-tag-msg").toFile()
+        restartServerWith(buildIndexedAppState(dir))
+        waitUntil { state.sourceIndex != null }
+
+        val body = post("/resolve_log_source", """{"tag":"Widgets","message":"widget attached 42"}""")
+
+        assertTrue(body.contains("\"matches\""), body)
+        assertTrue(body.contains("\"methodName\":\"attach\""), body)
+        assertTrue(body.contains("\"filePath\""), body)
+        assertTrue(body.contains("\"stale\":false"), body)
+    }
+
+    @Test
+    fun resolveLogSourceByTabIdAndLineIdReturnsMatch() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-resolve-tab-line").toFile()
+        restartServerWith(buildIndexedAppState(dir))
+        waitUntil { state.sourceIndex != null }
+        state.tabs = listOf(
+            mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.D, "Widgets", "widget attached 42"))),
+        )
+
+        val body = post("/resolve_log_source", """{"tabId":"t1","lineId":1}""")
+
+        assertTrue(body.contains("\"methodName\":\"attach\""), body)
+    }
+
+    @Test
+    fun resolveLogSourceReturnsEmptyMatchesNotErrorWhenNothingMatches() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-resolve-no-match").toFile()
+        restartServerWith(buildIndexedAppState(dir))
+        waitUntil { state.sourceIndex != null }
+
+        val body = post("/resolve_log_source", """{"message":"totally unrelated text that matches nothing"}""")
+
+        assertEquals("""{"matches":[]}""", body)
     }
 
     private fun buildZipFixture(entries: Map<String, String>): File {

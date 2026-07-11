@@ -31,6 +31,8 @@ object DesktopStorage {
 
     fun controlTokenFile(): File = File(appDataDir(), "control-token")
 
+    fun sourceIndexFile(): File = File(appDataDir(), "source-index")
+
     fun legacyNotesDir(userHome: String = System.getProperty("user.home").orEmpty()): File =
         File(userHome, ".openlog2/notes")
 }
