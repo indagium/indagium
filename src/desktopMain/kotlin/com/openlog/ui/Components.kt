@@ -16,6 +16,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Label
+import androidx.compose.material.icons.automirrored.outlined.LabelOff
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.ArrowDownward
+import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.Bookmark
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.FindInPage
+import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.Icon
@@ -582,6 +592,8 @@ fun AppButton(
     isDanger: Boolean = false,
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
+    leadingIcon: ImageVector? = null,
+    horizontalPadding: Dp = 10.dp,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
@@ -610,15 +622,23 @@ fun AppButton(
             .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(horizontal = 10.dp, vertical = 5.dp),
+            .padding(horizontal = horizontalPadding, vertical = 5.dp),
         contentAlignment = Alignment.Center,
     ) {
-        AppText(
-            label,
-            color = textColor,
-            fontSize = 12.sp,
-            fontWeight = if (variant == ButtonVariant.Primary) FontWeight.Medium else FontWeight.Normal,
-        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            leadingIcon?.let {
+                Icon(it, contentDescription = null, modifier = Modifier.size(14.dp), tint = textColor)
+            }
+            AppText(
+                label,
+                color = textColor,
+                fontSize = 12.sp,
+                fontWeight = if (variant == ButtonVariant.Primary) FontWeight.Medium else FontWeight.Normal,
+            )
+        }
     }
 }
 
@@ -721,6 +741,196 @@ internal fun CtxItem(icon: ImageVector, label: String, highlighted: Boolean = fa
             AppText(label, color = if (enabled) tc.tx else tc.td, fontSize = 12.sp, modifier = Modifier.weight(1f))
         }
     }
+}
+
+@Composable
+internal fun CtxTagActions(
+    highlighted: Boolean = false,
+    onInclude: () -> Unit,
+    onExclude: () -> Unit,
+    onHighlight: () -> Unit,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth(),
+        hoverBg = tc.hv,
+        forceHover = highlighted,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            AppText("Tag", color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
+                    AppButton("Include", onClick = onInclude, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.AutoMirrored.Outlined.Label, horizontalPadding = 4.dp)
+                }
+                CtxActionDivider(tc)
+                CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
+                    AppButton("Exclude", onClick = onExclude, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.AutoMirrored.Outlined.LabelOff, horizontalPadding = 4.dp)
+                }
+                CtxActionDivider(tc)
+                CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
+                    AppButton("Highlight", onClick = onHighlight, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.Bookmark, horizontalPadding = 4.dp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun CtxCollapseActions(
+    highlighted: Boolean = false,
+    onToStart: (() -> Unit)? = null,
+    onToEnd: (() -> Unit)? = null,
+    onSelected: (() -> Unit)? = null,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth(),
+        hoverBg = tc.hv,
+        forceHover = highlighted,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            AppText("Collapse", color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                onToStart?.let {
+                    CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
+                        AppButton("To start", onClick = it, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.ArrowUpward, horizontalPadding = 4.dp)
+                    }
+                }
+                if (onToStart != null && (onToEnd != null || onSelected != null)) {
+                    CtxActionDivider(tc)
+                }
+                onToEnd?.let {
+                    CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
+                        AppButton("To End", onClick = it, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.ArrowDownward, horizontalPadding = 4.dp)
+                    }
+                }
+                if (onToEnd != null && onSelected != null) {
+                    CtxActionDivider(tc)
+                }
+                onSelected?.let {
+                    CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
+                        AppButton("Selected", onClick = it, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.Layers, horizontalPadding = 4.dp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun CtxSelectionActions(
+    highlighted: Boolean = false,
+    onAskAi: () -> Unit,
+    onCopy: () -> Unit,
+    onHighlight: () -> Unit,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth(),
+        hoverBg = tc.hv,
+        forceHover = highlighted,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            AppText("Selection", color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
+                    AppButton("Ask AI", onClick = onAskAi, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.FindInPage, horizontalPadding = 4.dp)
+                }
+                CtxActionDivider(tc)
+                CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
+                    AppButton("Copy", onClick = onCopy, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.ContentCopy, horizontalPadding = 4.dp)
+                }
+                CtxActionDivider(tc)
+                CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
+                    AppButton("Highlight", onClick = onHighlight, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.Bookmark, horizontalPadding = 4.dp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun CtxSourceActions(
+    highlighted: Boolean = false,
+    enabled: Boolean = true,
+    onShowCode: () -> Unit,
+    onOpenFile: () -> Unit,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth(),
+        hoverBg = tc.hv,
+        forceHover = highlighted,
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CtxActionSlot(90.dp) {
+                AppButton(
+                    "Show code",
+                    onClick = onShowCode,
+                    variant = ButtonVariant.Ghost,
+                    enabled = enabled,
+                    modifier = Modifier.height(26.dp),
+                    leadingIcon = Icons.Outlined.FindInPage,
+                    horizontalPadding = 4.dp,
+                )
+            }
+            CtxActionDivider(tc)
+            CtxActionSlot(90.dp) {
+                AppButton(
+                    "Open file",
+                    onClick = onOpenFile,
+                    variant = ButtonVariant.Ghost,
+                    enabled = enabled,
+                    modifier = Modifier.height(26.dp),
+                    leadingIcon = Icons.AutoMirrored.Outlined.OpenInNew,
+                    horizontalPadding = 4.dp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CtxActionSlot(
+    width: Dp,
+    alignment: Alignment = Alignment.Center,
+    content: @Composable () -> Unit,
+) {
+    Box(Modifier.width(width), contentAlignment = alignment) { content() }
+}
+
+// All grouped actions deliberately use one shared width so the three columns line up
+// across Selection, Tag, and Collapse rows, regardless of label length.
+private val CTX_ACTION_BUTTON_WIDTH = 78.dp
+
+@Composable
+private fun CtxActionDivider(colors: ThemeColors) {
+    Box(Modifier.width(1.dp).height(18.dp).background(colors.br))
 }
 
 // Same row as CtxItem plus a trailing ▶ hit target: hovering/pressing that arrow specifically
@@ -871,6 +1081,30 @@ internal sealed class CtxMenuEntry {
     data class ActionHeader(val label: String, val onClick: () -> Unit) : CtxMenuEntry()
 
     data class Action(val icon: ImageVector, val label: String, val enabled: Boolean = true, val onClick: () -> Unit) : CtxMenuEntry()
+
+    data class TagActions(
+        val onInclude: () -> Unit,
+        val onExclude: () -> Unit,
+        val onHighlight: () -> Unit,
+    ) : CtxMenuEntry()
+
+    data class CollapseActions(
+        val onToStart: (() -> Unit)? = null,
+        val onToEnd: (() -> Unit)? = null,
+        val onSelected: (() -> Unit)? = null,
+    ) : CtxMenuEntry()
+
+    data class SelectionActions(
+        val onAskAi: () -> Unit,
+        val onCopy: () -> Unit,
+        val onHighlight: () -> Unit,
+    ) : CtxMenuEntry()
+
+    data class SourceActions(
+        val enabled: Boolean,
+        val onShowCode: () -> Unit,
+        val onOpenFile: () -> Unit,
+    ) : CtxMenuEntry()
 
     // The main row keeps today's default onClick; hovering/pressing the trailing ▶ opens a
     // flyout with up to 4 narrower match-scope choices instead (see messageRuleVariantsFromCtx).

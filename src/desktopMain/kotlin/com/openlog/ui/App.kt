@@ -13,14 +13,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CallMerge
-import androidx.compose.material.icons.automirrored.outlined.Label
-import androidx.compose.material.icons.automirrored.outlined.LabelOff
 import androidx.compose.material.icons.outlined.AddComment
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Bookmark
-import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.FindInPage
 import androidx.compose.material.icons.outlined.Flag
@@ -222,7 +219,6 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                     )
                 ) {
                     if (entry != null) {
-                        val menuWidth = 270.dp
                         // panelSelectedIds is non-empty when the right-click came from a panel
                         // with its own local selection (e.g. the "Original" unfiltered panel).
                         val selectedIds = ctx.panelSelectedIds.ifEmpty { ctxTab.selected }
@@ -244,18 +240,20 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                     selectedIds.maxOrNull(),
                                 ) == ManualCollapseAvailability.AVAILABLE
                         }
+                        // Keep the grouped action rows wide enough for three equal-width
+                        // buttons, including the longest Highlight/Selected labels.
+                        val menuWidth = 276.dp
                         val matchingHlId = ctx.selText.takeIf { it.isNotBlank() }
                             ?.let { state.matchingHighlighterId(ctx.tabId, it) }
                         // Estimate full menu height from items that will actually render:
                         //   header(37) + divider(9) + preview(63) + 1 item(32) + divider(9)
                         //   + 2 items(64) [sequence] + divider(9) + 2 items(64) [collapse-to-start/end]
-                        //   + divider(9) + 2 items(64) [hide/show] + divider(9) + 3 items(96) [tags]
+                        //   + divider(9) + 2 items(64) [hide/show] + divider(9) + 1 row(32) [tags]
                         //   + divider(9) + 2 items(64) = 538
                         // Selection text adds a preview extension line(15) on top of that.
-                        val estimatedMenuHeight = (538 +
+                        val estimatedMenuHeight = (458 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (state.pendingSequenceStart != null) 32 else 0) +
-                            (if (selCount > 1) 64 else 0) +
                             (if (state.settings.sourceFolders.isNotEmpty()) 44 else 0)).dp
                         val menuScroll = rememberScrollState()
                         val x = ctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
@@ -266,7 +264,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
 
                         val ruleVariants = state.messageRuleVariantsFromCtx()
                         // Resolved once per menu open (cheap — indexed lookup) rather than per
-                        // item, so both the enabled/disabled "Show in code" item below and its
+                        // item, so both the enabled/disabled source actions below and their
                         // onClick agree on the same match list.
                         val srcMatches = if (state.settings.sourceFolders.isEmpty()) {
                             emptyList()
@@ -284,16 +282,26 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             )
                             add(CtxMenuEntry.Divider)
                             add(CtxMenuEntry.Preview)
-                            // Block order: highlight, hide/show, tags, sequence, collapse, copy.
+                            // Block order: selection, hide/show, tags, sequence, collapse.
                             run {
-                                // Selecting an already-fully-highlighted span offers only "Remove
-                                // highlight" — "Highlight selection" would just be a same-color
-                                // no-op re-highlight of something already highlighted.
-                                if (matchingHlId != null) {
-                                    add(CtxMenuEntry.Action(Icons.Outlined.Block, "Remove highlight") { state.removeHlFromCtx() })
-                                } else {
-                                    add(CtxMenuEntry.Action(Icons.Outlined.Bookmark, "Highlight selection") { state.addHlFromCtx() })
-                                }
+                                val selectionIds = if (selCount > 1) selectedIds.toSortedSet().toList() else listOf(ctx.entryId)
+                                add(
+                                    CtxMenuEntry.SelectionActions(
+                                        onAskAi = { state.requestAiContext(ctx.tabId, selectionIds) },
+                                        onCopy = {
+                                            if (selCount > 1) {
+                                                state.copySelectedLines(ctx.tabId, selectionIds.toSet())
+                                            } else {
+                                                val pid = if (entry.pid > 0) "  ${entry.pid.toString().padStart(5)} ${
+                                                    entry.tid.toString().padStart(5)
+                                                }" else ""
+                                                state.copyToClipboard("${entry.ts}$pid  ${entry.level.key}  ${entry.tag}: ${entry.msg}")
+                                            }
+                                            state.ctx = null
+                                        },
+                                        onHighlight = { state.addHlFromCtx() },
+                                    ),
+                                )
                                 add(CtxMenuEntry.Divider)
                             }
                             add(
@@ -313,9 +321,13 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                 ),
                             )
                             add(CtxMenuEntry.Divider)
-                            add(CtxMenuEntry.Action(Icons.AutoMirrored.Outlined.Label, "Include tag") { state.addTagFilterFromCtx() })
-                            add(CtxMenuEntry.Action(Icons.AutoMirrored.Outlined.LabelOff, "Exclude tag") { state.addExcludeTagFromCtx() })
-                            add(CtxMenuEntry.Action(Icons.Outlined.Bookmark, "Highlight tag") { state.addHlTagFromCtx() })
+                            add(
+                                CtxMenuEntry.TagActions(
+                                    onInclude = { state.addTagFilterFromCtx() },
+                                    onExclude = { state.addExcludeTagFromCtx() },
+                                    onHighlight = { state.addHlTagFromCtx() },
+                                ),
+                            )
                             add(CtxMenuEntry.Divider)
                             // Sequence actions — own block, "Add as sequence" pulled out of the
                             // highlight block above to sit next to the rest of the sequence
@@ -341,78 +353,47 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             // back to back with nothing between them, here right before Copy).
                             run {
                                 val hasCollapseAction = canCollapseSelection || canCollapseToStart || canCollapseToEnd
-                                if (canCollapseSelection) {
+                                if (hasCollapseAction) {
                                     add(
-                                        CtxMenuEntry.Action(Icons.Outlined.Layers, "Collapse $selCount selected lines") {
-                                            state.collapseSelectedLinesFromCtx(ctx.tabId, selectedIds)
-                                        },
+                                        CtxMenuEntry.CollapseActions(
+                                            onToStart = canCollapseToStart.takeIf { it }?.let { { state.collapseToStartFromCtx() } },
+                                            onToEnd = canCollapseToEnd.takeIf { it }?.let { { state.collapseToEndFromCtx() } },
+                                            onSelected = canCollapseSelection.takeIf { it }?.let {
+                                                { state.collapseSelectedLinesFromCtx(ctx.tabId, selectedIds) }
+                                            },
+                                        ),
                                     )
-                                }
-                                if (canCollapseToStart) {
-                                    add(CtxMenuEntry.Action(Icons.Outlined.ArrowUpward, "Collapse to file start") { state.collapseToStartFromCtx() })
-                                }
-                                if (canCollapseToEnd) {
-                                    add(CtxMenuEntry.Action(Icons.Outlined.ArrowDownward, "Collapse to file end") { state.collapseToEndFromCtx() })
                                 }
                                 if (hasCollapseAction) add(CtxMenuEntry.Divider)
                             }
-                            if (selCount > 1) {
-                                add(
-                                    CtxMenuEntry.Action(Icons.Outlined.ContentCopy, "Copy $selCount selected lines") {
-                                        state.copySelectedLines(ctx.tabId, selectedIds); state.ctx = null
-                                    },
-                                )
-                            }
-                            add(
-                                CtxMenuEntry.Action(Icons.Outlined.ContentCopy, "Copy line") {
-                                    val pid = if (entry.pid > 0) "  ${entry.pid.toString().padStart(5)} ${
-                                        entry.tid.toString().padStart(5)
-                                    }" else ""
-                                    state.copyToClipboard("${entry.ts}$pid  ${entry.level.key}  ${entry.tag}: ${entry.msg}")
-                                    state.ctx = null
-                                },
-                            )
-                            add(
-                                CtxMenuEntry.Action(Icons.Outlined.Code, "Copy as Markdown") {
-                                    if (selCount > 1) {
-                                        state.copySelectedLinesAsMarkdown(ctx.tabId, selectedIds)
-                                    } else {
-                                        state.copyToClipboard(logEntryMarkdownLine(entry))
-                                    }
-                                    state.ctx = null
-                                },
-                            )
-                            add(
-                                CtxMenuEntry.Action(Icons.Outlined.FindInPage, "Ask AI about this line") {
-                                    state.requestAiAboutLine(ctx.tabId, ctx.entryId)
-                                },
-                            )
-                            add(
-                                CtxMenuEntry.Action(
-                                    Icons.Outlined.AddComment,
-                                    if (selCount > 1) "Add $selCount lines as AI context" else "Add line as AI context",
-                                ) {
-                                    val ids = if (selCount > 1) selectedIds.toSortedSet().toList() else listOf(ctx.entryId)
-                                    state.requestAiContext(ctx.tabId, ids)
-                                },
-                            )
                             // Only offered once source folders are configured; if they are but this
-                            // particular line has no resolved call site, the item still renders
-                            // (communicating the feature exists) just disabled rather than omitted.
-                            if (state.settings.sourceFolders.isNotEmpty()) {
-                                add(CtxMenuEntry.Divider)
-                                add(
-                                    CtxMenuEntry.Action(Icons.Outlined.FindInPage, "Show in code", enabled = srcMatches.isNotEmpty()) {
+                        // particular line has no resolved call site, the actions still render
+                        // disabled rather than disappearing.
+                        if (state.settings.sourceFolders.isNotEmpty()) {
+                            add(
+                                CtxMenuEntry.SourceActions(
+                                    enabled = srcMatches.isNotEmpty(),
+                                    onShowCode = {
                                         if (srcMatches.isNotEmpty()) {
                                             state.sourceCodeView = SourceCodeView(srcMatches)
                                             state.ctx = null
                                         }
                                     },
-                                )
-                            }
+                                    onOpenFile = {
+                                        srcMatches.firstOrNull()?.let { match ->
+                                            state.openInEditor(match.site.filePath, match.site.callLine)
+                                            state.ctx = null
+                                        }
+                                    },
+                                ),
+                            )
+                        }
                         }
                         val selectableEntries = menuEntries.filter {
-                            it is CtxMenuEntry.ActionHeader || it is CtxMenuEntry.Action || it is CtxMenuEntry.ActionWithSubmenu
+                            it is CtxMenuEntry.ActionHeader || it is CtxMenuEntry.Action ||
+                                it is CtxMenuEntry.TagActions || it is CtxMenuEntry.CollapseActions ||
+                                it is CtxMenuEntry.SelectionActions || it is CtxMenuEntry.SourceActions ||
+                                it is CtxMenuEntry.ActionWithSubmenu
                         }
                         var selectedIdx by remember(ctx) { mutableStateOf(0) }
                         val selectedEntry = selectableEntries.getOrNull(selectedIdx)
@@ -447,6 +428,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                                 when (it) {
                                                     is CtxMenuEntry.ActionHeader -> it.onClick()
                                                     is CtxMenuEntry.Action -> it.onClick()
+                                                    is CtxMenuEntry.TagActions -> it.onInclude()
+                                                    is CtxMenuEntry.CollapseActions -> it.onToStart?.invoke()
+                                                    is CtxMenuEntry.SelectionActions -> it.onAskAi()
+                                                    is CtxMenuEntry.SourceActions -> it.onShowCode()
                                                     is CtxMenuEntry.ActionWithSubmenu -> it.onClick()
                                                     else -> {}
                                                 }
@@ -475,6 +460,34 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                         }
                                         is CtxMenuEntry.Action ->
                                             CtxItem(e.icon, e.label, highlighted = e === selectedEntry, enabled = e.enabled, onClick = e.onClick)
+                                        is CtxMenuEntry.TagActions ->
+                                            CtxTagActions(
+                                                highlighted = e === selectedEntry,
+                                                onInclude = e.onInclude,
+                                                onExclude = e.onExclude,
+                                                onHighlight = e.onHighlight,
+                                            )
+                                        is CtxMenuEntry.CollapseActions ->
+                                            CtxCollapseActions(
+                                                highlighted = e === selectedEntry,
+                                                onToStart = e.onToStart,
+                                                onToEnd = e.onToEnd,
+                                                onSelected = e.onSelected,
+                                            )
+                                        is CtxMenuEntry.SelectionActions ->
+                                            CtxSelectionActions(
+                                                highlighted = e === selectedEntry,
+                                                onAskAi = e.onAskAi,
+                                                onCopy = e.onCopy,
+                                                onHighlight = e.onHighlight,
+                                            )
+                                        is CtxMenuEntry.SourceActions ->
+                                            CtxSourceActions(
+                                                highlighted = e === selectedEntry,
+                                                enabled = e.enabled,
+                                                onShowCode = e.onShowCode,
+                                                onOpenFile = e.onOpenFile,
+                                            )
                                         is CtxMenuEntry.ActionWithSubmenu ->
                                             CtxItemWithSubmenu(
                                                 e.icon, e.label, e.submenu,
