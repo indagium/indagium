@@ -11,6 +11,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -19,12 +20,17 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -36,6 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -48,17 +55,24 @@ import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.MarkdownTypography
+import com.mikepenz.markdown.model.rememberMarkdownState
 import com.openlog.ai.AiEvidence
 import com.openlog.ai.AiInvestigationContext
 import com.openlog.ai.AiQuickAction
@@ -73,69 +87,53 @@ import com.openlog.model.LogTab
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-/** A session-only choice for the existing right sidebar. It is intentionally absent from autosave. */
-internal enum class RightSidebarTab { NOTES, AI }
-
 /**
- * Keeps the existing Notes panel intact while making AI a sibling view in the same resizable
- * sidebar. Both modes use the same focus target, so F6/Shift+F6 panel traversal remains stable.
+ * Notes and the AI panel are independent visibility toggles (AppState.annotationVisible /
+ * aiPanelVisible, both driven from the main toolbar) sharing this one resizable sidebar slot.
+ * With both on, it splits vertically - Notes above AI - at a user-draggable ratio
+ * (rightSidebarSplit); with only one on, that one fills the whole slot.
  */
 @Composable
 internal fun RightSidebarPanel(
     state: AppState,
     tab: LogTab,
     width: Float,
-    focusRequester: FocusRequester,
-    onPanelFocusChanged: (Boolean) -> Unit,
+    aiFocusRequester: FocusRequester,
+    onAiPanelFocusChanged: (Boolean) -> Unit,
     notesContent: @Composable () -> Unit,
 ) {
+    val notesOn = state.annotationVisible
+    val aiOn = state.aiPanelVisible
     Column(Modifier.width(width.dp).fillMaxHeight().background(tc().p)) {
-        RightSidebarSelector(
-            selected = state.rightSidebarTab,
-            onSelect = { state.rightSidebarTab = it },
-        )
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            if (state.rightSidebarTab == RightSidebarTab.NOTES) {
-                notesContent()
-            } else {
+        when {
+            notesOn && aiOn -> BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                val totalHeightDp = maxHeight.value
+                Column(Modifier.fillMaxSize()) {
+                    Box(Modifier.weight(state.rightSidebarSplit).fillMaxWidth()) { notesContent() }
+                    VDivider { delta ->
+                        val newFrac = (state.rightSidebarSplit * totalHeightDp + delta) / totalHeightDp
+                        state.updateRightSidebarSplit(newFrac)
+                    }
+                    Box(Modifier.weight(1f - state.rightSidebarSplit).fillMaxWidth()) {
+                        AiSidebarPanel(
+                            state = state,
+                            tab = tab,
+                            focusRequester = aiFocusRequester,
+                            onPanelFocusChanged = onAiPanelFocusChanged,
+                        )
+                    }
+                }
+            }
+            aiOn -> Box(Modifier.weight(1f).fillMaxWidth()) {
                 AiSidebarPanel(
                     state = state,
                     tab = tab,
-                    focusRequester = focusRequester,
-                    onPanelFocusChanged = onPanelFocusChanged,
+                    focusRequester = aiFocusRequester,
+                    onPanelFocusChanged = onAiPanelFocusChanged,
                 )
             }
+            else -> Box(Modifier.weight(1f).fillMaxWidth()) { notesContent() }
         }
-    }
-}
-
-@Composable
-private fun RightSidebarSelector(selected: RightSidebarTab, onSelect: (RightSidebarTab) -> Unit) {
-    val colors = tc()
-    Row(
-        Modifier.fillMaxWidth().height(32.dp).background(colors.p2)
-            .border(BorderStroke(1.dp, colors.br)).padding(horizontal = 8.dp, vertical = 3.dp),
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        AppButton(
-            "Notes",
-            onClick = { onSelect(RightSidebarTab.NOTES) },
-            variant = if (selected == RightSidebarTab.NOTES) ButtonVariant.Primary else ButtonVariant.Secondary,
-            modifier = Modifier.height(24.dp),
-        )
-        AppButton(
-            "AI",
-            onClick = { onSelect(RightSidebarTab.AI) },
-            variant = if (selected == RightSidebarTab.AI) ButtonVariant.Primary else ButtonVariant.Secondary,
-            modifier = Modifier.height(24.dp),
-        )
-        AppText(
-            if (selected == RightSidebarTab.AI) "AI assistant" else "Log notes",
-            color = colors.td,
-            fontSize = 10.sp,
-            modifier = Modifier.padding(start = 3.dp),
-        )
     }
 }
 
@@ -164,6 +162,8 @@ private fun AiSidebarPanel(
     var keyDraft by remember(profile.id) { mutableStateOf(state.aiProviderApiKey(profile.id)) }
     var error by remember(tab.id, profile.id) { mutableStateOf<String?>(null) }
     var modelDiscovery by remember(profile.id) { mutableStateOf<ModelDiscoveryResult?>(null) }
+    var providerExpanded by remember { mutableStateOf(true) }
+    var quickActionsExpanded by remember { mutableStateOf(true) }
 
     fun profileForRun(): com.openlog.model.AiProviderProfile? {
         val draft = profile.copy(model = modelDraft.trim())
@@ -234,24 +234,42 @@ private fun AiSidebarPanel(
                         .padding(start = 10.dp, top = 8.dp, end = 18.dp, bottom = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    AiProviderControls(
-                        state = state,
-                        profile = profile,
-                        model = modelDraft,
-                        onModelChange = { modelDraft = it },
-                        apiKey = keyDraft,
-                        onApiKeyChange = { keyDraft = it; state.setAiProviderApiKey(profile.id, it) },
-                        discovery = modelDiscovery,
-                        onDiscoverModels = {
-                            scope.launch {
-                                modelDiscovery = runtime.discoverModels(profile.copy(model = modelDraft.trim()), keyDraft)
-                            }
+                    SectionHeader(
+                        "Provider",
+                        trailing = {
+                            AppButton(
+                                "+",
+                                onClick = {
+                                    state.addAiProviderProfile()
+                                    state.settingsOpen = true
+                                },
+                                variant = ButtonVariant.Ghost,
+                                modifier = Modifier.height(22.dp).width(28.dp),
+                            )
                         },
-                        onPickModel = { modelDraft = it },
-                        onOpenSettings = { state.settingsOpen = true },
+                        expanded = providerExpanded,
+                        onToggle = { providerExpanded = !providerExpanded },
                     )
+                    if (providerExpanded) {
+                        AiProviderControls(
+                            state = state,
+                            profile = profile,
+                            model = modelDraft,
+                            onModelChange = { modelDraft = it },
+                            apiKey = keyDraft,
+                            onApiKeyChange = { keyDraft = it; state.setAiProviderApiKey(profile.id, it) },
+                            discovery = modelDiscovery,
+                            onDiscoverModels = {
+                                scope.launch {
+                                    modelDiscovery = runtime.discoverModels(profile.copy(model = modelDraft.trim()), keyDraft)
+                                }
+                            },
+                        )
+                    }
                     AiQuickActions(
                         tab = tab,
+                        expanded = quickActionsExpanded,
+                        onToggle = { quickActionsExpanded = !quickActionsExpanded },
                         onAction = { action -> state.requestAiInvestigation(tab.id, action) },
                     )
                     val lastEvent = session.runs.lastOrNull()?.history?.lastOrNull()
@@ -295,7 +313,9 @@ private fun AiSidebarPanel(
                     // so a composable that only takes `run` as a parameter can be skipped by Compose
                     // (same object reference) and never pick up new events until something else
                     // forces the whole subtree to recompose.
-                    session.runs.forEach { run -> AiRunCard(run, run.history, runtime::resolveConfirmation, state::navigateAiEvidence) }
+                    session.runs.forEach { run ->
+                        AiRunCard(run, run.history, runtime::resolveConfirmation, state::navigateAiEvidence, state::copyToClipboard)
+                    }
                 }
             }
             VerticalScrollbar(
@@ -324,35 +344,42 @@ private fun AiSidebarPanel(
 }
 
 @Composable
-private fun AiQuickActions(tab: LogTab, onAction: (AiQuickAction) -> Unit) {
+private fun AiQuickActions(
+    tab: LogTab,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onAction: (AiQuickAction) -> Unit,
+) {
     val colors = tc()
     val hasSelectedLine = tab.selected.any { it in tab.rmap }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        AppText("Quick investigations", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            listOf(AiQuickAction.SELECTED_ERROR, AiQuickAction.ROOT_CAUSE, AiQuickAction.TIMELINE).forEach { action ->
-                AppButton(
-                    action.label,
-                    onClick = { onAction(action) },
-                    enabled = hasSelectedLine,
-                    variant = ButtonVariant.Ghost,
-                    modifier = Modifier.height(25.dp),
-                )
+        SectionHeader("Quick actions", expanded = expanded, onToggle = onToggle)
+        if (expanded) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf(AiQuickAction.SELECTED_ERROR, AiQuickAction.ROOT_CAUSE).forEach { action ->
+                    AppButton(
+                        action.label,
+                        onClick = { onAction(action) },
+                        enabled = hasSelectedLine,
+                        variant = ButtonVariant.Ghost,
+                        modifier = Modifier.height(25.dp),
+                    )
+                }
             }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            listOf(AiQuickAction.FILTERED_RESULT, AiQuickAction.MAPPED_SOURCE, AiQuickAction.ISSUE_INVESTIGATION).forEach { action ->
-                AppButton(
-                    action.label,
-                    onClick = { onAction(action) },
-                    enabled = !action.requiresLine || hasSelectedLine,
-                    variant = ButtonVariant.Ghost,
-                    modifier = Modifier.height(25.dp),
-                )
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                listOf(AiQuickAction.TIMELINE, AiQuickAction.ISSUE_INVESTIGATION).forEach { action ->
+                    AppButton(
+                        action.label,
+                        onClick = { onAction(action) },
+                        enabled = !action.requiresLine || hasSelectedLine,
+                        variant = ButtonVariant.Ghost,
+                        modifier = Modifier.height(25.dp),
+                    )
+                }
             }
-        }
-        if (!hasSelectedLine) {
-            AppText("Select a log line to enable line-based investigations.", color = colors.td, fontSize = 10.sp)
+            if (!hasSelectedLine) {
+                AppText("Select a log line to enable line-based investigations.", color = colors.td, fontSize = 10.sp)
+            }
         }
     }
 }
@@ -367,13 +394,10 @@ private fun AiProviderControls(
     onApiKeyChange: (String) -> Unit,
     discovery: ModelDiscoveryResult?,
     onDiscoverModels: () -> Unit,
-    onPickModel: (String) -> Unit,
-    onOpenSettings: () -> Unit,
 ) {
     val colors = tc()
     val profiles = normalizeAiProviderProfiles(state.settings.aiProviderProfiles)
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        AppText("Provider", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             profiles.forEach { item ->
                 AppButton(
@@ -383,7 +407,6 @@ private fun AiProviderControls(
                     modifier = Modifier.heightIn(min = 26.dp).widthIn(max = 150.dp),
                 )
             }
-            AppButton("Settings", onClick = onOpenSettings, variant = ButtonVariant.Ghost, modifier = Modifier.height(26.dp))
         }
         AppText(profile.baseUrl, color = colors.td, fontSize = 10.sp, maxLines = 1)
         val endpointHost = runCatching { java.net.URI(profile.baseUrl).host.orEmpty() }.getOrDefault("")
@@ -398,29 +421,12 @@ private fun AiProviderControls(
             }
         }
         AppText("Model", color = colors.td, fontSize = 10.sp)
-        Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
-            InlineField(
-                value = model,
-                onValue = onModelChange,
-                placeholder = "Enter a model id",
-                modifier = Modifier.weight(1f),
-                fontSize = 11.sp,
-            )
-            AppButton("Find", onClick = onDiscoverModels, modifier = Modifier.height(27.dp))
-        }
-        when (discovery) {
-            is ModelDiscoveryResult.Available -> if (discovery.models.isNotEmpty()) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    discovery.models.take(4).forEach { item ->
-                        AppButton(item.displayName, onClick = { onPickModel(item.id) }, variant = ButtonVariant.Ghost)
-                    }
-                }
-            } else {
-                AppText("No models were returned. You can enter a model id manually.", color = colors.td, fontSize = 10.sp)
-            }
-            is ModelDiscoveryResult.Unavailable -> AppText(discovery.message, color = colors.td, fontSize = 10.sp, maxLines = 2)
-            null -> Unit
-        }
+        AiModelDropdown(
+            model = model,
+            discovery = discovery,
+            onDiscoverModels = onDiscoverModels,
+            onPickModel = onModelChange,
+        )
         AppText("API key (this launch only)", color = colors.td, fontSize = 10.sp)
         InlineField(
             value = apiKey,
@@ -433,12 +439,149 @@ private fun AiProviderControls(
     }
 }
 
+// Mirrors FilterPanel's CrashCategoryDropdown: a clickable field showing the current value that
+// opens a themed option list on click, rather than the app's earlier free-text-field-plus-chips
+// layout. Manual entry remains possible (the profile's manually entered model must stay usable
+// even when discovery is unavailable) via the field at the bottom of the popup.
+@Composable
+private fun AiModelDropdown(
+    model: String,
+    discovery: ModelDiscoveryResult?,
+    onDiscoverModels: () -> Unit,
+    onPickModel: (String) -> Unit,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var open by remember { mutableStateOf(false) }
+    var fieldWidth by remember { mutableStateOf(0.dp) }
+    // See CrashCategoryDropdown for why this guard is needed: the Popup's dismissOnClickOutside
+    // also fires for a click back on the field itself, which would otherwise race the field's own
+    // toggle and net out to "stayed open" instead of closing.
+    var suppressToggleUntilMs by remember { mutableStateOf(0L) }
+    var manualEntry by remember(open) { mutableStateOf(model) }
+    Box(
+        Modifier.fillMaxWidth().onGloballyPositioned { coords ->
+            fieldWidth = with(density) { coords.size.width.toDp() }
+        },
+    ) {
+        HoverBox(
+            modifier = Modifier.fillMaxWidth().height(28.dp)
+                .clip(CORNER_SM)
+                .background(tc.p2, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM),
+            onClick = {
+                if (System.currentTimeMillis() >= suppressToggleUntilMs) {
+                    val opening = !open
+                    open = opening
+                    if (opening && discovery == null) onDiscoverModels()
+                }
+            },
+        ) {
+            Row(
+                Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                AppText(
+                    model.ifBlank { "Choose a model" },
+                    color = if (model.isBlank()) tc.td else tc.tx,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
+            }
+        }
+        if (open) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, with(density) { 32.dp.roundToPx() }),
+                onDismissRequest = {
+                    open = false
+                    suppressToggleUntilMs = System.currentTimeMillis() + 200
+                },
+                properties = PopupProperties(focusable = false),
+            ) {
+                Column(
+                    Modifier.width(fieldWidth)
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    HoverBox(
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                        onClick = onDiscoverModels,
+                    ) {
+                        AppText(
+                            "↻ Find models",
+                            color = tc.ac,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        )
+                    }
+                    when (discovery) {
+                        is ModelDiscoveryResult.Available -> if (discovery.models.isNotEmpty()) {
+                            discovery.models.forEach { item ->
+                                val active = item.id == model
+                                HoverBox(
+                                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                                    baseBg = if (active) tc.abg else Color.Transparent,
+                                    onClick = { open = false; onPickModel(item.id) },
+                                ) {
+                                    AppText(
+                                        item.displayName,
+                                        color = if (active) tc.ac else tc.tx,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    )
+                                }
+                            }
+                        } else {
+                            AppText(
+                                "No models were returned.",
+                                color = tc.td,
+                                fontSize = 10.sp,
+                                modifier = Modifier.padding(8.dp),
+                            )
+                        }
+                        is ModelDiscoveryResult.Unavailable -> AppText(
+                            discovery.message,
+                            color = tc.td,
+                            fontSize = 10.sp,
+                            maxLines = 3,
+                            modifier = Modifier.padding(8.dp),
+                        )
+                        null -> AppText("Finding models…", color = tc.td, fontSize = 10.sp, modifier = Modifier.padding(8.dp))
+                    }
+                    Divider()
+                    Row(
+                        Modifier.fillMaxWidth().padding(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        InlineField(manualEntry, { manualEntry = it }, "Enter a model id", Modifier.weight(1f), fontSize = 11.sp)
+                        AppButton("Use", onClick = { open = false; onPickModel(manualEntry.trim()) }, modifier = Modifier.height(26.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun AiRunCard(
     run: AiRun,
     events: List<AiRunEvent>,
     onResolveConfirmation: (AiRun, AiToolConfirmation, Boolean) -> Boolean,
     onNavigateEvidence: (AiEvidence) -> Unit,
+    onCopyText: (String) -> Unit,
 ) {
     val colors = tc()
     val assistantText = events.filterIsInstance<AiRunEvent.AssistantDelta>().joinToString(separator = "") { it.text }
@@ -472,18 +615,23 @@ private fun AiRunCard(
         }
         if (traceEvents.isNotEmpty()) {
             Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Row(
-                    Modifier.fillMaxWidth().clickable { expanded = !expanded },
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                HoverBox(
+                    modifier = Modifier.fillMaxWidth().clip(CORNER_SM),
+                    onClick = { expanded = !expanded },
                 ) {
-                    AppText(if (expanded) "▾" else "▸", color = colors.td, fontSize = 10.sp)
-                    AppText(
-                        "Investigation (${traceEvents.size} step${if (traceEvents.size == 1) "" else "s"})",
-                        color = colors.td,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        AppText(if (expanded) "▾" else "▸", color = colors.td, fontSize = 11.sp)
+                        AppText(
+                            "Investigation (${traceEvents.size} step${if (traceEvents.size == 1) "" else "s"})",
+                            color = colors.td,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
                 }
                 if (expanded) {
                     Box(Modifier.fillMaxWidth().heightIn(max = 220.dp)) {
@@ -512,11 +660,15 @@ private fun AiRunCard(
             }
         }
         if (assistantText.isNotBlank()) {
-            AiBubble("Assistant", colors.p2) {
+            AiBubble("Assistant", colors.p2, onCopy = { onCopyText(assistantText) }) {
                 // The renderer parses asynchronously. AiSidebarRuntime batches updates, so its
                 // content only changes at a modest cadence while a provider is streaming.
+                // retainState keeps the previously rendered Markdown visible while a reparse is in
+                // flight - without it, each update briefly shows the loading placeholder, which
+                // reads as the whole card flickering right as the final answer is written.
+                val markdownState = rememberMarkdownState(content = assistantText, retainState = true)
                 Markdown(
-                    assistantText,
+                    markdownState,
                     colors = aiMarkdownColors(colors),
                     typography = aiMarkdownTypography(colors),
                     modifier = Modifier.fillMaxWidth(),
@@ -625,13 +777,34 @@ private fun aiMarkdownTypography(colors: ThemeColors): MarkdownTypography {
 }
 
 @Composable
-private fun AiBubble(label: String, background: Color, content: @Composable () -> Unit) {
+private fun AiBubble(
+    label: String,
+    background: Color,
+    onCopy: (() -> Unit)? = null,
+    content: @Composable () -> Unit,
+) {
     val colors = tc()
     Column(
         Modifier.fillMaxWidth().background(background, CORNER_MD).border(0.5.dp, colors.br, CORNER_MD).padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        AppText(label, color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AppText(label, color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            onCopy?.let { copy ->
+                HoverBox(modifier = Modifier.size(20.dp).clip(CORNER_SM), onClick = copy) {
+                    Icon(
+                        Icons.Outlined.ContentCopy,
+                        contentDescription = "Copy",
+                        tint = colors.td,
+                        modifier = Modifier.size(13.dp).align(Alignment.Center),
+                    )
+                }
+            }
+        }
         content()
     }
 }

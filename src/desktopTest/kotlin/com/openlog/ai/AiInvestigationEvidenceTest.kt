@@ -6,7 +6,6 @@ import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
 import com.openlog.model.LogTab
 import com.openlog.ui.AppState
-import com.openlog.ui.RightSidebarTab
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -25,7 +24,7 @@ class AiInvestigationEvidenceTest {
             assertEquals(21, request.context.lineId)
             assertEquals(AiQuickAction.ROOT_CAUSE, request.context.action)
             assertEquals("second", state.activeTabId)
-            assertEquals(RightSidebarTab.AI, state.rightSidebarTab)
+            assertTrue(state.aiPanelVisible)
         } finally {
             state.close()
         }
@@ -71,9 +70,12 @@ class AiInvestigationEvidenceTest {
             )
             assertEquals("/tmp/Widget.kt", state.sourceCodeView!!.matches.single().site.filePath)
 
-            state.rightSidebarTab = RightSidebarTab.AI
+            // Notes and AI are independent toggles now: navigating to a note evidence card opens
+            // Notes without hiding an already-visible AI panel.
+            state.updateAiPanelVisible(true)
             state.navigateAiEvidence(AiEvidence.Note("second", "note-21"))
-            assertEquals(RightSidebarTab.NOTES, state.rightSidebarTab)
+            assertTrue(state.annotationVisible)
+            assertTrue(state.aiPanelVisible)
             assertEquals(AiEvidence.Note("second", "note-21"), state.aiEvidenceNoteTarget)
         } finally {
             state.close()

@@ -112,15 +112,17 @@ internal fun FileView(
     val filterFr = remember { FocusRequester() }
     val logViewerFr = remember { FocusRequester() }
     val annotationFr = remember { FocusRequester() }
+    val aiFr = remember { FocusRequester() }
     var focusedPanelIdx by remember { mutableStateOf(0) }
 
     fun visiblePanelFrs(): List<Pair<KeyboardPanel, FocusRequester>> = buildList {
         if (state.filterVisible) add(KeyboardPanel.FILTERS to filterFr)
         add(KeyboardPanel.LOG_VIEW to logViewerFr)
         if (state.annotationVisible) add(KeyboardPanel.NOTES to annotationFr)
+        if (state.aiPanelVisible) add(KeyboardPanel.AI to aiFr)
     }
 
-    LaunchedEffect(requestedPanelFocus, state.filterVisible, state.annotationVisible, tab.id) {
+    LaunchedEffect(requestedPanelFocus, state.filterVisible, state.annotationVisible, state.aiPanelVisible, tab.id) {
         val panel = requestedPanelFocus ?: return@LaunchedEffect
         val fr = visiblePanelFrs().firstOrNull { it.first == panel }?.second ?: return@LaunchedEffect
         runCatching { fr.requestFocus() }
@@ -180,7 +182,7 @@ internal fun FileView(
             onVisibleItems = { summary -> state.noteVisibleItems(tab.id, summary) },
             onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
         )
-        if (state.annotationVisible) {
+        if (state.annotationVisible || state.aiPanelVisible) {
             HDivider { delta ->
                 state.updateAnnotationPanelWidth(state.annotationPanelWidth - delta)
             }
@@ -188,9 +190,9 @@ internal fun FileView(
                 state = state,
                 tab = tab,
                 width = state.annotationPanelWidth,
-                focusRequester = annotationFr,
-                onPanelFocusChanged = { focused ->
-                    if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
+                aiFocusRequester = aiFr,
+                onAiPanelFocusChanged = { focused ->
+                    if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == aiFr }
                 },
             ) {
                 AnnotationPanel(

@@ -15,6 +15,7 @@ enum class KeyboardPanel {
     LOG_VIEW,
     FILTERS,
     NOTES,
+    AI,
     POPUPS,
 }
 

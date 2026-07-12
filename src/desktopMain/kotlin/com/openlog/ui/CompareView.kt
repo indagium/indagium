@@ -58,6 +58,7 @@ internal fun CompareView(
     val leftLogFr = remember { FocusRequester() }
     val rightLogFr = remember { FocusRequester() }
     val annotationFr = remember { FocusRequester() }
+    val aiFr = remember { FocusRequester() }
     var focusedPanelIdx by remember { mutableStateOf(0) }
 
     fun visiblePanelFrs(): List<Pair<KeyboardPanel, FocusRequester>> = buildList {
@@ -65,9 +66,10 @@ internal fun CompareView(
         add(KeyboardPanel.LOG_VIEW to leftLogFr)
         add(KeyboardPanel.LOG_VIEW to rightLogFr)
         if (state.annotationVisible) add(KeyboardPanel.NOTES to annotationFr)
+        if (state.aiPanelVisible) add(KeyboardPanel.AI to aiFr)
     }
 
-    LaunchedEffect(requestedPanelFocus, state.filterVisible, state.annotationVisible, leftTab.id, rightTab.id) {
+    LaunchedEffect(requestedPanelFocus, state.filterVisible, state.annotationVisible, state.aiPanelVisible, leftTab.id, rightTab.id) {
         val panel = requestedPanelFocus ?: return@LaunchedEffect
         val fr = visiblePanelFrs().firstOrNull { it.first == panel }?.second ?: return@LaunchedEffect
         runCatching { fr.requestFocus() }
@@ -216,7 +218,7 @@ internal fun CompareView(
                         onVisibleItems = { summary -> state.noteVisibleItems(rightTab.id, summary) },
                         onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
                     )
-                    if (state.annotationVisible) {
+                    if (state.annotationVisible || state.aiPanelVisible) {
                         HDivider { d ->
                             state.updateAnnotationPanelWidth(state.annotationPanelWidth - d)
                         }
@@ -224,9 +226,9 @@ internal fun CompareView(
                             state = state,
                             tab = leftTab,
                             width = state.annotationPanelWidth,
-                            focusRequester = annotationFr,
-                            onPanelFocusChanged = { focused ->
-                                if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
+                            aiFocusRequester = aiFr,
+                            onAiPanelFocusChanged = { focused ->
+                                if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == aiFr }
                             },
                         ) {
                             AnnotationPanel(

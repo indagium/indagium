@@ -21,28 +21,18 @@ internal enum class AiQuickAction(val label: String, val prompt: String, val req
         requiresLine = true,
     ),
     SELECTED_ERROR(
-        label = "Selected error",
+        label = "Check error",
         prompt = "Analyze the selected error. Explain what happened, likely causes, evidence, and the next useful checks.",
         requiresLine = true,
     ),
     ROOT_CAUSE(
-        label = "Root cause",
+        label = "Find root cause",
         prompt = "Investigate the selected line and determine the most likely root cause. Build a timeline from real log evidence before concluding.",
         requiresLine = true,
     ),
-    FILTERED_RESULT(
-        label = "Filtered result",
-        prompt = "Analyze the current filtered result. Summarize the important evidence, patterns, and recommended next checks.",
-        requiresLine = false,
-    ),
     TIMELINE(
-        label = "Timeline",
+        label = "Build timeline",
         prompt = "Build a timeline around the selected line. Identify preceding events that plausibly led to it and cite only tool-returned evidence.",
-        requiresLine = true,
-    ),
-    MAPPED_SOURCE(
-        label = "Mapped source",
-        prompt = "Resolve the selected log line to source code and explain the relevant mapped method using tool-returned source evidence.",
         requiresLine = true,
     ),
     ISSUE_INVESTIGATION(

@@ -60,17 +60,18 @@ or right-click a file in your file manager → **Open With** → **openLog** →
 
 ## In-app AI assistant
 
-The right sidebar has **Notes** and **AI** tabs. The AI assistant is optional and runs only when
-you send a request. Its first provider is an OpenAI-compatible Chat Completions endpoint, so the
-default profile works with a local LM Studio server:
+**Notes** and **AI** are independent toggles on the main toolbar (next to **Filter**), each showing
+or hiding its own panel in the same resizable sidebar slot. With only one on, it fills the slot;
+with both on, it splits into Notes above AI at a draggable divider. The AI assistant is optional
+and runs only when you send a request. Its first provider is an OpenAI-compatible Chat Completions
+endpoint, so the default profile works with a local LM Studio server:
 
 1. In LM Studio, load a tool-capable model and start its local API server.
-2. Open a log tab in openLog, select **AI** in the right sidebar, and enter or choose the loaded
-   model id. **Find** asks the provider for available models; if that endpoint is unavailable,
-   entering the model id manually still works.
-3. Ask a question or use a quick action such as **Selected error**, **Root cause**, **Timeline**,
-   **Filtered result**, **Mapped source**, or **Investigate issue**. You can also right-click a log
-   line and choose **Ask AI**.
+2. Open a log tab in openLog, turn on **AI** in the toolbar, and choose the loaded model from the
+   dropdown (click it to browse discovered models, or type an id manually at the bottom of the
+   list). If discovery is unavailable, manual entry still works.
+3. Ask a question or use a quick action such as **Check error**, **Find root cause**, **Build
+   timeline**, or **Investigate issue**. You can also right-click a log line and choose **Ask AI**.
 
 Each reply shows when the request was sent, how long the first response and the full answer took,
 and the reported token usage if the provider includes it. Tool-call activity for a request appears

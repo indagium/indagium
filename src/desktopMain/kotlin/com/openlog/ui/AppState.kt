@@ -164,6 +164,8 @@ internal const val FILTER_PANEL_MIN_WIDTH = 140f
 internal const val FILTER_PANEL_MAX_WIDTH = 420f
 internal const val COMPARE_SPLIT_MIN = 0.2f
 internal const val COMPARE_SPLIT_MAX = 0.8f
+internal const val RIGHT_SIDEBAR_SPLIT_MIN = 0.2f
+internal const val RIGHT_SIDEBAR_SPLIT_MAX = 0.8f
 internal const val MIN_PORT = 1
 internal const val MAX_PORT = 65535
 internal const val DEFAULT_MCP_PORT = 8991
@@ -441,8 +443,6 @@ class AppState(
         maxToolRounds = { settings.aiMaxToolRounds },
     )
 
-    /** Which view occupies the existing right sidebar for this launch; intentionally not saved. */
-    internal var rightSidebarTab by mutableStateOf(RightSidebarTab.NOTES)
 
     /** Session-only request produced by a log context menu or AI quick action. */
     internal var pendingAiPromptRequest by mutableStateOf<AiPromptRequest?>(null)
@@ -473,8 +473,7 @@ class AppState(
         if (action.requiresLine && (resolvedLineId == null || resolvedLineId !in tab.rmap)) return false
         if (resolvedLineId != null && resolvedLineId !in tab.rmap) return false
         activateTab(tabId)
-        updateAnnotationVisible(true)
-        rightSidebarTab = RightSidebarTab.AI
+        aiPanelVisible = true
         pendingAiPromptRequest = AiPromptRequest(
             context = AiInvestigationContext(tabId = tabId, lineId = resolvedLineId, action = action),
             prompt = action.prompt,
@@ -520,7 +519,6 @@ class AppState(
                 activateTab(evidence.tabId)
                 updateAnnotationVisible(true)
                 aiEvidenceNoteTarget = evidence
-                rightSidebarTab = RightSidebarTab.NOTES
             }
         }
     }
@@ -606,6 +604,10 @@ class AppState(
     // ── Layout ──────────────────────────────────────────────────────
     var filterVisible by mutableStateOf(true)
     var annotationVisible by mutableStateOf(true)
+    // Notes and the AI panel are independent visibility toggles sharing one sidebar slot (see
+    // RightSidebarPanel): both on splits it vertically, Notes above AI, sized by rightSidebarSplit.
+    var aiPanelVisible by mutableStateOf(false)
+    var rightSidebarSplit by mutableStateOf(0.5f)
     var filterPanelWidth by mutableStateOf(220f)
     var annotationPanelWidth by mutableStateOf(ANNOTATION_PANEL_MIN_WIDTH)
     var compareSplit by mutableStateOf(0.5f)
@@ -876,6 +878,19 @@ class AppState(
         if (annotationVisible == visible) return
         annotationVisible = visible
         autosaveNow()
+    }
+
+    fun updateAiPanelVisible(visible: Boolean) {
+        if (aiPanelVisible == visible) return
+        aiPanelVisible = visible
+        autosaveNow()
+    }
+
+    fun updateRightSidebarSplit(split: Float) {
+        val next = split.coerceIn(RIGHT_SIDEBAR_SPLIT_MIN, RIGHT_SIDEBAR_SPLIT_MAX)
+        if (rightSidebarSplit == next) return
+        rightSidebarSplit = next
+        autosaveInBackground()
     }
 
     fun updateCompareMode(enabled: Boolean) {
@@ -3605,6 +3620,8 @@ private fun AppState.compareStateToken(): String = tokenFields(
     filterPanelWidth.toString(),
     annotationPanelWidth.toString(),
     compareSplit.toString(),
+    aiPanelVisible.toString(),
+    rightSidebarSplit.toString(),
 )
 
 private fun AppState.restoreCompareState(token: String) {
@@ -3618,6 +3635,10 @@ private fun AppState.restoreCompareState(token: String) {
     filterPanelWidth = p[5].toFloatOrNull() ?: filterPanelWidth
     annotationPanelWidth = (p[6].toFloatOrNull() ?: annotationPanelWidth).coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
     compareSplit = p[7].toFloatOrNull() ?: compareSplit
+    // Trailing fields: absent on tokens from before the AI panel became independently toggleable.
+    aiPanelVisible = p.getOrNull(8)?.toBooleanStrictOrNull() ?: false
+    rightSidebarSplit = (p.getOrNull(9)?.toFloatOrNull() ?: rightSidebarSplit)
+        .coerceIn(RIGHT_SIDEBAR_SPLIT_MIN, RIGHT_SIDEBAR_SPLIT_MAX)
 }
 
 private fun FilterPanelUiState.filterPanelToken(): String = tokenFields(

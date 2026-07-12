@@ -290,10 +290,19 @@ fun ToolbarBtn(
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
+    // Solid fill (matching AppButton's Primary variant) rather than a translucent accent tint, so
+    // an active toggle in this row reads the same way the AI/Notes panel toggle does.
     Box(
         modifier
             .border(1.dp, if (active && enabled) tc.ac else tc.br, shape)
-            .background(if (active && enabled) tc.ac.copy(.2f) else if (hovered && enabled) tc.hv else Color.Transparent, shape)
+            .background(
+                when {
+                    active && enabled -> tc.ac
+                    hovered && enabled -> tc.hv
+                    else -> Color.Transparent
+                },
+                shape,
+            )
             .clip(shape)
             .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
@@ -303,7 +312,7 @@ fun ToolbarBtn(
     ) {
         AppText(
             label,
-            color = if (!enabled) tc.td.copy(.5f) else if (active) tc.ac else tc.ts,
+            color = if (!enabled) tc.td.copy(.5f) else if (active) Color.White else tc.ts,
             fontSize = 12.sp,
             fontWeight = if (active && enabled) FontWeight.Medium else FontWeight.Normal,
         )

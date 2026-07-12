@@ -64,6 +64,12 @@ internal fun TabBar(state: AppState) {
             shape = middleShape,
         ) { state.updateAnnotationVisible(!state.annotationVisible) }
         ToolbarBtn(
+            if (state.aiPanelVisible) "⊟ AI" else "⊞ AI",
+            active = state.aiPanelVisible,
+            modifier = Modifier.fillMaxHeight(),
+            shape = middleShape,
+        ) { state.updateAiPanelVisible(!state.aiPanelVisible) }
+        ToolbarBtn(
             if (state.compareMode) "⊟ Compare" else "⊠ Compare",
             active = state.compareMode,
             enabled = state.canCompare,
