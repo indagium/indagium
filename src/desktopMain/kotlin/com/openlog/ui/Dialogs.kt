@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.openlog.ai.CustomAiCommand
 import com.openlog.model.*
 import java.awt.FileDialog
 import java.awt.Frame
@@ -98,6 +99,151 @@ internal fun AddAnnDialog(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             DialogActionButton("Add annotation", active = true) { onConfirm(caption) }
+            DialogActionButton("Cancel", active = false, onClick = onDismiss)
+        }
+    }
+}
+
+// ── Custom AI command editor ──────────────────────────────────────────
+@Composable
+internal fun CustomAiCommandEditorDialog(
+    state: AppState,
+    target: CustomAiCommand,
+    onDismiss: () -> Unit,
+) {
+    val tc = tc()
+    val isNew = target.name.isBlank()
+    var name by remember(target) { mutableStateOf(target.name) }
+    var template by remember(target) { mutableStateOf(target.promptTemplate) }
+    var error by remember(target) { mutableStateOf<String?>(null) }
+
+    Column(
+        Modifier.width(440.dp).background(tc.p, RoundedCornerShape(8.dp))
+            .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        AppText(
+            if (isNew) "Add custom AI command" else "Edit custom AI command",
+            color = tc.tx,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppText("Name (invoked as /name)", color = tc.td, fontSize = 10.sp)
+            InlineField(name, { name = it }, "timeline", Modifier.fillMaxWidth(), fontSize = 12.sp)
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppText("Prompt template", color = tc.td, fontSize = 10.sp)
+            val templateScroll = rememberScrollState()
+            // Keep the dialog compact regardless of template length. verticalScroll changes its
+            // child's height constraints, so placing it outside the old heightIn modifier allowed
+            // a large template to grow the entire dialog before its scrollbar could take effect.
+            Box(Modifier.fillMaxWidth().height(260.dp)) {
+                BasicTextField(
+                    value = template,
+                    onValueChange = { template = it },
+                    textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
+                    cursorBrush = SolidColor(tc.ac),
+                    modifier = Modifier.fillMaxSize()
+                        .background(tc.bg, CORNER_MD)
+                        .border(1.dp, tc.ac.copy(.5f), CORNER_MD)
+                        .padding(10.dp)
+                        .verticalScroll(templateScroll),
+                    decorationBox = { inner ->
+                        if (template.isEmpty()) {
+                            AppText(
+                                "What should the assistant do when this command is invoked?",
+                                color = tc.td,
+                                fontSize = 12.sp,
+                            )
+                        }
+                        inner()
+                    },
+                )
+                VerticalScrollbar(
+                    adapter = rememberScrollbarAdapter(templateScroll),
+                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+                    style = appScrollbarStyle(tc),
+                )
+            }
+        }
+        error?.let { AppText(it, color = DANGER_RED, fontSize = 10.sp) }
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            DialogActionButton("Save", active = true) {
+                val saveError = state.saveCustomAiCommand(
+                    name.trim(),
+                    template,
+                    previousName = target.name.takeIf { it.isNotBlank() },
+                )
+                if (saveError != null) error = saveError else onDismiss()
+            }
+            DialogActionButton("Cancel", active = false, onClick = onDismiss)
+        }
+    }
+}
+
+// ── Per-folder project info editor ────────────────────────────────────
+@Composable
+internal fun SourceFolderInfoDialog(
+    state: AppState,
+    path: String,
+    onDismiss: () -> Unit,
+) {
+    val tc = tc()
+    val existing = state.settings.sourceFolderInfo[path] ?: SourceFolderInfo()
+    var description by remember(path) { mutableStateOf(existing.description) }
+    var readmePath by remember(path) { mutableStateOf(existing.readmePath.orEmpty()) }
+
+    Column(
+        Modifier.width(440.dp).background(tc.p, RoundedCornerShape(8.dp))
+            .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        AppText("Project info", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        AppText(truncatePathForDisplay(path), color = tc.td, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppText("Description", color = tc.td, fontSize = 10.sp)
+            BasicTextField(
+                value = description,
+                onValueChange = { description = it },
+                textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
+                cursorBrush = SolidColor(tc.ac),
+                modifier = Modifier.fillMaxWidth()
+                    .background(tc.bg, CORNER_MD)
+                    .border(1.dp, tc.ac.copy(.5f), CORNER_MD)
+                    .padding(10.dp).heightIn(min = 80.dp, max = 200.dp),
+                decorationBox = { inner ->
+                    if (description.isEmpty()) {
+                        AppText("What is this project / what should the AI know about it?", color = tc.td, fontSize = 12.sp)
+                    }
+                    inner()
+                },
+            )
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppText("README path (optional)", color = tc.td, fontSize = 10.sp)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                InlineField(readmePath, { readmePath = it }, "/path/to/README.md", Modifier.weight(1f), fontSize = 12.sp)
+                AppButton(
+                    "Browse",
+                    onClick = { state.pickReadmeFile()?.let { readmePath = it } },
+                    variant = ButtonVariant.Secondary,
+                )
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            DialogActionButton("Save", active = true) {
+                state.updateSourceFolderInfo(path, SourceFolderInfo(description, readmePath.trim().ifBlank { null }))
+                onDismiss()
+            }
             DialogActionButton("Cancel", active = false, onClick = onDismiss)
         }
     }

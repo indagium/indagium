@@ -2372,7 +2372,7 @@ private fun slashWrappedRegex(input: String): String? {
 }
 
 @Composable
-private fun TagPill(tag: String, color: Color, onRemove: () -> Unit) {
+internal fun TagPill(tag: String, color: Color, onRemove: () -> Unit) {
     BoxWithConstraints {
         // Cap the text to the pill's actual available width (from the enclosing FlowRow), not a
         // guessed constant — the filter panel can be resized down to 140dp (FILTER_PANEL_MIN_WIDTH),

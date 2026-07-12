@@ -722,6 +722,15 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
             ),
         ),
     ),
+    McpTool(
+        "get_project_info",
+        "Returns description and README content for registered source folders (Settings → Source " +
+            "code) that have any info set. Folders with neither a description nor a README path are " +
+            "omitted. README content is read live from disk on every call; a missing or unreadable " +
+            "file produces readmeError instead of failing the whole call. Useful context before " +
+            "starting a code-level investigation.",
+        schema(),
+    ),
 )
 
 // REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl

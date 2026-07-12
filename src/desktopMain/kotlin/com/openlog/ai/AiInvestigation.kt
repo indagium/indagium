@@ -10,30 +10,36 @@ import java.util.UUID
 internal data class AiInvestigationContext(
     val tabId: String,
     val lineId: Int? = null,
+    /** Additional selected lines attached from the log context menu. */
+    val lineIds: List<Int> = emptyList(),
     val action: AiQuickAction? = null,
 )
 
 /** Pre-built investigations exposed by the in-app panel and log-row context menu. */
-internal enum class AiQuickAction(val label: String, val prompt: String, val requiresLine: Boolean) {
+internal enum class AiQuickAction(val label: String, val prompt: String, val requiresLine: Boolean, val slashName: String) {
     LOG_LINE(
         label = "Log line",
         prompt = "Analyze this log line. Explain what it means, related evidence, and the next useful checks.",
         requiresLine = true,
+        slashName = "log_line",
     ),
     SELECTED_ERROR(
         label = "Check error",
         prompt = "Analyze the selected error. Explain what happened, likely causes, evidence, and the next useful checks.",
         requiresLine = true,
+        slashName = "check_error",
     ),
     ROOT_CAUSE(
         label = "Find root cause",
         prompt = "Investigate the selected line and determine the most likely root cause. Build a timeline from real log evidence before concluding.",
         requiresLine = true,
+        slashName = "root_cause",
     ),
     TIMELINE(
         label = "Build timeline",
         prompt = "Build a timeline around the selected line. Identify preceding events that plausibly led to it and cite only tool-returned evidence.",
         requiresLine = true,
+        slashName = "timeline",
     ),
     ISSUE_INVESTIGATION(
         label = "Investigate issue",
@@ -44,6 +50,7 @@ internal enum class AiQuickAction(val label: String, val prompt: String, val req
             "root cause, the supporting evidence, and recommended next steps - do not just describe the analysis " +
             "in your reply without also saving it as a note.",
         requiresLine = false,
+        slashName = "investigate_issue",
     ),
 }
 
@@ -53,6 +60,26 @@ internal data class AiPromptRequest(
     val context: AiInvestigationContext,
     val prompt: String,
 )
+
+/** Session-only request to attach selected log lines as a removable context chip, without sending. */
+internal data class AiContextRequest(
+    val id: String = UUID.randomUUID().toString(),
+    val tabId: String,
+    val lineIds: List<Int>,
+)
+
+/** Unifies predefined quick actions and user-defined commands for the composer's "/" suggestion list. */
+internal sealed interface AiChipCommand {
+    val displayName: String
+
+    data class Predefined(val action: AiQuickAction) : AiChipCommand {
+        override val displayName get() = "/${action.slashName}"
+    }
+
+    data class Custom(val command: CustomAiCommand) : AiChipCommand {
+        override val displayName get() = "/${command.name}"
+    }
+}
 
 /**
  * Navigation data is derived exclusively from a completed gateway result.  Model Markdown is

@@ -47,6 +47,78 @@ class SourceIndexAppStateTest {
     }
 
     @Test
+    fun settingsRoundTripPreservesSourceFolderInfo() {
+        val dir = createTempDirectory("openlog-src-folder-info").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(autosaveFile = cacheFile, sourceIndexFile = File(dir, "source-index"))
+        state.updateSettings {
+            it.copy(
+                sourceFolders = listOf("/a", "/b"),
+                sourceFolderInfo = mapOf(
+                    "/a" to com.openlog.model.SourceFolderInfo("Main app", "/a/README.md"),
+                    "/b" to com.openlog.model.SourceFolderInfo("Shared lib", null),
+                ),
+            )
+        }
+        state.autosaveNow()
+
+        val restored = AppState(autosaveFile = cacheFile, restoreOnCreate = true, sourceIndexFile = File(dir, "source-index"))
+
+        assertEquals(
+            mapOf(
+                "/a" to com.openlog.model.SourceFolderInfo("Main app", "/a/README.md"),
+                "/b" to com.openlog.model.SourceFolderInfo("Shared lib", null),
+            ),
+            restored.settings.sourceFolderInfo,
+        )
+    }
+
+    @Test
+    fun oldAutosaveTokenWithoutSourceFolderInfoFieldRestoresToEmptyMap() {
+        val dir = createTempDirectory("openlog-src-folder-info-legacy").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(autosaveFile = cacheFile, sourceIndexFile = File(dir, "source-index"))
+        state.updateSettings { it.copy(sourceFolders = listOf("/a"), aiMaxToolRounds = 200) }
+        state.autosaveNow()
+
+        // Simulate a pre-sourceFolderInfo cache file by round-tripping the real settings token
+        // through the same b64-outer-wrapper the app itself uses and dropping its last pipe-field
+        // (sourceFolderInfo, the newest trailing field) — settingsFromToken's tolerant
+        // p.getOrNull(mcpIndex + 12) must still parse everything before it.
+        val lines = cacheFile.readLines()
+        val settingsLine = lines.single { it.startsWith("settings\t") }
+        val encoded = settingsLine.removePrefix("settings\t")
+        val rawToken = String(java.util.Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8)
+        val truncatedRawToken = rawToken.split("|").dropLast(1).joinToString("|")
+        val truncatedEncoded = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(truncatedRawToken.toByteArray(Charsets.UTF_8))
+        cacheFile.writeText(lines.joinToString("\n") { if (it == settingsLine) "settings\t$truncatedEncoded" else it } + "\n")
+
+        val restored = AppState(autosaveFile = cacheFile, restoreOnCreate = true, sourceIndexFile = File(dir, "source-index"))
+
+        assertEquals(listOf("/a"), restored.settings.sourceFolders)
+        assertEquals(emptyMap(), restored.settings.sourceFolderInfo)
+        assertEquals(200, restored.settings.aiMaxToolRounds)
+    }
+
+    @Test
+    fun removeSourceFolderStripsItsInfoMapEntry() {
+        val dir = createTempDirectory("openlog-src-folder-info-remove").toFile()
+        val state = newState(dir)
+        state.updateSettings {
+            it.copy(
+                sourceFolders = listOf("/a"),
+                sourceFolderInfo = mapOf("/a" to com.openlog.model.SourceFolderInfo("Main app", null)),
+            )
+        }
+
+        state.removeSourceFolder("/a")
+
+        assertEquals(emptyList(), state.settings.sourceFolders)
+        assertEquals(emptyMap(), state.settings.sourceFolderInfo)
+    }
+
+    @Test
     fun settingsRoundTripPreservesEditorCommand() {
         val dir = createTempDirectory("openlog-src-editor-cmd").toFile()
         val cacheFile = File(dir, "state.cache")

@@ -43,6 +43,7 @@ class OpenLogToolGatewayTest {
             "get_issue_description", "add_text_note", "add_log_note", "update_note_block", "move_note_block",
             "delete_note_block", "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing", "resolve_log_source",
+            "get_project_info",
         )
         assertEquals(expected, operations.toolGateway.tools.map { it.name }.toSet())
         assertEquals(expected.size, operations.toolGateway.tools.size)
@@ -75,5 +76,67 @@ class OpenLogToolGatewayTest {
     fun confirmationClassifiedOperationIsNotAutomatic() {
         assertEquals(OpenLogToolActionPolicy.CONFIRMATION_REQUIRED, operations.toolGateway.actionPolicy("close_tab"))
         assertEquals(OpenLogToolActionPolicy.CONFIRMATION_REQUIRED, operations.toolGateway.actionPolicy("export_analysis"))
+    }
+
+    @Test
+    fun getProjectInfoOmitsFoldersWithNeitherDescriptionNorReadme() {
+        state.updateSettings {
+            it.copy(
+                sourceFolders = listOf("/a", "/b"),
+                sourceFolderInfo = mapOf("/a" to com.openlog.model.SourceFolderInfo(description = "")),
+            )
+        }
+
+        val result = operations.toolGateway.execute("get_project_info", emptyMap()) as Map<*, *>
+
+        assertEquals(emptyList<Any?>(), result["folders"])
+    }
+
+    @Test
+    fun getProjectInfoReturnsDescriptionOnlyFolder() {
+        state.updateSettings {
+            it.copy(sourceFolderInfo = mapOf("/a" to com.openlog.model.SourceFolderInfo(description = "The main app.")))
+        }
+
+        val folders = operations.toolGateway.execute("get_project_info", emptyMap()) as Map<*, *>
+        val folder = (folders["folders"] as List<*>).single() as Map<*, *>
+
+        assertEquals("/a", folder["path"])
+        assertEquals("The main app.", folder["description"])
+        assertEquals(null, folder["readmePath"])
+        assertTrue(!folder.containsKey("readmeContent"))
+        assertTrue(!folder.containsKey("readmeError"))
+    }
+
+    @Test
+    fun getProjectInfoReadsReadmeContentLiveFromDisk() {
+        val readme = File.createTempFile("openlog-readme", ".md").apply { writeText("# Hello project") }
+
+        state.updateSettings {
+            it.copy(sourceFolderInfo = mapOf("/a" to com.openlog.model.SourceFolderInfo(readmePath = readme.absolutePath)))
+        }
+
+        val folders = operations.toolGateway.execute("get_project_info", emptyMap()) as Map<*, *>
+        val folder = (folders["folders"] as List<*>).single() as Map<*, *>
+
+        assertEquals("# Hello project", folder["readmeContent"])
+        assertTrue(!folder.containsKey("readmeError"))
+    }
+
+    @Test
+    fun getProjectInfoReportsReadmeErrorForMissingFile() {
+        state.updateSettings {
+            it.copy(
+                sourceFolderInfo = mapOf(
+                    "/a" to com.openlog.model.SourceFolderInfo(readmePath = "/does/not/exist/README.md"),
+                ),
+            )
+        }
+
+        val folders = operations.toolGateway.execute("get_project_info", emptyMap()) as Map<*, *>
+        val folder = (folders["folders"] as List<*>).single() as Map<*, *>
+
+        assertNotNull(folder["readmeError"])
+        assertTrue(!folder.containsKey("readmeContent"))
     }
 }

@@ -1,4 +1,7 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+)
 
 package com.openlog.ui
 
@@ -12,6 +15,7 @@ import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -48,6 +52,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -64,7 +70,6 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -76,18 +81,22 @@ import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.MarkdownTypography
 import com.mikepenz.markdown.model.rememberMarkdownState
 import com.openlog.ai.AiEvidence
+import com.openlog.ai.AiChipCommand
+import com.openlog.ai.AiContextRequest
 import com.openlog.ai.AiInvestigationContext
 import com.openlog.ai.AiQuickAction
 import com.openlog.ai.AiRun
 import com.openlog.ai.AiRunEvent
 import com.openlog.ai.AiStartResult
 import com.openlog.ai.AiToolConfirmation
+import com.openlog.ai.CustomAiCommand
 import com.openlog.ai.ModelDiscoveryResult
 import com.openlog.ai.isLoopbackHost
 import com.openlog.ai.normalizeAiProviderProfiles
 import com.openlog.model.LogTab
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.awt.Cursor as AwtCursor
 
 /** Provider and Actions share one row as an accordion: opening one closes the other. */
 internal enum class AiSidebarSection { PROVIDER, ACTIONS }
@@ -153,6 +162,48 @@ internal fun RightSidebarPanel(
     }
 }
 
+// Matches "/name" or "/name trailing text" typed at the very start of the prompt. Case-insensitive
+// lookup against predefined actions and saved custom commands; no match => the raw text is sent
+// unchanged (never blocks Send).
+private val SLASH_COMMAND = Regex("^/([A-Za-z0-9_-]+)(\\s+(.*))?$", RegexOption.DOT_MATCHES_ALL)
+
+internal fun resolveSlashCommand(
+    raw: String,
+    commands: List<CustomAiCommand>,
+    actions: List<AiQuickAction> = AiQuickAction.entries,
+): String {
+    val trimmed = raw.trim()
+    val match = SLASH_COMMAND.matchEntire(trimmed) ?: return raw
+    val name = match.groupValues[1]
+    val trailing = match.groupValues.getOrNull(3)?.trim().orEmpty()
+    val template = commands.firstOrNull { it.name.equals(name, ignoreCase = true) }?.promptTemplate
+        ?: actions.firstOrNull { it.slashName.equals(name, ignoreCase = true) }?.prompt
+        ?: return raw
+    return appendCommandPrompt(template, trailing)
+}
+
+private fun appendCommandPrompt(template: String, request: String): String =
+    if (request.isBlank()) template else "$template\n\n${request.trim()}"
+
+private fun AiChipCommand.expand(request: String): String = when (this) {
+    is AiChipCommand.Predefined -> appendCommandPrompt(action.prompt, request)
+    is AiChipCommand.Custom -> appendCommandPrompt(command.promptTemplate, request)
+}
+
+/** Identifies a fully typed slash command so its action context matches the autocomplete path. */
+private fun typedSlashCommand(raw: String, commands: List<CustomAiCommand>): AiChipCommand? {
+    val match = SLASH_COMMAND.matchEntire(raw.trim()) ?: return null
+    val name = match.groupValues[1]
+    return commands.firstOrNull { it.name.equals(name, ignoreCase = true) }?.let { AiChipCommand.Custom(it) }
+        ?: AiQuickAction.entries.firstOrNull { it.slashName.equals(name, ignoreCase = true) }?.let { AiChipCommand.Predefined(it) }
+}
+
+private data class AiComposerSubmission(
+    val request: String,
+    val command: AiChipCommand?,
+    val contextLineIds: List<Int>,
+)
+
 @Composable
 private fun AiSidebarPanel(
     state: AppState,
@@ -178,7 +229,6 @@ private fun AiSidebarPanel(
     var keyDraft by remember(profile.id) { mutableStateOf(state.aiProviderApiKey(profile.id)) }
     var error by remember(tab.id, profile.id) { mutableStateOf<String?>(null) }
     var modelDiscovery by remember(profile.id) { mutableStateOf<ModelDiscoveryResult?>(null) }
-    var panelHeightPx by remember { mutableStateOf(0) }
     val density = LocalDensity.current
 
     fun profileForRun(): com.openlog.model.AiProviderProfile? {
@@ -193,15 +243,19 @@ private fun AiSidebarPanel(
         return state.settings.aiProviderProfiles.firstOrNull { it.id == draft.id } ?: draft
     }
 
-    fun start(promptToSend: String, context: AiInvestigationContext = AiInvestigationContext(tab.id)) {
-        val currentProfile = profileForRun() ?: return
+    fun start(promptToSend: String, context: AiInvestigationContext = AiInvestigationContext(tab.id)): Boolean {
+        val currentProfile = profileForRun() ?: return false
         state.setAiProviderApiKey(currentProfile.id, keyDraft)
-        when (val result = runtime.start(tab.id, currentProfile, keyDraft, promptToSend, context)) {
+        return when (val result = runtime.start(tab.id, currentProfile, keyDraft, promptToSend, context)) {
             is AiStartResult.Started -> {
                 prompt = ""
                 error = null
+                true
             }
-            is AiStartResult.Rejected -> error = result.message
+            is AiStartResult.Rejected -> {
+                error = result.message
+                false
+            }
         }
     }
 
@@ -226,19 +280,13 @@ private fun AiSidebarPanel(
     }
 
     Column(
-        Modifier.fillMaxSize().background(colors.p)
+            Modifier.fillMaxSize().background(colors.p)
             .border(BorderStroke(1.dp, if (panelFocused && state.keyboardFocusVisible) colors.ac else colors.br))
-            .onSizeChanged { panelHeightPx = it.height }
             .focusRequester(focusRequester).focusGroup().focusable()
             .onFocusChanged { panelFocused = it.hasFocus; onPanelFocusChanged(it.hasFocus) }
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                val actionPressed = event.isCtrlPressed || event.isMetaPressed
                 when {
-                    actionPressed && event.key == Key.Enter -> {
-                        if (session.activeRun == null) start(prompt) else runtime.cancel(session.activeRun!!)
-                        true
-                    }
                     event.key == Key.Escape && session.activeRun != null -> {
                         runtime.cancel(session.activeRun!!); true
                     }
@@ -261,7 +309,7 @@ private fun AiSidebarPanel(
                     // toggled off and back on (see aiSidebarExpandedSection).
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         AiSectionTab(
-                            "Actions",
+                            "Commands",
                             expanded = state.aiSidebarExpandedSection == AiSidebarSection.ACTIONS,
                             onToggle = {
                                 state.aiSidebarExpandedSection = state.aiSidebarExpandedSection
@@ -283,6 +331,8 @@ private fun AiSidebarPanel(
                         AiSidebarSection.ACTIONS -> AiQuickActionsContent(
                             tab = tab,
                             onAction = { action -> state.requestAiInvestigation(tab.id, action) },
+                            customCommands = state.customAiCommands,
+                            onCustomCommand = { command -> state.requestAiCustomCommand(tab.id, command) },
                         )
                         AiSidebarSection.PROVIDER -> AiProviderControls(
                             state = state,
@@ -356,14 +406,35 @@ private fun AiSidebarPanel(
                 style = appScrollbarStyle(colors),
             )
         }
-        val maxPromptHeightDp = with(density) { (panelHeightPx / 2).toDp() }.coerceAtLeast(54.dp)
         AiPromptComposer(
+            tabId = tab.id,
             prompt = prompt,
             running = session.activeRun,
             retryAvailable = session.activeRun == null && session.lastPrompt != null,
-            maxHeightDp = maxPromptHeightDp,
+            customCommands = state.customAiCommands,
+            pendingContextRequest = state.pendingAiContextRequest,
+            onConsumeContextRequest = state::consumeAiContextRequest,
             onPromptChange = { prompt = it },
-            onSend = { start(prompt) },
+            onSend = { submission ->
+                val command = submission.command ?: typedSlashCommand(submission.request, state.customAiCommands)
+                val action = (command as? AiChipCommand.Predefined)?.action
+                val attachedIds = submission.contextLineIds
+                val selectedLineId = attachedIds.firstOrNull() ?: tab.selected.minOrNull()
+                if (action?.requiresLine == true && selectedLineId !in tab.rmap) {
+                    error = "Select a log line before using /${action.slashName}."
+                    false
+                } else {
+                    val context = AiInvestigationContext(
+                        tabId = tab.id,
+                        lineId = selectedLineId?.takeIf { action?.requiresLine == true || attachedIds.isNotEmpty() },
+                        lineIds = attachedIds,
+                        action = action,
+                    )
+                    val promptToSend = submission.command?.expand(submission.request)
+                        ?: resolveSlashCommand(submission.request, state.customAiCommands)
+                    start(promptToSend, context)
+                }
+            },
             onStop = { session.activeRun?.let(runtime::cancel) },
             onRetry = {
                 val currentProfile = profileForRun() ?: return@AiPromptComposer
@@ -389,23 +460,26 @@ private fun AiCollapsibleHeader(
 ) {
     val colors = tc()
     HoverBox(
-        modifier = Modifier.fillMaxWidth().clip(CORNER_SM),
+        modifier = Modifier.fillMaxWidth().clip(CORNER_SM)
+            .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
         onClick = onToggle,
     ) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AppText(if (expanded) "▾" else "▸", color = colors.td, fontSize = 11.sp)
-            AppText(
-                title,
-                color = colors.td,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.weight(1f),
-            )
-            trailing?.invoke(this)
+        DisableSelection {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppText(if (expanded) "▾" else "▸", color = colors.td, fontSize = 11.sp)
+                AppText(
+                    title,
+                    color = colors.td,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                trailing?.invoke(this)
+            }
         }
     }
 }
@@ -444,23 +518,28 @@ private fun AiSectionTab(
 }
 
 @Composable
-private fun AiQuickActionsContent(tab: LogTab, onAction: (AiQuickAction) -> Unit) {
+private fun AiQuickActionsContent(
+    tab: LogTab,
+    onAction: (AiQuickAction) -> Unit,
+    customCommands: List<CustomAiCommand> = emptyList(),
+    onCustomCommand: (CustomAiCommand) -> Unit = {},
+) {
     val colors = tc()
     val hasSelectedLine = tab.selected.any { it in tab.rmap }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            listOf(AiQuickAction.SELECTED_ERROR, AiQuickAction.ROOT_CAUSE).forEach { action ->
-                AppButton(
-                    action.label,
-                    onClick = { onAction(action) },
-                    enabled = hasSelectedLine,
-                    variant = ButtonVariant.Ghost,
-                    modifier = Modifier.height(25.dp),
-                )
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            listOf(AiQuickAction.TIMELINE, AiQuickAction.ISSUE_INVESTIGATION).forEach { action ->
+        // Keep each command at its natural label width. FlowRow fills the unused space beside a
+        // short command and only starts a new line when another complete button will not fit.
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            listOf(
+                AiQuickAction.SELECTED_ERROR,
+                AiQuickAction.ROOT_CAUSE,
+                AiQuickAction.TIMELINE,
+                AiQuickAction.ISSUE_INVESTIGATION,
+            ).forEach { action ->
                 AppButton(
                     action.label,
                     onClick = { onAction(action) },
@@ -472,6 +551,26 @@ private fun AiQuickActionsContent(tab: LogTab, onAction: (AiQuickAction) -> Unit
         }
         if (!hasSelectedLine) {
             AppText("Select a log line to enable line-based investigations.", color = colors.td, fontSize = 10.sp)
+        }
+        // User-defined commands use the same responsive wrapping as the predefined actions.
+        if (customCommands.isNotEmpty()) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                customCommands.forEach { command ->
+                    // AppButton's label has no built-in truncation - shorten long command names
+                    // so one command cannot force the whole flow beyond the sidebar's width.
+                    val label = "/${command.name}".let { if (it.length > 20) it.take(18) + "…" else it }
+                    AppButton(
+                        label,
+                        onClick = { onCustomCommand(command) },
+                        variant = ButtonVariant.Ghost,
+                        modifier = Modifier.height(25.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -800,9 +899,41 @@ private fun AiRunCard(
 
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         if (run.userPrompt.isNotBlank()) {
+            val promptLines = run.userPrompt.lines()
+            var promptExpanded by remember(run.id) { mutableStateOf(false) }
             AiBubble("You", colors.ac.copy(.13f)) {
-                AppText(run.userPrompt, color = colors.tx, fontSize = 12.sp, maxLines = Int.MAX_VALUE)
-                AppText(clockTimeLabel(run.sentAt), color = colors.td, fontSize = 9.sp)
+                val shownPrompt = if (promptLines.size <= 10 || promptExpanded) {
+                    run.userPrompt
+                } else {
+                    promptLines.take(10).joinToString("\n")
+                }
+                AppText(shownPrompt, color = colors.tx, fontSize = 12.sp, maxLines = Int.MAX_VALUE)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AppText(clockTimeLabel(run.sentAt), color = colors.td, fontSize = 9.sp)
+                    if (promptLines.size > 10) {
+                        HoverBox(
+                            modifier = Modifier.clip(CORNER_SM)
+                                .pointerHoverIcon(
+                                    PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                                    overrideDescendants = true,
+                                ),
+                            onClick = { promptExpanded = !promptExpanded },
+                        ) {
+                            DisableSelection {
+                                AppText(
+                                    if (promptExpanded) "See less" else "See more",
+                                    color = colors.ac,
+                                    fontSize = 10.sp,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
         if (traceEvents.isNotEmpty()) {
@@ -1030,48 +1161,227 @@ private fun AiConfirmationCard(
 
 @Composable
 private fun AiPromptComposer(
+    tabId: String,
     prompt: String,
     running: AiRun?,
     retryAvailable: Boolean,
-    maxHeightDp: Dp,
+    customCommands: List<CustomAiCommand>,
+    pendingContextRequest: AiContextRequest?,
+    onConsumeContextRequest: (String) -> Unit,
     onPromptChange: (String) -> Unit,
-    onSend: () -> Unit,
+    onSend: (AiComposerSubmission) -> Boolean,
     onStop: () -> Unit,
     onRetry: () -> Unit,
 ) {
     val colors = tc()
+    val density = LocalDensity.current
+    // Custom commands intentionally win name collisions, matching resolveSlashCommand(). This
+    // preserves an existing user's /name behavior after predefined commands were introduced.
+    val availableCommands = remember(customCommands) {
+        buildList {
+            addAll(customCommands.map { AiChipCommand.Custom(it) })
+            addAll(AiQuickAction.entries.filter { action ->
+                customCommands.none { it.name.equals(action.slashName, ignoreCase = true) }
+            }.map { AiChipCommand.Predefined(it) })
+        }
+    }
+    // While the field holds only "/" plus a still-being-typed name (no space/newline yet), offer
+    // matching commands. Accepted commands become chips, leaving this field for the user's
+    // follow-up request rather than showing the slash token as ordinary text.
+    val slashQuery = remember(prompt) {
+        val typed = prompt.trimStart()
+        if (typed.startsWith("/") && !typed.contains(' ') && !typed.contains('\n')) typed.drop(1) else null
+    }
+    val suggestions = remember(slashQuery, availableCommands) {
+        if (slashQuery == null) emptyList() else availableCommands.filter {
+            it.displayName.removePrefix("/").startsWith(slashQuery, ignoreCase = true)
+        }
+    }
+    var selectedIndex by remember { mutableStateOf(0) }
+    // Reset the keyboard highlight whenever the suggestion set itself changes (new query, list
+    // reloaded) - keeps the highlight from pointing at a now-different item after the list shifts.
+    LaunchedEffect(suggestions.map { it.displayName }) { selectedIndex = 0 }
+    var fieldWidthPx by remember { mutableStateOf(0) }
+    var popupHeightPx by remember { mutableStateOf(0) }
+    val promptScroll = rememberScrollState()
+    var selectedCommand by remember(tabId) { mutableStateOf<AiChipCommand?>(null) }
+    var contextLineIds by remember(tabId) { mutableStateOf(emptyList<Int>()) }
+
+    // Context-menu requests are deliberately consumed only by their owning tab's composer. They
+    // merge so the user can add several selections before writing one question, and are rendered
+    // as a removable chip rather than silently changing the next AI request.
+    LaunchedEffect(pendingContextRequest?.id, tabId) {
+        val request = pendingContextRequest ?: return@LaunchedEffect
+        if (request.tabId != tabId) return@LaunchedEffect
+        contextLineIds = (contextLineIds + request.lineIds).distinct().sorted()
+        onConsumeContextRequest(request.id)
+    }
+
+    fun acceptSuggestion(command: AiChipCommand) {
+        selectedCommand = command
+        onPromptChange("")
+    }
+
+    fun send(): Boolean {
+        val accepted = onSend(AiComposerSubmission(prompt, selectedCommand, contextLineIds))
+        if (accepted) {
+            selectedCommand = null
+            contextLineIds = emptyList()
+        }
+        return accepted
+    }
+
     Column(
         Modifier.fillMaxWidth().background(colors.p2).border(BorderStroke(1.dp, colors.br)).padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        // No Modifier.verticalScroll() here - BasicTextField already scrolls internally to keep
-        // the cursor visible once content exceeds heightIn's max, with no extra modifier needed.
-        // Layering an explicit verticalScroll on top of that (tried in two earlier passes, for a
-        // visible scrollbar thumb) reliably pinned this field at its max height even when empty:
-        // that measures its child with infinite height and reports coerceAtMost(constraints.max)
-        // of whatever it gets back, which does not behave the same as plain heightIn once
-        // BasicTextField's own internal scroll state is *also* managing the same axis.
-        androidx.compose.foundation.text.BasicTextField(
-            value = prompt,
-            onValueChange = onPromptChange,
-            textStyle = TextStyle(color = colors.tx, fontSize = 12.sp),
-            cursorBrush = SolidColor(colors.ac),
-            modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp, max = maxHeightDp)
-                .background(colors.bg, CORNER_SM).border(1.dp, colors.br, CORNER_SM).padding(7.dp),
-            decorationBox = { inner ->
-                if (prompt.isBlank()) AppText("Ask about this log tab…", color = colors.td, fontSize = 12.sp)
-                inner()
-            },
-        )
+        if (selectedCommand != null || contextLineIds.isNotEmpty()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                selectedCommand?.let { command ->
+                    AiComposerChip(command.displayName, colors.ac) { selectedCommand = null }
+                }
+                if (contextLineIds.isNotEmpty()) {
+                    val label = if (contextLineIds.size == 1) {
+                        "Line ${contextLineIds.single()}"
+                    } else {
+                        "${contextLineIds.size} lines"
+                    }
+                    AiComposerChip(label, colors.ac) { contextLineIds = emptyList() }
+                }
+            }
+        }
+        Box(
+            // 60dp matches the original single-line composer viewport on a 2x display; the
+            // scrollbar handles longer prompts without doubling the visible editor height.
+            Modifier.fillMaxWidth().height(60.dp)
+                .onGloballyPositioned { fieldWidthPx = it.size.width },
+        ) {
+            androidx.compose.foundation.text.BasicTextField(
+                value = prompt,
+                onValueChange = onPromptChange,
+                textStyle = TextStyle(color = colors.tx, fontSize = 12.sp),
+                cursorBrush = SolidColor(colors.ac),
+                modifier = Modifier.fillMaxSize()
+                    .background(colors.bg, CORNER_SM).border(1.dp, colors.br, CORNER_SM)
+                    .padding(start = 7.dp, top = 7.dp, end = 18.dp, bottom = 7.dp)
+                    .verticalScroll(promptScroll)
+                    // Runs before BasicTextField's own key handling (arrow-key cursor movement,
+                    // Enter-inserts-newline), so it can steal command-list navigation and the
+                    // composer-wide Ctrl/Cmd+Enter send shortcut.
+                    .onPreviewKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        if (event.key == Key.Escape && suggestions.isNotEmpty()) {
+                            onPromptChange("")
+                            true
+                        } else if ((event.isCtrlPressed || event.isMetaPressed) && event.key == Key.Enter) {
+                            send()
+                            true
+                        } else if (suggestions.isEmpty()) {
+                            false
+                        } else when (event.key) {
+                            Key.DirectionDown -> {
+                                selectedIndex = (selectedIndex + 1).coerceAtMost(suggestions.lastIndex)
+                                true
+                            }
+                            Key.DirectionUp -> {
+                                selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
+                                true
+                            }
+                            Key.Enter, Key.Tab -> {
+                                acceptSuggestion(suggestions[selectedIndex.coerceIn(0, suggestions.lastIndex)])
+                                true
+                            }
+                            else -> false
+                        }
+                    },
+                decorationBox = { inner ->
+                    if (prompt.isBlank()) AppText("Ask about this log tab…", color = colors.td, fontSize = 12.sp)
+                    inner()
+                },
+            )
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(promptScroll),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+                style = appScrollbarStyle(colors),
+            )
+            if (suggestions.isNotEmpty()) {
+                Popup(
+                    alignment = Alignment.TopStart,
+                    // Floats above the field: popup's own top-left is placed at the field's
+                    // top-left, then shifted up by the popup's own measured height (plus a small
+                    // gap) so its bottom edge lands just above the field instead of overlapping it.
+                    offset = IntOffset(0, -(popupHeightPx + with(density) { 4.dp.roundToPx() })),
+                    onDismissRequest = {},
+                    properties = PopupProperties(focusable = false),
+                ) {
+                    DisableSelection {
+                        Column(
+                            Modifier
+                                .width(with(density) { fieldWidthPx.toDp() })
+                                .heightIn(max = 220.dp)
+                                .onSizeChanged { popupHeightPx = it.height }
+                                .background(colors.bg, RoundedCornerShape(8.dp))
+                                .border(1.dp, colors.br, RoundedCornerShape(8.dp))
+                                .verticalScroll(rememberScrollState())
+                                .padding(4.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            suggestions.forEachIndexed { index, command ->
+                                val active = index == selectedIndex
+                                HoverBox(
+                                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                                    baseBg = if (active) colors.abg else Color.Transparent,
+                                    onClick = { acceptSuggestion(command) },
+                                ) {
+                                    AppText(
+                                        command.displayName,
+                                        color = if (active) colors.ac else colors.tx,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             if (running == null) {
-                AppButton("Send", onClick = onSend, variant = ButtonVariant.Primary, enabled = prompt.isNotBlank())
+                AppButton(
+                    "Send",
+                    onClick = { send() },
+                    variant = ButtonVariant.Primary,
+                    enabled = prompt.isNotBlank() || selectedCommand != null,
+                )
                 if (retryAvailable) AppButton("Retry", onClick = onRetry, variant = ButtonVariant.Secondary)
                 AppText("Ctrl/Cmd + Enter to send", color = colors.td, fontSize = 10.sp)
             } else {
                 AppButton("Stop", onClick = onStop, variant = ButtonVariant.Secondary, isDanger = true)
                 AppText("Esc to stop", color = colors.td, fontSize = 10.sp)
             }
+        }
+    }
+}
+
+@Composable
+private fun AiComposerChip(label: String, color: Color, onRemove: () -> Unit) {
+    HoverBox(
+        modifier = Modifier.clip(CORNER_SM)
+            .background(color.copy(.13f), CORNER_SM)
+            .border(1.dp, color.copy(.4f), CORNER_SM),
+        onClick = onRemove,
+    ) {
+        Row(
+            Modifier.padding(start = 7.dp, end = 5.dp, top = 2.dp, bottom = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AppText(label, color = color, fontSize = 11.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            AppText("×", color = color.copy(.75f), fontSize = 14.sp)
         }
     }
 }

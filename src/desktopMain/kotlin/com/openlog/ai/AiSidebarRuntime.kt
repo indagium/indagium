@@ -175,7 +175,11 @@ internal class AiSidebarRuntime(
     private fun systemPrompt(context: AiInvestigationContext): String =
         """
         You are openLog's in-app log investigation assistant. The pinned log tab for this request is `${context.tabId}`.
-        ${context.lineId?.let { "The pinned log line is `$it`." } ?: "There is no pinned log line for this request."}
+        ${when {
+            context.lineIds.isNotEmpty() -> "The selected log-line context is `${context.lineIds.joinToString(", ")}`. Use those lines as the starting evidence."
+            context.lineId != null -> "The pinned log line is `${context.lineId}`."
+            else -> "There is no pinned log line for this request."
+        }}
         Use the provided tools for evidence; pass this pinned tab id to tools that require tabId unless
         the user explicitly asks about another open tab. Do not invent facts, log lines, source
         mappings, or completed actions. State uncertainty and the next useful check clearly.

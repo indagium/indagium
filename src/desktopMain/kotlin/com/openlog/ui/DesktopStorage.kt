@@ -27,6 +27,8 @@ object DesktopStorage {
 
     fun notesDir(): File = File(appDataDir(), "notes")
 
+    fun customCommandsDir(): File = File(appDataDir(), "custom-ai-commands")
+
     fun filterBackupsDir(): File = File(appDataDir(), "filter-backups")
 
     fun controlTokenFile(): File = File(appDataDir(), "control-token")

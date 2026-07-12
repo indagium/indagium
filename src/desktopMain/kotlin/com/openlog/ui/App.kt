@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CallMerge
 import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.LabelOff
+import androidx.compose.material.icons.outlined.AddComment
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Block
@@ -384,6 +385,15 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             add(
                                 CtxMenuEntry.Action(Icons.Outlined.FindInPage, "Ask AI about this line") {
                                     state.requestAiAboutLine(ctx.tabId, ctx.entryId)
+                                },
+                            )
+                            add(
+                                CtxMenuEntry.Action(
+                                    Icons.Outlined.AddComment,
+                                    if (selCount > 1) "Add $selCount lines as AI context" else "Add line as AI context",
+                                ) {
+                                    val ids = if (selCount > 1) selectedIds.toSortedSet().toList() else listOf(ctx.entryId)
+                                    state.requestAiContext(ctx.tabId, ids)
                                 },
                             )
                             // Only offered once source folders are configured; if they are but this
@@ -1475,6 +1485,20 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                 val token = state.connectionInfoToken()
                 Dialog(onDismissRequest = { state.mcpInfoOpen = false }) {
                     McpInfoDialog(state = state, port = state.settings.mcpControlPort, token = token) { state.mcpInfoOpen = false }
+                }
+            }
+
+            // ── Custom AI command editor dialog ───────────────────────
+            state.customCommandEditorTarget?.let { target ->
+                Dialog(onDismissRequest = { state.customCommandEditorTarget = null }) {
+                    CustomAiCommandEditorDialog(state = state, target = target) { state.customCommandEditorTarget = null }
+                }
+            }
+
+            // ── Source folder project info dialog ─────────────────────
+            state.sourceFolderInfoEditorTarget?.let { path ->
+                Dialog(onDismissRequest = { state.sourceFolderInfoEditorTarget = null }) {
+                    SourceFolderInfoDialog(state = state, path = path) { state.sourceFolderInfoEditorTarget = null }
                 }
             }
         }

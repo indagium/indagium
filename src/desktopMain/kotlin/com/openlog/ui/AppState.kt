@@ -2,12 +2,15 @@ package com.openlog.ui
 
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
+import com.openlog.ai.AiContextRequest
 import com.openlog.ai.AiEvidence
 import com.openlog.ai.AiInvestigationContext
 import com.openlog.ai.AiPromptRequest
 import com.openlog.ai.AiQuickAction
 import com.openlog.ai.AiSessionRegistry
 import com.openlog.ai.AiSidebarRuntime
+import com.openlog.ai.CustomAiCommand
+import com.openlog.ai.CustomAiCommandName
 import com.openlog.ai.normalizeAiProviderProfiles
 import com.openlog.ai.validateAiProviderProfile
 import com.openlog.debug.ControlServer
@@ -404,6 +407,7 @@ class AppState(
     private val parser: (File) -> List<LogEntry> = ::parseLogcat,
     private val notesDir: File = DesktopStorage.notesDir(),
     private val archiveCacheDir: File = DesktopStorage.archiveCacheDir(),
+    private val customCommandsDir: File = DesktopStorage.customCommandsDir(),
     private val filterBackupsDir: File? = null,
     private val autoExportNotes: Boolean = true,
     // Test seam for the S-03 archive extraction budget (openZipEntry): production uses the real
@@ -446,7 +450,7 @@ class AppState(
     // Lifted out of AiSidebarPanel's own composition (rather than a local `remember`) because
     // toggling aiPanelVisible off unmounts that whole composable, which would otherwise discard
     // this along with every other `remember`ed UI state in it.
-    internal var aiSidebarExpandedSection by mutableStateOf<AiSidebarSection?>(AiSidebarSection.ACTIONS)
+    internal var aiSidebarExpandedSection by mutableStateOf<AiSidebarSection?>(null)
 
 
     /** Session-only request produced by a log context menu or AI quick action. */
@@ -454,6 +458,45 @@ class AppState(
 
     /** Session-only annotation target used by evidence cards; never written into notes/autosave. */
     internal var aiEvidenceNoteTarget by mutableStateOf<AiEvidence.Note?>(null)
+
+    // User-defined prompt templates, one `.md` file per command under customCommandsDir (mirrors
+    // the notesDir pattern) — not part of AppSettings/autosave since they're disk-backed, not
+    // settings-token-backed. Filename (sans extension) doubles as the /slash-name.
+    internal var customAiCommands by mutableStateOf<List<CustomAiCommand>>(emptyList())
+
+    /** Editor dialog target: a blank CustomAiCommand("", "") means "new"; null means closed. */
+    internal var customCommandEditorTarget by mutableStateOf<CustomAiCommand?>(null)
+
+    /** Source folder path whose SourceFolderInfoDialog is open; null means closed. */
+    internal var sourceFolderInfoEditorTarget by mutableStateOf<String?>(null)
+
+    private fun loadCustomAiCommands() {
+        customAiCommands = customCommandsDir.listFiles { f -> f.isFile && f.extension.equals("md", ignoreCase = true) }
+            ?.mapNotNull { f -> runCatching { CustomAiCommand(f.nameWithoutExtension, f.readText()) }.getOrNull() }
+            ?.sortedBy { it.name.lowercase() }
+            ?: emptyList()
+    }
+
+    /** Returns an error message on failure, null on success. Renaming = save under the new name, then delete the old file. */
+    fun saveCustomAiCommand(name: String, promptTemplate: String, previousName: String? = null): String? {
+        if (!CustomAiCommandName.isValid(name)) {
+            return "Command name must be non-blank and use only letters, digits, - or _."
+        }
+        runCatching {
+            customCommandsDir.mkdirs()
+            File(customCommandsDir, "$name.md").writeText(promptTemplate)
+            if (previousName != null && !previousName.equals(name, ignoreCase = true)) {
+                File(customCommandsDir, "$previousName.md").delete()
+            }
+        }.onFailure { return it.message ?: "Failed to save command" }
+        loadCustomAiCommands()
+        return null
+    }
+
+    fun deleteCustomAiCommand(name: String) {
+        runCatching { File(customCommandsDir, "$name.md").delete() }
+        loadCustomAiCommands()
+    }
 
     fun aiProviderApiKey(profileId: String): String = aiProviderApiKeys[profileId].orEmpty()
 
@@ -490,8 +533,39 @@ class AppState(
     internal fun requestAiAboutLine(tabId: String, lineId: Int): Boolean =
         requestAiInvestigation(tabId, AiQuickAction.LOG_LINE, lineId)
 
+    /** Same pipeline as requestAiInvestigation but for a user-defined command: always enabled, no line requirement. */
+    internal fun requestAiCustomCommand(tabId: String, command: CustomAiCommand): Boolean {
+        tab(tabId) ?: return false
+        activateTab(tabId)
+        aiPanelVisible = true
+        pendingAiPromptRequest = AiPromptRequest(
+            context = AiInvestigationContext(tabId = tabId, lineId = null, action = null),
+            prompt = command.promptTemplate,
+        )
+        ctx = null
+        return true
+    }
+
     internal fun consumeAiPromptRequest(id: String) {
         if (pendingAiPromptRequest?.id == id) pendingAiPromptRequest = null
+    }
+
+    /** Session-only request to attach selected lines as an AI context chip, produced by the log context menu. */
+    internal var pendingAiContextRequest by mutableStateOf<AiContextRequest?>(null)
+
+    internal fun requestAiContext(tabId: String, lineIds: List<Int>): Boolean {
+        val tab = tab(tabId) ?: return false
+        val validIds = lineIds.distinct().filter { it in tab.rmap }
+        if (validIds.isEmpty()) return false
+        activateTab(tabId)
+        aiPanelVisible = true
+        pendingAiContextRequest = AiContextRequest(tabId = tabId, lineIds = validIds)
+        ctx = null
+        return true
+    }
+
+    internal fun consumeAiContextRequest(id: String) {
+        if (pendingAiContextRequest?.id == id) pendingAiContextRequest = null
     }
 
     /** Navigate a card only through IDs/paths returned by the tool gateway, never model text. */
@@ -770,6 +844,7 @@ class AppState(
         refreshArchiveCacheInfo()
         if (restoreOnCreate) restoreAutosave()
         loadPersistedSourceIndex()
+        loadCustomAiCommands()
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
@@ -2886,7 +2961,23 @@ class AppState(
     }
 
     fun removeSourceFolder(path: String) {
-        updateSettings { it.copy(sourceFolders = it.sourceFolders - path) }
+        updateSettings { it.copy(sourceFolders = it.sourceFolders - path, sourceFolderInfo = it.sourceFolderInfo - path) }
+    }
+
+    fun updateSourceFolderInfo(path: String, info: SourceFolderInfo) {
+        updateSettings { it.copy(sourceFolderInfo = it.sourceFolderInfo + (path to info)) }
+    }
+
+    // Plain (non-directory) file picker for a folder's optional README path — same FileDialog
+    // mechanism as pickSourceFolder/pickSaveFolder, but without toggling the directory-mode system
+    // property, since a README is a single file. Returns the path rather than writing straight to
+    // settings: the caller (SourceFolderInfoDialog) needs it in the still-open editor's draft state.
+    fun pickReadmeFile(): String? {
+        val dlg = FileDialog(null as Frame?, "Choose README file", FileDialog.LOAD)
+        dlg.isVisible = true
+        val dir = dlg.directory ?: return null
+        val file = dlg.file ?: return null
+        return java.io.File(dir, file).absolutePath
     }
 
     // ── Source index (Task 2) ───────────────────────────────────────
@@ -3525,6 +3616,7 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     editorCommand,
     aiProviderProfilesToken(),
     aiMaxToolRounds.toString(),
+    sourceFolderInfoToken(),
 )
 
 private fun AppSettings.aiProviderProfilesToken(): String = normalizeAiProviderProfiles(aiProviderProfiles)
@@ -3557,6 +3649,21 @@ private fun String.aiProviderProfilesFromToken(): List<AiProviderProfile> = runC
         }.getOrNull()
     }.let(::normalizeAiProviderProfiles)
 }.getOrElse { listOf(defaultAiProviderProfile()) }
+
+private fun AppSettings.sourceFolderInfoToken(): String = sourceFolderInfo.entries
+    .joinToString(",") { (path, info) -> tokenFields(path, info.description, info.readmePath.orEmpty()).b64() }
+    .b64()
+
+private fun String.sourceFolderInfoFromToken(): Map<String, SourceFolderInfo> = runCatching {
+    if (isBlank()) return@runCatching emptyMap()
+    unb64().split(',').mapNotNull { encoded ->
+        runCatching {
+            val fields = encoded.unb64().tokenFields()
+            if (fields.size < 3 || fields[0].isBlank()) return@runCatching null
+            fields[0] to SourceFolderInfo(description = fields[1], readmePath = fields[2].takeIf { it.isNotBlank() })
+        }.getOrNull()
+    }.toMap()
+}.getOrElse { emptyMap() }
 
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
     val p = token.tokenFields()
@@ -3613,6 +3720,9 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         aiMaxToolRounds = p.getOrNull(mcpIndex + 11)?.toIntOrNull()
             ?.coerceIn(MIN_AI_MAX_TOOL_ROUNDS, MAX_AI_MAX_TOOL_ROUNDS)
             ?: DEFAULT_AI_MAX_TOOL_ROUNDS,
+        // Missing entirely (old token, predates this field) -> emptyMap(), same backward-compat
+        // pattern as sourceFolders above.
+        sourceFolderInfo = p.getOrNull(mcpIndex + 12)?.sourceFolderInfoFromToken() ?: emptyMap(),
     )
 }.getOrNull()
 

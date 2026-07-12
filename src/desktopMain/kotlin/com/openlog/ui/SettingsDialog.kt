@@ -20,6 +20,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.openlog.ai.CustomAiCommand
 import com.openlog.ai.ModelDiscoveryResult
 import com.openlog.ai.OpenAiCompatibleProvider
 import com.openlog.ai.normalizeAiProviderProfiles
@@ -393,6 +394,9 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
             SettingsSectionHeader("AI providers")
             AiProviderSettingsSection(state)
 
+            SettingsSectionHeader("Custom AI commands")
+            CustomAiCommandsSettingsSection(state)
+
             SettingsSectionHeader("Source code")
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (state.settings.sourceFolders.isEmpty()) {
@@ -429,6 +433,11 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
+                            AppButton(
+                                "Info",
+                                onClick = { state.sourceFolderInfoEditorTarget = path },
+                                variant = ButtonVariant.Secondary,
+                            )
                             AppButton("Remove", onClick = { state.removeSourceFolder(path) }, variant = ButtonVariant.Secondary)
                         }
                     }
@@ -574,8 +583,12 @@ private fun AiProviderSettingsSection(state: AppState) {
     var name by remember(profile.id, profile.displayName) { mutableStateOf(profile.displayName) }
     var endpoint by remember(profile.id, profile.baseUrl) { mutableStateOf(profile.baseUrl) }
     var model by remember(profile.id, profile.model) { mutableStateOf(profile.model) }
-    var acknowledged by remember(profile.id, profile.remoteDisclosureAcknowledged) {
-        mutableStateOf(profile.remoteDisclosureAcknowledged)
+    // Tracks (endpoint text, acknowledged) as a pair rather than a bare boolean so the checkbox
+    // reflects the *live* endpoint field: editing the endpoint away from what was last acknowledged
+    // shows unchecked again, without a Save round-trip. `acknowledged` below is a plain derived val
+    // (never written to directly), so there's no write-triggers-recompute-triggers-write loop risk.
+    var ackState by remember(profile.id, profile.remoteDisclosureAcknowledged) {
+        mutableStateOf(profile.baseUrl.trim() to profile.remoteDisclosureAcknowledged)
     }
     var apiKey by remember(profile.id) { mutableStateOf(state.aiProviderApiKey(profile.id)) }
     var validationError by remember(profile.id) { mutableStateOf<String?>(null) }
@@ -614,6 +627,7 @@ private fun AiProviderSettingsSection(state: AppState) {
                 visualTransformation = PasswordVisualTransformation(),
             )
         }
+        val acknowledged = if (endpoint.trim() == ackState.first) ackState.second else false
         val draft = profile.copy(
             displayName = name.trim().ifBlank { "OpenAI-compatible" },
             baseUrl = endpoint.trim(),
@@ -622,7 +636,7 @@ private fun AiProviderSettingsSection(state: AppState) {
         )
         val endpointHost = runCatching { java.net.URI(endpoint.trim()).host.orEmpty() }.getOrDefault("")
         if (endpoint.isNotBlank() && !com.openlog.ai.isLoopbackHost(endpointHost)) {
-            CheckRow(acknowledged, { acknowledged = !acknowledged }) {
+            CheckRow(acknowledged, { ackState = endpoint.trim() to !acknowledged }) {
                 AppText(
                     "I understand logs, source code, paths, and tool results may leave this device.",
                     color = tc.td,
@@ -694,6 +708,48 @@ private fun AiProviderSettingsSection(state: AppState) {
             color = tc.td,
             fontSize = 10.sp,
             maxLines = 3,
+        )
+    }
+}
+
+@Composable
+private fun CustomAiCommandsSettingsSection(state: AppState) {
+    val tc = tc()
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (state.customAiCommands.isEmpty()) {
+            AppText(
+                "(none yet — add one to invoke it as a button in Actions or by typing /name in the chat box)",
+                color = tc.td,
+                fontSize = 11.sp,
+            )
+        } else {
+            state.customAiCommands.forEach { command ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        AppText("/${command.name}", color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                        val preview = command.promptTemplate.lineSequence().firstOrNull().orEmpty()
+                        if (preview.isNotBlank()) {
+                            AppText(preview, color = tc.td, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    AppButton("Edit", onClick = { state.customCommandEditorTarget = command }, variant = ButtonVariant.Secondary)
+                    AppButton(
+                        "Delete",
+                        onClick = { state.deleteCustomAiCommand(command.name) },
+                        variant = ButtonVariant.Secondary,
+                        isDanger = true,
+                    )
+                }
+            }
+        }
+        AppButton(
+            "Add command",
+            onClick = { state.customCommandEditorTarget = CustomAiCommand("", "") },
+            variant = ButtonVariant.Secondary,
         )
     }
 }

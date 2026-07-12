@@ -95,6 +95,7 @@ internal class OpenLogToolOperations(
         "start_tailing" to { a -> startTailingRoute(a.str("tabId") ?: "") },
         "stop_tailing" to { a -> stopTailingRoute(a.str("tabId") ?: "") },
         "resolve_log_source" to { a -> resolveLogSourceRoute(a) },
+        "get_project_info" to { getProjectInfoRoute() },
     )
 
     // Direct in-process entry point shared by MCP/REST and the future AI runner.
@@ -289,6 +290,23 @@ internal class OpenLogToolOperations(
                 put("lineId", lineId)
             }
         }
+    }
+
+    private fun getProjectInfoRoute(): Map<String, Any?> {
+        val folders = appState.settings.sourceFolderInfo.mapNotNull { (path, info) ->
+            if (info.description.isBlank() && info.readmePath.isNullOrBlank()) return@mapNotNull null
+            buildMap<String, Any?> {
+                put("path", path)
+                put("description", info.description)
+                put("readmePath", info.readmePath)
+                if (info.readmePath != null) {
+                    runCatching { File(info.readmePath).readText() }
+                        .onSuccess { put("readmeContent", it) }
+                        .onFailure { put("readmeError", it.message ?: "unreadable") }
+                }
+            }
+        }
+        return mapOf("folders" to folders)
     }
 
     private fun closeTab(tabId: String): Map<String, Any?> {

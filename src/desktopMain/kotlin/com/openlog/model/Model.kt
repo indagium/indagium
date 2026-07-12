@@ -261,6 +261,12 @@ fun defaultAiProviderProfile(): AiProviderProfile = AiProviderProfile(
     selected = true,
 )
 
+/** Optional per-registered-source-folder description/README, surfaced via get_project_info. */
+data class SourceFolderInfo(
+    val description: String = "",
+    val readmePath: String? = null,
+)
+
 data class AppSettings(
     val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
@@ -298,6 +304,11 @@ data class AppSettings(
     // that could have emitted it (source/SourceIndexer.kt, AppState.reindexSources). Trailing with
     // a default so old settings tokens (without this field) still parse — see settingsFromToken.
     val sourceFolders: List<String> = emptyList(),
+    // Optional per-folder description/README, keyed by the folder's absolute path (a side-map so
+    // sourceFolders itself stays a plain List<String> for every existing consumer). Exposed to the
+    // AI/MCP via get_project_info (OpenLogToolOperations.getProjectInfoRoute). Trailing with a
+    // default so old settings tokens (without this field) still parse — see settingsFromToken.
+    val sourceFolderInfo: Map<String, SourceFolderInfo> = emptyMap(),
     // Command template used by SourceCodeDialog's "Open" button to jump to the log call line in an
     // external editor, e.g. "idea --line {line} {file}" or "code -g {file}:{line}" — see
     // AppState.openInEditor. Blank (the default) means auto-detect a common editor CLI, falling

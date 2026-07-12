@@ -10,6 +10,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class AiInvestigationEvidenceTest {
@@ -25,6 +26,25 @@ class AiInvestigationEvidenceTest {
             assertEquals(AiQuickAction.ROOT_CAUSE, request.context.action)
             assertEquals("second", state.activeTabId)
             assertTrue(state.aiPanelVisible)
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test
+    fun selectedLinesCanBeQueuedAsAiContextWithoutSendingARequest() {
+        val state = stateWithTabs()
+        try {
+            assertTrue(state.requestAiContext("second", listOf(21, 999, 21)))
+
+            val request = assertNotNull(state.pendingAiContextRequest)
+            assertEquals("second", request.tabId)
+            assertEquals(listOf(21), request.lineIds)
+            assertEquals("second", state.activeTabId)
+            assertTrue(state.aiPanelVisible)
+
+            state.consumeAiContextRequest(request.id)
+            assertNull(state.pendingAiContextRequest)
         } finally {
             state.close()
         }
