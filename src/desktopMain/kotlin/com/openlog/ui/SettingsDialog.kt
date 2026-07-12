@@ -16,9 +16,11 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.openlog.ai.normalizeAiProviderProfiles
 import com.openlog.generated.BuildInfo
 import com.openlog.model.*
 
@@ -384,6 +386,9 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 AppButton("Connection info…", onClick = { state.mcpInfoOpen = true }, variant = ButtonVariant.Secondary)
             }
 
+            SettingsSectionHeader("AI providers")
+            AiProviderSettingsSection(state)
+
             SettingsSectionHeader("Source code")
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (state.settings.sourceFolders.isEmpty()) {
@@ -549,6 +554,95 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
             modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
             style = appScrollbarStyle(tc),
         )
+    }
+}
+
+@Composable
+private fun AiProviderSettingsSection(state: AppState) {
+    val tc = tc()
+    // Settings migration normally guarantees this invariant, but keeping the editor safe during
+    // a transient empty state avoids a compose-time crash while a profile list is being replaced.
+    val profiles = normalizeAiProviderProfiles(state.settings.aiProviderProfiles)
+    var editingProfileId by remember { mutableStateOf(profiles.firstOrNull { it.selected }?.id.orEmpty()) }
+    val profile = profiles.firstOrNull { it.id == editingProfileId }
+        ?: profiles.firstOrNull { it.selected }
+        ?: profiles.first()
+    var name by remember(profile.id, profile.displayName) { mutableStateOf(profile.displayName) }
+    var endpoint by remember(profile.id, profile.baseUrl) { mutableStateOf(profile.baseUrl) }
+    var model by remember(profile.id, profile.model) { mutableStateOf(profile.model) }
+    var acknowledged by remember(profile.id, profile.remoteDisclosureAcknowledged) {
+        mutableStateOf(profile.remoteDisclosureAcknowledged)
+    }
+    var apiKey by remember(profile.id) { mutableStateOf(state.aiProviderApiKey(profile.id)) }
+    var validationError by remember(profile.id) { mutableStateOf<String?>(null) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            profiles.forEach { item ->
+                AppButton(
+                    item.displayName,
+                    onClick = {
+                        state.selectAiProviderProfile(item.id)
+                        editingProfileId = item.id
+                    },
+                    variant = if (item.id == profile.id) ButtonVariant.Primary else ButtonVariant.Secondary,
+                )
+            }
+            AppButton("Add", onClick = { editingProfileId = state.addAiProviderProfile().id })
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppText("Profile name", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            InlineField(name, { name = it }, "LM Studio (local)", Modifier.fillMaxWidth(), fontSize = 12.sp)
+            AppText("Endpoint", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            InlineField(endpoint, { endpoint = it }, "http://127.0.0.1:1234/v1", Modifier.fillMaxWidth(), fontSize = 12.sp)
+            AppText("Model (optional)", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            InlineField(model, { model = it }, "Choose later or enter a model id", Modifier.fillMaxWidth(), fontSize = 12.sp)
+            AppText("API key — this session only; it is never saved", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            InlineField(
+                apiKey,
+                { value -> apiKey = value; state.setAiProviderApiKey(profile.id, value) },
+                "Optional for LM Studio",
+                Modifier.fillMaxWidth(),
+                fontSize = 12.sp,
+                visualTransformation = PasswordVisualTransformation(),
+            )
+        }
+        val draft = profile.copy(
+            displayName = name.trim().ifBlank { "OpenAI-compatible" },
+            baseUrl = endpoint.trim(),
+            model = model.trim(),
+            remoteDisclosureAcknowledged = acknowledged,
+        )
+        val endpointHost = runCatching { java.net.URI(endpoint.trim()).host.orEmpty() }.getOrDefault("")
+        if (endpoint.isNotBlank() && !com.openlog.ai.isLoopbackHost(endpointHost)) {
+            CheckRow(acknowledged, { acknowledged = !acknowledged }) {
+                AppText(
+                    "I understand logs, source code, paths, and tool results may leave this device.",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    maxLines = 2,
+                )
+            }
+        }
+        validationError?.let { AppText(it, color = DANGER_RED, fontSize = 10.sp) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AppButton(
+                "Save profile",
+                onClick = { validationError = state.updateAiProviderProfile(draft) },
+                variant = ButtonVariant.Primary,
+            )
+            if (profiles.size > 1) {
+                AppButton(
+                    "Remove",
+                    onClick = {
+                        state.removeAiProviderProfile(profile.id)
+                        editingProfileId = state.settings.aiProviderProfiles.first { it.selected }.id
+                    },
+                    variant = ButtonVariant.Secondary,
+                    isDanger = true,
+                )
+            }
+        }
     }
 }
 

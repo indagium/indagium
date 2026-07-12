@@ -68,11 +68,19 @@ kotlin {
                 implementation("io.modelcontextprotocol:kotlin-sdk-server:0.14.0")
                 implementation("io.ktor:ktor-server-cio:$ktorVersion")
                 implementation("io.ktor:ktor-server-cors:$ktorVersion")
+                // In-app AI providers use the same Ktor line as the MCP server. Keeping the
+                // transport explicit avoids depending on the server engine transitively.
+                implementation("io.ktor:ktor-client-cio:$ktorVersion")
+                // Streaming AI answers are Markdown. This Compose Multiplatform renderer supports
+                // the app's Material 3 stack without adding a web view or a second UI toolkit.
+                implementation("com.mikepenz:multiplatform-markdown-renderer:0.41.0")
+                implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.41.0")
             }
         }
         val desktopTest by getting
         desktopTest.dependencies {
             implementation(kotlin("test"))
+            implementation("io.ktor:ktor-client-mock:$ktorVersion")
         }
     }
 }

@@ -127,6 +127,9 @@ fun AnnotationPanel(
     onPanelFocusChanged: (Boolean) -> Unit = {},
     keyboardFocusVisible: Boolean = false,
     scrollStateStore: LogViewerScrollStateStore? = null,
+    /** Session-only target supplied by a real AI note-tool result. */
+    highlightedBlockId: String? = null,
+    modifier: Modifier = Modifier.fillMaxHeight(),
 ) {
     val tc = tc()
     val mono = monoFont()
@@ -296,7 +299,7 @@ fun AnnotationPanel(
     }
 
     Column(
-        Modifier.width(width.dp).fillMaxHeight().background(tc.p)
+        modifier.width(width.dp).background(tc.p)
             .border(BorderStroke(1.dp, if (panelFocused && keyboardFocusVisible) tc.ac else tc.br))
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .focusGroup()
@@ -397,6 +400,11 @@ fun AnnotationPanel(
         LaunchedEffect(totalBlockHeightPx, scroll) {
             if (stickToBottom) scroll.scrollTo(scroll.maxValue)
         }
+        LaunchedEffect(highlightedBlockId, tab.id, blockStartOffsets[highlightedBlockId]) {
+            val target = highlightedBlockId ?: return@LaunchedEffect
+            if (ann.blocks.none { it.id == target }) return@LaunchedEffect
+            scroll.scrollTo((blockStartOffsets[target] ?: 0f).roundToInt())
+        }
         Box(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 8.dp)) {
                 // Issue description — a private working note, persisted in the .ann sidecar and
@@ -468,7 +476,7 @@ fun AnnotationPanel(
                     when (block) {
                         is AnnBlock.Note -> NoteBlock(
                             block = block, tc = tc, isFirst = isFirst, isLast = isLast,
-                            focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}",
+                            focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}" || highlightedBlockId == block.id,
                             fieldFocusRequester = blockFieldRequesters[block.id],
                             onFieldFocusChanged = { blockFieldFocused = it },
                             onUpdate = { onUpdateBlock(block.id, it) },
@@ -481,7 +489,7 @@ fun AnnotationPanel(
                         is AnnBlock.LogRef -> LogRefBlock(
                             block = block, tab = tab, mono = mono, tc = tc,
                             isFirst = isFirst, isLast = isLast,
-                            focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}",
+                            focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}" || highlightedBlockId == block.id,
                             fieldFocusRequester = blockFieldRequesters[block.id],
                             onFieldFocusChanged = { blockFieldFocused = it },
                             onUpdateCaption = { onUpdateBlock(block.id, it) },

@@ -234,6 +234,26 @@ enum class AnnotationLogBlockStyle { INDENTED, JIRA_JAVA }
 // Which filter input Ctrl/Cmd+F focuses (see FilterPanel's focusSearchRequest LaunchedEffect).
 enum class CtrlFTarget { TAGS, MESSAGE_RULE, KEYWORD_REGEX }
 
+/** Non-secret OpenAI-compatible endpoint configuration. API keys never belong in AppSettings. */
+data class AiProviderProfile(
+    val id: String,
+    val displayName: String,
+    val baseUrl: String,
+    val model: String,
+    val selected: Boolean = false,
+    val remoteDisclosureAcknowledged: Boolean = false,
+)
+
+const val DEFAULT_LM_STUDIO_PROFILE_ID = "lm-studio"
+
+fun defaultAiProviderProfile(): AiProviderProfile = AiProviderProfile(
+    id = DEFAULT_LM_STUDIO_PROFILE_ID,
+    displayName = "LM Studio (local)",
+    baseUrl = "http://127.0.0.1:1234/v1",
+    model = "",
+    selected = true,
+)
+
 data class AppSettings(
     val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
@@ -276,6 +296,8 @@ data class AppSettings(
     // AppState.openInEditor. Blank (the default) means auto-detect a common editor CLI, falling
     // back to Desktop.open(). Trailing with a default so old settings tokens still parse.
     val editorCommand: String = "",
+    // API keys stay in AppState's session-only credential store and are never serialized.
+    val aiProviderProfiles: List<AiProviderProfile> = listOf(defaultAiProviderProfile()),
 )
 
 enum class ThemePreset(val label: String) {

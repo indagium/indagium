@@ -36,6 +36,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -339,10 +340,12 @@ fun InlineField(
     onSubmit: (() -> Unit)? = null,
     singleLine: Boolean = true,
     centerTextVertically: Boolean = false,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
 ) {
     val tc = tc()
     BasicTextField(
         value = value, onValueChange = onValue,
+        visualTransformation = visualTransformation,
         textStyle = TextStyle(color = tc.tx, fontSize = fontSize, fontFamily = FontFamily.Default),
         cursorBrush = SolidColor(tc.ac),
         singleLine = singleLine,

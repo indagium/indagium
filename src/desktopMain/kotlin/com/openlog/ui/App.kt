@@ -381,6 +381,11 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                     state.ctx = null
                                 },
                             )
+                            add(
+                                CtxMenuEntry.Action(Icons.Outlined.FindInPage, "Ask AI about this line") {
+                                    state.requestAiAboutLine(ctx.tabId, ctx.entryId)
+                                },
+                            )
                             // Only offered once source folders are configured; if they are but this
                             // particular line has no resolved call site, the item still renders
                             // (communicating the feature exists) just disabled rather than omitted.

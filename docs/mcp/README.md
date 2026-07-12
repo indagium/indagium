@@ -14,7 +14,8 @@ The server is off by default and never runs in a packaged build unless you turn 
 
 ## Connect a client
 
-The endpoint is `http://127.0.0.1:8991/mcp` (swap the port if you changed it).
+The endpoint is `http://127.0.0.1:8991/mcp` (swap the port if you changed it). Every request
+also requires the bearer token shown by **Connection info…** in openLog Settings.
 
 **LM Studio / Cursor-style `mcp.json`** (e.g. `~/.lmstudio/mcp.json`):
 
@@ -22,7 +23,10 @@ The endpoint is `http://127.0.0.1:8991/mcp` (swap the port if you changed it).
 {
   "mcpServers": {
     "openlog-control": {
-      "url": "http://127.0.0.1:8991/mcp"
+      "url": "http://127.0.0.1:8991/mcp",
+      "headers": {
+        "Authorization": "Bearer PASTE_THE_TOKEN_FROM_CONNECTION_INFO"
+      }
     }
   }
 }
@@ -62,5 +66,6 @@ agent how to actually investigate a log with these tools.
 ## Direct HTTP (no MCP)
 
 The same server also serves a plain JSON/REST surface for quick scripting or `curl`, e.g.
-`curl http://127.0.0.1:8991/tabs`. This is the escape hatch the MCP tools are built on; the MCP
-endpoint at `/mcp` is what agent clients should use.
+`curl -H "Authorization: Bearer PASTE_THE_TOKEN_FROM_CONNECTION_INFO" http://127.0.0.1:8991/tabs`.
+This is the escape hatch the MCP tools are built on; the MCP endpoint at `/mcp` is what agent
+clients should use.

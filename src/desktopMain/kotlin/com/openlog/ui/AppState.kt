@@ -2,7 +2,16 @@ package com.openlog.ui
 
 import androidx.compose.runtime.*
 import androidx.compose.ui.graphics.Color
+import com.openlog.ai.AiEvidence
+import com.openlog.ai.AiInvestigationContext
+import com.openlog.ai.AiPromptRequest
+import com.openlog.ai.AiQuickAction
+import com.openlog.ai.AiSessionRegistry
+import com.openlog.ai.AiSidebarRuntime
+import com.openlog.ai.normalizeAiProviderProfiles
+import com.openlog.ai.validateAiProviderProfile
 import com.openlog.debug.ControlServer
+import com.openlog.debug.OpenLogToolOperations
 import com.openlog.debug.loadOrCreateControlToken
 import com.openlog.model.*
 import com.openlog.source.FileMeta
@@ -46,6 +55,7 @@ import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.io.File
 import java.util.Base64
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -418,6 +428,163 @@ class AppState(
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
 
+    // Session-only by construction: AppSettings is the only settings object serialized into
+    // autosave.cache, so pasted API keys cannot reach an autosave or exported-settings path.
+    private val aiProviderApiKeys = ConcurrentHashMap<String, String>()
+
+    // The AI panel owns current-launch conversation state. Keeping the registry here lets tab
+    // closure cancel its in-flight request without adding any AI fields to LogTab/autosave.
+    internal val aiSessions = AiSessionRegistry()
+    internal val aiSidebarRuntime = AiSidebarRuntime(
+        sessions = aiSessions,
+        toolGatewayFactory = { OpenLogToolOperations(this).toolGateway },
+    )
+
+    /** Which view occupies the existing right sidebar for this launch; intentionally not saved. */
+    internal var rightSidebarTab by mutableStateOf(RightSidebarTab.NOTES)
+
+    /** Session-only request produced by a log context menu or AI quick action. */
+    internal var pendingAiPromptRequest by mutableStateOf<AiPromptRequest?>(null)
+
+    /** Session-only annotation target used by evidence cards; never written into notes/autosave. */
+    internal var aiEvidenceNoteTarget by mutableStateOf<AiEvidence.Note?>(null)
+
+    fun aiProviderApiKey(profileId: String): String = aiProviderApiKeys[profileId].orEmpty()
+
+    fun setAiProviderApiKey(profileId: String, apiKey: String) {
+        if (profileId.isBlank()) return
+        if (apiKey.isBlank()) aiProviderApiKeys.remove(profileId) else aiProviderApiKeys[profileId] = apiKey
+    }
+
+    fun clearAiProviderApiKey(profileId: String) {
+        aiProviderApiKeys.remove(profileId)
+    }
+
+    /**
+     * Pins an investigation to the concrete tab/line that initiated it and makes that tab own the
+     * sidebar.  We deliberately switch the active tab before rendering the AI sidebar in compare
+     * mode too: otherwise the sidebar could visually imply that a right-pane request belonged to
+     * the left tab.
+     */
+    internal fun requestAiInvestigation(tabId: String, action: AiQuickAction, lineId: Int? = null): Boolean {
+        val tab = tab(tabId) ?: return false
+        val resolvedLineId = lineId ?: tab.selected.minOrNull()
+        if (action.requiresLine && (resolvedLineId == null || resolvedLineId !in tab.rmap)) return false
+        if (resolvedLineId != null && resolvedLineId !in tab.rmap) return false
+        activateTab(tabId)
+        updateAnnotationVisible(true)
+        rightSidebarTab = RightSidebarTab.AI
+        pendingAiPromptRequest = AiPromptRequest(
+            context = AiInvestigationContext(tabId = tabId, lineId = resolvedLineId, action = action),
+            prompt = action.prompt,
+        )
+        ctx = null
+        return true
+    }
+
+    internal fun requestAiAboutLine(tabId: String, lineId: Int): Boolean =
+        requestAiInvestigation(tabId, AiQuickAction.LOG_LINE, lineId)
+
+    internal fun consumeAiPromptRequest(id: String) {
+        if (pendingAiPromptRequest?.id == id) pendingAiPromptRequest = null
+    }
+
+    /** Navigate a card only through IDs/paths returned by the tool gateway, never model text. */
+    internal fun navigateAiEvidence(evidence: AiEvidence) {
+        when (evidence) {
+            is AiEvidence.LogRows -> requestAiLogNavigation(evidence.tabId, evidence.lineIds)
+            is AiEvidence.Source -> {
+                sourceCodeView = SourceCodeView(
+                    listOf(
+                        SourceMatch(
+                            site = LogCallSite(
+                                filePath = evidence.filePath,
+                                tag = evidence.tag,
+                                methodName = evidence.methodName,
+                                methodStartLine = evidence.methodStartLine,
+                                methodEndLine = evidence.methodEndLine,
+                                callLine = evidence.callLine,
+                                matcher = "",
+                                literalLen = 0,
+                            ),
+                            confidence = evidence.confidence,
+                            stale = evidence.stale,
+                        ),
+                    ),
+                )
+            }
+            is AiEvidence.Note -> {
+                val tab = tab(evidence.tabId) ?: return
+                if (tab.annotations.blocks.none { it.id == evidence.blockId }) return
+                activateTab(evidence.tabId)
+                updateAnnotationVisible(true)
+                aiEvidenceNoteTarget = evidence
+                rightSidebarTab = RightSidebarTab.NOTES
+            }
+        }
+    }
+
+    fun addAiProviderProfile(): AiProviderProfile {
+        val profiles = normalizeAiProviderProfiles(settings.aiProviderProfiles)
+        val profile = (profiles.firstOrNull { it.selected } ?: profiles.first()).copy(
+            id = UUID.randomUUID().toString(),
+            displayName = "Provider ${profiles.size + 1}",
+            selected = true,
+        )
+        updateSettings { it.copy(aiProviderProfiles = normalizeAiProviderProfiles(profiles + profile)) }
+        return profile
+    }
+
+    /**
+     * Returns a validation message when a draft is unsafe. A changed endpoint is still persisted
+     * with its acknowledgement cleared, so a remote profile cannot retain consent from its old URL.
+     */
+    fun updateAiProviderProfile(profile: AiProviderProfile): String? {
+        val profiles = normalizeAiProviderProfiles(settings.aiProviderProfiles)
+        val current = profiles.firstOrNull { it.id == profile.id } ?: return "Provider profile was not found."
+        // An acknowledgement applies to one endpoint only. Persist the changed endpoint with the
+        // acknowledgement cleared so the UI can explicitly ask again before a remote provider is
+        // used; this also prevents a host switch from silently inheriting prior consent.
+        val updated = if (current.baseUrl.trim() != profile.baseUrl.trim()) {
+            profile.copy(remoteDisclosureAcknowledged = false)
+        } else {
+            profile
+        }
+        val validation = validateAiProviderProfile(updated)
+        if (!validation.isValid) {
+            if (current.baseUrl.trim() != profile.baseUrl.trim() &&
+                validation.problem == com.openlog.ai.AiProviderUrlProblem.REMOTE_DISCLOSURE_REQUIRED
+            ) {
+                updateSettings {
+                    it.copy(aiProviderProfiles = normalizeAiProviderProfiles(profiles.map {
+                        if (it.id == updated.id) updated else it
+                    }))
+                }
+            }
+            return validation.problem!!.message
+        }
+        updateSettings {
+            it.copy(aiProviderProfiles = normalizeAiProviderProfiles(profiles.map {
+                if (it.id == updated.id) updated else it
+            }))
+        }
+        return null
+    }
+
+    fun selectAiProviderProfile(profileId: String) {
+        val profiles = normalizeAiProviderProfiles(settings.aiProviderProfiles)
+        if (profiles.none { it.id == profileId }) return
+        updateSettings { it.copy(aiProviderProfiles = profiles.map { it.copy(selected = it.id == profileId) }) }
+    }
+
+    fun removeAiProviderProfile(profileId: String): Boolean {
+        val profiles = normalizeAiProviderProfiles(settings.aiProviderProfiles)
+        if (profiles.size <= 1 || profiles.none { it.id == profileId }) return false
+        aiProviderApiKeys.remove(profileId)
+        updateSettings { it.copy(aiProviderProfiles = normalizeAiProviderProfiles(profiles.filterNot { it.id == profileId })) }
+        return true
+    }
+
     // ── Source index (Task 2) ──────────────────────────────────────────
     // sourceIndex/sourceIndexStatus/sourceCodeView are the only pieces observed by Compose;
     // sourceResolver is a plain cache rebuilt alongside sourceIndex (see publishSourceIndex) so a
@@ -600,6 +767,9 @@ class AppState(
     // ── Helpers ─────────────────────────────────────────────────────
 
     fun close() {
+        aiProviderApiKeys.clear()
+        aiSidebarRuntime.close()
+        aiSessions.clear()
         ioJob.cancel() // also cancels every active FileTailer's Job — each is started on ioScope
         tailCoordinator.clear()
         activeLoads.clear()
@@ -1543,6 +1713,21 @@ class AppState(
         pendingAnnotationNavigation = AnnotationNavigationRequest(annotationNavigationCounter, tabId, listOf(logId))
     }
 
+    /** Evidence cards use the established selection/scroll pathway so collapsed groups expand. */
+    private fun requestAiLogNavigation(tabId: String, lineIds: List<Int>) {
+        val tab = tab(tabId) ?: return
+        val actualIds = lineIds.distinct().filter { it in tab.rmap }
+        if (actualIds.isEmpty()) return
+        if (compareMode && tabId != activeTabId) {
+            compareTabId = tabId
+        } else {
+            activateTab(tabId)
+        }
+        setSelectedRows(tabId, actualIds)
+        annotationNavigationCounter += 1
+        pendingAnnotationNavigation = AnnotationNavigationRequest(annotationNavigationCounter, tabId, actualIds)
+    }
+
     // ── Sequence expand/collapse ─────────────────────────────────────
     fun toggleGroup(tabId: String, gid: String) = upTab(tabId) { t ->
         t.copy(expanded = if (gid in t.expanded) t.expanded - gid else t.expanded + gid)
@@ -1930,6 +2115,7 @@ class AppState(
         if (tabIds.isEmpty()) return
         synchronized(stateLock) {
             tabIds.forEach { tabId ->
+                aiSessions.remove(tabId)
                 cancelActiveLoad(tabId)
                 tailCoordinator.cancelTailingFor(tabId)
                 visibleItemsByTab.remove(tabId)
@@ -3316,7 +3502,39 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     // off on the way back in (see settingsFromToken below).
     sourceFolders.joinToString(",") { it.b64() }.b64(),
     editorCommand,
+    aiProviderProfilesToken(),
 )
+
+private fun AppSettings.aiProviderProfilesToken(): String = normalizeAiProviderProfiles(aiProviderProfiles)
+    .joinToString(",") { it.profileToken().b64() }
+    .b64()
+
+private fun AiProviderProfile.profileToken(): String = tokenFields(
+    id,
+    displayName,
+    baseUrl,
+    model,
+    selected.toString(),
+    remoteDisclosureAcknowledged.toString(),
+)
+
+private fun String.aiProviderProfilesFromToken(): List<AiProviderProfile> = runCatching {
+    if (isBlank()) return@runCatching listOf(defaultAiProviderProfile())
+    unb64().split(',').mapNotNull { encoded ->
+        runCatching {
+            val fields = encoded.unb64().tokenFields()
+            if (fields.size < 6 || fields[0].isBlank()) return@runCatching null
+            AiProviderProfile(
+                id = fields[0],
+                displayName = fields[1].ifBlank { "OpenAI-compatible" },
+                baseUrl = fields[2],
+                model = fields[3],
+                selected = fields[4].toBooleanStrictOrNull() ?: false,
+                remoteDisclosureAcknowledged = fields[5].toBooleanStrictOrNull() ?: false,
+            )
+        }.getOrNull()
+    }.let(::normalizeAiProviderProfiles)
+}.getOrElse { listOf(defaultAiProviderProfile()) }
 
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
     val p = token.tokenFields()
@@ -3368,6 +3586,8 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         // a plain fieldToken() string.
         sourceFolders = p.getOrNull(mcpIndex + 8)?.pathTokenList() ?: emptyList(),
         editorCommand = p.getOrNull(mcpIndex + 9)?.takeIf { it.isNotBlank() } ?: "",
+        aiProviderProfiles = p.getOrNull(mcpIndex + 10)?.aiProviderProfilesFromToken()
+            ?: listOf(defaultAiProviderProfile()),
     )
 }.getOrNull()
 

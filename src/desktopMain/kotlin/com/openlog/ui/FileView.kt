@@ -184,33 +184,45 @@ internal fun FileView(
             HDivider { delta ->
                 state.updateAnnotationPanelWidth(state.annotationPanelWidth - delta)
             }
-            AnnotationPanel(
+            RightSidebarPanel(
+                state = state,
                 tab = tab,
-                settings = state.settings,
-                recentNotes = state.recentNotesForTab(tab),
-                recentNotesMenuOpen = state.recentNotesMenuOpen,
-                onToggleMd = { state.toggleMd(tab.id) },
-                onCopy = { state.copyAnn(tab.id) },
-                onSave = { state.saveAnalysis(tab.id) },
-                onToggleRecentNotes = { state.toggleRecentNotesMenu() },
-                onOpenNote = { state.openNoteFileAsync(tab.id, it) },
-                onUpdatePrefix = { state.setPrefix(tab.id, it) },
-                onUpdateSuffix = { state.setSuffix(tab.id, it) },
-                onUpdateIssueDescription = { state.setIssueDescription(tab.id, it) },
-                onUpdateBlock = { blockId, text -> state.updateBlock(tab.id, blockId, text) },
-                onRemoveBlock = { state.removeBlock(tab.id, it) },
-                onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
-                onReorderBlock = { blockId, idx -> state.reorderBlock(tab.id, blockId, idx) },
-                onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
-                onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
                 width = state.annotationPanelWidth,
                 focusRequester = annotationFr,
                 onPanelFocusChanged = { focused ->
                     if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
                 },
-                keyboardFocusVisible = state.keyboardFocusVisible,
-                scrollStateStore = state.logViewerScrollStateStore,
-            )
+            ) {
+                AnnotationPanel(
+                    tab = tab,
+                    settings = state.settings,
+                    recentNotes = state.recentNotesForTab(tab),
+                    recentNotesMenuOpen = state.recentNotesMenuOpen,
+                    onToggleMd = { state.toggleMd(tab.id) },
+                    onCopy = { state.copyAnn(tab.id) },
+                    onSave = { state.saveAnalysis(tab.id) },
+                    onToggleRecentNotes = { state.toggleRecentNotesMenu() },
+                    onOpenNote = { state.openNoteFileAsync(tab.id, it) },
+                    onUpdatePrefix = { state.setPrefix(tab.id, it) },
+                    onUpdateSuffix = { state.setSuffix(tab.id, it) },
+                    onUpdateIssueDescription = { state.setIssueDescription(tab.id, it) },
+                    onUpdateBlock = { blockId, text -> state.updateBlock(tab.id, blockId, text) },
+                    onRemoveBlock = { state.removeBlock(tab.id, it) },
+                    onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
+                    onReorderBlock = { blockId, idx -> state.reorderBlock(tab.id, blockId, idx) },
+                    onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
+                    onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
+                    width = state.annotationPanelWidth,
+                    focusRequester = annotationFr,
+                    onPanelFocusChanged = { focused ->
+                        if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
+                    },
+                    keyboardFocusVisible = state.keyboardFocusVisible,
+                    scrollStateStore = state.logViewerScrollStateStore,
+                    highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == tab.id }?.blockId,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         }
     }
 }

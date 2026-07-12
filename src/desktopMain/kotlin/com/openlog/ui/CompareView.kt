@@ -220,33 +220,45 @@ internal fun CompareView(
                         HDivider { d ->
                             state.updateAnnotationPanelWidth(state.annotationPanelWidth - d)
                         }
-                        AnnotationPanel(
+                        RightSidebarPanel(
+                            state = state,
                             tab = leftTab,
-                            settings = state.settings,
-                            recentNotes = state.recentNotesForTab(leftTab),
-                            recentNotesMenuOpen = state.recentNotesMenuOpen,
-                            onToggleMd = { state.toggleMd(leftTab.id) },
-                            onCopy = { state.copyAnn(leftTab.id) },
-                            onSave = { state.saveAnalysis(leftTab.id) },
-                            onToggleRecentNotes = { state.toggleRecentNotesMenu() },
-                            onOpenNote = { state.openNoteFileAsync(leftTab.id, it) },
-                            onUpdatePrefix = { state.setPrefix(leftTab.id, it) },
-                            onUpdateSuffix = { state.setSuffix(leftTab.id, it) },
-                            onUpdateIssueDescription = { state.setIssueDescription(leftTab.id, it) },
-                            onUpdateBlock = { bid, t -> state.updateBlock(leftTab.id, bid, t) },
-                            onRemoveBlock = { state.removeBlock(leftTab.id, it) },
-                            onMoveBlock = { bid, d -> state.moveBlock(leftTab.id, bid, d) },
-                            onReorderBlock = { bid, idx -> state.reorderBlock(leftTab.id, bid, idx) },
-                            onAddNoteAfter = { state.addNoteBlock(leftTab.id, it) },
-                            onNavigateLogRef = { state.requestAnnotationNavigation(leftTab.id, it) },
                             width = state.annotationPanelWidth,
                             focusRequester = annotationFr,
                             onPanelFocusChanged = { focused ->
                                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
                             },
-                            keyboardFocusVisible = state.keyboardFocusVisible,
-                            scrollStateStore = state.logViewerScrollStateStore,
-                        )
+                        ) {
+                            AnnotationPanel(
+                                tab = leftTab,
+                                settings = state.settings,
+                                recentNotes = state.recentNotesForTab(leftTab),
+                                recentNotesMenuOpen = state.recentNotesMenuOpen,
+                                onToggleMd = { state.toggleMd(leftTab.id) },
+                                onCopy = { state.copyAnn(leftTab.id) },
+                                onSave = { state.saveAnalysis(leftTab.id) },
+                                onToggleRecentNotes = { state.toggleRecentNotesMenu() },
+                                onOpenNote = { state.openNoteFileAsync(leftTab.id, it) },
+                                onUpdatePrefix = { state.setPrefix(leftTab.id, it) },
+                                onUpdateSuffix = { state.setSuffix(leftTab.id, it) },
+                                onUpdateIssueDescription = { state.setIssueDescription(leftTab.id, it) },
+                                onUpdateBlock = { bid, t -> state.updateBlock(leftTab.id, bid, t) },
+                                onRemoveBlock = { state.removeBlock(leftTab.id, it) },
+                                onMoveBlock = { bid, d -> state.moveBlock(leftTab.id, bid, d) },
+                                onReorderBlock = { bid, idx -> state.reorderBlock(leftTab.id, bid, idx) },
+                                onAddNoteAfter = { state.addNoteBlock(leftTab.id, it) },
+                                onNavigateLogRef = { state.requestAnnotationNavigation(leftTab.id, it) },
+                                width = state.annotationPanelWidth,
+                                focusRequester = annotationFr,
+                                onPanelFocusChanged = { focused ->
+                                    if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
+                                },
+                                keyboardFocusVisible = state.keyboardFocusVisible,
+                                scrollStateStore = state.logViewerScrollStateStore,
+                                highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == leftTab.id }?.blockId,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
                     }
                 }
             }
