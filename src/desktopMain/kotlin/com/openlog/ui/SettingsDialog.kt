@@ -679,6 +679,22 @@ private fun AiProviderSettingsSection(state: AppState) {
                 )
             }
         }
+        CompactSetting("Max tool rounds per request") {
+            val roundLimits = listOf(12, 25, 50, 100, 200, 500)
+            ListStepper(
+                options = roundLimits,
+                value = state.settings.aiMaxToolRounds,
+                onChange = { v -> state.updateSettings { it.copy(aiMaxToolRounds = v) } },
+            )
+        }
+        AppText(
+            "A multi-step investigation (filtering, reading lines, then writing a note) can take " +
+                "many tool calls, especially with a smaller local model. Raise this if a request stops " +
+                "with \"tool rounds\" before it finishes.",
+            color = tc.td,
+            fontSize = 10.sp,
+            maxLines = 3,
+        )
     }
 }
 

@@ -246,6 +246,13 @@ data class AiProviderProfile(
 
 const val DEFAULT_LM_STUDIO_PROFILE_ID = "lm-studio"
 
+// A multi-step investigation (gathering filtered evidence across several tool calls, then writing
+// a note back) can plausibly need dozens of tool round trips, especially against a small local
+// model that re-checks evidence cautiously - see AiAgentRunner.MAX_TOOL_ROUNDS.
+const val DEFAULT_AI_MAX_TOOL_ROUNDS = 100
+const val MIN_AI_MAX_TOOL_ROUNDS = 1
+const val MAX_AI_MAX_TOOL_ROUNDS = 500
+
 fun defaultAiProviderProfile(): AiProviderProfile = AiProviderProfile(
     id = DEFAULT_LM_STUDIO_PROFILE_ID,
     displayName = "LM Studio (local)",
@@ -298,6 +305,9 @@ data class AppSettings(
     val editorCommand: String = "",
     // API keys stay in AppState's session-only credential store and are never serialized.
     val aiProviderProfiles: List<AiProviderProfile> = listOf(defaultAiProviderProfile()),
+    // Caps tool-call round trips per AI request (see AiAgentRunner). Trailing with a default so
+    // old settings tokens (without this field) still parse - see settingsFromToken.
+    val aiMaxToolRounds: Int = DEFAULT_AI_MAX_TOOL_ROUNDS,
 )
 
 enum class ThemePreset(val label: String) {

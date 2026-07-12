@@ -99,6 +99,11 @@ shows that tab's separate session; relaunching openLog clears all AI sessions. U
 Escape while a run is active) to cancel the active request. **Retry** resends the last request in
 that tab after a provider error or cancellation.
 
+A single request is capped at a configurable number of tool round trips (Settings → AI providers
+→ **Max tool rounds per request**, default 100) so an investigation can't run forever. As that
+budget runs low, the assistant is told to stop gathering evidence and conclude with what it has —
+including writing a note if that was part of the request — rather than being cut off mid-task.
+
 ### Troubleshooting
 
 - **"Choose or enter a model"** — select a model returned by **Find** or type the exact model id
@@ -109,6 +114,9 @@ that tab after a provider error or cancellation.
 - **No models returned** — model discovery is optional; enter the model id manually.
 - **Remote provider blocked** — save the profile after acknowledging the remote data disclosure
   in Settings (HTTP and HTTPS are both allowed once acknowledged).
+- **"Stopped after N tool rounds"** — a multi-step investigation (filtering, reading lines, then
+  writing a note) can need many rounds, especially with a smaller local model. Raise **Max tool
+  rounds per request** in Settings → AI providers.
 - **An investigation waits** — inspect the tool trace and choose **Allow** or **Deny** on its
   confirmation card. Use **Stop** if the action is no longer wanted.
 

@@ -35,6 +35,9 @@ internal sealed interface AiStartResult {
 internal class AiSidebarRuntime(
     private val sessions: AiSessionRegistry,
     private val toolGatewayFactory: () -> OpenLogToolGateway,
+    // Read fresh per run rather than captured once, so a mid-launch Settings change (Settings ->
+    // AI providers -> Max tool rounds) applies to the next request without restarting the app.
+    private val maxToolRounds: () -> Int = { com.openlog.model.DEFAULT_AI_MAX_TOOL_ROUNDS },
     private val providerFactory: AiProviderFactory = AiProviderFactory { profile, key ->
         OpenAiCompatibleProvider(profile, key)
     },
@@ -76,7 +79,10 @@ internal class AiSidebarRuntime(
         } catch (error: Exception) {
             return AiStartResult.Rejected(error.message ?: "Unable to prepare the model provider.")
         }
-        val resourcesForRun = RunResources(AiAgentRunner(provider, toolGatewayFactory()), provider)
+        val resourcesForRun = RunResources(
+            AiAgentRunner(provider, toolGatewayFactory(), maxToolRounds = maxToolRounds()),
+            provider,
+        )
         val run = try {
             resourcesForRun.runner.start(
                 session = session,

@@ -220,6 +220,13 @@ internal class AiAgentRunner(
         }
         conversation += LlmMessage(LlmRole.USER, prompt)
         var toolRounds = 0
+        // Scales with the configured budget rather than a fixed count: a small model given a large
+        // budget (Settings -> AI providers) can otherwise spend all of it re-checking evidence and
+        // never reach the point of writing a note, which is itself several tool calls (see the
+        // ISSUE_INVESTIGATION quick action). Bounded so a small configured budget still nudges early
+        // rather than only in its very last round.
+        val nudgeLeadRounds = (maxToolRounds / NUDGE_LEAD_FRACTION).coerceIn(1, NUDGE_LEAD_ROUNDS_CAP)
+        var nudgeSent = false
 
         try {
             while (true) {
@@ -294,6 +301,13 @@ internal class AiAgentRunner(
                     val result = executeToolWithPolicy(run, call)
                     conversation += LlmMessage(LlmRole.TOOL, content = result.content, toolCallId = call.id)
                     run.emit(AiRunEvent.ToolCompleted(call, result.preview, result.truncated, result.evidence))
+                }
+
+                val roundsLeft = maxToolRounds - toolRounds
+                if (!nudgeSent && roundsLeft <= nudgeLeadRounds) {
+                    nudgeSent = true
+                    conversation += LlmMessage(LlmRole.SYSTEM, wrapUpNudge(roundsLeft))
+                    run.emit(AiRunEvent.Status("Nearing the tool-call budget; asking the model to wrap up…"))
                 }
             }
         } finally {
@@ -378,9 +392,19 @@ internal class AiAgentRunner(
         else -> "Perform a confirmation-required action"
     }
 
+    private fun wrapUpNudge(roundsLeft: Int): String =
+        "You have $roundsLeft tool round(s) left before this investigation is stopped automatically. " +
+            "Stop requesting more evidence now. Conclude using only what you already have: if the task " +
+            "asked you to save a note, call add_text_note before your final reply; otherwise give your " +
+            "final answer directly without requesting further tools."
+
     private companion object {
-        const val MAX_TOOL_ROUNDS = 12
+        const val MAX_TOOL_ROUNDS = com.openlog.model.DEFAULT_AI_MAX_TOOL_ROUNDS
         const val MAX_TOOL_RESULT_CHARS = 12_000
+        // Cap on how many rounds before the limit the wrap-up nudge fires, and the fraction of the
+        // total budget it scales from - see the nudgeLeadRounds computation in runLoop.
+        const val NUDGE_LEAD_ROUNDS_CAP = 15
+        const val NUDGE_LEAD_FRACTION = 4
         val json = Json { ignoreUnknownKeys = true }
     }
 }

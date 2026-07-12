@@ -267,23 +267,56 @@ class AiAgentRunnerTest {
     }
 
     @Test
-    fun stopsBeforeThirteenthToolRound() = runBlocking {
+    fun stopsAfterConfiguredToolRounds() = runBlocking {
         var executions = 0
         val toolResponse = listOf(
             LlmStreamEvent.ToolCall(LlmToolCall("call", "set_filter", "{}")),
             LlmStreamEvent.Completed,
         )
         val runner = runner(
-            responses = List(13) { toolResponse },
+            responses = List(6) { toolResponse },
             handlers = mapOf("set_filter" to { _: Map<String, Any?> -> executions++ }),
+            maxToolRounds = 5,
         )
         try {
             val run = runner.start(AiSession("tab-1"), "model", "Keep investigating")
             run.job!!.join()
 
-            assertEquals(12, executions)
+            assertEquals(5, executions)
             assertIs<AiRunEvent.Error>(run.events.replayCache.last())
-            assertTrue((run.events.replayCache.last() as AiRunEvent.Error).message.contains("12 tool rounds"))
+            assertTrue((run.events.replayCache.last() as AiRunEvent.Error).message.contains("5 tool rounds"))
+        } finally {
+            runner.close()
+        }
+    }
+
+    @Test
+    fun nudgesTheModelToWrapUpBeforeHittingTheToolRoundLimit() = runBlocking {
+        val toolResponse = listOf(
+            LlmStreamEvent.ToolCall(LlmToolCall("call", "set_filter", "{}")),
+            LlmStreamEvent.Completed,
+        )
+        val runner = runner(
+            responses = List(6) { toolResponse },
+            handlers = mapOf("set_filter" to { _: Map<String, Any?> -> Unit }),
+            maxToolRounds = 5,
+        )
+        try {
+            val session = AiSession("tab-1")
+            val run = runner.start(session, "model", "Keep investigating")
+            run.job!!.join()
+
+            assertTrue(
+                run.events.replayCache.any {
+                    it is AiRunEvent.Status && it.text.contains("Nearing the tool-call budget")
+                },
+            )
+            assertTrue(
+                session.messages.any {
+                    it.role == LlmRole.SYSTEM && it.content.orEmpty().contains("tool round(s) left")
+                },
+                "Expected a wrap-up nudge asking the model to conclude before the round limit.",
+            )
         } finally {
             runner.close()
         }
@@ -315,7 +348,13 @@ class AiAgentRunnerTest {
         responses: List<List<LlmStreamEvent>>,
         handlers: Map<String, (Map<String, Any?>) -> Any?>,
         maxToolResultChars: Int = 12_000,
-    ): AiAgentRunner = AiAgentRunner(ScriptedProvider(responses), gateway(handlers), maxToolResultChars = maxToolResultChars)
+        maxToolRounds: Int = 12,
+    ): AiAgentRunner = AiAgentRunner(
+        ScriptedProvider(responses),
+        gateway(handlers),
+        maxToolRounds = maxToolRounds,
+        maxToolResultChars = maxToolResultChars,
+    )
 
     private fun gateway(handlers: Map<String, (Map<String, Any?>) -> Any?>): OpenLogToolGateway {
         val catalog = handlers.keys.map { name ->

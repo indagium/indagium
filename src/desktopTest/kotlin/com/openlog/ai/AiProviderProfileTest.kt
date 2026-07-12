@@ -1,6 +1,7 @@
 package com.openlog.ai
 
 import com.openlog.model.AiProviderProfile
+import com.openlog.model.DEFAULT_AI_MAX_TOOL_ROUNDS
 import com.openlog.model.defaultAiProviderProfile
 import com.openlog.ui.AppState
 import java.io.File
@@ -136,6 +137,20 @@ class AiProviderProfileTest {
         val restored = AppState(cacheFile, restoreOnCreate = true)
 
         assertEquals(listOf(defaultAiProviderProfile()), restored.settings.aiProviderProfiles)
+        assertEquals(DEFAULT_AI_MAX_TOOL_ROUNDS, restored.settings.aiMaxToolRounds)
+        restored.close()
+    }
+
+    @Test
+    fun maxToolRoundsRoundTripsThroughAutosaveAndStaysWithinBounds() {
+        val cacheFile = File(createTempDirectory("openlog-ai-max-rounds").toFile(), "state.cache")
+        val state = AppState(cacheFile)
+        state.updateSettings { it.copy(aiMaxToolRounds = 250) }
+        state.autosaveNow()
+        state.close()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        assertEquals(250, restored.settings.aiMaxToolRounds)
         restored.close()
     }
 

@@ -438,6 +438,7 @@ class AppState(
     internal val aiSidebarRuntime = AiSidebarRuntime(
         sessions = aiSessions,
         toolGatewayFactory = { OpenLogToolOperations(this).toolGateway },
+        maxToolRounds = { settings.aiMaxToolRounds },
     )
 
     /** Which view occupies the existing right sidebar for this launch; intentionally not saved. */
@@ -3503,6 +3504,7 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     sourceFolders.joinToString(",") { it.b64() }.b64(),
     editorCommand,
     aiProviderProfilesToken(),
+    aiMaxToolRounds.toString(),
 )
 
 private fun AppSettings.aiProviderProfilesToken(): String = normalizeAiProviderProfiles(aiProviderProfiles)
@@ -3588,6 +3590,9 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         editorCommand = p.getOrNull(mcpIndex + 9)?.takeIf { it.isNotBlank() } ?: "",
         aiProviderProfiles = p.getOrNull(mcpIndex + 10)?.aiProviderProfilesFromToken()
             ?: listOf(defaultAiProviderProfile()),
+        aiMaxToolRounds = p.getOrNull(mcpIndex + 11)?.toIntOrNull()
+            ?.coerceIn(MIN_AI_MAX_TOOL_ROUNDS, MAX_AI_MAX_TOOL_ROUNDS)
+            ?: DEFAULT_AI_MAX_TOOL_ROUNDS,
     )
 }.getOrNull()
 
