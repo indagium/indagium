@@ -443,6 +443,11 @@ class AppState(
         maxToolRounds = { settings.aiMaxToolRounds },
     )
 
+    // Lifted out of AiSidebarPanel's own composition (rather than a local `remember`) because
+    // toggling aiPanelVisible off unmounts that whole composable, which would otherwise discard
+    // this along with every other `remember`ed UI state in it.
+    internal var aiSidebarExpandedSection by mutableStateOf<AiSidebarSection?>(AiSidebarSection.ACTIONS)
+
 
     /** Session-only request produced by a log context menu or AI quick action. */
     internal var pendingAiPromptRequest by mutableStateOf<AiPromptRequest?>(null)

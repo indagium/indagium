@@ -11,7 +11,6 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -23,7 +22,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -57,6 +55,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -64,6 +63,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -88,6 +88,12 @@ import com.openlog.model.LogTab
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+/** Provider and Actions share one row as an accordion: opening one closes the other. */
+internal enum class AiSidebarSection { PROVIDER, ACTIONS }
+
+private fun AiSidebarSection?.toggled(section: AiSidebarSection): AiSidebarSection? =
+    if (this == section) null else section
+
 /**
  * Notes and the AI panel are independent visibility toggles (AppState.annotationVisible /
  * aiPanelVisible, both driven from the main toolbar) sharing this one resizable sidebar slot.
@@ -105,6 +111,8 @@ internal fun RightSidebarPanel(
 ) {
     val notesOn = state.annotationVisible
     val aiOn = state.aiPanelVisible
+    val density = LocalDensity.current
+    var totalHeightPx by remember { mutableStateOf(0) }
     Column(Modifier.width(width.dp).fillMaxHeight().background(tc().p)) {
         // notesContent() and AiSidebarPanel() each appear at exactly one call site below,
         // regardless of notesOn/aiOn - only their weight changes. Branching into separate `when`
@@ -112,27 +120,32 @@ internal fun RightSidebarPanel(
         // composition groups, so Compose tears down and rebuilds the whole subtree - and every
         // `remember`ed UI state (collapsed sections, scroll position) - the moment the other panel
         // is toggled, rather than just resizing in place.
-        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-            val totalHeightDp = maxHeight.value
-            Column(Modifier.fillMaxSize()) {
-                if (notesOn) {
-                    Box(Modifier.weight(if (aiOn) state.rightSidebarSplit else 1f).fillMaxWidth()) { notesContent() }
+        //
+        // Height comes from onSizeChanged rather than BoxWithConstraints: the latter is backed by
+        // SubcomposeLayout, and nesting a Popup-based dropdown (the model/provider pickers below)
+        // several levels inside one has been observed to throw a Compose Desktop
+        // "layouts are not part of the same hierarchy" IllegalArgumentException when the popup
+        // tries to position itself relative to its anchor. Plain onSizeChanged avoids the extra
+        // subcomposition boundary entirely.
+        Column(Modifier.weight(1f).fillMaxWidth().onSizeChanged { totalHeightPx = it.height }) {
+            val totalHeightDp = with(density) { totalHeightPx.toDp().value }
+            if (notesOn) {
+                Box(Modifier.weight(if (aiOn) state.rightSidebarSplit else 1f).fillMaxWidth()) { notesContent() }
+            }
+            if (notesOn && aiOn) {
+                VDivider { delta ->
+                    val newFrac = (state.rightSidebarSplit * totalHeightDp + delta) / totalHeightDp
+                    state.updateRightSidebarSplit(newFrac)
                 }
-                if (notesOn && aiOn) {
-                    VDivider { delta ->
-                        val newFrac = (state.rightSidebarSplit * totalHeightDp + delta) / totalHeightDp
-                        state.updateRightSidebarSplit(newFrac)
-                    }
-                }
-                if (aiOn) {
-                    Box(Modifier.weight(if (notesOn) 1f - state.rightSidebarSplit else 1f).fillMaxWidth()) {
-                        AiSidebarPanel(
-                            state = state,
-                            tab = tab,
-                            focusRequester = aiFocusRequester,
-                            onPanelFocusChanged = onAiPanelFocusChanged,
-                        )
-                    }
+            }
+            if (aiOn) {
+                Box(Modifier.weight(if (notesOn) 1f - state.rightSidebarSplit else 1f).fillMaxWidth()) {
+                    AiSidebarPanel(
+                        state = state,
+                        tab = tab,
+                        focusRequester = aiFocusRequester,
+                        onPanelFocusChanged = onAiPanelFocusChanged,
+                    )
                 }
             }
         }
@@ -164,8 +177,8 @@ private fun AiSidebarPanel(
     var keyDraft by remember(profile.id) { mutableStateOf(state.aiProviderApiKey(profile.id)) }
     var error by remember(tab.id, profile.id) { mutableStateOf<String?>(null) }
     var modelDiscovery by remember(profile.id) { mutableStateOf<ModelDiscoveryResult?>(null) }
-    var providerExpanded by remember { mutableStateOf(true) }
-    var quickActionsExpanded by remember { mutableStateOf(true) }
+    var panelHeightPx by remember { mutableStateOf(0) }
+    val density = LocalDensity.current
 
     fun profileForRun(): com.openlog.model.AiProviderProfile? {
         val draft = profile.copy(model = modelDraft.trim())
@@ -214,6 +227,7 @@ private fun AiSidebarPanel(
     Column(
         Modifier.fillMaxSize().background(colors.p)
             .border(BorderStroke(1.dp, if (panelFocused && state.keyboardFocusVisible) colors.ac else colors.br))
+            .onSizeChanged { panelHeightPx = it.height }
             .focusRequester(focusRequester).focusGroup().focusable()
             .onFocusChanged { panelFocused = it.hasFocus; onPanelFocusChanged(it.hasFocus) }
             .onPreviewKeyEvent { event ->
@@ -238,26 +252,38 @@ private fun AiSidebarPanel(
                         .padding(start = 10.dp, top = 8.dp, end = 18.dp, bottom = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    AiCollapsibleHeader(
-                        "Provider",
-                        trailing = {
-                            AppButton(
-                                "+",
-                                onClick = {
-                                    state.addAiProviderProfile()
-                                    state.settingsOpen = true
-                                },
-                                variant = ButtonVariant.Ghost,
-                                // Same square footprint as CloseButton ("×"), the app's other
-                                // single-glyph icon-style button.
-                                modifier = Modifier.size(24.dp),
-                            )
-                        },
-                        expanded = providerExpanded,
-                        onToggle = { providerExpanded = !providerExpanded },
-                    )
-                    if (providerExpanded) {
-                        AiProviderControls(
+                    // Actions and Provider share one row as an accordion (opening one closes the
+                    // other) rather than two independently-collapsible sections stacked on top of
+                    // each other - besides being more compact, this keeps both tabs the same height
+                    // regardless of what either section's content contains. The expanded section is
+                    // tracked on AppState, not a local `remember`, so it survives the AI panel being
+                    // toggled off and back on (see aiSidebarExpandedSection).
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        AiSectionTab(
+                            "Actions",
+                            expanded = state.aiSidebarExpandedSection == AiSidebarSection.ACTIONS,
+                            onToggle = {
+                                state.aiSidebarExpandedSection = state.aiSidebarExpandedSection
+                                    .toggled(AiSidebarSection.ACTIONS)
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        AiSectionTab(
+                            "Provider",
+                            expanded = state.aiSidebarExpandedSection == AiSidebarSection.PROVIDER,
+                            onToggle = {
+                                state.aiSidebarExpandedSection = state.aiSidebarExpandedSection
+                                    .toggled(AiSidebarSection.PROVIDER)
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    when (state.aiSidebarExpandedSection) {
+                        AiSidebarSection.ACTIONS -> AiQuickActionsContent(
+                            tab = tab,
+                            onAction = { action -> state.requestAiInvestigation(tab.id, action) },
+                        )
+                        AiSidebarSection.PROVIDER -> AiProviderControls(
                             state = state,
                             profile = profile,
                             model = modelDraft,
@@ -270,14 +296,13 @@ private fun AiSidebarPanel(
                                     modelDiscovery = runtime.discoverModels(profile.copy(model = modelDraft.trim()), keyDraft)
                                 }
                             },
+                            onAddProvider = {
+                                state.addAiProviderProfile()
+                                state.settingsOpen = true
+                            },
                         )
+                        null -> Unit
                     }
-                    AiQuickActions(
-                        tab = tab,
-                        expanded = quickActionsExpanded,
-                        onToggle = { quickActionsExpanded = !quickActionsExpanded },
-                        onAction = { action -> state.requestAiInvestigation(tab.id, action) },
-                    )
                     val lastEvent = session.runs.lastOrNull()?.history?.lastOrNull()
                     val connectionState = when {
                         session.activeRun != null -> "Generating with ${profile.displayName}…"
@@ -330,10 +355,12 @@ private fun AiSidebarPanel(
                 style = appScrollbarStyle(colors),
             )
         }
+        val maxPromptHeightDp = with(density) { (panelHeightPx / 2).toDp() }.coerceAtLeast(54.dp)
         AiPromptComposer(
             prompt = prompt,
             running = session.activeRun,
             retryAvailable = session.activeRun == null && session.lastPrompt != null,
+            maxHeightDp = maxPromptHeightDp,
             onPromptChange = { prompt = it },
             onSend = { start(prompt) },
             onStop = { session.activeRun?.let(runtime::cancel) },
@@ -382,43 +409,68 @@ private fun AiCollapsibleHeader(
     }
 }
 
+// One segment of the Actions/Provider accordion row - same visual language as
+// AiCollapsibleHeader (rounded hover target) but half-width and highlighted while selected, so
+// both segments stay the same height regardless of what either section's content holds.
 @Composable
-private fun AiQuickActions(
-    tab: LogTab,
+private fun AiSectionTab(
+    title: String,
     expanded: Boolean,
     onToggle: () -> Unit,
-    onAction: (AiQuickAction) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
+    val colors = tc()
+    HoverBox(
+        modifier = modifier.clip(CORNER_SM)
+            .background(if (expanded) colors.abg else Color.Transparent, CORNER_SM)
+            .border(1.dp, if (expanded) colors.ac.copy(.4f) else colors.br, CORNER_SM),
+        onClick = onToggle,
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AppText(if (expanded) "▾" else "▸", color = if (expanded) colors.ac else colors.td, fontSize = 11.sp)
+            AppText(
+                title,
+                color = if (expanded) colors.ac else colors.td,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AiQuickActionsContent(tab: LogTab, onAction: (AiQuickAction) -> Unit) {
     val colors = tc()
     val hasSelectedLine = tab.selected.any { it in tab.rmap }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        AiCollapsibleHeader("Actions", expanded = expanded, onToggle = onToggle)
-        if (expanded) {
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                listOf(AiQuickAction.SELECTED_ERROR, AiQuickAction.ROOT_CAUSE).forEach { action ->
-                    AppButton(
-                        action.label,
-                        onClick = { onAction(action) },
-                        enabled = hasSelectedLine,
-                        variant = ButtonVariant.Ghost,
-                        modifier = Modifier.height(25.dp),
-                    )
-                }
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            listOf(AiQuickAction.SELECTED_ERROR, AiQuickAction.ROOT_CAUSE).forEach { action ->
+                AppButton(
+                    action.label,
+                    onClick = { onAction(action) },
+                    enabled = hasSelectedLine,
+                    variant = ButtonVariant.Ghost,
+                    modifier = Modifier.height(25.dp),
+                )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                listOf(AiQuickAction.TIMELINE, AiQuickAction.ISSUE_INVESTIGATION).forEach { action ->
-                    AppButton(
-                        action.label,
-                        onClick = { onAction(action) },
-                        enabled = !action.requiresLine || hasSelectedLine,
-                        variant = ButtonVariant.Ghost,
-                        modifier = Modifier.height(25.dp),
-                    )
-                }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            listOf(AiQuickAction.TIMELINE, AiQuickAction.ISSUE_INVESTIGATION).forEach { action ->
+                AppButton(
+                    action.label,
+                    onClick = { onAction(action) },
+                    enabled = !action.requiresLine || hasSelectedLine,
+                    variant = ButtonVariant.Ghost,
+                    modifier = Modifier.height(25.dp),
+                )
             }
-            if (!hasSelectedLine) {
-                AppText("Select a log line to enable line-based investigations.", color = colors.td, fontSize = 10.sp)
-            }
+        }
+        if (!hasSelectedLine) {
+            AppText("Select a log line to enable line-based investigations.", color = colors.td, fontSize = 10.sp)
         }
     }
 }
@@ -433,19 +485,26 @@ private fun AiProviderControls(
     onApiKeyChange: (String) -> Unit,
     discovery: ModelDiscoveryResult?,
     onDiscoverModels: () -> Unit,
+    onAddProvider: () -> Unit,
 ) {
     val colors = tc()
     val profiles = normalizeAiProviderProfiles(state.settings.aiProviderProfiles)
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            profiles.forEach { item ->
-                AppButton(
-                    item.displayName,
-                    onClick = { state.selectAiProviderProfile(item.id) },
-                    variant = if (item.id == profile.id) ButtonVariant.Primary else ButtonVariant.Secondary,
-                    modifier = Modifier.heightIn(min = 26.dp).widthIn(max = 150.dp),
-                )
-            }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            AiProviderDropdown(
+                profiles = profiles,
+                selected = profile,
+                onSelect = { id -> state.selectAiProviderProfile(id) },
+                modifier = Modifier.weight(1f),
+            )
+            AppButton(
+                "+",
+                onClick = onAddProvider,
+                variant = ButtonVariant.Ghost,
+                // Same square footprint as CloseButton ("×"), the app's other single-glyph
+                // icon-style button.
+                modifier = Modifier.size(24.dp),
+            )
         }
         AppText(profile.baseUrl, color = colors.td, fontSize = 10.sp, maxLines = 1)
         val endpointHost = runCatching { java.net.URI(profile.baseUrl).host.orEmpty() }.getOrDefault("")
@@ -475,6 +534,90 @@ private fun AiProviderControls(
             fontSize = 11.sp,
             visualTransformation = PasswordVisualTransformation(),
         )
+    }
+}
+
+// Same dropdown treatment as AiModelDropdown/CrashCategoryDropdown, for choosing which provider
+// profile is active - consistent with "model choosing" now that both use the same interaction.
+@Composable
+private fun AiProviderDropdown(
+    profiles: List<com.openlog.model.AiProviderProfile>,
+    selected: com.openlog.model.AiProviderProfile,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var open by remember { mutableStateOf(false) }
+    var fieldWidth by remember { mutableStateOf(0.dp) }
+    var suppressToggleUntilMs by remember { mutableStateOf(0L) }
+    Box(
+        modifier.onGloballyPositioned { coords ->
+            fieldWidth = with(density) { coords.size.width.toDp() }
+        },
+    ) {
+        HoverBox(
+            modifier = Modifier.fillMaxWidth().height(28.dp)
+                .clip(CORNER_SM)
+                .background(tc.p2, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM),
+            onClick = { if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open },
+        ) {
+            Row(
+                Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                AppText(
+                    selected.displayName,
+                    color = tc.tx,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
+            }
+        }
+        if (open) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, with(density) { 32.dp.roundToPx() }),
+                onDismissRequest = {
+                    open = false
+                    suppressToggleUntilMs = System.currentTimeMillis() + 200
+                },
+                properties = PopupProperties(focusable = false),
+            ) {
+                Column(
+                    Modifier.width(fieldWidth)
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    profiles.forEach { item ->
+                        val active = item.id == selected.id
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                            baseBg = if (active) tc.abg else Color.Transparent,
+                            onClick = { open = false; onSelect(item.id) },
+                        ) {
+                            AppText(
+                                item.displayName,
+                                color = if (active) tc.ac else tc.tx,
+                                fontSize = 11.sp,
+                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -628,17 +771,9 @@ private fun AiRunCard(
     val usage = events.filterIsInstance<AiRunEvent.Usage>().lastOrNull()
     val isTerminal = events.any { it is AiRunEvent.Done || it is AiRunEvent.Error || it == AiRunEvent.Cancelled }
 
-    // Expanded while the investigation runs, so it's visible as it happens; collapsed exactly once
-    // when it finishes so the final answer isn't buried under a wall of trace rows, but the user can
-    // still reopen it (autoCollapsedOnce guards against re-collapsing a manual re-expand).
-    var expanded by remember(run.id) { mutableStateOf(true) }
-    var autoCollapsedOnce by remember(run.id) { mutableStateOf(false) }
-    LaunchedEffect(run.id, isTerminal) {
-        if (isTerminal && !autoCollapsedOnce) {
-            expanded = false
-            autoCollapsedOnce = true
-        }
-    }
+    // Closed by default - the trace is available on demand, but doesn't compete with the final
+    // answer for attention while it's still visible.
+    var expanded by remember(run.id) { mutableStateOf(false) }
 
     val traceScroll = rememberScrollState()
     // Same reasoning as the outer transcript scroll: only auto-follow while this run is still
@@ -883,28 +1018,39 @@ private fun AiPromptComposer(
     prompt: String,
     running: AiRun?,
     retryAvailable: Boolean,
+    maxHeightDp: Dp,
     onPromptChange: (String) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
     onRetry: () -> Unit,
 ) {
     val colors = tc()
+    val promptScroll = rememberScrollState()
     Column(
         Modifier.fillMaxWidth().background(colors.p2).border(BorderStroke(1.dp, colors.br)).padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        androidx.compose.foundation.text.BasicTextField(
-            value = prompt,
-            onValueChange = onPromptChange,
-            textStyle = TextStyle(color = colors.tx, fontSize = 12.sp),
-            cursorBrush = SolidColor(colors.ac),
-            modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp, max = 120.dp)
-                .background(colors.bg, CORNER_SM).border(1.dp, colors.br, CORNER_SM).padding(7.dp),
-            decorationBox = { inner ->
-                if (prompt.isBlank()) AppText("Ask about this log tab…", color = colors.td, fontSize = 12.sp)
-                inner()
-            },
-        )
+        Box(Modifier.fillMaxWidth().heightIn(min = 54.dp, max = maxHeightDp)) {
+            androidx.compose.foundation.text.BasicTextField(
+                value = prompt,
+                onValueChange = onPromptChange,
+                textStyle = TextStyle(color = colors.tx, fontSize = 12.sp),
+                cursorBrush = SolidColor(colors.ac),
+                modifier = Modifier.fillMaxWidth()
+                    .background(colors.bg, CORNER_SM).border(1.dp, colors.br, CORNER_SM)
+                    .verticalScroll(promptScroll)
+                    .padding(start = 7.dp, top = 7.dp, bottom = 7.dp, end = 14.dp),
+                decorationBox = { inner ->
+                    if (prompt.isBlank()) AppText("Ask about this log tab…", color = colors.td, fontSize = 12.sp)
+                    inner()
+                },
+            )
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(promptScroll),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 2.dp),
+                style = appScrollbarStyle(colors),
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             if (running == null) {
                 AppButton("Send", onClick = onSend, variant = ButtonVariant.Primary, enabled = prompt.isNotBlank())
