@@ -45,6 +45,16 @@ internal enum class AiQuickAction(val label: String, val prompt: String, val req
         prompt = "Resolve the selected log line to source code and explain the relevant mapped method using tool-returned source evidence.",
         requiresLine = true,
     ),
+    ISSUE_INVESTIGATION(
+        label = "Investigate issue",
+        prompt = "Call get_issue_description for this tab and read its issueDescription field as the problem to " +
+            "investigate; if it is blank, say so and stop instead of guessing what the issue is. Otherwise use " +
+            "set_filter and the log/source tools to narrow down and gather only tool-returned evidence relevant " +
+            "to that description. Once you have a conclusion, call add_text_note to write a note summarizing the " +
+            "root cause, the supporting evidence, and recommended next steps - do not just describe the analysis " +
+            "in your reply without also saving it as a note.",
+        requiresLine = false,
+    ),
 }
 
 /** One session-only request queued by a context action until its owning tab's sidebar composes. */

@@ -44,11 +44,16 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.m3.markdownTypography
+import com.mikepenz.markdown.model.MarkdownTypography
 import com.openlog.ai.AiEvidence
 import com.openlog.ai.AiInvestigationContext
 import com.openlog.ai.AiQuickAction
@@ -250,7 +255,12 @@ private fun AiSidebarPanel(
                     maxLines = 4,
                 )
             }
-            session.runs.forEach { run -> AiRunCard(run, runtime::resolveConfirmation, state::navigateAiEvidence) }
+            // run.history is read here, in the scope that actually observes `revision`, and passed
+            // down as a plain List so Compose's skip check sees real structural change. AiRun
+            // itself mutates its history in place behind a synchronized list, so a composable that
+            // only takes `run` as a parameter can be skipped by Compose (same object reference) and
+            // never pick up new events until something else forces the whole subtree to recompose.
+            session.runs.forEach { run -> AiRunCard(run, run.history, runtime::resolveConfirmation, state::navigateAiEvidence) }
         }
         AiPromptComposer(
             prompt = prompt,
@@ -289,7 +299,7 @@ private fun AiQuickActions(tab: LogTab, onAction: (AiQuickAction) -> Unit) {
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            listOf(AiQuickAction.FILTERED_RESULT, AiQuickAction.MAPPED_SOURCE).forEach { action ->
+            listOf(AiQuickAction.FILTERED_RESULT, AiQuickAction.MAPPED_SOURCE, AiQuickAction.ISSUE_INVESTIGATION).forEach { action ->
                 AppButton(
                     action.label,
                     onClick = { onAction(action) },
@@ -384,11 +394,11 @@ private fun AiProviderControls(
 @Composable
 private fun AiRunCard(
     run: AiRun,
+    events: List<AiRunEvent>,
     onResolveConfirmation: (AiRun, AiToolConfirmation, Boolean) -> Boolean,
     onNavigateEvidence: (AiEvidence) -> Unit,
 ) {
     val colors = tc()
-    val events = run.history
     val assistantText = events.filterIsInstance<AiRunEvent.AssistantDelta>().joinToString(separator = "") { it.text }
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         if (run.userPrompt.isNotBlank()) {
@@ -398,7 +408,12 @@ private fun AiRunCard(
             AiBubble("Assistant", colors.p2) {
                 // The renderer parses asynchronously. AiSidebarRuntime batches updates, so its
                 // content only changes at a modest cadence while a provider is streaming.
-                Markdown(assistantText, modifier = Modifier.fillMaxWidth())
+                Markdown(
+                    assistantText,
+                    colors = aiMarkdownColors(colors),
+                    typography = aiMarkdownTypography(colors),
+                    modifier = Modifier.fillMaxWidth(),
+                )
             }
         }
         events.filterNot { it is AiRunEvent.AssistantDelta }.forEach { event ->
@@ -431,6 +446,43 @@ private fun AiEvidenceCard(evidence: AiEvidence, onNavigate: (AiEvidence) -> Uni
     ) {
         AppButton(label, onClick = { onNavigate(evidence) }, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(25.dp))
     }
+}
+
+// The renderer's own defaults pull from MaterialTheme.colorScheme/typography, which resolve to
+// Material3's stock light baseline (57sp display headings) since this app never installs a
+// MaterialTheme - it has its own ThemeColors/tc() system instead. Map assistant Markdown onto
+// that same compact scale so headings and body text read like the rest of the sidebar.
+@Composable
+private fun aiMarkdownColors(colors: ThemeColors) = markdownColor(
+    text = colors.tx,
+    codeBackground = colors.p2,
+    inlineCodeBackground = colors.p2,
+    dividerColor = colors.br,
+    tableBackground = colors.p2,
+)
+
+@Composable
+private fun aiMarkdownTypography(colors: ThemeColors): MarkdownTypography {
+    val body = TextStyle(color = colors.tx, fontSize = 12.sp, fontFamily = UI)
+    val code = TextStyle(color = colors.tx, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+    val heading = body.copy(fontWeight = FontWeight.SemiBold)
+    return markdownTypography(
+        h1 = heading.copy(fontSize = 15.sp),
+        h2 = heading.copy(fontSize = 14.sp),
+        h3 = heading.copy(fontSize = 13.sp),
+        h4 = heading.copy(fontSize = 12.sp),
+        h5 = heading.copy(fontSize = 12.sp),
+        h6 = heading.copy(fontSize = 12.sp),
+        text = body,
+        code = code,
+        inlineCode = code,
+        quote = body.copy(fontStyle = FontStyle.Italic),
+        paragraph = body,
+        ordered = body,
+        bullet = body,
+        list = body,
+        table = body,
+    )
 }
 
 @Composable
