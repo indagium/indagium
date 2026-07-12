@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -105,16 +106,26 @@ internal fun RightSidebarPanel(
     val notesOn = state.annotationVisible
     val aiOn = state.aiPanelVisible
     Column(Modifier.width(width.dp).fillMaxHeight().background(tc().p)) {
-        when {
-            notesOn && aiOn -> BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                val totalHeightDp = maxHeight.value
-                Column(Modifier.fillMaxSize()) {
-                    Box(Modifier.weight(state.rightSidebarSplit).fillMaxWidth()) { notesContent() }
+        // notesContent() and AiSidebarPanel() each appear at exactly one call site below,
+        // regardless of notesOn/aiOn - only their weight changes. Branching into separate `when`
+        // arms that each called them (as this used to) puts them in structurally different
+        // composition groups, so Compose tears down and rebuilds the whole subtree - and every
+        // `remember`ed UI state (collapsed sections, scroll position) - the moment the other panel
+        // is toggled, rather than just resizing in place.
+        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+            val totalHeightDp = maxHeight.value
+            Column(Modifier.fillMaxSize()) {
+                if (notesOn) {
+                    Box(Modifier.weight(if (aiOn) state.rightSidebarSplit else 1f).fillMaxWidth()) { notesContent() }
+                }
+                if (notesOn && aiOn) {
                     VDivider { delta ->
                         val newFrac = (state.rightSidebarSplit * totalHeightDp + delta) / totalHeightDp
                         state.updateRightSidebarSplit(newFrac)
                     }
-                    Box(Modifier.weight(1f - state.rightSidebarSplit).fillMaxWidth()) {
+                }
+                if (aiOn) {
+                    Box(Modifier.weight(if (notesOn) 1f - state.rightSidebarSplit else 1f).fillMaxWidth()) {
                         AiSidebarPanel(
                             state = state,
                             tab = tab,
@@ -124,15 +135,6 @@ internal fun RightSidebarPanel(
                     }
                 }
             }
-            aiOn -> Box(Modifier.weight(1f).fillMaxWidth()) {
-                AiSidebarPanel(
-                    state = state,
-                    tab = tab,
-                    focusRequester = aiFocusRequester,
-                    onPanelFocusChanged = onAiPanelFocusChanged,
-                )
-            }
-            else -> Box(Modifier.weight(1f).fillMaxWidth()) { notesContent() }
         }
     }
 }
@@ -200,10 +202,12 @@ private fun AiSidebarPanel(
         state.consumeAiPromptRequest(request.id)
     }
 
-    // Pins to the bottom whenever the scrollable content actually grows (streamed tokens, a new
-    // tool-trace row, a new run) rather than on a fixed cadence - snapshotFlow only re-fires when
-    // maxValue itself changes, so this doesn't fight a still-in-place conversation.
-    LaunchedEffect(scroll) {
+    // Pins to the bottom while a request is in flight (streamed tokens, a new tool-trace row)
+    // rather than on any content-size change: gating on activeRun, not a bare maxValue watch,
+    // means expanding/collapsing an already-finished run's investigation block - which also
+    // changes maxValue - no longer yanks the view back to the bottom.
+    LaunchedEffect(scroll, session.activeRun) {
+        if (session.activeRun == null) return@LaunchedEffect
         snapshotFlow { scroll.maxValue }.collect { max -> scroll.scrollTo(max) }
     }
 
@@ -234,7 +238,7 @@ private fun AiSidebarPanel(
                         .padding(start = 10.dp, top = 8.dp, end = 18.dp, bottom = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    SectionHeader(
+                    AiCollapsibleHeader(
                         "Provider",
                         trailing = {
                             AppButton(
@@ -244,7 +248,9 @@ private fun AiSidebarPanel(
                                     state.settingsOpen = true
                                 },
                                 variant = ButtonVariant.Ghost,
-                                modifier = Modifier.height(22.dp).width(28.dp),
+                                // Same square footprint as CloseButton ("×"), the app's other
+                                // single-glyph icon-style button.
+                                modifier = Modifier.size(24.dp),
                             )
                         },
                         expanded = providerExpanded,
@@ -343,6 +349,39 @@ private fun AiSidebarPanel(
     }
 }
 
+// Shared look for every collapsible section in this sidebar (Provider, Actions, and each run's
+// Investigation trace) - a rounded, padded hover target rather than bare clickable text, so the
+// toggle reads consistently and has a comfortable click area everywhere it appears.
+@Composable
+private fun AiCollapsibleHeader(
+    title: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    trailing: (@Composable RowScope.() -> Unit)? = null,
+) {
+    val colors = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth().clip(CORNER_SM),
+        onClick = onToggle,
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AppText(if (expanded) "▾" else "▸", color = colors.td, fontSize = 11.sp)
+            AppText(
+                title,
+                color = colors.td,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+            trailing?.invoke(this)
+        }
+    }
+}
+
 @Composable
 private fun AiQuickActions(
     tab: LogTab,
@@ -353,7 +392,7 @@ private fun AiQuickActions(
     val colors = tc()
     val hasSelectedLine = tab.selected.any { it in tab.rmap }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        SectionHeader("Quick actions", expanded = expanded, onToggle = onToggle)
+        AiCollapsibleHeader("Actions", expanded = expanded, onToggle = onToggle)
         if (expanded) {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 listOf(AiQuickAction.SELECTED_ERROR, AiQuickAction.ROOT_CAUSE).forEach { action ->
@@ -602,7 +641,10 @@ private fun AiRunCard(
     }
 
     val traceScroll = rememberScrollState()
-    LaunchedEffect(traceScroll) {
+    // Same reasoning as the outer transcript scroll: only auto-follow while this run is still
+    // adding steps, so reopening a finished run's trace later doesn't jump it to the bottom.
+    LaunchedEffect(traceScroll, isTerminal) {
+        if (isTerminal) return@LaunchedEffect
         snapshotFlow { traceScroll.maxValue }.collect { max -> traceScroll.scrollTo(max) }
     }
 
@@ -615,24 +657,11 @@ private fun AiRunCard(
         }
         if (traceEvents.isNotEmpty()) {
             Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                HoverBox(
-                    modifier = Modifier.fillMaxWidth().clip(CORNER_SM),
-                    onClick = { expanded = !expanded },
-                ) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        AppText(if (expanded) "▾" else "▸", color = colors.td, fontSize = 11.sp)
-                        AppText(
-                            "Investigation (${traceEvents.size} step${if (traceEvents.size == 1) "" else "s"})",
-                            color = colors.td,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
-                }
+                AiCollapsibleHeader(
+                    "Investigation (${traceEvents.size} step${if (traceEvents.size == 1) "" else "s"})",
+                    expanded = expanded,
+                    onToggle = { expanded = !expanded },
+                )
                 if (expanded) {
                     Box(Modifier.fillMaxWidth().heightIn(max = 220.dp)) {
                         Column(
