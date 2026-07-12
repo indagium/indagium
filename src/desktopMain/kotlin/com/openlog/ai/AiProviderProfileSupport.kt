@@ -6,7 +6,6 @@ import java.net.URI
 
 enum class AiProviderUrlProblem(val message: String) {
     MALFORMED("Enter a complete HTTP or HTTPS endpoint URL."),
-    REMOTE_HTTP("Remote model endpoints must use HTTPS."),
     REMOTE_DISCLOSURE_REQUIRED("Acknowledge that logs and source context may leave this device."),
 }
 
@@ -24,7 +23,8 @@ fun validateAiProviderProfile(profile: AiProviderProfile): AiProviderUrlValidati
         return AiProviderUrlValidation(AiProviderUrlProblem.MALFORMED)
     }
     if (isLoopbackHost(host)) return AiProviderUrlValidation()
-    if (scheme != "https") return AiProviderUrlValidation(AiProviderUrlProblem.REMOTE_HTTP)
+    // LM Studio (and many local-network OpenAI-compatible servers) only ever serve HTTP, even
+    // when reached over a LAN address rather than loopback, so HTTPS cannot be required here.
     return if (profile.remoteDisclosureAcknowledged) AiProviderUrlValidation()
     else AiProviderUrlValidation(AiProviderUrlProblem.REMOTE_DISCLOSURE_REQUIRED)
 }

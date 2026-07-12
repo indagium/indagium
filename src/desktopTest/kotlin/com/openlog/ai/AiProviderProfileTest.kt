@@ -24,15 +24,28 @@ class AiProviderProfileTest {
         }
 
         assertEquals(AiProviderUrlProblem.MALFORMED, validateAiProviderProfile(defaultAiProviderProfile().copy(baseUrl = "not a url")).problem)
-        assertEquals(AiProviderUrlProblem.REMOTE_HTTP, validateAiProviderProfile(defaultAiProviderProfile().copy(baseUrl = "http://models.example/v1")).problem)
         assertEquals(
             AiProviderUrlProblem.REMOTE_DISCLOSURE_REQUIRED,
             validateAiProviderProfile(defaultAiProviderProfile().copy(baseUrl = "https://models.example/v1")).problem,
+        )
+        // Remote HTTP (e.g. an LM Studio instance reached over the LAN, which never serves TLS)
+        // is allowed once the disclosure is acknowledged, same as remote HTTPS.
+        assertEquals(
+            AiProviderUrlProblem.REMOTE_DISCLOSURE_REQUIRED,
+            validateAiProviderProfile(defaultAiProviderProfile().copy(baseUrl = "http://models.example/v1")).problem,
         )
         assertTrue(
             validateAiProviderProfile(
                 defaultAiProviderProfile().copy(
                     baseUrl = "https://models.example/v1",
+                    remoteDisclosureAcknowledged = true,
+                ),
+            ).isValid,
+        )
+        assertTrue(
+            validateAiProviderProfile(
+                defaultAiProviderProfile().copy(
+                    baseUrl = "http://models.example/v1",
                     remoteDisclosureAcknowledged = true,
                 ),
             ).isValid,

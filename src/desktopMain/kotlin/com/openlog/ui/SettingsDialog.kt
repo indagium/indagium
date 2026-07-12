@@ -20,9 +20,13 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.openlog.ai.ModelDiscoveryResult
+import com.openlog.ai.OpenAiCompatibleProvider
 import com.openlog.ai.normalizeAiProviderProfiles
 import com.openlog.generated.BuildInfo
 import com.openlog.model.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 // ── Settings dialog ───────────────────────────────────────────────────
 @Composable
@@ -575,6 +579,9 @@ private fun AiProviderSettingsSection(state: AppState) {
     }
     var apiKey by remember(profile.id) { mutableStateOf(state.aiProviderApiKey(profile.id)) }
     var validationError by remember(profile.id) { mutableStateOf<String?>(null) }
+    var connectionTest by remember(profile.id) { mutableStateOf<ModelDiscoveryResult?>(null) }
+    var testingConnection by remember(profile.id) { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -625,11 +632,40 @@ private fun AiProviderSettingsSection(state: AppState) {
             }
         }
         validationError?.let { AppText(it, color = DANGER_RED, fontSize = 10.sp) }
+        connectionTest?.let { result ->
+            when (result) {
+                is ModelDiscoveryResult.Available -> AppText(
+                    "Reachable — ${result.models.size} model(s) found.",
+                    color = tc.ac,
+                    fontSize = 10.sp,
+                )
+                is ModelDiscoveryResult.Unavailable -> AppText(result.message, color = DANGER_RED, fontSize = 10.sp)
+            }
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             AppButton(
                 "Save profile",
                 onClick = { validationError = state.updateAiProviderProfile(draft) },
                 variant = ButtonVariant.Primary,
+            )
+            // Reachability is a pure network probe against the current form fields: it never
+            // saves, validates, or otherwise touches the stored profile, so it works whether or
+            // not the endpoint would currently pass Save (e.g. an unacknowledged remote endpoint).
+            AppButton(
+                if (testingConnection) "Checking…" else "Test connection",
+                onClick = {
+                    val testProfile = draft
+                    val testKey = apiKey
+                    testingConnection = true
+                    connectionTest = null
+                    coroutineScope.launch(Dispatchers.IO) {
+                        val provider = OpenAiCompatibleProvider(testProfile, testKey)
+                        connectionTest = try { provider.listModels() } finally { provider.close() }
+                        testingConnection = false
+                    }
+                },
+                variant = ButtonVariant.Secondary,
+                enabled = !testingConnection && endpoint.isNotBlank(),
             )
             if (profiles.size > 1) {
                 AppButton(

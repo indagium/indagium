@@ -81,9 +81,11 @@ settings, notes, or exports, and must be entered again after restart.
 ### Data and action safety
 
 Loopback endpoints (`127.0.0.1`, `localhost`, and equivalent local addresses) are treated as
-local. A non-local provider must use HTTPS and is blocked until you acknowledge in Settings that
-the request can disclose log text, selected context, source-code paths and snippets, and tool
-results to that provider.
+local. A non-local provider (HTTP or HTTPS — some local-network LM Studio setups only ever serve
+HTTP) is blocked until you acknowledge in Settings that the request can disclose log text,
+selected context, source-code paths and snippets, and tool results to that provider. Use **Test
+connection** in Settings → AI providers to check whether an endpoint is reachable before or after
+saving; it only probes the endpoint and never saves or otherwise affects the profile.
 
 The assistant can automatically read log/source context and apply filter, selection, folding, and
 annotation changes. Actions that affect files or tab lifecycle always pause for an **Allow** or
@@ -103,10 +105,10 @@ that tab after a provider error or cancellation.
   exposed by your provider.
 - **Connection or stream error** — confirm the endpoint is reachable, that LM Studio's server is
   running, and that the endpoint includes its required API version path (the default ends in
-  `/v1`).
+  `/v1`). Use **Test connection** in Settings → AI providers to check reachability directly.
 - **No models returned** — model discovery is optional; enter the model id manually.
-- **Remote provider blocked** — use HTTPS, then save the profile after acknowledging the remote
-  data disclosure in Settings.
+- **Remote provider blocked** — save the profile after acknowledging the remote data disclosure
+  in Settings (HTTP and HTTPS are both allowed once acknowledged).
 - **An investigation waits** — inspect the tool trace and choose **Allow** or **Deny** on its
   confirmation card. Use **Stop** if the action is no longer wanted.
 
