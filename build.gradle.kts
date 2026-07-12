@@ -160,6 +160,29 @@ tasks.named("compileKotlinDesktop") {
     dependsOn(generateBuildInfo)
 }
 
+// jpackage/jlink bundle whatever JVM is running Gradle ITSELF into the native distribution's
+// runtime image — this is completely independent of kotlin.jvmToolchain(21) above, which only
+// pins the JDK used to compile/run our own code. A packaging run launched under an older JDK on
+// PATH (e.g. a machine with both a Homebrew JDK 17 and IDE-managed JDK 21 installed, JAVA_HOME
+// unset) silently bundles a JDK-17 runtime image: since our own compiled classes now target
+// bytecode 65 (JDK 21, from the toolchain above), the packaged app fails to load its own MainKt
+// and the .app appears to "immediately close" on launch with no visible error — this is the same
+// root cause as the deferred Markdown-renderer crash fixed alongside this check, just hitting on
+// the very first class load instead of a lazily-touched one. createRuntimeImage is the common
+// ancestor of every packaging task (packageDmg/packageMsi/packageDeb/
+// packageDistributionForCurrentOS), so gating there catches all of them in one place.
+tasks.matching { it.name == "createRuntimeImage" }.configureEach {
+    doFirst {
+        check(JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_21)) {
+            "Packaging must be run with Gradle itself on JDK 21+ (currently ${JavaVersion.current()}) — " +
+                "jpackage/jlink bundle whatever JVM launches Gradle, regardless of kotlin.jvmToolchain. " +
+                "Set JAVA_HOME to a JDK 21+ install before running packageDmg/packageDeb/packageMsi/" +
+                "packageDistributionForCurrentOS, e.g. on macOS: " +
+                "JAVA_HOME=\$(/usr/libexec/java_home -v 21) ./gradlew packageDistributionForCurrentOS"
+        }
+    }
+}
+
 // Same heap headroom for dev runs (./gradlew desktopRun) as for the packaged app. Also forwards
 // two optional -D properties from the Gradle command line into the app JVM (Gradle doesn't do
 // this by itself): openlog.debugControl to enable the MCP control server (see Main.kt), and
