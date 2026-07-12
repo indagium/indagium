@@ -7,12 +7,22 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Terminal
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -28,41 +38,200 @@ import com.openlog.generated.BuildInfo
 import com.openlog.model.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.io.File
 
 // ── Settings dialog ───────────────────────────────────────────────────
+// Left-hand nav lists every section; only the selected section's content renders on the
+// right, so growing any one section (e.g. AI providers) no longer pushes every other
+// section down a shared scroll. There's no standalone "About" entry — its former content
+// (keyboard shortcuts, version, author) now lives in Editor behavior and the footer.
+private enum class SettingsSection(val title: String, val icon: ImageVector) {
+    Appearance("Appearance", Icons.Outlined.Palette),
+    EditorBehavior("Editor behavior", Icons.Outlined.Tune),
+    ExportAnnotations("Export & annotations", Icons.Outlined.Description),
+    Automation("Automation", Icons.Outlined.Bolt),
+    AiProviders("AI providers", Icons.Outlined.Psychology),
+    CustomAiCommands("Custom AI commands", Icons.Outlined.Terminal),
+    SourceCode("Source code", Icons.Outlined.Code),
+}
+
 @Composable
 internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
     val tc = tc()
-    val scroll = rememberScrollState()
     val shape = RoundedCornerShape(8.dp)
+    var selectedSection by remember { mutableStateOf(SettingsSection.Appearance) }
     LaunchedEffect(Unit) {
         state.refreshArchiveCacheInfo()
     }
     Box(
-        Modifier.width(580.dp).heightIn(max = 860.dp)
+        // 190 (sidebar) + 1 (divider) + 572 (content). 572 is tuned tight against ThemeGallery's
+        // FlowRow math (118dp cards, 8dp gaps: 4 cards = 496dp) plus just enough slack (~8dp) that
+        // the scrollbar sits close against the 4th card instead of floating in leftover width.
+        Modifier.width(763.dp).height(560.dp)
             .clip(shape)
             .background(tc.p)
             .border(1.dp, tc.br, shape),
     ) {
-        Column(
-            Modifier.verticalScroll(scroll).padding(24.dp).padding(end = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
+        Column(Modifier.fillMaxSize()) {
             Row(
-                Modifier.fillMaxWidth(),
+                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 AppText("Settings", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                 CloseButton(onClick = onDismiss)
             }
-
-            SettingsSectionHeader("Appearance")
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                ThemeGallery(state)
+            Divider()
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+                Column(
+                    Modifier.width(190.dp).fillMaxHeight().padding(vertical = 12.dp, horizontal = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    SettingsSection.entries.forEach { section ->
+                        SettingsMenuItem(
+                            section = section,
+                            selected = section == selectedSection,
+                            onClick = { selectedSection = section },
+                        )
+                    }
+                }
+                Box(Modifier.width(1.dp).fillMaxHeight().background(tc.br))
+                val contentScroll = rememberScrollState()
+                Box(Modifier.weight(1f).fillMaxHeight()) {
+                    Column(
+                        Modifier.fillMaxSize().verticalScroll(contentScroll).padding(24.dp).padding(end = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        when (selectedSection) {
+                            SettingsSection.Appearance -> AppearanceSettingsSection(state)
+                            SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state)
+                            SettingsSection.ExportAnnotations -> ExportAnnotationsSettingsSection(state)
+                            SettingsSection.Automation -> AutomationSettingsSection(state)
+                            SettingsSection.AiProviders -> AiProviderSettingsSection(state)
+                            SettingsSection.CustomAiCommands -> CustomAiCommandsSettingsSection(state)
+                            SettingsSection.SourceCode -> SourceCodeSettingsSection(state)
+                        }
+                    }
+                    VerticalScrollbar(
+                        adapter = rememberScrollbarAdapter(contentScroll),
+                        modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+                        style = appScrollbarStyle(tc),
+                    )
+                }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Divider()
+            Row(
+                Modifier.fillMaxWidth().padding(16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // Fixed-width label column (not spacedBy) so "Version"/"Author" — different
+                // lengths in a proportional font — leave their values starting at the same x.
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.width(52.dp)) {
+                            AppText("Version", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                        }
+                        AppText(BuildInfo.APP_VERSION, color = tc.ts, fontSize = 10.sp, fontFamily = MONO)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.width(52.dp)) {
+                            AppText("Author", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                        }
+                        AppText(BuildInfo.APP_AUTHOR, color = tc.ts, fontSize = 10.sp, fontFamily = MONO)
+                    }
+                }
+                AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsMenuItem(section: SettingsSection, selected: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(8.dp)
+    Row(
+        Modifier.fillMaxWidth()
+            .clip(shape)
+            .background(
+                when {
+                    selected -> tc.ac.copy(alpha = .16f)
+                    hovered -> tc.br.copy(alpha = .5f)
+                    else -> Color.Transparent
+                },
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            section.icon,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = if (selected) tc.ac else tc.td,
+        )
+        AppText(
+            section.title,
+            color = if (selected) tc.tx else tc.ts,
+            fontSize = 12.sp,
+            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun AppearanceSettingsSection(state: AppState) {
+    val tc = tc()
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        ThemeGallery(state)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        TooltipArea(
+            tooltip = {
+                Box(
+                    Modifier
+                        .background(tc.p2, RoundedCornerShape(4.dp))
+                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    AppText(
+                        "Auto-saved notes are written here when this folder exists. Clear cache keeps this folder.",
+                        color = tc.tx,
+                        fontSize = 11.sp,
+                        maxLines = 2,
+                    )
+                }
+            },
+        ) {
+            AppText(
+                "Default save folder",
+                color = tc.td,
+                fontSize = 10.sp,
+                fontFamily = UI,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            val fullPath = state.settings.defaultSaveDir
+            val pathText: @Composable () -> Unit = {
+                AppText(
+                    fullPath?.let { truncatePathForDisplay(it) } ?: "(not set)",
+                    color = tc.ts, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (fullPath != null) {
                 TooltipArea(
                     tooltip = {
                         Box(
@@ -71,502 +240,453 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                                 .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
                                 .padding(horizontal = 8.dp, vertical = 4.dp),
                         ) {
-                            AppText(
-                                "Auto-saved notes are written here when this folder exists. Clear cache keeps this folder.",
-                                color = tc.tx,
-                                fontSize = 11.sp,
-                                maxLines = 2,
-                            )
+                            AppText(fullPath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
                         }
                     },
-                ) {
-                    AppText(
-                        "Default save folder",
-                        color = tc.td,
-                        fontSize = 10.sp,
-                        fontFamily = UI,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    val fullPath = state.settings.defaultSaveDir
-                    val pathText: @Composable () -> Unit = {
-                        AppText(
-                            fullPath?.let { truncatePathForDisplay(it) } ?: "(not set)",
-                            color = tc.ts, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    if (fullPath != null) {
-                        TooltipArea(
-                            tooltip = {
-                                Box(
-                                    Modifier
-                                        .background(tc.p2, RoundedCornerShape(4.dp))
-                                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                                ) {
-                                    AppText(fullPath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                        ) { pathText() }
-                    } else {
-                        Box(Modifier.weight(1f)) { pathText() }
-                    }
-                    AppButton("Browse", onClick = { state.pickSaveFolder() })
-                    if (fullPath != null) AppButton(
-                        "Clear",
-                        onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } })
-                }
+                    modifier = Modifier.weight(1f),
+                ) { pathText() }
+            } else {
+                Box(Modifier.weight(1f)) { pathText() }
             }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                AppText(
-                    "App cache",
-                    color = tc.td,
-                    fontSize = 10.sp,
-                    fontFamily = UI,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    val cachePath = state.appCachePath
-                    TooltipArea(
-                        tooltip = {
-                            Box(
-                                Modifier
-                                    .background(tc.p2, RoundedCornerShape(4.dp))
-                                    .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                            ) {
-                                AppText(cachePath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
+            AppButton("Browse", onClick = { state.pickSaveFolder() })
+            if (fullPath != null) AppButton(
+                "Clear",
+                onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } })
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppText(
+            "App cache",
+            color = tc.td,
+            fontSize = 10.sp,
+            fontFamily = UI,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            val cachePath = state.appCachePath
+            TooltipArea(
+                tooltip = {
+                    Box(
+                        Modifier
+                            .background(tc.p2, RoundedCornerShape(4.dp))
+                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
                     ) {
-                        AppText(
-                            "${truncatePathForDisplay(cachePath)} · ${formatByteSize(state.archiveCacheSizeBytes)}",
-                            color = tc.ts,
-                            fontSize = 11.sp,
-                            fontFamily = MONO,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        AppText(cachePath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
                     }
-                    AppButton("Clear cache", onClick = { state.requestClearCache() }, variant = ButtonVariant.Secondary)
-                }
-            }
-            state.autosaveError?.let { message ->
-                AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
-            }
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.Top,
+                },
+                modifier = Modifier.weight(1f),
             ) {
-                CompactSetting("Font family", Modifier.weight(1f)) {
-                    SegmentedControl(
-                        options = listOf("Monospace", "Proportional"),
-                        selectedIndices = setOf(if (state.settings.fontMono) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
-                    )
-                }
-                CompactSetting("Font size", Modifier.weight(1f), horizontalAlignment = Alignment.End) {
-                    ListStepper(
-                        options = (10..16).toList(),
-                        value = state.settings.fontSize,
-                        onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
-                    )
-                }
-            }
-
-            SettingsSectionHeader("Editor behavior")
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                CompactSetting("Visible tabs") {
-                    val tabLimits = listOf(4, 6, 8, 10, 12, 16)
-                    ListStepper(
-                        options = tabLimits,
-                        value = state.settings.visibleTabLimit,
-                        onChange = { v -> state.updateSettings { it.copy(visibleTabLimit = v) } },
-                    )
-                }
-                CompactSetting("Keyboard scroll margin") {
-                    val scrollMargins = listOf(0, 2, 3, 5, 8, 12)
-                    ListStepper(
-                        options = scrollMargins,
-                        value = state.settings.navScrollMargin,
-                        onChange = { v -> state.updateSettings { it.copy(navScrollMargin = v) } },
-                    )
-                }
-                CompactSetting("Most-used tags") {
-                    val tagLimits = listOf(0, 3, 5, 10, 20)
-                    ListStepper(
-                        options = tagLimits,
-                        value = state.settings.mostUsedTagLimit,
-                        onChange = { v -> state.updateSettings { it.copy(mostUsedTagLimit = v) } },
-                    )
-                }
-                CompactSetting("Filter list rows") {
-                    val rowLimits = listOf(3, 5, 8, 10, 15)
-                    ListStepper(
-                        options = rowLimits,
-                        value = state.settings.filterListRows,
-                        onChange = { v -> state.updateSettings { it.copy(filterListRows = v) } },
-                    )
-                }
-            }
-            // Plain SpaceBetween, no weight()/forced alignment: with weighted equal-width columns
-            // and the last item End-aligned, that item's own leading slack (columnWidth minus its
-            // content width) piled onto the third gap on top of the third column's own trailing
-            // slack, visibly doubling it. Left tightly wrapped (each item's width = its own
-            // content, per CompactSettingWithTooltip's plain Column), SpaceBetween's
-            // (available − Σwidths)/(n−1) split gives a numerically equal gap between every pair
-            // of adjacent items regardless of how their label/control widths differ, and pins the
-            // last item flush to the row's right edge for free — no explicit End alignment needed.
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                CompactSettingWithTooltip(
-                    label = "Row wrapping",
-                    // AWT has no horizontal mouse-wheel axis at all (confirmed via
-                    // java.awt.event.MouseWheelEvent — there's no getWheelRotationX() or
-                    // equivalent), so Compose Desktop only ever produces a horizontal scroll
-                    // delta when Shift is held down (its AWT bridge maps the wheel rotation into
-                    // Offset.x specifically for that case). A genuine two-finger trackpad
-                    // horizontal swipe never reaches Compose as a horizontal delta at all on
-                    // Linux; see ui/LinuxHorizontalScroll.kt for the X11-button bridge that
-                    // targets that gap directly. Shift+wheel works everywhere regardless, hence
-                    // the tooltip below.
-                    tooltip = "Auto wraps long lines to fit the panel width; toggle off to set a fixed " +
-                        "wrap column and scroll horizontally instead. Tip: hold Shift while scrolling if " +
-                        "two-finger trackpad swipe doesn't scroll horizontally.",
-                ) {
-                    RowWrapControl(
-                        auto = state.settings.autoLogRowWrap,
-                        wrapChars = state.settings.logRowWrapLimitChars,
-                        onToggleAuto = { state.updateSettings { it.copy(autoLogRowWrap = !it.autoLogRowWrap) } },
-                        onWrapCharsChange = { limit -> state.updateSettings { it.copy(logRowWrapLimitChars = limit) } },
-                    )
-                }
-                CompactSettingWithTooltip(
-                    label = "Crash rows",
-                    tooltip = "Colors every row in an expanded crash/stack-trace group, not just the header.",
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 0) } },
-                    )
-                }
-                CompactSettingWithTooltip(
-                    label = "Original panel",
-                    tooltip = "Controls whether newly opened files start with the unfiltered Original panel visible.",
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 0) } },
-                    )
-                }
-                CompactSettingWithTooltip(
-                    label = "Ctrl+F focuses",
-                    tooltip = "Which filter input Ctrl/Cmd+F jumps to.",
-                ) {
-                    // Rules (CtrlFTarget.MESSAGE_RULE) dropped from the selector, not the enum —
-                    // a settings token saved before this change can still hold it, so indexOf
-                    // falling through to -1 (nothing highlighted, existing behavior unaffected)
-                    // is the correct degrade rather than a crash.
-                    val targets = listOf(CtrlFTarget.TAGS, CtrlFTarget.KEYWORD_REGEX)
-                    SegmentedControl(
-                        options = listOf("Tags", "Regex"),
-                        selectedIndices = setOf(targets.indexOf(state.settings.ctrlFTarget)),
-                        onToggle = { idx -> state.updateSettings { it.copy(ctrlFTarget = targets[idx]) } },
-                    )
-                }
-            }
-
-            SettingsSectionHeader("Export & annotations")
-            AnnotationSettingsRow(state)
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 AppText(
-                    "Annotation file prefix",
-                    color = tc.td,
-                    fontSize = 10.sp,
-                    fontFamily = UI,
-                    fontWeight = FontWeight.SemiBold
+                    "${truncatePathForDisplay(cachePath)} · ${formatByteSize(state.archiveCacheSizeBytes)}",
+                    color = tc.ts,
+                    fontSize = 11.sp,
+                    fontFamily = MONO,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                InlineField(
-                    state.settings.annotationPrefixLabel,
-                    { value -> state.updateSettings { it.copy(annotationPrefixLabel = value) } },
-                    "From",
-                    Modifier.fillMaxWidth(),
-                    fontSize = 12.sp,
-                )
-                val previewLabel = state.settings.annotationPrefixLabel.trim().ifBlank { "From" }
-                AppText("Preview: $previewLabel app.log", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
             }
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    AppText("Mask word on copy", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.maskWordOnCopy) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(maskWordOnCopy = idx == 0) } },
-                    )
-                }
-                if (state.settings.maskWordOnCopy) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            AppText("Word", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-                            InlineField(
-                                state.settings.maskWordTarget,
-                                { value -> state.updateSettings { it.copy(maskWordTarget = value) } },
-                                "java",
-                                Modifier.fillMaxWidth(),
-                                fontSize = 12.sp,
-                            )
-                        }
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            AppText("Replacement", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-                            InlineField(
-                                state.settings.maskWordReplacement,
-                                { value -> state.updateSettings { it.copy(maskWordReplacement = value) } },
-                                "j*ava",
-                                Modifier.fillMaxWidth(),
-                                fontSize = 12.sp,
-                            )
-                        }
-                    }
-                    AppText(
-                        "Replaces the whole word \"${state.settings.maskWordTarget}\" when copying a note — " +
-                            "{code:java} block markers are never touched.",
-                        color = tc.td, fontSize = 10.sp, maxLines = 2,
-                    )
-                }
-            }
+            AppButton("Clear cache", onClick = { state.requestClearCache() }, variant = ButtonVariant.Secondary)
+        }
+    }
+    state.autosaveError?.let { message ->
+        AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+    }
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        CompactSetting("Font family", Modifier.weight(1f)) {
+            SegmentedControl(
+                options = listOf("Monospace", "Proportional"),
+                selectedIndices = setOf(if (state.settings.fontMono) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
+            )
+        }
+        CompactSetting("Font size", Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+            ListStepper(
+                options = (10..16).toList(),
+                value = state.settings.fontSize,
+                onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
+            )
+        }
+    }
+}
 
-            SettingsSectionHeader("Automation")
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                CompactSetting("MCP control server") {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.mcpControlEnabled) 0 else 1),
-                        onToggle = { idx -> state.setMcpControlEnabled(idx == 0, state.settings.mcpControlPort) },
+@Composable
+private fun EditorBehaviorSettingsSection(state: AppState) {
+    val tc = tc()
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        CompactSetting("Visible tabs") {
+            val tabLimits = listOf(4, 6, 8, 10, 12, 16)
+            ListStepper(
+                options = tabLimits,
+                value = state.settings.visibleTabLimit,
+                onChange = { v -> state.updateSettings { it.copy(visibleTabLimit = v) } },
+            )
+        }
+        CompactSetting("Keyboard scroll margin") {
+            val scrollMargins = listOf(0, 2, 3, 5, 8, 12)
+            ListStepper(
+                options = scrollMargins,
+                value = state.settings.navScrollMargin,
+                onChange = { v -> state.updateSettings { it.copy(navScrollMargin = v) } },
+            )
+        }
+        CompactSetting("Most-used tags") {
+            val tagLimits = listOf(0, 3, 5, 10, 20)
+            ListStepper(
+                options = tagLimits,
+                value = state.settings.mostUsedTagLimit,
+                onChange = { v -> state.updateSettings { it.copy(mostUsedTagLimit = v) } },
+            )
+        }
+        CompactSetting("Filter list rows") {
+            val rowLimits = listOf(3, 5, 8, 10, 15)
+            ListStepper(
+                options = rowLimits,
+                value = state.settings.filterListRows,
+                onChange = { v -> state.updateSettings { it.copy(filterListRows = v) } },
+            )
+        }
+    }
+    // Plain SpaceBetween, no weight()/forced alignment: with weighted equal-width columns
+    // and the last item End-aligned, that item's own leading slack (columnWidth minus its
+    // content width) piled onto the third gap on top of the third column's own trailing
+    // slack, visibly doubling it. Left tightly wrapped (each item's width = its own
+    // content, per CompactSettingWithTooltip's plain Column), SpaceBetween's
+    // (available − Σwidths)/(n−1) split gives a numerically equal gap between every pair
+    // of adjacent items regardless of how their label/control widths differ, and pins the
+    // last item flush to the row's right edge for free — no explicit End alignment needed.
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        CompactSettingWithTooltip(
+            label = "Row wrapping",
+            // AWT has no horizontal mouse-wheel axis at all (confirmed via
+            // java.awt.event.MouseWheelEvent — there's no getWheelRotationX() or
+            // equivalent), so Compose Desktop only ever produces a horizontal scroll
+            // delta when Shift is held down (its AWT bridge maps the wheel rotation into
+            // Offset.x specifically for that case). A genuine two-finger trackpad
+            // horizontal swipe never reaches Compose as a horizontal delta at all on
+            // Linux; see ui/LinuxHorizontalScroll.kt for the X11-button bridge that
+            // targets that gap directly. Shift+wheel works everywhere regardless, hence
+            // the tooltip below.
+            tooltip = "Auto wraps long lines to fit the panel width; toggle off to set a fixed " +
+                "wrap column and scroll horizontally instead. Tip: hold Shift while scrolling if " +
+                "two-finger trackpad swipe doesn't scroll horizontally.",
+        ) {
+            RowWrapControl(
+                auto = state.settings.autoLogRowWrap,
+                wrapChars = state.settings.logRowWrapLimitChars,
+                onToggleAuto = { state.updateSettings { it.copy(autoLogRowWrap = !it.autoLogRowWrap) } },
+                onWrapCharsChange = { limit -> state.updateSettings { it.copy(logRowWrapLimitChars = limit) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Crash rows",
+            tooltip = "Colors every row in an expanded crash/stack-trace group, not just the header.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Original panel",
+            tooltip = "Controls whether newly opened files start with the unfiltered Original panel visible.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Ctrl+F focuses",
+            tooltip = "Which filter input Ctrl/Cmd+F jumps to.",
+        ) {
+            // Rules (CtrlFTarget.MESSAGE_RULE) dropped from the selector, not the enum —
+            // a settings token saved before this change can still hold it, so indexOf
+            // falling through to -1 (nothing highlighted, existing behavior unaffected)
+            // is the correct degrade rather than a crash.
+            val targets = listOf(CtrlFTarget.TAGS, CtrlFTarget.KEYWORD_REGEX)
+            SegmentedControl(
+                options = listOf("Tags", "Regex"),
+                selectedIndices = setOf(targets.indexOf(state.settings.ctrlFTarget)),
+                onToggle = { idx -> state.updateSettings { it.copy(ctrlFTarget = targets[idx]) } },
+            )
+        }
+    }
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AppText("Keyboard shortcuts", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        // Deliberately doesn't close Settings first — stacks on top instead, so closing
+        // this popup returns you to Settings rather than to the main window.
+        AppButton("Show shortcuts…", onClick = { state.shortcutsOpen = true }, variant = ButtonVariant.Secondary)
+    }
+}
+
+@Composable
+private fun ExportAnnotationsSettingsSection(state: AppState) {
+    val tc = tc()
+    AnnotationSettingsRow(state)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppText(
+            "Annotation file prefix",
+            color = tc.td,
+            fontSize = 10.sp,
+            fontFamily = UI,
+            fontWeight = FontWeight.SemiBold
+        )
+        InlineField(
+            state.settings.annotationPrefixLabel,
+            { value -> state.updateSettings { it.copy(annotationPrefixLabel = value) } },
+            "From",
+            Modifier.fillMaxWidth(),
+            fontSize = 12.sp,
+        )
+        val previewLabel = state.settings.annotationPrefixLabel.trim().ifBlank { "From" }
+        AppText("Preview: $previewLabel app.log", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AppText("Mask word on copy", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.maskWordOnCopy) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(maskWordOnCopy = idx == 0) } },
+            )
+        }
+        if (state.settings.maskWordOnCopy) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    AppText("Word", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                    InlineField(
+                        state.settings.maskWordTarget,
+                        { value -> state.updateSettings { it.copy(maskWordTarget = value) } },
+                        "java",
+                        Modifier.fillMaxWidth(),
+                        fontSize = 12.sp,
                     )
                 }
-                CompactSetting("Port", horizontalAlignment = Alignment.End) {
-                    var portText by remember(state.settings.mcpControlPort) {
-                        mutableStateOf(state.settings.mcpControlPort.toString())
-                    }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    AppText("Replacement", color = tc.td, fontSize = 10.sp, fontFamily = UI)
                     InlineField(
-                        portText,
-                        { v ->
-                            val digits = v.filter { it.isDigit() }.take(5)
-                            portText = digits
-                            digits.toIntOrNull()?.coerceIn(MIN_PORT, MAX_PORT)?.let { p ->
-                                if (state.settings.mcpControlEnabled) state.setMcpControlEnabled(true, p)
-                                else state.updateSettings { it.copy(mcpControlPort = p) }
-                            }
-                        },
-                        "8991",
-                        Modifier.width(72.dp),
+                        state.settings.maskWordReplacement,
+                        { value -> state.updateSettings { it.copy(maskWordReplacement = value) } },
+                        "j*ava",
+                        Modifier.fillMaxWidth(),
                         fontSize = 12.sp,
                     )
                 }
             }
-            state.mcpControlError?.let { message ->
-                AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+            AppText(
+                "Replaces the whole word \"${state.settings.maskWordTarget}\" when copying a note — " +
+                    "{code:java} block markers are never touched.",
+                color = tc.td, fontSize = 10.sp, maxLines = 2,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AutomationSettingsSection(state: AppState) {
+    val tc = tc()
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CompactSetting("MCP control server") {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.mcpControlEnabled) 0 else 1),
+                onToggle = { idx -> state.setMcpControlEnabled(idx == 0, state.settings.mcpControlPort) },
+            )
+        }
+        CompactSetting("Port", horizontalAlignment = Alignment.End) {
+            var portText by remember(state.settings.mcpControlPort) {
+                mutableStateOf(state.settings.mcpControlPort.toString())
             }
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                AppText("Connection info", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                // Deliberately doesn't close Settings first — stacks on top instead, so closing
-                // this popup returns you to Settings rather than to the main window.
-                AppButton("Connection info…", onClick = { state.mcpInfoOpen = true }, variant = ButtonVariant.Secondary)
-            }
-
-            SettingsSectionHeader("AI providers")
-            AiProviderSettingsSection(state)
-
-            SettingsSectionHeader("Custom AI commands")
-            CustomAiCommandsSettingsSection(state)
-
-            SettingsSectionHeader("Source code")
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (state.settings.sourceFolders.isEmpty()) {
-                    AppText(
-                        "(no folders — register one to enable Show in code)",
-                        color = tc.td,
-                        fontSize = 11.sp,
-                    )
-                } else {
-                    state.settings.sourceFolders.forEach { path ->
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            TooltipArea(
-                                tooltip = {
-                                    Box(
-                                        Modifier
-                                            .background(tc.p2, RoundedCornerShape(4.dp))
-                                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                                    ) {
-                                        AppText(path, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
-                                    }
-                                },
-                                modifier = Modifier.weight(1f),
-                            ) {
-                                AppText(
-                                    truncatePathForDisplay(path),
-                                    color = tc.ts,
-                                    fontSize = 11.sp,
-                                    fontFamily = MONO,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            AppButton(
-                                "Info",
-                                onClick = { state.sourceFolderInfoEditorTarget = path },
-                                variant = ButtonVariant.Secondary,
-                            )
-                            AppButton("Remove", onClick = { state.removeSourceFolder(path) }, variant = ButtonVariant.Secondary)
-                        }
+            InlineField(
+                portText,
+                { v ->
+                    val digits = v.filter { it.isDigit() }.take(5)
+                    portText = digits
+                    digits.toIntOrNull()?.coerceIn(MIN_PORT, MAX_PORT)?.let { p ->
+                        if (state.settings.mcpControlEnabled) state.setMcpControlEnabled(true, p)
+                        else state.updateSettings { it.copy(mcpControlPort = p) }
                     }
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                TooltipArea(
-                    tooltip = {
-                        Box(
-                            Modifier
-                                .background(tc.p2, RoundedCornerShape(4.dp))
-                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                        ) {
-                            AppText(
-                                "Point openLog at your project's source folder(s), then right-click a log line → " +
-                                    "\"Show in code\" to see the code that logged it.",
-                                color = tc.tx,
-                                fontSize = 11.sp,
-                                maxLines = 2,
-                            )
-                        }
-                    },
-                ) {
-                    AppButton("Register source code", onClick = { state.pickSourceFolder() })
-                }
-                AppButton(
-                    "Reindex",
-                    onClick = { state.reindexSources() },
-                    variant = ButtonVariant.Secondary,
-                    enabled = !state.isIndexingSources && state.settings.sourceFolders.isNotEmpty(),
-                )
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                val sourceStatus = state.sourceIndexStatus
-                AppText(
-                    if (sourceStatus.builtAt == 0L) {
-                        "Not indexed yet"
-                    } else {
-                        "${sourceStatus.fileCount} files · ${sourceStatus.siteCount} call sites · " +
-                            "indexed ${sourceIndexAgeLabel(sourceStatus.builtAt)}"
-                    },
-                    color = tc.td,
-                    fontSize = 10.sp,
-                    fontFamily = UI,
-                )
-                if (sourceStatus.changedFileCount > 0) {
-                    AppText(
-                        "${sourceStatus.changedFileCount} files changed — reindex recommended",
-                        color = tc.ac,
-                        fontSize = 10.sp,
-                        fontFamily = UI,
-                    )
-                }
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                TooltipArea(
-                    tooltip = {
-                        Box(
-                            Modifier
-                                .background(tc.p2, RoundedCornerShape(4.dp))
-                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                        ) {
-                            AppText(
-                                "Command to open a file at a line. Use {file} and {line} placeholders, e.g. " +
-                                    "idea --line {line} {file} or code -g {file}:{line}. Leave blank to " +
-                                    "auto-detect a common editor (VS Code, IntelliJ, Cursor, Sublime) or fall " +
-                                    "back to the default app. A configured command is not replaced by that fallback.",
-                                color = tc.tx,
-                                fontSize = 11.sp,
-                                maxLines = 4,
-                            )
-                        }
-                    },
-                ) {
-                    AppText(
-                        "Open command",
-                        color = tc.td,
-                        fontSize = 10.sp,
-                        fontFamily = UI,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
-                InlineField(
-                    state.settings.editorCommand,
-                    { value -> state.updateSettings { it.copy(editorCommand = value) } },
-                    "idea --line {line} {file}",
-                    Modifier.fillMaxWidth(),
-                    fontSize = 12.sp,
-                )
-            }
+                },
+                "8991",
+                Modifier.width(72.dp),
+                fontSize = 12.sp,
+            )
+        }
+    }
+    state.mcpControlError?.let { message ->
+        AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+    }
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AppText("Connection info", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        // Deliberately doesn't close Settings first — stacks on top instead, so closing
+        // this popup returns you to Settings rather than to the main window.
+        AppButton("Connection info…", onClick = { state.mcpInfoOpen = true }, variant = ButtonVariant.Secondary)
+    }
+}
 
-            SettingsSectionHeader("About")
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                AppText("Keyboard shortcuts", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                // Deliberately doesn't close Settings first — stacks on top instead, so closing
-                // this popup returns you to Settings rather than to the main window.
-                AppButton("Show shortcuts…", onClick = { state.shortcutsOpen = true }, variant = ButtonVariant.Secondary)
-            }
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                AppText("Version", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                AppText(BuildInfo.APP_VERSION, color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
-            }
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                AppText("Author", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                AppText(BuildInfo.APP_AUTHOR, color = tc.ts, fontSize = 11.sp, fontFamily = MONO)
-            }
-            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
+@Composable
+private fun SourceCodeSettingsSection(state: AppState) {
+    val tc = tc()
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (state.settings.sourceFolders.isEmpty()) {
+            AppText(
+                "(no folders — register one to enable Show in code)",
+                color = tc.td,
+                fontSize = 11.sp,
+            )
+        } else {
+            state.settings.sourceFolders.forEach { path ->
+                SourceFolderRow(state, path)
             }
         }
-        VerticalScrollbar(
-            adapter = rememberScrollbarAdapter(scroll),
-            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
-            style = appScrollbarStyle(tc),
+    }
+    TooltipArea(
+        tooltip = {
+            Box(
+                Modifier
+                    .background(tc.p2, RoundedCornerShape(4.dp))
+                    .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                AppText(
+                    "Point openLog at your project's source folder(s), then right-click a log line → " +
+                        "\"Show in code\" to see the code that logged it.",
+                    color = tc.tx,
+                    fontSize = 11.sp,
+                    maxLines = 2,
+                )
+            }
+        },
+    ) {
+        AppButton("Register source code", onClick = { state.pickSourceFolder() })
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        TooltipArea(
+            tooltip = {
+                Box(
+                    Modifier
+                        .background(tc.p2, RoundedCornerShape(4.dp))
+                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    AppText(
+                        "Command to open a file at a line. Use {file} and {line} placeholders, e.g. " +
+                            "idea --line {line} {file} or code -g {file}:{line}. Leave blank to " +
+                            "auto-detect a common editor (VS Code, IntelliJ, Cursor, Sublime) or fall " +
+                            "back to the default app. A configured command is not replaced by that fallback.",
+                        color = tc.tx,
+                        fontSize = 11.sp,
+                        maxLines = 4,
+                    )
+                }
+            },
+        ) {
+            AppText(
+                "Open command",
+                color = tc.td,
+                fontSize = 10.sp,
+                fontFamily = UI,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        InlineField(
+            state.settings.editorCommand,
+            { value -> state.updateSettings { it.copy(editorCommand = value) } },
+            "idea --line {line} {file}",
+            Modifier.fillMaxWidth(),
+            fontSize = 12.sp,
         )
+    }
+}
+
+// Indexing is per folder (AppState.reindexSources/sourceIndexStatusForFolder) — each registered
+// folder gets its own status line and its own Reindex button, rather than one aggregate action
+// that rescans every folder together.
+@Composable
+private fun SourceFolderRow(state: AppState, path: String) {
+    val tc = tc()
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TooltipArea(
+                tooltip = {
+                    Box(
+                        Modifier
+                            .background(tc.p2, RoundedCornerShape(4.dp))
+                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        AppText(path, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                AppText(
+                    truncatePathForDisplay(path),
+                    color = tc.ts,
+                    fontSize = 11.sp,
+                    fontFamily = MONO,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            AppButton(
+                "Reindex",
+                onClick = { state.reindexSources(path) },
+                variant = ButtonVariant.Secondary,
+                enabled = File(path).absolutePath !in state.indexingFolders,
+            )
+            AppButton(
+                "Info",
+                onClick = { state.sourceFolderInfoEditorTarget = path },
+                variant = ButtonVariant.Secondary,
+            )
+            AppButton("Remove", onClick = { state.removeSourceFolder(path) }, variant = ButtonVariant.Secondary)
+        }
+        val folderStatus = state.sourceIndexStatusForFolder(path)
+        AppText(
+            if (folderStatus.builtAt == 0L) {
+                "Not indexed yet"
+            } else {
+                "${folderStatus.fileCount} files · ${folderStatus.siteCount} call sites · " +
+                    "indexed ${sourceIndexAgeLabel(folderStatus.builtAt)}"
+            },
+            color = tc.td,
+            fontSize = 10.sp,
+            fontFamily = UI,
+        )
+        if (folderStatus.changedFileCount > 0) {
+            AppText(
+                "${folderStatus.changedFileCount} files changed — reindex recommended",
+                color = tc.ac,
+                fontSize = 10.sp,
+                fontFamily = UI,
+            )
+        }
     }
 }
 
@@ -597,17 +717,18 @@ private fun AiProviderSettingsSection(state: AppState) {
     val coroutineScope = rememberCoroutineScope()
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            profiles.forEach { item ->
-                AppButton(
-                    item.displayName,
-                    onClick = {
-                        state.selectAiProviderProfile(item.id)
-                        editingProfileId = item.id
-                    },
-                    variant = if (item.id == profile.id) ButtonVariant.Primary else ButtonVariant.Secondary,
-                )
-            }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            // Same toggle-track style as every other exclusive-choice control in Settings (Font
+            // family, Row wrapping, etc.) instead of a row of separate filled/outlined buttons.
+            SegmentedControl(
+                options = profiles.map { it.displayName },
+                selectedIndices = setOf(profiles.indexOfFirst { it.id == profile.id }),
+                onToggle = { idx ->
+                    val item = profiles[idx]
+                    state.selectAiProviderProfile(item.id)
+                    editingProfileId = item.id
+                },
+            )
             AppButton("Add", onClick = { editingProfileId = state.addAiProviderProfile().id })
         }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -657,10 +778,11 @@ private fun AiProviderSettingsSection(state: AppState) {
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Secondary, not Primary — elsewhere in Settings, Primary is reserved for the
+            // dialog's own "Done" action, not per-section actions like this one.
             AppButton(
                 "Save profile",
                 onClick = { validationError = state.updateAiProviderProfile(draft) },
-                variant = ButtonVariant.Primary,
             )
             // Reachability is a pure network probe against the current form fields: it never
             // saves, validates, or otherwise touches the stored profile, so it works whether or
@@ -674,7 +796,11 @@ private fun AiProviderSettingsSection(state: AppState) {
                     connectionTest = null
                     coroutineScope.launch(Dispatchers.IO) {
                         val provider = OpenAiCompatibleProvider(testProfile, testKey)
-                        connectionTest = try { provider.listModels() } finally { provider.close() }
+                        connectionTest = try {
+                            provider.listModels()
+                        } finally {
+                            provider.close()
+                        }
                         testingConnection = false
                     }
                 },
@@ -768,15 +894,6 @@ internal fun sourceIndexAgeLabel(builtAt: Long): String {
         delta < MS_PER_HOUR -> "${delta / MS_PER_MINUTE} min ago"
         delta < MS_PER_DAY -> "${delta / MS_PER_HOUR} h ago"
         else -> java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.US).format(java.util.Date(builtAt))
-    }
-}
-
-@Composable
-internal fun SettingsSectionHeader(title: String) {
-    val tc = tc()
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        AppText(title, color = tc.ts, fontSize = 11.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-        Divider()
     }
 }
 

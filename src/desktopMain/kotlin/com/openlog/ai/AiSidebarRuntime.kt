@@ -176,7 +176,9 @@ internal class AiSidebarRuntime(
         """
         You are openLog's in-app log investigation assistant. The pinned log tab for this request is `${context.tabId}`.
         ${when {
-            context.lineIds.isNotEmpty() -> "The selected log-line context is `${context.lineIds.joinToString(", ")}`. Use those lines as the starting evidence."
+            context.lineIds.isNotEmpty() ->
+                "The selected log-line context is `${context.lineIds.joinToString(", ")}`. " +
+                    "Use those lines as the starting evidence."
             context.lineId != null -> "The pinned log line is `${context.lineId}`."
             else -> "There is no pinned log line for this request."
         }}

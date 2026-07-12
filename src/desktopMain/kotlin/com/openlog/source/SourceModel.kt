@@ -4,7 +4,7 @@ package com.openlog.source
  *  changes in a way that makes a previously-persisted index stale. Task 1 doesn't persist
  *  anything yet, but later tasks compare this against a saved value to decide whether a cached
  *  index must be rebuilt rather than merely refreshed. */
-const val SOURCE_INDEX_VERSION = 3
+const val SOURCE_INDEX_VERSION = 4
 
 /** One Android logging call site discovered by [SourceIndexer.build].
  *
@@ -38,6 +38,10 @@ data class SourceIndex(
     val sites: List<LogCallSite>,
     val fileMeta: Map<String, FileMeta>,
     val builtAt: Long,
+    // Per-root last-reindex timestamp — reindexing is per source folder (AppState.reindexSources),
+    // so unlike [builtAt] (stamped whenever any one root is merged in) this is what the Settings UI
+    // shows as "indexed N ago" for a given folder.
+    val rootBuiltAt: Map<String, Long> = emptyMap(),
 )
 
 /** A candidate source site for a resolved log line. [stale] is always false in Task 1 — later

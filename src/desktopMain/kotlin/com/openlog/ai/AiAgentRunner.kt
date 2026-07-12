@@ -422,6 +422,7 @@ internal class AiAgentRunner(
     private companion object {
         const val MAX_TOOL_ROUNDS = com.openlog.model.DEFAULT_AI_MAX_TOOL_ROUNDS
         const val MAX_TOOL_RESULT_CHARS = 12_000
+
         // Cap on how many rounds before the limit the wrap-up nudge fires, and the fraction of the
         // total budget it scales from - see the nudgeLeadRounds computation in runLoop.
         const val NUDGE_LEAD_ROUNDS_CAP = 15

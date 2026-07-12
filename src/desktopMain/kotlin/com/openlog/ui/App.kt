@@ -13,13 +13,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CallMerge
-import androidx.compose.material.icons.outlined.AddComment
-import androidx.compose.material.icons.outlined.ArrowDownward
-import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Block
-import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material.icons.outlined.FindInPage
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.PlayArrow
@@ -243,8 +238,6 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                         // Keep the grouped action rows wide enough for three equal-width
                         // buttons, including the longest Highlight/Selected labels.
                         val menuWidth = 276.dp
-                        val matchingHlId = ctx.selText.takeIf { it.isNotBlank() }
-                            ?.let { state.matchingHighlighterId(ctx.tabId, it) }
                         // Estimate full menu height from items that will actually render:
                         //   header(37) + divider(9) + preview(63) + 1 item(32) + divider(9)
                         //   + 2 items(64) [sequence] + divider(9) + 2 items(64) [collapse-to-start/end]
@@ -367,27 +360,31 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                 if (hasCollapseAction) add(CtxMenuEntry.Divider)
                             }
                             // Only offered once source folders are configured; if they are but this
-                        // particular line has no resolved call site, the actions still render
-                        // disabled rather than disappearing.
-                        if (state.settings.sourceFolders.isNotEmpty()) {
-                            add(
-                                CtxMenuEntry.SourceActions(
-                                    enabled = srcMatches.isNotEmpty(),
-                                    onShowCode = {
-                                        if (srcMatches.isNotEmpty()) {
-                                            state.sourceCodeView = SourceCodeView(srcMatches)
-                                            state.ctx = null
-                                        }
-                                    },
-                                    onOpenFile = {
-                                        srcMatches.firstOrNull()?.let { match ->
-                                            state.openInEditor(match.site.filePath, match.site.callLine)
-                                            state.ctx = null
-                                        }
-                                    },
-                                ),
-                            )
-                        }
+                            // particular line has no resolved call site, the actions still render
+                            // disabled rather than disappearing.
+                            if (state.settings.sourceFolders.isNotEmpty()) {
+                                add(
+                                    CtxMenuEntry.SourceActions(
+                                        // Both actions resolve a single line (ctx.entryId) regardless of
+                                        // selection — with multiple lines selected there's no single call
+                                        // site to show/open, so disable rather than silently acting on
+                                        // just the right-clicked row.
+                                        enabled = srcMatches.isNotEmpty() && selCount <= 1,
+                                        onShowCode = {
+                                            if (srcMatches.isNotEmpty()) {
+                                                state.sourceCodeView = SourceCodeView(srcMatches)
+                                                state.ctx = null
+                                            }
+                                        },
+                                        onOpenFile = {
+                                            srcMatches.firstOrNull()?.let { match ->
+                                                state.openInEditor(match.site.filePath, match.site.callLine)
+                                                state.ctx = null
+                                            }
+                                        },
+                                    ),
+                                )
+                            }
                         }
                         val selectableEntries = menuEntries.filter {
                             it is CtxMenuEntry.ActionHeader || it is CtxMenuEntry.Action ||
@@ -1435,7 +1432,14 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
 
             // ── Settings dialog ───────────────────────────────────────
             if (state.settingsOpen) {
-                Dialog(onDismissRequest = { state.settingsOpen = false }) {
+                // usePlatformDefaultWidth defaults to true, which silently clamps this dialog's
+                // content to Android's ported "preferred dialog width" (580dp on a window this
+                // size) no matter what width SettingsDialog's own Box requests — disabled so the
+                // sidebar + content layout actually gets the width it asks for.
+                Dialog(
+                    onDismissRequest = { state.settingsOpen = false },
+                    properties = DialogProperties(usePlatformDefaultWidth = false),
+                ) {
                     SettingsDialog(state) { state.settingsOpen = false }
                 }
             }

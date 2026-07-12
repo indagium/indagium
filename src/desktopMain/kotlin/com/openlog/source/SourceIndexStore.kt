@@ -60,6 +60,13 @@ private class ParseState {
     val roots = mutableListOf<String>()
     val fileMeta = mutableMapOf<String, FileMeta>()
     val sites = mutableListOf<LogCallSite>()
+    val rootBuiltAt = mutableMapOf<String, Long>()
+}
+
+private fun parseRootBuiltAtLine(rest: String): Pair<String, Long>? {
+    val parts = rest.split("\t")
+    if (parts.size < 2) return null
+    return parts[0].fieldValue() to parts[1].toLong()
 }
 
 private fun ParseState.applyLine(line: String) {
@@ -71,6 +78,7 @@ private fun ParseState.applyLine(line: String) {
         "root" -> roots += rest.fieldValue()
         "meta" -> parseMetaLine(rest)?.let { (path, meta) -> fileMeta[path] = meta }
         "site" -> parseSiteLine(rest)?.let { sites += it }
+        "rootBuiltAt" -> parseRootBuiltAtLine(rest)?.let { (root, at) -> rootBuiltAt[root] = at }
     }
 }
 
@@ -86,6 +94,7 @@ private fun parseSourceIndexLines(lines: List<String>): SourceIndex? {
         sites = state.sites,
         fileMeta = state.fileMeta,
         builtAt = state.builtAt,
+        rootBuiltAt = state.rootBuiltAt,
     )
 }
 
@@ -102,6 +111,7 @@ object SourceIndexStore {
             writer.appendLine("version\t${index.version}")
             writer.appendLine("builtAt\t${index.builtAt}")
             index.roots.forEach { root -> writer.appendLine("root\t${root.fieldToken()}") }
+            index.rootBuiltAt.forEach { (root, at) -> writer.appendLine("rootBuiltAt\t${root.fieldToken()}\t$at") }
             index.fileMeta.forEach { (path, meta) ->
                 writer.appendLine("meta\t${path.fieldToken()}\t${meta.mtime}\t${meta.size}")
             }

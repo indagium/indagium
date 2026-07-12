@@ -767,15 +767,27 @@ internal fun CtxTagActions(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
-                    AppButton("Include", onClick = onInclude, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.AutoMirrored.Outlined.Label, horizontalPadding = 4.dp)
+                    AppButton(
+                        "Include", onClick = onInclude, variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth().height(26.dp),
+                        leadingIcon = Icons.AutoMirrored.Outlined.Label, horizontalPadding = 4.dp,
+                    )
                 }
                 CtxActionDivider(tc)
                 CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
-                    AppButton("Exclude", onClick = onExclude, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.AutoMirrored.Outlined.LabelOff, horizontalPadding = 4.dp)
+                    AppButton(
+                        "Exclude", onClick = onExclude, variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth().height(26.dp),
+                        leadingIcon = Icons.AutoMirrored.Outlined.LabelOff, horizontalPadding = 4.dp,
+                    )
                 }
                 CtxActionDivider(tc)
                 CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
-                    AppButton("Highlight", onClick = onHighlight, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.Bookmark, horizontalPadding = 4.dp)
+                    AppButton(
+                        "Highlight", onClick = onHighlight, variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth().height(26.dp),
+                        leadingIcon = Icons.Outlined.Bookmark, horizontalPadding = 4.dp,
+                    )
                 }
             }
         }
@@ -807,7 +819,11 @@ internal fun CtxCollapseActions(
             ) {
                 onToStart?.let {
                     CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
-                        AppButton("To start", onClick = it, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.ArrowUpward, horizontalPadding = 4.dp)
+                        AppButton(
+                            "To start", onClick = it, variant = ButtonVariant.Ghost,
+                            modifier = Modifier.fillMaxWidth().height(26.dp),
+                            leadingIcon = Icons.Outlined.ArrowUpward, horizontalPadding = 4.dp,
+                        )
                     }
                 }
                 if (onToStart != null && (onToEnd != null || onSelected != null)) {
@@ -815,7 +831,11 @@ internal fun CtxCollapseActions(
                 }
                 onToEnd?.let {
                     CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
-                        AppButton("To End", onClick = it, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.ArrowDownward, horizontalPadding = 4.dp)
+                        AppButton(
+                            "To End", onClick = it, variant = ButtonVariant.Ghost,
+                            modifier = Modifier.fillMaxWidth().height(26.dp),
+                            leadingIcon = Icons.Outlined.ArrowDownward, horizontalPadding = 4.dp,
+                        )
                     }
                 }
                 if (onToEnd != null && onSelected != null) {
@@ -823,7 +843,11 @@ internal fun CtxCollapseActions(
                 }
                 onSelected?.let {
                     CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
-                        AppButton("Selected", onClick = it, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.Layers, horizontalPadding = 4.dp)
+                        AppButton(
+                            "Selected", onClick = it, variant = ButtonVariant.Ghost,
+                            modifier = Modifier.fillMaxWidth().height(26.dp),
+                            leadingIcon = Icons.Outlined.Layers, horizontalPadding = 4.dp,
+                        )
                     }
                 }
             }
@@ -855,15 +879,27 @@ internal fun CtxSelectionActions(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
-                    AppButton("Ask AI", onClick = onAskAi, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.FindInPage, horizontalPadding = 4.dp)
+                    AppButton(
+                        "Ask AI", onClick = onAskAi, variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth().height(26.dp),
+                        leadingIcon = Icons.Outlined.FindInPage, horizontalPadding = 4.dp,
+                    )
                 }
                 CtxActionDivider(tc)
                 CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
-                    AppButton("Copy", onClick = onCopy, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.ContentCopy, horizontalPadding = 4.dp)
+                    AppButton(
+                        "Copy", onClick = onCopy, variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth().height(26.dp),
+                        leadingIcon = Icons.Outlined.ContentCopy, horizontalPadding = 4.dp,
+                    )
                 }
                 CtxActionDivider(tc)
                 CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
-                    AppButton("Highlight", onClick = onHighlight, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth().height(26.dp), leadingIcon = Icons.Outlined.Bookmark, horizontalPadding = 4.dp)
+                    AppButton(
+                        "Highlight", onClick = onHighlight, variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth().height(26.dp),
+                        leadingIcon = Icons.Outlined.Bookmark, horizontalPadding = 4.dp,
+                    )
                 }
             }
         }

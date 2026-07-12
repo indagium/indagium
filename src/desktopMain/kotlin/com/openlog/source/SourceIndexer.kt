@@ -280,6 +280,7 @@ private fun consumeStringLiteral(expr: String, startIdx: Int, literal: StringBui
 // formatting specifiers (including positional/width/precision variants) become dynamic holes,
 // while `%%` remains one literal percent. A malformed percent sequence stays literal rather than
 // widening the matcher unexpectedly.
+@Suppress("CyclomaticComplexMethod", "LoopWithTooManyJumpStatements")
 private fun formatterTemplateParts(format: String): List<TplPart> {
     val parts = mutableListOf<TplPart>()
     val literal = StringBuilder()
@@ -328,8 +329,9 @@ private fun formatterTemplateParts(format: String): List<TplPart> {
         }
         if (j < format.length && format[j] in "tT") {
             j++
-            if (j < format.length && format[j] in "HIklMSLNpzZsQBbhAaCYyjmdeRTrDFc") j++
-            else {
+            if (j < format.length && format[j] in "HIklMSLNpzZsQBbhAaCYyjmdeRTrDFc") {
+                j++
+            } else {
                 literal.append('%')
                 i++
                 continue
@@ -527,6 +529,7 @@ private fun buildConstMap(text: String, mask: CodeMask, filePackage: String?): M
     val map = LinkedHashMap<String, MutableList<ScopedConst>>()
 
     fun isReal(offset: Int) = mask.isCode.getOrElse(offset) { false }
+
     fun add(name: String, value: String, offset: Int) {
         val scoped = ScopedConst(value, findEnclosingNamedType(text, mask, offset))
         val entries = map.getOrPut(name) { mutableListOf() }

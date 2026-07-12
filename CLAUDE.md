@@ -39,7 +39,7 @@ Skipping this leaves the README showing a stale version after a release ships, w
 ./gradlew packageMsi        # Windows .msi (run on Windows)
 
 # Release (triggers GitHub Actions → builds Linux + Windows + macOS → creates GitHub Release)
-git tag v1.2.0 && git push --tags
+git tag v1.2.8 && git push --tags
 ```
 
 Source sets are `desktopMain` and `desktopTest` (Kotlin Multiplatform with a single `jvm("desktop")` target).
@@ -111,6 +111,7 @@ Autosave triggers via `LaunchedEffect` with a 400ms debounce on tab/filter/setti
 - **HDivider/VDivider**: track `dragging` with a separate `MutableState<Boolean>` to suppress the hover-highlight flicker that occurs when the cursor leaves the hit target during a drag.
 - **ID collisions across tabs**: `LogParser` starts IDs from 1 per file. `pointerInput` keys and `rowBoundsAbs` maps must include `tab.id` to avoid cross-tab collisions.
 - **LazyColumn horizontal scroll**: wrap `LazyColumn` in a `Box` with `horizontalScroll`, and give items `widthIn(min = 2000.dp)` so all columns stay aligned.
+- **`Dialog(onDismissRequest = ...)` width clamp**: defaults to `usePlatformDefaultWidth = true`, which silently caps content to a ported-from-Android "preferred dialog width" (580dp on a window this size — see `RootMeasurePolicy.skiko.kt`'s `preferredDialogWidth`) no matter how wide the composable inside requests. Any `Dialog` meant to be wider than ~580dp needs `properties = DialogProperties(usePlatformDefaultWidth = false)` (see `SettingsDialog`'s call site in `App.kt`) — otherwise every width tweak on the inner content is silently a no-op.
 
 ## IDEA MCP
 

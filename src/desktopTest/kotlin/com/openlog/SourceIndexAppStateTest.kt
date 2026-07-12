@@ -192,7 +192,7 @@ class SourceIndexAppStateTest {
 
         val state = newState(dir)
         state.updateSettings { it.copy(sourceFolders = listOf(srcDir.absolutePath)) }
-        state.reindexSources()
+        state.reindexSources(srcDir.absolutePath)
         waitUntil { state.sourceIndex != null }
 
         val tab = mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.D, "TagX", "Hello world")))
@@ -231,7 +231,7 @@ class SourceIndexAppStateTest {
 
         val state = newState(dir)
         state.updateSettings { it.copy(sourceFolders = listOf(srcDir.absolutePath)) }
-        state.reindexSources()
+        state.reindexSources(srcDir.absolutePath)
         waitUntil { state.sourceIndex != null }
 
         val site = state.sourceIndex!!.sites.single()
@@ -277,17 +277,17 @@ class SourceIndexAppStateTest {
 
         val first = newState(dir, indexFile)
         first.updateSettings { it.copy(sourceFolders = listOf(srcDir.absolutePath)) }
-        first.reindexSources()
+        first.reindexSources(srcDir.absolutePath)
         waitUntil { first.sourceIndex != null }
 
         assertTrue(indexFile.exists())
         assertEquals(first.sourceIndex, SourceIndexStore.load(indexFile))
 
         val second = newState(dir, indexFile)
-        waitUntil { second.sourceIndexStatus.siteCount == 1 }
+        waitUntil { second.sourceIndexStatusForFolder(srcDir.absolutePath).siteCount == 1 }
 
-        assertEquals(1, second.sourceIndexStatus.siteCount)
-        assertEquals(0, second.sourceIndexStatus.changedFileCount)
+        assertEquals(1, second.sourceIndexStatusForFolder(srcDir.absolutePath).siteCount)
+        assertEquals(0, second.sourceIndexStatusForFolder(srcDir.absolutePath).changedFileCount)
     }
 
     @Test
@@ -311,9 +311,9 @@ class SourceIndexAppStateTest {
 
         val state = newState(dir, indexFile)
         state.updateSettings { it.copy(sourceFolders = listOf(srcDir.absolutePath)) }
-        state.reindexSources()
-        waitUntil { state.sourceIndexStatus.siteCount == 1 }
-        assertEquals(0, state.sourceIndexStatus.changedFileCount)
+        state.reindexSources(srcDir.absolutePath)
+        waitUntil { state.sourceIndexStatusForFolder(srcDir.absolutePath).siteCount == 1 }
+        assertEquals(0, state.sourceIndexStatusForFolder(srcDir.absolutePath).changedFileCount)
 
         // resolveLogSource checks the file's current on-disk state against the recorded FileMeta on
         // every call (not just at index-build time), so this already reflects the edit below without
@@ -339,8 +339,8 @@ class SourceIndexAppStateTest {
         // changedFileCount is recomputed against live disk state whenever an index is (re)loaded —
         // a fresh AppState pointed at the same persisted index file should now see the edit too.
         val reopened = newState(dir, indexFile)
-        waitUntil { reopened.sourceIndexStatus.changedFileCount > 0 }
-        assertTrue(reopened.sourceIndexStatus.changedFileCount > 0)
+        waitUntil { reopened.sourceIndexStatusForFolder(srcDir.absolutePath).changedFileCount > 0 }
+        assertTrue(reopened.sourceIndexStatusForFolder(srcDir.absolutePath).changedFileCount > 0)
     }
 
     @Test

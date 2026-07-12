@@ -9,9 +9,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -52,8 +51,6 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.input.pointer.PointerIcon
-import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -61,6 +58,8 @@ import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -80,9 +79,9 @@ import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.MarkdownTypography
 import com.mikepenz.markdown.model.rememberMarkdownState
-import com.openlog.ai.AiEvidence
 import com.openlog.ai.AiChipCommand
 import com.openlog.ai.AiContextRequest
+import com.openlog.ai.AiEvidence
 import com.openlog.ai.AiInvestigationContext
 import com.openlog.ai.AiQuickAction
 import com.openlog.ai.AiRun
@@ -216,6 +215,7 @@ private fun AiSidebarPanel(
     // Reading this value subscribes composition to a batched update stream: assistant Markdown
     // is not recomposed for every provider token.
     val revision by runtime.revision.collectAsState()
+
     @Suppress("UNUSED_VARIABLE")
     val observedRevision = revision
     val profiles = normalizeAiProviderProfiles(state.settings.aiProviderProfiles)
@@ -280,7 +280,7 @@ private fun AiSidebarPanel(
     }
 
     Column(
-            Modifier.fillMaxSize().background(colors.p)
+        Modifier.fillMaxSize().background(colors.p)
             .border(BorderStroke(1.dp, if (panelFocused && state.keyboardFocusVisible) colors.ac else colors.br))
             .focusRequester(focusRequester).focusGroup().focusable()
             .onFocusChanged { panelFocused = it.hasFocus; onPanelFocusChanged(it.hasFocus) }
@@ -1025,9 +1025,9 @@ private fun clockTimeLabel(epochMs: Long): String =
     java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(epochMs))
 
 private fun durationLabel(ms: Long): String = when {
-    ms < 1000 -> "${ms.coerceAtLeast(0)}ms"
-    ms < 60_000 -> String.format(java.util.Locale.US, "%.1fs", ms / 1000.0)
-    else -> "${ms / 60_000}m ${(ms % 60_000) / 1000}s"
+    ms < MS_PER_SECOND -> "${ms.coerceAtLeast(0)}ms"
+    ms < MS_PER_MINUTE -> String.format(java.util.Locale.US, "%.1fs", ms / MS_PER_SECOND.toDouble())
+    else -> "${ms / MS_PER_MINUTE}m ${(ms % MS_PER_MINUTE) / MS_PER_SECOND}s"
 }
 
 @Composable
@@ -1278,20 +1278,22 @@ private fun AiPromptComposer(
                             true
                         } else if (suggestions.isEmpty()) {
                             false
-                        } else when (event.key) {
-                            Key.DirectionDown -> {
-                                selectedIndex = (selectedIndex + 1).coerceAtMost(suggestions.lastIndex)
-                                true
+                        } else {
+                            when (event.key) {
+                                Key.DirectionDown -> {
+                                    selectedIndex = (selectedIndex + 1).coerceAtMost(suggestions.lastIndex)
+                                    true
+                                }
+                                Key.DirectionUp -> {
+                                    selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
+                                    true
+                                }
+                                Key.Enter, Key.Tab -> {
+                                    acceptSuggestion(suggestions[selectedIndex.coerceIn(0, suggestions.lastIndex)])
+                                    true
+                                }
+                                else -> false
                             }
-                            Key.DirectionUp -> {
-                                selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
-                                true
-                            }
-                            Key.Enter, Key.Tab -> {
-                                acceptSuggestion(suggestions[selectedIndex.coerceIn(0, suggestions.lastIndex)])
-                                true
-                            }
-                            else -> false
                         }
                     },
                 decorationBox = { inner ->

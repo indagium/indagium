@@ -20,6 +20,7 @@ import com.openlog.model.*
 import com.openlog.source.FileMeta
 import com.openlog.source.LogCallSite
 import com.openlog.source.LogSourceResolver
+import com.openlog.source.SOURCE_INDEX_VERSION
 import com.openlog.source.SourceCodeView
 import com.openlog.source.SourceIndex
 import com.openlog.source.SourceIndexStatus
@@ -401,6 +402,11 @@ data class PendingSplitPrompt(
     val deferredArchiveEntries: List<DeferredArchiveEntry> = emptyList(),
 )
 
+// Every parameter beyond the first few is a test seam with a real-default value (autosaveFile,
+// archiveEntryByteBudget, sourceIndexFile, etc. — see their own doc comments below), not
+// prop-drilled config a caller assembles by hand. Splitting them into a config object would just
+// move the same test-injection surface one level down, not reduce it.
+@Suppress("LongParameterList")
 class AppState(
     private val autosaveFile: File = defaultAutosaveFile(),
     restoreOnCreate: Boolean = false,
@@ -451,7 +457,6 @@ class AppState(
     // toggling aiPanelVisible off unmounts that whole composable, which would otherwise discard
     // this along with every other `remember`ed UI state in it.
     internal var aiSidebarExpandedSection by mutableStateOf<AiSidebarSection?>(null)
-
 
     /** Session-only request produced by a log context menu or AI quick action. */
     internal var pendingAiPromptRequest by mutableStateOf<AiPromptRequest?>(null)
@@ -669,20 +674,19 @@ class AppState(
     // per-row lookup (resolveLogSource) never recompiles every site's matcher regex on the hot path.
     var sourceIndex by mutableStateOf<SourceIndex?>(null)
         private set
-    var sourceIndexStatus by mutableStateOf(SourceIndexStatus())
-        private set
     var sourceCodeView by mutableStateOf<SourceCodeView?>(null)
 
-    // Reactive mirror of the sourceIndexing latch below, purely so the Settings "Reindex" button can
-    // disable itself while a build runs (the private AtomicBoolean isn't observable by Compose).
-    var isIndexingSources by mutableStateOf(false)
+    // Reindexing is per source folder (see reindexSources) — this tracks which folder paths
+    // (absolute) currently have a scan in flight, purely so the Settings UI can disable that
+    // folder's own "Reindex" button and no other's while a build runs.
+    var indexingFolders by mutableStateOf<Set<String>>(emptySet())
         private set
     private var sourceResolver: LogSourceResolver? = null
-    private val sourceIndexing = AtomicBoolean(false)
 
     // ── Layout ──────────────────────────────────────────────────────
     var filterVisible by mutableStateOf(true)
     var annotationVisible by mutableStateOf(true)
+
     // Notes and the AI panel are independent visibility toggles sharing one sidebar slot (see
     // RightSidebarPanel): both on splits it vertically, Notes above AI, sized by rightSidebarSplit.
     var aiPanelVisible by mutableStateOf(false)
@@ -2994,46 +2998,79 @@ class AppState(
     }
 
     private fun publishSourceIndex(index: SourceIndex) {
-        val status = sourceIndexStatusFor(index)
         synchronized(stateLock) {
             sourceIndex = index
             sourceResolver = LogSourceResolver(index)
-            sourceIndexStatus = status
         }
     }
 
-    private fun sourceIndexStatusFor(index: SourceIndex): SourceIndexStatus = SourceIndexStatus(
-        fileCount = index.fileMeta.size,
-        siteCount = index.sites.size,
-        builtAt = index.builtAt,
-        changedFileCount = index.fileMeta.count { (path, meta) -> fileChangedSince(path, meta) },
-    )
+    private fun isUnderSourceRoot(path: String, rootAbs: String): Boolean =
+        path == rootAbs || path.startsWith(rootAbs + File.separator)
 
     private fun fileChangedSince(path: String, meta: FileMeta): Boolean {
         val file = File(path)
         return !file.exists() || file.lastModified() != meta.mtime || file.length() != meta.size
     }
 
-    // Single-flight (sourceIndexing): a second call while a build is already running is a no-op
-    // rather than queued — the settings UI's "Reindex" action can't be double-clicked into two
-    // concurrent scans racing to publish sourceIndex/write sourceIndexFile.
-    fun reindexSources() {
-        if (!sourceIndexing.compareAndSet(false, true)) return
-        isIndexingSources = true
+    // Derived from the current combined sourceIndex rather than stored separately — every site/
+    // fileMeta entry already carries its absolute file path, so a folder's own slice is just a
+    // filter. Never indexed yet (no rootBuiltAt entry) reads as the zero-value status.
+    fun sourceIndexStatusForFolder(folder: String): SourceIndexStatus {
+        val index = sourceIndex ?: return SourceIndexStatus()
+        val rootAbs = File(folder).absolutePath
+        val builtAt = index.rootBuiltAt[rootAbs] ?: return SourceIndexStatus()
+        val metaEntries = index.fileMeta.filterKeys { isUnderSourceRoot(it, rootAbs) }
+        return SourceIndexStatus(
+            fileCount = metaEntries.size,
+            siteCount = index.sites.count { isUnderSourceRoot(it.filePath, rootAbs) },
+            builtAt = builtAt,
+            changedFileCount = metaEntries.count { (path, meta) -> fileChangedSince(path, meta) },
+        )
+    }
+
+    // Single-flight per folder: a second call for the same folder while its scan is already
+    // running is a no-op rather than queued — a folder's own "Reindex" button can't be
+    // double-clicked into two concurrent scans racing to publish/save. Only files under [folder]
+    // are rescanned; sites/fileMeta from every other registered folder are carried over unchanged.
+    fun reindexSources(folder: String) {
+        val rootAbs = File(folder).absolutePath
+        val started = synchronized(stateLock) {
+            if (rootAbs in indexingFolders) {
+                false
+            } else {
+                indexingFolders = indexingFolders + rootAbs
+                true
+            }
+        }
+        if (!started) return
         beginLoading("Indexing source…")
         ioScope.launch {
             try {
-                val roots = settings.sourceFolders.map { File(it) }
-                val index = runCatching {
-                    SourceIndexer.build(roots) { scanned, total -> loadingStatus = "Indexing source… ($scanned/$total)" }
+                val partial = runCatching {
+                    SourceIndexer.build(listOf(File(folder))) { scanned, total ->
+                        loadingStatus = "Indexing source… ($scanned/$total)"
+                    }
                 }.getOrNull()
-                if (index != null) {
-                    runCatching { SourceIndexStore.save(index, sourceIndexFile) }
-                    publishSourceIndex(index)
+                if (partial != null) {
+                    val mergedAt = System.currentTimeMillis()
+                    val merged = synchronized(stateLock) {
+                        val current = sourceIndex
+                        val keptSites = current?.sites.orEmpty().filterNot { isUnderSourceRoot(it.filePath, rootAbs) }
+                        val keptMeta = current?.fileMeta.orEmpty().filterKeys { !isUnderSourceRoot(it, rootAbs) }
+                        SourceIndex(
+                            version = SOURCE_INDEX_VERSION,
+                            roots = settings.sourceFolders,
+                            sites = keptSites + partial.sites,
+                            fileMeta = keptMeta + partial.fileMeta,
+                            builtAt = mergedAt,
+                            rootBuiltAt = current?.rootBuiltAt.orEmpty() + (rootAbs to mergedAt),
+                        )
+                    }
+                    runCatching { SourceIndexStore.save(merged, sourceIndexFile) }
+                    publishSourceIndex(merged)
                 }
             } finally {
-                sourceIndexing.set(false)
-                isIndexingSources = false
+                synchronized(stateLock) { indexingFolders = indexingFolders - rootAbs }
                 finishLoading()
             }
         }
