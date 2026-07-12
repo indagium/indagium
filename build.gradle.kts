@@ -46,6 +46,14 @@ val generateBuildInfo by tasks.registering {
 }
 
 kotlin {
+    // com.mikepenz:multiplatform-markdown-renderer (used for AI sidebar replies) ships class
+    // files compiled for Java 21 (class file major version 65). Packaging with an older JDK
+    // silently bundles a jlink runtime image that can't load it — the app builds and runs fine
+    // until Markdown actually renders, then crashes with "compiled by a more recent version of
+    // the Java Runtime". Pinning the toolchain here makes that a build-time requirement instead
+    // of a runtime surprise, for `desktopRun`/`desktopTest` and for the packaging tasks alike.
+    jvmToolchain(21)
+
     jvm("desktop") {
         mainRun {
             mainClass.set("MainKt")
