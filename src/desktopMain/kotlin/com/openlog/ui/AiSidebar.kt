@@ -1042,28 +1042,27 @@ private fun AiPromptComposer(
     val colors = tc()
     val density = LocalDensity.current
     val promptScroll = rememberScrollState()
-    // The scrollbar's height can't be fillMaxHeight() here: inside a Box whose own height is
-    // meant to be *derived from* its text content (up to maxHeightDp), a fillMaxHeight() sibling
-    // would itself claim the full incoming max constraint, which makes the Box report that same
-    // max as its size regardless of how little text there is - the box would render at half the
-    // panel's height even when empty. Measuring the box's own resolved height via onSizeChanged
-    // and giving the scrollbar that exact, fixed height instead avoids feeding back into the
-    // Box's own size decision.
-    var promptBoxHeightPx by remember { mutableStateOf(0) }
+    // Measuring the *Box's own* resolved height (as a previous version of this did) and feeding
+    // that back into the scrollbar's height is a self-sustaining loop: once the scrollbar has any
+    // height, it becomes one of the Box's children too, so the Box's own size includes it - and
+    // next frame the (now-including-scrollbar) size gets fed back in again, permanently pinning
+    // the box at whatever size it first happened to settle on, regardless of how little text
+    // there is. Measuring the text field's own size instead has no such loop: a Box's non-
+    // matchParentSize children are measured independently of each other, so the text field's
+    // resolved size never depends on what the scrollbar was in a previous frame.
+    var textFieldHeightPx by remember { mutableStateOf(0) }
     Column(
         Modifier.fillMaxWidth().background(colors.p2).border(BorderStroke(1.dp, colors.br)).padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(
-            Modifier.fillMaxWidth().heightIn(min = 54.dp, max = maxHeightDp)
-                .onSizeChanged { promptBoxHeightPx = it.height },
-        ) {
+        Box(Modifier.fillMaxWidth().heightIn(min = 54.dp, max = maxHeightDp)) {
             androidx.compose.foundation.text.BasicTextField(
                 value = prompt,
                 onValueChange = onPromptChange,
                 textStyle = TextStyle(color = colors.tx, fontSize = 12.sp),
                 cursorBrush = SolidColor(colors.ac),
                 modifier = Modifier.fillMaxWidth()
+                    .onSizeChanged { textFieldHeightPx = it.height }
                     .background(colors.bg, CORNER_SM).border(1.dp, colors.br, CORNER_SM)
                     .verticalScroll(promptScroll)
                     .padding(start = 7.dp, top = 7.dp, bottom = 7.dp, end = 14.dp),
@@ -1072,11 +1071,11 @@ private fun AiPromptComposer(
                     inner()
                 },
             )
-            if (promptBoxHeightPx > 0) {
+            if (textFieldHeightPx > 0) {
                 VerticalScrollbar(
                     adapter = rememberScrollbarAdapter(promptScroll),
                     modifier = Modifier.align(Alignment.CenterEnd)
-                        .height(with(density) { promptBoxHeightPx.toDp() })
+                        .height(with(density) { textFieldHeightPx.toDp() })
                         .padding(vertical = 2.dp),
                     style = appScrollbarStyle(colors),
                 )
