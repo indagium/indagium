@@ -36,7 +36,16 @@ import kotlinx.serialization.json.put
 class OpenAiCompatibleProvider(
     private val profile: AiProviderProfile,
     private val apiKey: String = "",
-    private val httpClient: HttpClient = HttpClient(CIO) { expectSuccess = false },
+    private val httpClient: HttpClient = HttpClient(CIO) {
+        expectSuccess = false
+        engine {
+            // CIO's whole-call requestTimeout (15s default) applies even to this hand-rolled SSE
+            // read, since only the official ktor SSE plugin is exempted from it. Local model
+            // generation routinely exceeds 15s, so disable it here; the agent runner's own Stop
+            // control is what cancels an in-flight request.
+            requestTimeout = 0
+        }
+    },
 ) : LlmProvider, AutoCloseable {
     override val capabilities = ProviderCapabilities(
         streaming = true,
