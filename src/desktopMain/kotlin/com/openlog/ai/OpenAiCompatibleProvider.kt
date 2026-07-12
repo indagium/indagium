@@ -147,15 +147,25 @@ class OpenAiCompatibleProvider(
         accumulators: MutableMap<Int, ToolCallAccumulator>,
     ): List<LlmStreamEvent> = try {
         val root = json.parseToJsonElement(data).jsonObject
-        val choice = root["choices"]?.jsonArray.orEmpty()
-            .firstOrNull { (it.jsonObject["index"]?.jsonPrimitive?.intOrNull ?: 0) == 0 }
-            ?.jsonObject ?: return emptyList()
-        val delta = choice["delta"] as? JsonObject ?: return emptyList()
         buildList {
-            delta["content"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() }?.let {
+            // Sent as its own final chunk with an empty `choices` array, so this must be checked
+            // independently rather than after bailing out on a missing/empty choice.
+            (root["usage"] as? JsonObject)?.let { usage ->
+                add(
+                    LlmStreamEvent.Usage(
+                        promptTokens = usage["prompt_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
+                        completionTokens = usage["completion_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
+                        totalTokens = usage["total_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
+                    ),
+                )
+            }
+            val delta = root["choices"]?.jsonArray.orEmpty()
+                .firstOrNull { (it.jsonObject["index"]?.jsonPrimitive?.intOrNull ?: 0) == 0 }
+                ?.jsonObject?.get("delta") as? JsonObject
+            delta?.get("content")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotEmpty() }?.let {
                 add(LlmStreamEvent.TextDelta(it))
             }
-            delta["tool_calls"]?.jsonArray.orEmpty().forEachIndexed { fallbackIndex, element ->
+            delta?.get("tool_calls")?.jsonArray.orEmpty().forEachIndexed { fallbackIndex, element ->
                 val toolDelta = element as? JsonObject ?: return@forEachIndexed
                 val index = toolDelta["index"]?.jsonPrimitive?.intOrNull ?: fallbackIndex
                 val id = toolDelta["id"]?.jsonPrimitive?.contentOrNull
@@ -173,6 +183,10 @@ class OpenAiCompatibleProvider(
     private fun LlmRequest.toOpenAiJson(): JsonObject = buildJsonObject {
         put("model", model)
         put("stream", true)
+        // Opt into the final usage-only chunk (see parseChunk) so the sidebar can show a per-request
+        // token count. Providers that don't recognise this option (or don't report usage at all)
+        // simply never send that chunk - there is nothing else to opt out of here.
+        put("stream_options", buildJsonObject { put("include_usage", true) })
         temperature?.let { put("temperature", it) }
         maxTokens?.let { put("max_tokens", it) }
         put("messages", buildJsonArray { messages.forEach { add(it.toOpenAiJson()) } })

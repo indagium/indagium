@@ -118,6 +118,16 @@ internal class AiSidebarRuntime(
         scheduleUiUpdate()
     }
 
+    /**
+     * Drops this tab's session entirely: [AiSessionRegistry.remove] cancels any active run (which
+     * still cancels its underlying job and, via that job's invokeOnCompletion, its own resources),
+     * and the next [sessionFor] call for this tab starts a brand-new, empty [AiSession].
+     */
+    fun resetSession(tabId: String) {
+        sessions.remove(tabId)
+        scheduleUiUpdate()
+    }
+
     fun resolveConfirmation(run: AiRun, confirmation: AiToolConfirmation, accepted: Boolean): Boolean {
         val resolved = resources[run.id]?.runner?.resolveConfirmation(run, confirmation.id, accepted) ?: false
         if (resolved) scheduleUiUpdate()

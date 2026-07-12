@@ -18,6 +18,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -50,6 +51,11 @@ class AiAgentRunnerTest {
             assertNull(session.activeRun)
             assertEquals(listOf(run), session.runs)
             assertEquals(events, run.history)
+
+            val firstResponseAt = assertNotNull(run.firstResponseAt, "A tool call or reply should record a first-response time.")
+            val completedAt = assertNotNull(run.completedAt, "A finished run should record a completion time.")
+            assertTrue(firstResponseAt >= run.sentAt)
+            assertTrue(completedAt >= firstResponseAt)
         } finally {
             runner.close()
         }

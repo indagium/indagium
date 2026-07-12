@@ -92,6 +92,13 @@ sealed interface LlmStreamEvent {
     /** One malformed non-terminal SSE message was skipped while the stream continued. */
     data class Warning(val message: String) : LlmStreamEvent
 
+    /**
+     * Token accounting for one request, if the provider reports it. OpenAI-compatible servers
+     * (including LM Studio) only include this on the request's final chunk, and only when asked
+     * via `stream_options.include_usage` - so it may never arrive for a given provider.
+     */
+    data class Usage(val promptTokens: Int, val completionTokens: Int, val totalTokens: Int) : LlmStreamEvent
+
     /** A failed request or an unusable terminal response. Cancellation is never represented here. */
     data class Error(val message: String) : LlmStreamEvent
 }

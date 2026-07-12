@@ -3,8 +3,10 @@
 package com.openlog.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
@@ -20,6 +22,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -29,6 +33,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -65,6 +70,7 @@ import com.openlog.ai.ModelDiscoveryResult
 import com.openlog.ai.isLoopbackHost
 import com.openlog.ai.normalizeAiProviderProfiles
 import com.openlog.model.LogTab
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** A session-only choice for the existing right sidebar. It is intentionally absent from autosave. */
@@ -194,6 +200,13 @@ private fun AiSidebarPanel(
         state.consumeAiPromptRequest(request.id)
     }
 
+    // Pins to the bottom whenever the scrollable content actually grows (streamed tokens, a new
+    // tool-trace row, a new run) rather than on a fixed cadence - snapshotFlow only re-fires when
+    // maxValue itself changes, so this doesn't fight a still-in-place conversation.
+    LaunchedEffect(scroll) {
+        snapshotFlow { scroll.maxValue }.collect { max -> scroll.scrollTo(max) }
+    }
+
     Column(
         Modifier.fillMaxSize().background(colors.p)
             .border(BorderStroke(1.dp, if (panelFocused && state.keyboardFocusVisible) colors.ac else colors.br))
@@ -214,53 +227,82 @@ private fun AiSidebarPanel(
                 }
             },
     ) {
-        Column(
-            Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll).padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            AiProviderControls(
-                state = state,
-                profile = profile,
-                model = modelDraft,
-                onModelChange = { modelDraft = it },
-                apiKey = keyDraft,
-                onApiKeyChange = { keyDraft = it; state.setAiProviderApiKey(profile.id, it) },
-                discovery = modelDiscovery,
-                onDiscoverModels = {
-                    scope.launch {
-                        modelDiscovery = runtime.discoverModels(profile.copy(model = modelDraft.trim()), keyDraft)
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            SelectionContainer {
+                Column(
+                    Modifier.fillMaxWidth().verticalScroll(scroll)
+                        .padding(start = 10.dp, top = 8.dp, end = 18.dp, bottom = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    AiProviderControls(
+                        state = state,
+                        profile = profile,
+                        model = modelDraft,
+                        onModelChange = { modelDraft = it },
+                        apiKey = keyDraft,
+                        onApiKeyChange = { keyDraft = it; state.setAiProviderApiKey(profile.id, it) },
+                        discovery = modelDiscovery,
+                        onDiscoverModels = {
+                            scope.launch {
+                                modelDiscovery = runtime.discoverModels(profile.copy(model = modelDraft.trim()), keyDraft)
+                            }
+                        },
+                        onPickModel = { modelDraft = it },
+                        onOpenSettings = { state.settingsOpen = true },
+                    )
+                    AiQuickActions(
+                        tab = tab,
+                        onAction = { action -> state.requestAiInvestigation(tab.id, action) },
+                    )
+                    val lastEvent = session.runs.lastOrNull()?.history?.lastOrNull()
+                    val connectionState = when {
+                        session.activeRun != null -> "Generating with ${profile.displayName}…"
+                        lastEvent is AiRunEvent.Error -> "Last provider request failed"
+                        lastEvent == AiRunEvent.Cancelled -> "Last request was stopped"
+                        else -> "Ready"
                     }
-                },
-                onPickModel = { modelDraft = it },
-                onOpenSettings = { state.settingsOpen = true },
-            )
-            AiQuickActions(
-                tab = tab,
-                onAction = { action -> state.requestAiInvestigation(tab.id, action) },
-            )
-            val lastEvent = session.runs.lastOrNull()?.history?.lastOrNull()
-            val connectionState = when {
-                session.activeRun != null -> "Generating with ${profile.displayName}…"
-                lastEvent is AiRunEvent.Error -> "Last provider request failed"
-                lastEvent == AiRunEvent.Cancelled -> "Last request was stopped"
-                else -> "Ready"
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        AppText("Connection: $connectionState", color = colors.td, fontSize = 10.sp)
+                        if (session.runs.isNotEmpty()) {
+                            AppButton(
+                                "Reset",
+                                onClick = {
+                                    runtime.resetSession(tab.id)
+                                    prompt = ""
+                                    error = null
+                                },
+                                variant = ButtonVariant.Ghost,
+                                modifier = Modifier.height(22.dp),
+                            )
+                        }
+                    }
+                    error?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp) }
+                    if (session.runs.isEmpty()) {
+                        AppText(
+                            "Ask about the active log tab. The assistant can use the same log, filter, source, and notes tools as MCP.",
+                            color = colors.td,
+                            fontSize = 11.sp,
+                            maxLines = 4,
+                        )
+                    }
+                    // run.history is read here, in the scope that actually observes `revision`, and
+                    // passed down as a plain List so Compose's skip check sees real structural
+                    // change. AiRun itself mutates its history in place behind a synchronized list,
+                    // so a composable that only takes `run` as a parameter can be skipped by Compose
+                    // (same object reference) and never pick up new events until something else
+                    // forces the whole subtree to recompose.
+                    session.runs.forEach { run -> AiRunCard(run, run.history, runtime::resolveConfirmation, state::navigateAiEvidence) }
+                }
             }
-            AppText("Connection: $connectionState", color = colors.td, fontSize = 10.sp)
-            error?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp) }
-            if (session.runs.isEmpty()) {
-                AppText(
-                    "Ask about the active log tab. The assistant can use the same log, filter, source, and notes tools as MCP.",
-                    color = colors.td,
-                    fontSize = 11.sp,
-                    maxLines = 4,
-                )
-            }
-            // run.history is read here, in the scope that actually observes `revision`, and passed
-            // down as a plain List so Compose's skip check sees real structural change. AiRun
-            // itself mutates its history in place behind a synchronized list, so a composable that
-            // only takes `run` as a parameter can be skipped by Compose (same object reference) and
-            // never pick up new events until something else forces the whole subtree to recompose.
-            session.runs.forEach { run -> AiRunCard(run, run.history, runtime::resolveConfirmation, state::navigateAiEvidence) }
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(scroll),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+                style = appScrollbarStyle(colors),
+            )
         }
         AiPromptComposer(
             prompt = prompt,
@@ -400,9 +442,74 @@ private fun AiRunCard(
 ) {
     val colors = tc()
     val assistantText = events.filterIsInstance<AiRunEvent.AssistantDelta>().joinToString(separator = "") { it.text }
+    val traceEvents = events.filter { it !is AiRunEvent.AssistantDelta && it !is AiRunEvent.Usage }
+    val usage = events.filterIsInstance<AiRunEvent.Usage>().lastOrNull()
+    val isTerminal = events.any { it is AiRunEvent.Done || it is AiRunEvent.Error || it == AiRunEvent.Cancelled }
+
+    // Expanded while the investigation runs, so it's visible as it happens; collapsed exactly once
+    // when it finishes so the final answer isn't buried under a wall of trace rows, but the user can
+    // still reopen it (autoCollapsedOnce guards against re-collapsing a manual re-expand).
+    var expanded by remember(run.id) { mutableStateOf(true) }
+    var autoCollapsedOnce by remember(run.id) { mutableStateOf(false) }
+    LaunchedEffect(run.id, isTerminal) {
+        if (isTerminal && !autoCollapsedOnce) {
+            expanded = false
+            autoCollapsedOnce = true
+        }
+    }
+
+    val traceScroll = rememberScrollState()
+    LaunchedEffect(traceScroll) {
+        snapshotFlow { traceScroll.maxValue }.collect { max -> traceScroll.scrollTo(max) }
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
         if (run.userPrompt.isNotBlank()) {
-            AiBubble("You", colors.ac.copy(.13f)) { AppText(run.userPrompt, color = colors.tx, fontSize = 12.sp) }
+            AiBubble("You", colors.ac.copy(.13f)) {
+                AppText(run.userPrompt, color = colors.tx, fontSize = 12.sp, maxLines = Int.MAX_VALUE)
+                AppText(clockTimeLabel(run.sentAt), color = colors.td, fontSize = 9.sp)
+            }
+        }
+        if (traceEvents.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(
+                    Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AppText(if (expanded) "▾" else "▸", color = colors.td, fontSize = 10.sp)
+                    AppText(
+                        "Investigation (${traceEvents.size} step${if (traceEvents.size == 1) "" else "s"})",
+                        color = colors.td,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                if (expanded) {
+                    Box(Modifier.fillMaxWidth().heightIn(max = 220.dp)) {
+                        Column(
+                            Modifier.verticalScroll(traceScroll).padding(end = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            traceEvents.forEach { event ->
+                                when (event) {
+                                    is AiRunEvent.ConfirmationRequired -> AiConfirmationCard(run, event.confirmation, onResolveConfirmation)
+                                    is AiRunEvent.ToolCompleted -> {
+                                        AiTraceRow(event)
+                                        event.evidence.forEach { evidence -> AiEvidenceCard(evidence, onNavigateEvidence) }
+                                    }
+                                    else -> AiTraceRow(event)
+                                }
+                            }
+                        }
+                        VerticalScrollbar(
+                            adapter = rememberScrollbarAdapter(traceScroll),
+                            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+                            style = appScrollbarStyle(colors),
+                        )
+                    }
+                }
+            }
         }
         if (assistantText.isNotBlank()) {
             AiBubble("Assistant", colors.p2) {
@@ -416,17 +523,49 @@ private fun AiRunCard(
                 )
             }
         }
-        events.filterNot { it is AiRunEvent.AssistantDelta }.forEach { event ->
-            when (event) {
-                is AiRunEvent.ConfirmationRequired -> AiConfirmationCard(run, event.confirmation, onResolveConfirmation)
-                is AiRunEvent.ToolCompleted -> {
-                    AiTraceRow(event)
-                    event.evidence.forEach { evidence -> AiEvidenceCard(evidence, onNavigateEvidence) }
-                }
-                else -> AiTraceRow(event)
-            }
+        AiRunTimingRow(run, isTerminal, usage)
+    }
+}
+
+@Composable
+private fun AiRunTimingRow(run: AiRun, isTerminal: Boolean, usage: AiRunEvent.Usage?) {
+    val colors = tc()
+    // Ticks once a second while active so "running Xs" advances live; freezes once terminal since
+    // run.completedAt is then fixed and no further ticks are scheduled.
+    var liveNow by remember(run.id) { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(run.id, isTerminal) {
+        while (!isTerminal) {
+            delay(1000)
+            liveNow = System.currentTimeMillis()
         }
     }
+    val firstResponseAt = run.firstResponseAt
+    val elapsedEnd = run.completedAt ?: liveNow
+    val parts = buildList {
+        add("Sent ${clockTimeLabel(run.sentAt)}")
+        firstResponseAt?.let { add("first reply after ${durationLabel(it - run.sentAt)}") }
+        val elapsed = durationLabel(elapsedEnd - run.sentAt)
+        add(if (run.completedAt != null) "took $elapsed" else "running $elapsed")
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        AppText(parts.joinToString(" · "), color = colors.td, fontSize = 9.sp, maxLines = 2)
+        usage?.let {
+            AppText(
+                "Tokens: ${it.promptTokens} prompt + ${it.completionTokens} completion = ${it.totalTokens} total",
+                color = colors.td,
+                fontSize = 9.sp,
+            )
+        }
+    }
+}
+
+private fun clockTimeLabel(epochMs: Long): String =
+    java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(epochMs))
+
+private fun durationLabel(ms: Long): String = when {
+    ms < 1000 -> "${ms.coerceAtLeast(0)}ms"
+    ms < 60_000 -> String.format(java.util.Locale.US, "%.1fs", ms / 1000.0)
+    else -> "${ms / 60_000}m ${(ms % 60_000) / 1000}s"
 }
 
 @Composable

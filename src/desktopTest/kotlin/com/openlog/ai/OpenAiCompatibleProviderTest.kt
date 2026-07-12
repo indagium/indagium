@@ -116,6 +116,7 @@ class OpenAiCompatibleProviderTest {
         assertEquals("Bearer session-only-key", request.headers[HttpHeaders.Authorization])
         val payload = Json.parseToJsonElement((request.body as TextContent).text).jsonObject
         assertTrue(payload["stream"]!!.jsonPrimitive.boolean)
+        assertTrue(payload["stream_options"]!!.jsonObject["include_usage"]!!.jsonPrimitive.boolean)
         assertEquals("local-model", payload["model"]!!.jsonPrimitive.content)
         val function = payload["tools"]!!.jsonArray.single().jsonObject["function"]!!.jsonObject
         assertEquals("function", payload["tools"]!!.jsonArray.single().jsonObject["type"]!!.jsonPrimitive.content)
@@ -140,6 +141,28 @@ class OpenAiCompatibleProviderTest {
             provider.streamChat(request()).toList()
         }
         assertEquals("/v1/chat/completions", requireNotNull(capturedRequest).url.encodedPath)
+    }
+
+    @Test
+    fun finalUsageOnlyChunkIsParsedDespiteItsEmptyChoicesArray() = runBlocking {
+        provider(
+            sse(
+                """
+                {"choices":[{"index":0,"delta":{"content":"Answer"}}]}
+                {"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":34,"total_tokens":154}}
+                [DONE]
+                """,
+            ),
+        ).use { provider ->
+            assertEquals(
+                listOf(
+                    LlmStreamEvent.TextDelta("Answer"),
+                    LlmStreamEvent.Usage(promptTokens = 120, completionTokens = 34, totalTokens = 154),
+                    LlmStreamEvent.Completed,
+                ),
+                provider.streamChat(request()).toList(),
+            )
+        }
     }
 
     @Test

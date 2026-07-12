@@ -69,8 +69,14 @@ default profile works with a local LM Studio server:
    model id. **Find** asks the provider for available models; if that endpoint is unavailable,
    entering the model id manually still works.
 3. Ask a question or use a quick action such as **Selected error**, **Root cause**, **Timeline**,
-   **Filtered result**, or **Mapped source**. You can also right-click a log line and choose
-   **Ask AI**.
+   **Filtered result**, **Mapped source**, or **Investigate issue**. You can also right-click a log
+   line and choose **Ask AI**.
+
+Each reply shows when the request was sent, how long the first response and the full answer took,
+and the reported token usage if the provider includes it. Tool-call activity for a request appears
+in a collapsible, independently scrollable **Investigation** section between your message and the
+final answer — expanded while it's running, collapsed once it finishes (click to reopen). Chat text
+is selectable/copyable, and **Reset** clears the current tab's conversation to start over.
 
 The built-in `LM Studio (local)` profile uses `http://127.0.0.1:1234/v1`. A key is normally not
 needed for LM Studio. Add or edit compatible-provider profiles in **Settings → AI providers**;

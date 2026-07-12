@@ -86,11 +86,20 @@ internal class AiRun internal constructor(
     val tabId: String,
     val userPrompt: String = "",
     val context: AiInvestigationContext = AiInvestigationContext(tabId),
+    val sentAt: Long = System.currentTimeMillis(),
 ) {
     private val _events = MutableSharedFlow<AiRunEvent>(replay = EVENT_REPLAY, extraBufferCapacity = EVENT_BUFFER)
     private val _history = mutableListOf<AiRunEvent>()
     internal val confirmations = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
     internal var job: Job? = null
+
+    /** Wall-clock time of the first model-originated event (a reply or a tool call), if any yet. */
+    var firstResponseAt: Long? = null
+        private set
+
+    /** Wall-clock time this run reached a terminal state (done, error, or cancelled), if any yet. */
+    var completedAt: Long? = null
+        private set
 
     val events: SharedFlow<AiRunEvent> = _events.asSharedFlow()
 
@@ -100,6 +109,12 @@ internal class AiRun internal constructor(
 
     internal suspend fun emit(event: AiRunEvent) {
         synchronized(_history) { _history += event }
+        if (firstResponseAt == null && (event is AiRunEvent.AssistantDelta || event is AiRunEvent.ToolRequested)) {
+            firstResponseAt = System.currentTimeMillis()
+        }
+        if (completedAt == null && (event is AiRunEvent.Done || event is AiRunEvent.Error || event == AiRunEvent.Cancelled)) {
+            completedAt = System.currentTimeMillis()
+        }
         _events.emit(event)
     }
 
@@ -131,6 +146,9 @@ internal sealed interface AiRunEvent {
     ) : AiRunEvent
 
     data class ConfirmationRequired(val confirmation: AiToolConfirmation) : AiRunEvent
+
+    /** Forwarded verbatim from [LlmStreamEvent.Usage] when a provider reports it. */
+    data class Usage(val promptTokens: Int, val completionTokens: Int, val totalTokens: Int) : AiRunEvent
 
     data class Error(val message: String) : AiRunEvent
 
@@ -271,6 +289,9 @@ internal class AiAgentRunner(
                             is LlmStreamEvent.Warning -> run.emit(AiRunEvent.Status(event.message))
                             LlmStreamEvent.Completed -> completed = true
                             is LlmStreamEvent.ToolCallDelta -> Unit // Provider-level detail is represented by ToolRequested below.
+                            is LlmStreamEvent.Usage -> run.emit(
+                                AiRunEvent.Usage(event.promptTokens, event.completionTokens, event.totalTokens),
+                            )
                         }
                     }
                 } catch (cancelled: CancellationException) {
