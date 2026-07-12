@@ -34,6 +34,20 @@ fun isLoopbackHost(host: String): Boolean = when (host.trim('[', ']').lowercase(
     else -> false
 }
 
+/**
+ * LM Studio's own UI displays its "Reachable at" address as a bare `http://host:port` with no
+ * path, but this app only ever speaks the OpenAI-compatible `/v1` contract (`/v1/models`,
+ * `/v1/chat/completions`). Pasting that bare address verbatim used to hit `/models` at the root,
+ * which some servers answer with an unrelated 200 instead of a 404 - silently reporting "reachable,
+ * 0 models found" rather than a clear error. Treat a path-less base URL as shorthand for `/v1`
+ * without rewriting anything the user actually typed with an explicit path.
+ */
+fun aiProviderRequestBaseUrl(rawBaseUrl: String): String {
+    val trimmed = rawBaseUrl.trim()
+    val path = runCatching { URI(trimmed).rawPath.orEmpty() }.getOrDefault("")
+    return if (path.isEmpty() || path == "/") trimmed.trimEnd('/') + "/v1" else trimmed
+}
+
 /** Keeps migration from old or malformed settings safe and leaves one selected profile. */
 fun normalizeAiProviderProfiles(profiles: List<AiProviderProfile>): List<AiProviderProfile> {
     val distinct = profiles.filter { it.id.isNotBlank() }.distinctBy { it.id }

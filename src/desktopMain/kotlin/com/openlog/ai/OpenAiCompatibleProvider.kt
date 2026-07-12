@@ -127,7 +127,7 @@ class OpenAiCompatibleProvider(
         httpClient.close()
     }
 
-    private fun endpoint(path: String): String = profile.baseUrl.trim().trimEnd('/') + "/$path"
+    private fun endpoint(path: String): String = aiProviderRequestBaseUrl(profile.baseUrl).trimEnd('/') + "/$path"
 
     private fun io.ktor.client.request.HttpRequestBuilder.applyAuthorization() {
         apiKey.takeIf { it.isNotBlank() }?.let { header(HttpHeaders.Authorization, "Bearer $it") }

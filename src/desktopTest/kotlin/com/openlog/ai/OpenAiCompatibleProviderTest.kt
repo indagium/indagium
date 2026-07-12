@@ -125,6 +125,24 @@ class OpenAiCompatibleProviderTest {
     }
 
     @Test
+    fun pathlessBaseUrlIsTreatedAsItsV1Base() = runBlocking {
+        var capturedRequest: HttpRequestData? = null
+        val client = HttpClient(MockEngine { request ->
+            capturedRequest = request
+            respond(sse("[DONE]"), HttpStatusCode.OK, headersOf("Content-Type", "text/event-stream"))
+        }) { expectSuccess = false }
+        // LM Studio's own UI shows its "Reachable at" address as a bare http://host:port with no
+        // path; a request against that address verbatim would hit /chat/completions at the root.
+        OpenAiCompatibleProvider(
+            profile = defaultAiProviderProfile().copy(baseUrl = "http://192.168.0.189:1234"),
+            httpClient = client,
+        ).use { provider ->
+            provider.streamChat(request()).toList()
+        }
+        assertEquals("/v1/chat/completions", requireNotNull(capturedRequest).url.encodedPath)
+    }
+
+    @Test
     fun cancellationAfterFirstDeltaDoesNotEmitCompletion() = runBlocking {
         provider(
             sse(

@@ -53,6 +53,17 @@ class AiProviderProfileTest {
     }
 
     @Test
+    fun pathlessBaseUrlIsTreatedAsItsV1BaseButExplicitPathsAreLeftAlone() {
+        // LM Studio's UI shows its "Reachable at" address as a bare http://host:port; treat that
+        // as shorthand for the /v1 base this app actually speaks.
+        assertEquals("http://192.168.0.189:1234/v1", aiProviderRequestBaseUrl("http://192.168.0.189:1234"))
+        assertEquals("http://192.168.0.189:1234/v1", aiProviderRequestBaseUrl("http://192.168.0.189:1234/"))
+        // An endpoint the user typed with an explicit path is never rewritten.
+        assertEquals("http://192.168.0.189:1234/v1", aiProviderRequestBaseUrl("http://192.168.0.189:1234/v1"))
+        assertEquals("https://models.example/proxy/openai", aiProviderRequestBaseUrl("https://models.example/proxy/openai"))
+    }
+
+    @Test
     fun profilesRoundTripButSessionKeyNeverEntersAutosave() {
         val cacheFile = File(createTempDirectory("openlog-ai-profiles").toFile(), "state.cache")
         val state = AppState(cacheFile)
