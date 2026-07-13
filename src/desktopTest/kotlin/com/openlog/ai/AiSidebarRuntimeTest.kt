@@ -105,12 +105,16 @@ class AiSidebarRuntimeTest {
             listOf(
                 object : LlmProvider {
                     override val capabilities = ProviderCapabilities(true, true, true)
+
                     override suspend fun listModels() = ModelDiscoveryResult.Available(listOf(LlmModel("local")))
+
                     override fun streamChat(request: LlmRequest): Flow<LlmStreamEvent> = flow { emit(LlmStreamEvent.Completed) }
                 },
                 object : LlmProvider {
                     override val capabilities = ProviderCapabilities(true, true, true)
+
                     override suspend fun listModels() = ModelDiscoveryResult.Unavailable("HTTP 503")
+
                     override fun streamChat(request: LlmRequest): Flow<LlmStreamEvent> = flow { emit(LlmStreamEvent.Completed) }
                 },
             ),

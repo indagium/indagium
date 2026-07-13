@@ -29,8 +29,11 @@ internal sealed interface AiStartResult {
 /** Ephemeral, per-provider result for the sidebar. It is never written to settings. */
 internal sealed interface AiConnectionState {
     data object NotChecked : AiConnectionState
+
     data object Checking : AiConnectionState
+
     data object Ready : AiConnectionState
+
     data class Failed(val message: String) : AiConnectionState
 }
 

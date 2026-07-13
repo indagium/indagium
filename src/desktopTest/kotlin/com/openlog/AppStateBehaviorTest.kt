@@ -37,8 +37,8 @@ import com.openlog.ui.sequenceOrderDuringDrag
 import com.openlog.ui.sequenceRenderY
 import com.openlog.ui.sequenceRowBaseBackground
 import com.openlog.ui.shouldSyncSequenceVisualOrder
-import com.openlog.ui.themeColors
 import com.openlog.ui.tabDisplayLabel
+import com.openlog.ui.themeColors
 import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems

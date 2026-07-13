@@ -938,7 +938,8 @@ private fun declaredOwnerCandidates(receiver: String, text: String, beforeOffset
     val simpleReceiver = normalizedReceiver.substringAfterLast('.')
     val candidates = linkedSetOf(normalizedReceiver, simpleReceiver)
     val declaration = Regex(
-        """(?m)\b(?:public\s+|private\s+|protected\s+|internal\s+|final\s+|override\s+)*(?:val|var)\s+$simpleReceiver\s*:\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)""",
+        """(?m)\b(?:public\s+|private\s+|protected\s+|internal\s+|final\s+|override\s+)*""" +
+            """(?:val|var)\s+$simpleReceiver\s*:\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)""",
     ).findAll(text.substring(0, beforeOffset)).lastOrNull()
     declaration?.groupValues?.getOrNull(1)?.let {
         candidates += it

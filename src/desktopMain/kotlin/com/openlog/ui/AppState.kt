@@ -787,6 +787,7 @@ class AppState(
     var savedFilters by mutableStateOf<List<SavedFilter>>(emptyList())
     var tagUsage by mutableStateOf<Map<String, Int>>(emptyMap())
     var settingsOpen by mutableStateOf(false)
+
     /** One-shot Settings destination for contextual controls such as the AI provider picker. */
     internal var requestedSettingsSection by mutableStateOf<SettingsSection?>(null)
     var shortcutsOpen by mutableStateOf(false)

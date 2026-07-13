@@ -783,7 +783,8 @@ private fun SourceLoggingConfigurationEditor(
                     checked = configuration.id in assignedFolders[path].orEmpty(),
                     onToggle = {
                         val current = assignedFolders[path].orEmpty().toSet()
-                        state.assignSourceLogConfigurations(path, (if (configuration.id in current) current - configuration.id else current + configuration.id).toList())
+                        val next = if (configuration.id in current) current - configuration.id else current + configuration.id
+                        state.assignSourceLogConfigurations(path, next.toList())
                     },
                 ) {
                     AppText(truncatePathForDisplay(folder), color = tc.ts, fontSize = 10.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
@@ -821,9 +822,27 @@ private fun SourceLoggingConfigurationEditor(
                     )
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    InlineField(rule.tagArgumentIndex.toString(), { value -> value.toIntOrNull()?.let { draft = draft.replaceWrapperRule(index, rule.copy(tagArgumentIndex = it)) } }, "Tag argument", Modifier.weight(1f), fontSize = 11.sp)
-                    InlineField(rule.messageArgumentIndex.toString(), { value -> value.toIntOrNull()?.let { draft = draft.replaceWrapperRule(index, rule.copy(messageArgumentIndex = it)) } }, "Message argument", Modifier.weight(1f), fontSize = 11.sp)
-                    InlineField(rule.throwableArgumentIndex?.toString().orEmpty(), { value -> draft = draft.replaceWrapperRule(index, rule.copy(throwableArgumentIndex = value.toIntOrNull())) }, "Throwable (optional)", Modifier.weight(1f), fontSize = 11.sp)
+                    InlineField(
+                        rule.tagArgumentIndex.toString(),
+                        { value -> value.toIntOrNull()?.let { draft = draft.replaceWrapperRule(index, rule.copy(tagArgumentIndex = it)) } },
+                        "Tag argument",
+                        Modifier.weight(1f),
+                        fontSize = 11.sp,
+                    )
+                    InlineField(
+                        rule.messageArgumentIndex.toString(),
+                        { value -> value.toIntOrNull()?.let { draft = draft.replaceWrapperRule(index, rule.copy(messageArgumentIndex = it)) } },
+                        "Message argument",
+                        Modifier.weight(1f),
+                        fontSize = 11.sp,
+                    )
+                    InlineField(
+                        rule.throwableArgumentIndex?.toString().orEmpty(),
+                        { value -> draft = draft.replaceWrapperRule(index, rule.copy(throwableArgumentIndex = value.toIntOrNull())) },
+                        "Throwable (optional)",
+                        Modifier.weight(1f),
+                        fontSize = 11.sp,
+                    )
                 }
             }
         }

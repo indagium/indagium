@@ -225,14 +225,25 @@ tasks.withType<Test>().configureEach {
 
 // ── Dependency locking ─────────────────────────────────────────────
 // Locks only the desktop target's own compile/runtime/test classpaths, not
-// dependencyLocking { lockAllConfigurations() }. compose.desktop.currentOs
-// (desktopMain dependencies above) resolves to a different platform-specific native Compose
-// Desktop artifact depending on which OS Gradle runs on — packaging-related configurations
-// (packageDeb/packageMsi/packageDmg's own resolution) would need Windows/Linux/macOS runs to
-// generate correct lockfile entries for all three, which this macOS-only session can't produce
-// or verify. Locking is scoped to what's actually resolved (and verified) here: `./gradlew
-// build`'s own compile/test classpaths. Regenerate with `./gradlew build --write-locks` after
+// dependencyLocking { lockAllConfigurations() }.
+//
+// compose.desktop.currentOs (desktopMain dependencies above) and its transitive Skiko runtime
+// resolve to a different platform-specific artifact (desktop-jvm-macos-arm64 vs
+// desktop-jvm-linux-x64 vs desktop-jvm-windows-x64, and the matching skiko-awt-runtime-*)
+// depending on which OS Gradle runs on. A single shared gradle.lockfile can't hold "either
+// this artifact or that one" for the same configuration — Gradle's lock validation requires
+// every locked entry to actually be resolved, not just permits a subset — so locking a
+// platform-specific artifact on one OS makes the lock file unsatisfiable on every other OS
+// (this broke the Linux CI build: see the incident that added this comment). These two
+// modules are excluded from locking entirely so each OS resolves its own native artifact
+// freely; their version is already pinned via the Compose/Skiko plugin coordinates above, so
+// the reproducibility loss is minimal. Regenerate with `./gradlew build --write-locks` after
 // a dependency version bump.
+dependencyLocking {
+    ignoredDependencies.add("org.jetbrains.compose.desktop:desktop-jvm-*")
+    ignoredDependencies.add("org.jetbrains.skiko:skiko-awt-runtime-*")
+}
+
 configurations.matching {
     it.name in
         setOf(
