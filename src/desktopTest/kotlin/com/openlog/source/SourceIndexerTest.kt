@@ -1,5 +1,7 @@
 package com.openlog.source
 
+import com.openlog.model.SourceLogConfiguration
+import com.openlog.model.SourceWrapperRule
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
@@ -16,6 +18,170 @@ private fun Path.write(relPath: String, content: String) {
 }
 
 class SourceIndexerTest {
+    @Test
+    fun localTagConstantsAreNotShadowedByAnotherFilesTag() {
+        val dir = createTempDirectory("openlog-src-local-tag-scope")
+        dir.write(
+            "Alpha.kt",
+            """
+            package demo
+
+            class Alpha {
+                companion object { private const val TAG = "AlphaTag" }
+                fun log() { Log.d(TAG, "alpha message") }
+            }
+            """.trimIndent(),
+        )
+        dir.write(
+            "Zebra.kt",
+            """
+            package demo
+
+            class Zebra {
+                companion object { private const val TAG = "ZebraTag" }
+                fun log() { Log.d(TAG, "zebra message") }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+
+        assertEquals(setOf("AlphaTag", "ZebraTag"), index.sites.mapNotNull { it.tag }.toSet())
+        val resolver = LogSourceResolver(index)
+        assertEquals(1, resolver.resolve("AlphaTag", "alpha message").size)
+        assertEquals(1, resolver.resolve("ZebraTag", "zebra message").size)
+    }
+
+    @Test
+    fun configuredWrapperUsesConfiguredArgumentsAndExistingMessageMatcher() {
+        val dir = createTempDirectory("openlog-src-wrapper")
+        dir.write(
+            "Logger.kt",
+            """
+            package demo
+
+            class Logger {
+                fun write(code: String, tag: String, error: Throwable?, message: String) {
+                    Log.d(tag, message, error)
+                }
+            }
+
+            class Feature(private val logger: Logger) {
+                fun run(id: String) {
+                    logger.write("E1", "WrapperTag", null, "Failure ${'$'}id")
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val config = SourceLogConfiguration(
+            id = "wrapper",
+            name = "Wrapper",
+            wrapperRules = listOf(SourceWrapperRule("Logger", "write", tagArgumentIndex = 1, messageArgumentIndex = 3, throwableArgumentIndex = 2)),
+        )
+        val index = SourceIndexer.build(
+            listOf(dir.toFile()),
+            options = SourceIndexBuildOptions(
+                wrapperRules = config.wrapperRules,
+                configurationFingerprint = sourceConfigurationFingerprint(listOf(config), autoDiscoveryEnabled = false),
+            ),
+        )
+
+        assertEquals(1, index.sites.size)
+        val site = index.sites.single()
+        assertEquals("WrapperTag", site.tag)
+        assertEquals("run", site.methodName)
+        assertEquals(1, LogSourceResolver(index).resolve("WrapperTag", "Failure 42").size)
+    }
+
+    @Test
+    fun sameMethodNameOnUnrelatedOwnerIsNotMatched() {
+        val dir = createTempDirectory("openlog-src-wrapper-owner")
+        dir.write(
+            "Other.kt",
+            """
+            package demo
+
+            class Other {
+                fun write(tag: String, message: String) = Unit
+            }
+
+            class Feature(private val other: Other) {
+                fun run() {
+                    other.write("Wrong", "Must not match")
+                }
+            }
+            """.trimIndent(),
+        )
+        val index = SourceIndexer.build(
+            listOf(dir.toFile()),
+            options = SourceIndexBuildOptions(
+                wrapperRules = listOf(SourceWrapperRule("Logger", "write")),
+            ),
+        )
+
+        assertTrue(index.sites.isEmpty())
+    }
+
+    @Test
+    fun autoDiscoveryFollowsOneInterfaceImplementationHop() {
+        val dir = createTempDirectory("openlog-src-discovery")
+        dir.write(
+            "Fixture.kt",
+            """
+            package demo
+
+            interface FixtureLogger {
+                fun debug(tag: String, message: String)
+            }
+
+            object Telemetry : FixtureLogger {
+                override fun debug(tag: String, message: String) {
+                    Log.d(tag, message)
+                }
+            }
+
+            class Feature(private val logger: FixtureLogger) {
+                fun load() {
+                    logger.debug("Fixture", "Feature failed")
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(
+            listOf(dir.toFile()),
+            options = SourceIndexBuildOptions(autoDiscover = true),
+        )
+
+        assertEquals(1, index.sites.size)
+        assertEquals("load", index.sites.single().methodName)
+        assertEquals(1, LogSourceResolver(index).resolve("Fixture", "Feature failed").size)
+    }
+
+    @Test
+    fun qualifiedConstantsResolveAcrossFiles() {
+        val dir = createTempDirectory("openlog-src-qualified-constant")
+        dir.write("Telemetry.kt", "package demo\nobject Telemetry { const val BUG = \"BugTag\" }")
+        dir.write(
+            "Feature.kt",
+            """
+            package demo
+
+            class Feature {
+                fun fail() {
+                    Log.e(Telemetry.BUG, "Bug happened")
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+
+        assertEquals(1, index.sites.size)
+        assertEquals("BugTag", index.sites.single().tag)
+    }
+
     @Test
     fun plainLiteralMatchResolvesToRightMethod() {
         val dir = createTempDirectory("openlog-src")

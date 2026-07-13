@@ -62,6 +62,31 @@ class AiAgentRunnerTest {
     }
 
     @Test
+    fun inAppToolCallsAlwaysUseTheRequestTabsId() = runBlocking {
+        var receivedTabId: Any? = null
+        val runner = runner(
+            responses = listOf(
+                listOf(
+                    LlmStreamEvent.ToolCall(LlmToolCall("visible", "get_visible_lines", "{\"tabId\":\"wrong-tab\"}")),
+                    LlmStreamEvent.Completed,
+                ),
+                listOf(LlmStreamEvent.Completed),
+            ),
+            handlers = mapOf("get_visible_lines" to { arguments ->
+                receivedTabId = arguments["tabId"]
+                mapOf("ok" to true)
+            }),
+        )
+        try {
+            val run = runner.start(AiSession("pinned-tab"), "model", "Inspect this log")
+            run.job!!.join()
+            assertEquals("pinned-tab", receivedTabId)
+        } finally {
+            runner.close()
+        }
+    }
+
+    @Test
     fun failedRunKeepsItsHistoryAndPartialAssistantMessageInTheSession() = runBlocking {
         val runner = runner(
             responses = listOf(

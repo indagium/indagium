@@ -2,6 +2,8 @@ package com.openlog
 
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
+import com.openlog.model.SourceLogConfiguration
+import com.openlog.model.SourceWrapperRule
 import com.openlog.source.SourceIndexStore
 import com.openlog.ui.AppState
 import com.openlog.ui.editorCommandArguments
@@ -21,6 +23,184 @@ import kotlin.test.assertTrue
 // AppState here is given its own temp autosaveFile/sourceIndexFile so these tests never touch the
 // real ~/.openlog2-equivalent location (see the constructor's own doc comments on those seams).
 class SourceIndexAppStateTest {
+    @Test
+    fun settingsRoundTripPreservesLoggingConfigurationsAndAssignments() {
+        val dir = createTempDirectory("openlog-src-logging-settings").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val folder = File(dir, "feature").apply { mkdirs() }.absolutePath
+        val configuration = SourceLogConfiguration(
+            id = "feature-logging",
+            name = "Feature logger",
+            wrapperRules = listOf(SourceWrapperRule("demo.Telemetry", "debug", 0, 1, 2)),
+        )
+        val state = AppState(autosaveFile = cacheFile, sourceIndexFile = File(dir, "source-index"))
+        state.updateSettings {
+            it.copy(
+                sourceFolders = listOf(folder),
+                sourceLogConfigurations = listOf(configuration),
+                sourceFolderConfigurationIds = mapOf(folder to listOf(configuration.id)),
+                sourceAutoDiscoveryEnabled = false,
+            )
+        }
+        state.autosaveNow()
+
+        val restored = AppState(autosaveFile = cacheFile, restoreOnCreate = true, sourceIndexFile = File(dir, "source-index"))
+
+        assertEquals(listOf(configuration), restored.settings.sourceLogConfigurations)
+        assertEquals(mapOf(folder to listOf(configuration.id)), restored.settings.sourceFolderConfigurationIds)
+        assertEquals(false, restored.settings.sourceAutoDiscoveryEnabled)
+    }
+
+    @Test
+    fun configurationChangeMarksFolderForReindex() {
+        val dir = createTempDirectory("openlog-src-logging-reindex").toFile()
+        val srcDir = File(dir, "src").apply { mkdirs() }
+        File(srcDir, "Feature.kt").writeText(
+            """
+            package demo
+            class Feature {
+                fun run() { Log.d("Tag", "Message") }
+            }
+            """.trimIndent(),
+        )
+        val state = newState(dir)
+        state.updateSettings { it.copy(sourceFolders = listOf(srcDir.absolutePath)) }
+        state.reindexSources(srcDir.absolutePath)
+        waitUntil { state.sourceIndexStatusForFolder(srcDir.absolutePath).siteCount == 1 }
+
+        val configuration = SourceLogConfiguration("config", "Configured")
+        state.updateSettings {
+            it.copy(
+                sourceLogConfigurations = listOf(configuration),
+                sourceFolderConfigurationIds = mapOf(srcDir.absolutePath to listOf(configuration.id)),
+            )
+        }
+
+        val status = state.sourceIndexStatusForFolder(srcDir.absolutePath)
+        assertTrue(status.configurationChanged)
+        assertEquals(0, status.siteCount)
+        // Direct Log/Timber sites do not depend on custom-wrapper configuration, so a wrapper
+        // configuration edit must not regress normal source navigation.
+        assertEquals(1, state.resolveLogSource("Tag", "Message").size)
+    }
+
+    @Test
+    fun configurationChangeHidesStaleWrapperSitesButKeepsDirectSites() {
+        val dir = createTempDirectory("openlog-src-wrapper-config-validity").toFile()
+        val srcDir = File(dir, "src").apply { mkdirs() }
+        File(srcDir, "Feature.kt").writeText(
+            """
+            package demo
+
+            object Telemetry {
+                fun debug(tag: String, message: String) { Log.d(tag, message) }
+            }
+
+            class Feature {
+                fun run() {
+                    Log.d("Direct", "direct message")
+                    Telemetry.debug("Wrapper", "wrapper message")
+                }
+            }
+            """.trimIndent(),
+        )
+        val initial = SourceLogConfiguration(
+            id = "config",
+            name = "Configured",
+            wrapperRules = listOf(SourceWrapperRule("Telemetry", "debug", 0, 1)),
+        )
+        val state = newState(dir)
+        state.updateSettings {
+            it.copy(
+                sourceFolders = listOf(srcDir.absolutePath),
+                sourceLogConfigurations = listOf(initial),
+                sourceFolderConfigurationIds = mapOf(srcDir.absolutePath to listOf(initial.id)),
+            )
+        }
+        state.reindexSources(srcDir.absolutePath)
+        waitUntil { state.sourceIndexStatusForFolder(srcDir.absolutePath).siteCount == 2 }
+
+        assertEquals(1, state.resolveLogSource("Direct", "direct message").size)
+        assertEquals(1, state.resolveLogSource("Wrapper", "wrapper message").size)
+
+        state.updateSettings {
+            it.copy(sourceLogConfigurations = listOf(initial.copy(wrapperRules = emptyList())))
+        }
+
+        assertEquals(1, state.resolveLogSource("Direct", "direct message").size)
+        assertEquals(emptyList(), state.resolveLogSource("Wrapper", "wrapper message"))
+    }
+
+    @Test
+    fun globalAutoDiscoveryIsEnabledByDefaultWithoutAConfiguration() {
+        val dir = createTempDirectory("openlog-src-global-discovery").toFile()
+        val srcDir = File(dir, "src").apply { mkdirs() }
+        File(srcDir, "Feature.kt").writeText(
+            """
+            package demo
+
+            interface FixtureLogger {
+                fun debug(tag: String, message: String)
+            }
+
+            object Telemetry : FixtureLogger {
+                override fun debug(tag: String, message: String) { Log.d(tag, message) }
+            }
+
+            class Feature(private val logger: FixtureLogger) {
+                fun run() { logger.debug("Fixture", "Feature failed") }
+            }
+            """.trimIndent(),
+        )
+        val state = newState(dir)
+        state.updateSettings { it.copy(sourceFolders = listOf(srcDir.absolutePath)) }
+
+        state.reindexSources(srcDir.absolutePath)
+        waitUntil { state.sourceIndexStatusForFolder(srcDir.absolutePath).siteCount == 1 }
+        assertEquals(1, state.resolveLogSource("Fixture", "Feature failed").size)
+
+        state.updateSettings { it.copy(sourceAutoDiscoveryEnabled = false) }
+
+        assertTrue(state.sourceIndexStatusForFolder(srcDir.absolutePath).configurationChanged)
+        assertEquals(emptyList(), state.resolveLogSource("Fixture", "Feature failed"))
+    }
+
+    @Test
+    fun nestedSourceFolderUsesItsOwnConfigurationForSourceResolution() {
+        val dir = createTempDirectory("openlog-src-nested-roots").toFile()
+        val projectRoot = File(dir, "project").apply { mkdirs() }
+        val moduleRoot = File(projectRoot, "module").apply { mkdirs() }
+        File(projectRoot, "Outer.kt").writeText(
+            """
+            class Outer {
+                fun run() { Log.d("Outer", "outer message") }
+            }
+            """.trimIndent(),
+        )
+        File(moduleRoot, "Module.kt").writeText(
+            """
+            class Module {
+                fun run() { Log.d("Module", "module message") }
+            }
+            """.trimIndent(),
+        )
+        val configuration = SourceLogConfiguration("module-config", "Module logging")
+        val state = newState(dir)
+        state.updateSettings {
+            it.copy(
+                sourceFolders = listOf(projectRoot.absolutePath, moduleRoot.absolutePath),
+                sourceLogConfigurations = listOf(configuration),
+                sourceFolderConfigurationIds = mapOf(moduleRoot.absolutePath to listOf(configuration.id)),
+            )
+        }
+        state.reindexSources(projectRoot.absolutePath)
+        waitUntil { state.sourceIndexStatusForFolder(projectRoot.absolutePath).builtAt != 0L }
+        state.reindexSources(moduleRoot.absolutePath)
+        waitUntil { state.sourceIndexStatusForFolder(moduleRoot.absolutePath).siteCount == 1 }
+
+        assertEquals(1, state.resolveLogSource("Module", "module message").size)
+    }
+
     private fun waitUntil(timeoutMs: Long = 5_000, condition: () -> Boolean) {
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
         while (System.nanoTime() < deadline) {

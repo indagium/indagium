@@ -24,6 +24,7 @@ import com.openlog.ui.DesktopStorage
 import com.openlog.ui.ImportFilterAction
 import com.openlog.ui.ManualCollapseAvailability
 import com.openlog.ui.SEQ_COLORS
+import com.openlog.ui.SettingsSection
 import com.openlog.ui.SplitMode
 import com.openlog.ui.blockOrderDuringDrag
 import com.openlog.ui.cumulativeBlockOffsets
@@ -31,11 +32,13 @@ import com.openlog.ui.emptyWorkspaceTab
 import com.openlog.ui.manualCollapseAvailability
 import com.openlog.ui.maskWordForCopy
 import com.openlog.ui.mkTab
+import com.openlog.ui.recentFilesForMenu
 import com.openlog.ui.sequenceOrderDuringDrag
 import com.openlog.ui.sequenceRenderY
 import com.openlog.ui.sequenceRowBaseBackground
 import com.openlog.ui.shouldSyncSequenceVisualOrder
 import com.openlog.ui.themeColors
+import com.openlog.ui.tabDisplayLabel
 import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
@@ -2454,13 +2457,11 @@ class AppStateBehaviorTest {
         state.showOnlyMessagesLikeCtx()
 
         val rules = state.tabs.single().filter.messageRules
-        assertEquals(false, rules[0].include)
-        assertEquals(true, rules[1].include)
-        assertEquals("heartbeat", rules[0].pattern)
-        assertEquals("com.app.Network", rules[0].tag)
-        assertEquals("com.app.Network", rules[1].tag)
-        assertEquals(null, rules[0].packagePrefix)
-        assertEquals(null, rules[1].packagePrefix)
+        assertEquals(1, rules.size)
+        assertTrue(rules.single().include)
+        assertEquals("heartbeat", rules.single().pattern)
+        assertEquals("com.app.Network", rules.single().tag)
+        assertEquals(null, rules.single().packagePrefix)
     }
 
     @Test
@@ -2480,10 +2481,10 @@ class AppStateBehaviorTest {
         state.showOnlyMessagesLikeCtx()
 
         val rules = state.tabs.single().filter.messageRules
-        assertEquals(listOf("timeout", "timeout"), rules.map { it.pattern })
-        assertEquals(listOf(false, true), rules.map { it.include })
-        assertEquals(listOf("com.app.Network", "com.app.Network"), rules.map { it.tag })
-        assertEquals(listOf(null, null), rules.map { it.packagePrefix })
+        assertEquals(listOf("timeout"), rules.map { it.pattern })
+        assertEquals(listOf(true), rules.map { it.include })
+        assertEquals(listOf("com.app.Network"), rules.map { it.tag })
+        assertEquals(listOf(null), rules.map { it.packagePrefix })
     }
 
     // ── requestScrollAnchor (via filter-changing ctx actions) ────────────────
@@ -3138,6 +3139,48 @@ class AppStateBehaviorTest {
         val rules = state.tabs.single().filter.messageRules
         assertEquals(2, rules.size)
         assertFalse(rules[0].id == rules[1].id)
+    }
+
+    @Test
+    fun addingOppositeTagAndMessageRuleReplacesTheExistingPolarity() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+
+        state.toggleExcludeTag(tabId, "Network")
+        state.toggleTag(tabId, "Network")
+        assertEquals(setOf("Network"), state.tabs.single().filter.activeTags)
+        assertTrue(state.tabs.single().filter.excludeTags.isEmpty())
+
+        state.addMessageRule(tabId, include = false, pattern = "timeout", regex = true, tag = "Network", packagePrefix = null)
+        state.addMessageRule(tabId, include = true, pattern = "timeout", regex = true, tag = "Network", packagePrefix = null)
+        state.addMessageRule(tabId, include = true, pattern = "timeout", regex = true, tag = "Network", packagePrefix = null)
+        val rules = state.tabs.single().filter.messageRules
+        assertEquals(1, rules.size)
+        assertTrue(rules.single().include)
+    }
+
+    @Test
+    fun duplicateTabFilenamesGetSourceSuffixAndRecentMenuKeepsAllEntries() {
+        val first = mkTab("one", "same.log", emptyList()).copy(sourcePath = "/logs/first/same.log")
+        val second = mkTab("two", "same.log", emptyList()).copy(sourcePath = "/logs/second/same.log")
+        assertEquals("same.log — first", tabDisplayLabel(first, listOf(first, second)))
+        assertEquals("same.log — second", tabDisplayLabel(second, listOf(first, second)))
+        assertEquals("same.log", tabDisplayLabel(first, listOf(first)))
+        assertEquals(30, recentFilesForMenu((1..30).map { "/logs/$it.log" }).size)
+    }
+
+    @Test
+    fun providerPickerOpensSettingsAtAiProviders() {
+        val state = AppState(restoreOnCreate = false)
+        try {
+            state.openAiProviderSettings()
+
+            assertTrue(state.settingsOpen)
+            assertEquals(SettingsSection.AiProviders, state.requestedSettingsSection)
+        } finally {
+            state.close()
+        }
     }
 
     @Test

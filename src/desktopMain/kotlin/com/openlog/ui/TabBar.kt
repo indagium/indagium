@@ -35,6 +35,14 @@ import kotlin.math.roundToInt
 // App.kt's file-level consts since it's only used by TabBar's drag logic.
 internal const val TAB_DRAG_SNAP_BIAS = 0.25f
 
+/** Only disambiguate labels when a filename collision is actually visible to the user. */
+internal fun tabDisplayLabel(tab: LogTab, allTabs: List<LogTab>): String {
+    if (allTabs.count { it.filename == tab.filename } < 2) return tab.filename
+    val source = tab.sourcePath.orEmpty().substringBefore('!')
+    val parent = File(source).parentFile?.name?.takeIf { it.isNotBlank() }
+    return "${tab.filename} — ${parent ?: tab.id.take(8)}"
+}
+
 // ── TabBar ────────────────────────────────────────────────────────────
 @Composable
 internal fun TabBar(state: AppState) {
@@ -309,6 +317,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                     ) {
                         TabItem(
                             tab = tab,
+                            label = tabDisplayLabel(tab, state.tabs),
                             isActive = tab.id == state.activeTabId,
                             showClose = true,
                             dragging = isDragging,
@@ -346,7 +355,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                         onClick = { state.activateOverflowTab(tab.id); overflowOpen = false },
                                     ) {
                                         AppText(
-                                            tab.filename, color = tc.tx, fontSize = 12.sp,
+                                            tabDisplayLabel(tab, state.tabs), color = tc.tx, fontSize = 12.sp,
                                             fontFamily = MONO,
                                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
                                             overflow = TextOverflow.Ellipsis,
@@ -366,6 +375,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
 @Composable
 internal fun TabItem(
     tab: LogTab, isActive: Boolean, showClose: Boolean,
+    label: String = tab.filename,
     dragging: Boolean = false, onClick: () -> Unit, onClose: () -> Unit,
     onCtxMenu: (Float, Float) -> Unit = { _, _ -> },
 ) {
@@ -449,7 +459,7 @@ internal fun TabItem(
             modifier = Modifier.weight(1f),
         ) {
             AppText(
-                tab.filename,
+                label,
                 color = if (isActive || dragging) tc.tx else tc.ts,
                 fontSize = 12.sp,
                 fontFamily = MONO,

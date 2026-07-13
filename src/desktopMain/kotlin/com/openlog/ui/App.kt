@@ -50,6 +50,9 @@ import java.io.File
 import java.net.URI
 import kotlin.math.roundToInt
 
+/** The popup is bounded visually, but every retained path stays reachable by scrolling. */
+internal fun recentFilesForMenu(recentFiles: List<String>): List<String> = recentFiles
+
 @Composable
 fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) }) {
     val theme = themeColors(state.settings.theme)
@@ -1349,44 +1352,49 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                 )
                             }
                             Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
-                            // Show 10 items, scrollable; list stores up to 30
-                            val displayFiles = state.recentFiles.take(10)
+                            // All retained entries are reachable; keep the popup bounded and
+                            // scroll the full list rather than showing an unusable "N more" hint.
+                            val displayFiles = recentFilesForMenu(state.recentFiles)
                             val listH = (displayFiles.size * 46).coerceAtMost(460).dp
-                            Column(Modifier.fillMaxWidth().height(listH).verticalScroll(rememberScrollState())) {
-                                displayFiles.forEach { path ->
-                                    val file = File(path)
-                                    val exists = file.exists()
-                                    HoverBox(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        onClick = { state.openPath(file) },
-                                    ) {
-                                        Column(
-                                            Modifier.fillMaxWidth()
-                                                .padding(horizontal = 14.dp, vertical = 7.dp),
+                            val recentScroll = rememberScrollState()
+                            Box(Modifier.fillMaxWidth().height(listH)) {
+                                Column(
+                                    Modifier.fillMaxSize().verticalScroll(recentScroll).padding(end = 10.dp),
+                                ) {
+                                    displayFiles.forEach { path ->
+                                        val file = File(path)
+                                        val exists = file.exists()
+                                        HoverBox(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            onClick = { state.openPath(file) },
                                         ) {
-                                            AppText(
-                                                file.name,
-                                                color = if (exists) tc.tx else tc.td,
-                                                fontSize = 12.sp,
-                                                fontFamily = MONO,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
-                                            AppText(
-                                                file.parent ?: path,
-                                                color = tc.td,
-                                                fontSize = 10.sp,
-                                                fontFamily = MONO,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
+                                            Column(
+                                                Modifier.fillMaxWidth()
+                                                    .padding(horizontal = 14.dp, vertical = 7.dp),
+                                            ) {
+                                                AppText(
+                                                    file.name,
+                                                    color = if (exists) tc.tx else tc.td,
+                                                    fontSize = 12.sp,
+                                                    fontFamily = MONO,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                                AppText(
+                                                    file.parent ?: path,
+                                                    color = tc.td,
+                                                    fontSize = 10.sp,
+                                                    fontFamily = MONO,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            if (state.recentFiles.size > 10) {
-                                Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
-                                Box(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp)) {
-                                    AppText("… ${state.recentFiles.size - 10} more", color = tc.td, fontSize = 10.sp)
-                                }
+                                VerticalScrollbar(
+                                    adapter = rememberScrollbarAdapter(recentScroll),
+                                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+                                    style = appScrollbarStyle(tc),
+                                )
                             }
                         }
                     }

@@ -1,5 +1,6 @@
 package com.openlog.source
 
+import com.openlog.model.SourceWrapperRule
 import java.io.File
 
 // ── Public entry point ───────────────────────────────────────────────────
@@ -11,16 +12,38 @@ object SourceIndexer {
     private val SOURCE_EXTENSIONS = setOf("kt", "java")
     private val SKIP_DIR_NAMES = setOf("build", ".git", ".gradle", ".idea", "node_modules", "out")
 
-    fun build(roots: List<File>, progress: ((scanned: Int, total: Int) -> Unit)? = null): SourceIndex {
+    fun build(
+        roots: List<File>,
+        progress: ((scanned: Int, total: Int) -> Unit)? = null,
+        options: SourceIndexBuildOptions = SourceIndexBuildOptions(),
+    ): SourceIndex {
         val files = roots.flatMap { collectSourceFiles(it) }.distinct()
         val sites = mutableListOf<LogCallSite>()
         val fileMeta = mutableMapOf<String, FileMeta>()
+        val texts = mutableMapOf<String, String>()
+
+        files.forEach { file -> runCatching { texts[file.absolutePath] = file.readText() } }
+        val globalConstants = buildGlobalConstants(texts)
+        val discoveredRules = if (options.autoDiscover) discoverWrapperRules(texts) else emptyList()
+        val wrapperRules = (options.wrapperRules + discoveredRules).distinct()
 
         files.forEachIndexed { idx, file ->
             runCatching {
-                val text = file.readText()
+                val text = texts[file.absolutePath] ?: return@runCatching
                 fileMeta[file.absolutePath] = FileMeta(mtime = file.lastModified(), size = file.length())
-                sites += extractCallSites(file.absolutePath, text, isJavaFile = file.extension.equals("java", true))
+                sites += extractCallSites(
+                    file.absolutePath,
+                    text,
+                    isJavaFile = file.extension.equals("java", true),
+                    globalConstants = globalConstants,
+                )
+                sites += extractWrapperCallSites(
+                    file.absolutePath,
+                    text,
+                    isJavaFile = file.extension.equals("java", true),
+                    wrapperRules = wrapperRules,
+                    globalConstants = globalConstants,
+                )
             }
             progress?.invoke(idx + 1, files.size)
         }
@@ -28,9 +51,22 @@ object SourceIndexer {
         return SourceIndex(
             version = SOURCE_INDEX_VERSION,
             roots = roots.map { it.absolutePath },
-            sites = sites,
+            sites = sites.distinctBy { site ->
+                listOf(
+                    site.filePath,
+                    site.callLine,
+                    site.tag,
+                    site.matcher,
+                    site.methodStartLine,
+                    site.configurationDependent,
+                )
+            },
             fileMeta = fileMeta,
             builtAt = System.currentTimeMillis(),
+            rootConfigFingerprints = roots.associate { root ->
+                root.absolutePath to (options.configurationFingerprint
+                    ?: sourceConfigurationFingerprint(emptyList(), options.autoDiscover))
+            },
         )
     }
 
@@ -42,6 +78,12 @@ object SourceIndexer {
             .toList()
     }
 }
+
+data class SourceIndexBuildOptions(
+    val wrapperRules: List<SourceWrapperRule> = emptyList(),
+    val autoDiscover: Boolean = false,
+    val configurationFingerprint: String? = null,
+)
 
 // ── Character classification (opaque = string/char literal or comment) ────
 
@@ -587,6 +629,7 @@ private fun resolveTag(
     mask: CodeMask,
     constMap: Map<String, List<ScopedConst>>,
     filePackage: String?,
+    globalConstants: Map<String, String> = emptyMap(),
 ): String? {
     val trimmed = rawArg.trim()
     FULL_STRING_LITERAL_RE.matchEntire(trimmed)?.let { return decodeQuotedLiteral(it.groupValues[1]) }
@@ -596,7 +639,32 @@ private fun resolveTag(
         return constMap[trimmed]?.firstOrNull { it.enclosingType == enclosingType }?.value
             ?: constMap[trimmed]?.firstOrNull { it.enclosingType == null }?.value
     }
+    // Cross-file constants must be qualified (`Telemetry.BUG`). A bare `TAG` is scoped to the
+    // containing file/type; resolving it from a project-wide map makes every Log.d(TAG, ...) use
+    // whichever class happened to be scanned first.
+    globalConstants[trimmed]?.let { return it }
     return null
+}
+
+private fun buildGlobalConstants(texts: Map<String, String>): Map<String, String> {
+    val result = linkedMapOf<String, String>()
+    texts.forEach { (_, text) ->
+        val mask = CodeMask(text)
+        val pkg = findFilePackage(text, mask)
+        for (regex in listOf(KOTLIN_CONST_RE, JAVA_CONST_RE)) {
+            regex.findAll(text).forEach { match ->
+                if (!mask.isCode.getOrElse(match.range.first) { false }) return@forEach
+                val owner = findEnclosingNamedType(text, mask, match.range.first)
+                val value = decodeQuotedLiteral(match.groupValues[2])
+                val name = match.groupValues[1]
+                if (owner != null) {
+                    result["$owner.$name"] = value
+                    if (!pkg.isNullOrBlank()) result["$pkg.$owner.$name"] = value
+                }
+            }
+        }
+    }
+    return result
 }
 
 // ── Method-boundary detection ────────────────────────────────────────────────
@@ -760,6 +828,7 @@ private fun buildSite(
     callStartIdx: Int,
     msgExprRaw: String,
     tag: String?,
+    configurationDependent: Boolean = false,
 ): LogCallSite? {
     val parts = buildTemplateParts(msgExprRaw)
     val matcherInfo = buildMatcher(parts) ?: return null
@@ -773,6 +842,7 @@ private fun buildSite(
         callLine = lines.lineOf(callStartIdx),
         matcher = matcherInfo.pattern,
         literalLen = matcherInfo.literalLen,
+        configurationDependent = configurationDependent,
     )
 }
 
@@ -786,13 +856,19 @@ private class ScanCtx(
     val constMap: Map<String, List<ScopedConst>>,
     val isJavaFile: Boolean,
     val filePackage: String?,
+    val globalConstants: Map<String, String>,
 )
 
-private fun extractCallSites(filePath: String, text: String, isJavaFile: Boolean): List<LogCallSite> {
+private fun extractCallSites(
+    filePath: String,
+    text: String,
+    isJavaFile: Boolean,
+    globalConstants: Map<String, String> = emptyMap(),
+): List<LogCallSite> {
     val mask = CodeMask(text)
     val filePackage = findFilePackage(text, mask)
     val constMap = buildConstMap(text, mask, filePackage)
-    val ctx = ScanCtx(filePath, text, mask, LineIndex(text), constMap, isJavaFile, filePackage)
+    val ctx = ScanCtx(filePath, text, mask, LineIndex(text), constMap, isJavaFile, filePackage, globalConstants)
     return CALL_RE.findAll(text).mapNotNull { processCallMatch(ctx, it) }.toList()
 }
 
@@ -815,7 +891,7 @@ private fun processLogCall(ctx: ScanCtx, startIdx: Int, method: String, openPare
     if (method !in LOG_METHODS) return null
     val callArgs = parseArgs(ctx.text, ctx.mask, openParenIdx)
     if (callArgs.args.size < 2) return null
-    val tag = resolveTag(callArgs.args[0], startIdx, ctx.text, ctx.mask, ctx.constMap, ctx.filePackage)
+    val tag = resolveTag(callArgs.args[0], startIdx, ctx.text, ctx.mask, ctx.constMap, ctx.filePackage, ctx.globalConstants)
     return buildSite(ctx.filePath, ctx.text, ctx.mask, ctx.lines, ctx.isJavaFile, startIdx, callArgs.args[1], tag)
 }
 
@@ -823,7 +899,9 @@ private fun processLogCall(ctx: ScanCtx, startIdx: Int, method: String, openPare
 // site is the method chained immediately after it.
 private fun processTimberTagChain(ctx: ScanCtx, startIdx: Int, openParenIdx: Int): LogCallSite? {
     val tagArgs = parseArgs(ctx.text, ctx.mask, openParenIdx)
-    val tagValue = tagArgs.args.getOrNull(0)?.let { resolveTag(it, startIdx, ctx.text, ctx.mask, ctx.constMap, ctx.filePackage) }
+    val tagValue = tagArgs.args.getOrNull(0)?.let {
+        resolveTag(it, startIdx, ctx.text, ctx.mask, ctx.constMap, ctx.filePackage, ctx.globalConstants)
+    }
     val chain = findChainedTimberCall(ctx.text, ctx.mask, tagArgs.closeIdx) ?: return null
     val callArgs = parseArgs(ctx.text, ctx.mask, chain.openParenIdx)
     if (callArgs.args.isEmpty()) return null
@@ -834,4 +912,140 @@ private fun processTimberCall(ctx: ScanCtx, startIdx: Int, openParenIdx: Int): L
     val callArgs = parseArgs(ctx.text, ctx.mask, openParenIdx)
     if (callArgs.args.isEmpty()) return null
     return buildSite(ctx.filePath, ctx.text, ctx.mask, ctx.lines, ctx.isJavaFile, startIdx, callArgs.args[0], null)
+}
+
+private val CUSTOM_CALL_RE = Regex("""\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)?)\s*\.\s*(\w+)\s*\(""")
+private val KOTLIN_FUNCTION_DECL_RE = Regex("""\bfun\s+(\w+)\s*\(([^)]*)\)""")
+private val JAVA_METHOD_DECL_RE = Regex(
+    """(?m)^\s*(?:(?:public|private|protected|static|final|synchronized)\s+)*[\w<>,.?\[\]]+\s+(\w+)\s*\(([^)]*)\)\s*\{""",
+)
+
+private fun parameterNames(raw: String, isJavaFile: Boolean): List<String> = raw.split(',').mapNotNull { parameter ->
+    val cleaned = parameter.substringBefore('=').trim()
+    if (cleaned.isBlank()) return@mapNotNull null
+    if (isJavaFile) Regex("""([A-Za-z_]\w*)\s*$""").find(cleaned)?.groupValues?.get(1)
+    else Regex("""([A-Za-z_]\w*)\s*(?::|$)""").find(cleaned)?.groupValues?.get(1)
+}
+
+private fun enclosingFunctionParameters(text: String, callOffset: Int, methodName: String, isJavaFile: Boolean): List<String> {
+    val declarations = if (isJavaFile) JAVA_METHOD_DECL_RE.findAll(text).toList() else KOTLIN_FUNCTION_DECL_RE.findAll(text).toList()
+    val declaration = declarations.lastOrNull { it.range.first < callOffset && it.groupValues[1] == methodName } ?: return emptyList()
+    return parameterNames(declaration.groupValues[2], isJavaFile)
+}
+
+private fun declaredOwnerCandidates(receiver: String, text: String, beforeOffset: Int, filePackage: String?): Set<String> {
+    val normalizedReceiver = receiver.replace(" ", "")
+    val simpleReceiver = normalizedReceiver.substringAfterLast('.')
+    val candidates = linkedSetOf(normalizedReceiver, simpleReceiver)
+    val declaration = Regex(
+        """(?m)\b(?:public\s+|private\s+|protected\s+|internal\s+|final\s+|override\s+)*(?:val|var)\s+$simpleReceiver\s*:\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)""",
+    ).findAll(text.substring(0, beforeOffset)).lastOrNull()
+    declaration?.groupValues?.getOrNull(1)?.let {
+        candidates += it
+        if (!filePackage.isNullOrBlank() && !it.contains('.')) candidates += "$filePackage.$it"
+    }
+    val parameter = Regex("""\b$simpleReceiver\s*:\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)""")
+        .findAll(text.substring(0, beforeOffset)).lastOrNull()
+    parameter?.groupValues?.getOrNull(1)?.let {
+        candidates += it
+        if (!filePackage.isNullOrBlank() && !it.contains('.')) candidates += "$filePackage.$it"
+    }
+    val javaField = Regex(
+        """(?m)\b(?:public\s+|private\s+|protected\s+|static\s+|final\s+|volatile\s+)*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+$simpleReceiver\s*(?:=|;)""",
+    ).findAll(text.substring(0, beforeOffset)).lastOrNull()
+    javaField?.groupValues?.getOrNull(1)?.let {
+        candidates += it
+        if (!filePackage.isNullOrBlank() && !it.contains('.')) candidates += "$filePackage.$it"
+    }
+    val javaParameter = Regex(
+        """\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+$simpleReceiver\s*(?:[,)]|$)""",
+    ).findAll(text.substring(0, beforeOffset)).lastOrNull()
+    javaParameter?.groupValues?.getOrNull(1)?.let {
+        candidates += it
+        if (!filePackage.isNullOrBlank() && !it.contains('.')) candidates += "$filePackage.$it"
+    }
+    return candidates
+}
+
+private fun ownerMatches(rule: SourceWrapperRule, candidates: Set<String>): Boolean {
+    val configured = rule.ownerType.trim()
+    if (configured.isBlank()) return false
+    val configuredSimple = configured.substringAfterLast('.')
+    return if (configured.contains('.')) configured in candidates else configuredSimple in candidates
+}
+
+private fun extractWrapperCallSites(
+    filePath: String,
+    text: String,
+    isJavaFile: Boolean,
+    wrapperRules: List<SourceWrapperRule>,
+    globalConstants: Map<String, String>,
+): List<LogCallSite> {
+    if (wrapperRules.isEmpty()) return emptyList()
+    val mask = CodeMask(text)
+    val lines = LineIndex(text)
+    val filePackage = findFilePackage(text, mask)
+    val constMap = buildConstMap(text, mask, filePackage)
+    return CUSTOM_CALL_RE.findAll(text).mapNotNull { match ->
+        val startIdx = match.range.first
+        if (!mask.isCode.getOrElse(startIdx) { false }) return@mapNotNull null
+        val receiver = match.groupValues[1].replace(Regex("\\s+"), "")
+        val methodName = match.groupValues[2]
+        val candidates = declaredOwnerCandidates(receiver, text, startIdx, filePackage)
+        val rule = wrapperRules.firstOrNull { it.methodName == methodName && ownerMatches(it, candidates) }
+            ?: return@mapNotNull null
+        val args = parseArgs(text, mask, match.range.last).args
+        val tagExpr = args.getOrNull(rule.tagArgumentIndex) ?: return@mapNotNull null
+        val messageExpr = args.getOrNull(rule.messageArgumentIndex) ?: return@mapNotNull null
+        val tag = resolveTag(tagExpr, startIdx, text, mask, constMap, filePackage, globalConstants)
+        buildSite(
+            filePath,
+            text,
+            mask,
+            lines,
+            isJavaFile,
+            startIdx,
+            messageExpr,
+            tag,
+            configurationDependent = true,
+        )
+    }.toList()
+}
+
+private fun discoverWrapperRules(texts: Map<String, String>): List<SourceWrapperRule> {
+    val discovered = linkedSetOf<SourceWrapperRule>()
+    texts.forEach { (filePath, text) ->
+        val mask = CodeMask(text)
+        val pkg = findFilePackage(text, mask)
+        val isJavaFile = filePath.endsWith(".java", ignoreCase = true)
+        CALL_RE.findAll(text).forEach { match ->
+            if (!mask.isCode.getOrElse(match.range.first) { false }) return@forEach
+            val receiver = match.groupValues[1]
+            if (receiver != "Log" && receiver != "Timber") return@forEach
+            val args = parseArgs(text, mask, match.range.last).args
+            if (args.size < 2) return@forEach
+            val method = findEnclosingMethod(text, mask, LineIndex(text), match.range.first, isJavaFile)
+            if (method.name == "<file>") return@forEach
+            val params = enclosingFunctionParameters(text, match.range.first, method.name, isJavaFile)
+            val tagIndex = params.indexOf(args[0].trim()).takeIf { it >= 0 } ?: return@forEach
+            val messageIndex = params.indexOf(args[1].trim()).takeIf { it >= 0 } ?: return@forEach
+            val owner = findEnclosingNamedType(text, mask, match.range.first) ?: return@forEach
+            val ownerName = if (pkg.isNullOrBlank()) owner else "$pkg.$owner"
+            val rule = SourceWrapperRule(ownerName, method.name, tagIndex, messageIndex)
+            discovered += rule
+            implementedTypes(text, owner).forEach { interfaceName ->
+                discovered += rule.copy(ownerType = interfaceName)
+                if (!pkg.isNullOrBlank()) discovered += rule.copy(ownerType = "$pkg.$interfaceName")
+            }
+        }
+    }
+    return discovered.toList()
+}
+
+private fun implementedTypes(text: String, owner: String): List<String> {
+    val kotlinMatch = Regex("""(?:class|object)\s+$owner\b[^\{]*:\s*([^\{]+)\{""").find(text)
+    val javaMatch = Regex("""class\s+$owner\b[^\{]*\bimplements\s+([^\{]+)\{""").find(text)
+    val implemented = kotlinMatch?.groupValues?.getOrNull(1) ?: javaMatch?.groupValues?.getOrNull(1) ?: return emptyList()
+    return implemented.split(',').map { it.trim().substringBefore('<').trim() }
+        .filter { it.matches(Regex("[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*")) }
 }

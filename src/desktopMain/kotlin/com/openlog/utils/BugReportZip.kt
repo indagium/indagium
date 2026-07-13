@@ -80,8 +80,9 @@ private fun isSevenZFile(file: File): Boolean {
     return runCatching { sevenZFile(file).use { } }.isSuccess
 }
 
-// Candidate filter: entry basename contains "log" (case-insensitive), extension is .txt/.log/none,
-// and the entry's own content sniffs as text — a bug-report zip bundles binary buffers
+// Candidate filter: entries named like logs/ANR traces remain eligible, and every readable .txt
+// entry is eligible even when its name says nothing about logs. The entry's own content must
+// still sniff as text — a bug-report zip bundles binary buffers
 // (bugreport-*.txt is itself text, but nested traces/heap dumps aren't) alongside the logcat
 // buffers we actually want.
 fun listLogcatCandidates(zipFile: File, maxEntries: Int = MAX_ARCHIVE_ENTRIES_SCANNED): List<ZipLogCandidate> =
@@ -127,16 +128,17 @@ private fun candidateKind(entryPath: String, isText: () -> Boolean): ZipLogCandi
     val lowerPath = entryPath.lowercase()
     val lowerName = name.lowercase()
     val ext = name.substringAfterLast('.', missingDelimiterValue = "")
+    val isTextFile = ext.equals("txt", ignoreCase = true)
     val looksLikeLog = name.contains("log", ignoreCase = true) && (ext.isEmpty() || ext.lowercase() in LOG_EXTENSIONS)
     val inAnrDir = lowerPath.contains("/anr/") || lowerPath.startsWith("anr/")
     val looksLikeAnrTrace = lowerName.startsWith("anr_") ||
         lowerName.startsWith("traces") ||
         lowerName.contains("anr") && (ext.isEmpty() || ext.lowercase() in ANR_EXTENSIONS)
     val looksLikeAnr = (inAnrDir || looksLikeAnrTrace) && (ext.isEmpty() || ext.lowercase() in ANR_EXTENSIONS)
-    if (!looksLikeLog && !looksLikeAnr) return null
+    if (!looksLikeLog && !looksLikeAnr && !isTextFile) return null
     if (!runCatching { isText() }.getOrDefault(false)) return null
 
-    if (looksLikeLog) {
+    if (looksLikeLog || isTextFile) {
         return ZipLogCandidateKind.LOGCAT
     }
 

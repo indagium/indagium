@@ -39,19 +39,20 @@ import com.openlog.model.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.UUID
 
 // ── Settings dialog ───────────────────────────────────────────────────
 // Left-hand nav lists every section; only the selected section's content renders on the
 // right, so growing any one section (e.g. AI providers) no longer pushes every other
 // section down a shared scroll. There's no standalone "About" entry — its former content
 // (keyboard shortcuts, version, author) now lives in Editor behavior and the footer.
-private enum class SettingsSection(val title: String, val icon: ImageVector) {
+internal enum class SettingsSection(val title: String, val icon: ImageVector) {
     Appearance("Appearance", Icons.Outlined.Palette),
     EditorBehavior("Editor behavior", Icons.Outlined.Tune),
     ExportAnnotations("Export & annotations", Icons.Outlined.Description),
     Automation("Automation", Icons.Outlined.Bolt),
     AiProviders("AI providers", Icons.Outlined.Psychology),
-    CustomAiCommands("Custom AI commands", Icons.Outlined.Terminal),
+    CustomAiCommands("AI commands", Icons.Outlined.Terminal),
     SourceCode("Source code", Icons.Outlined.Code),
 }
 
@@ -59,8 +60,14 @@ private enum class SettingsSection(val title: String, val icon: ImageVector) {
 internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
-    var selectedSection by remember { mutableStateOf(SettingsSection.Appearance) }
+    var selectedSection by remember {
+        mutableStateOf(state.requestedSettingsSection ?: SettingsSection.Appearance)
+    }
     LaunchedEffect(Unit) {
+        state.requestedSettingsSection?.let {
+            selectedSection = it
+            state.requestedSettingsSection = null
+        }
         state.refreshArchiveCacheInfo()
     }
     Box(
@@ -619,7 +626,219 @@ private fun SourceCodeSettingsSection(state: AppState) {
             fontSize = 12.sp,
         )
     }
+    TooltipArea(
+        tooltip = {
+            Box(
+                Modifier
+                    .background(tc.p2, RoundedCornerShape(4.dp))
+                    .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                    .padding(horizontal = 8.dp, vertical = 5.dp),
+            ) {
+                AppText(
+                    "During reindexing, finds simple wrapper methods that directly delegate to Log.* or Timber " +
+                        "and follows one interface/implementation hop. It runs for every registered source folder; " +
+                        "folders without wrappers simply discover none. Ambiguous or multi-level wrappers are skipped.",
+                    color = tc.tx,
+                    fontSize = 11.sp,
+                    maxLines = 5,
+                )
+            }
+        },
+    ) {
+        CheckRow(
+            checked = state.settings.sourceAutoDiscoveryEnabled,
+            onToggle = {
+                state.updateSettings {
+                    it.copy(sourceAutoDiscoveryEnabled = !it.sourceAutoDiscoveryEnabled)
+                }
+            },
+        ) {
+            AppText("Discover simple custom log wrappers", color = tc.tx, fontSize = 11.sp)
+            AppText("ⓘ", color = tc.td, fontSize = 11.sp)
+        }
+    }
+    SourceLoggingConfigurations(state)
 }
+
+@Composable
+private fun SourceLoggingConfigurations(state: AppState) {
+    val tc = tc()
+    var editingId by remember { mutableStateOf<String?>(null) }
+    var editingIsNew by remember { mutableStateOf(false) }
+    val configurations = state.settings.sourceLogConfigurations
+    val editing = configurations.firstOrNull { it.id == editingId }
+
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                AppText("Logging configurations", color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                AppText(
+                    "Assign module-specific wrapper rules to registered source folders.",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                )
+            }
+            AppButton(
+                "Add configuration",
+                onClick = {
+                    val id = UUID.randomUUID().toString()
+                    state.saveSourceLogConfiguration(SourceLogConfiguration(id = id, name = "Logging configuration"))
+                    editingId = id
+                    editingIsNew = true
+                },
+                variant = ButtonVariant.Secondary,
+            )
+        }
+        if (editing != null) {
+            SourceLoggingConfigurationEditor(
+                state = state,
+                configuration = editing,
+                onClose = {
+                    if (editingIsNew) editingId?.let(state::deleteSourceLogConfiguration)
+                    editingId = null
+                    editingIsNew = false
+                },
+                onSaved = { editingIsNew = false },
+            )
+        } else if (configurations.isEmpty()) {
+            AppText("No custom logging configurations.", color = tc.td, fontSize = 10.sp)
+        } else {
+            configurations.forEach { configuration ->
+                Row(
+                    Modifier.fillMaxWidth().background(tc.p2, CORNER_SM).padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        AppText(configuration.name, color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                        AppText(
+                            "${configuration.wrapperRules.size} wrapper rules",
+                            color = tc.td,
+                            fontSize = 10.sp,
+                        )
+                    }
+                    AppButton("Edit", onClick = { editingId = configuration.id; editingIsNew = false })
+                    AppButton(
+                        "Duplicate",
+                        onClick = {
+                            val id = UUID.randomUUID().toString()
+                            state.saveSourceLogConfiguration(configuration.copy(id = id, name = "${configuration.name} copy"))
+                            editingId = id
+                            editingIsNew = true
+                        },
+                    )
+                    AppButton(
+                        "Delete",
+                        onClick = {
+                            state.deleteSourceLogConfiguration(configuration.id)
+                            if (editingId == configuration.id) {
+                                editingId = null
+                                editingIsNew = false
+                            }
+                        },
+                        isDanger = true,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SourceLoggingConfigurationEditor(
+    state: AppState,
+    configuration: SourceLogConfiguration,
+    onClose: () -> Unit,
+    onSaved: () -> Unit,
+) {
+    val tc = tc()
+    var draft by remember(configuration.id) { mutableStateOf(configuration) }
+    val assignedFolders = state.settings.sourceFolderConfigurationIds
+    Column(
+        Modifier.fillMaxWidth().background(tc.p2, CORNER_SM).padding(8.dp),
+        verticalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            AppText("Edit logging configuration", color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+            AppButton("Cancel", onClick = onClose)
+        }
+        InlineField(
+            draft.name,
+            { draft = draft.copy(name = it) },
+            "Configuration name",
+            Modifier.fillMaxWidth(),
+            fontSize = 12.sp,
+        )
+        AppText("Source folders", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+        if (state.settings.sourceFolders.isEmpty()) {
+            AppText("Register source folders above to assign this configuration.", color = tc.td, fontSize = 10.sp)
+        } else {
+            state.settings.sourceFolders.forEach { folder ->
+                val path = File(folder).absolutePath
+                CheckRow(
+                    checked = configuration.id in assignedFolders[path].orEmpty(),
+                    onToggle = {
+                        val current = assignedFolders[path].orEmpty().toSet()
+                        state.assignSourceLogConfigurations(path, (if (configuration.id in current) current - configuration.id else current + configuration.id).toList())
+                    },
+                ) {
+                    AppText(truncatePathForDisplay(folder), color = tc.ts, fontSize = 10.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            AppText("Wrapper rules", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            AppButton(
+                "Add rule",
+                onClick = { draft = draft.copy(wrapperRules = draft.wrapperRules + SourceWrapperRule("", "")) },
+            )
+        }
+        draft.wrapperRules.forEachIndexed { index, rule ->
+            Column(Modifier.fillMaxWidth().border(0.5.dp, tc.br, CORNER_SM).padding(6.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    InlineField(
+                        rule.ownerType,
+                        { value -> draft = draft.replaceWrapperRule(index, rule.copy(ownerType = value)) },
+                        "Owner/type, e.g. com.example.Telemetry",
+                        Modifier.weight(1f),
+                        fontSize = 11.sp,
+                    )
+                    InlineField(
+                        rule.methodName,
+                        { value -> draft = draft.replaceWrapperRule(index, rule.copy(methodName = value)) },
+                        "Method",
+                        Modifier.width(100.dp),
+                        fontSize = 11.sp,
+                    )
+                    AppButton(
+                        "Remove",
+                        onClick = { draft = draft.copy(wrapperRules = draft.wrapperRules.filterIndexed { ruleIndex, _ -> ruleIndex != index }) },
+                        isDanger = true,
+                    )
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    InlineField(rule.tagArgumentIndex.toString(), { value -> value.toIntOrNull()?.let { draft = draft.replaceWrapperRule(index, rule.copy(tagArgumentIndex = it)) } }, "Tag argument", Modifier.weight(1f), fontSize = 11.sp)
+                    InlineField(rule.messageArgumentIndex.toString(), { value -> value.toIntOrNull()?.let { draft = draft.replaceWrapperRule(index, rule.copy(messageArgumentIndex = it)) } }, "Message argument", Modifier.weight(1f), fontSize = 11.sp)
+                    InlineField(rule.throwableArgumentIndex?.toString().orEmpty(), { value -> draft = draft.replaceWrapperRule(index, rule.copy(throwableArgumentIndex = value.toIntOrNull())) }, "Throwable (optional)", Modifier.weight(1f), fontSize = 11.sp)
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            AppButton(
+                "Save configuration",
+                onClick = { state.saveSourceLogConfiguration(draft); onSaved() },
+                variant = ButtonVariant.Primary,
+            )
+        }
+    }
+}
+
+private fun SourceLogConfiguration.replaceWrapperRule(index: Int, rule: SourceWrapperRule): SourceLogConfiguration =
+    copy(wrapperRules = wrapperRules.mapIndexed { ruleIndex, current -> if (ruleIndex == index) rule else current })
 
 // Indexing is per folder (AppState.reindexSources/sourceIndexStatusForFolder) — each registered
 // folder gets its own status line and its own Reindex button, rather than one aggregate action
@@ -671,6 +890,8 @@ private fun SourceFolderRow(state: AppState, path: String) {
         AppText(
             if (folderStatus.builtAt == 0L) {
                 "Not indexed yet"
+            } else if (folderStatus.configurationChanged) {
+                "Configuration changed — reindex required"
             } else {
                 "${folderStatus.fileCount} files · ${folderStatus.siteCount} call sites · " +
                     "indexed ${sourceIndexAgeLabel(folderStatus.builtAt)}"
@@ -679,6 +900,22 @@ private fun SourceFolderRow(state: AppState, path: String) {
             fontSize = 10.sp,
             fontFamily = UI,
         )
+        val configurationNames = state.sourceConfigurationsForFolder(path).map { it.name }
+        if (configurationNames.isNotEmpty()) {
+            AppText(
+                "Configurations: ${configurationNames.joinToString()}",
+                color = tc.td,
+                fontSize = 10.sp,
+                fontFamily = UI,
+            )
+        } else if (state.settings.sourceLogConfigurations.isNotEmpty()) {
+            AppText(
+                "No logging configuration assigned — assign one below, then reindex",
+                color = tc.ac,
+                fontSize = 10.sp,
+                fontFamily = UI,
+            )
+        }
         if (folderStatus.changedFileCount > 0) {
             AppText(
                 "${folderStatus.changedFileCount} files changed — reindex recommended",

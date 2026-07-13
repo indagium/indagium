@@ -13,7 +13,7 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
-import io.ktor.utils.io.readUTF8Line
+import io.ktor.utils.io.readLine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -111,7 +111,7 @@ class OpenAiCompatibleProvider(
 
                 val channel = response.bodyAsChannel()
                 while (!receivedTerminator) {
-                    val line = channel.readUTF8Line() ?: break
+                    val line = channel.readLine() ?: break
                     if (line.isEmpty()) {
                         dispatchFrame()
                     } else if (line.startsWith("data:")) {

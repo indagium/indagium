@@ -115,6 +115,14 @@ class BugReportZipTest {
     }
 
     @Test
+    fun listLogcatCandidatesAcceptsReadableTxtRegardlessOfItsName() {
+        val dir = createTempDirectory("openlog-zip").toFile()
+        val zip = buildTextZip(dir, "archive(1).zip", mapOf("documents/session.txt" to "plain readable diagnostic text"))
+
+        assertEquals(listOf("documents/session.txt"), listLogcatCandidates(zip).map { it.entryPath })
+    }
+
+    @Test
     fun extractCandidateParsesEntryContentInMemory() {
         val dir = createTempDirectory("openlog-zip").toFile()
         val zip = buildTextZip(
