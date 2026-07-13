@@ -267,6 +267,22 @@ data class SourceFolderInfo(
     val readmePath: String? = null,
 )
 
+/** Explicit description of a custom logging API understood by source indexing. */
+data class SourceWrapperRule(
+    val ownerType: String,
+    val methodName: String,
+    val tagArgumentIndex: Int = 0,
+    val messageArgumentIndex: Int = 1,
+    val throwableArgumentIndex: Int? = null,
+)
+
+/** User-owned source logging configuration. The folder-to-configuration assignment lives in [AppSettings]. */
+data class SourceLogConfiguration(
+    val id: String,
+    val name: String,
+    val wrapperRules: List<SourceWrapperRule> = emptyList(),
+)
+
 data class AppSettings(
     val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
@@ -309,6 +325,13 @@ data class AppSettings(
     // AI/MCP via get_project_info (OpenLogToolOperations.getProjectInfoRoute). Trailing with a
     // default so old settings tokens (without this field) still parse — see settingsFromToken.
     val sourceFolderInfo: Map<String, SourceFolderInfo> = emptyMap(),
+    // Custom source logging APIs. Configurations are assigned to registered source folders through
+    // sourceFolderConfigurationIds so different modules can use different logging conventions.
+    val sourceLogConfigurations: List<SourceLogConfiguration> = emptyList(),
+    val sourceFolderConfigurationIds: Map<String, List<String>> = emptyMap(),
+    // Bounded wrapper discovery applies to every registered source folder. It is separate from
+    // explicit per-module configurations because folders without wrappers simply discover none.
+    val sourceAutoDiscoveryEnabled: Boolean = true,
     // Command template used by SourceCodeDialog's "Open" button to jump to the log call line in an
     // external editor, e.g. "idea --line {line} {file}" or "code -g {file}:{line}" — see
     // AppState.openInEditor. Blank (the default) means auto-detect a common editor CLI, falling

@@ -28,11 +28,12 @@ private fun LogCallSite.toLine(): String = listOf(
     callLine.toString(),
     matcher.fieldToken(),
     literalLen.toString(),
+    configurationDependent.toString(),
 ).joinToString("\t")
 
 private fun parseSiteLine(rest: String): LogCallSite? {
     val parts = rest.split("\t")
-    if (parts.size < 8) return null
+    if (parts.size < 9) return null
     return LogCallSite(
         filePath = parts[0].fieldValue(),
         tag = parts[1].fieldValue().takeIf { it.isNotBlank() },
@@ -42,6 +43,7 @@ private fun parseSiteLine(rest: String): LogCallSite? {
         callLine = parts[5].toInt(),
         matcher = parts[6].fieldValue(),
         literalLen = parts[7].toInt(),
+        configurationDependent = parts[8].toBooleanStrict(),
     )
 }
 
@@ -61,6 +63,7 @@ private class ParseState {
     val fileMeta = mutableMapOf<String, FileMeta>()
     val sites = mutableListOf<LogCallSite>()
     val rootBuiltAt = mutableMapOf<String, Long>()
+    val rootConfigFingerprints = mutableMapOf<String, String>()
 }
 
 private fun parseRootBuiltAtLine(rest: String): Pair<String, Long>? {
@@ -79,6 +82,10 @@ private fun ParseState.applyLine(line: String) {
         "meta" -> parseMetaLine(rest)?.let { (path, meta) -> fileMeta[path] = meta }
         "site" -> parseSiteLine(rest)?.let { sites += it }
         "rootBuiltAt" -> parseRootBuiltAtLine(rest)?.let { (root, at) -> rootBuiltAt[root] = at }
+        "rootConfig" -> {
+            val parts = rest.split("\t")
+            if (parts.size >= 2) rootConfigFingerprints[parts[0].fieldValue()] = parts[1].fieldValue()
+        }
     }
 }
 
@@ -95,6 +102,7 @@ private fun parseSourceIndexLines(lines: List<String>): SourceIndex? {
         fileMeta = state.fileMeta,
         builtAt = state.builtAt,
         rootBuiltAt = state.rootBuiltAt,
+        rootConfigFingerprints = state.rootConfigFingerprints,
     )
 }
 
@@ -112,6 +120,9 @@ object SourceIndexStore {
             writer.appendLine("builtAt\t${index.builtAt}")
             index.roots.forEach { root -> writer.appendLine("root\t${root.fieldToken()}") }
             index.rootBuiltAt.forEach { (root, at) -> writer.appendLine("rootBuiltAt\t${root.fieldToken()}\t$at") }
+            index.rootConfigFingerprints.forEach { (root, fingerprint) ->
+                writer.appendLine("rootConfig\t${root.fieldToken()}\t${fingerprint.fieldToken()}")
+            }
             index.fileMeta.forEach { (path, meta) ->
                 writer.appendLine("meta\t${path.fieldToken()}\t${meta.mtime}\t${meta.size}")
             }

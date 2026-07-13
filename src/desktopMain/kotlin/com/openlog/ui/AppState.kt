@@ -23,10 +23,12 @@ import com.openlog.source.LogSourceResolver
 import com.openlog.source.SOURCE_INDEX_VERSION
 import com.openlog.source.SourceCodeView
 import com.openlog.source.SourceIndex
+import com.openlog.source.SourceIndexBuildOptions
 import com.openlog.source.SourceIndexStatus
 import com.openlog.source.SourceIndexStore
 import com.openlog.source.SourceIndexer
 import com.openlog.source.SourceMatch
+import com.openlog.source.sourceConfigurationFingerprint
 import com.openlog.utils.ArchiveBudgetExceededException
 import com.openlog.utils.EntryIdMap
 import com.openlog.utils.MAX_ARCHIVE_ENTRY_BYTES
@@ -2965,11 +2967,57 @@ class AppState(
     }
 
     fun removeSourceFolder(path: String) {
-        updateSettings { it.copy(sourceFolders = it.sourceFolders - path, sourceFolderInfo = it.sourceFolderInfo - path) }
+        updateSettings {
+            it.copy(
+                sourceFolders = it.sourceFolders - path,
+                sourceFolderInfo = it.sourceFolderInfo - path,
+                sourceFolderConfigurationIds = it.sourceFolderConfigurationIds - path,
+            )
+        }
     }
 
     fun updateSourceFolderInfo(path: String, info: SourceFolderInfo) {
         updateSettings { it.copy(sourceFolderInfo = it.sourceFolderInfo + (path to info)) }
+    }
+
+    fun sourceConfigurationsForFolder(folder: String): List<SourceLogConfiguration> {
+        val ids = settings.sourceFolderConfigurationIds[File(folder).absolutePath].orEmpty().toSet()
+        return settings.sourceLogConfigurations.filter { it.id in ids }
+    }
+
+    fun saveSourceLogConfiguration(configuration: SourceLogConfiguration) {
+        val normalized = configuration.copy(
+            id = configuration.id.ifBlank { UUID.randomUUID().toString() },
+            name = configuration.name.trim().ifBlank { "Logging configuration" },
+            wrapperRules = configuration.wrapperRules.filter { it.ownerType.isNotBlank() && it.methodName.isNotBlank() },
+        )
+        updateSettings { current ->
+            val replaced = current.sourceLogConfigurations.any { it.id == normalized.id }
+            current.copy(
+                sourceLogConfigurations = if (replaced) {
+                    current.sourceLogConfigurations.map { if (it.id == normalized.id) normalized else it }
+                } else {
+                    current.sourceLogConfigurations + normalized
+                },
+            )
+        }
+    }
+
+    fun deleteSourceLogConfiguration(id: String) {
+        updateSettings { current ->
+            current.copy(
+                sourceLogConfigurations = current.sourceLogConfigurations.filterNot { it.id == id },
+                sourceFolderConfigurationIds = current.sourceFolderConfigurationIds.mapValues { (_, ids) ->
+                    ids.filterNot { it == id }
+                }.filterValues { it.isNotEmpty() },
+            )
+        }
+    }
+
+    fun assignSourceLogConfigurations(folder: String, ids: List<String>) {
+        val path = File(folder).absolutePath
+        val valid = ids.distinct().filter { id -> settings.sourceLogConfigurations.any { it.id == id } }
+        updateSettings { it.copy(sourceFolderConfigurationIds = it.sourceFolderConfigurationIds + (path to valid)) }
     }
 
     // Plain (non-directory) file picker for a folder's optional README path — same FileDialog
@@ -3007,6 +3055,27 @@ class AppState(
     private fun isUnderSourceRoot(path: String, rootAbs: String): Boolean =
         path == rootAbs || path.startsWith(rootAbs + File.separator)
 
+    // Registered folders may intentionally overlap (for example, a project root plus a module
+    // source root with a different logging configuration). A source file belongs to the most
+    // specific matching root; using the first configured folder would validate nested-module
+    // sites against the wrong configuration fingerprint and make source actions appear disabled.
+    private fun sourceRootForPath(path: String): String? = settings.sourceFolders
+        .asSequence()
+        .map { File(it).absolutePath }
+        .filter { root -> isUnderSourceRoot(path, root) }
+        .maxByOrNull(String::length)
+
+    private fun belongsToSourceFolder(path: String, rootAbs: String): Boolean {
+        val registeredRoots = settings.sourceFolders.map { File(it).absolutePath }
+        return if (rootAbs in registeredRoots) {
+            sourceRootForPath(path) == rootAbs
+        } else {
+            // Persisted-index inspection can happen before autosaved settings finish restoring;
+            // preserve the status API's historical folder-scoped behavior in that case.
+            isUnderSourceRoot(path, rootAbs)
+        }
+    }
+
     private fun fileChangedSince(path: String, meta: FileMeta): Boolean {
         val file = File(path)
         return !file.exists() || file.lastModified() != meta.mtime || file.length() != meta.size
@@ -3019,12 +3088,18 @@ class AppState(
         val index = sourceIndex ?: return SourceIndexStatus()
         val rootAbs = File(folder).absolutePath
         val builtAt = index.rootBuiltAt[rootAbs] ?: return SourceIndexStatus()
-        val metaEntries = index.fileMeta.filterKeys { isUnderSourceRoot(it, rootAbs) }
+        val metaEntries = index.fileMeta.filterKeys { belongsToSourceFolder(it, rootAbs) }
+        val configurationChanged = index.rootConfigFingerprints[rootAbs] !=
+            sourceConfigurationFingerprint(
+                sourceConfigurationsForFolder(rootAbs),
+                settings.sourceAutoDiscoveryEnabled,
+            )
         return SourceIndexStatus(
             fileCount = metaEntries.size,
-            siteCount = index.sites.count { isUnderSourceRoot(it.filePath, rootAbs) },
+            siteCount = if (configurationChanged) 0 else index.sites.count { belongsToSourceFolder(it.filePath, rootAbs) },
             builtAt = builtAt,
             changedFileCount = metaEntries.count { (path, meta) -> fileChangedSince(path, meta) },
+            configurationChanged = configurationChanged,
         )
     }
 
@@ -3047,9 +3122,19 @@ class AppState(
         ioScope.launch {
             try {
                 val partial = runCatching {
-                    SourceIndexer.build(listOf(File(folder))) { scanned, total ->
-                        loadingStatus = "Indexing source… ($scanned/$total)"
-                    }
+                    val configs = sourceConfigurationsForFolder(rootAbs)
+                    SourceIndexer.build(
+                        roots = listOf(File(folder)),
+                        progress = { scanned, total -> loadingStatus = "Indexing source… ($scanned/$total)" },
+                        options = SourceIndexBuildOptions(
+                            wrapperRules = configs.flatMap { it.wrapperRules },
+                            autoDiscover = settings.sourceAutoDiscoveryEnabled,
+                            configurationFingerprint = sourceConfigurationFingerprint(
+                                configs,
+                                settings.sourceAutoDiscoveryEnabled,
+                            ),
+                        ),
+                    )
                 }.getOrNull()
                 if (partial != null) {
                     val mergedAt = System.currentTimeMillis()
@@ -3064,6 +3149,11 @@ class AppState(
                             fileMeta = keptMeta + partial.fileMeta,
                             builtAt = mergedAt,
                             rootBuiltAt = current?.rootBuiltAt.orEmpty() + (rootAbs to mergedAt),
+                            rootConfigFingerprints = current?.rootConfigFingerprints.orEmpty() +
+                                (rootAbs to sourceConfigurationFingerprint(
+                                    sourceConfigurationsForFolder(rootAbs),
+                                    settings.sourceAutoDiscoveryEnabled,
+                                )),
                         )
                     }
                     runCatching { SourceIndexStore.save(merged, sourceIndexFile) }
@@ -3094,7 +3184,16 @@ class AppState(
             val index = sourceIndex ?: return emptyList()
             resolver to index
         }
-        return resolver.resolve(tag, msg, limit).map { match ->
+        return resolver.resolve(tag, msg, limit).filter { match ->
+            if (!match.site.configurationDependent) return@filter true
+            val root = sourceRootForPath(match.site.filePath)
+                ?: return@filter false
+            index.rootConfigFingerprints[root] ==
+                sourceConfigurationFingerprint(
+                    sourceConfigurationsForFolder(root),
+                    settings.sourceAutoDiscoveryEnabled,
+                )
+        }.map { match ->
             val meta = index.fileMeta[match.site.filePath]
             val stale = meta == null || fileChangedSince(match.site.filePath, meta)
             if (stale) match.copy(stale = true) else match
@@ -3654,6 +3753,9 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     aiProviderProfilesToken(),
     aiMaxToolRounds.toString(),
     sourceFolderInfoToken(),
+    sourceLogConfigurationsToken(),
+    sourceFolderConfigurationIdsToken(),
+    sourceAutoDiscoveryEnabled.toString(),
 )
 
 private fun AppSettings.aiProviderProfilesToken(): String = normalizeAiProviderProfiles(aiProviderProfiles)
@@ -3700,6 +3802,77 @@ private fun String.sourceFolderInfoFromToken(): Map<String, SourceFolderInfo> = 
             fields[0] to SourceFolderInfo(description = fields[1], readmePath = fields[2].takeIf { it.isNotBlank() })
         }.getOrNull()
     }.toMap()
+}.getOrElse { emptyMap() }
+
+private fun SourceWrapperRule.wrapperRuleToken(): String = tokenFields(
+    ownerType,
+    methodName,
+    tagArgumentIndex.toString(),
+    messageArgumentIndex.toString(),
+    throwableArgumentIndex?.toString().orEmpty(),
+)
+
+private fun String.wrapperRuleFromToken(): SourceWrapperRule? = runCatching {
+    val fields = tokenFields()
+    if (fields.size < 4 || fields[0].isBlank() || fields[1].isBlank()) return@runCatching null
+    SourceWrapperRule(
+        ownerType = fields[0],
+        methodName = fields[1],
+        tagArgumentIndex = fields[2].toIntOrNull() ?: return@runCatching null,
+        messageArgumentIndex = fields[3].toIntOrNull() ?: return@runCatching null,
+        throwableArgumentIndex = fields.getOrNull(4)?.toIntOrNull(),
+    )
+}.getOrNull()
+
+private fun SourceLogConfiguration.configurationToken(): String = tokenFields(
+    id,
+    name,
+    wrapperRules.joinToString(",") { it.wrapperRuleToken().b64() },
+)
+
+private fun String.configurationFromToken(): SourceLogConfiguration? = runCatching {
+    val fields = tokenFields()
+    if (fields.size < 2 || fields[0].isBlank()) return@runCatching null
+    // v1 configurations included a per-configuration auto-discovery flag in field 2. The
+    // setting is global now; preserve the rules while intentionally ignoring that legacy value.
+    val legacyAutoDiscovery = fields.getOrNull(2)?.toBooleanStrictOrNull() != null
+    SourceLogConfiguration(
+        id = fields[0],
+        name = fields[1].ifBlank { "Logging configuration" },
+        wrapperRules = fields.getOrNull(if (legacyAutoDiscovery) 3 else 2).orEmpty().split(',').filter { it.isNotBlank() }
+            .mapNotNull { encoded -> runCatching { encoded.unb64().wrapperRuleFromToken() }.getOrNull() },
+    )
+}.getOrNull()
+
+private fun AppSettings.sourceLogConfigurationsToken(): String = sourceLogConfigurations
+    .joinToString(",") { it.configurationToken().b64() }
+    .b64()
+
+private fun String.sourceLogConfigurationsFromToken(): List<SourceLogConfiguration> = runCatching {
+    if (isBlank()) return@runCatching emptyList()
+    unb64().split(',').filter { it.isNotBlank() }.mapNotNull { encoded ->
+        runCatching { encoded.unb64().configurationFromToken() }.getOrNull()
+    }.distinctBy { it.id }
+}.getOrElse { emptyList() }
+
+private fun AppSettings.sourceFolderConfigurationIdsToken(): String = sourceFolderConfigurationIds
+    .entries
+    .joinToString(",") { (path, ids) ->
+        tokenFields(path, ids.joinToString(",") { it.b64() }).b64()
+    }
+    .b64()
+
+private fun String.sourceFolderConfigurationIdsFromToken(): Map<String, List<String>> = runCatching {
+    if (isBlank()) return@runCatching emptyMap()
+    unb64().split(',').mapNotNull { encoded ->
+        runCatching {
+            val fields = encoded.unb64().tokenFields()
+            if (fields.size < 2 || fields[0].isBlank()) return@runCatching null
+            fields[0] to fields[1].split(',').filter { it.isNotBlank() }.mapNotNull { id ->
+                runCatching { id.unb64() }.getOrNull()
+            }.distinct()
+        }.getOrNull()
+    }.filter { it.second.isNotEmpty() }.toMap()
 }.getOrElse { emptyMap() }
 
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
@@ -3760,6 +3933,9 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         // Missing entirely (old token, predates this field) -> emptyMap(), same backward-compat
         // pattern as sourceFolders above.
         sourceFolderInfo = p.getOrNull(mcpIndex + 12)?.sourceFolderInfoFromToken() ?: emptyMap(),
+        sourceLogConfigurations = p.getOrNull(mcpIndex + 13)?.sourceLogConfigurationsFromToken() ?: emptyList(),
+        sourceFolderConfigurationIds = p.getOrNull(mcpIndex + 14)?.sourceFolderConfigurationIdsFromToken() ?: emptyMap(),
+        sourceAutoDiscoveryEnabled = p.getOrNull(mcpIndex + 15)?.toBooleanStrictOrNull() ?: true,
     )
 }.getOrNull()
 
