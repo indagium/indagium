@@ -157,6 +157,16 @@ git tag v1.2.9 && git push --tags
 
 The macOS build is unsigned (no Apple Developer certificate in CI) — see the Installation section above for the Gatekeeper workaround.
 
+### GitLab mirror
+
+The repo is also mirrored to GitLab (`gitlab.com/rarnaut-dev-group/openlog2`), which runs [.gitlab-ci.yml](.gitlab-ci.yml) on GitLab's shared runners — a separate compute/storage pool from GitHub Actions, useful if GitHub's Actions quota is exhausted. The mirror is manual, not automatic: after pushing to `origin`, run:
+
+```bash
+./scripts/push-gitlab-mirror.sh
+```
+
+Pushing a `v*.*.*` tag there builds the Linux `.deb` automatically; Windows `.msi` and macOS `.dmg` are optional manual jobs in the resulting pipeline (triggered with the "play" button), since GitLab's Windows/macOS SaaS runners are pricier and only worth running by request.
+
 ## License
 
 Copyright © 2026 Roman Arnaut

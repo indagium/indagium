@@ -1,0 +1,137 @@
+# Mirrors .github/workflows/build.yml's packaging jobs on GitLab's shared runners — a separate
+# compute/storage pool from GitHub Actions, so a release isn't blocked by GitHub's artifact
+# storage quota. The linux-x64 .deb builds automatically on tag pipelines; Windows/.msi and
+# macOS/.dmg are manual (`when: manual`) rather than automatic, since GitLab's shared macOS
+# runners cost 6-12x the free-tier minute pool and Windows runners are still in beta — both are
+# cheap enough to run occasionally by request, not worth burning quota on every tag.
+stages:
+  - verify
+  - package
+
+image: eclipse-temurin:21-jdk
+
+variables:
+  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+
+.gradle_cache: &gradle_cache
+  key:
+    files:
+      - gradle/wrapper/gradle-wrapper.properties
+      - build.gradle.kts
+  paths:
+    - .gradle/wrapper
+    - .gradle/caches
+
+verify:
+  stage: verify
+  cache: *gradle_cache
+  script:
+    - chmod +x gradlew
+    - ./gradlew build
+
+package-linux-deb:
+  stage: package
+  needs: ["verify"]
+  cache: *gradle_cache
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq desktop-file-utils fakeroot
+  script:
+    - chmod +x gradlew
+    - ./gradlew packageDeb
+    - deb=$(find build/compose/binaries/main/deb -name '*.deb')
+    - workdir=$(mktemp -d)
+    - dpkg-deb -R "$deb" "$workdir"
+    - desktop_file=$(find "$workdir/opt" -maxdepth 3 -type f -name '*.desktop')
+    # StartupWMClass: jpackage never emits it, so docks/taskbars can't match the running
+    # window (WM_CLASS "openLog", set in Main.kt) back to this launcher entry.
+    - |
+      if ! grep -q '^StartupWMClass=' "$desktop_file"; then
+        echo "StartupWMClass=openLog" >> "$desktop_file"
+      fi
+    # Rebuild the desktop/MIME cache post-install as a safety net alongside xdg-desktop-menu.
+    - |
+      postinst="$workdir/DEBIAN/postinst"
+      if [ -f "$postinst" ] && ! grep -q 'update-desktop-database' "$postinst"; then
+        echo 'update-desktop-database -q /usr/share/applications 2>/dev/null || true' >> "$postinst"
+      fi
+    # Desktop Entry Spec: a MimeType entry needs a field code in Exec or "Open With" no-ops.
+    - |
+      if ! grep -q '^Exec=.* %F$' "$desktop_file"; then
+        sed -i 's|^\(Exec=.*\)$|\1 %F|' "$desktop_file"
+      fi
+    # jpackage repeats MimeType=text/plain once per fileAssociation() call - dedupe.
+    - |
+      mime_line=$(grep '^MimeType=' "$desktop_file" || true)
+      if [ -n "$mime_line" ]; then
+        deduped=$(echo "${mime_line#MimeType=}" | tr ';' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ';')
+        sed -i "s|^MimeType=.*|MimeType=${deduped}|" "$desktop_file"
+      fi
+    # desktop-file-validate rejects a Categories list with no trailing separator.
+    - |
+      if grep -q '^Categories=[^;]*$' "$desktop_file"; then
+        sed -i 's|^\(Categories=.*\)$|\1;|' "$desktop_file"
+      fi
+    - |
+      mimeinfo_file=$(find "$workdir/opt" -name '*-MimeInfo.xml')
+      if [ -n "$mimeinfo_file" ]; then
+        cp packaging/linux/openlog-mimeinfo.xml "$mimeinfo_file"
+      fi
+    - dpkg-deb -b "$workdir" "$deb"
+    - desktop-file-validate "$desktop_file"
+    - grep -q '^Exec=.* %F$' "$desktop_file"
+    - rm -rf "$workdir"
+  artifacts:
+    name: "openLog-linux-x64-$CI_COMMIT_TAG"
+    paths:
+      - build/compose/binaries/main/deb/*.deb
+    expire_in: 90 days
+
+# Optional, triggered manually from the pipeline view (the "play" button on this job) — not
+# part of the automatic tag pipeline.
+package-windows-msi:
+  stage: package
+  needs: ["verify"]
+  tags:
+    - saas-windows-medium-amd64
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+      when: manual
+      allow_failure: true
+  before_script:
+    - choco install temurin21 -y --no-progress
+    - refreshenv
+  script:
+    - .\gradlew.bat packageMsi
+  artifacts:
+    name: "openLog-windows-x64-$CI_COMMIT_TAG"
+    paths:
+      - build/compose/binaries/main/msi/*.msi
+    expire_in: 90 days
+
+# Optional, triggered manually — see package-windows-msi above. Runs on GitLab's Apple
+# Silicon (M1) SaaS runners, matching the arm64 macOS build GitHub Actions produces.
+package-macos-dmg:
+  stage: package
+  needs: ["verify"]
+  tags:
+    - saas-macos-medium-m1
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+      when: manual
+      allow_failure: true
+  before_script:
+    - brew install --quiet openjdk@21
+    - export JAVA_HOME="/opt/homebrew/opt/openjdk@21"
+    - export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"
+  script:
+    - chmod +x gradlew
+    - ./gradlew packageDmg
+  artifacts:
+    name: "openLog-macos-arm64-$CI_COMMIT_TAG"
+    paths:
+      - build/compose/binaries/main/dmg/*.dmg
+    expire_in: 90 days
