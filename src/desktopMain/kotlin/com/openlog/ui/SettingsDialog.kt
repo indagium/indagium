@@ -46,13 +46,13 @@ import java.util.UUID
 // right, so growing any one section (e.g. AI providers) no longer pushes every other
 // section down a shared scroll. There's no standalone "About" entry — its former content
 // (keyboard shortcuts, version, author) now lives in Editor behavior and the footer.
-private enum class SettingsSection(val title: String, val icon: ImageVector) {
+internal enum class SettingsSection(val title: String, val icon: ImageVector) {
     Appearance("Appearance", Icons.Outlined.Palette),
     EditorBehavior("Editor behavior", Icons.Outlined.Tune),
     ExportAnnotations("Export & annotations", Icons.Outlined.Description),
     Automation("Automation", Icons.Outlined.Bolt),
     AiProviders("AI providers", Icons.Outlined.Psychology),
-    CustomAiCommands("Custom AI commands", Icons.Outlined.Terminal),
+    CustomAiCommands("AI commands", Icons.Outlined.Terminal),
     SourceCode("Source code", Icons.Outlined.Code),
 }
 
@@ -60,8 +60,14 @@ private enum class SettingsSection(val title: String, val icon: ImageVector) {
 internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
-    var selectedSection by remember { mutableStateOf(SettingsSection.Appearance) }
+    var selectedSection by remember {
+        mutableStateOf(state.requestedSettingsSection ?: SettingsSection.Appearance)
+    }
     LaunchedEffect(Unit) {
+        state.requestedSettingsSection?.let {
+            selectedSection = it
+            state.requestedSettingsSection = null
+        }
         state.refreshArchiveCacheInfo()
     }
     Box(

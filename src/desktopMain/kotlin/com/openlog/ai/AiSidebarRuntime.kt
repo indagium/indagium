@@ -26,6 +26,14 @@ internal sealed interface AiStartResult {
     data class Rejected(val message: String) : AiStartResult
 }
 
+/** Ephemeral, per-provider result for the sidebar. It is never written to settings. */
+internal sealed interface AiConnectionState {
+    data object NotChecked : AiConnectionState
+    data object Checking : AiConnectionState
+    data object Ready : AiConnectionState
+    data class Failed(val message: String) : AiConnectionState
+}
+
 /**
  * Current-launch UI coordinator around [AiAgentRunner]. It deliberately owns neither settings
  * nor a serialized transcript: [AiSessionRegistry] is tab-scoped and AppState owns profiles and
@@ -55,6 +63,7 @@ internal class AiSidebarRuntime(
 
     private val resources = ConcurrentHashMap<String, RunResources>()
     private val observers = ConcurrentHashMap<String, Job>()
+    private val connectionStates = ConcurrentHashMap<String, AiConnectionState>()
     private val _revision = MutableStateFlow(0L)
     private val updatePending = AtomicBoolean(false)
 
@@ -62,6 +71,9 @@ internal class AiSidebarRuntime(
     val revision: StateFlow<Long> = _revision.asStateFlow()
 
     fun sessionFor(tabId: String): AiSession = sessions.sessionFor(tabId)
+
+    fun connectionState(profileId: String): AiConnectionState =
+        connectionStates[profileId] ?: AiConnectionState.NotChecked
 
     @Suppress("TooGenericExceptionCaught")
     fun start(
@@ -96,8 +108,12 @@ internal class AiSidebarRuntime(
             return AiStartResult.Rejected(error.message ?: "Unable to start the AI request.")
         }
         resources[run.id] = resourcesForRun
-        observers[run.id] = observe(run)
+        connectionStates[profile.id] = AiConnectionState.Checking
+        observers[run.id] = observe(run, profile.id)
         run.job?.invokeOnCompletion {
+            // The observer is intentionally cancelled with the run resources. Read the retained
+            // history here as well so a very fast terminal event cannot race that cancellation.
+            run.history.lastOrNull()?.let { updateConnectionState(profile.id, it) }
             observers.remove(run.id)?.cancel()
             resources.remove(run.id)?.close()
             scheduleUiUpdate()
@@ -150,10 +166,54 @@ internal class AiSidebarRuntime(
         }
     }
 
-    private fun observe(run: AiRun): Job =
-        scope.launch {
-            run.events.collect { scheduleUiUpdate() }
+    /** Explicit `/models` probe; neither credentials nor the outcome leave the current launch. */
+    @Suppress("TooGenericExceptionCaught")
+    suspend fun testConnection(profile: AiProviderProfile, apiKey: String): AiConnectionState {
+        val validation = validateAiProviderProfile(profile)
+        if (!validation.isValid) {
+            return AiConnectionState.Failed(validation.problem!!.message).also {
+                connectionStates[profile.id] = it
+                scheduleUiUpdate()
+            }
         }
+        connectionStates[profile.id] = AiConnectionState.Checking
+        scheduleUiUpdate()
+        val outcome = try {
+            val provider = providerFactory.create(profile, apiKey)
+            try {
+                when (val discovered = provider.listModels()) {
+                    is ModelDiscoveryResult.Available -> AiConnectionState.Ready
+                    is ModelDiscoveryResult.Unavailable -> AiConnectionState.Failed(discovered.message)
+                }
+            } finally {
+                (provider as? AutoCloseable)?.close()
+            }
+        } catch (error: Exception) {
+            AiConnectionState.Failed(error.message ?: "Unable to connect to the configured model provider.")
+        }
+        connectionStates[profile.id] = outcome
+        scheduleUiUpdate()
+        return outcome
+    }
+
+    private fun observe(run: AiRun, profileId: String): Job =
+        scope.launch {
+            run.events.collect { event ->
+                updateConnectionState(profileId, event)
+                scheduleUiUpdate()
+            }
+        }
+
+    private fun updateConnectionState(profileId: String, event: AiRunEvent) {
+        when (event) {
+            AiRunEvent.Done -> connectionStates[profileId] = AiConnectionState.Ready
+            is AiRunEvent.Error -> connectionStates[profileId] = AiConnectionState.Failed(event.message)
+            AiRunEvent.Cancelled -> if (connectionStates[profileId] == AiConnectionState.Checking) {
+                connectionStates[profileId] = AiConnectionState.NotChecked
+            }
+            else -> Unit
+        }
+    }
 
     private fun scheduleUiUpdate() {
         if (!updatePending.compareAndSet(false, true)) return

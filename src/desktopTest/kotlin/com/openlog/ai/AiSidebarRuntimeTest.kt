@@ -87,11 +87,41 @@ class AiSidebarRuntimeTest {
                 runtime.start("tab-a", defaultAiProviderProfile().copy(model = "local-model"), "", "Close it"),
             ).run
             val confirmation = run.events.filterIsInstance<AiRunEvent.ConfirmationRequired>().first().confirmation
+            assertEquals(1, run.pendingConfirmationCount)
             assertEquals(0, executions)
             assertTrue(runtime.resolveConfirmation(run, confirmation, accepted = false))
             run.job!!.join()
             assertEquals(0, executions)
+            assertEquals(0, run.pendingConfirmationCount)
             assertNotNull(run.history.filterIsInstance<AiRunEvent.ToolCompleted>().singleOrNull())
+        } finally {
+            runtime.close()
+        }
+    }
+
+    @Test
+    fun explicitConnectionTestKeepsStatusPerProfileAndReportsFailures() = runBlocking<Unit> {
+        val providers = ArrayDeque<LlmProvider>(
+            listOf(
+                object : LlmProvider {
+                    override val capabilities = ProviderCapabilities(true, true, true)
+                    override suspend fun listModels() = ModelDiscoveryResult.Available(listOf(LlmModel("local")))
+                    override fun streamChat(request: LlmRequest): Flow<LlmStreamEvent> = flow { emit(LlmStreamEvent.Completed) }
+                },
+                object : LlmProvider {
+                    override val capabilities = ProviderCapabilities(true, true, true)
+                    override suspend fun listModels() = ModelDiscoveryResult.Unavailable("HTTP 503")
+                    override fun streamChat(request: LlmRequest): Flow<LlmStreamEvent> = flow { emit(LlmStreamEvent.Completed) }
+                },
+            ),
+        )
+        val runtime = runtime(provider = { providers.removeFirst() })
+        try {
+            val profile = defaultAiProviderProfile().copy(model = "local-model")
+            assertEquals(AiConnectionState.NotChecked, runtime.connectionState(profile.id))
+            assertEquals(AiConnectionState.Ready, runtime.testConnection(profile, ""))
+            assertIs<AiConnectionState.Failed>(runtime.testConnection(profile.copy(id = "other"), ""))
+            assertEquals(AiConnectionState.Ready, runtime.connectionState(profile.id))
         } finally {
             runtime.close()
         }

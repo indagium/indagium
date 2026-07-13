@@ -787,6 +787,8 @@ class AppState(
     var savedFilters by mutableStateOf<List<SavedFilter>>(emptyList())
     var tagUsage by mutableStateOf<Map<String, Int>>(emptyMap())
     var settingsOpen by mutableStateOf(false)
+    /** One-shot Settings destination for contextual controls such as the AI provider picker. */
+    internal var requestedSettingsSection by mutableStateOf<SettingsSection?>(null)
     var shortcutsOpen by mutableStateOf(false)
     var mcpInfoOpen by mutableStateOf(false)
 
@@ -1025,6 +1027,11 @@ class AppState(
         autosaveNow()
     }
 
+    fun openAiProviderSettings() {
+        requestedSettingsSection = SettingsSection.AiProviders
+        settingsOpen = true
+    }
+
     fun updateFilterPanelUiState(update: FilterPanelUiState.() -> Unit) {
         fpState.update()
         autosaveNow()
@@ -1090,7 +1097,13 @@ class AppState(
     }
 
     fun toggleTag(tabId: String, tag: String) {
-        upFlt(tabId) { f -> f.copy(activeTags = if (tag in f.activeTags) f.activeTags - tag else f.activeTags + tag) }
+        upFlt(tabId) { f ->
+            val adding = tag !in f.activeTags
+            f.copy(
+                activeTags = if (adding) f.activeTags + tag else f.activeTags - tag,
+                excludeTags = if (adding) f.excludeTags - tag else f.excludeTags,
+            )
+        }
         tagUsage = tagUsage + (tag to ((tagUsage[tag] ?: 0) + 1))
     }
 
@@ -1130,7 +1143,11 @@ class AppState(
     }
 
     fun toggleExcludeTag(tabId: String, tag: String) = upFlt(tabId) { f ->
-        f.copy(excludeTags = if (tag in f.excludeTags) f.excludeTags - tag else f.excludeTags + tag)
+        val adding = tag !in f.excludeTags
+        f.copy(
+            excludeTags = if (adding) f.excludeTags + tag else f.excludeTags - tag,
+            activeTags = if (adding) f.activeTags - tag else f.activeTags,
+        )
     }.also { tagUsage = tagUsage + (tag to ((tagUsage[tag] ?: 0) + 1)) }
 
     fun setExcludeKw(tabId: String, v: String) = upFlt(tabId) { it.copy(excludeKw = v) }
@@ -1183,7 +1200,19 @@ class AppState(
                 target = target,
                 mode = f.mode,
             )
-            f.copy(messageRules = f.messageRules + rule)
+            val sameShape: (MessageRule) -> Boolean = { existing ->
+                existing.pattern == rule.pattern && existing.regex == rule.regex &&
+                    existing.tag == rule.tag && existing.packagePrefix == rule.packagePrefix &&
+                    existing.target == rule.target && existing.mode == rule.mode
+            }
+            val withoutOpposite = f.messageRules.filterNot { sameShape(it) && it.include != include }
+            f.copy(
+                messageRules = if (withoutOpposite.any { sameShape(it) && it.include == include }) {
+                    withoutOpposite
+                } else {
+                    withoutOpposite + rule
+                },
+            )
         }
     }
 

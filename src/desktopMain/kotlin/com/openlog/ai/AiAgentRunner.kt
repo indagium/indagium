@@ -107,6 +107,11 @@ internal class AiRun internal constructor(
     val history: List<AiRunEvent>
         get() = synchronized(_history) { _history.toList() }
 
+    /** The number of user decisions still blocking this run. */
+    val pendingConfirmationCount: Int get() = confirmations.size
+
+    fun isConfirmationPending(confirmationId: String): Boolean = confirmations.containsKey(confirmationId)
+
     internal suspend fun emit(event: AiRunEvent) {
         synchronized(_history) { _history += event }
         if (firstResponseAt == null && (event is AiRunEvent.AssistantDelta || event is AiRunEvent.ToolRequested)) {
@@ -340,6 +345,15 @@ internal class AiAgentRunner(
     private suspend fun executeToolWithPolicy(run: AiRun, call: LlmToolCall): ToolResult {
         val arguments = parseArguments(call.argumentsJson)
             ?: return ToolResult.error("Tool arguments must be a JSON object.")
+        // The in-app sidebar is pinned to the tab that started this request. MCP callers keep
+        // their explicit multi-tab behavior because this guard lives only in the agent runner.
+        val pinnedArguments = if (
+            call.name in TAB_SCOPED_TOOL_NAMES || (call.name == "resolve_log_source" && "tabId" in arguments)
+        ) {
+            arguments + ("tabId" to run.tabId)
+        } else {
+            arguments
+        }
         if (toolGateway.actionPolicy(call.name) == OpenLogToolActionPolicy.CONFIRMATION_REQUIRED) {
             val confirmation = AiToolConfirmation(
                 id = UUID.randomUUID().toString(),
@@ -358,7 +372,7 @@ internal class AiAgentRunner(
         }
 
         return try {
-            val rawResult = toolGateway.execute(call.name, arguments)
+            val rawResult = toolGateway.execute(call.name, pinnedArguments)
             ToolResult.from(rawResult, maxToolResultChars, AiEvidenceExtractor.from(call.name, rawResult))
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -427,6 +441,14 @@ internal class AiAgentRunner(
         // total budget it scales from - see the nudgeLeadRounds computation in runLoop.
         const val NUDGE_LEAD_ROUNDS_CAP = 15
         const val NUDGE_LEAD_FRACTION = 4
+        val TAB_SCOPED_TOOL_NAMES = setOf(
+            "close_tab", "get_filter", "set_filter", "get_visible_lines", "get_line_context",
+            "select_lines", "get_selection", "toggle_group", "expand_all", "collapse_all",
+            "get_tags", "get_packages", "get_crash_sites", "get_issue_description",
+            "add_text_note", "add_log_note", "update_note_block", "move_note_block",
+            "delete_note_block", "export_analysis", "export_filtered_log", "save_annotations",
+            "load_annotations", "apply_filter_preset", "start_tailing", "stop_tailing",
+        )
         val json = Json { ignoreUnknownKeys = true }
     }
 }

@@ -80,6 +80,7 @@ import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.MarkdownTypography
 import com.mikepenz.markdown.model.rememberMarkdownState
 import com.openlog.ai.AiChipCommand
+import com.openlog.ai.AiConnectionState
 import com.openlog.ai.AiContextRequest
 import com.openlog.ai.AiEvidence
 import com.openlog.ai.AiInvestigationContext
@@ -347,19 +348,23 @@ private fun AiSidebarPanel(
                                     modelDiscovery = runtime.discoverModels(profile.copy(model = modelDraft.trim()), keyDraft)
                                 }
                             },
+                            onTestConnection = {
+                                scope.launch {
+                                    state.setAiProviderApiKey(profile.id, keyDraft)
+                                    runtime.testConnection(profile.copy(model = modelDraft.trim()), keyDraft)
+                                }
+                            },
                             onAddProvider = {
-                                state.addAiProviderProfile()
-                                state.settingsOpen = true
+                                state.openAiProviderSettings()
                             },
                         )
                         null -> Unit
                     }
-                    val lastEvent = session.runs.lastOrNull()?.history?.lastOrNull()
-                    val connectionState = when {
-                        session.activeRun != null -> "Generating with ${profile.displayName}…"
-                        lastEvent is AiRunEvent.Error -> "Last provider request failed"
-                        lastEvent == AiRunEvent.Cancelled -> "Last request was stopped"
-                        else -> "Ready"
+                    val connectionState = when (val status = runtime.connectionState(profile.id)) {
+                        AiConnectionState.NotChecked -> "Not checked"
+                        AiConnectionState.Checking -> "Checking"
+                        AiConnectionState.Ready -> "Ready"
+                        is AiConnectionState.Failed -> "${status.message}"
                     }
                     Row(
                         Modifier.fillMaxWidth(),
@@ -585,6 +590,7 @@ private fun AiProviderControls(
     onApiKeyChange: (String) -> Unit,
     discovery: ModelDiscoveryResult?,
     onDiscoverModels: () -> Unit,
+    onTestConnection: () -> Unit,
     onAddProvider: () -> Unit,
 ) {
     val colors = tc()
@@ -634,6 +640,12 @@ private fun AiProviderControls(
             modifier = Modifier.fillMaxWidth(),
             fontSize = 11.sp,
             visualTransformation = PasswordVisualTransformation(),
+        )
+        AppButton(
+            "Test connection",
+            onClick = onTestConnection,
+            variant = ButtonVariant.Ghost,
+            modifier = Modifier.height(26.dp),
         )
     }
 }
@@ -882,6 +894,8 @@ private fun AiRunCard(
     val colors = tc()
     val assistantText = events.filterIsInstance<AiRunEvent.AssistantDelta>().joinToString(separator = "") { it.text }
     val traceEvents = events.filter { it !is AiRunEvent.AssistantDelta && it !is AiRunEvent.Usage }
+    val pendingConfirmationCount = events.filterIsInstance<AiRunEvent.ConfirmationRequired>()
+        .count { run.isConfirmationPending(it.confirmation.id) }
     val usage = events.filterIsInstance<AiRunEvent.Usage>().lastOrNull()
     val isTerminal = events.any { it is AiRunEvent.Done || it is AiRunEvent.Error || it == AiRunEvent.Cancelled }
 
@@ -939,7 +953,8 @@ private fun AiRunCard(
         if (traceEvents.isNotEmpty()) {
             Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 AiCollapsibleHeader(
-                    "Investigation (${traceEvents.size} step${if (traceEvents.size == 1) "" else "s"})",
+                    "Investigation (${traceEvents.size} step${if (traceEvents.size == 1) "" else "s"})" +
+                        if (pendingConfirmationCount > 0) " • Confirmation required ($pendingConfirmationCount)" else "",
                     expanded = expanded,
                     onToggle = { expanded = !expanded },
                 )
@@ -951,7 +966,13 @@ private fun AiRunCard(
                         ) {
                             traceEvents.forEach { event ->
                                 when (event) {
-                                    is AiRunEvent.ConfirmationRequired -> AiConfirmationCard(run, event.confirmation, onResolveConfirmation)
+                                    is AiRunEvent.ConfirmationRequired -> {
+                                        if (run.isConfirmationPending(event.confirmation.id)) {
+                                            AiConfirmationCard(run, event.confirmation, onResolveConfirmation)
+                                        } else {
+                                            AiTraceRow(event)
+                                        }
+                                    }
                                     is AiRunEvent.ToolCompleted -> {
                                         AiTraceRow(event)
                                         event.evidence.forEach { evidence -> AiEvidenceCard(evidence, onNavigateEvidence) }
