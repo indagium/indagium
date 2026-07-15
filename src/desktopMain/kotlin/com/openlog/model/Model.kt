@@ -231,7 +231,7 @@ data class SavedFilter(
 // ── Settings ───────────────────────────────────────────────────────
 enum class AnnotationLogBlockStyle { INDENTED, JIRA_JAVA }
 
-// Which filter input Ctrl/Cmd+F focuses (see FilterPanel's focusSearchRequest LaunchedEffect).
+// Which filter input Ctrl/Cmd+F focuses (see FilterPanel's tab-scoped filter-search request).
 enum class CtrlFTarget { TAGS, MESSAGE_RULE, KEYWORD_REGEX }
 
 /** The execution protocol behind an AI profile. Secrets never belong in [AppSettings]. */

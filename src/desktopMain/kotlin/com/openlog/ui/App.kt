@@ -58,7 +58,8 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
     val theme = themeColors(state.settings.theme)
     val rootFocusRequester = remember { FocusRequester() }
     var pendingPanelFocus by remember { mutableStateOf<KeyboardPanel?>(null) }
-    var filterSearchFocusRequest by remember { mutableStateOf(0) }
+    var nextFilterSearchRequestNonce by remember { mutableStateOf(0L) }
+    var pendingFilterSearchRequest by remember { mutableStateOf<FilterSearchRequest?>(null) }
 
     CompositionLocalProvider(
         LocalTheme provides theme,
@@ -131,7 +132,14 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             if (state.settings.openUnfilteredOnCtrlF) state.ensureActiveTabUnfiltered()
                             state.updateFilterVisible(true)
                             pendingPanelFocus = KeyboardPanel.FILTERS
-                            filterSearchFocusRequest += 1
+                            state.activeTab()?.id?.let { tabId ->
+                                nextFilterSearchRequestNonce += 1
+                                pendingFilterSearchRequest = FilterSearchRequest(
+                                    nonce = nextFilterSearchRequestNonce,
+                                    tabId = tabId,
+                                    target = state.settings.ctrlFTarget,
+                                )
+                            }
                         },
                     )
                 }
@@ -148,7 +156,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                     state.compareMode -> CompareView(
                         state = state,
                         requestedPanelFocus = pendingPanelFocus,
-                        filterSearchFocusRequest = filterSearchFocusRequest,
+                        filterSearchRequest = pendingFilterSearchRequest,
+                        onFilterSearchRequestConsumed = { request ->
+                            pendingFilterSearchRequest = consumeFilterSearchRequest(pendingFilterSearchRequest, request)
+                        },
                         onPanelFocusConsumed = { pendingPanelFocus = null },
                     )
                     activeTab != null -> key(activeTab.id) {
@@ -156,7 +167,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             state = state,
                             tab = activeTab,
                             requestedPanelFocus = pendingPanelFocus,
-                            filterSearchFocusRequest = filterSearchFocusRequest,
+                            filterSearchRequest = pendingFilterSearchRequest,
+                            onFilterSearchRequestConsumed = { request ->
+                                pendingFilterSearchRequest = consumeFilterSearchRequest(pendingFilterSearchRequest, request)
+                            },
                             onPanelFocusConsumed = { pendingPanelFocus = null },
                         )
                     }

@@ -37,10 +37,32 @@ internal const val TAB_DRAG_SNAP_BIAS = 0.25f
 
 /** Only disambiguate labels when a filename collision is actually visible to the user. */
 internal fun tabDisplayLabel(tab: LogTab, allTabs: List<LogTab>): String {
-    if (allTabs.count { it.filename == tab.filename } < 2) return tab.filename
-    val source = tab.sourcePath.orEmpty().substringBefore('!')
-    val parent = File(source).parentFile?.name?.takeIf { it.isNotBlank() }
-    return "${tab.filename} — ${parent ?: tab.id.take(8)}"
+    val sameNameTabs = allTabs.filter { it.filename == tab.filename }
+    if (sameNameTabs.size < 2) return tab.filename
+
+    fun sourceSuffix(candidate: LogTab, includeArchiveEntryPath: Boolean): String {
+        val sourcePath = candidate.sourcePath.orEmpty()
+        val archiveSeparator = sourcePath.indexOf('!')
+        if (archiveSeparator >= 0) {
+            val archiveName = File(sourcePath.substring(0, archiveSeparator)).name.takeIf { it.isNotBlank() }
+            val entryPath = sourcePath.substring(archiveSeparator + 1).trim('/').takeIf { it.isNotBlank() }
+            if (archiveName != null && includeArchiveEntryPath && entryPath != null) return "$archiveName/$entryPath"
+            if (archiveName != null) return archiveName
+        }
+        return File(sourcePath).parentFile?.name?.takeIf { it.isNotBlank() } ?: candidate.id.take(8)
+    }
+
+    val compactSuffix = sourceSuffix(tab, includeArchiveEntryPath = false)
+    if (sameNameTabs.count { sourceSuffix(it, includeArchiveEntryPath = false) == compactSuffix } == 1) {
+        return "${tab.filename} — $compactSuffix"
+    }
+
+    val expandedSuffix = sourceSuffix(tab, includeArchiveEntryPath = true)
+    if (sameNameTabs.count { sourceSuffix(it, includeArchiveEntryPath = true) == expandedSuffix } == 1) {
+        return "${tab.filename} — $expandedSuffix"
+    }
+
+    return "${tab.filename} — $expandedSuffix — ${tab.id.take(8)}"
 }
 
 // ── TabBar ────────────────────────────────────────────────────────────

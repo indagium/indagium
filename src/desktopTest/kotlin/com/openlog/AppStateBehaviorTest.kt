@@ -8,6 +8,7 @@ import com.openlog.model.Annotations
 import com.openlog.model.AppSettings
 import com.openlog.model.CrashCategory
 import com.openlog.model.CopyMaskRule
+import com.openlog.model.CtrlFTarget
 import com.openlog.model.CtxMenuState
 import com.openlog.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.openlog.model.Filter
@@ -22,6 +23,7 @@ import com.openlog.model.SequenceDef
 import com.openlog.model.ThemePreset
 import com.openlog.ui.AppState
 import com.openlog.ui.DesktopStorage
+import com.openlog.ui.FilterSearchRequest
 import com.openlog.ui.ImportFilterAction
 import com.openlog.ui.ManualCollapseAvailability
 import com.openlog.ui.SEQ_COLORS
@@ -29,7 +31,9 @@ import com.openlog.ui.SettingsSection
 import com.openlog.ui.SplitMode
 import com.openlog.ui.blockOrderDuringDrag
 import com.openlog.ui.cumulativeBlockOffsets
+import com.openlog.ui.consumeFilterSearchRequest
 import com.openlog.ui.emptyWorkspaceTab
+import com.openlog.ui.filterSearchTargetForTab
 import com.openlog.ui.manualCollapseAvailability
 import com.openlog.ui.maskWordForCopy
 import com.openlog.ui.mkTab
@@ -834,6 +838,35 @@ class AppStateBehaviorTest {
         assertEquals(null, state.pendingDuplicateFilterSave)
         assertEquals(1, state.savedFilters.size)
         assertEquals(setOf("com.second"), state.savedFilters.single().pkgPrefixes)
+    }
+
+    @Test
+    fun replacingSharedSavedFilterLeavesOtherOpenTabsUntouchedUntilTheyReloadIt() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("one", "one.log", emptyList()),
+            mkTab("two", "two.log", emptyList()),
+        )
+        state.activeTabId = "one"
+        state.addPkgPrefix("one", "com.base")
+        state.saveFilter("one", "network")
+        val saved = state.savedFilters.single()
+        state.loadFilter("two", saved)
+
+        state.startRegexSearch("one")
+        state.setKw("one", "network.*")
+        state.setFilterMode("one", FilterMode.TAGS)
+        state.addPkgPrefix("one", "com.changed")
+        state.saveFilter("one", "network")
+        state.confirmReplaceDuplicateFilter()
+
+        assertEquals(FilterMode.TAGS, state.tab("one")!!.filter.mode)
+        assertEquals(FilterMode.TAGS, state.tab("two")!!.filter.mode)
+        assertEquals(setOf("com.base"), state.tab("two")!!.filter.pkgPrefixes)
+        assertEquals(setOf("com.base", "com.changed"), state.savedFilters.single().pkgPrefixes)
+
+        state.loadFilter("two", state.savedFilters.single())
+        assertEquals(setOf("com.base", "com.changed"), state.tab("two")!!.filter.pkgPrefixes)
     }
 
     @Test
@@ -3207,13 +3240,75 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun duplicateTabFilenamesGetSourceSuffixAndRecentMenuKeepsAllEntries() {
+    fun duplicateTabFilenamesUseProgressiveSourceSuffixesAndRecentMenuKeepsAllEntries() {
         val first = mkTab("one", "same.log", emptyList()).copy(sourcePath = "/logs/first/same.log")
         val second = mkTab("two", "same.log", emptyList()).copy(sourcePath = "/logs/second/same.log")
         assertEquals("same.log — first", tabDisplayLabel(first, listOf(first, second)))
         assertEquals("same.log — second", tabDisplayLabel(second, listOf(first, second)))
         assertEquals("same.log", tabDisplayLabel(first, listOf(first)))
+
+        val archiveA = mkTab("archive-a", "same.log", emptyList())
+            .copy(sourcePath = "/logs/reports/archive-a.zip!FS/a/same.log")
+        val archiveB = mkTab("archive-b", "same.log", emptyList())
+            .copy(sourcePath = "/logs/reports/archive-b.zip!FS/b/same.log")
+        assertEquals("same.log — archive-a.zip", tabDisplayLabel(archiveA, listOf(archiveA, archiveB)))
+        assertEquals("same.log — archive-b.zip", tabDisplayLabel(archiveB, listOf(archiveA, archiveB)))
+
+        val archiveFolderA = mkTab("archive-folder-a", "same.log", emptyList())
+            .copy(sourcePath = "/logs/archive.zip!FS/a/same.log")
+        val archiveFolderB = mkTab("archive-folder-b", "same.log", emptyList())
+            .copy(sourcePath = "/logs/archive.zip!FS/b/same.log")
+        assertEquals(
+            "same.log — archive.zip/FS/a/same.log",
+            tabDisplayLabel(archiveFolderA, listOf(archiveFolderA, archiveFolderB)),
+        )
+        assertEquals(
+            "same.log — archive.zip/FS/b/same.log",
+            tabDisplayLabel(archiveFolderB, listOf(archiveFolderA, archiveFolderB)),
+        )
+
+        val sameNamedArchiveA = mkTab("archive-path-a", "same.log", emptyList())
+            .copy(sourcePath = "/logs/first/archive.zip!FS/a/same.log")
+        val sameNamedArchiveB = mkTab("archive-path-b", "same.log", emptyList())
+            .copy(sourcePath = "/logs/second/archive.zip!FS/b/same.log")
+        assertEquals(
+            "same.log — archive.zip/FS/a/same.log",
+            tabDisplayLabel(sameNamedArchiveA, listOf(sameNamedArchiveA, sameNamedArchiveB)),
+        )
+        assertEquals(
+            "same.log — archive.zip/FS/b/same.log",
+            tabDisplayLabel(sameNamedArchiveB, listOf(sameNamedArchiveA, sameNamedArchiveB)),
+        )
+
+        val sameFolderA = mkTab("real-a", "same.log", emptyList()).copy(sourcePath = "/logs/shared/same.log")
+        val sameFolderB = mkTab("real-b", "same.log", emptyList()).copy(sourcePath = "/logs/shared/same.log")
+        assertEquals("same.log — shared — real-a", tabDisplayLabel(sameFolderA, listOf(sameFolderA, sameFolderB)))
+        assertEquals("same.log — shared — real-b", tabDisplayLabel(sameFolderB, listOf(sameFolderA, sameFolderB)))
         assertEquals(30, recentFilesForMenu((1..30).map { "/logs/$it.log" }).size)
+    }
+
+    @Test
+    fun filterSearchRequestTargetsOnlyItsOriginTabAndIsConsumedOnce() {
+        val request = FilterSearchRequest(1, "one", CtrlFTarget.KEYWORD_REGEX)
+
+        assertEquals(CtrlFTarget.KEYWORD_REGEX, filterSearchTargetForTab(request, "one"))
+        assertEquals(null, filterSearchTargetForTab(request, "two"))
+
+        val consumed = consumeFilterSearchRequest(request, request)
+        assertEquals(null, consumed)
+        assertEquals(null, filterSearchTargetForTab(consumed, "one"))
+    }
+
+    @Test
+    fun filterSearchRequestPreservesTagsAndMessageRuleTargetsForItsOriginTab() {
+        val tags = FilterSearchRequest(2, "one", CtrlFTarget.TAGS)
+        val messageRules = FilterSearchRequest(3, "two", CtrlFTarget.MESSAGE_RULE)
+
+        assertEquals(CtrlFTarget.TAGS, filterSearchTargetForTab(tags, "one"))
+        assertEquals(null, filterSearchTargetForTab(tags, "two"))
+        assertEquals(CtrlFTarget.MESSAGE_RULE, filterSearchTargetForTab(messageRules, "two"))
+        assertEquals(null, filterSearchTargetForTab(messageRules, "one"))
+        assertEquals(messageRules, consumeFilterSearchRequest(messageRules, tags))
     }
 
     @Test
