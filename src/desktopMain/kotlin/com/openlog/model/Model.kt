@@ -338,6 +338,12 @@ data class SourceLogConfiguration(
     val wrapperRules: List<SourceWrapperRule> = emptyList(),
 )
 
+/** One ordered whole-word replacement applied when a note is copied. */
+data class CopyMaskRule(
+    val target: String = "",
+    val replacement: String = "",
+)
+
 data class AppSettings(
     val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
@@ -363,6 +369,10 @@ data class AppSettings(
     // word "java" outside a code block. This masks a configurable whole word when copying a
     // note's Markdown (copyAnn) — the {code:java}/{code} fence markers are never touched.
     val maskWordOnCopy: Boolean = false,
+    /**
+     * Legacy single-rule fields. Keep these so their established autosave token positions stay
+     * readable; new settings use [copyMaskRules] instead.
+     */
     val maskWordTarget: String = "java",
     val maskWordReplacement: String = "j*ava",
     // An expanded crash/stack-trace group's member rows only get a thin left-edge stripe by
@@ -371,6 +381,8 @@ data class AppSettings(
     val highlightEntireCrashGroup: Boolean = false,
     val ctrlFTarget: CtrlFTarget = CtrlFTarget.KEYWORD_REGEX,
     val openNewFilesWithUnfiltered: Boolean = false,
+    /** When enabled, Ctrl/Cmd+F first reveals the active tab's Original panel. */
+    val openUnfilteredOnCtrlF: Boolean = false,
     // Source roots scanned by SourceIndexer to resolve a log line back to the Log/Timber call site
     // that could have emitted it (source/SourceIndexer.kt, AppState.reindexSources). Trailing with
     // a default so old settings tokens (without this field) still parse — see settingsFromToken.
@@ -397,6 +409,8 @@ data class AppSettings(
     // Caps tool-call round trips per AI request (see AiAgentRunner). Trailing with a default so
     // old settings tokens (without this field) still parse - see settingsFromToken.
     val aiMaxToolRounds: Int = DEFAULT_AI_MAX_TOOL_ROUNDS,
+    /** Ordered copy-mask rules. An empty list intentionally means no replacements. */
+    val copyMaskRules: List<CopyMaskRule> = listOf(CopyMaskRule("java", "j*ava")),
 )
 
 enum class ThemePreset(val label: String) {

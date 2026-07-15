@@ -319,6 +319,38 @@ private fun SettingsMenuItem(section: SettingsSection, selected: Boolean, onClic
     }
 }
 
+/** A bounded, scrollable collection used for Settings sections that can grow without bound.
+ *
+ * Keeping the add/register action outside this viewport makes it available even when a long list
+ * is scrolled to the bottom, matching the Theme gallery's compact scrollbar treatment. */
+@Composable
+private fun SettingsScrollableRows(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val tc = tc()
+    val scrollState = rememberScrollState()
+    val shape = RoundedCornerShape(6.dp)
+    Box(
+        modifier.fillMaxWidth().height(148.dp)
+            .clip(shape)
+            .background(tc.p2)
+            .border(1.dp, tc.br, shape)
+            .padding(8.dp),
+    ) {
+        Column(
+            Modifier.fillMaxSize().verticalScroll(scrollState).padding(end = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            content = content,
+        )
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scrollState),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+            style = appScrollbarStyle(tc),
+        )
+    }
+}
+
 @Composable
 private fun AppearanceSettingsSection(state: AppState) {
     val tc = tc()
@@ -385,7 +417,7 @@ private fun AppearanceSettingsSection(state: AppState) {
     }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
-            "App cache",
+            "App data",
             color = tc.td,
             fontSize = 10.sp,
             fontFamily = UI,
@@ -407,7 +439,7 @@ private fun AppearanceSettingsSection(state: AppState) {
                 modifier = Modifier.weight(1f),
             ) {
                 AppText(
-                    "${truncatePathForDisplay(cachePath)} · ${formatByteSize(state.archiveCacheSizeBytes)}",
+                    "${truncatePathForDisplay(cachePath)} · ${formatByteSize(state.appDataSizeBytes)}",
                     color = tc.ts,
                     fontSize = 11.sp,
                     fontFamily = MONO,
@@ -546,6 +578,16 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             )
         }
     }
+    CompactSettingWithTooltip(
+        label = "Ctrl+F opens Original",
+        tooltip = "When enabled, Ctrl/Cmd+F reveals the active file's unfiltered Original panel before focusing the configured search field.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(openUnfilteredOnCtrlF = idx == 0) } },
+        )
+    }
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -595,31 +637,68 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
         }
         if (state.settings.maskWordOnCopy) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    AppText("Word", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-                    InlineField(
-                        state.settings.maskWordTarget,
-                        { value -> state.updateSettings { it.copy(maskWordTarget = value) } },
-                        "java",
-                        Modifier.fillMaxWidth(),
-                        fontSize = 12.sp,
-                    )
+                AppText("Word", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(1f))
+                AppText("Replacement", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(1f))
+                Spacer(Modifier.width(68.dp))
+            }
+            SettingsScrollableRows {
+                if (state.settings.copyMaskRules.isEmpty()) {
+                    AppText("(no pairs yet — add one to mask text when copying a note)", color = tc.td, fontSize = 11.sp)
                 }
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    AppText("Replacement", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-                    InlineField(
-                        state.settings.maskWordReplacement,
-                        { value -> state.updateSettings { it.copy(maskWordReplacement = value) } },
-                        "j*ava",
+                state.settings.copyMaskRules.forEachIndexed { index, rule ->
+                    Row(
                         Modifier.fillMaxWidth(),
-                        fontSize = 12.sp,
-                    )
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        InlineField(
+                            rule.target,
+                            { value ->
+                                state.updateSettings { settings ->
+                                    settings.copy(copyMaskRules = settings.copyMaskRules.mapIndexed { ruleIndex, current ->
+                                        if (ruleIndex == index) current.copy(target = value) else current
+                                    })
+                                }
+                            },
+                            "java",
+                            Modifier.weight(1f),
+                            fontSize = 12.sp,
+                        )
+                        InlineField(
+                            rule.replacement,
+                            { value ->
+                                state.updateSettings { settings ->
+                                    settings.copy(copyMaskRules = settings.copyMaskRules.mapIndexed { ruleIndex, current ->
+                                        if (ruleIndex == index) current.copy(replacement = value) else current
+                                    })
+                                }
+                            },
+                            "j*ava",
+                            Modifier.weight(1f),
+                            fontSize = 12.sp,
+                        )
+                        AppButton(
+                            "Remove",
+                            onClick = {
+                                state.updateSettings { settings ->
+                                    settings.copy(copyMaskRules = settings.copyMaskRules.filterIndexed { ruleIndex, _ -> ruleIndex != index })
+                                }
+                            },
+                            variant = ButtonVariant.Secondary,
+                            isDanger = true,
+                        )
+                    }
                 }
             }
             AppText(
-                "Replaces the whole word \"${state.settings.maskWordTarget}\" when copying a note — " +
+                "Rules replace case-sensitive whole words in the listed order when copying a note — " +
                     "{code:java} block markers are never touched.",
                 color = tc.td, fontSize = 10.sp, maxLines = 2,
+            )
+            AppButton(
+                "Add mask",
+                onClick = { state.updateSettings { it.copy(copyMaskRules = it.copyMaskRules + CopyMaskRule()) } },
+                variant = ButtonVariant.Secondary,
             )
         }
     }
@@ -678,19 +757,6 @@ private fun AutomationSettingsSection(state: AppState) {
 @Composable
 private fun SourceCodeSettingsSection(state: AppState) {
     val tc = tc()
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        if (state.settings.sourceFolders.isEmpty()) {
-            AppText(
-                "(no folders — register one to enable Show in code)",
-                color = tc.td,
-                fontSize = 11.sp,
-            )
-        } else {
-            state.settings.sourceFolders.forEach { path ->
-                SourceFolderRow(state, path)
-            }
-        }
-    }
     TooltipArea(
         tooltip = {
             Box(
@@ -710,6 +776,19 @@ private fun SourceCodeSettingsSection(state: AppState) {
         },
     ) {
         AppButton("Register source code", onClick = { state.pickSourceFolder() })
+    }
+    SettingsScrollableRows {
+        if (state.settings.sourceFolders.isEmpty()) {
+            AppText(
+                "(no folders — register one to enable Show in code)",
+                color = tc.td,
+                fontSize = 11.sp,
+            )
+        } else {
+            state.settings.sourceFolders.forEach { path ->
+                SourceFolderRow(state, path)
+            }
+        }
     }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         TooltipArea(
@@ -1455,42 +1534,58 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
 @Composable
 private fun CustomAiCommandsSettingsSection(state: AppState) {
     val tc = tc()
+    var pendingDeleteCommand by remember { mutableStateOf<CustomAiCommand?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        if (state.customAiCommands.isEmpty()) {
-            AppText(
-                "(none yet — add one to invoke it as a button in Actions or by typing /name in the chat box)",
-                color = tc.td,
-                fontSize = 11.sp,
-            )
-        } else {
-            state.customAiCommands.forEach { command ->
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        AppText("/${command.name}", color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
-                        val preview = command.promptTemplate.lineSequence().firstOrNull().orEmpty()
-                        if (preview.isNotBlank()) {
-                            AppText(preview, color = tc.td, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                    AppButton("Edit", onClick = { state.customCommandEditorTarget = command }, variant = ButtonVariant.Secondary)
-                    AppButton(
-                        "Delete",
-                        onClick = { state.deleteCustomAiCommand(command.name) },
-                        variant = ButtonVariant.Secondary,
-                        isDanger = true,
-                    )
-                }
-            }
-        }
         AppButton(
             "Add command",
             onClick = { state.customCommandEditorTarget = CustomAiCommand("", "") },
             variant = ButtonVariant.Secondary,
         )
+        SettingsScrollableRows {
+            if (state.customAiCommands.isEmpty()) {
+                AppText(
+                    "(none yet — add one to invoke it as a button in Actions or by typing /name in the chat box)",
+                    color = tc.td,
+                    fontSize = 11.sp,
+                )
+            } else {
+                state.customAiCommands.forEach { command ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            AppText("/${command.name}", color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                            val preview = command.promptTemplate.lineSequence().firstOrNull().orEmpty()
+                            if (preview.isNotBlank()) {
+                                AppText(preview, color = tc.td, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        AppButton("Edit", onClick = { state.customCommandEditorTarget = command }, variant = ButtonVariant.Secondary)
+                        AppButton(
+                            "Delete",
+                            onClick = { pendingDeleteCommand = command },
+                            variant = ButtonVariant.Secondary,
+                            isDanger = true,
+                        )
+                    }
+                }
+            }
+        }
+    }
+    pendingDeleteCommand?.let { command ->
+        SettingsConfirmDialog(
+            title = "Delete AI command?",
+            message = "Delete /${command.name} from AI commands. This can't be undone.",
+            onDismissRequest = { pendingDeleteCommand = null },
+        ) {
+            DialogActionButton("Delete", active = true, danger = true) {
+                state.deleteCustomAiCommand(command.name)
+                pendingDeleteCommand = null
+            }
+            DialogActionButton("Cancel", active = false) { pendingDeleteCommand = null }
+        }
     }
 }
 

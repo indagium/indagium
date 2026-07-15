@@ -128,6 +128,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                         onFocusPanel = { panel -> state.keyboardFocusVisible = true; pendingPanelFocus = panel },
                         onFocusFilterSearch = {
                             state.keyboardFocusVisible = true
+                            if (state.settings.openUnfilteredOnCtrlF) state.ensureActiveTabUnfiltered()
                             state.updateFilterVisible(true)
                             pendingPanelFocus = KeyboardPanel.FILTERS
                             filterSearchFocusRequest += 1

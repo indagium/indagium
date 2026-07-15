@@ -7,6 +7,7 @@ import com.openlog.model.AnnotationLogBlockStyle
 import com.openlog.model.Annotations
 import com.openlog.model.AppSettings
 import com.openlog.model.CrashCategory
+import com.openlog.model.CopyMaskRule
 import com.openlog.model.CtxMenuState
 import com.openlog.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.openlog.model.Filter
@@ -64,6 +65,7 @@ class AppStateBehaviorTest {
         assertTrue(state.tabs.isEmpty())
         assertEquals(null, state.activeTab())
         assertEquals(ThemePreset.LIGHT, state.settings.theme)
+        assertFalse(state.settings.openUnfilteredOnCtrlF)
     }
 
     @Test
@@ -1679,10 +1681,11 @@ class AppStateBehaviorTest {
         val dir = createTempDirectory("openlog-archive-cache").toFile()
         val archiveCacheDir = File(dir, "archive-cache").apply { mkdirs() }
         val notesDir = File(dir, "notes").apply { mkdirs() }
-        val userNotesDir = File(dir, "user-notes").apply { mkdirs() }
+        val userNotesDir = createTempDirectory("openlog-user-notes").toFile()
         File(archiveCacheDir, "a.tmp").writeText("12345")
         File(archiveCacheDir, "nested").apply { mkdirs() }.resolve("b.tmp").writeText("123")
         File(notesDir, "cached_analysis.md").writeText("note")
+        File(dir, "root-data.bin").writeText("root")
         File(userNotesDir, "saved_analysis.md").writeText("keep")
 
         val state = AppState(
@@ -1698,12 +1701,13 @@ class AppStateBehaviorTest {
 
         assertEquals(archiveCacheDir.absolutePath, state.archiveCachePath)
         assertEquals(dir.absolutePath, state.appCachePath)
-        assertEquals(12L, state.archiveCacheSizeBytes)
+        assertEquals(16L, state.appDataSizeBytes)
+        assertEquals(16L, state.archiveCacheSizeBytes)
         File(archiveCacheDir, "later.tmp").writeText("xx")
-        assertEquals(12L, state.archiveCacheSizeBytes)
+        assertEquals(16L, state.appDataSizeBytes)
 
-        state.refreshArchiveCacheInfo()
-        assertEquals(14L, state.archiveCacheSizeBytes)
+        state.refreshAppDataSizeInfo()
+        assertEquals(18L, state.appDataSizeBytes)
 
         state.requestClearCache()
         assertTrue(state.cacheClearConfirmOpen)
@@ -1712,7 +1716,10 @@ class AppStateBehaviorTest {
 
         state.confirmClearCache()
         assertFalse(state.cacheClearConfirmOpen)
-        assertEquals(0L, state.archiveCacheSizeBytes)
+        // Clear cache intentionally leaves other app data (including the autosave it refreshes).
+        val recursiveAppDataSize = dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        assertEquals(recursiveAppDataSize, state.appDataSizeBytes)
+        assertTrue(state.appDataSizeBytes > 0L)
         assertTrue(archiveCacheDir.listFiles().orEmpty().isEmpty())
         assertTrue(notesDir.listFiles().orEmpty().isEmpty())
         assertTrue(File(userNotesDir, "saved_analysis.md").exists())
@@ -2997,8 +3004,13 @@ class AppStateBehaviorTest {
                 maskWordOnCopy = true,
                 maskWordTarget = "kotlin",
                 maskWordReplacement = "k*otlin",
+                copyMaskRules = listOf(
+                    CopyMaskRule("kotlin", ""),
+                    CopyMaskRule("timeout", "delayed"),
+                ),
                 highlightEntireCrashGroup = true,
                 openNewFilesWithUnfiltered = true,
+                openUnfilteredOnCtrlF = true,
             )
         }
 
@@ -3016,8 +3028,42 @@ class AppStateBehaviorTest {
         assertEquals(true, restored.settings.maskWordOnCopy)
         assertEquals("kotlin", restored.settings.maskWordTarget)
         assertEquals("k*otlin", restored.settings.maskWordReplacement)
+        assertEquals(
+            listOf(CopyMaskRule("kotlin", ""), CopyMaskRule("timeout", "delayed")),
+            restored.settings.copyMaskRules,
+        )
         assertEquals(true, restored.settings.highlightEntireCrashGroup)
         assertEquals(true, restored.settings.openNewFilesWithUnfiltered)
+        assertEquals(true, restored.settings.openUnfilteredOnCtrlF)
+    }
+
+    @Test
+    fun legacySingleCopyMaskPairMigratesToOneOrderedRule() {
+        val dir = createTempDirectory("openlog-copy-mask-legacy").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.updateSettings {
+            it.copy(maskWordOnCopy = true, maskWordTarget = "kotlin", maskWordReplacement = "k*otlin")
+        }
+        state.autosaveNow()
+
+        // Drop only the two fields appended by the multi-rule/Ctrl+F change, preserving the
+        // legacy pair in its historic token positions.
+        val lines = cacheFile.readLines()
+        val settingsLine = lines.single { it.startsWith("settings\t") }
+        val encoded = settingsLine.removePrefix("settings\t")
+        val rawToken = String(java.util.Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8)
+        val legacyRawToken = rawToken.split("|").dropLast(2).joinToString("|")
+        val legacyEncoded = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(legacyRawToken.toByteArray(Charsets.UTF_8))
+        cacheFile.writeText(lines.joinToString("\n") { line ->
+            if (line == settingsLine) "settings\t$legacyEncoded" else line
+        } + "\n")
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals(listOf(CopyMaskRule("kotlin", "k*otlin")), restored.settings.copyMaskRules)
+        assertFalse(restored.settings.openUnfilteredOnCtrlF)
     }
 
     @Test
@@ -3691,7 +3737,7 @@ class AppStateBehaviorTest {
 
     @Test
     fun maskWordForCopyReplacesWholeWordCaseSensitively() {
-        val settings = AppSettings(maskWordOnCopy = true, maskWordTarget = "java", maskWordReplacement = "j*ava")
+        val settings = AppSettings(maskWordOnCopy = true, copyMaskRules = listOf(CopyMaskRule("java", "j*ava")))
 
         val result = maskWordForCopy("Crash seen in java, not Java or javascript.", settings)
 
@@ -3717,6 +3763,38 @@ class AppStateBehaviorTest {
         val result = maskWordForCopy("plain java text", settings)
 
         assertEquals("plain java text", result)
+    }
+
+    @Test
+    fun maskWordForCopyAppliesOrderedRulesAndAllowsAnEmptyReplacement() {
+        val settings = AppSettings(
+            maskWordOnCopy = true,
+            copyMaskRules = listOf(
+                CopyMaskRule("java", "kotlin"),
+                CopyMaskRule("kotlin", ""),
+                CopyMaskRule("", "ignored"),
+            ),
+        )
+
+        val result = maskWordForCopy("java Kotlin javaScript", settings)
+
+        assertEquals(" Kotlin javaScript", result)
+    }
+
+    @Test
+    fun ensureActiveTabUnfilteredOnlyOpensTheActiveOriginalPanel() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("active", "active.log", emptyList()),
+            mkTab("other", "other.log", emptyList()),
+        )
+        state.activeTabId = "active"
+
+        state.ensureActiveTabUnfiltered()
+        state.ensureActiveTabUnfiltered()
+
+        assertTrue(state.tab("active")!!.showUnfiltered)
+        assertFalse(state.tab("other")!!.showUnfiltered)
     }
 
     @Test
