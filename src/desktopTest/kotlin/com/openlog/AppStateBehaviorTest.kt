@@ -13,6 +13,7 @@ import com.openlog.model.CtxMenuState
 import com.openlog.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
+import com.openlog.model.Highlighter
 import com.openlog.model.LogAnalysis
 import com.openlog.model.LogEntry
 import com.openlog.model.LogItem
@@ -24,6 +25,7 @@ import com.openlog.model.ThemePreset
 import com.openlog.ui.AppState
 import com.openlog.ui.DesktopStorage
 import com.openlog.ui.FilterSearchRequest
+import com.openlog.ui.HL_COLORS
 import com.openlog.ui.ImportFilterAction
 import com.openlog.ui.ManualCollapseAvailability
 import com.openlog.ui.SEQ_COLORS
@@ -3730,6 +3732,72 @@ class AppStateBehaviorTest {
         state.addHlFromCtx()
 
         assertEquals("full message", state.tabs.single().filter.highlighters.single().pattern)
+    }
+
+    @Test
+    fun addHlFromCtxUsesNextUnusedColorFromTheDraftCursor() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(
+            mkTab("t1", "test.log", listOf(entry)).copy(
+                filter = Filter(highlighters = listOf(
+                    Highlighter("one", "first", false, HL_COLORS[0], true),
+                    Highlighter("two", "second", false, HL_COLORS[1], true),
+                )),
+            ),
+        )
+        state.newHlColor = HL_COLORS[0]
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "selected")
+
+        state.addHlFromCtx()
+
+        assertEquals(HL_COLORS[2], state.tabs.single().filter.highlighters.last().color)
+        assertEquals(HL_COLORS[3], state.newHlColor)
+    }
+
+    @Test
+    fun addHlFromCtxWrapsToDraftColorWhenEveryPaletteColorIsInUse() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(
+            mkTab("t1", "test.log", listOf(entry)).copy(
+                filter = Filter(highlighters = HL_COLORS.mapIndexed { index, color ->
+                    Highlighter("h$index", "existing $index", false, color, true)
+                }),
+            ),
+        )
+        state.newHlColor = HL_COLORS.last()
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "selected")
+
+        state.addHlFromCtx()
+
+        assertEquals(HL_COLORS.last(), state.tabs.single().filter.highlighters.last().color)
+    }
+
+    @Test
+    fun addHlFromCtxUsesExplicitPickerColor() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "selected")
+
+        state.addHlFromCtx(HL_COLORS[7])
+
+        assertEquals(HL_COLORS[7], state.tabs.single().filter.highlighters.single().color)
+    }
+
+    @Test
+    fun addHlTagFromCtxUsesExplicitPickerColor() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "")
+
+        state.addHlTagFromCtx(HL_COLORS[11])
+
+        val highlighter = state.tabs.single().filter.highlighters.single()
+        assertEquals("MyTag", highlighter.pattern)
+        assertEquals(HL_COLORS[11], highlighter.color)
     }
 
     // ── requestAddAnn source label (displaySourceLabel) ──────────────────────

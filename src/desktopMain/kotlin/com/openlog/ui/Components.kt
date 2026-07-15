@@ -23,7 +23,6 @@ import androidx.compose.material.icons.automirrored.outlined.LabelOff
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowUpward
-import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.FindInPage
 import androidx.compose.material.icons.outlined.Layers
@@ -755,6 +754,9 @@ internal fun CtxTagActions(
     onInclude: () -> Unit,
     onExclude: () -> Unit,
     onHighlight: () -> Unit,
+    onHighlightColor: (Color) -> Unit,
+    highlightAutoColor: Color,
+    preferPickerLeft: Boolean,
 ) {
     val tc = tc()
     HoverBox(
@@ -768,8 +770,8 @@ internal fun CtxTagActions(
         ) {
             AppText("Tag", color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                Modifier.fillMaxWidth().padding(start = 10.dp, end = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
@@ -788,11 +790,12 @@ internal fun CtxTagActions(
                     )
                 }
                 CtxActionDivider(tc)
-                CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
-                    AppButton(
-                        "Highlight", onClick = onHighlight, variant = ButtonVariant.Ghost,
-                        modifier = Modifier.fillMaxWidth().height(26.dp),
-                        leadingIcon = Icons.Outlined.Bookmark, horizontalPadding = 4.dp,
+                CtxActionSlot(CTX_HIGHLIGHT_ACTION_WIDTH) {
+                    CtxHighlightAction(
+                        onHighlight = onHighlight,
+                        onHighlightColor = onHighlightColor,
+                        autoColor = highlightAutoColor,
+                        preferLeft = preferPickerLeft,
                     )
                 }
             }
@@ -867,6 +870,9 @@ internal fun CtxSelectionActions(
     onAskAi: () -> Unit,
     onCopy: () -> Unit,
     onHighlight: () -> Unit,
+    onHighlightColor: (Color) -> Unit,
+    highlightAutoColor: Color,
+    preferPickerLeft: Boolean,
 ) {
     val tc = tc()
     HoverBox(
@@ -880,8 +886,8 @@ internal fun CtxSelectionActions(
         ) {
             AppText("Selection", color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                Modifier.fillMaxWidth().padding(start = 10.dp, end = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
@@ -900,11 +906,12 @@ internal fun CtxSelectionActions(
                     )
                 }
                 CtxActionDivider(tc)
-                CtxActionSlot(CTX_ACTION_BUTTON_WIDTH) {
-                    AppButton(
-                        "Highlight", onClick = onHighlight, variant = ButtonVariant.Ghost,
-                        modifier = Modifier.fillMaxWidth().height(26.dp),
-                        leadingIcon = Icons.Outlined.Bookmark, horizontalPadding = 4.dp,
+                CtxActionSlot(CTX_HIGHLIGHT_ACTION_WIDTH) {
+                    CtxHighlightAction(
+                        onHighlight = onHighlight,
+                        onHighlightColor = onHighlightColor,
+                        autoColor = highlightAutoColor,
+                        preferLeft = preferPickerLeft,
                     )
                 }
             }
@@ -970,9 +977,91 @@ private fun CtxActionSlot(
 // across Selection, Tag, and Collapse rows, regardless of label length.
 private val CTX_ACTION_BUTTON_WIDTH = 78.dp
 
+// Extends into the row's existing right padding so the picker target can align with the
+// Show/Hide chevron without overlapping the Highlight label or leaving its hit area.
+private val CTX_HIGHLIGHT_ACTION_WIDTH = 86.dp
+
 @Composable
 private fun CtxActionDivider(colors: ThemeColors) {
     Box(Modifier.width(1.dp).height(18.dp).background(colors.br))
+}
+
+// 82dp inner width fits five 14dp swatches with 3dp gaps, but not a sixth. Matching the
+// 9dp vertical padding makes every edge around the grid equally spaced.
+private val CTX_HIGHLIGHT_PICKER_WIDTH = 100.dp
+
+// The primary button preserves the existing grouped Highlight action. Its wider final slot puts
+// the entire picker target in the same position as the Show/Hide messages submenu chevron.
+@Composable
+private fun CtxHighlightAction(
+    onHighlight: () -> Unit,
+    onHighlightColor: (Color) -> Unit,
+    autoColor: Color,
+    preferLeft: Boolean,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var hoveringTrigger by remember { mutableStateOf(false) }
+    var hoveringPopup by remember { mutableStateOf(false) }
+    var pickerOpen by remember { mutableStateOf(false) }
+    var anchorWidthPx by remember { mutableStateOf(0) }
+    LaunchedEffect(hoveringTrigger, hoveringPopup) {
+        if (hoveringTrigger || hoveringPopup) {
+            pickerOpen = true
+        } else if (pickerOpen) {
+            delay(CTX_SUBMENU_CLOSE_DELAY_MS)
+            pickerOpen = false
+        }
+    }
+    Box(Modifier.fillMaxWidth().height(26.dp).onGloballyPositioned { anchorWidthPx = it.size.width }) {
+        AppButton(
+            "Highlight", onClick = onHighlight, variant = ButtonVariant.Ghost,
+            modifier = Modifier.fillMaxSize().padding(end = 24.dp),
+            horizontalPadding = 4.dp,
+        )
+        HoverBox(
+            modifier = Modifier.align(Alignment.CenterEnd).size(24.dp).clip(RoundedCornerShape(6.dp))
+                .onPointerEvent(PointerEventType.Enter) { hoveringTrigger = true }
+                .onPointerEvent(PointerEventType.Exit) { hoveringTrigger = false },
+            onClick = { pickerOpen = true },
+        ) {
+            Box(
+                Modifier.align(Alignment.Center).size(10.dp)
+                    .background(autoColor, CORNER_SM)
+                    .border(1.dp, tc.br, CORNER_SM),
+            )
+        }
+        if (pickerOpen) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(
+                    if (preferLeft) -with(density) { CTX_HIGHLIGHT_PICKER_WIDTH.roundToPx() } else anchorWidthPx,
+                    0,
+                ),
+                onDismissRequest = { pickerOpen = false },
+                properties = PopupProperties(focusable = false),
+            ) {
+                FlowRow(
+                    Modifier.width(CTX_HIGHLIGHT_PICKER_WIDTH)
+                        .shadow(8.dp, RoundedCornerShape(7.dp))
+                        .background(tc.p, RoundedCornerShape(7.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                        .padding(9.dp)
+                        .onPointerEvent(PointerEventType.Enter) { hoveringPopup = true }
+                        .onPointerEvent(PointerEventType.Exit) { hoveringPopup = false },
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    HL_COLORS.forEach { color ->
+                        ColorSwatch(color, color == autoColor) {
+                            pickerOpen = false
+                            onHighlightColor(color)
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // Same row as CtxItem plus a trailing ▶ hit target: hovering/pressing that arrow specifically
@@ -1128,6 +1217,9 @@ internal sealed class CtxMenuEntry {
         val onInclude: () -> Unit,
         val onExclude: () -> Unit,
         val onHighlight: () -> Unit,
+        val onHighlightColor: (Color) -> Unit,
+        val highlightAutoColor: Color,
+        val preferPickerLeft: Boolean,
     ) : CtxMenuEntry()
 
     data class CollapseActions(
@@ -1140,6 +1232,9 @@ internal sealed class CtxMenuEntry {
         val onAskAi: () -> Unit,
         val onCopy: () -> Unit,
         val onHighlight: () -> Unit,
+        val onHighlightColor: (Color) -> Unit,
+        val highlightAutoColor: Color,
+        val preferPickerLeft: Boolean,
     ) : CtxMenuEntry()
 
     data class SourceActions(

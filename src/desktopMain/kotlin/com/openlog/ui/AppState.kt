@@ -1252,6 +1252,20 @@ class AppState(
         newHlColor = HL_COLORS[(HL_COLORS.indexOf(color) + 1) % HL_COLORS.size]
     }
 
+    /**
+     * Context-menu highlights begin at the same palette cursor as the Highlighters add form,
+     * but avoid colors already in use in this tab until the complete palette has been exhausted.
+     */
+    fun nextAvailableHighlighterColor(tabId: String): Color {
+        val used = tab(tabId)?.filter?.highlighters?.map { it.color }?.toSet().orEmpty()
+        val start = HL_COLORS.indexOf(newHlColor).takeIf { it >= 0 } ?: 0
+        for (offset in HL_COLORS.indices) {
+            val candidate = HL_COLORS[(start + offset) % HL_COLORS.size]
+            if (candidate !in used) return candidate
+        }
+        return HL_COLORS[start]
+    }
+
     fun removeHl(tabId: String, id: String) =
         upFlt(tabId) { f -> f.copy(highlighters = f.highlighters.filter { it.id != id }) }
 
@@ -2029,7 +2043,7 @@ class AppState(
         toggleExcludeTag(c.tabId, tag); ctx = null
     }
 
-    fun addHlFromCtx() {
+    fun addHlFromCtx(color: Color? = null) {
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
         // Unlike the message-only actions below, highlighter matching runs against the full
@@ -2039,13 +2053,13 @@ class AppState(
         // ever matches entry.msg, which would silently change what a cross-boundary selection
         // (e.g. spanning tag + message) actually highlights.
         val text = c.selText.trim().ifBlank { entry.msg }
-        addHl(c.tabId, text, false, newHlColor); ctx = null
+        addHl(c.tabId, text, false, color ?: nextAvailableHighlighterColor(c.tabId)); ctx = null
     }
 
-    fun addHlTagFromCtx() {
+    fun addHlTagFromCtx(color: Color? = null) {
         val c = ctx ?: return
         val tag = tab(c.tabId)?.rmap?.get(c.entryId)?.tag ?: return
-        addHl(c.tabId, tag, false, newHlColor); ctx = null
+        addHl(c.tabId, tag, false, color ?: nextAvailableHighlighterColor(c.tabId)); ctx = null
     }
 
     fun addSeqFromCtx() {

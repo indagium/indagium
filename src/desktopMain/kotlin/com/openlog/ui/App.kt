@@ -311,6 +311,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                             state.ctx = null
                                         },
                                         onHighlight = { state.addHlFromCtx() },
+                                        onHighlightColor = { color -> state.addHlFromCtx(color) },
+                                        highlightAutoColor = state.nextAvailableHighlighterColor(ctx.tabId),
+                                        preferPickerLeft = submenuOpensLeft,
                                     ),
                                 )
                                 add(CtxMenuEntry.Divider)
@@ -337,6 +340,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                     onInclude = { state.addTagFilterFromCtx() },
                                     onExclude = { state.addExcludeTagFromCtx() },
                                     onHighlight = { state.addHlTagFromCtx() },
+                                    onHighlightColor = { color -> state.addHlTagFromCtx(color) },
+                                    highlightAutoColor = state.nextAvailableHighlighterColor(ctx.tabId),
+                                    preferPickerLeft = submenuOpensLeft,
                                 ),
                             )
                             add(CtxMenuEntry.Divider)
@@ -481,6 +487,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                                 onInclude = e.onInclude,
                                                 onExclude = e.onExclude,
                                                 onHighlight = e.onHighlight,
+                                                onHighlightColor = e.onHighlightColor,
+                                                highlightAutoColor = e.highlightAutoColor,
+                                                preferPickerLeft = e.preferPickerLeft,
                                             )
                                         is CtxMenuEntry.CollapseActions ->
                                             CtxCollapseActions(
@@ -495,6 +504,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                                 onAskAi = e.onAskAi,
                                                 onCopy = e.onCopy,
                                                 onHighlight = e.onHighlight,
+                                                onHighlightColor = e.onHighlightColor,
+                                                highlightAutoColor = e.highlightAutoColor,
+                                                preferPickerLeft = e.preferPickerLeft,
                                             )
                                         is CtxMenuEntry.SourceActions ->
                                             CtxSourceActions(
