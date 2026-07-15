@@ -1,5 +1,9 @@
 package com.openlog.debug
 
+import com.openlog.ai.AiRun
+import com.openlog.ai.ManagedMcpAccess
+import com.openlog.ai.ManagedMcpRun
+import com.openlog.ai.ManagedMcpRunRegistry
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.LogLevel
@@ -221,6 +225,16 @@ class ControlServer(
 ) {
     private var engine: EmbeddedServer<*, *>? = null
     private var mcpServer: Server? = null
+    // The normal MCP server is shared by manual clients. Account-agent panel runs instead receive
+    // a server instance bound to one ephemeral run token so tool calls can pause for confirmation.
+    private val managedMcpServers = ConcurrentHashMap<String, Server>()
+
+    // HTTP/MCP transport adapter over the same direct AppState operations used by the in-app AI.
+    // It intentionally owns no tool implementations; that keeps protocol behavior and internal
+    // execution in lockstep without an HTTP loopback hop.
+    private val operations = OpenLogToolOperations(appState)
+    internal val toolGateway: OpenLogToolGateway get() = operations.toolGateway
+    private val managedMcpRuns = ManagedMcpRunRegistry(toolGateway)
 
     private data class ClientRecord(val name: String, val lastSeenMs: Long)
 
@@ -230,6 +244,19 @@ class ControlServer(
     @Volatile
     private var resolvedPort: Int = port
     val boundPort: Int get() = resolvedPort
+
+    /** Registers a panel account-agent run for managed MCP tool calls until [releaseManagedMcpRun]. */
+    internal fun registerManagedMcpRun(run: AiRun): ManagedMcpAccess? =
+        if (engine == null) null else managedMcpRuns.register(run)
+
+    internal fun releaseManagedMcpRun(access: ManagedMcpAccess) {
+        managedMcpRuns.remove(access.token)
+        managedMcpServers.remove(access.token)?.sessions?.values?.forEach { session ->
+            runCatching { runBlocking { session.close() } }
+        }
+    }
+
+    internal fun managedMcpUrl(): String = "http://127.0.0.1:$boundPort/mcp"
 
     // Read by the Settings/Connection-info UI (in-process, no HTTP hop needed — Compose and this
     // server share the same JVM). Prunes anything not seen in the last CLIENT_STALE_MS so a
@@ -315,13 +342,16 @@ class ControlServer(
                     val provided = call.request.header(AUTH_HEADER)
                         ?.takeIf { it.startsWith(AUTH_SCHEME_PREFIX) }
                         ?.removePrefix(AUTH_SCHEME_PREFIX)
-                    if (provided == null || !constantTimeEquals(provided, token)) {
+                    if (provided == null || (!constantTimeEquals(provided, token) && managedMcpRuns.get(provided) == null)) {
                         call.respondText("{\"error\":\"unauthorized\"}", io.ktor.http.ContentType.Application.Json, HttpStatusCode.Unauthorized)
                         finish()
                         return@intercept
                     }
                 }
-                mcpStreamableHttp { mcp }
+                mcpStreamableHttp {
+                    val provided = bearerToken(call.request.header(AUTH_HEADER))
+                    managedMcpRuns.get(provided)?.let(::managedMcpServer) ?: mcp
+                }
                 registerRestRoutes()
             }
             // Application is itself a CoroutineScope tied to the server's lifecycle, so this loop
@@ -337,6 +367,10 @@ class ControlServer(
         engine?.stop()
         engine = null
         mcpServer = null
+        managedMcpServers.values.forEach { server ->
+            server.sessions.values.forEach { session -> runCatching { runBlocking { session.close() } } }
+        }
+        managedMcpServers.clear()
     }
 
     // ── REST transport (curl escape hatch + ControlServerTest) ─────────────
@@ -354,6 +388,12 @@ class ControlServer(
     }
 
     private suspend fun RoutingContext.handleRest(op: String) {
+        // A short-lived managed token may use only the MCP transport it was issued for. It must
+        // never become a general REST capability while an account-agent run is active.
+        if (!constantTimeEquals(bearerToken(call.request.header(AUTH_HEADER)).orEmpty(), token)) {
+            respondJson(HttpStatusCode.Unauthorized, mapOf("error" to "unauthorized"))
+            return
+        }
         val headers = call.request.headers
         val clientId = headers[CLIENT_ID_HEADER]
         if (clientId != null && clientId in blockedIds) {
@@ -398,15 +438,31 @@ class ControlServer(
         return server
     }
 
-    // HTTP/MCP transport adapter over the same direct AppState operations used by the in-app AI.
-    // It intentionally owns no tool implementations; that keeps protocol behavior and internal
-    // execution in lockstep without an HTTP loopback hop.
-    private val operations = OpenLogToolOperations(appState)
-
-    internal val toolGateway: OpenLogToolGateway get() = operations.toolGateway
+    private fun managedMcpServer(managed: ManagedMcpRun): Server =
+        managedMcpServers.computeIfAbsent(managed.access.token) {
+            Server(
+                serverInfo = Implementation(name = "openlog-managed-agent", version = "1.0.0"),
+                options = ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false))),
+            ).also { server ->
+                toolGateway.tools.forEach { tool ->
+                    server.addTool(name = tool.name, description = tool.description, inputSchema = tool.schema) { request ->
+                        val result = try {
+                            managed.toolExecutor.executeManaged(managed.run, tool.name, request.arguments?.toArgMap() ?: emptyMap()).content
+                        } catch (error: Exception) {
+                            "{\"error\":${Json.encode(error.message ?: "managed MCP tool failed")}}"
+                        }
+                        CallToolResult(content = listOf(TextContent(result)))
+                    }
+                }
+            }
+        }
 
     internal fun openAiFunctionDefinitions() = operations.openAiFunctionDefinitions()
 }
+
+private fun bearerToken(rawHeader: String?): String? = rawHeader
+    ?.takeIf { it.startsWith(AUTH_SCHEME_PREFIX) }
+    ?.removePrefix(AUTH_SCHEME_PREFIX)
 
 // MCP tool argument objects arrive as kotlinx JsonObject; flatten to the same String/Int/Boolean/
 // List/Map shapes Json.decode produces for REST bodies, so gateway handlers' accessors work identically.

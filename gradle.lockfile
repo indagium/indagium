@@ -178,5 +178,6 @@ org.jetbrains:markdown-jvm:0.7.3=desktopCompileClasspath,desktopRuntimeClasspath
 org.jetbrains:markdown:0.7.3=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 org.jspecify:jspecify:1.0.0=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 org.slf4j:slf4j-api:2.0.17=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
+org.slf4j:slf4j-nop:2.0.17=desktopRuntimeClasspath,desktopTestRuntimeClasspath
 org.tukaani:xz:1.10=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 empty=

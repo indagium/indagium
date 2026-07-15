@@ -1,6 +1,7 @@
 package com.openlog.ai
 
 import com.openlog.debug.OpenLogToolGateway
+import com.openlog.model.AiProviderKind
 import com.openlog.model.AiProviderProfile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -12,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -50,18 +52,34 @@ internal class AiSidebarRuntime(
     // AI providers -> Max tool rounds) applies to the next request without restarting the app.
     private val maxToolRounds: () -> Int = { com.openlog.model.DEFAULT_AI_MAX_TOOL_ROUNDS },
     private val providerFactory: AiProviderFactory = AiProviderFactory { profile, key ->
-        OpenAiCompatibleProvider(profile, key)
+        when (profile.kind) {
+            AiProviderKind.ANTHROPIC_API -> AnthropicMessagesProvider(profile.baseUrl, key)
+            else -> OpenAiCompatibleProvider(profile, key)
+        }
     },
+    private val accountAgentRunnerFactory: (() -> AccountAgentRunner)? = null,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) : AutoCloseable {
-    private data class RunResources(
+    private interface RunResources : AutoCloseable {
+        fun cancel(run: AiRun)
+    }
+
+    private data class ProviderRunResources(
         val runner: AiAgentRunner,
         val provider: LlmProvider,
-    ) : AutoCloseable {
+    ) : RunResources {
+        override fun cancel(run: AiRun) = runner.cancel(run)
+
         override fun close() {
             runner.close()
             (provider as? AutoCloseable)?.close()
         }
+    }
+
+    private data class AccountRunResources(val runner: AccountAgentRunner) : RunResources {
+        override fun cancel(run: AiRun) = run.cancel()
+
+        override fun close() = runner.close()
     }
 
     private val resources = ConcurrentHashMap<String, RunResources>()
@@ -89,12 +107,25 @@ internal class AiSidebarRuntime(
         startProblem(tabId, profile, prompt, context)?.let { return AiStartResult.Rejected(it) }
 
         val session = sessions.sessionFor(tabId)
+        if (profile.kind == AiProviderKind.CODEX_ACCOUNT || profile.kind == AiProviderKind.CLAUDE_CODE_ACCOUNT) {
+            val runner = accountAgentRunnerFactory?.invoke()
+                ?: return AiStartResult.Rejected("Account-agent support is unavailable in this app session.")
+            val resourcesForRun = AccountRunResources(runner)
+            val run = try {
+                runner.start(session, profile, prompt.trim(), systemPrompt(context), context)
+            } catch (error: Exception) {
+                resourcesForRun.close()
+                return AiStartResult.Rejected(error.message ?: "Unable to start the account agent.")
+            }
+            retainRun(run, resourcesForRun, profile.id)
+            return AiStartResult.Started(run)
+        }
         val provider = try {
             providerFactory.create(profile, apiKey)
         } catch (error: Exception) {
             return AiStartResult.Rejected(error.message ?: "Unable to prepare the model provider.")
         }
-        val resourcesForRun = RunResources(
+        val resourcesForRun = ProviderRunResources(
             AiAgentRunner(provider, toolGatewayFactory(), maxToolRounds = maxToolRounds()),
             provider,
         )
@@ -105,23 +136,13 @@ internal class AiSidebarRuntime(
                 prompt = prompt.trim(),
                 systemPrompt = systemPrompt(context),
                 context = context,
+                reasoningEffort = profile.reasoningEffort,
             )
         } catch (error: Exception) {
             resourcesForRun.close()
             return AiStartResult.Rejected(error.message ?: "Unable to start the AI request.")
         }
-        resources[run.id] = resourcesForRun
-        connectionStates[profile.id] = AiConnectionState.Checking
-        observers[run.id] = observe(run, profile.id)
-        run.job?.invokeOnCompletion {
-            // The observer is intentionally cancelled with the run resources. Read the retained
-            // history here as well so a very fast terminal event cannot race that cancellation.
-            run.history.lastOrNull()?.let { updateConnectionState(profile.id, it) }
-            observers.remove(run.id)?.cancel()
-            resources.remove(run.id)?.close()
-            scheduleUiUpdate()
-        }
-        scheduleUiUpdate()
+        retainRun(run, resourcesForRun, profile.id)
         return AiStartResult.Started(run)
     }
 
@@ -133,7 +154,7 @@ internal class AiSidebarRuntime(
     }
 
     fun cancel(run: AiRun) {
-        resources[run.id]?.runner?.cancel(run) ?: run.cancel()
+        resources[run.id]?.cancel(run) ?: run.cancel()
         scheduleUiUpdate()
     }
 
@@ -148,13 +169,16 @@ internal class AiSidebarRuntime(
     }
 
     fun resolveConfirmation(run: AiRun, confirmation: AiToolConfirmation, accepted: Boolean): Boolean {
-        val resolved = resources[run.id]?.runner?.resolveConfirmation(run, confirmation.id, accepted) ?: false
+        val resolved = run.confirmations.remove(confirmation.id)?.complete(accepted) ?: false
         if (resolved) scheduleUiUpdate()
         return resolved
     }
 
     @Suppress("TooGenericExceptionCaught")
     suspend fun discoverModels(profile: AiProviderProfile, apiKey: String): ModelDiscoveryResult {
+        if (!profile.kind.usesHttpEndpoint) {
+            return withContext(Dispatchers.IO) { discoverAccountModels(profile) }
+        }
         val validation = validateAiProviderProfile(profile)
         if (!validation.isValid) return ModelDiscoveryResult.Unavailable(validation.problem!!.message)
         val provider = try {
@@ -172,6 +196,13 @@ internal class AiSidebarRuntime(
     /** Explicit `/models` probe; neither credentials nor the outcome leave the current launch. */
     @Suppress("TooGenericExceptionCaught")
     suspend fun testConnection(profile: AiProviderProfile, apiKey: String): AiConnectionState {
+        if (!profile.kind.usesHttpEndpoint) {
+            val check = withContext(Dispatchers.IO) { checkAccountCli(profile) }
+            return (if (check.isReady) AiConnectionState.Ready else AiConnectionState.Failed(check.message)).also {
+                connectionStates[profile.id] = it
+                scheduleUiUpdate()
+            }
+        }
         val validation = validateAiProviderProfile(profile)
         if (!validation.isValid) {
             return AiConnectionState.Failed(validation.problem!!.message).also {
@@ -206,6 +237,21 @@ internal class AiSidebarRuntime(
                 scheduleUiUpdate()
             }
         }
+
+    private fun retainRun(run: AiRun, resourcesForRun: RunResources, profileId: String) {
+        resources[run.id] = resourcesForRun
+        connectionStates[profileId] = AiConnectionState.Checking
+        observers[run.id] = observe(run, profileId)
+        run.job?.invokeOnCompletion {
+            // The observer is intentionally cancelled with the run resources. Read the retained
+            // history here as well so a very fast terminal event cannot race that cancellation.
+            run.history.lastOrNull()?.let { updateConnectionState(profileId, it) }
+            observers.remove(run.id)?.cancel()
+            resources.remove(run.id)?.close()
+            scheduleUiUpdate()
+        }
+        scheduleUiUpdate()
+    }
 
     private fun updateConnectionState(profileId: String, event: AiRunEvent) {
         when (event) {
@@ -259,7 +305,7 @@ internal class AiSidebarRuntime(
         val validation = validateAiProviderProfile(profile)
         return when {
             !validation.isValid -> validation.problem!!.message
-            profile.model.isBlank() -> "Choose or enter a model before sending a request."
+            profile.kind.usesHttpEndpoint && profile.model.isBlank() -> "Choose or enter a model before sending a request."
             prompt.isBlank() -> "Enter a question for the AI assistant."
             context.tabId != tabId -> "The AI context belongs to a different log tab."
             else -> null

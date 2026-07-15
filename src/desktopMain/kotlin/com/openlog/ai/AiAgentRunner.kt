@@ -1,6 +1,5 @@
 package com.openlog.ai
 
-import com.openlog.debug.OpenLogToolActionPolicy
 import com.openlog.debug.OpenLogToolGateway
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -12,15 +11,6 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.doubleOrNull
-import kotlinx.serialization.json.jsonObject
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -114,7 +104,10 @@ internal class AiRun internal constructor(
 
     internal suspend fun emit(event: AiRunEvent) {
         synchronized(_history) { _history += event }
-        if (firstResponseAt == null && (event is AiRunEvent.AssistantDelta || event is AiRunEvent.ToolRequested)) {
+        if (firstResponseAt == null && (
+                event is AiRunEvent.AssistantDelta || event is AiRunEvent.AgentProgress || event is AiRunEvent.ToolRequested
+            )
+        ) {
             firstResponseAt = System.currentTimeMillis()
         }
         if (completedAt == null && (event is AiRunEvent.Done || event is AiRunEvent.Error || event == AiRunEvent.Cancelled)) {
@@ -138,6 +131,9 @@ internal class AiRun internal constructor(
 /** UI-neutral trace of an agent request. Task 05 renders these events in the sidebar. */
 internal sealed interface AiRunEvent {
     data class Status(val text: String) : AiRunEvent
+
+    /** A user-visible agent update emitted before the final response; rendered in Investigation. */
+    data class AgentProgress(val text: String) : AiRunEvent
 
     data class AssistantDelta(val text: String) : AiRunEvent
 
@@ -187,12 +183,15 @@ internal class AiAgentRunner(
         require(maxToolResultChars > 0) { "maxToolResultChars must be positive" }
     }
 
+    private val toolExecutor = AiToolExecutionCoordinator(toolGateway, maxToolResultChars)
+
     fun start(
         session: AiSession,
         model: String,
         prompt: String,
         systemPrompt: String? = null,
         context: AiInvestigationContext = AiInvestigationContext(session.tabId),
+        reasoningEffort: String? = null,
     ): AiRun {
         require(prompt.isNotBlank()) { "AI prompt must not be blank" }
         require(context.tabId == session.tabId) { "AI context must belong to the session tab." }
@@ -204,7 +203,7 @@ internal class AiAgentRunner(
         session.retain(run)
         run.job = scope.launch {
             try {
-                runLoop(session, run, model, prompt, systemPrompt)
+                runLoop(session, run, model, prompt, systemPrompt, reasoningEffort)
             } catch (_: CancellationException) {
                 run.emit(AiRunEvent.Cancelled)
             } finally {
@@ -235,6 +234,7 @@ internal class AiAgentRunner(
         model: String,
         prompt: String,
         systemPrompt: String?,
+        reasoningEffort: String?,
     ) {
         val conversation = session.messages.toMutableList()
         val initialMessageCount = session.messages.size
@@ -256,16 +256,18 @@ internal class AiAgentRunner(
                 run.emit(AiRunEvent.Status(if (toolRounds == 0) "Generating response…" else "Continuing investigation…"))
                 val assistantText = StringBuilder()
                 val toolCalls = mutableListOf<LlmToolCall>()
+                val reasoning = mutableListOf<LlmReasoning>()
                 var completed = false
                 var failed = false
                 var assistantRecorded = false
 
                 fun recordAssistantMessage() {
-                    if (!assistantRecorded && (assistantText.isNotEmpty() || toolCalls.isNotEmpty())) {
+                    if (!assistantRecorded && (assistantText.isNotEmpty() || toolCalls.isNotEmpty() || reasoning.isNotEmpty())) {
                         conversation += LlmMessage(
                             role = LlmRole.ASSISTANT,
                             content = assistantText.toString().ifBlank { null },
                             toolCalls = toolCalls,
+                            reasoning = reasoning.toList(),
                         )
                         assistantRecorded = true
                     }
@@ -277,6 +279,7 @@ internal class AiAgentRunner(
                             model = model,
                             messages = conversation,
                             tools = toolGateway.openAiFunctions(),
+                            reasoningEffort = reasoningEffort?.takeIf(String::isNotBlank),
                         ),
                     ).collect { event ->
                         when (event) {
@@ -286,6 +289,7 @@ internal class AiAgentRunner(
                             }
 
                             is LlmStreamEvent.ToolCall -> toolCalls += event.call
+                            is LlmStreamEvent.ReasoningComplete -> reasoning += event.block
                             is LlmStreamEvent.Error -> {
                                 failed = true
                                 run.emit(AiRunEvent.Error(event.message))
@@ -323,10 +327,8 @@ internal class AiAgentRunner(
                 toolRounds++
 
                 toolCalls.forEach { call ->
-                    run.emit(AiRunEvent.ToolRequested(call))
-                    val result = executeToolWithPolicy(run, call)
+                    val result = toolExecutor.execute(run, call)
                     conversation += LlmMessage(LlmRole.TOOL, content = result.content, toolCallId = call.id)
-                    run.emit(AiRunEvent.ToolCompleted(call, result.preview, result.truncated, result.evidence))
                 }
 
                 val roundsLeft = maxToolRounds - toolRounds
@@ -339,92 +341,6 @@ internal class AiAgentRunner(
         } finally {
             session.messages += conversation.drop(initialMessageCount)
         }
-    }
-
-    @Suppress("TooGenericExceptionCaught")
-    private suspend fun executeToolWithPolicy(run: AiRun, call: LlmToolCall): ToolResult {
-        val arguments = parseArguments(call.argumentsJson)
-            ?: return ToolResult.error("Tool arguments must be a JSON object.")
-        // The in-app sidebar is pinned to the tab that started this request. MCP callers keep
-        // their explicit multi-tab behavior because this guard lives only in the agent runner.
-        val pinnedArguments = if (
-            call.name in TAB_SCOPED_TOOL_NAMES || (call.name == "resolve_log_source" && "tabId" in arguments)
-        ) {
-            arguments + ("tabId" to run.tabId)
-        } else {
-            arguments
-        }
-        if (toolGateway.actionPolicy(call.name) == OpenLogToolActionPolicy.CONFIRMATION_REQUIRED) {
-            val confirmation = AiToolConfirmation(
-                id = UUID.randomUUID().toString(),
-                call = call,
-                description = confirmationDescription(call.name),
-            )
-            val decision = CompletableDeferred<Boolean>()
-            run.confirmations[confirmation.id] = decision
-            run.emit(AiRunEvent.ConfirmationRequired(confirmation))
-            val accepted = try {
-                decision.await()
-            } finally {
-                run.confirmations.remove(confirmation.id, decision)
-            }
-            if (!accepted) return ToolResult.error("The user declined this action; no changes were made.")
-        }
-
-        return try {
-            val rawResult = toolGateway.execute(call.name, pinnedArguments)
-            ToolResult.from(rawResult, maxToolResultChars, AiEvidenceExtractor.from(call.name, rawResult))
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            ToolResult.error("Tool '${call.name}' failed: ${error.message ?: "unexpected error"}")
-        }
-    }
-
-    private fun parseArguments(rawArguments: String): Map<String, Any?>? = try {
-        json.parseToJsonElement(rawArguments).jsonObject.toKotlinMap()
-    } catch (_: Exception) {
-        null
-    }
-
-    private fun JsonObject.toKotlinMap(): Map<String, Any?> = entries.associate { (key, value) -> key to value.toKotlinValue() }
-
-    private fun JsonElement.toKotlinValue(): Any? = when (this) {
-        JsonNull -> null
-        is JsonObject -> toKotlinMap()
-        is JsonArray -> map { it.toKotlinValue() }
-        is JsonPrimitive -> booleanOrNull ?: doubleOrNull ?: content
-    }
-
-    private data class ToolResult(
-        val content: String,
-        val preview: String,
-        val truncated: Boolean,
-        val evidence: List<AiEvidence> = emptyList(),
-    ) {
-        companion object {
-            fun from(value: Any?, maxChars: Int, evidence: List<AiEvidence>): ToolResult {
-                val rendered = value?.toString() ?: "null"
-                return if (rendered.length <= maxChars) {
-                    ToolResult(rendered, rendered, truncated = false, evidence = evidence)
-                } else {
-                    val notice = "\n\n[Tool result truncated to $maxChars characters by openLog.]"
-                    val bounded = rendered.take((maxChars - notice.length).coerceAtLeast(0)) + notice
-                    ToolResult(bounded, bounded, truncated = true, evidence = evidence)
-                }
-            }
-
-            fun error(message: String): ToolResult = ToolResult(message, message, truncated = false)
-        }
-    }
-
-    private fun confirmationDescription(toolName: String): String = when (toolName) {
-        "open_log_file", "split_log_file" -> "Open or split a log file"
-        "close_tab", "merge_tabs" -> "Change open log tabs"
-        "start_tailing", "stop_tailing" -> "Change live tailing"
-        "export_analysis", "export_filtered_log" -> "Write an export file"
-        "save_annotations", "load_annotations" -> "Save or load annotation files"
-        else -> "Perform a confirmation-required action"
     }
 
     private fun wrapUpNudge(roundsLeft: Int): String =
@@ -441,14 +357,5 @@ internal class AiAgentRunner(
         // total budget it scales from - see the nudgeLeadRounds computation in runLoop.
         const val NUDGE_LEAD_ROUNDS_CAP = 15
         const val NUDGE_LEAD_FRACTION = 4
-        val TAB_SCOPED_TOOL_NAMES = setOf(
-            "close_tab", "get_filter", "set_filter", "get_visible_lines", "get_line_context",
-            "select_lines", "get_selection", "toggle_group", "expand_all", "collapse_all",
-            "get_tags", "get_packages", "get_crash_sites", "get_issue_description",
-            "add_text_note", "add_log_note", "update_note_block", "move_note_block",
-            "delete_note_block", "export_analysis", "export_filtered_log", "save_annotations",
-            "load_annotations", "apply_filter_preset", "start_tailing", "stop_tailing",
-        )
-        val json = Json { ignoreUnknownKeys = true }
     }
 }

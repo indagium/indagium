@@ -83,6 +83,12 @@ kotlin {
                 // the app's Material 3 stack without adding a web view or a second UI toolkit.
                 implementation("com.mikepenz:multiplatform-markdown-renderer:0.41.0")
                 implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.41.0")
+                // The MCP SDK and Ktor both log through SLF4J internally; without a binding on the
+                // classpath, every launch prints "No SLF4J providers were found" to the console.
+                // The app itself never calls SLF4J directly and has no logging config to maintain,
+                // so a no-op binding (silently discard) is the right fit here, not a real backend
+                // like logback. Version pinned to match the resolved slf4j-api transitive version.
+                runtimeOnly("org.slf4j:slf4j-nop:2.0.17")
             }
         }
         val desktopTest by getting

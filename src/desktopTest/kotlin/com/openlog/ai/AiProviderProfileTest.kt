@@ -1,6 +1,7 @@
 package com.openlog.ai
 
 import com.openlog.model.AiProviderProfile
+import com.openlog.model.AiProviderKind
 import com.openlog.model.DEFAULT_AI_MAX_TOOL_ROUNDS
 import com.openlog.model.defaultAiProviderProfile
 import com.openlog.ui.AppState
@@ -91,6 +92,7 @@ class AiProviderProfileTest {
         assertEquals(listOf("lm-studio", "remote"), restored.settings.aiProviderProfiles.map { it.id })
         assertEquals("remote", restored.settings.aiProviderProfiles.single { it.selected }.id)
         assertEquals("team-model", restored.settings.aiProviderProfiles.single { it.id == "remote" }.model)
+        assertEquals(AiProviderKind.OPENAI_COMPATIBLE, restored.settings.aiProviderProfiles.single { it.id == "remote" }.kind)
         assertEquals("", restored.aiProviderApiKey("remote"))
         restored.close()
     }
@@ -151,6 +153,48 @@ class AiProviderProfileTest {
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
         assertEquals(250, restored.settings.aiMaxToolRounds)
+        restored.close()
+    }
+
+    @Test
+    fun providerKindsRoundTripWithoutPersistingTheirCredentials() {
+        val cacheFile = File(createTempDirectory("openlog-ai-kinds").toFile(), "state.cache")
+        val state = AppState(cacheFile)
+        val profiles = listOf(
+            defaultAiProviderProfile().copy(selected = false),
+            AiProviderProfile("openai", "OpenAI API", "https://api.openai.com/v1", "gpt", kind = AiProviderKind.OPENAI_API),
+            AiProviderProfile("anthropic", "Anthropic API", "https://api.anthropic.com", "claude", kind = AiProviderKind.ANTHROPIC_API),
+            AiProviderProfile(
+                "codex", "Codex account", "", "", kind = AiProviderKind.CODEX_ACCOUNT,
+                executablePath = "/Applications/ChatGPT.app/Contents/Resources/codex", reasoningEffort = "high",
+            ),
+            AiProviderProfile(
+                "claude-code", "Claude Code account", "", "", selected = true,
+                kind = AiProviderKind.CLAUDE_CODE_ACCOUNT, executablePath = "/opt/homebrew/bin/claude",
+            ),
+        )
+        state.updateSettings { it.copy(aiProviderProfiles = profiles) }
+        state.setAiProviderApiKey("anthropic", "never-persist")
+        state.autosaveNow()
+        state.close()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        assertEquals(
+            listOf(
+                AiProviderKind.OPENAI_COMPATIBLE,
+                AiProviderKind.OPENAI_API,
+                AiProviderKind.ANTHROPIC_API,
+                AiProviderKind.CODEX_ACCOUNT,
+                AiProviderKind.CLAUDE_CODE_ACCOUNT,
+            ),
+            restored.settings.aiProviderProfiles.map { it.kind },
+        )
+        assertEquals(
+            listOf("", "", "", "/Applications/ChatGPT.app/Contents/Resources/codex", "/opt/homebrew/bin/claude"),
+            restored.settings.aiProviderProfiles.map { it.executablePath },
+        )
+        assertEquals(listOf("", "", "", "high", ""), restored.settings.aiProviderProfiles.map { it.reasoningEffort })
+        assertEquals("", restored.aiProviderApiKey("anthropic"))
         restored.close()
     }
 

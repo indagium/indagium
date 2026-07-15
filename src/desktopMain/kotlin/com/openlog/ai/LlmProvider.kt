@@ -33,6 +33,8 @@ data class ProviderCapabilities(
 data class LlmModel(
     val id: String,
     val displayName: String = id,
+    /** Provider-reported effort values; empty means discovery did not expose configurable effort. */
+    val reasoningEfforts: List<String> = emptyList(),
 )
 
 sealed interface ModelDiscoveryResult {
@@ -49,6 +51,19 @@ data class LlmMessage(
     val content: String? = null,
     val toolCalls: List<LlmToolCall> = emptyList(),
     val toolCallId: String? = null,
+    /**
+     * Opaque provider reasoning blocks for an assistant turn. Anthropic extended thinking requires
+     * these (with their signatures) to be replayed verbatim on the request that carries the tool
+     * results, or the API rejects the turn. Providers that do not use them ignore this field.
+     */
+    val reasoning: List<LlmReasoning> = emptyList(),
+)
+
+/** One extended-thinking block. Either [thinking]+[signature] or [redactedData] is populated. */
+data class LlmReasoning(
+    val thinking: String? = null,
+    val signature: String? = null,
+    val redactedData: String? = null,
 )
 
 data class LlmToolCall(
@@ -70,6 +85,9 @@ data class LlmRequest(
     val tools: List<LlmToolDefinition> = emptyList(),
     val temperature: Double? = null,
     val maxTokens: Int? = null,
+    /** Provider-neutral reasoning level; blank/null means the model's default. Only providers that
+     *  advertise [LlmModel.reasoningEfforts] act on it (currently Anthropic extended thinking). */
+    val reasoningEffort: String? = null,
 )
 
 sealed interface LlmStreamEvent {
@@ -85,6 +103,9 @@ sealed interface LlmStreamEvent {
 
     /** A complete tool call assembled from one or more [ToolCallDelta] events. */
     data class ToolCall(val call: LlmToolCall) : LlmStreamEvent
+
+    /** A completed reasoning block that must be replayed on the next request (Anthropic thinking). */
+    data class ReasoningComplete(val block: LlmReasoning) : LlmStreamEvent
 
     /** The provider explicitly sent a valid stream terminator. */
     data object Completed : LlmStreamEvent

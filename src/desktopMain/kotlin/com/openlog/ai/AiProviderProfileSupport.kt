@@ -1,6 +1,7 @@
 package com.openlog.ai
 
 import com.openlog.model.AiProviderProfile
+import com.openlog.model.AiProviderKind
 import com.openlog.model.defaultAiProviderProfile
 import java.net.URI
 
@@ -15,6 +16,7 @@ data class AiProviderUrlValidation(val problem: AiProviderUrlProblem? = null) {
 
 /** Local and deterministic: settings validation must never resolve arbitrary hosts over DNS. */
 fun validateAiProviderProfile(profile: AiProviderProfile): AiProviderUrlValidation {
+    if (!profile.kind.usesHttpEndpoint) return AiProviderUrlValidation()
     val endpoint = runCatching { URI(profile.baseUrl.trim()) }.getOrNull()
         ?: return AiProviderUrlValidation(AiProviderUrlProblem.MALFORMED)
     val scheme = endpoint.scheme?.lowercase()
@@ -46,6 +48,12 @@ fun aiProviderRequestBaseUrl(rawBaseUrl: String): String {
     val trimmed = rawBaseUrl.trim()
     val path = runCatching { URI(trimmed).rawPath.orEmpty() }.getOrDefault("")
     return if (path.isEmpty() || path == "/") trimmed.trimEnd('/') + "/v1" else trimmed
+}
+
+fun aiProviderDisplayEndpoint(profile: AiProviderProfile): String = when (profile.kind) {
+    AiProviderKind.CODEX_ACCOUNT -> "Local Codex account"
+    AiProviderKind.CLAUDE_CODE_ACCOUNT -> "Local Claude Code account"
+    else -> profile.baseUrl
 }
 
 /** Keeps migration from old or malformed settings safe and leaves one selected profile. */

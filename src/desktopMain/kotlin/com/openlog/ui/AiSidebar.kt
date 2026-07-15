@@ -93,6 +93,7 @@ import com.openlog.ai.CustomAiCommand
 import com.openlog.ai.ModelDiscoveryResult
 import com.openlog.ai.isLoopbackHost
 import com.openlog.ai.normalizeAiProviderProfiles
+import com.openlog.model.AiProviderKind
 import com.openlog.model.LogTab
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -227,13 +228,14 @@ private fun AiSidebarPanel(
     var panelFocused by remember { mutableStateOf(false) }
     var prompt by remember(tab.id) { mutableStateOf("") }
     var modelDraft by remember(profile.id, profile.model) { mutableStateOf(profile.model) }
+    var reasoningEffortDraft by remember(profile.id, profile.reasoningEffort) { mutableStateOf(profile.reasoningEffort) }
     var keyDraft by remember(profile.id) { mutableStateOf(state.aiProviderApiKey(profile.id)) }
     var error by remember(tab.id, profile.id) { mutableStateOf<String?>(null) }
     var modelDiscovery by remember(profile.id) { mutableStateOf<ModelDiscoveryResult?>(null) }
     val density = LocalDensity.current
 
     fun profileForRun(): com.openlog.model.AiProviderProfile? {
-        val draft = profile.copy(model = modelDraft.trim())
+        val draft = profile.copy(model = modelDraft.trim(), reasoningEffort = reasoningEffortDraft)
         if (draft != profile) {
             val saveError = state.updateAiProviderProfile(draft)
             if (saveError != null) {
@@ -339,7 +341,17 @@ private fun AiSidebarPanel(
                             state = state,
                             profile = profile,
                             model = modelDraft,
-                            onModelChange = { modelDraft = it },
+                            onModelChange = { selectedModel ->
+                                modelDraft = selectedModel
+                                val supportedEfforts = (modelDiscovery as? ModelDiscoveryResult.Available)
+                                    ?.models
+                                    ?.firstOrNull { it.id == selectedModel }
+                                    ?.reasoningEfforts
+                                    .orEmpty()
+                                if (reasoningEffortDraft !in supportedEfforts) reasoningEffortDraft = ""
+                            },
+                            reasoningEffort = reasoningEffortDraft,
+                            onReasoningEffortChange = { reasoningEffortDraft = it },
                             apiKey = keyDraft,
                             onApiKeyChange = { keyDraft = it; state.setAiProviderApiKey(profile.id, it) },
                             discovery = modelDiscovery,
@@ -586,6 +598,8 @@ private fun AiProviderControls(
     profile: com.openlog.model.AiProviderProfile,
     model: String,
     onModelChange: (String) -> Unit,
+    reasoningEffort: String,
+    onReasoningEffortChange: (String) -> Unit,
     apiKey: String,
     onApiKeyChange: (String) -> Unit,
     discovery: ModelDiscoveryResult?,
@@ -613,9 +627,14 @@ private fun AiProviderControls(
                 AppText("+", color = colors.td, fontSize = 15.sp, modifier = Modifier.align(Alignment.Center))
             }
         }
-        AppText(profile.baseUrl, color = colors.td, fontSize = 10.sp, maxLines = 1)
+        AppText(
+            if (profile.kind.usesHttpEndpoint) profile.baseUrl else "Uses the signed-in local CLI account",
+            color = colors.td,
+            fontSize = 10.sp,
+            maxLines = 1,
+        )
         val endpointHost = runCatching { java.net.URI(profile.baseUrl).host.orEmpty() }.getOrDefault("")
-        if (!isLoopbackHost(endpointHost) && !profile.remoteDisclosureAcknowledged) {
+        if (profile.kind.usesHttpEndpoint && !isLoopbackHost(endpointHost) && !profile.remoteDisclosureAcknowledged) {
             Box(Modifier.fillMaxWidth().background(DANGER_RED.copy(.10f), CORNER_SM).padding(7.dp)) {
                 AppText(
                     "Remote provider is blocked until you acknowledge the data disclosure in Settings.",
@@ -632,17 +651,40 @@ private fun AiProviderControls(
             onDiscoverModels = onDiscoverModels,
             onPickModel = onModelChange,
         )
-        AppText("API key (this launch only)", color = colors.td, fontSize = 10.sp)
-        InlineField(
-            value = apiKey,
-            onValue = onApiKeyChange,
-            placeholder = "Optional for LM Studio",
-            modifier = Modifier.fillMaxWidth(),
-            fontSize = 11.sp,
-            visualTransformation = PasswordVisualTransformation(),
-        )
+        val codexModel = (discovery as? ModelDiscoveryResult.Available)
+            ?.models
+            ?.firstOrNull { it.id == model }
+        if (profile.kind == AiProviderKind.CODEX_ACCOUNT && codexModel?.reasoningEfforts?.isNotEmpty() == true) {
+            AppText("Reasoning", color = colors.td, fontSize = 10.sp)
+            AiReasoningEffortDropdown(
+                efforts = codexModel.reasoningEfforts,
+                selected = reasoningEffort,
+                onPick = onReasoningEffortChange,
+            )
+        } else if (profile.kind == AiProviderKind.CODEX_ACCOUNT && model.isNotBlank()) {
+            AppText("Find models to choose this model's reasoning effort.", color = colors.td, fontSize = 10.sp, maxLines = 2)
+        }
+        if (profile.kind == AiProviderKind.CLAUDE_CODE_ACCOUNT) {
+            AppText(
+                "Claude Code supports Sonnet and Opus aliases or a full model id; it has no per-request reasoning control.",
+                color = colors.td,
+                fontSize = 10.sp,
+                maxLines = 3,
+            )
+        }
+        if (profile.kind.usesApiKey) {
+            AppText("API key (this launch only)", color = colors.td, fontSize = 10.sp)
+            InlineField(
+                value = apiKey,
+                onValue = onApiKeyChange,
+                placeholder = "Optional for LM Studio",
+                modifier = Modifier.fillMaxWidth(),
+                fontSize = 11.sp,
+                visualTransformation = PasswordVisualTransformation(),
+            )
+        }
         AppButton(
-            "Test connection",
+            if (profile.kind.usesHttpEndpoint) "Test connection" else "Check local CLI",
             onClick = onTestConnection,
             variant = ButtonVariant.Ghost,
             modifier = Modifier.height(26.dp),
@@ -747,7 +789,7 @@ private fun AiProviderDropdown(
 // layout. Manual entry remains possible (the profile's manually entered model must stay usable
 // even when discovery is unavailable) via the field at the bottom of the popup.
 @Composable
-private fun AiModelDropdown(
+internal fun AiModelDropdown(
     model: String,
     discovery: ModelDiscoveryResult?,
     onDiscoverModels: () -> Unit,
@@ -875,6 +917,90 @@ private fun AiModelDropdown(
                         ) {
                             InlineField(manualEntry, { manualEntry = it }, "Enter a model id", Modifier.weight(1f), fontSize = 11.sp)
                             AppButton("Use", onClick = { open = false; onPickModel(manualEntry.trim()) }, modifier = Modifier.height(26.dp))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Compact choice menu for Codex model-provided reasoning efforts. */
+@Composable
+private fun AiReasoningEffortDropdown(
+    efforts: List<String>,
+    selected: String,
+    onPick: (String) -> Unit,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var open by remember { mutableStateOf(false) }
+    var fieldWidth by remember { mutableStateOf(0.dp) }
+    var suppressToggleUntilMs by remember { mutableStateOf(0L) }
+    val options = listOf("" to "Model default") + efforts.map { it to it.replaceFirstChar(Char::uppercase) }
+    Box(
+        Modifier.fillMaxWidth().onGloballyPositioned { coords ->
+            fieldWidth = with(density) { coords.size.width.toDp() }
+        },
+    ) {
+        HoverBox(
+            modifier = Modifier.fillMaxWidth().height(28.dp)
+                .clip(CORNER_SM)
+                .background(tc.p2, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM),
+            onClick = {
+                if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open
+            },
+        ) {
+            Row(
+                Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                AppText(
+                    options.firstOrNull { it.first == selected }?.second ?: "Model default",
+                    color = tc.tx,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f),
+                )
+                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
+            }
+        }
+        if (open) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, with(density) { 32.dp.roundToPx() }),
+                onDismissRequest = {
+                    open = false
+                    suppressToggleUntilMs = System.currentTimeMillis() + 200
+                },
+                properties = PopupProperties(focusable = false),
+            ) {
+                DisableSelection {
+                    Column(
+                        Modifier.width(fieldWidth)
+                            .background(tc.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                            .padding(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        options.forEach { (value, label) ->
+                            val active = value == selected
+                            HoverBox(
+                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                                baseBg = if (active) tc.abg else Color.Transparent,
+                                onClick = { open = false; onPick(value) },
+                            ) {
+                                AppText(
+                                    label,
+                                    color = if (active) tc.ac else tc.tx,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                )
+                            }
                         }
                     }
                 }
@@ -1145,6 +1271,7 @@ private fun AiTraceRow(event: AiRunEvent) {
     val colors = tc()
     val text = when (event) {
         is AiRunEvent.Status -> event.text
+        is AiRunEvent.AgentProgress -> "Agent progress: ${event.text}"
         is AiRunEvent.ToolRequested -> "Using tool: ${event.call.name}"
         is AiRunEvent.ToolCompleted -> buildString {
             append("Tool finished: ${event.call.name}")
@@ -1156,7 +1283,13 @@ private fun AiTraceRow(event: AiRunEvent) {
         else -> return
     }
     val color = if (event is AiRunEvent.Error) DANGER_RED else colors.td
-    AppText(text, color = color, fontSize = 10.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 3.dp))
+    AppText(
+        text,
+        color = color,
+        fontSize = 10.sp,
+        maxLines = if (event is AiRunEvent.AgentProgress) 5 else 2,
+        modifier = Modifier.padding(horizontal = 3.dp),
+    )
 }
 
 @Composable

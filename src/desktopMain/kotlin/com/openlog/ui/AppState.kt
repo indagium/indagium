@@ -453,6 +453,12 @@ class AppState(
         sessions = aiSessions,
         toolGatewayFactory = { OpenLogToolOperations(this).toolGateway },
         maxToolRounds = { settings.aiMaxToolRounds },
+        accountAgentRunnerFactory = {
+            com.openlog.ai.AccountAgentRunner(
+                managedMcpServerFactory = { run -> com.openlog.ai.ManagedMcpServerLease.start(this, run) },
+                maxToolRounds = settings.aiMaxToolRounds,
+            )
+        },
     )
 
     // Lifted out of AiSidebarPanel's own composition (rather than a local `remember`) because
@@ -3062,6 +3068,15 @@ class AppState(
         return java.io.File(dir, file).absolutePath
     }
 
+    /** Opens a picker for the CLI executable used by a locally authenticated account profile. */
+    fun pickAccountCliExecutable(): String? {
+        val dlg = FileDialog(null as Frame?, "Choose Codex or Claude Code executable", FileDialog.LOAD)
+        dlg.isVisible = true
+        val dir = dlg.directory ?: return null
+        val file = dlg.file ?: return null
+        return File(dir, file).absolutePath
+    }
+
     // ── Source index (Task 2) ───────────────────────────────────────
     // Restores whatever was persisted from a prior run, if any — a missing/stale/corrupt file is
     // "no usable index" (see SourceIndexStore.load), simply leaving sourceIndex null so the
@@ -3799,6 +3814,9 @@ private fun AiProviderProfile.profileToken(): String = tokenFields(
     model,
     selected.toString(),
     remoteDisclosureAcknowledged.toString(),
+    kind.name,
+    executablePath,
+    reasoningEffort,
 )
 
 private fun String.aiProviderProfilesFromToken(): List<AiProviderProfile> = runCatching {
@@ -3814,6 +3832,11 @@ private fun String.aiProviderProfilesFromToken(): List<AiProviderProfile> = runC
                 model = fields[3],
                 selected = fields[4].toBooleanStrictOrNull() ?: false,
                 remoteDisclosureAcknowledged = fields[5].toBooleanStrictOrNull() ?: false,
+                kind = fields.getOrNull(6)?.let { raw ->
+                    runCatching { AiProviderKind.valueOf(raw) }.getOrNull()
+                } ?: AiProviderKind.OPENAI_COMPATIBLE,
+                executablePath = fields.getOrNull(7).orEmpty(),
+                reasoningEffort = fields.getOrNull(8).orEmpty(),
             )
         }.getOrNull()
     }.let(::normalizeAiProviderProfiles)

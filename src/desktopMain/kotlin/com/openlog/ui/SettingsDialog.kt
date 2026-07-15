@@ -959,6 +959,9 @@ private fun AiProviderSettingsSection(state: AppState) {
     var name by remember(profile.id, profile.displayName) { mutableStateOf(profile.displayName) }
     var endpoint by remember(profile.id, profile.baseUrl) { mutableStateOf(profile.baseUrl) }
     var model by remember(profile.id, profile.model) { mutableStateOf(profile.model) }
+    var kind by remember(profile.id, profile.kind) { mutableStateOf(profile.kind) }
+    var executablePath by remember(profile.id, profile.executablePath) { mutableStateOf(profile.executablePath) }
+    var reasoningEffort by remember(profile.id, profile.reasoningEffort) { mutableStateOf(profile.reasoningEffort) }
     // Tracks (endpoint text, acknowledged) as a pair rather than a bare boolean so the checkbox
     // reflects the *live* endpoint field: editing the endpoint away from what was last acknowledged
     // shows unchecked again, without a Save round-trip. `acknowledged` below is a plain derived val
@@ -968,9 +971,21 @@ private fun AiProviderSettingsSection(state: AppState) {
     }
     var apiKey by remember(profile.id) { mutableStateOf(state.aiProviderApiKey(profile.id)) }
     var validationError by remember(profile.id) { mutableStateOf<String?>(null) }
-    var connectionTest by remember(profile.id) { mutableStateOf<ModelDiscoveryResult?>(null) }
-    var testingConnection by remember(profile.id) { mutableStateOf(false) }
+    var connectionTest by remember(profile.id, kind) { mutableStateOf<ModelDiscoveryResult?>(null) }
+    var accountCliCheck by remember(profile.id, kind) { mutableStateOf<com.openlog.ai.AccountCliCheck?>(null) }
+    var modelDiscovery by remember(profile.id, kind) { mutableStateOf<ModelDiscoveryResult?>(null) }
+    var testingConnection by remember(profile.id, kind) { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
+    val acknowledged = if (endpoint.trim() == ackState.first) ackState.second else false
+    val draft = profile.copy(
+        displayName = name.trim().ifBlank { "OpenAI-compatible" },
+        baseUrl = endpoint.trim(),
+        model = model.trim(),
+        remoteDisclosureAcknowledged = acknowledged,
+        kind = kind,
+        executablePath = executablePath.trim(),
+        reasoningEffort = reasoningEffort,
+    )
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -988,31 +1003,154 @@ private fun AiProviderSettingsSection(state: AppState) {
             AppButton("Add", onClick = { editingProfileId = state.addAiProviderProfile().id })
         }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppText("Provider type", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            SegmentedControl(
+                options = com.openlog.model.AiProviderKind.entries.map { it.label },
+                selectedIndices = setOf(com.openlog.model.AiProviderKind.entries.indexOf(kind)),
+                onToggle = { index ->
+                    val selectedKind = com.openlog.model.AiProviderKind.entries[index]
+                    if (selectedKind != kind) {
+                        val preset = com.openlog.model.defaultAiProviderProfile(selectedKind)
+                        kind = selectedKind
+                        name = preset.displayName
+                        endpoint = preset.baseUrl
+                        model = preset.model
+                        executablePath = preset.executablePath
+                        reasoningEffort = preset.reasoningEffort
+                        ackState = endpoint.trim() to false
+                    }
+                },
+            )
             AppText("Profile name", color = tc.td, fontSize = 10.sp, fontFamily = UI)
             InlineField(name, { name = it }, "LM Studio (local)", Modifier.fillMaxWidth(), fontSize = 12.sp)
-            AppText("Endpoint", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-            InlineField(endpoint, { endpoint = it }, "http://127.0.0.1:1234/v1", Modifier.fillMaxWidth(), fontSize = 12.sp)
-            AppText("Model (optional)", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-            InlineField(model, { model = it }, "Choose later or enter a model id", Modifier.fillMaxWidth(), fontSize = 12.sp)
-            AppText("API key — this session only; it is never saved", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-            InlineField(
-                apiKey,
-                { value -> apiKey = value; state.setAiProviderApiKey(profile.id, value) },
-                "Optional for LM Studio",
-                Modifier.fillMaxWidth(),
-                fontSize = 12.sp,
-                visualTransformation = PasswordVisualTransformation(),
+            if (kind.usesHttpEndpoint) {
+                AppText("Endpoint", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                InlineField(endpoint, { endpoint = it }, "https://api.example.com/v1", Modifier.fillMaxWidth(), fontSize = 12.sp)
+            } else {
+                AppText(
+                    "Uses a local CLI account already signed in on this computer.",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                )
+                AppText("CLI executable (optional)", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    InlineField(
+                        executablePath,
+                        { executablePath = it },
+                        if (kind == AiProviderKind.CODEX_ACCOUNT) "codex" else "claude",
+                        Modifier.weight(1f),
+                        fontSize = 12.sp,
+                    )
+                    AppButton(
+                        "Detect",
+                        onClick = {
+                            val detected = com.openlog.ai.LocalAccountCli.detectExecutable(kind)
+                            if (detected != null) {
+                                executablePath = detected
+                                accountCliCheck = com.openlog.ai.AccountCliCheck(true, "Found local CLI: $detected")
+                            } else {
+                                val appPath = com.openlog.ai.LocalAccountCli.detectedDesktopApp(kind)
+                                accountCliCheck = com.openlog.ai.AccountCliCheck(
+                                    false,
+                                    if (kind == AiProviderKind.CLAUDE_CODE_ACCOUNT && appPath != null) {
+                                        "Claude desktop app was found at $appPath, but Claude Code CLI is not installed."
+                                    } else {
+                                        "No ${if (kind == AiProviderKind.CODEX_ACCOUNT) "Codex" else "Claude Code"} CLI was detected."
+                                    },
+                                )
+                            }
+                        },
+                        variant = ButtonVariant.Secondary,
+                    )
+                    AppButton(
+                        "Browse",
+                        onClick = { state.pickAccountCliExecutable()?.let { executablePath = it } },
+                        variant = ButtonVariant.Secondary,
+                    )
+                }
+                AppText(
+                    if (kind == AiProviderKind.CODEX_ACCOUNT) {
+                        "Choose a CLI executable, not an app bundle. On macOS Detect can use ChatGPT's bundled Codex CLI."
+                    } else {
+                        "Choose the Claude Code CLI executable. Claude desktop app bundles cannot run managed panel requests."
+                    },
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    maxLines = 2,
+                )
+            }
+            AppText(if (kind.usesHttpEndpoint) "Model (optional)" else "Model (optional override)", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            AiModelDropdown(
+                model = model,
+                discovery = modelDiscovery,
+                onDiscoverModels = {
+                    coroutineScope.launch(Dispatchers.IO) {
+                        modelDiscovery = state.aiSidebarRuntime.discoverModels(draft, apiKey)
+                    }
+                },
+                onPickModel = { selectedModel ->
+                    model = selectedModel
+                    val supportedEfforts = (modelDiscovery as? ModelDiscoveryResult.Available)
+                        ?.models
+                        ?.firstOrNull { it.id == selectedModel }
+                        ?.reasoningEfforts
+                        .orEmpty()
+                    if (reasoningEffort !in supportedEfforts) reasoningEffort = ""
+                },
             )
+            val discoveredModel = (modelDiscovery as? ModelDiscoveryResult.Available)
+                ?.models
+                ?.firstOrNull { it.id == model }
+            val showsReasoning = kind == AiProviderKind.CODEX_ACCOUNT || kind == AiProviderKind.ANTHROPIC_API ||
+                kind == AiProviderKind.CLAUDE_CODE_ACCOUNT
+            if (showsReasoning && discoveredModel != null) {
+                val effortOptions = listOf("Default") + discoveredModel.reasoningEfforts.map { it.replaceFirstChar(Char::uppercase) }
+                if (discoveredModel.reasoningEfforts.isNotEmpty()) {
+                    AppText("Reasoning effort", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                    SegmentedControl(
+                        options = effortOptions,
+                        selectedIndices = setOf(
+                            discoveredModel.reasoningEfforts.indexOf(reasoningEffort).takeIf { it >= 0 }?.plus(1) ?: 0,
+                        ),
+                        onToggle = { index ->
+                            reasoningEffort = discoveredModel.reasoningEfforts.getOrNull(index - 1).orEmpty()
+                        },
+                        fillWidth = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    AppText(
+                        "This model does not expose configurable reasoning effort.",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        maxLines = 2,
+                    )
+                }
+            }
+            if (kind == AiProviderKind.CLAUDE_CODE_ACCOUNT) {
+                AppText(
+                    "Claude Code cannot list models enabled for this account. Sonnet, Opus, and Haiku are " +
+                        "documented aliases; blank uses your account default, and you can enter a full model id.",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    maxLines = 3,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (kind.usesApiKey) {
+                AppText("API key — this session only; it is never saved", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                InlineField(
+                    apiKey,
+                    { value -> apiKey = value; state.setAiProviderApiKey(profile.id, value) },
+                    "Required for cloud API providers",
+                    Modifier.fillMaxWidth(),
+                    fontSize = 12.sp,
+                    visualTransformation = PasswordVisualTransformation(),
+                )
+            }
         }
-        val acknowledged = if (endpoint.trim() == ackState.first) ackState.second else false
-        val draft = profile.copy(
-            displayName = name.trim().ifBlank { "OpenAI-compatible" },
-            baseUrl = endpoint.trim(),
-            model = model.trim(),
-            remoteDisclosureAcknowledged = acknowledged,
-        )
         val endpointHost = runCatching { java.net.URI(endpoint.trim()).host.orEmpty() }.getOrDefault("")
-        if (endpoint.isNotBlank() && !com.openlog.ai.isLoopbackHost(endpointHost)) {
+        if (kind.usesHttpEndpoint && endpoint.isNotBlank() && !com.openlog.ai.isLoopbackHost(endpointHost)) {
             CheckRow(acknowledged, { ackState = endpoint.trim() to !acknowledged }) {
                 AppText(
                     "I understand logs, source code, paths, and tool results may leave this device.",
@@ -1033,6 +1171,15 @@ private fun AiProviderSettingsSection(state: AppState) {
                 is ModelDiscoveryResult.Unavailable -> AppText(result.message, color = DANGER_RED, fontSize = 10.sp)
             }
         }
+        accountCliCheck?.let { result ->
+            AppText(
+                result.message,
+                color = if (result.isReady) tc.ac else DANGER_RED,
+                fontSize = 10.sp,
+                maxLines = 3,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             // Secondary, not Primary — elsewhere in Settings, Primary is reserved for the
             // dialog's own "Done" action, not per-section actions like this one.
@@ -1044,24 +1191,33 @@ private fun AiProviderSettingsSection(state: AppState) {
             // saves, validates, or otherwise touches the stored profile, so it works whether or
             // not the endpoint would currently pass Save (e.g. an unacknowledged remote endpoint).
             AppButton(
-                if (testingConnection) "Checking…" else "Test connection",
+                if (testingConnection) "Checking…" else if (kind.usesHttpEndpoint) "Test connection" else "Check local CLI",
                 onClick = {
                     val testProfile = draft
                     val testKey = apiKey
                     testingConnection = true
                     connectionTest = null
+                    accountCliCheck = null
                     coroutineScope.launch(Dispatchers.IO) {
-                        val provider = OpenAiCompatibleProvider(testProfile, testKey)
-                        connectionTest = try {
-                            provider.listModels()
-                        } finally {
-                            provider.close()
+                        if (!testProfile.kind.usesHttpEndpoint) {
+                            accountCliCheck = com.openlog.ai.checkAccountCli(testProfile)
+                        } else {
+                            val provider = when (testProfile.kind) {
+                                com.openlog.model.AiProviderKind.ANTHROPIC_API ->
+                                    com.openlog.ai.AnthropicMessagesProvider(testProfile.baseUrl, testKey)
+                                else -> OpenAiCompatibleProvider(testProfile, testKey)
+                            }
+                            connectionTest = try {
+                                provider.listModels()
+                            } finally {
+                                provider.close()
+                            }
                         }
                         testingConnection = false
                     }
                 },
                 variant = ButtonVariant.Secondary,
-                enabled = !testingConnection && endpoint.isNotBlank(),
+                enabled = !testingConnection && (!kind.usesHttpEndpoint || endpoint.isNotBlank()),
             )
             if (profiles.size > 1) {
                 AppButton(

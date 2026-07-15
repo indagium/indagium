@@ -15,7 +15,7 @@ A desktop log viewer for Android logcat files, built with Kotlin and Compose Mul
 - **Highlighters** — color-code lines by message pattern
 - **Annotations** — annotate log selections with notes, exported as Markdown
 - **Show in code** — register your project's source folder(s) in Settings, then right-click a log line to view the exact method that emitted it (Kotlin/Java, `Log.*` + Timber); also exposed to AI assistants via the `resolve_log_source` MCP tool
-- **In-app AI assistant** — use a local LM Studio model or another OpenAI-compatible provider to investigate the active log tab with the same log, filter, source, and notes tools exposed through MCP
+- **In-app AI assistant** — use LM Studio, OpenAI, Anthropic, Codex, Claude Code, or another compatible provider to investigate the active log tab with the same log, filter, source, and notes tools exposed through MCP
 - **Compare view** — diff two open tabs line by line
 - **Themes** — 20 built-in themes (light, dark, and paper variants)
 - **Autosave** — session is fully restored on next launch
@@ -79,11 +79,20 @@ in a collapsible, independently scrollable **Investigation** section between you
 final answer — expanded while it's running, collapsed once it finishes (click to reopen). Chat text
 is selectable/copyable, and **Reset** clears the current tab's conversation to start over.
 
-The built-in `LM Studio (local)` profile uses `http://127.0.0.1:1234/v1`. A key is normally not
-needed for LM Studio. Add or edit compatible-provider profiles in **Settings → AI providers**;
-profiles retain only their name, endpoint, selected model, and remote-disclosure acknowledgement.
-The API-key field is memory-only for the current app launch. It is not written to autosave,
-settings, notes, or exports, and must be entered again after restart.
+The built-in `LM Studio (local)` profile uses `http://127.0.0.1:1234/v1`. **Settings → AI
+providers** also offers explicit **OpenAI API** and **Anthropic API** profiles, alongside the
+existing generic OpenAI-compatible option. API keys are memory-only for the current app launch;
+they are not written to autosave, settings, notes, or exports and must be entered again after
+restart.
+
+**Codex account** and **Claude Code account** profiles use a locally installed CLI executable and
+its existing signed-in account instead of an API key. Settings can detect a common installation
+or let you browse to the executable. On macOS, Codex can use the `codex` binary bundled inside
+ChatGPT; a desktop app bundle itself is not enough. Claude requires the Claude Code CLI. Each request gets a fresh empty temporary
+workspace plus a private, short-lived managed MCP endpoint. That endpoint exposes the same
+openLog tools and confirmation rules as the LM Studio panel path, pins requests to the active log
+tab, and is revoked when the run ends. The account agents do not receive source-folder or app
+workspace access; log and source evidence is available only through openLog tools.
 
 ### Data and action safety
 
@@ -119,6 +128,9 @@ including writing a note if that was part of the request — rather than being c
   running, and that the endpoint includes its required API version path (the default ends in
   `/v1`). Use **Test connection** in Settings → AI providers to check reachability directly.
 - **No models returned** — model discovery is optional; enter the model id manually.
+- **Codex or Claude Code cannot start** — use **Detect** or **Browse** in the account profile to
+  select its CLI executable, then sign in to that CLI. The account profile does not accept or
+  store API keys.
 - **Remote provider blocked** — save the profile after acknowledging the remote data disclosure
   in Settings (HTTP and HTTPS are both allowed once acknowledged).
 - **"Stopped after N tool rounds"** — a multi-step investigation (filtering, reading lines, then

@@ -234,7 +234,16 @@ enum class AnnotationLogBlockStyle { INDENTED, JIRA_JAVA }
 // Which filter input Ctrl/Cmd+F focuses (see FilterPanel's focusSearchRequest LaunchedEffect).
 enum class CtrlFTarget { TAGS, MESSAGE_RULE, KEYWORD_REGEX }
 
-/** Non-secret OpenAI-compatible endpoint configuration. API keys never belong in AppSettings. */
+/** The execution protocol behind an AI profile. Secrets never belong in [AppSettings]. */
+enum class AiProviderKind(val label: String, val usesHttpEndpoint: Boolean, val usesApiKey: Boolean) {
+    OPENAI_COMPATIBLE("OpenAI-compatible", true, true),
+    OPENAI_API("OpenAI API", true, true),
+    ANTHROPIC_API("Anthropic API", true, true),
+    CODEX_ACCOUNT("Codex account", false, false),
+    CLAUDE_CODE_ACCOUNT("Claude Code account", false, false),
+}
+
+/** Non-secret provider configuration. API keys and account credentials never belong in AppSettings. */
 data class AiProviderProfile(
     val id: String,
     val displayName: String,
@@ -242,6 +251,12 @@ data class AiProviderProfile(
     val model: String,
     val selected: Boolean = false,
     val remoteDisclosureAcknowledged: Boolean = false,
+    // Trailing default keeps existing constructors and serialized profiles compatible.
+    val kind: AiProviderKind = AiProviderKind.OPENAI_COMPATIBLE,
+    /** Optional absolute path to the Codex or Claude Code executable used by account profiles. */
+    val executablePath: String = "",
+    /** Optional Codex reasoning effort; blank preserves the selected model's default. */
+    val reasoningEffort: String = "",
 )
 
 const val DEFAULT_LM_STUDIO_PROFILE_ID = "lm-studio"
@@ -260,6 +275,46 @@ fun defaultAiProviderProfile(): AiProviderProfile = AiProviderProfile(
     model = "",
     selected = true,
 )
+
+fun defaultOpenAiApiProfile(): AiProviderProfile = AiProviderProfile(
+    id = "openai-api",
+    displayName = "OpenAI API",
+    baseUrl = "https://api.openai.com/v1",
+    model = "",
+    kind = AiProviderKind.OPENAI_API,
+)
+
+fun defaultAnthropicApiProfile(): AiProviderProfile = AiProviderProfile(
+    id = "anthropic-api",
+    displayName = "Anthropic API",
+    baseUrl = "https://api.anthropic.com",
+    model = "",
+    kind = AiProviderKind.ANTHROPIC_API,
+)
+
+fun defaultCodexAccountProfile(): AiProviderProfile = AiProviderProfile(
+    id = "codex-account",
+    displayName = "Codex account",
+    baseUrl = "",
+    model = "",
+    kind = AiProviderKind.CODEX_ACCOUNT,
+)
+
+fun defaultClaudeCodeAccountProfile(): AiProviderProfile = AiProviderProfile(
+    id = "claude-code-account",
+    displayName = "Claude Code account",
+    baseUrl = "",
+    model = "",
+    kind = AiProviderKind.CLAUDE_CODE_ACCOUNT,
+)
+
+fun defaultAiProviderProfile(kind: AiProviderKind): AiProviderProfile = when (kind) {
+    AiProviderKind.OPENAI_COMPATIBLE -> defaultAiProviderProfile()
+    AiProviderKind.OPENAI_API -> defaultOpenAiApiProfile()
+    AiProviderKind.ANTHROPIC_API -> defaultAnthropicApiProfile()
+    AiProviderKind.CODEX_ACCOUNT -> defaultCodexAccountProfile()
+    AiProviderKind.CLAUDE_CODE_ACCOUNT -> defaultClaudeCodeAccountProfile()
+}
 
 /** Optional per-registered-source-folder description/README, surfaced via get_project_info. */
 data class SourceFolderInfo(
