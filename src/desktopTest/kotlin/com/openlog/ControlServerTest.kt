@@ -353,6 +353,30 @@ class ControlServerTest {
     }
 
     @Test
+    fun annotationSectionRoutesReadAndAppendNotesWithoutReplacingThem() {
+        state.tabs = listOf(mkTab("t1", "test.log", emptyList()))
+        state.setPrefix("t1", "Investigating startup")
+
+        assertEquals(
+            """{"tabId":"t1","prefix":"Investigating startup","suffix":""}""",
+            get("/annotations/sections?tabId=t1"),
+        )
+        assertEquals(
+            mapOf(
+                "ok" to true,
+                "tabId" to "t1",
+                "section" to "prefix",
+                "content" to "Investigating startup\n\nChecked cold start",
+            ),
+            Json.decode(post("/annotations/section/append", """{"tabId":"t1","section":"prefix","text":"Checked cold start"}""")),
+        )
+        assertEquals(
+            mapOf("ok" to true, "tabId" to "t1", "section" to "suffix", "content" to "- Re-run smoke test"),
+            Json.decode(post("/annotations/section/append", """{"tabId":"t1","section":"suffix","text":"- Re-run smoke test"}""")),
+        )
+    }
+
+    @Test
     fun getPackagesReturnsDottedPrefixesWithCounts() {
         state.tabs = listOf(
             mkTab(

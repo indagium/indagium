@@ -81,13 +81,13 @@ class ControlServerMcpTest {
             "list_tabs", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
             "get_filter", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
             "toggle_group", "expand_all", "collapse_all", "get_tags", "get_packages", "get_crash_sites",
-            "get_issue_description",
+            "get_issue_description", "get_annotation_sections", "append_annotation_section",
             "add_text_note", "add_log_note", "update_note_block", "move_note_block", "delete_note_block",
             "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing",
-            "resolve_log_source",
+            "resolve_log_source", "get_project_info",
         )
-        assertEquals(33, expected.size)
+        assertEquals(36, expected.size)
         expected.forEach { name -> assertTrue(body.contains("\"$name\""), "tools/list missing $name:\n$body") }
     }
 
@@ -132,6 +132,17 @@ class ControlServerMcpTest {
             assertTrue(s.contains("integer"), "lineIds schema should declare integer items:\n$s")
             assertTrue(!s.contains("\"string\""), "lineIds schema should not declare string items:\n$s")
         }
+    }
+
+    @Test
+    fun toolsListDeclaresAnnotationSectionEnum() {
+        val session = initSession()
+        val body = mcp("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""", session).body()
+        val sectionSchema = Regex(""""section":\{[^}]*\}""").findAll(body).map { it.value }
+            .firstOrNull { it.contains("prefix") && it.contains("suffix") }
+            ?: error("no annotation section schema found in tools/list:\n$body")
+        assertTrue(sectionSchema.contains("\"prefix\""), "annotation section enum missing prefix:\n$sectionSchema")
+        assertTrue(sectionSchema.contains("\"suffix\""), "annotation section enum missing suffix:\n$sectionSchema")
     }
 
     @Test

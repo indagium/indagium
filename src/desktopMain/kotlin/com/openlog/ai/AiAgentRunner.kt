@@ -381,8 +381,8 @@ internal class AiAgentRunner(
     private fun wrapUpNudge(roundsLeft: Int): String =
         "You have $roundsLeft tool round(s) left before this investigation is stopped automatically. " +
             "Stop requesting more evidence now. Conclude using only what you already have: if the task " +
-            "asked you to save a note, call add_text_note before your final reply; otherwise give your " +
-            "final answer directly without requesting further tools."
+            "asked you to update Notes, use the appropriate notes tool before your final reply; otherwise " +
+            "give your final answer directly without requesting further tools."
 
     private companion object {
         const val MAX_TOOL_ROUNDS = com.openlog.model.DEFAULT_AI_MAX_TOOL_ROUNDS

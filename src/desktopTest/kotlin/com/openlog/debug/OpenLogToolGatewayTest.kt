@@ -40,7 +40,8 @@ class OpenLogToolGatewayTest {
             "list_tabs", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
             "get_filter", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
             "toggle_group", "expand_all", "collapse_all", "get_tags", "get_packages", "get_crash_sites",
-            "get_issue_description", "add_text_note", "add_log_note", "update_note_block", "move_note_block",
+            "get_issue_description", "get_annotation_sections", "append_annotation_section",
+            "add_text_note", "add_log_note", "update_note_block", "move_note_block",
             "delete_note_block", "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing", "resolve_log_source",
             "get_project_info",
@@ -70,6 +71,49 @@ class OpenLogToolGatewayTest {
         assertEquals(true, result["ok"])
         assertEquals(FilterMode.KEYWORD, state.tab("t1")!!.filter.mode)
         assertEquals(OpenLogToolActionPolicy.AUTOMATIC, operations.toolGateway.actionPolicy("set_filter"))
+    }
+
+    @Test
+    fun annotationSectionToolsReadAndAppendWithoutReplacingExistingNotes() {
+        state.setPrefix("t1", "Existing context")
+        state.setSuffix("t1", "- Reproduce")
+
+        val before = operations.toolGateway.execute("get_annotation_sections", mapOf("tabId" to "t1")) as Map<*, *>
+        assertEquals("Existing context", before["prefix"])
+        assertEquals("- Reproduce", before["suffix"])
+
+        val prefix = operations.toolGateway.execute(
+            "append_annotation_section", mapOf("tabId" to "t1", "section" to "prefix", "text" to "Captured on Android 16"),
+        ) as Map<*, *>
+        val suffix = operations.toolGateway.execute(
+            "append_annotation_section", mapOf("tabId" to "t1", "section" to "suffix", "text" to "- Verify the fix"),
+        ) as Map<*, *>
+
+        assertEquals(true, prefix["ok"])
+        assertEquals("Existing context\n\nCaptured on Android 16", prefix["content"])
+        assertEquals(true, suffix["ok"])
+        assertEquals("- Reproduce\n\n- Verify the fix", suffix["content"])
+        assertEquals(OpenLogToolActionPolicy.AUTOMATIC, operations.toolGateway.actionPolicy("append_annotation_section"))
+    }
+
+    @Test
+    fun annotationSectionAppendRejectsInvalidInputWithoutChangingNotes() {
+        state.setPrefix("t1", "Existing context")
+
+        val invalidSection = operations.toolGateway.execute(
+            "append_annotation_section", mapOf("tabId" to "t1", "section" to "body", "text" to "Ignored"),
+        ) as Map<*, *>
+        val blankText = operations.toolGateway.execute(
+            "append_annotation_section", mapOf("tabId" to "t1", "section" to "prefix", "text" to "  "),
+        ) as Map<*, *>
+        val missingTab = operations.toolGateway.execute(
+            "append_annotation_section", mapOf("tabId" to "missing", "section" to "suffix", "text" to "- Ignored"),
+        ) as Map<*, *>
+
+        assertTrue((invalidSection["error"] as String).contains("valid: prefix,suffix"))
+        assertTrue((blankText["error"] as String).contains("blank annotation text"))
+        assertTrue((missingTab["error"] as String).contains("no such tab: missing"))
+        assertEquals("Existing context", state.tab("t1")!!.annotations.prefix)
     }
 
     @Test

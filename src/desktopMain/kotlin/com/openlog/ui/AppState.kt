@@ -1977,6 +1977,10 @@ class AppState(
 
     fun setSuffix(tabId: String, v: String) = annotationManager.setSuffix(tabId, v)
 
+    fun appendPrefix(tabId: String, text: String) = annotationManager.appendPrefix(tabId, text)
+
+    fun appendSuffix(tabId: String, text: String) = annotationManager.appendSuffix(tabId, text)
+
     fun setIssueDescription(tabId: String, v: String) = annotationManager.setIssueDescription(tabId, v)
 
     fun toggleMd(tabId: String) = upTab(tabId) { it.copy(showAnnMd = !it.showAnnMd) }

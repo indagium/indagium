@@ -689,6 +689,21 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(
+        "get_annotation_sections",
+        "Read the Notes panel's From and Next steps text. `prefix` is the configurable From " +
+            "section (labelled From by default); `suffix` is Next steps.",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "append_annotation_section",
+        "Append non-blank text to one Notes section without replacing its existing content. Use " +
+            "section `prefix` for From or `suffix` for Next steps.",
+        schema(
+            "tabId" to "string", "section" to "string", "text" to "string", required = listOf("tabId", "section", "text"),
+            enums = mapOf("section" to listOf("prefix", "suffix")),
+        ),
+    ),
+    McpTool(
         "add_text_note",
         "Append a plain text analysis note block, optionally after an existing block id.",
         schema("tabId" to "string", "text" to "string", "afterId" to "string", required = listOf("tabId", "text")),
@@ -810,6 +825,8 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Get, "/packages", "get_packages"),
     Triple(HttpMethod.Get, "/crashes", "get_crash_sites"),
     Triple(HttpMethod.Get, "/annotations/issue-description", "get_issue_description"),
+    Triple(HttpMethod.Get, "/annotations/sections", "get_annotation_sections"),
+    Triple(HttpMethod.Post, "/annotations/section/append", "append_annotation_section"),
     Triple(HttpMethod.Post, "/annotations/note", "add_text_note"),
     Triple(HttpMethod.Post, "/annotations/log", "add_log_note"),
     Triple(HttpMethod.Post, "/annotations/update", "update_note_block"),
