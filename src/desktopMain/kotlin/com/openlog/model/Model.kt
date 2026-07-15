@@ -239,7 +239,7 @@ enum class AiProviderKind(val label: String, val usesHttpEndpoint: Boolean, val 
     OPENAI_COMPATIBLE("OpenAI-compatible", true, true),
     OPENAI_API("OpenAI API", true, true),
     ANTHROPIC_API("Anthropic API", true, true),
-    CODEX_ACCOUNT("Codex account", false, false),
+    CODEX_ACCOUNT("Codex", false, false),
     CLAUDE_CODE_ACCOUNT("Claude Code account", false, false),
 }
 

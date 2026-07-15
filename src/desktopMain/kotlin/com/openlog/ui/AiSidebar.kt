@@ -1,11 +1,13 @@
 @file:OptIn(
     androidx.compose.ui.ExperimentalComposeUiApi::class,
     androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
 )
 
 package com.openlog.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -234,6 +236,13 @@ private fun AiSidebarPanel(
     var modelDiscovery by remember(profile.id) { mutableStateOf<ModelDiscoveryResult?>(null) }
     val density = LocalDensity.current
 
+    // Without this, switching providers and back showed the saved model but silently hid its
+    // reasoning dropdown (modelDiscovery resets to null on every profile switch) until the model
+    // dropdown was opened by hand, which is what used to trigger discovery.
+    LaunchedEffect(profile.id) {
+        modelDiscovery = runtime.discoverModels(profile.copy(model = modelDraft.trim()), keyDraft)
+    }
+
     fun profileForRun(): com.openlog.model.AiProviderProfile? {
         val draft = profile.copy(model = modelDraft.trim(), reasoningEffort = reasoningEffortDraft)
         if (draft != profile) {
@@ -378,12 +387,51 @@ private fun AiSidebarPanel(
                         AiConnectionState.Ready -> "Ready"
                         is AiConnectionState.Failed -> "${status.message}"
                     }
+                    // Provider/model/reasoning appended on the same line so the active
+                    // configuration is visible without opening the Provider section; the tooltip
+                    // carries the full text for whenever the sidebar is too narrow to show it all.
+                    val connectionDetail = buildString {
+                        append("Connection: ")
+                        append(connectionState)
+                        append(" — ")
+                        append(profile.displayName)
+                        if (modelDraft.isNotBlank()) append(" / ").append(modelDraft)
+                        if (reasoningEffortDraft.isNotBlank()) {
+                            append(" / ").append(reasoningEffortDraft.replaceFirstChar(Char::uppercase))
+                        }
+                    }
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        AppText("Connection: $connectionState", color = colors.td, fontSize = 10.sp)
+                        TooltipArea(
+                            tooltip = {
+                                // The tooltip renders in a Popup outside this panel's own layout
+                                // hierarchy; without opting out, its text stays registered with the
+                                // ambient SelectionContainer above and a selection drag anywhere in
+                                // the panel crashes comparing coordinates across the two hierarchies
+                                // ("layouts are not part of the same hierarchy" - see AiModelDropdown).
+                                DisableSelection {
+                                    Box(
+                                        Modifier.background(colors.p2, RoundedCornerShape(4.dp))
+                                            .border(0.5.dp, colors.br, RoundedCornerShape(4.dp))
+                                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                                    ) {
+                                        AppText(connectionDetail, color = colors.tx, fontSize = 11.sp, maxLines = 3)
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            AppText(
+                                connectionDetail,
+                                color = colors.td,
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                         if (session.runs.isNotEmpty()) {
                             AppButton(
                                 "Reset",
@@ -518,18 +566,22 @@ private fun AiSectionTab(
             .border(1.dp, if (expanded) colors.ac.copy(.4f) else colors.br, CORNER_SM),
         onClick = onToggle,
     ) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AppText(if (expanded) "▾" else "▸", color = if (expanded) colors.ac else colors.td, fontSize = 11.sp)
-            AppText(
-                title,
-                color = if (expanded) colors.ac else colors.td,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
+        // See AppButton for why: this tab sits inside the panel's ambient SelectionContainer, and
+        // without opting out its label shows an I-beam cursor instead of looking clickable.
+        DisableSelection {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppText(if (expanded) "▾" else "▸", color = if (expanded) colors.ac else colors.td, fontSize = 11.sp)
+                AppText(
+                    title,
+                    color = if (expanded) colors.ac else colors.td,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
         }
     }
 }
@@ -644,25 +696,36 @@ private fun AiProviderControls(
                 )
             }
         }
-        AppText("Model", color = colors.td, fontSize = 10.sp)
-        AiModelDropdown(
-            model = model,
-            discovery = discovery,
-            onDiscoverModels = onDiscoverModels,
-            onPickModel = onModelChange,
-        )
-        val codexModel = (discovery as? ModelDiscoveryResult.Available)
+        val discoveredModel = (discovery as? ModelDiscoveryResult.Available)
             ?.models
             ?.firstOrNull { it.id == model }
-        if (profile.kind == AiProviderKind.CODEX_ACCOUNT && codexModel?.reasoningEfforts?.isNotEmpty() == true) {
-            AppText("Reasoning", color = colors.td, fontSize = 10.sp)
-            AiReasoningEffortDropdown(
-                efforts = codexModel.reasoningEfforts,
-                selected = reasoningEffort,
-                onPick = onReasoningEffortChange,
+        val reasoningEfforts = discoveredModel?.reasoningEfforts.orEmpty()
+        val showReasoningDropdown = discoveredModel != null && reasoningEfforts.isNotEmpty()
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppText("Model", color = colors.td, fontSize = 10.sp, modifier = Modifier.weight(1f))
+            if (showReasoningDropdown) {
+                AppText("Reasoning", color = colors.td, fontSize = 10.sp, modifier = Modifier.weight(1f))
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            AiModelDropdown(
+                model = model,
+                discovery = discovery,
+                onDiscoverModels = onDiscoverModels,
+                onPickModel = onModelChange,
+                modifier = Modifier.weight(1f),
             )
-        } else if (profile.kind == AiProviderKind.CODEX_ACCOUNT && model.isNotBlank()) {
-            AppText("Find models to choose this model's reasoning effort.", color = colors.td, fontSize = 10.sp, maxLines = 2)
+            if (showReasoningDropdown) {
+                AiReasoningEffortDropdown(
+                    efforts = reasoningEfforts,
+                    selected = reasoningEffort,
+                    onPick = onReasoningEffortChange,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+        if (discoveredModel != null && reasoningEfforts.isEmpty() && profile.kind != AiProviderKind.CLAUDE_CODE_ACCOUNT) {
+            AppText("This model does not expose configurable reasoning effort.", color = colors.td, fontSize = 10.sp, maxLines = 2)
         }
         if (profile.kind == AiProviderKind.CLAUDE_CODE_ACCOUNT) {
             AppText(
@@ -694,8 +757,10 @@ private fun AiProviderControls(
 
 // Same dropdown treatment as AiModelDropdown/CrashCategoryDropdown, for choosing which provider
 // profile is active - consistent with "model choosing" now that both use the same interaction.
+// Also reused by the Settings dialog's AI providers section so profile switching looks and
+// behaves identically in both places.
 @Composable
-private fun AiProviderDropdown(
+internal fun AiProviderDropdown(
     profiles: List<com.openlog.model.AiProviderProfile>,
     selected: com.openlog.model.AiProviderProfile,
     onSelect: (String) -> Unit,
@@ -794,6 +859,7 @@ internal fun AiModelDropdown(
     discovery: ModelDiscoveryResult?,
     onDiscoverModels: () -> Unit,
     onPickModel: (String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val tc = tc()
     val density = LocalDensity.current
@@ -805,7 +871,7 @@ internal fun AiModelDropdown(
     var suppressToggleUntilMs by remember { mutableStateOf(0L) }
     var manualEntry by remember(open) { mutableStateOf(model) }
     Box(
-        Modifier.fillMaxWidth().onGloballyPositioned { coords ->
+        modifier.fillMaxWidth().onGloballyPositioned { coords ->
             fieldWidth = with(density) { coords.size.width.toDp() }
         },
     ) {
@@ -927,10 +993,11 @@ internal fun AiModelDropdown(
 
 /** Compact choice menu for Codex model-provided reasoning efforts. */
 @Composable
-private fun AiReasoningEffortDropdown(
+internal fun AiReasoningEffortDropdown(
     efforts: List<String>,
     selected: String,
     onPick: (String) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val tc = tc()
     val density = LocalDensity.current
@@ -939,7 +1006,7 @@ private fun AiReasoningEffortDropdown(
     var suppressToggleUntilMs by remember { mutableStateOf(0L) }
     val options = listOf("" to "Model default") + efforts.map { it to it.replaceFirstChar(Char::uppercase) }
     Box(
-        Modifier.fillMaxWidth().onGloballyPositioned { coords ->
+        modifier.fillMaxWidth().onGloballyPositioned { coords ->
             fieldWidth = with(density) { coords.size.width.toDp() }
         },
     ) {

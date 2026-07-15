@@ -62,7 +62,11 @@ class OpenAiCompatibleProvider(
         val models = payload["data"]?.jsonArray.orEmpty().mapNotNull { model ->
             val item = model as? JsonObject ?: return@mapNotNull null
             item["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }?.let { id ->
-                LlmModel(id = id, displayName = item["name"]?.jsonPrimitive?.contentOrNull ?: id)
+                LlmModel(
+                    id = id,
+                    displayName = item["name"]?.jsonPrimitive?.contentOrNull ?: id,
+                    reasoningEfforts = if (supportsReasoningEffort(id)) REASONING_EFFORTS else emptyList(),
+                )
             }
         }.distinctBy { it.id }
         ModelDiscoveryResult.Available(models)
@@ -189,6 +193,9 @@ class OpenAiCompatibleProvider(
         put("stream_options", buildJsonObject { put("include_usage", true) })
         temperature?.let { put("temperature", it) }
         maxTokens?.let { put("max_tokens", it) }
+        // OpenAI's harmony reasoning_effort field (low/medium/high). Servers that don't recognize
+        // it - including most non-reasoning local models served via LM Studio - simply ignore it.
+        reasoningEffort?.takeIf { it.isNotBlank() }?.let { put("reasoning_effort", it) }
         put("messages", buildJsonArray { messages.forEach { add(it.toOpenAiJson()) } })
         if (tools.isNotEmpty()) {
             put("tools", buildJsonArray {
@@ -245,7 +252,24 @@ class OpenAiCompatibleProvider(
         }
     }
 
+    /**
+     * There is no standard way to ask an OpenAI-compatible `/models` endpoint whether a model
+     * supports reasoning, so this matches known local reasoning-model families (gpt-oss, the
+     * DeepSeek-R1/QwQ/Qwen3 lineage, Phi-4-reasoning, Magistral) by id, the same way
+     * [AnthropicMessagesProvider] recognizes thinking-capable Claude models by id.
+     */
+    private fun supportsReasoningEffort(model: String): Boolean = REASONING_MODEL_REGEX.containsMatchIn(model)
+
     private companion object {
         val json = Json { ignoreUnknownKeys = true }
+
+        // Reasoning levels offered for reasoning-capable models; LM Studio and other
+        // llama.cpp-based servers accept this fixed low/medium/high set for gpt-oss's harmony
+        // format. There is no per-model discovery for this, unlike Anthropic's model list.
+        val REASONING_EFFORTS = listOf("low", "medium", "high")
+        val REASONING_MODEL_REGEX = Regex(
+            "gpt-oss|deepseek.*r1|qwq|qwen3|phi-4-reasoning|magistral|reasoning|thinking",
+            RegexOption.IGNORE_CASE,
+        )
     }
 }

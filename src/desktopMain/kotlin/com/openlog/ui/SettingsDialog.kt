@@ -30,6 +30,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.openlog.ai.CustomAiCommand
 import com.openlog.ai.ModelDiscoveryResult
 import com.openlog.ai.OpenAiCompatibleProvider
@@ -46,6 +47,11 @@ import java.util.UUID
 // right, so growing any one section (e.g. AI providers) no longer pushes every other
 // section down a shared scroll. There's no standalone "About" entry — its former content
 // (keyboard shortcuts, version, author) now lives in Editor behavior and the footer.
+/** Published by [AiProviderSettingsSection] each recomposition so [SettingsDialog] can gate
+ *  section switches and closing the dialog behind an unsaved-changes prompt without hoisting the
+ *  section's entire edit-draft state up to the dialog. */
+private class AiProviderGuard(val isDirty: Boolean, val profileName: String, val save: () -> String?)
+
 internal enum class SettingsSection(val title: String, val icon: ImageVector) {
     Appearance("Appearance", Icons.Outlined.Palette),
     EditorBehavior("Editor behavior", Icons.Outlined.Tune),
@@ -57,7 +63,7 @@ internal enum class SettingsSection(val title: String, val icon: ImageVector) {
 }
 
 @Composable
-internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
+internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestCloseChanged: (() -> Unit) -> Unit = {}) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
     var selectedSection by remember {
@@ -70,6 +76,35 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
         }
         state.refreshArchiveCacheInfo()
     }
+    // Guards leaving the AI providers section (switching to another section, or closing the
+    // dialog entirely) with unsaved profile edits. Only consulted while that section is actually
+    // selected, so a stale guard value left over from an earlier visit is harmless.
+    var aiProviderGuard by remember { mutableStateOf<AiProviderGuard?>(null) }
+    var pendingSectionSwitch by remember { mutableStateOf<SettingsSection?>(null) }
+    var pendingClose by remember { mutableStateOf(false) }
+    var guardSaveError by remember { mutableStateOf<String?>(null) }
+
+    fun requestSectionSwitch(target: SettingsSection) {
+        if (selectedSection == SettingsSection.AiProviders && aiProviderGuard?.isDirty == true) {
+            guardSaveError = null
+            pendingSectionSwitch = target
+        } else {
+            selectedSection = target
+        }
+    }
+
+    fun requestClose() {
+        if (selectedSection == SettingsSection.AiProviders && aiProviderGuard?.isDirty == true) {
+            guardSaveError = null
+            pendingClose = true
+        } else {
+            onDismiss()
+        }
+    }
+    // Escape still reaches the outer Dialog's onDismissRequest (only click-outside is disabled
+    // there), so it must go through the same unsaved-changes guard rather than closing unconditionally.
+    SideEffect { onRequestCloseChanged(::requestClose) }
+
     Box(
         // 190 (sidebar) + 1 (divider) + 572 (content). 572 is tuned tight against ThemeGallery's
         // FlowRow math (118dp cards, 8dp gaps: 4 cards = 496dp) plus just enough slack (~8dp) that
@@ -86,7 +121,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 AppText("Settings", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                CloseButton(onClick = onDismiss)
+                CloseButton(onClick = ::requestClose)
             }
             Divider()
             Row(Modifier.weight(1f).fillMaxWidth()) {
@@ -98,7 +133,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                         SettingsMenuItem(
                             section = section,
                             selected = section == selectedSection,
-                            onClick = { selectedSection = section },
+                            onClick = { requestSectionSwitch(section) },
                         )
                     }
                 }
@@ -114,7 +149,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                             SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state)
                             SettingsSection.ExportAnnotations -> ExportAnnotationsSettingsSection(state)
                             SettingsSection.Automation -> AutomationSettingsSection(state)
-                            SettingsSection.AiProviders -> AiProviderSettingsSection(state)
+                            SettingsSection.AiProviders -> AiProviderSettingsSection(state) { aiProviderGuard = it }
                             SettingsSection.CustomAiCommands -> CustomAiCommandsSettingsSection(state)
                             SettingsSection.SourceCode -> SourceCodeSettingsSection(state)
                         }
@@ -148,8 +183,95 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit) {
                         AppText(BuildInfo.APP_AUTHOR, color = tc.ts, fontSize = 10.sp, fontFamily = MONO)
                     }
                 }
-                AppButton("Done", onClick = onDismiss, variant = ButtonVariant.Primary)
+                AppButton("Done", onClick = ::requestClose, variant = ButtonVariant.Primary)
             }
+        }
+    }
+
+    pendingSectionSwitch?.let { target ->
+        SettingsConfirmDialog(
+            title = "Save changes to ${aiProviderGuard?.profileName.orEmpty()}?",
+            message = "You changed this provider's settings without saving. Save them before switching sections?",
+            error = guardSaveError,
+            onDismissRequest = { pendingSectionSwitch = null; guardSaveError = null },
+        ) {
+            DialogActionButton("Save", active = true) {
+                val err = aiProviderGuard?.save?.invoke()
+                if (err == null) {
+                    pendingSectionSwitch = null
+                    guardSaveError = null
+                    selectedSection = target
+                } else {
+                    guardSaveError = err
+                }
+            }
+            DialogActionButton("Discard", active = false, danger = true) {
+                pendingSectionSwitch = null
+                guardSaveError = null
+                selectedSection = target
+            }
+            DialogActionButton("Cancel", active = false) { pendingSectionSwitch = null; guardSaveError = null }
+        }
+    }
+
+    if (pendingClose) {
+        SettingsConfirmDialog(
+            title = "Save changes to ${aiProviderGuard?.profileName.orEmpty()}?",
+            message = "You changed this provider's settings without saving. Save them before closing Settings?",
+            error = guardSaveError,
+            onDismissRequest = { pendingClose = false; guardSaveError = null },
+        ) {
+            DialogActionButton("Save", active = true) {
+                val err = aiProviderGuard?.save?.invoke()
+                if (err == null) {
+                    pendingClose = false
+                    guardSaveError = null
+                    onDismiss()
+                } else {
+                    guardSaveError = err
+                }
+            }
+            DialogActionButton("Discard", active = false, danger = true) {
+                pendingClose = false
+                guardSaveError = null
+                onDismiss()
+            }
+            DialogActionButton("Cancel", active = false) { pendingClose = false; guardSaveError = null }
+        }
+    }
+}
+
+/** Shared modal shape for the confirm/discard prompts in this file - title, message, an optional
+ *  inline error (surfaced when a Save attempt from within the dialog fails validation), and a
+ *  caller-supplied row of [DialogActionButton]s. */
+@Composable
+private fun SettingsConfirmDialog(
+    title: String,
+    message: String,
+    onDismissRequest: () -> Unit,
+    error: String? = null,
+    buttons: @Composable RowScope.() -> Unit,
+) {
+    val tc = tc()
+    Dialog(onDismissRequest = onDismissRequest) {
+        Column(
+            Modifier.width(460.dp).background(tc.p, RoundedCornerShape(8.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(20.dp),
+        ) {
+            AppText(title, color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(6.dp))
+            AppText(message, color = tc.td, fontSize = 11.sp, maxLines = 3)
+            error?.let {
+                Spacer(Modifier.height(6.dp))
+                AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 3)
+            }
+            Spacer(Modifier.height(14.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+                content = buttons,
+            )
         }
     }
 }
@@ -947,7 +1069,7 @@ private fun SourceFolderRow(state: AppState, path: String) {
 }
 
 @Composable
-private fun AiProviderSettingsSection(state: AppState) {
+private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProviderGuard) -> Unit = {}) {
     val tc = tc()
     // Settings migration normally guarantees this invariant, but keeping the editor safe during
     // a transient empty state avoids a compose-time crash while a profile list is being replaced.
@@ -986,21 +1108,55 @@ private fun AiProviderSettingsSection(state: AppState) {
         executablePath = executablePath.trim(),
         reasoningEffort = reasoningEffort,
     )
+    // Discovery used to only run when the user opened the model dropdown, so switching back to a
+    // profile that already had a model+reasoning effort saved showed the model but silently hid
+    // the reasoning dropdown (modelDiscovery resets to null on every profile/kind switch) until
+    // the model dropdown was clicked again. Running it eagerly keeps the two in sync.
+    LaunchedEffect(profile.id, kind) {
+        modelDiscovery = state.aiSidebarRuntime.discoverModels(draft, apiKey)
+    }
+    val isDirty = draft != profile
+    SideEffect { onGuardChange(AiProviderGuard(isDirty, profile.displayName) { state.updateAiProviderProfile(draft) }) }
+
+    // Any navigation away from a dirty draft (switching provider, adding a new one, or removing a
+    // *different* profile) goes through this instead of acting immediately, so edits are never
+    // silently lost. Switching settings section or closing the dialog is guarded the same way, one
+    // level up in SettingsDialog, via the published AiProviderGuard above.
+    var pendingNavigation by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var navigationSaveError by remember { mutableStateOf<String?>(null) }
+    var pendingDeleteProfileId by remember { mutableStateOf<String?>(null) }
+    fun navigateOrConfirm(action: () -> Unit) {
+        if (isDirty) {
+            navigationSaveError = null
+            pendingNavigation = action
+        } else {
+            action()
+        }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        AppText("Providers", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+        // Same dropdown-plus-"+" treatment as the AI panel's own provider switcher
+        // (AiProviderControls in AiSidebar.kt), for a consistent look and so both places share one
+        // battle-tested selection path instead of a second, subtly different one.
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            // Same toggle-track style as every other exclusive-choice control in Settings (Font
-            // family, Row wrapping, etc.) instead of a row of separate filled/outlined buttons.
-            SegmentedControl(
-                options = profiles.map { it.displayName },
-                selectedIndices = setOf(profiles.indexOfFirst { it.id == profile.id }),
-                onToggle = { idx ->
-                    val item = profiles[idx]
-                    state.selectAiProviderProfile(item.id)
-                    editingProfileId = item.id
+            AiProviderDropdown(
+                profiles = profiles,
+                selected = profile,
+                onSelect = { id ->
+                    navigateOrConfirm {
+                        state.selectAiProviderProfile(id)
+                        editingProfileId = id
+                    }
                 },
+                modifier = Modifier.weight(1f),
             )
-            AppButton("Add", onClick = { editingProfileId = state.addAiProviderProfile().id })
+            HoverBox(
+                modifier = Modifier.size(28.dp).clip(RoundedCornerShape(6.dp)).border(1.dp, tc.br, RoundedCornerShape(6.dp)),
+                onClick = { navigateOrConfirm { editingProfileId = state.addAiProviderProfile().id } },
+            ) {
+                AppText("+", color = tc.td, fontSize = 16.sp, modifier = Modifier.align(Alignment.Center))
+            }
         }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             AppText("Provider type", color = tc.td, fontSize = 10.sp, fontFamily = UI)
@@ -1079,53 +1235,60 @@ private fun AiProviderSettingsSection(state: AppState) {
                     maxLines = 2,
                 )
             }
-            AppText(if (kind.usesHttpEndpoint) "Model (optional)" else "Model (optional override)", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-            AiModelDropdown(
-                model = model,
-                discovery = modelDiscovery,
-                onDiscoverModels = {
-                    coroutineScope.launch(Dispatchers.IO) {
-                        modelDiscovery = state.aiSidebarRuntime.discoverModels(draft, apiKey)
-                    }
-                },
-                onPickModel = { selectedModel ->
-                    model = selectedModel
-                    val supportedEfforts = (modelDiscovery as? ModelDiscoveryResult.Available)
-                        ?.models
-                        ?.firstOrNull { it.id == selectedModel }
-                        ?.reasoningEfforts
-                        .orEmpty()
-                    if (reasoningEffort !in supportedEfforts) reasoningEffort = ""
-                },
-            )
+            // Not gated by provider kind: any provider whose discovered model reports reasoning
+            // efforts gets the dropdown, so Codex, Anthropic, and OpenAI-compatible endpoints
+            // (including reasoning-capable local models served via LM Studio) all work the same way.
             val discoveredModel = (modelDiscovery as? ModelDiscoveryResult.Available)
                 ?.models
                 ?.firstOrNull { it.id == model }
-            val showsReasoning = kind == AiProviderKind.CODEX_ACCOUNT || kind == AiProviderKind.ANTHROPIC_API ||
-                kind == AiProviderKind.CLAUDE_CODE_ACCOUNT
-            if (showsReasoning && discoveredModel != null) {
-                val effortOptions = listOf("Default") + discoveredModel.reasoningEfforts.map { it.replaceFirstChar(Char::uppercase) }
-                if (discoveredModel.reasoningEfforts.isNotEmpty()) {
-                    AppText("Reasoning effort", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-                    SegmentedControl(
-                        options = effortOptions,
-                        selectedIndices = setOf(
-                            discoveredModel.reasoningEfforts.indexOf(reasoningEffort).takeIf { it >= 0 }?.plus(1) ?: 0,
-                        ),
-                        onToggle = { index ->
-                            reasoningEffort = discoveredModel.reasoningEfforts.getOrNull(index - 1).orEmpty()
-                        },
-                        fillWidth = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                } else {
-                    AppText(
-                        "This model does not expose configurable reasoning effort.",
-                        color = tc.td,
-                        fontSize = 10.sp,
-                        maxLines = 2,
+            val reasoningEfforts = discoveredModel?.reasoningEfforts.orEmpty()
+            val showReasoningDropdown = discoveredModel != null && reasoningEfforts.isNotEmpty()
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AppText(
+                    if (kind.usesHttpEndpoint) "Model (optional)" else "Model (optional override)",
+                    color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                    modifier = Modifier.weight(1f),
+                )
+                if (showReasoningDropdown) {
+                    AppText("Reasoning effort", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(1f))
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AiModelDropdown(
+                    model = model,
+                    discovery = modelDiscovery,
+                    onDiscoverModels = {
+                        coroutineScope.launch(Dispatchers.IO) {
+                            modelDiscovery = state.aiSidebarRuntime.discoverModels(draft, apiKey)
+                        }
+                    },
+                    onPickModel = { selectedModel ->
+                        model = selectedModel
+                        val supportedEfforts = (modelDiscovery as? ModelDiscoveryResult.Available)
+                            ?.models
+                            ?.firstOrNull { it.id == selectedModel }
+                            ?.reasoningEfforts
+                            .orEmpty()
+                        if (reasoningEffort !in supportedEfforts) reasoningEffort = ""
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+                if (showReasoningDropdown) {
+                    AiReasoningEffortDropdown(
+                        efforts = reasoningEfforts,
+                        selected = reasoningEffort,
+                        onPick = { reasoningEffort = it },
+                        modifier = Modifier.weight(1f),
                     )
                 }
+            }
+            if (discoveredModel != null && reasoningEfforts.isEmpty()) {
+                AppText(
+                    "This model does not expose configurable reasoning effort.",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    maxLines = 2,
+                )
             }
             if (kind == AiProviderKind.CLAUDE_CODE_ACCOUNT) {
                 AppText(
@@ -1222,10 +1385,7 @@ private fun AiProviderSettingsSection(state: AppState) {
             if (profiles.size > 1) {
                 AppButton(
                     "Remove",
-                    onClick = {
-                        state.removeAiProviderProfile(profile.id)
-                        editingProfileId = state.settings.aiProviderProfiles.first { it.selected }.id
-                    },
+                    onClick = { pendingDeleteProfileId = profile.id },
                     variant = ButtonVariant.Secondary,
                     isDanger = true,
                 )
@@ -1247,6 +1407,48 @@ private fun AiProviderSettingsSection(state: AppState) {
             fontSize = 10.sp,
             maxLines = 3,
         )
+    }
+
+    pendingDeleteProfileId?.let { id ->
+        val targetName = profiles.firstOrNull { it.id == id }?.displayName ?: "this provider"
+        SettingsConfirmDialog(
+            title = "Remove provider profile?",
+            message = "Delete \"$targetName\" from AI providers. This can't be undone.",
+            onDismissRequest = { pendingDeleteProfileId = null },
+        ) {
+            DialogActionButton("Delete", active = true, danger = true) {
+                state.removeAiProviderProfile(id)
+                editingProfileId = state.settings.aiProviderProfiles.first { it.selected }.id
+                pendingDeleteProfileId = null
+            }
+            DialogActionButton("Cancel", active = false) { pendingDeleteProfileId = null }
+        }
+    }
+
+    pendingNavigation?.let { action ->
+        SettingsConfirmDialog(
+            title = "Save changes to ${profile.displayName}?",
+            message = "You changed this provider's settings without saving. Save them before continuing?",
+            error = navigationSaveError,
+            onDismissRequest = { pendingNavigation = null; navigationSaveError = null },
+        ) {
+            DialogActionButton("Save", active = true) {
+                val err = state.updateAiProviderProfile(draft)
+                if (err == null) {
+                    pendingNavigation = null
+                    navigationSaveError = null
+                    action()
+                } else {
+                    navigationSaveError = err
+                }
+            }
+            DialogActionButton("Discard", active = false, danger = true) {
+                pendingNavigation = null
+                navigationSaveError = null
+                action()
+            }
+            DialogActionButton("Cancel", active = false) { pendingNavigation = null; navigationSaveError = null }
+        }
     }
 }
 

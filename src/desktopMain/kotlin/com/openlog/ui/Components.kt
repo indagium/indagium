@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.LabelOff
@@ -625,19 +626,24 @@ fun AppButton(
             .padding(horizontal = horizontalPadding, vertical = 5.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            leadingIcon?.let {
-                Icon(it, contentDescription = null, modifier = Modifier.size(14.dp), tint = textColor)
+        // A button label must never behave like selectable text - without this, a button placed
+        // inside an ambient SelectionContainer (e.g. the AI sidebar's response area) shows an
+        // I-beam cursor on hover instead of looking clickable.
+        DisableSelection {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                leadingIcon?.let {
+                    Icon(it, contentDescription = null, modifier = Modifier.size(14.dp), tint = textColor)
+                }
+                AppText(
+                    label,
+                    color = textColor,
+                    fontSize = 12.sp,
+                    fontWeight = if (variant == ButtonVariant.Primary) FontWeight.Medium else FontWeight.Normal,
+                )
             }
-            AppText(
-                label,
-                color = textColor,
-                fontSize = 12.sp,
-                fontWeight = if (variant == ButtonVariant.Primary) FontWeight.Medium else FontWeight.Normal,
-            )
         }
     }
 }

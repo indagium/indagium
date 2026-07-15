@@ -1440,15 +1440,23 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
 
             // ── Settings dialog ───────────────────────────────────────
             if (state.settingsOpen) {
+                // Clicking outside used to close the dialog unconditionally, bypassing the AI
+                // providers section's unsaved-changes guard entirely - disabled so the only way
+                // out is through a control SettingsDialog itself gates (X, Done, Escape).
+                var settingsRequestClose by remember { mutableStateOf<() -> Unit>({ state.settingsOpen = false }) }
                 // usePlatformDefaultWidth defaults to true, which silently clamps this dialog's
                 // content to Android's ported "preferred dialog width" (580dp on a window this
                 // size) no matter what width SettingsDialog's own Box requests — disabled so the
                 // sidebar + content layout actually gets the width it asks for.
                 Dialog(
-                    onDismissRequest = { state.settingsOpen = false },
-                    properties = DialogProperties(usePlatformDefaultWidth = false),
+                    onDismissRequest = { settingsRequestClose() },
+                    properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
                 ) {
-                    SettingsDialog(state) { state.settingsOpen = false }
+                    SettingsDialog(
+                        state,
+                        onDismiss = { state.settingsOpen = false },
+                        onRequestCloseChanged = { settingsRequestClose = it },
+                    )
                 }
             }
 
