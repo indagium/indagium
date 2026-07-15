@@ -1,13 +1,56 @@
 package com.openlog.ai
 
+import com.openlog.model.AiProviderKind
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class AccountAgentRunnerTest {
+    // resolveAccountAgentWorkspace covers a real regression: Claude Code's --resume looks up a
+    // session by *project directory*, not id alone, so a follow-up in a workspace different from
+    // the one the session was created in fails with "No conversation found with session ID: ...".
+    // Verified against the real CLI - see the fix's history for the reproduction.
+
+    @Test
+    fun claudeCodeReusesTheSameWorkspaceAcrossCallsInOneSession() {
+        val session = AiSession(tabId = "t1")
+        try {
+            val first = resolveAccountAgentWorkspace(session, AiProviderKind.CLAUDE_CODE_ACCOUNT)
+            val second = resolveAccountAgentWorkspace(session, AiProviderKind.CLAUDE_CODE_ACCOUNT)
+
+            assertEquals(first, second)
+            assertEquals(first, session.claudeCodeWorkspace)
+        } finally {
+            session.deleteClaudeCodeWorkspace()
+        }
+    }
+
+    @Test
+    fun codexGetsAFreshWorkspaceEveryCallAndNeverStoresOneOnTheSession() {
+        val session = AiSession(tabId = "t1")
+        val first = resolveAccountAgentWorkspace(session, AiProviderKind.CODEX_ACCOUNT)
+        val second = resolveAccountAgentWorkspace(session, AiProviderKind.CODEX_ACCOUNT)
+
+        assertNotEquals(first, second)
+        assertEquals(null, session.claudeCodeWorkspace)
+    }
+
+    @Test
+    fun deletingTheClaudeCodeWorkspaceClearsItFromTheSession() {
+        val session = AiSession(tabId = "t1")
+        val workspace = resolveAccountAgentWorkspace(session, AiProviderKind.CLAUDE_CODE_ACCOUNT)
+        assertTrue(java.nio.file.Files.isDirectory(workspace))
+
+        session.deleteClaudeCodeWorkspace()
+
+        assertEquals(null, session.claudeCodeWorkspace)
+        assertTrue(!java.nio.file.Files.exists(workspace))
+    }
+
     @Test
     fun codexManagedMcpConfigUsesTheStaticHeaderAcceptedByAppServer() {
         assertEquals(

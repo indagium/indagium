@@ -124,6 +124,23 @@ class ClaudeCodeClientTest {
     }
 
     @Test
+    fun errorsArrayIsUsedWhenNoErrorOrMessageFieldIsPresent() = runBlocking {
+        // Real shape from a failed --resume: no top-level "error"/"message" field, just "errors".
+        // Without checking it, the real reason ("No conversation found...") was silently replaced
+        // by a generic fallback, which is what made this bug hard to diagnose in the first place.
+        val process = FakeProcess(
+            stdoutText = """
+                {"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"session-9","errors":["No conversation found with session ID: session-9"]}
+            """.trimIndent(),
+        )
+
+        val events = ClaudeCodeClient(FakeFactory(process)).stream(ClaudeCodeRequest("prompt")).toList()
+
+        val error = assertIs<ClaudeCodeEvent.Error>(events.last())
+        assertEquals("No conversation found with session ID: session-9", error.message)
+    }
+
+    @Test
     fun turnBoundaryFiresOncePerCompleteAssistantMessageAcrossToolCalls() = runBlocking {
         // Shape of a real multi-turn run: interim narration, a tool call/result round-trip (the
         // "user" tool-result line in between is not parsed into any event), then a final turn.
@@ -154,6 +171,41 @@ class ClaudeCodeClientTest {
             ),
             events,
         )
+    }
+
+    @Test
+    fun finalResultCarriesUsageWhenTheCliReportsIt() = runBlocking {
+        val process = FakeProcess(
+            stdoutText = """
+                {"type":"system","subtype":"init","session_id":"session-11"}
+                {"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Done."}}}
+                {"type":"result","subtype":"success","result":"Done.","session_id":"session-11","usage":{"input_tokens":120,"output_tokens":30,"cache_creation_input_tokens":40,"cache_read_input_tokens":5}}
+            """.trimIndent(),
+        )
+
+        val events = ClaudeCodeClient(FakeFactory(process)).stream(ClaudeCodeRequest("prompt")).toList()
+
+        val final = assertIs<ClaudeCodeEvent.Final>(events.last())
+        val usage = requireNotNull(final.usage)
+        assertEquals(120, usage.inputTokens)
+        assertEquals(30, usage.outputTokens)
+        assertEquals(40, usage.cacheCreationInputTokens)
+        assertEquals(5, usage.cacheReadInputTokens)
+    }
+
+    @Test
+    fun finalResultUsageIsNullWhenTheCliOmitsIt() = runBlocking {
+        val process = FakeProcess(
+            stdoutText = """
+                {"type":"system","subtype":"init","session_id":"session-12"}
+                {"type":"result","subtype":"success","result":"Done.","session_id":"session-12"}
+            """.trimIndent(),
+        )
+
+        val events = ClaudeCodeClient(FakeFactory(process)).stream(ClaudeCodeRequest("prompt")).toList()
+
+        val final = assertIs<ClaudeCodeEvent.Final>(events.last())
+        assertEquals(null, final.usage)
     }
 
     @Test

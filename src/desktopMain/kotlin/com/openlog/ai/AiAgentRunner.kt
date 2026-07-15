@@ -11,6 +11,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import java.nio.file.Files
+import java.nio.file.Path
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -23,6 +25,33 @@ internal class AiSession internal constructor(val tabId: String) {
     internal var activeRun: AiRun? = null
     internal var lastPrompt: String? = null
     internal var lastContext: AiInvestigationContext = AiInvestigationContext(tabId)
+
+    /**
+     * The Claude Code CLI's own session id for this tab, so a follow-up request in the same tab
+     * resumes the prior conversation (`--resume`) instead of starting a blank one with no memory
+     * of what was already investigated. Independent of [messages], which only the HTTP-endpoint
+     * provider path uses; unaffected by switching to a different provider and back.
+     */
+    internal var claudeCodeSessionId: String? = null
+
+    /**
+     * Workspace directory backing [claudeCodeSessionId]. Claude Code's `--resume` looks up a
+     * session by *project directory* (its own on-disk session store is keyed by cwd), not by id
+     * alone - resuming from a different directory than the session was created in fails with "No
+     * conversation found". So unlike Codex (a fresh, immediately-deleted temp dir per call is
+     * fine), this one has to survive and be reused across follow-ups in the same tab. Deleted by
+     * [AiSessionRegistry] once this session itself is discarded (tab closed, or app shutdown).
+     */
+    internal var claudeCodeWorkspace: Path? = null
+
+    internal fun deleteClaudeCodeWorkspace() {
+        val workspace = claudeCodeWorkspace ?: return
+        claudeCodeWorkspace = null
+        runCatching {
+            Files.walk(workspace).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
+        }
+    }
+
     private val _runs = ArrayDeque<AiRun>()
 
     /** Completed, failed, cancelled, and active requests for this tab during the current launch. */
@@ -61,11 +90,17 @@ internal class AiSessionRegistry {
     fun sessionFor(tabId: String): AiSession = sessions.computeIfAbsent(tabId, ::AiSession)
 
     fun remove(tabId: String) {
-        sessions.remove(tabId)?.activeRun?.cancel()
+        sessions.remove(tabId)?.let { session ->
+            session.activeRun?.cancel()
+            session.deleteClaudeCodeWorkspace()
+        }
     }
 
     fun clear() {
-        sessions.values.forEach { it.activeRun?.cancel() }
+        sessions.values.forEach {
+            it.activeRun?.cancel()
+            it.deleteClaudeCodeWorkspace()
+        }
         sessions.clear()
     }
 }

@@ -158,6 +158,41 @@ class CodexAppServerClientTest {
     }
 
     @Test
+    fun tokenUsageUpdatedNotificationParsesTheCumulativeTotalBreakdown() = runBlocking {
+        lateinit var process: FakeProcess
+        process = FakeProcess { }
+
+        CodexAppServerClient(process).use { client ->
+            process.notify(
+                """
+                {"method":"thread/tokenUsage/updated","params":{"threadId":"thread-1","turnId":"turn-1",
+                  "tokenUsage":{
+                    "last":{"inputTokens":10,"cachedInputTokens":0,"outputTokens":5,"reasoningOutputTokens":0,"totalTokens":15},
+                    "total":{"inputTokens":120,"cachedInputTokens":40,"outputTokens":30,"reasoningOutputTokens":8,"totalTokens":150},
+                    "modelContextWindow":200000
+                  }}}
+                """.trimIndent(),
+            )
+            withTimeout(2_000) {
+                while (client.events.replayCache.none { it is CodexAppServerEvent.TokenUsageUpdated }) {
+                    kotlinx.coroutines.yield()
+                }
+            }
+            val event = assertIs<CodexAppServerEvent.TokenUsageUpdated>(
+                client.events.replayCache.filterIsInstance<CodexAppServerEvent.TokenUsageUpdated>().single(),
+            )
+            assertEquals("thread-1", event.threadId)
+            assertEquals("turn-1", event.turnId)
+            // The cumulative "total" breakdown is what callers use, not the per-notification "last".
+            assertEquals(120L, event.total.inputTokens)
+            assertEquals(40L, event.total.cachedInputTokens)
+            assertEquals(30L, event.total.outputTokens)
+            assertEquals(8L, event.total.reasoningOutputTokens)
+            assertEquals(150L, event.total.totalTokens)
+        }
+    }
+
+    @Test
     fun requestErrorsAreRaisedWithJsonRpcDetails() = runBlocking {
         lateinit var process: FakeProcess
         process = FakeProcess { line ->

@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import java.io.FileNotFoundException
@@ -66,6 +67,14 @@ data class ClaudeCodeRequest(
     val effort: String? = null,
 )
 
+/** Token accounting the CLI's terminal `"result"` line reports for the whole run so far. */
+data class ClaudeCodeUsage(
+    val inputTokens: Int,
+    val outputTokens: Int,
+    val cacheCreationInputTokens: Int,
+    val cacheReadInputTokens: Int,
+)
+
 enum class ClaudeCodeErrorKind {
     BinaryNotFound,
     ProcessStart,
@@ -88,7 +97,7 @@ sealed interface ClaudeCodeEvent {
      */
     data object TurnBoundary : ClaudeCodeEvent
 
-    data class Final(val text: String, val sessionId: String?) : ClaudeCodeEvent
+    data class Final(val text: String, val sessionId: String?, val usage: ClaudeCodeUsage? = null) : ClaudeCodeEvent
 
     data class Error(
         val kind: ClaudeCodeErrorKind,
@@ -163,7 +172,7 @@ class ClaudeCodeStreamParser {
                             ),
                         )
                     } else {
-                        add(ClaudeCodeEvent.Final(result, sessionId))
+                        add(ClaudeCodeEvent.Final(result, sessionId, parseUsage(root)))
                     }
                 }
 
@@ -195,12 +204,26 @@ class ClaudeCodeStreamParser {
         }
         ?.joinToString("")
 
+    private fun parseUsage(root: JsonObject): ClaudeCodeUsage? {
+        val usage = root["usage"] as? JsonObject ?: return null
+        return ClaudeCodeUsage(
+            inputTokens = usage.int("input_tokens"),
+            outputTokens = usage.int("output_tokens"),
+            cacheCreationInputTokens = usage.int("cache_creation_input_tokens"),
+            cacheReadInputTokens = usage.int("cache_read_input_tokens"),
+        )
+    }
+
     private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
 
     private fun JsonObject.boolean(key: String): Boolean? = (this[key] as? JsonPrimitive)?.booleanOrNull
 
+    private fun JsonObject.int(key: String): Int = (this[key] as? JsonPrimitive)?.intOrNull ?: 0
+
     private fun JsonObject.errorMessage(): String? = string("error") ?: string("message")
         ?: (this["error"] as? JsonObject)?.string("message")
+        // e.g. a failed `--resume`: {"is_error":true,"errors":["No conversation found with session ID: ..."]}
+        ?: (this["errors"] as? JsonArray)?.firstOrNull()?.let { (it as? JsonPrimitive)?.contentOrNull }
 }
 
 /** Claude Code print-mode adapter used by the account agent's managed run (see [buildCommand]). */

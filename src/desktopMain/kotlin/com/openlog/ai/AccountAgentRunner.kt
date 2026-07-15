@@ -44,7 +44,7 @@ internal class AccountAgentRunner(
         session.activeRun = run
         session.retain(run)
         run.job = scope.launch {
-            val workspace = Files.createTempDirectory("openlog-agent-")
+            val workspace = resolveAccountAgentWorkspace(session, profile.kind)
             var lease: ManagedMcpServerLease? = null
             try {
                 run.emit(AiRunEvent.Status("Checking ${profile.kind.label}…"))
@@ -55,7 +55,7 @@ internal class AccountAgentRunner(
                 run.emit(AiRunEvent.Status("Starting ${profile.kind.label}…"))
                 when (profile.kind) {
                     AiProviderKind.CODEX_ACCOUNT -> runCodex(run, profile, prompt, systemPrompt, workspace, lease)
-                    AiProviderKind.CLAUDE_CODE_ACCOUNT -> runClaude(run, profile, prompt, systemPrompt, workspace, lease)
+                    AiProviderKind.CLAUDE_CODE_ACCOUNT -> runClaude(session, run, profile, prompt, systemPrompt, workspace, lease)
                 }
             } catch (_: CancellationException) {
                 run.emit(AiRunEvent.Cancelled)
@@ -63,7 +63,7 @@ internal class AccountAgentRunner(
                 run.emit(AiRunEvent.Error(error.message ?: "Unable to start the account agent."))
             } finally {
                 lease?.close()
-                deleteWorkspace(workspace)
+                if (profile.kind != AiProviderKind.CLAUDE_CODE_ACCOUNT) deleteWorkspace(workspace)
                 run.confirmations.values.forEach { it.cancel() }
                 run.confirmations.clear()
                 if (session.activeRun === run) session.activeRun = null
@@ -158,6 +158,15 @@ internal class AccountAgentRunner(
                                 )
                             }
                         }
+                        is CodexAppServerEvent.TokenUsageUpdated -> if (event.threadId == null || event.threadId == thread.id) {
+                            run.emit(
+                                AiRunEvent.Usage(
+                                    promptTokens = event.total.inputTokens.toInt(),
+                                    completionTokens = event.total.outputTokens.toInt(),
+                                    totalTokens = event.total.totalTokens.toInt(),
+                                ),
+                            )
+                        }
                         is CodexAppServerEvent.TurnCompleted -> if (event.threadId == null || event.threadId == thread.id) {
                             agentMessages.finalText()
                                 ?.let { run.emit(AiRunEvent.AssistantDelta(it)) }
@@ -191,6 +200,7 @@ internal class AccountAgentRunner(
     }
 
     private suspend fun runClaude(
+        session: AiSession,
         run: AiRun,
         profile: AiProviderProfile,
         prompt: String,
@@ -212,6 +222,10 @@ internal class AccountAgentRunner(
             ClaudeCodeRequest(
                 prompt = accountPrompt(systemPrompt, prompt),
                 mcpServers = mapOf("openlog" to ClaudeCodeMcpServer(lease.url, mapOf("Authorization" to "Bearer ${lease.token}"))),
+                // Resumes the same tab's prior Claude Code session (if any) so a follow-up like "are
+                // you sure?" is answered from real conversation memory instead of a blank session
+                // that has to either re-investigate from scratch or admit it has no context.
+                sessionId = session.claudeCodeSessionId,
                 model = profile.model.takeIf(String::isNotBlank),
                 maxTurns = maxToolRounds,
                 workingDirectory = workspace,
@@ -233,10 +247,19 @@ internal class AccountAgentRunner(
                     } else if (!sawDelta && event.text.isNotBlank()) {
                         run.emit(AiRunEvent.AssistantDelta(event.text))
                     }
+                    event.usage?.let { usage ->
+                        run.emit(
+                            AiRunEvent.Usage(
+                                promptTokens = usage.inputTokens,
+                                completionTokens = usage.outputTokens,
+                                totalTokens = usage.inputTokens + usage.outputTokens,
+                            ),
+                        )
+                    }
                     completed = true
                 }
                 is ClaudeCodeEvent.Error -> throw IllegalStateException(event.message)
-                is ClaudeCodeEvent.SessionId -> Unit
+                is ClaudeCodeEvent.SessionId -> session.claudeCodeSessionId = event.value
             }
         }
         if (!completed) throw IllegalStateException("Claude Code ended before the response completed.")
@@ -256,6 +279,20 @@ internal class AccountAgentRunner(
         }
     }
 }
+
+/**
+ * The workspace directory an account-agent run should use as its `cwd`. Codex gets a fresh one
+ * per call - it never resumes a prior thread (see [AccountAgentRunner]'s class doc) - which the
+ * caller deletes once that call ends. Claude Code instead reuses and keeps the same tab-scoped
+ * workspace across follow-ups, storing it on [session]: see [AiSession.claudeCodeWorkspace] for
+ * why that's required for `--resume` to work at all.
+ */
+internal fun resolveAccountAgentWorkspace(session: AiSession, kind: AiProviderKind): Path =
+    if (kind == AiProviderKind.CLAUDE_CODE_ACCOUNT) {
+        session.claudeCodeWorkspace ?: Files.createTempDirectory("openlog-agent-").also { session.claudeCodeWorkspace = it }
+    } else {
+        Files.createTempDirectory("openlog-agent-")
+    }
 
 /**
  * The bundled Codex app-server currently ignores `bearer_token_env_var` and `env_http_headers`

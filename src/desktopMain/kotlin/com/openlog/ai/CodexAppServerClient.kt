@@ -82,6 +82,15 @@ data class CodexInitializeResult(
     val raw: JsonObject,
 )
 
+/** Mirrors app-server's `TokenUsageBreakdown` (see `thread/tokenUsage/updated`'s schema). */
+data class CodexTokenUsage(
+    val inputTokens: Long,
+    val cachedInputTokens: Long,
+    val outputTokens: Long,
+    val reasoningOutputTokens: Long,
+    val totalTokens: Long,
+)
+
 sealed interface CodexAppServerEvent {
     data class Initialized(val result: CodexInitializeResult) : CodexAppServerEvent
 
@@ -123,6 +132,13 @@ sealed interface CodexAppServerEvent {
         val threadId: String?,
         val turnId: String,
         val status: String?,
+    ) : CodexAppServerEvent
+
+    /** Cumulative token usage for the thread, pushed after each turn (`thread/tokenUsage/updated`). */
+    data class TokenUsageUpdated(
+        val threadId: String?,
+        val turnId: String?,
+        val total: CodexTokenUsage,
     ) : CodexAppServerEvent
 
     data class TurnFailed(
@@ -428,6 +444,20 @@ class CodexAppServerClient(
                 )
             }
         }
+        "thread/tokenUsage/updated" -> {
+            val total = params["tokenUsage"]?.jsonObject?.get("total")?.jsonObject ?: return null
+            CodexAppServerEvent.TokenUsageUpdated(
+                threadId = params.string("threadId"),
+                turnId = params.string("turnId"),
+                total = CodexTokenUsage(
+                    inputTokens = total.long("inputTokens"),
+                    cachedInputTokens = total.long("cachedInputTokens"),
+                    outputTokens = total.long("outputTokens"),
+                    reasoningOutputTokens = total.long("reasoningOutputTokens"),
+                    totalTokens = total.long("totalTokens"),
+                ),
+            )
+        }
         "error" -> CodexAppServerEvent.ProtocolError(
             message = params.string("message") ?: "Codex app-server error",
         )
@@ -473,6 +503,8 @@ class CodexAppServerClient(
     private fun JsonElement.jsonObjectOrNull(): JsonObject? = this as? JsonObject
 
     private fun JsonObject.string(name: String): String? = this[name]?.jsonPrimitive?.contentOrNull
+
+    private fun JsonObject.long(name: String): Long = this[name]?.jsonPrimitive?.longOrNull ?: 0L
 
     private fun JsonObject.statusType(): String? {
         val status = this["status"]
