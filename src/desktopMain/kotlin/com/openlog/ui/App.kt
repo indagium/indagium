@@ -58,7 +58,8 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
     val theme = themeColors(state.settings.theme)
     val rootFocusRequester = remember { FocusRequester() }
     var pendingPanelFocus by remember { mutableStateOf<KeyboardPanel?>(null) }
-    var filterSearchFocusRequest by remember { mutableStateOf(0) }
+    var nextFilterSearchRequestNonce by remember { mutableStateOf(0L) }
+    var pendingFilterSearchRequest by remember { mutableStateOf<FilterSearchRequest?>(null) }
 
     CompositionLocalProvider(
         LocalTheme provides theme,
@@ -128,9 +129,17 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                         onFocusPanel = { panel -> state.keyboardFocusVisible = true; pendingPanelFocus = panel },
                         onFocusFilterSearch = {
                             state.keyboardFocusVisible = true
+                            if (state.settings.openUnfilteredOnCtrlF) state.ensureActiveTabUnfiltered()
                             state.updateFilterVisible(true)
                             pendingPanelFocus = KeyboardPanel.FILTERS
-                            filterSearchFocusRequest += 1
+                            state.activeTab()?.id?.let { tabId ->
+                                nextFilterSearchRequestNonce += 1
+                                pendingFilterSearchRequest = FilterSearchRequest(
+                                    nonce = nextFilterSearchRequestNonce,
+                                    tabId = tabId,
+                                    target = state.settings.ctrlFTarget,
+                                )
+                            }
                         },
                     )
                 }
@@ -147,7 +156,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                     state.compareMode -> CompareView(
                         state = state,
                         requestedPanelFocus = pendingPanelFocus,
-                        filterSearchFocusRequest = filterSearchFocusRequest,
+                        filterSearchRequest = pendingFilterSearchRequest,
+                        onFilterSearchRequestConsumed = { request ->
+                            pendingFilterSearchRequest = consumeFilterSearchRequest(pendingFilterSearchRequest, request)
+                        },
                         onPanelFocusConsumed = { pendingPanelFocus = null },
                     )
                     activeTab != null -> key(activeTab.id) {
@@ -155,7 +167,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             state = state,
                             tab = activeTab,
                             requestedPanelFocus = pendingPanelFocus,
-                            filterSearchFocusRequest = filterSearchFocusRequest,
+                            filterSearchRequest = pendingFilterSearchRequest,
+                            onFilterSearchRequestConsumed = { request ->
+                                pendingFilterSearchRequest = consumeFilterSearchRequest(pendingFilterSearchRequest, request)
+                            },
                             onPanelFocusConsumed = { pendingPanelFocus = null },
                         )
                     }
@@ -296,6 +311,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                             state.ctx = null
                                         },
                                         onHighlight = { state.addHlFromCtx() },
+                                        onHighlightColor = { color -> state.addHlFromCtx(color) },
+                                        highlightAutoColor = state.nextAvailableHighlighterColor(ctx.tabId),
+                                        preferPickerLeft = submenuOpensLeft,
                                     ),
                                 )
                                 add(CtxMenuEntry.Divider)
@@ -322,6 +340,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                     onInclude = { state.addTagFilterFromCtx() },
                                     onExclude = { state.addExcludeTagFromCtx() },
                                     onHighlight = { state.addHlTagFromCtx() },
+                                    onHighlightColor = { color -> state.addHlTagFromCtx(color) },
+                                    highlightAutoColor = state.nextAvailableHighlighterColor(ctx.tabId),
+                                    preferPickerLeft = submenuOpensLeft,
                                 ),
                             )
                             add(CtxMenuEntry.Divider)
@@ -466,6 +487,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                                 onInclude = e.onInclude,
                                                 onExclude = e.onExclude,
                                                 onHighlight = e.onHighlight,
+                                                onHighlightColor = e.onHighlightColor,
+                                                highlightAutoColor = e.highlightAutoColor,
+                                                preferPickerLeft = e.preferPickerLeft,
                                             )
                                         is CtxMenuEntry.CollapseActions ->
                                             CtxCollapseActions(
@@ -480,6 +504,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                                                 onAskAi = e.onAskAi,
                                                 onCopy = e.onCopy,
                                                 onHighlight = e.onHighlight,
+                                                onHighlightColor = e.onHighlightColor,
+                                                highlightAutoColor = e.highlightAutoColor,
+                                                preferPickerLeft = e.preferPickerLeft,
                                             )
                                         is CtxMenuEntry.SourceActions ->
                                             CtxSourceActions(

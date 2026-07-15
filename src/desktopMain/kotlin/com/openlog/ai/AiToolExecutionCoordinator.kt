@@ -115,6 +115,7 @@ internal class AiToolExecutionCoordinator(
             "close_tab", "get_filter", "set_filter", "get_visible_lines", "get_line_context",
             "select_lines", "get_selection", "toggle_group", "expand_all", "collapse_all",
             "get_tags", "get_packages", "get_crash_sites", "get_issue_description",
+            "get_annotation_sections", "append_annotation_section",
             "add_text_note", "add_log_note", "update_note_block", "move_note_block",
             "delete_note_block", "export_analysis", "export_filtered_log", "save_annotations",
             "load_annotations", "apply_filter_preset", "start_tailing", "stop_tailing",

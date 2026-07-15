@@ -40,7 +40,8 @@ import kotlin.math.roundToInt
 internal fun CompareView(
     state: AppState,
     requestedPanelFocus: KeyboardPanel? = null,
-    filterSearchFocusRequest: Int = 0,
+    filterSearchRequest: FilterSearchRequest? = null,
+    onFilterSearchRequestConsumed: (FilterSearchRequest) -> Unit = {},
     onPanelFocusConsumed: () -> Unit = {},
 ) {
     val leftTab = state.tab(state.activeTabId) ?: state.tabs.firstOrNull() ?: return
@@ -118,7 +119,8 @@ internal fun CompareView(
                         state = state,
                         tab = leftTab,
                         focusRequester = filterFr,
-                        focusSearchRequest = filterSearchFocusRequest,
+                        filterSearchRequest = filterSearchRequest,
+                        onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
                         onPanelFocusChanged = { focused ->
                             if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
                         },

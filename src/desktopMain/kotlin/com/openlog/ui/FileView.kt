@@ -14,12 +14,27 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import com.openlog.model.*
 
+internal data class FilterSearchRequest(
+    val nonce: Long,
+    val tabId: String,
+    val target: CtrlFTarget,
+)
+
+internal fun filterSearchTargetForTab(request: FilterSearchRequest?, tabId: String): CtrlFTarget? =
+    request?.takeIf { it.tabId == tabId }?.target
+
+internal fun consumeFilterSearchRequest(
+    pending: FilterSearchRequest?,
+    consumed: FilterSearchRequest,
+): FilterSearchRequest? = if (pending?.nonce == consumed.nonce) null else pending
+
 @Composable
 internal fun BoundFilterPanel(
     state: AppState,
     tab: LogTab,
     focusRequester: FocusRequester? = null,
-    focusSearchRequest: Int = 0,
+    filterSearchRequest: FilterSearchRequest? = null,
+    onFilterSearchRequestConsumed: (FilterSearchRequest) -> Unit = {},
     onPanelFocusChanged: (Boolean) -> Unit = {},
 ) {
     if (!state.filterVisible) return
@@ -92,8 +107,8 @@ internal fun BoundFilterPanel(
         filterListRows = state.settings.filterListRows,
         width = state.filterPanelWidth,
         focusRequester = focusRequester,
-        focusSearchRequest = focusSearchRequest,
-        ctrlFTarget = state.settings.ctrlFTarget,
+        filterSearchRequest = filterSearchRequest,
+        onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
         onPanelFocusChanged = onPanelFocusChanged,
         keyboardFocusVisible = state.keyboardFocusVisible,
     )
@@ -106,7 +121,8 @@ internal fun FileView(
     state: AppState,
     tab: LogTab,
     requestedPanelFocus: KeyboardPanel? = null,
-    filterSearchFocusRequest: Int = 0,
+    filterSearchRequest: FilterSearchRequest? = null,
+    onFilterSearchRequestConsumed: (FilterSearchRequest) -> Unit = {},
     onPanelFocusConsumed: () -> Unit = {},
 ) {
     val filterFr = remember { FocusRequester() }
@@ -148,7 +164,8 @@ internal fun FileView(
         BoundFilterPanel(
             state, tab,
             focusRequester = filterFr,
-            focusSearchRequest = filterSearchFocusRequest,
+            filterSearchRequest = filterSearchRequest,
+            onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
             onPanelFocusChanged = { focused ->
                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
             },

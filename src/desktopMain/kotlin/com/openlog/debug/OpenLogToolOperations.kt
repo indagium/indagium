@@ -68,6 +68,10 @@ internal class OpenLogToolOperations(
         "get_packages" to { a -> getPackages(a.str("tabId") ?: "") },
         "get_crash_sites" to { a -> getCrashSites(a.str("tabId") ?: "") },
         "get_issue_description" to { a -> getIssueDescription(a.str("tabId") ?: "") },
+        "get_annotation_sections" to { a -> getAnnotationSections(a.str("tabId") ?: "") },
+        "append_annotation_section" to { a ->
+            appendAnnotationSection(a.str("tabId") ?: "", a.str("section") ?: "", a.str("text"))
+        },
         "add_text_note" to { a ->
             addTextNoteRoute(a.str("tabId") ?: "", a.str("text") ?: "", a.str("afterId"))
         },
@@ -623,6 +627,26 @@ internal class OpenLogToolOperations(
     private fun getIssueDescription(tabId: String): Map<String, Any?> {
         val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         return mapOf("issueDescription" to tab.annotations.issueDescription)
+    }
+
+    private fun getAnnotationSections(tabId: String): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        return mapOf("tabId" to tabId, "prefix" to tab.annotations.prefix, "suffix" to tab.annotations.suffix)
+    }
+
+    private fun appendAnnotationSection(tabId: String, section: String, text: String?): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        if (text.isNullOrBlank()) return mapOf("error" to "missing or blank annotation text")
+        when (section) {
+            "prefix" -> appState.appendPrefix(tabId, text)
+            "suffix" -> appState.appendSuffix(tabId, text)
+            else -> return mapOf("error" to "unknown annotation section '$section'; valid: prefix,suffix")
+        }
+        val content = when (section) {
+            "prefix" -> appState.tab(tabId)?.annotations?.prefix
+            else -> appState.tab(tabId)?.annotations?.suffix
+        } ?: tab.annotations.let { if (section == "prefix") it.prefix else it.suffix }
+        return mapOf("ok" to true, "tabId" to tabId, "section" to section, "content" to content)
     }
 
     // Detected on the whole (unfiltered) file, matching CrashPanel's own "complete inventory"

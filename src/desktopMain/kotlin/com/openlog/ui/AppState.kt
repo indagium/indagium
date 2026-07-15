@@ -807,8 +807,11 @@ class AppState(
     var cacheClearConfirmOpen by mutableStateOf(false)
     val archiveCachePath: String = archiveCacheDir.absolutePath
     val appCachePath: String = archiveCacheDir.parentFile?.absolutePath ?: archiveCacheDir.absolutePath
-    var archiveCacheSizeBytes by mutableStateOf(0L)
+    /** Recursive size of the app-data directory displayed in Settings. */
+    var appDataSizeBytes by mutableStateOf(0L)
         private set
+    /** Compatibility alias for callers that still use the previous cache-only name. */
+    val archiveCacheSizeBytes: Long get() = appDataSizeBytes
     var pendingSequenceStart by mutableStateOf<PendingSequenceStart?>(null)
     var pendingFilterLoad by mutableStateOf<PendingFilterLoad?>(null)
     var updateExistingPickerOpen by mutableStateOf(false)
@@ -856,7 +859,7 @@ class AppState(
     private var annotationNavigationCounter = 0L
 
     init {
-        refreshArchiveCacheInfo()
+        refreshAppDataSizeInfo()
         if (restoreOnCreate) restoreAutosave()
         loadPersistedSourceIndex()
         loadCustomAiCommands()
@@ -1247,6 +1250,20 @@ class AppState(
         }
         newHlPat = ""
         newHlColor = HL_COLORS[(HL_COLORS.indexOf(color) + 1) % HL_COLORS.size]
+    }
+
+    /**
+     * Context-menu highlights begin at the same palette cursor as the Highlighters add form,
+     * but avoid colors already in use in this tab until the complete palette has been exhausted.
+     */
+    fun nextAvailableHighlighterColor(tabId: String): Color {
+        val used = tab(tabId)?.filter?.highlighters?.map { it.color }?.toSet().orEmpty()
+        val start = HL_COLORS.indexOf(newHlColor).takeIf { it >= 0 } ?: 0
+        for (offset in HL_COLORS.indices) {
+            val candidate = HL_COLORS[(start + offset) % HL_COLORS.size]
+            if (candidate !in used) return candidate
+        }
+        return HL_COLORS[start]
     }
 
     fun removeHl(tabId: String, id: String) =
@@ -1916,6 +1933,13 @@ class AppState(
 
     fun toggleUnfiltered(tabId: String) = upTab(tabId) { it.copy(showUnfiltered = !it.showUnfiltered) }
 
+    /** Reveals Original for the active tab without changing any already-visible panel. */
+    fun ensureActiveTabUnfiltered() {
+        val tabId = activeTabId
+        if (tabId.isBlank()) return
+        upTab(tabId) { tab -> if (tab.showUnfiltered) tab else tab.copy(showUnfiltered = true) }
+    }
+
     // ── Annotations (block model) ────────────────────────────────────
     // Zip-backed tabs encode sourcePath as "<absZipPath>!<entryPath>" (see openZipEntry) — the
     // bare entry filename alone doesn't say which archive it came from, so this is qualified
@@ -1967,6 +1991,10 @@ class AppState(
 
     fun setSuffix(tabId: String, v: String) = annotationManager.setSuffix(tabId, v)
 
+    fun appendPrefix(tabId: String, text: String) = annotationManager.appendPrefix(tabId, text)
+
+    fun appendSuffix(tabId: String, text: String) = annotationManager.appendSuffix(tabId, text)
+
     fun setIssueDescription(tabId: String, v: String) = annotationManager.setIssueDescription(tabId, v)
 
     fun toggleMd(tabId: String) = upTab(tabId) { it.copy(showAnnMd = !it.showAnnMd) }
@@ -2015,7 +2043,7 @@ class AppState(
         toggleExcludeTag(c.tabId, tag); ctx = null
     }
 
-    fun addHlFromCtx() {
+    fun addHlFromCtx(color: Color? = null) {
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
         // Unlike the message-only actions below, highlighter matching runs against the full
@@ -2025,13 +2053,13 @@ class AppState(
         // ever matches entry.msg, which would silently change what a cross-boundary selection
         // (e.g. spanning tag + message) actually highlights.
         val text = c.selText.trim().ifBlank { entry.msg }
-        addHl(c.tabId, text, false, newHlColor); ctx = null
+        addHl(c.tabId, text, false, color ?: nextAvailableHighlighterColor(c.tabId)); ctx = null
     }
 
-    fun addHlTagFromCtx() {
+    fun addHlTagFromCtx(color: Color? = null) {
         val c = ctx ?: return
         val tag = tab(c.tabId)?.rmap?.get(c.entryId)?.tag ?: return
-        addHl(c.tabId, tag, false, newHlColor); ctx = null
+        addHl(c.tabId, tag, false, color ?: nextAvailableHighlighterColor(c.tabId)); ctx = null
     }
 
     fun addSeqFromCtx() {
@@ -3338,9 +3366,14 @@ class AppState(
         }
     }
 
-    // ── Archive cache ────────────────────────────────────────────────
+    // ── App data / clearable cache ────────────────────────────────────
+    fun refreshAppDataSizeInfo() {
+        appDataSizeBytes = File(appCachePath).totalFileSize()
+    }
+
+    /** Compatibility entry point; the Settings counter now reports all app data. */
     fun refreshArchiveCacheInfo() {
-        archiveCacheSizeBytes = archiveCacheDir.totalFileSize() + notesDir.totalFileSize()
+        refreshAppDataSizeInfo()
     }
 
     fun clearArchiveCache() {
@@ -3743,13 +3776,25 @@ private fun String.tokenFields(): List<String> = split("|", limit = Int.MAX_VALU
 // note's Markdown — skips the {code:java}/{code} fence marker lines buildMd() emits for
 // AnnotationLogBlockStyle.JIRA_JAVA so the block's type token itself is never mangled.
 internal fun maskWordForCopy(text: String, settings: AppSettings): String {
-    if (!settings.maskWordOnCopy || settings.maskWordTarget.isBlank()) return text
-    val wordRegex = Regex("\\b${Regex.escape(settings.maskWordTarget)}\\b")
+    if (!settings.maskWordOnCopy) return text
+    val rules = settings.effectiveCopyMaskRules().filter { it.target.isNotBlank() }
+    if (rules.isEmpty()) return text
     return text.lines().joinToString("\n") { line ->
         val trimmed = line.trim()
         if (trimmed == "{code:java}" || trimmed == "{code}") line
-        else wordRegex.replace(line, settings.maskWordReplacement)
+        else rules.fold(line) { masked, rule ->
+            Regex("\\b${Regex.escape(rule.target)}\\b").replace(masked, rule.replacement)
+        }
     }
+}
+
+private fun AppSettings.effectiveCopyMaskRules(): List<CopyMaskRule> {
+    val defaultRule = CopyMaskRule("java", "j*ava")
+    val legacyRule = CopyMaskRule(maskWordTarget, maskWordReplacement)
+    // Retain correct behavior for source-compatible callers that still set the previous pair.
+    // Autosave restoration always populates copyMaskRules explicitly, so an intentionally empty
+    // modern collection remains empty and disables replacements even while the master switch is on.
+    return if (copyMaskRules == listOf(defaultRule) && legacyRule != defaultRule) listOf(legacyRule) else copyMaskRules
 }
 
 private fun analysisNoteMarkdownName(filename: String): String {
@@ -3801,7 +3846,24 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     sourceLogConfigurationsToken(),
     sourceFolderConfigurationIdsToken(),
     sourceAutoDiscoveryEnabled.toString(),
+    copyMaskRulesToken(),
+    openUnfilteredOnCtrlF.toString(),
 )
+
+private fun AppSettings.copyMaskRulesToken(): String = copyMaskRules
+    .joinToString(",") { rule -> tokenFields(rule.target, rule.replacement).b64() }
+    .b64()
+
+private fun String.copyMaskRulesFromToken(): List<CopyMaskRule> = runCatching {
+    if (isBlank()) return@runCatching emptyList()
+    unb64().split(',').filter { it.isNotBlank() }.mapNotNull { encoded ->
+        runCatching {
+            val fields = encoded.unb64().tokenFields()
+            if (fields.size < 2) return@runCatching null
+            CopyMaskRule(target = fields[0], replacement = fields[1])
+        }.getOrNull()
+    }
+}.getOrElse { emptyList() }
 
 private fun AppSettings.aiProviderProfilesToken(): String = normalizeAiProviderProfiles(aiProviderProfiles)
     .joinToString(",") { it.profileToken().b64() }
@@ -3940,6 +4002,12 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         p.getOrNull(autoWrapIndex)?.toBooleanStrictOrNull() != null &&
         p.getOrNull(autoWrapIndex + 1)?.toBooleanStrictOrNull() != null
     val mcpIndex = wrapIndex + (if (hasWrapLimitField) 1 else 0) + (if (hasAutoWrapField) 1 else 0)
+    val legacyMaskTarget = p.getOrNull(mcpIndex + 3)?.takeIf { it.isNotBlank() } ?: "java"
+    val legacyMaskReplacement = p.getOrNull(mcpIndex + 4)?.takeIf { it.isNotBlank() } ?: "j*ava"
+    // These are deliberately appended after the pre-existing source settings so every historic
+    // token position stays stable. A missing rules field represents the previous single pair.
+    val copyMaskRules = p.getOrNull(mcpIndex + 16)?.copyMaskRulesFromToken()
+        ?: listOf(CopyMaskRule(legacyMaskTarget, legacyMaskReplacement))
     AppSettings(
         theme = runCatching { ThemePreset.valueOf(p[0]) }.getOrElse { ThemePreset.LIGHT },
         fontSize = p[1].toIntOrNull() ?: 12,
@@ -3965,8 +4033,8 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         mcpControlEnabled = p.getOrNull(mcpIndex)?.toBooleanStrictOrNull() ?: false,
         mcpControlPort = p.getOrNull(mcpIndex + 1)?.toIntOrNull()?.coerceIn(MIN_PORT, MAX_PORT) ?: DEFAULT_MCP_PORT,
         maskWordOnCopy = p.getOrNull(mcpIndex + 2)?.toBooleanStrictOrNull() ?: false,
-        maskWordTarget = p.getOrNull(mcpIndex + 3)?.takeIf { it.isNotBlank() } ?: "java",
-        maskWordReplacement = p.getOrNull(mcpIndex + 4)?.takeIf { it.isNotBlank() } ?: "j*ava",
+        maskWordTarget = legacyMaskTarget,
+        maskWordReplacement = legacyMaskReplacement,
         highlightEntireCrashGroup = p.getOrNull(mcpIndex + 5)?.toBooleanStrictOrNull() ?: false,
         ctrlFTarget = p.getOrNull(mcpIndex + 6)
             ?.let { runCatching { CtrlFTarget.valueOf(it) }.getOrNull() }
@@ -3989,6 +4057,8 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         sourceLogConfigurations = p.getOrNull(mcpIndex + 13)?.sourceLogConfigurationsFromToken() ?: emptyList(),
         sourceFolderConfigurationIds = p.getOrNull(mcpIndex + 14)?.sourceFolderConfigurationIdsFromToken() ?: emptyMap(),
         sourceAutoDiscoveryEnabled = p.getOrNull(mcpIndex + 15)?.toBooleanStrictOrNull() ?: true,
+        copyMaskRules = copyMaskRules,
+        openUnfilteredOnCtrlF = p.getOrNull(mcpIndex + 17)?.toBooleanStrictOrNull() ?: false,
     )
 }.getOrNull()
 

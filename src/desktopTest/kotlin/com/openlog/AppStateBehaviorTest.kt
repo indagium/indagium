@@ -7,10 +7,13 @@ import com.openlog.model.AnnotationLogBlockStyle
 import com.openlog.model.Annotations
 import com.openlog.model.AppSettings
 import com.openlog.model.CrashCategory
+import com.openlog.model.CopyMaskRule
+import com.openlog.model.CtrlFTarget
 import com.openlog.model.CtxMenuState
 import com.openlog.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
+import com.openlog.model.Highlighter
 import com.openlog.model.LogAnalysis
 import com.openlog.model.LogEntry
 import com.openlog.model.LogItem
@@ -21,6 +24,8 @@ import com.openlog.model.SequenceDef
 import com.openlog.model.ThemePreset
 import com.openlog.ui.AppState
 import com.openlog.ui.DesktopStorage
+import com.openlog.ui.FilterSearchRequest
+import com.openlog.ui.HL_COLORS
 import com.openlog.ui.ImportFilterAction
 import com.openlog.ui.ManualCollapseAvailability
 import com.openlog.ui.SEQ_COLORS
@@ -28,7 +33,9 @@ import com.openlog.ui.SettingsSection
 import com.openlog.ui.SplitMode
 import com.openlog.ui.blockOrderDuringDrag
 import com.openlog.ui.cumulativeBlockOffsets
+import com.openlog.ui.consumeFilterSearchRequest
 import com.openlog.ui.emptyWorkspaceTab
+import com.openlog.ui.filterSearchTargetForTab
 import com.openlog.ui.manualCollapseAvailability
 import com.openlog.ui.maskWordForCopy
 import com.openlog.ui.mkTab
@@ -64,6 +71,7 @@ class AppStateBehaviorTest {
         assertTrue(state.tabs.isEmpty())
         assertEquals(null, state.activeTab())
         assertEquals(ThemePreset.LIGHT, state.settings.theme)
+        assertFalse(state.settings.openUnfilteredOnCtrlF)
     }
 
     @Test
@@ -832,6 +840,35 @@ class AppStateBehaviorTest {
         assertEquals(null, state.pendingDuplicateFilterSave)
         assertEquals(1, state.savedFilters.size)
         assertEquals(setOf("com.second"), state.savedFilters.single().pkgPrefixes)
+    }
+
+    @Test
+    fun replacingSharedSavedFilterLeavesOtherOpenTabsUntouchedUntilTheyReloadIt() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("one", "one.log", emptyList()),
+            mkTab("two", "two.log", emptyList()),
+        )
+        state.activeTabId = "one"
+        state.addPkgPrefix("one", "com.base")
+        state.saveFilter("one", "network")
+        val saved = state.savedFilters.single()
+        state.loadFilter("two", saved)
+
+        state.startRegexSearch("one")
+        state.setKw("one", "network.*")
+        state.setFilterMode("one", FilterMode.TAGS)
+        state.addPkgPrefix("one", "com.changed")
+        state.saveFilter("one", "network")
+        state.confirmReplaceDuplicateFilter()
+
+        assertEquals(FilterMode.TAGS, state.tab("one")!!.filter.mode)
+        assertEquals(FilterMode.TAGS, state.tab("two")!!.filter.mode)
+        assertEquals(setOf("com.base"), state.tab("two")!!.filter.pkgPrefixes)
+        assertEquals(setOf("com.base", "com.changed"), state.savedFilters.single().pkgPrefixes)
+
+        state.loadFilter("two", state.savedFilters.single())
+        assertEquals(setOf("com.base", "com.changed"), state.tab("two")!!.filter.pkgPrefixes)
     }
 
     @Test
@@ -1679,10 +1716,11 @@ class AppStateBehaviorTest {
         val dir = createTempDirectory("openlog-archive-cache").toFile()
         val archiveCacheDir = File(dir, "archive-cache").apply { mkdirs() }
         val notesDir = File(dir, "notes").apply { mkdirs() }
-        val userNotesDir = File(dir, "user-notes").apply { mkdirs() }
+        val userNotesDir = createTempDirectory("openlog-user-notes").toFile()
         File(archiveCacheDir, "a.tmp").writeText("12345")
         File(archiveCacheDir, "nested").apply { mkdirs() }.resolve("b.tmp").writeText("123")
         File(notesDir, "cached_analysis.md").writeText("note")
+        File(dir, "root-data.bin").writeText("root")
         File(userNotesDir, "saved_analysis.md").writeText("keep")
 
         val state = AppState(
@@ -1698,12 +1736,13 @@ class AppStateBehaviorTest {
 
         assertEquals(archiveCacheDir.absolutePath, state.archiveCachePath)
         assertEquals(dir.absolutePath, state.appCachePath)
-        assertEquals(12L, state.archiveCacheSizeBytes)
+        assertEquals(16L, state.appDataSizeBytes)
+        assertEquals(16L, state.archiveCacheSizeBytes)
         File(archiveCacheDir, "later.tmp").writeText("xx")
-        assertEquals(12L, state.archiveCacheSizeBytes)
+        assertEquals(16L, state.appDataSizeBytes)
 
-        state.refreshArchiveCacheInfo()
-        assertEquals(14L, state.archiveCacheSizeBytes)
+        state.refreshAppDataSizeInfo()
+        assertEquals(18L, state.appDataSizeBytes)
 
         state.requestClearCache()
         assertTrue(state.cacheClearConfirmOpen)
@@ -1712,7 +1751,10 @@ class AppStateBehaviorTest {
 
         state.confirmClearCache()
         assertFalse(state.cacheClearConfirmOpen)
-        assertEquals(0L, state.archiveCacheSizeBytes)
+        // Clear cache intentionally leaves other app data (including the autosave it refreshes).
+        val recursiveAppDataSize = dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        assertEquals(recursiveAppDataSize, state.appDataSizeBytes)
+        assertTrue(state.appDataSizeBytes > 0L)
         assertTrue(archiveCacheDir.listFiles().orEmpty().isEmpty())
         assertTrue(notesDir.listFiles().orEmpty().isEmpty())
         assertTrue(File(userNotesDir, "saved_analysis.md").exists())
@@ -2997,8 +3039,13 @@ class AppStateBehaviorTest {
                 maskWordOnCopy = true,
                 maskWordTarget = "kotlin",
                 maskWordReplacement = "k*otlin",
+                copyMaskRules = listOf(
+                    CopyMaskRule("kotlin", ""),
+                    CopyMaskRule("timeout", "delayed"),
+                ),
                 highlightEntireCrashGroup = true,
                 openNewFilesWithUnfiltered = true,
+                openUnfilteredOnCtrlF = true,
             )
         }
 
@@ -3016,8 +3063,42 @@ class AppStateBehaviorTest {
         assertEquals(true, restored.settings.maskWordOnCopy)
         assertEquals("kotlin", restored.settings.maskWordTarget)
         assertEquals("k*otlin", restored.settings.maskWordReplacement)
+        assertEquals(
+            listOf(CopyMaskRule("kotlin", ""), CopyMaskRule("timeout", "delayed")),
+            restored.settings.copyMaskRules,
+        )
         assertEquals(true, restored.settings.highlightEntireCrashGroup)
         assertEquals(true, restored.settings.openNewFilesWithUnfiltered)
+        assertEquals(true, restored.settings.openUnfilteredOnCtrlF)
+    }
+
+    @Test
+    fun legacySingleCopyMaskPairMigratesToOneOrderedRule() {
+        val dir = createTempDirectory("openlog-copy-mask-legacy").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.updateSettings {
+            it.copy(maskWordOnCopy = true, maskWordTarget = "kotlin", maskWordReplacement = "k*otlin")
+        }
+        state.autosaveNow()
+
+        // Drop only the two fields appended by the multi-rule/Ctrl+F change, preserving the
+        // legacy pair in its historic token positions.
+        val lines = cacheFile.readLines()
+        val settingsLine = lines.single { it.startsWith("settings\t") }
+        val encoded = settingsLine.removePrefix("settings\t")
+        val rawToken = String(java.util.Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8)
+        val legacyRawToken = rawToken.split("|").dropLast(2).joinToString("|")
+        val legacyEncoded = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(legacyRawToken.toByteArray(Charsets.UTF_8))
+        cacheFile.writeText(lines.joinToString("\n") { line ->
+            if (line == settingsLine) "settings\t$legacyEncoded" else line
+        } + "\n")
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals(listOf(CopyMaskRule("kotlin", "k*otlin")), restored.settings.copyMaskRules)
+        assertFalse(restored.settings.openUnfilteredOnCtrlF)
     }
 
     @Test
@@ -3161,13 +3242,75 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun duplicateTabFilenamesGetSourceSuffixAndRecentMenuKeepsAllEntries() {
+    fun duplicateTabFilenamesUseProgressiveSourceSuffixesAndRecentMenuKeepsAllEntries() {
         val first = mkTab("one", "same.log", emptyList()).copy(sourcePath = "/logs/first/same.log")
         val second = mkTab("two", "same.log", emptyList()).copy(sourcePath = "/logs/second/same.log")
         assertEquals("same.log — first", tabDisplayLabel(first, listOf(first, second)))
         assertEquals("same.log — second", tabDisplayLabel(second, listOf(first, second)))
         assertEquals("same.log", tabDisplayLabel(first, listOf(first)))
+
+        val archiveA = mkTab("archive-a", "same.log", emptyList())
+            .copy(sourcePath = "/logs/reports/archive-a.zip!FS/a/same.log")
+        val archiveB = mkTab("archive-b", "same.log", emptyList())
+            .copy(sourcePath = "/logs/reports/archive-b.zip!FS/b/same.log")
+        assertEquals("same.log — archive-a.zip", tabDisplayLabel(archiveA, listOf(archiveA, archiveB)))
+        assertEquals("same.log — archive-b.zip", tabDisplayLabel(archiveB, listOf(archiveA, archiveB)))
+
+        val archiveFolderA = mkTab("archive-folder-a", "same.log", emptyList())
+            .copy(sourcePath = "/logs/archive.zip!FS/a/same.log")
+        val archiveFolderB = mkTab("archive-folder-b", "same.log", emptyList())
+            .copy(sourcePath = "/logs/archive.zip!FS/b/same.log")
+        assertEquals(
+            "same.log — archive.zip/FS/a/same.log",
+            tabDisplayLabel(archiveFolderA, listOf(archiveFolderA, archiveFolderB)),
+        )
+        assertEquals(
+            "same.log — archive.zip/FS/b/same.log",
+            tabDisplayLabel(archiveFolderB, listOf(archiveFolderA, archiveFolderB)),
+        )
+
+        val sameNamedArchiveA = mkTab("archive-path-a", "same.log", emptyList())
+            .copy(sourcePath = "/logs/first/archive.zip!FS/a/same.log")
+        val sameNamedArchiveB = mkTab("archive-path-b", "same.log", emptyList())
+            .copy(sourcePath = "/logs/second/archive.zip!FS/b/same.log")
+        assertEquals(
+            "same.log — archive.zip/FS/a/same.log",
+            tabDisplayLabel(sameNamedArchiveA, listOf(sameNamedArchiveA, sameNamedArchiveB)),
+        )
+        assertEquals(
+            "same.log — archive.zip/FS/b/same.log",
+            tabDisplayLabel(sameNamedArchiveB, listOf(sameNamedArchiveA, sameNamedArchiveB)),
+        )
+
+        val sameFolderA = mkTab("real-a", "same.log", emptyList()).copy(sourcePath = "/logs/shared/same.log")
+        val sameFolderB = mkTab("real-b", "same.log", emptyList()).copy(sourcePath = "/logs/shared/same.log")
+        assertEquals("same.log — shared — real-a", tabDisplayLabel(sameFolderA, listOf(sameFolderA, sameFolderB)))
+        assertEquals("same.log — shared — real-b", tabDisplayLabel(sameFolderB, listOf(sameFolderA, sameFolderB)))
         assertEquals(30, recentFilesForMenu((1..30).map { "/logs/$it.log" }).size)
+    }
+
+    @Test
+    fun filterSearchRequestTargetsOnlyItsOriginTabAndIsConsumedOnce() {
+        val request = FilterSearchRequest(1, "one", CtrlFTarget.KEYWORD_REGEX)
+
+        assertEquals(CtrlFTarget.KEYWORD_REGEX, filterSearchTargetForTab(request, "one"))
+        assertEquals(null, filterSearchTargetForTab(request, "two"))
+
+        val consumed = consumeFilterSearchRequest(request, request)
+        assertEquals(null, consumed)
+        assertEquals(null, filterSearchTargetForTab(consumed, "one"))
+    }
+
+    @Test
+    fun filterSearchRequestPreservesTagsAndMessageRuleTargetsForItsOriginTab() {
+        val tags = FilterSearchRequest(2, "one", CtrlFTarget.TAGS)
+        val messageRules = FilterSearchRequest(3, "two", CtrlFTarget.MESSAGE_RULE)
+
+        assertEquals(CtrlFTarget.TAGS, filterSearchTargetForTab(tags, "one"))
+        assertEquals(null, filterSearchTargetForTab(tags, "two"))
+        assertEquals(CtrlFTarget.MESSAGE_RULE, filterSearchTargetForTab(messageRules, "two"))
+        assertEquals(null, filterSearchTargetForTab(messageRules, "one"))
+        assertEquals(messageRules, consumeFilterSearchRequest(messageRules, tags))
     }
 
     @Test
@@ -3591,6 +3734,72 @@ class AppStateBehaviorTest {
         assertEquals("full message", state.tabs.single().filter.highlighters.single().pattern)
     }
 
+    @Test
+    fun addHlFromCtxUsesNextUnusedColorFromTheDraftCursor() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(
+            mkTab("t1", "test.log", listOf(entry)).copy(
+                filter = Filter(highlighters = listOf(
+                    Highlighter("one", "first", false, HL_COLORS[0], true),
+                    Highlighter("two", "second", false, HL_COLORS[1], true),
+                )),
+            ),
+        )
+        state.newHlColor = HL_COLORS[0]
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "selected")
+
+        state.addHlFromCtx()
+
+        assertEquals(HL_COLORS[2], state.tabs.single().filter.highlighters.last().color)
+        assertEquals(HL_COLORS[3], state.newHlColor)
+    }
+
+    @Test
+    fun addHlFromCtxWrapsToDraftColorWhenEveryPaletteColorIsInUse() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(
+            mkTab("t1", "test.log", listOf(entry)).copy(
+                filter = Filter(highlighters = HL_COLORS.mapIndexed { index, color ->
+                    Highlighter("h$index", "existing $index", false, color, true)
+                }),
+            ),
+        )
+        state.newHlColor = HL_COLORS.last()
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "selected")
+
+        state.addHlFromCtx()
+
+        assertEquals(HL_COLORS.last(), state.tabs.single().filter.highlighters.last().color)
+    }
+
+    @Test
+    fun addHlFromCtxUsesExplicitPickerColor() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "selected")
+
+        state.addHlFromCtx(HL_COLORS[7])
+
+        assertEquals(HL_COLORS[7], state.tabs.single().filter.highlighters.single().color)
+    }
+
+    @Test
+    fun addHlTagFromCtxUsesExplicitPickerColor() {
+        val state = AppState()
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "")
+
+        state.addHlTagFromCtx(HL_COLORS[11])
+
+        val highlighter = state.tabs.single().filter.highlighters.single()
+        assertEquals("MyTag", highlighter.pattern)
+        assertEquals(HL_COLORS[11], highlighter.color)
+    }
+
     // ── requestAddAnn source label (displaySourceLabel) ──────────────────────
 
     @Test
@@ -3691,7 +3900,7 @@ class AppStateBehaviorTest {
 
     @Test
     fun maskWordForCopyReplacesWholeWordCaseSensitively() {
-        val settings = AppSettings(maskWordOnCopy = true, maskWordTarget = "java", maskWordReplacement = "j*ava")
+        val settings = AppSettings(maskWordOnCopy = true, copyMaskRules = listOf(CopyMaskRule("java", "j*ava")))
 
         val result = maskWordForCopy("Crash seen in java, not Java or javascript.", settings)
 
@@ -3717,6 +3926,38 @@ class AppStateBehaviorTest {
         val result = maskWordForCopy("plain java text", settings)
 
         assertEquals("plain java text", result)
+    }
+
+    @Test
+    fun maskWordForCopyAppliesOrderedRulesAndAllowsAnEmptyReplacement() {
+        val settings = AppSettings(
+            maskWordOnCopy = true,
+            copyMaskRules = listOf(
+                CopyMaskRule("java", "kotlin"),
+                CopyMaskRule("kotlin", ""),
+                CopyMaskRule("", "ignored"),
+            ),
+        )
+
+        val result = maskWordForCopy("java Kotlin javaScript", settings)
+
+        assertEquals(" Kotlin javaScript", result)
+    }
+
+    @Test
+    fun ensureActiveTabUnfilteredOnlyOpensTheActiveOriginalPanel() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("active", "active.log", emptyList()),
+            mkTab("other", "other.log", emptyList()),
+        )
+        state.activeTabId = "active"
+
+        state.ensureActiveTabUnfiltered()
+        state.ensureActiveTabUnfiltered()
+
+        assertTrue(state.tab("active")!!.showUnfiltered)
+        assertFalse(state.tab("other")!!.showUnfiltered)
     }
 
     @Test

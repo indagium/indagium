@@ -134,6 +134,23 @@ internal class AnnotationManager(private val appState: AppState) {
 
     fun setSuffix(tabId: String, v: String) = appState.upAnn(tabId) { t -> t.copy(annotations = t.annotations.copy(suffix = v)) }
 
+    // Keep the existing Notes text intact when an MCP/AI caller contributes a follow-up. Separate
+    // populated entries by one blank line without reformatting either side.
+    fun appendPrefix(tabId: String, text: String) = appState.upAnn(tabId) { t ->
+        t.copy(annotations = t.annotations.copy(prefix = appendSectionText(t.annotations.prefix, text)))
+    }
+
+    fun appendSuffix(tabId: String, text: String) = appState.upAnn(tabId) { t ->
+        t.copy(annotations = t.annotations.copy(suffix = appendSectionText(t.annotations.suffix, text)))
+    }
+
     fun setIssueDescription(tabId: String, v: String) =
         appState.upAnn(tabId) { t -> t.copy(annotations = t.annotations.copy(issueDescription = v)) }
+
+    private fun appendSectionText(existing: String, addition: String): String = when {
+        existing.isEmpty() -> addition
+        existing.endsWith("\n\n") -> existing + addition
+        existing.endsWith('\n') -> "$existing\n$addition"
+        else -> "$existing\n\n$addition"
+    }
 }

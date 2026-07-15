@@ -262,14 +262,14 @@ class SourceIndexAppStateTest {
         state.autosaveNow()
 
         // Simulate a pre-sourceFolderInfo cache file by round-tripping the real settings token
-        // through the same b64-outer-wrapper the app itself uses and dropping its last pipe-field
-        // (sourceFolderInfo, the newest trailing field) — settingsFromToken's tolerant
-        // p.getOrNull(mcpIndex + 12) must still parse everything before it.
+        // through the same b64-outer-wrapper the app itself uses and dropping sourceFolderInfo
+        // and every later appended field — settingsFromToken's tolerant p.getOrNull(mcpIndex + 12)
+        // must still parse everything before it.
         val lines = cacheFile.readLines()
         val settingsLine = lines.single { it.startsWith("settings\t") }
         val encoded = settingsLine.removePrefix("settings\t")
         val rawToken = String(java.util.Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8)
-        val truncatedRawToken = rawToken.split("|").dropLast(1).joinToString("|")
+        val truncatedRawToken = rawToken.split("|").dropLast(6).joinToString("|")
         val truncatedEncoded = java.util.Base64.getUrlEncoder().withoutPadding()
             .encodeToString(truncatedRawToken.toByteArray(Charsets.UTF_8))
         cacheFile.writeText(lines.joinToString("\n") { if (it == settingsLine) "settings\t$truncatedEncoded" else it } + "\n")

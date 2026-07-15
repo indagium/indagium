@@ -62,17 +62,22 @@ class AiAgentRunnerTest {
     }
 
     @Test
-    fun inAppToolCallsAlwaysUseTheRequestTabsId() = runBlocking {
+    fun inAppAnnotationSectionCallsAlwaysUseTheRequestTabsId() = runBlocking {
         var receivedTabId: Any? = null
         val runner = runner(
             responses = listOf(
                 listOf(
-                    LlmStreamEvent.ToolCall(LlmToolCall("visible", "get_visible_lines", "{\"tabId\":\"wrong-tab\"}")),
+                    LlmStreamEvent.ToolCall(
+                        LlmToolCall(
+                            "append-section", "append_annotation_section",
+                            "{\"tabId\":\"wrong-tab\",\"section\":\"suffix\",\"text\":\"- Verify fix\"}",
+                        ),
+                    ),
                     LlmStreamEvent.Completed,
                 ),
                 listOf(LlmStreamEvent.Completed),
             ),
-            handlers = mapOf("get_visible_lines" to { arguments ->
+            handlers = mapOf("append_annotation_section" to { arguments ->
                 receivedTabId = arguments["tabId"]
                 mapOf("ok" to true)
             }),

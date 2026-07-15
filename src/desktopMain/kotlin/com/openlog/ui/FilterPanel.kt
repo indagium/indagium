@@ -172,7 +172,7 @@ class FilterPanelUiState {
     androidx.compose.ui.ExperimentalComposeUiApi::class,
 )
 @Composable
-fun FilterPanel(
+internal fun FilterPanel(
     tab: LogTab,
     fpState: FilterPanelUiState,
     savedFilters: List<SavedFilter>,
@@ -242,8 +242,8 @@ fun FilterPanel(
     filterListRows: Int,
     width: Float,
     focusRequester: FocusRequester? = null,
-    focusSearchRequest: Int = 0,
-    ctrlFTarget: CtrlFTarget = CtrlFTarget.KEYWORD_REGEX,
+    filterSearchRequest: FilterSearchRequest? = null,
+    onFilterSearchRequestConsumed: (FilterSearchRequest) -> Unit = {},
     onPanelFocusChanged: (Boolean) -> Unit = {},
     keyboardFocusVisible: Boolean = false,
 ) {
@@ -455,35 +455,35 @@ fun FilterPanel(
         return true
     }
 
-    LaunchedEffect(focusSearchRequest) {
-        if (focusSearchRequest > 0) {
-            when (ctrlFTarget) {
-                CtrlFTarget.TAGS -> {
-                    if (filter.mode != FilterMode.TAGS) {
-                        pendingSearchFocusTarget = CtrlFTarget.TAGS
-                        onSetFilterMode(FilterMode.TAGS)
-                    } else {
-                        runCatching { tagFr.requestFocus() }
-                    }
+    LaunchedEffect(filterSearchRequest?.nonce, tab.id) {
+        val request = filterSearchRequest ?: return@LaunchedEffect
+        when (filterSearchTargetForTab(request, tab.id) ?: return@LaunchedEffect) {
+            CtrlFTarget.TAGS -> {
+                if (filter.mode != FilterMode.TAGS) {
+                    pendingSearchFocusTarget = CtrlFTarget.TAGS
+                    onSetFilterMode(FilterMode.TAGS)
+                } else {
+                    runCatching { tagFr.requestFocus() }
                 }
-                CtrlFTarget.KEYWORD_REGEX -> {
-                    if (filter.mode != FilterMode.KEYWORD) {
-                        pendingSearchFocusTarget = CtrlFTarget.KEYWORD_REGEX
-                        onStartRegexSearch()
-                    } else {
-                        runCatching { kwFr.requestFocus() }
-                    }
+            }
+            CtrlFTarget.KEYWORD_REGEX -> {
+                if (filter.mode != FilterMode.KEYWORD) {
+                    pendingSearchFocusTarget = CtrlFTarget.KEYWORD_REGEX
+                    onStartRegexSearch()
+                } else {
+                    runCatching { kwFr.requestFocus() }
                 }
-                CtrlFTarget.MESSAGE_RULE -> {
-                    if (filter.mode != FilterMode.TAGS) {
-                        pendingSearchFocusTarget = CtrlFTarget.MESSAGE_RULE
-                        onSetFilterMode(FilterMode.TAGS)
-                    } else {
-                        runCatching { msgRuleFr.requestFocus() }
-                    }
+            }
+            CtrlFTarget.MESSAGE_RULE -> {
+                if (filter.mode != FilterMode.TAGS) {
+                    pendingSearchFocusTarget = CtrlFTarget.MESSAGE_RULE
+                    onSetFilterMode(FilterMode.TAGS)
+                } else {
+                    runCatching { msgRuleFr.requestFocus() }
                 }
             }
         }
+        onFilterSearchRequestConsumed(request)
     }
     LaunchedEffect(filter.mode, pendingSearchFocusTarget) {
         when (pendingSearchFocusTarget) {
