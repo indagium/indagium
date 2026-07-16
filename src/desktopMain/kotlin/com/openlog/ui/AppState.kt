@@ -2806,7 +2806,7 @@ class AppState(
         ioScope.launch {
             runCatching {
                 saved.writeText(buildMd(t, settings))
-                File(saved.parent, saved.nameWithoutExtension + ".ann").writeText(t.annotations.annotationsToken())
+                File(saved.parent, saved.nameWithoutExtension + ".ann").writeText(t.annotations.annotationsToken(t.sourcePath))
                 rememberRecentNote(saved)
             }
         }
@@ -2947,30 +2947,36 @@ class AppState(
                 targetDir.mkdirs()
                 val mdFile = resolveNoteTarget(targetDir, tab.filename, tab.sourcePath)
                 mdFile.writeText(buildMd(tab, settings))
-                // Sidecar stores full block state for restoration
-                File(targetDir, "${mdFile.nameWithoutExtension}.ann").writeText(tab.annotations.annotationsToken())
-                writeSourceFingerprint(mdFile, tab.sourcePath)
+                // Sidecar stores full block state for restoration, plus the sourcePath
+                // fingerprint (5th token field) used to disambiguate same-named notes.
+                File(targetDir, "${mdFile.nameWithoutExtension}.ann")
+                    .writeText(tab.annotations.annotationsToken(tab.sourcePath))
+                legacySourceFingerprintFile(mdFile).delete()
                 rememberRecentNote(mdFile)
             }
         }
     }
 
-    // Fingerprint sidecar recording which sourcePath a saved note "<name>_analysis.md" actually
-    // belongs to — lets resolveNoteTarget/recentNotesForTab tell apart two different files that
-    // happen to share a display name, without changing the plain filename in the common
-    // (non-colliding) case. Deliberately a tiny separate file rather than a new field in the
-    // .ann token format: the .ann/.md pair's own format is shared with the user-facing
-    // Save/Open-note flow and stays untouched by this auto-export-only bookkeeping.
-    private fun sourceFingerprintFile(mdFile: File): File = File(mdFile.parent, "${mdFile.name}.src")
+    // Fingerprint recording which sourcePath a saved note "<name>_analysis.md" actually belongs
+    // to — lets resolveNoteTarget/recentNotesForTab tell apart two different files that happen to
+    // share a display name, without changing the plain filename in the common (non-colliding)
+    // case. Lives in the .ann sidecar's 5th token field (see Annotations.annotationsToken).
+    //
+    // Legacy fingerprint sidecar from before the sourcePath was folded into the .ann token. No
+    // longer written, but still read as a fallback so notes exported before this change keep
+    // disambiguating correctly.
+    private fun legacySourceFingerprintFile(mdFile: File): File = File(mdFile.parent, "${mdFile.name}.src")
 
-    private fun readSourceFingerprint(mdFile: File): String? =
-        sourceFingerprintFile(mdFile).takeIf { it.exists() }
+    private fun readSourceFingerprint(mdFile: File): String? {
+        val annFile = File(mdFile.parent, "${mdFile.nameWithoutExtension}.ann")
+        val fromAnn = annFile.takeIf { it.exists() }
+            ?.let { runCatching { it.readText() }.getOrNull() }
+            ?.tokenFields()?.getOrNull(4)
+            ?.takeIf { it.isNotBlank() }
+        if (fromAnn != null) return fromAnn
+        return legacySourceFingerprintFile(mdFile).takeIf { it.exists() }
             ?.let { runCatching { it.readText().trim() }.getOrNull() }
             ?.takeIf { it.isNotBlank() }
-
-    private fun writeSourceFingerprint(mdFile: File, sourcePath: String?) {
-        if (sourcePath == null) return
-        runCatching { sourceFingerprintFile(mdFile).writeText(sourcePath) }
     }
 
     // Picks the .md target for this tab's auto-exported note in targetDir. Reuses the plain
@@ -4277,11 +4283,12 @@ private fun String.annBlockFromToken(): AnnBlock? = runCatching {
     }
 }.getOrNull()
 
-private fun Annotations.annotationsToken(): String = tokenFields(
+private fun Annotations.annotationsToken(sourcePath: String? = null): String = tokenFields(
     prefix,
     suffix,
     blocks.joinToString(",") { it.annBlockToken().b64() },
     issueDescription,
+    sourcePath.orEmpty(),
 )
 
 private fun String.annotationsFromToken(): Annotations? = runCatching {

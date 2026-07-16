@@ -2003,6 +2003,24 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun autoExportNoLongerWritesStandaloneSrcSidecar() {
+        val dir = createTempDirectory("openlog-no-src-sidecar").toFile()
+        val notesDir = File(dir, "notes")
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = File(dir, "sample.log").absolutePath),
+        )
+
+        state.confirmAddAnn("log", "log", listOf(1), "save this", null)
+        waitUntil { File(notesDir, "sample_analysis.md").exists() && File(notesDir, "sample_analysis.ann").exists() }
+
+        // The sourcePath fingerprint now lives in the .ann file's 5th token field instead of a
+        // separate sidecar — only two files should exist per analysis.
+        assertTrue(!File(notesDir, "sample_analysis.md.src").exists())
+    }
+
+    @Test
     fun autoExportDisambiguatesWhenADifferentFileSharesTheSameName() {
         val dir = createTempDirectory("openlog-collision-notes").toFile()
         val notesDir = File(dir, "notes")
