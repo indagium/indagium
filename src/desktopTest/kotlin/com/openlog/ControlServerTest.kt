@@ -952,32 +952,35 @@ class ControlServerTest {
     // this flag; these tests only cover the separate CORS-plugin behavior, which controls whether
     // a *browser* is additionally allowed to read cross-origin responses at all.
 
-    private fun corsProbe(target: ControlServer): HttpResponse<String> {
-        val req = HttpRequest.newBuilder(URI.create("http://127.0.0.1:${target.boundPort}/tabs"))
-            .header("Authorization", "Bearer ${target.token}")
+    private fun mcpPreflight(target: ControlServer): HttpResponse<String> {
+        val req = HttpRequest.newBuilder(URI.create("http://127.0.0.1:${target.boundPort}/mcp"))
             .header("Origin", "http://example.com")
-            .GET().build()
+            .header("Access-Control-Request-Method", "POST")
+            .header(
+                "Access-Control-Request-Headers",
+                "Authorization, Content-Type, Mcp-Session-Id, Mcp-Protocol-Version",
+            )
+            .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+            .build()
         return client.send(req, HttpResponse.BodyHandlers.ofString())
     }
 
     @Test
-    fun defaultConstructionHasNoCorsHeaderButStillAuthenticatesAndServes() {
+    fun defaultConstructionGrantsNoCorsForMcpPreflight() {
         // `server` (from setUp()) is the plain `ControlServer(state, 0)` construction every other
         // test in this suite already relies on — reasserting it here ties the CORS-off default
         // explicitly to SEC-1 rather than leaving it merely implicit in the rest of the suite.
-        val resp = corsProbe(server)
-        assertEquals(200, resp.statusCode())
-        assertTrue(resp.body().contains("[]") || resp.body().startsWith("["), resp.body())
+        val resp = mcpPreflight(server)
         assertTrue(resp.headers().firstValue("Access-Control-Allow-Origin").isEmpty, "default construction must install no CORS block at all")
     }
 
     @Test
-    fun allowBrowserClientsTrueStillAuthenticatesAndServesAndAddsCorsHeader() {
+    fun allowBrowserClientsTrueAllowsUnauthenticatedMcpPreflight() {
         val browserState = AppState(autosaveFile = File.createTempFile("openlog-control-server-cors-test", ".cache"))
         val browserServer = ControlServer(browserState, 0, allowBrowserClients = true)
         browserServer.start()
         try {
-            val resp = corsProbe(browserServer)
+            val resp = mcpPreflight(browserServer)
             assertEquals(200, resp.statusCode())
             assertTrue(
                 resp.headers().firstValue("Access-Control-Allow-Origin").isPresent,

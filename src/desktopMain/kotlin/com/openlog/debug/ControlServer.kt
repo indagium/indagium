@@ -8,6 +8,7 @@ import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.LogLevel
 import com.openlog.ui.AppState
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCallPipeline
@@ -118,7 +119,7 @@ private const val DEFAULT_CLIENT_NAME = "MCP client"
 // via loadOrCreateControlToken() below, so the user doesn't have to re-copy the MCP client config
 // on every launch; a bare `ControlServer(appState, port)` (as most tests construct it) still gets
 // a fresh in-memory-only token with no disk I/O, via the constructor default.
-private const val AUTH_HEADER = "Authorization"
+private const val AUTH_HEADER = HttpHeaders.Authorization
 private const val AUTH_SCHEME_PREFIX = "Bearer "
 private val LOOPBACK_HOSTNAMES = setOf("127.0.0.1", "localhost", "[::1]", "::1")
 private const val TOKEN_HEX_LENGTH = 32 // 16 bytes, hex-encoded
@@ -233,6 +234,7 @@ class ControlServer(
 ) {
     private var engine: EmbeddedServer<*, *>? = null
     private var mcpServer: Server? = null
+
     // The normal MCP server is shared by manual clients. Account-agent panel runs instead receive
     // a server instance bound to one ephemeral run token so tool calls can pause for confirmation.
     private val managedMcpServers = ConcurrentHashMap<String, Server>()
@@ -326,16 +328,15 @@ class ControlServer(
             // cross-origin requests to this loopback port (the intercept below still authenticates
             // them, but a browser would happily let unauthenticated preflight/simple requests
             // through and let script read the response once authenticated). Gated behind Settings
-            // now; only installed when the user opts in. Note this block still doesn't
-            // allowHeader("Authorization") — an authenticated browser call needs that too, so this
-            // flag alone doesn't yet make a browser-based client fully functional; it only bounds
-            // the blast radius of leaving it on.
+            // now; only installed when the user opts in.
             if (allowBrowserClients) {
                 install(CORS) {
                     anyHost()
+                    allowHeader(HttpHeaders.Authorization)
+                    allowHeader(HttpHeaders.ContentType)
                     allowHeader("Mcp-Session-Id")
                     allowHeader("Mcp-Protocol-Version")
-                    allowHeader("Content-Type")
+                    allowMethod(HttpMethod.Delete)
                 }
             }
             // Native MCP over Streamable HTTP at /mcp — what LM Studio, Claude Code, and Codex
@@ -367,7 +368,12 @@ class ControlServer(
                         return@intercept
                     }
                 }
-                mcpStreamableHttp {
+                mcpStreamableHttp(
+                    // The SDK validates foreign Origin headers by default. Browser opt-in instead
+                    // delegates origin permission to CORS while retaining its loopback Host check
+                    // (and the independent global Host gate above).
+                    allowedHosts = LOOPBACK_HOSTNAMES.filterNot { it == "::1" }.takeIf { allowBrowserClients },
+                ) {
                     val provided = bearerToken(call.request.header(AUTH_HEADER))
                     managedMcpRuns.get(provided)?.let(::managedMcpServer) ?: mcp
                 }

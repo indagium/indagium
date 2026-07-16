@@ -21,6 +21,14 @@ import kotlin.test.assertTrue
 private const val INITIALIZE_REQUEST =
     """{"jsonrpc":"2.0","id":1,"method":"initialize","params":""" +
         """{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"""
+private const val BROWSER_ORIGIN = "http://example.com"
+private const val MCP_PROTOCOL_VERSION = "2025-06-18"
+private val MCP_BROWSER_HEADERS = setOf(
+    "authorization",
+    "content-type",
+    "mcp-session-id",
+    "mcp-protocol-version",
+)
 
 // Exercises the native MCP Streamable HTTP endpoint the same ControlServer also serves the REST
 // routes from — proving a real MCP client (which does exactly these JSON-RPC-over-HTTP calls)
@@ -44,31 +52,158 @@ class ControlServerMcpTest {
         state.close()
     }
 
-    private fun mcp(json: String, sessionId: String? = null, port: Int = server.boundPort, token: String = server.token): HttpResponse<String> {
+    private fun mcp(
+        json: String,
+        sessionId: String? = null,
+        port: Int = server.boundPort,
+        token: String? = server.token,
+        origin: String? = null,
+    ): HttpResponse<String> {
         var b = HttpRequest.newBuilder(URI.create("http://127.0.0.1:$port/mcp"))
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream")
-            .header("Authorization", "Bearer $token")
             .POST(HttpRequest.BodyPublishers.ofString(json))
+        if (token != null) b = b.header("Authorization", "Bearer $token")
         if (sessionId != null) b = b.header("Mcp-Session-Id", sessionId)
+        if (origin != null) {
+            b = b
+                .header("Origin", origin)
+                .header("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION)
+        }
         return client.send(b.build(), HttpResponse.BodyHandlers.ofString())
     }
 
-    private fun initSession(port: Int = server.boundPort, token: String = server.token): String {
-        val init = mcp(INITIALIZE_REQUEST, port = port, token = token)
+    private fun initSession(
+        port: Int = server.boundPort,
+        token: String = server.token,
+        origin: String? = null,
+    ): String {
+        val init = mcp(INITIALIZE_REQUEST, port = port, token = token, origin = origin)
         assertTrue(init.statusCode() in 200..299, "initialize failed: ${init.statusCode()} ${init.body()}")
         val session = init.headers().firstValue("mcp-session-id")
             .orElseThrow { AssertionError("no Mcp-Session-Id:\n${init.body()}") }
         // Real MCP clients must send notifications/initialized before issuing requests; skipping it
         // leaves the server in a pre-ready state where tool calls behave inconsistently.
-        mcp("""{"jsonrpc":"2.0","method":"notifications/initialized"}""", session, port = port, token = token)
+        mcp(
+            """{"jsonrpc":"2.0","method":"notifications/initialized"}""",
+            session,
+            port = port,
+            token = token,
+            origin = origin,
+        )
         return session
+    }
+
+    private fun preflight(
+        target: ControlServer,
+        method: String,
+        requestedHeaders: String = "AUTHORIZATION, content-TYPE, MCP-session-ID, mCp-PrOtOcOl-VeRsIoN",
+    ): HttpResponse<String> {
+        val request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:${target.boundPort}/mcp"))
+            .header("Origin", BROWSER_ORIGIN)
+            .header("Access-Control-Request-Method", method)
+            .header("Access-Control-Request-Headers", requestedHeaders)
+            .method("OPTIONS", HttpRequest.BodyPublishers.noBody())
+            .build()
+        return client.send(request, HttpResponse.BodyHandlers.ofString())
+    }
+
+    private fun commaSeparatedHeader(response: HttpResponse<*>, name: String): Set<String> =
+        response.headers().allValues(name)
+            .flatMap { value -> value.split(",") }
+            .map { value -> value.trim().lowercase() }
+            .filter { value -> value.isNotEmpty() }
+            .toSet()
+
+    private fun deleteSession(target: ControlServer, sessionId: String, token: String? = target.token): HttpResponse<String> {
+        var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:${target.boundPort}/mcp"))
+            .header("Origin", BROWSER_ORIGIN)
+            .header("Mcp-Session-Id", sessionId)
+            .header("Mcp-Protocol-Version", MCP_PROTOCOL_VERSION)
+            .method("DELETE", HttpRequest.BodyPublishers.noBody())
+        if (token != null) request = request.header("Authorization", "Bearer $token")
+        return client.send(request.build(), HttpResponse.BodyHandlers.ofString())
     }
 
     @Test
     fun initializeReturnsServerInfo() {
         val init = mcp(INITIALIZE_REQUEST)
         assertTrue(init.body().contains("openlog-control"), "missing serverInfo:\n${init.body()}")
+    }
+
+    @Test
+    fun browserPostPreflightAllowsMcpHeadersButActualRequestStillRequiresAuthentication() {
+        val browserState = AppState(autosaveFile = File.createTempFile("openlog-mcp-cors-test", ".cache"))
+        val browserServer = ControlServer(browserState, 0, allowBrowserClients = true)
+        browserServer.start()
+        try {
+            val preflight = preflight(browserServer, "POST")
+            assertEquals(200, preflight.statusCode(), preflight.body())
+            assertTrue(preflight.headers().firstValue("Access-Control-Allow-Origin").isPresent)
+            assertTrue(
+                commaSeparatedHeader(preflight, "Access-Control-Allow-Headers").containsAll(MCP_BROWSER_HEADERS),
+                "missing allowed headers: ${preflight.headers().map()}",
+            )
+
+            val authenticated = mcp(
+                INITIALIZE_REQUEST,
+                port = browserServer.boundPort,
+                token = browserServer.token,
+                origin = BROWSER_ORIGIN,
+            )
+            assertTrue(
+                authenticated.statusCode() in 200..299,
+                "authenticated browser initialize failed: ${authenticated.statusCode()} ${authenticated.body()}",
+            )
+
+            val unauthenticated = mcp(
+                INITIALIZE_REQUEST,
+                port = browserServer.boundPort,
+                token = null,
+                origin = BROWSER_ORIGIN,
+            )
+            assertEquals(401, unauthenticated.statusCode())
+        } finally {
+            browserServer.stop()
+            browserState.close()
+        }
+    }
+
+    @Test
+    fun browserDeletePreflightAllowsAuthenticatedSessionClose() {
+        val browserState = AppState(autosaveFile = File.createTempFile("openlog-mcp-delete-cors-test", ".cache"))
+        val browserServer = ControlServer(browserState, 0, allowBrowserClients = true)
+        browserServer.start()
+        try {
+            val preflight = preflight(browserServer, "DELETE")
+            assertEquals(200, preflight.statusCode(), preflight.body())
+            assertTrue(preflight.headers().firstValue("Access-Control-Allow-Origin").isPresent)
+            assertTrue(
+                "delete" in commaSeparatedHeader(preflight, "Access-Control-Allow-Methods"),
+                "DELETE missing from allowed methods: ${preflight.headers().map()}",
+            )
+
+            val session = initSession(
+                port = browserServer.boundPort,
+                token = browserServer.token,
+                origin = BROWSER_ORIGIN,
+            )
+            val closed = deleteSession(browserServer, session)
+            assertEquals(200, closed.statusCode(), closed.body())
+            waitUntil { browserServer.mcpSessions().isEmpty() }
+
+            val afterClose = mcp(
+                """{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}""",
+                session,
+                port = browserServer.boundPort,
+                token = browserServer.token,
+                origin = BROWSER_ORIGIN,
+            )
+            assertTrue(afterClose.statusCode() !in 200..299, "expected deleted session to be rejected")
+        } finally {
+            browserServer.stop()
+            browserState.close()
+        }
     }
 
     @Test
