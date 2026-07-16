@@ -2,6 +2,8 @@ package com.openlog
 
 import androidx.compose.ui.graphics.Color
 import com.openlog.debug.ControlServer
+import com.openlog.model.AiProviderKind
+import com.openlog.model.AiProviderProfile
 import com.openlog.model.AnnBlock
 import com.openlog.model.AnnotationLogBlockStyle
 import com.openlog.model.Annotations
@@ -21,6 +23,9 @@ import com.openlog.model.LogLevel
 import com.openlog.model.ManualCollapseBlock
 import com.openlog.model.ManualCollapseDirection
 import com.openlog.model.SequenceDef
+import com.openlog.model.SourceFolderInfo
+import com.openlog.model.SourceLogConfiguration
+import com.openlog.model.SourceWrapperRule
 import com.openlog.model.ThemePreset
 import com.openlog.ui.AppState
 import com.openlog.ui.DesktopStorage
@@ -3268,33 +3273,147 @@ class AppStateBehaviorTest {
         assertEquals(true, restored.settings.mcpAllowBrowserClients)
     }
 
+    // (ARCH-2/Batch 5) The write path now emits the "settings" line as keyed JSON (settingsJson()
+    // in AppState.kt), so this test can no longer derive a legacy blob by stripping fields off a
+    // live autosaveNow() write — that write is JSON now, not pipe-delimited. Instead this hand-
+    // builds a v1 POSITIONAL settings token from scratch, mirroring the retired settingsToken()'s
+    // field order up to (and including) sourceAutoDiscoveryEnabled and deliberately omitting the
+    // copyMaskRules/openUnfilteredOnCtrlF/mcpAllowBrowserClients fields that came after it — the
+    // same shape a real pre-copyMaskRules cache would have had. This still exercises exactly what
+    // the test name says: settingsFromToken()'s legacy-read fallback (restoreAutosaveKey dispatches
+    // to it whenever the decoded "settings" value doesn't start with '{') migrating the single
+    // legacy maskWordTarget/maskWordReplacement pair into one CopyMaskRule.
     @Test
     fun legacySingleCopyMaskPairMigratesToOneOrderedRule() {
         val dir = createTempDirectory("openlog-copy-mask-legacy").toFile()
         val cacheFile = File(dir, "state.cache")
-        val state = AppState(cacheFile)
-        state.updateSettings {
-            it.copy(maskWordOnCopy = true, maskWordTarget = "kotlin", maskWordReplacement = "k*otlin")
-        }
-        state.autosaveNow()
 
-        // Drop only the three fields appended after the legacy pair (multi-rule/Ctrl+F/SEC-1
-        // browser-CORS), preserving the legacy pair in its historic token positions.
-        val lines = cacheFile.readLines()
-        val settingsLine = lines.single { it.startsWith("settings\t") }
-        val encoded = settingsLine.removePrefix("settings\t")
-        val rawToken = String(java.util.Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8)
-        val legacyRawToken = rawToken.split("|").dropLast(3).joinToString("|")
+        fun legacyField(v: String): String =
+            if (v.isEmpty()) "~" else java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(v.toByteArray(Charsets.UTF_8))
+
+        val legacyRawToken = listOf(
+            "LIGHT", "12", "true", "", "5", "5", "8", "true", "true", "JIRA_JAVA", "false", "From",
+            "5", "480", "true", "false", "8991", "true", "kotlin", "k*otlin", "false", "KEYWORD_REGEX", "false",
+            "", "", "", "100", "", "", "", "true",
+        ).joinToString("|") { legacyField(it) }
         val legacyEncoded = java.util.Base64.getUrlEncoder().withoutPadding()
             .encodeToString(legacyRawToken.toByteArray(Charsets.UTF_8))
-        cacheFile.writeText(lines.joinToString("\n") { line ->
-            if (line == settingsLine) "settings\t$legacyEncoded" else line
-        } + "\n")
+        cacheFile.writeText("openLog2-cache-v1\nsettings\t$legacyEncoded\n")
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
 
         assertEquals(listOf(CopyMaskRule("kotlin", "k*otlin")), restored.settings.copyMaskRules)
         assertFalse(restored.settings.openUnfilteredOnCtrlF)
+    }
+
+    // Every AppSettings field pushed off its default, for settingsJsonRoundTripsEveryFieldAndWritesKeyedJson
+    // below — split out so that test stays under detekt's LongMethod threshold. AppSettings (and
+    // every type it nests: AiProviderProfile/SourceFolderInfo/SourceLogConfiguration/
+    // SourceWrapperRule/CopyMaskRule) is a data class, so a single structural assertEquals against
+    // this value proves every field round-tripped, not just the ones a hand-picked list happens
+    // to check.
+    private fun offDefaultSettingsForJsonRoundTripTest() = AppSettings(
+        theme = ThemePreset.DRACULA,
+        fontSize = 18,
+        fontMono = false,
+        defaultSaveDir = "/tmp/openlog-rt-saves",
+        mostUsedTagLimit = 11,
+        filterListRows = 12,
+        visibleTabLimit = 9,
+        autoExportNotes = false,
+        autoSaveFilters = false,
+        annotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED,
+        numberAnnotationBlocks = true,
+        annotationPrefixLabel = "Cite",
+        navScrollMargin = 10,
+        logRowWrapLimitChars = 777,
+        autoLogRowWrap = false,
+        mcpControlEnabled = true,
+        mcpControlPort = 9200,
+        maskWordOnCopy = true,
+        maskWordTarget = "kotlin",
+        maskWordReplacement = "k*otlin",
+        highlightEntireCrashGroup = true,
+        ctrlFTarget = CtrlFTarget.MESSAGE_RULE,
+        openNewFilesWithUnfiltered = true,
+        openUnfilteredOnCtrlF = true,
+        sourceFolders = listOf("/tmp/openlog-rt-src-a", "/tmp/openlog-rt-src-b"),
+        editorCommand = "code -g {file}:{line}",
+        aiProviderProfiles = listOf(
+            AiProviderProfile(
+                id = "anthropic-rt",
+                displayName = "Anthropic RT",
+                baseUrl = "https://api.anthropic.com",
+                model = "claude-sonnet-4-5",
+                selected = true,
+                remoteDisclosureAcknowledged = true,
+                kind = AiProviderKind.ANTHROPIC_API,
+                executablePath = "",
+                reasoningEffort = "high",
+            ),
+            AiProviderProfile(
+                id = "codex-rt",
+                displayName = "Codex RT",
+                baseUrl = "",
+                model = "",
+                selected = false,
+                remoteDisclosureAcknowledged = false,
+                kind = AiProviderKind.CODEX_ACCOUNT,
+                executablePath = "/usr/local/bin/codex",
+                reasoningEffort = "medium",
+            ),
+        ),
+        aiMaxToolRounds = 222,
+        sourceFolderInfo = mapOf(
+            "/tmp/openlog-rt-src-a" to
+                SourceFolderInfo(description = "Module A", readmePath = "/tmp/openlog-rt-src-a/README.md"),
+        ),
+        sourceLogConfigurations = listOf(
+            SourceLogConfiguration(
+                id = "cfg-rt-1",
+                name = "Custom Logger",
+                wrapperRules = listOf(
+                    SourceWrapperRule(
+                        ownerType = "com.example.Log",
+                        methodName = "d",
+                        tagArgumentIndex = 0,
+                        messageArgumentIndex = 1,
+                        throwableArgumentIndex = 2,
+                    ),
+                ),
+            ),
+        ),
+        sourceFolderConfigurationIds = mapOf("/tmp/openlog-rt-src-a" to listOf("cfg-rt-1")),
+        sourceAutoDiscoveryEnabled = false,
+        copyMaskRules = listOf(CopyMaskRule("java", "j*ava"), CopyMaskRule("secret", "s3cret")),
+        mcpAllowBrowserClients = true,
+    )
+
+    // (ARCH-2/Batch 5) Proves the migration end to end: every AppSettings field pushed off its
+    // default round-trips through a real autosaveNow() write, AND the written "settings" line is
+    // actually the new keyed-JSON format (not a pipe token that merely happens to decode).
+    @Test
+    fun settingsJsonRoundTripsEveryFieldAndWritesKeyedJson() {
+        val dir = createTempDirectory("openlog-settings-json").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        val expected = offDefaultSettingsForJsonRoundTripTest()
+        state.updateSettings { expected }
+        state.autosaveNow()
+
+        val lines = cacheFile.readLines()
+        val settingsLine = lines.single { it.startsWith("settings\t") }
+        val decoded = String(
+            java.util.Base64.getUrlDecoder().decode(settingsLine.removePrefix("settings\t")),
+            Charsets.UTF_8,
+        )
+        assertTrue(
+            decoded.trimStart().startsWith("{"),
+            "settings blob must be written as keyed JSON now, not the legacy pipe token: $decoded",
+        )
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        assertEquals(expected, restored.settings)
     }
 
     @Test

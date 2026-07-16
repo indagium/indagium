@@ -253,26 +253,34 @@ class SourceIndexAppStateTest {
         )
     }
 
+    // (ARCH-2/Batch 5) The write path now emits "settings" as keyed JSON (see AppState.kt's
+    // settingsJson()), so this can no longer derive a legacy blob by truncating a live
+    // autosaveNow() write — that write isn't pipe-delimited anymore. Hand-builds a v1 POSITIONAL
+    // settings token instead, stopping right after sourceFolderInfo (28 fields, indices 0-27) and
+    // omitting every field appended later (sourceLogConfigurations onward) — the same shape a real
+    // pre-those-fields cache would have had. Still exercises exactly what the name says:
+    // settingsFromToken()'s tolerant p.getOrNull(mcpIndex + 12) parsing everything before the cut
+    // and defaulting sourceFolderInfo to emptyMap() when it's off the end of the token.
     @Test
     fun oldAutosaveTokenWithoutSourceFolderInfoFieldRestoresToEmptyMap() {
         val dir = createTempDirectory("openlog-src-folder-info-legacy").toFile()
         val cacheFile = File(dir, "state.cache")
-        val state = AppState(autosaveFile = cacheFile, sourceIndexFile = File(dir, "source-index"))
-        state.updateSettings { it.copy(sourceFolders = listOf("/a"), aiMaxToolRounds = 200) }
-        state.autosaveNow()
 
-        // Simulate a pre-sourceFolderInfo cache file by round-tripping the real settings token
-        // through the same b64-outer-wrapper the app itself uses and dropping sourceFolderInfo
-        // and every later appended field — settingsFromToken's tolerant p.getOrNull(mcpIndex + 12)
-        // must still parse everything before it.
-        val lines = cacheFile.readLines()
-        val settingsLine = lines.single { it.startsWith("settings\t") }
-        val encoded = settingsLine.removePrefix("settings\t")
-        val rawToken = String(java.util.Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8)
-        val truncatedRawToken = rawToken.split("|").dropLast(6).joinToString("|")
-        val truncatedEncoded = java.util.Base64.getUrlEncoder().withoutPadding()
-            .encodeToString(truncatedRawToken.toByteArray(Charsets.UTF_8))
-        cacheFile.writeText(lines.joinToString("\n") { if (it == settingsLine) "settings\t$truncatedEncoded" else it } + "\n")
+        fun b64(v: String): String = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(v.toByteArray(Charsets.UTF_8))
+
+        fun legacyField(v: String): String = if (v.isEmpty()) "~" else b64(v)
+        // Mirrors the retired settingsToken()'s sourceFolders encoding: each path b64'd, joined by
+        // comma, then that whole blob b64'd again — one layer below the fieldToken() wrap every
+        // pipe field gets, which pathTokenList() expects to peel off on the way back in.
+        val sourceFoldersBlob = b64(listOf("/a").joinToString(",") { b64(it) })
+
+        val legacyRawToken = listOf(
+            "LIGHT", "12", "true", "", "5", "5", "8", "true", "true", "JIRA_JAVA", "false", "From",
+            "5", "480", "true", "false", "8991", "false", "java", "j*ava", "false", "KEYWORD_REGEX", "false",
+            sourceFoldersBlob, "", "", "200", "",
+        ).joinToString("|") { legacyField(it) }
+        val legacyEncoded = b64(legacyRawToken)
+        cacheFile.writeText("openLog2-cache-v1\nsettings\t$legacyEncoded\n")
 
         val restored = AppState(autosaveFile = cacheFile, restoreOnCreate = true, sourceIndexFile = File(dir, "source-index"))
 

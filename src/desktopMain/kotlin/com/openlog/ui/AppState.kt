@@ -58,6 +58,18 @@ import com.openlog.utils.splitFileToFiles
 import com.openlog.utils.splitStreamToFiles
 import com.openlog.utils.suggestedSplitPartCount
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.awt.FileDialog
 import java.awt.Frame
 import java.awt.Toolkit
@@ -178,6 +190,13 @@ internal const val RIGHT_SIDEBAR_SPLIT_MAX = 0.8f
 internal const val MIN_PORT = 1
 internal const val MAX_PORT = 65535
 internal const val DEFAULT_MCP_PORT = 8991
+
+// (ARCH-2) Named so settingsFromJson()'s logRowWrapLimitChars bound/default aren't fresh
+// magic-number findings — settingsFromToken() above keeps its own inline 80/20_000/480 literals
+// untouched (it's legacy-read-only, see its doc comment) rather than being migrated onto these too.
+internal const val MIN_LOG_ROW_WRAP_LIMIT_CHARS = 80
+internal const val MAX_LOG_ROW_WRAP_LIMIT_CHARS = 20_000
+internal const val DEFAULT_LOG_ROW_WRAP_LIMIT_CHARS = 480
 
 // Auto-detect fallback chain for AppState.openInEditor, tried in order when settings.editorCommand
 // is blank — the first one whose CLI is actually on PATH (i.e. ProcessBuilder.start() succeeds)
@@ -3478,7 +3497,18 @@ class AppState(
 
     private fun restoreAutosaveKey(key: String, value: String) {
         when (key) {
-            "settings" -> settingsFromToken(value.unb64())?.let { settings = it }
+            // (ARCH-2) Content-sniffed dispatch: a JSON object (new format, see settingsJson())
+            // starts with '{' once decoded; anything else is the legacy positional pipe blob
+            // (see settingsFromToken()) from a cache written before this migration.
+            "settings" -> {
+                val decoded = value.unb64()
+                val restored = if (decoded.trimStart().startsWith("{")) {
+                    settingsFromJson(decoded)
+                } else {
+                    settingsFromToken(decoded)
+                }
+                restored?.let { settings = it }
+            }
             "active" -> activeTabId = value.unb64()
             "compare" -> restoreCompareState(value.unb64())
             "sequences" -> { /* legacy global-sequences key — migrated into tab filter; ignored on load */ }
@@ -3550,7 +3580,11 @@ class AppState(
 
     private fun serializeAutosave(): String = buildString {
         appendLine("openLog2-cache-v1")
-        appendLine("settings\t${settings.settingsToken().b64()}")
+        // (ARCH-2) settings is the only blob on this line encoded as keyed JSON rather than the
+        // positional pipe format every other autosave key still uses — see settingsJson()/
+        // settingsFromJson() below for why, and restoreAutosaveKey()'s "settings" branch for the
+        // content-sniffed dispatch that keeps old positional caches readable.
+        appendLine("settings\t${settings.settingsJson().b64()}")
         appendLine("active\t${activeTabId.b64()}")
         appendLine("compare\t${compareStateToken().b64()}")
         appendLine("saved\t${exportFilters().b64()}")
@@ -3858,52 +3892,6 @@ private fun String.tokenList(): List<String> =
 private fun String.pathTokenList(): List<String> =
     tokenList().map { item -> runCatching { item.unb64() }.getOrElse { item } }
 
-private fun AppSettings.settingsToken(): String = tokenFields(
-    theme.name,
-    fontSize.toString(),
-    fontMono.toString(),
-    defaultSaveDir.orEmpty(),
-    mostUsedTagLimit.toString(),
-    filterListRows.toString(),
-    visibleTabLimit.toString(),
-    autoExportNotes.toString(),
-    autoSaveFilters.toString(),
-    annotationLogBlockStyle.name,
-    numberAnnotationBlocks.toString(),
-    annotationPrefixLabel,
-    navScrollMargin.toString(),
-    logRowWrapLimitChars.toString(),
-    autoLogRowWrap.toString(),
-    mcpControlEnabled.toString(),
-    mcpControlPort.toString(),
-    maskWordOnCopy.toString(),
-    maskWordTarget,
-    maskWordReplacement,
-    highlightEntireCrashGroup.toString(),
-    ctrlFTarget.name,
-    openNewFilesWithUnfiltered.toString(),
-    // List field, not a scalar: reuses the same encoding as recentFiles/recentNotes in the
-    // top-level autosave (join each b64-encoded path with a comma, then b64 the whole blob) rather
-    // than a plain fieldToken() value — tokenFields()'s own fieldToken() wraps this blob with one
-    // more b64 layer, which is exactly the extra layer pathTokenList()/tokenList() expect to peel
-    // off on the way back in (see settingsFromToken below).
-    sourceFolders.joinToString(",") { it.b64() }.b64(),
-    editorCommand,
-    aiProviderProfilesToken(),
-    aiMaxToolRounds.toString(),
-    sourceFolderInfoToken(),
-    sourceLogConfigurationsToken(),
-    sourceFolderConfigurationIdsToken(),
-    sourceAutoDiscoveryEnabled.toString(),
-    copyMaskRulesToken(),
-    openUnfilteredOnCtrlF.toString(),
-    mcpAllowBrowserClients.toString(),
-)
-
-private fun AppSettings.copyMaskRulesToken(): String = copyMaskRules
-    .joinToString(",") { rule -> tokenFields(rule.target, rule.replacement).b64() }
-    .b64()
-
 private fun String.copyMaskRulesFromToken(): List<CopyMaskRule> = runCatching {
     if (isBlank()) return@runCatching emptyList()
     unb64().split(',').filter { it.isNotBlank() }.mapNotNull { encoded ->
@@ -3914,22 +3902,6 @@ private fun String.copyMaskRulesFromToken(): List<CopyMaskRule> = runCatching {
         }.getOrNull()
     }
 }.getOrElse { emptyList() }
-
-private fun AppSettings.aiProviderProfilesToken(): String = normalizeAiProviderProfiles(aiProviderProfiles)
-    .joinToString(",") { it.profileToken().b64() }
-    .b64()
-
-private fun AiProviderProfile.profileToken(): String = tokenFields(
-    id,
-    displayName,
-    baseUrl,
-    model,
-    selected.toString(),
-    remoteDisclosureAcknowledged.toString(),
-    kind.name,
-    executablePath,
-    reasoningEffort,
-)
 
 private fun String.aiProviderProfilesFromToken(): List<AiProviderProfile> = runCatching {
     if (isBlank()) return@runCatching listOf(defaultAiProviderProfile())
@@ -3954,10 +3926,6 @@ private fun String.aiProviderProfilesFromToken(): List<AiProviderProfile> = runC
     }.let(::normalizeAiProviderProfiles)
 }.getOrElse { listOf(defaultAiProviderProfile()) }
 
-private fun AppSettings.sourceFolderInfoToken(): String = sourceFolderInfo.entries
-    .joinToString(",") { (path, info) -> tokenFields(path, info.description, info.readmePath.orEmpty()).b64() }
-    .b64()
-
 private fun String.sourceFolderInfoFromToken(): Map<String, SourceFolderInfo> = runCatching {
     if (isBlank()) return@runCatching emptyMap()
     unb64().split(',').mapNotNull { encoded ->
@@ -3968,14 +3936,6 @@ private fun String.sourceFolderInfoFromToken(): Map<String, SourceFolderInfo> = 
         }.getOrNull()
     }.toMap()
 }.getOrElse { emptyMap() }
-
-private fun SourceWrapperRule.wrapperRuleToken(): String = tokenFields(
-    ownerType,
-    methodName,
-    tagArgumentIndex.toString(),
-    messageArgumentIndex.toString(),
-    throwableArgumentIndex?.toString().orEmpty(),
-)
 
 private fun String.wrapperRuleFromToken(): SourceWrapperRule? = runCatching {
     val fields = tokenFields()
@@ -3988,12 +3948,6 @@ private fun String.wrapperRuleFromToken(): SourceWrapperRule? = runCatching {
         throwableArgumentIndex = fields.getOrNull(4)?.toIntOrNull(),
     )
 }.getOrNull()
-
-private fun SourceLogConfiguration.configurationToken(): String = tokenFields(
-    id,
-    name,
-    wrapperRules.joinToString(",") { it.wrapperRuleToken().b64() },
-)
 
 private fun String.configurationFromToken(): SourceLogConfiguration? = runCatching {
     val fields = tokenFields()
@@ -4009,23 +3963,12 @@ private fun String.configurationFromToken(): SourceLogConfiguration? = runCatchi
     )
 }.getOrNull()
 
-private fun AppSettings.sourceLogConfigurationsToken(): String = sourceLogConfigurations
-    .joinToString(",") { it.configurationToken().b64() }
-    .b64()
-
 private fun String.sourceLogConfigurationsFromToken(): List<SourceLogConfiguration> = runCatching {
     if (isBlank()) return@runCatching emptyList()
     unb64().split(',').filter { it.isNotBlank() }.mapNotNull { encoded ->
         runCatching { encoded.unb64().configurationFromToken() }.getOrNull()
     }.distinctBy { it.id }
 }.getOrElse { emptyList() }
-
-private fun AppSettings.sourceFolderConfigurationIdsToken(): String = sourceFolderConfigurationIds
-    .entries
-    .joinToString(",") { (path, ids) ->
-        tokenFields(path, ids.joinToString(",") { it.b64() }).b64()
-    }
-    .b64()
 
 private fun String.sourceFolderConfigurationIdsFromToken(): Map<String, List<String>> = runCatching {
     if (isBlank()) return@runCatching emptyMap()
@@ -4040,6 +3983,14 @@ private fun String.sourceFolderConfigurationIdsFromToken(): Map<String, List<Str
     }.filter { it.second.isNotEmpty() }.toMap()
 }.getOrElse { emptyMap() }
 
+// (ARCH-2) LEGACY READ-ONLY: decodes the positional pipe-delimited settings blob written before
+// this migration. Every field is looked up by an index derived from how many earlier fields
+// happen to exist (mcpIndex + N) — exactly the fragile pattern that made a mis-ordered append
+// silently shift every field after it. Never extend this positional layout again; new AppSettings
+// fields belong only in settingsJson()/settingsFromJson() below, where each field has an explicit
+// name and a missing/new key can never shift another. This function (and the *FromToken readers it
+// calls) must stay byte-for-byte capable of decoding old caches, including the frozen
+// AutosaveGoldenV1Test fixture.
 private fun settingsFromToken(token: String): AppSettings? = runCatching {
     val p = token.tokenFields()
     if (p.size < 5) return@runCatching null
@@ -4092,8 +4043,8 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         openNewFilesWithUnfiltered = p.getOrNull(mcpIndex + 7)?.toBooleanStrictOrNull() ?: false,
         // Missing entirely (old token, predates this field) -> emptyList(); present-but-empty
         // (fieldToken's "~" for an empty list) -> also emptyList() via pathTokenList()'s own blank
-        // check. See settingsToken above for why this field is pathTokenList()-shaped rather than
-        // a plain fieldToken() string.
+        // check. This field is pathTokenList()-shaped (comma-joined b64 paths, b64'd once more)
+        // rather than a plain fieldToken() string — a relic of the retired positional writer.
         sourceFolders = p.getOrNull(mcpIndex + 8)?.pathTokenList() ?: emptyList(),
         editorCommand = p.getOrNull(mcpIndex + 9)?.takeIf { it.isNotBlank() } ?: "",
         aiProviderProfiles = p.getOrNull(mcpIndex + 10)?.aiProviderProfilesFromToken()
@@ -4110,6 +4061,243 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         copyMaskRules = copyMaskRules,
         openUnfilteredOnCtrlF = p.getOrNull(mcpIndex + 17)?.toBooleanStrictOrNull() ?: false,
         mcpAllowBrowserClients = p.getOrNull(mcpIndex + 18)?.toBooleanStrictOrNull() ?: false,
+    )
+}.getOrNull()
+
+// (ARCH-2) Current settings format: a single keyed JSON object (the "settings" autosave line
+// carries this text b64'd once, see serializeAutosave()). Every field is looked up by name, so
+// adding, removing, or reordering fields here never shifts any other field's value — the exact
+// failure mode settingsFromToken()/settingsToken() above were retired to fix. Kept as plain
+// kotlinx.serialization.json runtime calls (buildJsonObject/Json.parseToJsonElement), the same
+// pattern already used in debug/ControlServer.kt and ai/AnthropicMessagesProvider.kt, rather than
+// @Serializable data classes, so this migration doesn't need a new Gradle plugin.
+private fun AppSettings.settingsJson(): String = buildJsonObject {
+    put("formatVersion", 1)
+    put("theme", theme.name)
+    put("fontSize", fontSize)
+    put("fontMono", fontMono)
+    defaultSaveDir?.let { put("defaultSaveDir", it) }
+    put("mostUsedTagLimit", mostUsedTagLimit)
+    put("filterListRows", filterListRows)
+    put("visibleTabLimit", visibleTabLimit)
+    put("autoExportNotes", autoExportNotes)
+    put("autoSaveFilters", autoSaveFilters)
+    put("annotationLogBlockStyle", annotationLogBlockStyle.name)
+    put("numberAnnotationBlocks", numberAnnotationBlocks)
+    put("annotationPrefixLabel", annotationPrefixLabel)
+    put("navScrollMargin", navScrollMargin)
+    put("logRowWrapLimitChars", logRowWrapLimitChars)
+    put("autoLogRowWrap", autoLogRowWrap)
+    put("mcpControlEnabled", mcpControlEnabled)
+    put("mcpControlPort", mcpControlPort)
+    put("maskWordOnCopy", maskWordOnCopy)
+    put("maskWordTarget", maskWordTarget)
+    put("maskWordReplacement", maskWordReplacement)
+    put("highlightEntireCrashGroup", highlightEntireCrashGroup)
+    put("ctrlFTarget", ctrlFTarget.name)
+    put("openNewFilesWithUnfiltered", openNewFilesWithUnfiltered)
+    put("openUnfilteredOnCtrlF", openUnfilteredOnCtrlF)
+    put("sourceFolders", buildJsonArray { sourceFolders.forEach { add(it) } })
+    put("editorCommand", editorCommand)
+    put("aiMaxToolRounds", aiMaxToolRounds)
+    put("sourceAutoDiscoveryEnabled", sourceAutoDiscoveryEnabled)
+    put("sourceFolderInfo", sourceFolderInfoJson(sourceFolderInfo))
+    put("sourceLogConfigurations", sourceLogConfigurationsJson(sourceLogConfigurations))
+    put("sourceFolderConfigurationIds", sourceFolderConfigurationIdsJson(sourceFolderConfigurationIds))
+    // normalizeAiProviderProfiles() is what serializeAutosave() previously relied on
+    // aiProviderProfilesToken() to apply — reused here so the persisted list is always
+    // exactly-one-selected/id-deduplicated the same way the writer always guaranteed before.
+    put("aiProviderProfiles", aiProviderProfilesJson(normalizeAiProviderProfiles(aiProviderProfiles)))
+    put("copyMaskRules", copyMaskRulesJson(copyMaskRules))
+    put("mcpAllowBrowserClients", mcpAllowBrowserClients)
+}.toString()
+
+private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
+    info.forEach { (path, value) ->
+        put(
+            path,
+            buildJsonObject {
+                put("description", value.description)
+                value.readmePath?.let { put("readmePath", it) }
+            },
+        )
+    }
+}
+
+private fun sourceLogConfigurationsJson(configs: List<SourceLogConfiguration>) = buildJsonArray {
+    configs.forEach { cfg ->
+        add(
+            buildJsonObject {
+                put("id", cfg.id)
+                put("name", cfg.name)
+                put("wrapperRules", wrapperRulesJson(cfg.wrapperRules))
+            },
+        )
+    }
+}
+
+private fun wrapperRulesJson(rules: List<SourceWrapperRule>) = buildJsonArray {
+    rules.forEach { rule ->
+        add(
+            buildJsonObject {
+                put("ownerType", rule.ownerType)
+                put("methodName", rule.methodName)
+                put("tagArgumentIndex", rule.tagArgumentIndex)
+                put("messageArgumentIndex", rule.messageArgumentIndex)
+                rule.throwableArgumentIndex?.let { put("throwableArgumentIndex", it) }
+            },
+        )
+    }
+}
+
+private fun sourceFolderConfigurationIdsJson(ids: Map<String, List<String>>) = buildJsonObject {
+    ids.forEach { (path, configIds) -> put(path, buildJsonArray { configIds.forEach { add(it) } }) }
+}
+
+private fun aiProviderProfilesJson(profiles: List<AiProviderProfile>) = buildJsonArray {
+    profiles.forEach { profile ->
+        add(
+            buildJsonObject {
+                put("id", profile.id)
+                put("displayName", profile.displayName)
+                put("baseUrl", profile.baseUrl)
+                put("model", profile.model)
+                put("selected", profile.selected)
+                put("remoteDisclosureAcknowledged", profile.remoteDisclosureAcknowledged)
+                put("kind", profile.kind.name)
+                put("executablePath", profile.executablePath)
+                put("reasoningEffort", profile.reasoningEffort)
+            },
+        )
+    }
+}
+
+private fun copyMaskRulesJson(rules: List<CopyMaskRule>) = buildJsonArray {
+    rules.forEach { rule -> add(buildJsonObject { put("target", rule.target); put("replacement", rule.replacement) }) }
+}
+
+private fun JsonObject.stringOrNull(key: String): String? = this[key]?.jsonPrimitive?.contentOrNull
+
+private fun JsonObject.boolOrDefault(key: String, default: Boolean): Boolean =
+    this[key]?.jsonPrimitive?.booleanOrNull ?: default
+
+private fun JsonObject.intOrDefault(key: String, default: Int): Int = this[key]?.jsonPrimitive?.intOrNull ?: default
+
+private fun JsonObject.stringArray(key: String): List<String> =
+    (this[key] as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+
+private fun JsonObject.sourceFolderInfoFromJson(key: String): Map<String, SourceFolderInfo> =
+    (this[key] as? JsonObject)?.entries?.mapNotNull { (path, value) ->
+        val obj = value as? JsonObject ?: return@mapNotNull null
+        path to SourceFolderInfo(
+            description = obj.stringOrNull("description").orEmpty(),
+            readmePath = obj.stringOrNull("readmePath"),
+        )
+    }?.toMap() ?: emptyMap()
+
+private fun JsonObject.wrapperRuleFromJson(): SourceWrapperRule? {
+    val ownerType = stringOrNull("ownerType") ?: return null
+    val methodName = stringOrNull("methodName") ?: return null
+    return SourceWrapperRule(
+        ownerType = ownerType,
+        methodName = methodName,
+        tagArgumentIndex = intOrDefault("tagArgumentIndex", 0),
+        messageArgumentIndex = intOrDefault("messageArgumentIndex", 1),
+        throwableArgumentIndex = this["throwableArgumentIndex"]?.jsonPrimitive?.intOrNull,
+    )
+}
+
+private fun JsonObject.sourceLogConfigurationsFromJson(key: String): List<SourceLogConfiguration> =
+    (this[key] as? JsonArray)?.mapNotNull { el ->
+        val obj = el as? JsonObject ?: return@mapNotNull null
+        val id = obj.stringOrNull("id") ?: return@mapNotNull null
+        val wrapperRules = (obj["wrapperRules"] as? JsonArray)
+            ?.mapNotNull { (it as? JsonObject)?.wrapperRuleFromJson() }
+            ?: emptyList()
+        SourceLogConfiguration(id = id, name = obj.stringOrNull("name") ?: "Logging configuration", wrapperRules = wrapperRules)
+    }?.distinctBy { it.id } ?: emptyList()
+
+private fun JsonObject.sourceFolderConfigurationIdsFromJson(key: String): Map<String, List<String>> =
+    (this[key] as? JsonObject)?.entries?.mapNotNull { (path, value) ->
+        val ids = (value as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+        if (ids.isEmpty()) null else path to ids
+    }?.toMap() ?: emptyMap()
+
+private fun JsonObject.aiProviderProfilesFromJson(key: String): List<AiProviderProfile> {
+    val profiles = (this[key] as? JsonArray)?.mapNotNull { el ->
+        val obj = el as? JsonObject ?: return@mapNotNull null
+        val id = obj.stringOrNull("id")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        AiProviderProfile(
+            id = id,
+            displayName = obj.stringOrNull("displayName")?.ifBlank { "OpenAI-compatible" } ?: "OpenAI-compatible",
+            baseUrl = obj.stringOrNull("baseUrl").orEmpty(),
+            model = obj.stringOrNull("model").orEmpty(),
+            selected = obj.boolOrDefault("selected", false),
+            remoteDisclosureAcknowledged = obj.boolOrDefault("remoteDisclosureAcknowledged", false),
+            kind = obj.stringOrNull("kind")?.let { raw -> runCatching { AiProviderKind.valueOf(raw) }.getOrNull() }
+                ?: AiProviderKind.OPENAI_COMPATIBLE,
+            executablePath = obj.stringOrNull("executablePath").orEmpty(),
+            reasoningEffort = obj.stringOrNull("reasoningEffort").orEmpty(),
+        )
+    } ?: return listOf(defaultAiProviderProfile())
+    return normalizeAiProviderProfiles(profiles)
+}
+
+private fun JsonObject.copyMaskRulesFromJson(key: String): List<CopyMaskRule> =
+    (this[key] as? JsonArray)?.mapNotNull { el ->
+        val obj = el as? JsonObject ?: return@mapNotNull null
+        CopyMaskRule(target = obj.stringOrNull("target").orEmpty(), replacement = obj.stringOrNull("replacement").orEmpty())
+    } ?: listOf(CopyMaskRule("java", "j*ava"))
+
+// (ARCH-2) Reads the current keyed-JSON settings format written by settingsJson() above. Every
+// lookup is by name with an explicit default matching AppSettings' own default — a missing key
+// (old cache predating a field, or a hand-edited file) falls back to that field's default rather
+// than misreading a neighboring field's value, which is exactly what positional decoding couldn't
+// guarantee. Never throws: a malformed document (or an unexpected element type via jsonPrimitive's
+// cast) is caught by the outer runCatching and reported as a hard failure (null), same contract as
+// settingsFromToken() above.
+private fun settingsFromJson(raw: String): AppSettings? = runCatching {
+    val o = Json.parseToJsonElement(raw).jsonObject
+    AppSettings(
+        theme = o.stringOrNull("theme")?.let { runCatching { ThemePreset.valueOf(it) }.getOrNull() } ?: ThemePreset.LIGHT,
+        fontSize = o.intOrDefault("fontSize", 12),
+        fontMono = o.boolOrDefault("fontMono", true),
+        defaultSaveDir = o.stringOrNull("defaultSaveDir"),
+        mostUsedTagLimit = o.intOrDefault("mostUsedTagLimit", 5),
+        filterListRows = o.intOrDefault("filterListRows", 5).coerceIn(1, 20),
+        visibleTabLimit = o.intOrDefault("visibleTabLimit", 8).coerceIn(2, 20),
+        autoExportNotes = o.boolOrDefault("autoExportNotes", true),
+        autoSaveFilters = o.boolOrDefault("autoSaveFilters", true),
+        annotationLogBlockStyle = o.stringOrNull("annotationLogBlockStyle")
+            ?.let { runCatching { AnnotationLogBlockStyle.valueOf(it) }.getOrNull() }
+            ?: AnnotationLogBlockStyle.JIRA_JAVA,
+        numberAnnotationBlocks = o.boolOrDefault("numberAnnotationBlocks", false),
+        annotationPrefixLabel = o.stringOrNull("annotationPrefixLabel")?.takeIf { it.isNotBlank() } ?: "From",
+        navScrollMargin = o.intOrDefault("navScrollMargin", 5).coerceIn(0, 30),
+        logRowWrapLimitChars = o.intOrDefault("logRowWrapLimitChars", DEFAULT_LOG_ROW_WRAP_LIMIT_CHARS)
+            .coerceIn(MIN_LOG_ROW_WRAP_LIMIT_CHARS, MAX_LOG_ROW_WRAP_LIMIT_CHARS),
+        autoLogRowWrap = o.boolOrDefault("autoLogRowWrap", true),
+        mcpControlEnabled = o.boolOrDefault("mcpControlEnabled", false),
+        mcpControlPort = o.intOrDefault("mcpControlPort", DEFAULT_MCP_PORT).coerceIn(MIN_PORT, MAX_PORT),
+        maskWordOnCopy = o.boolOrDefault("maskWordOnCopy", false),
+        maskWordTarget = o.stringOrNull("maskWordTarget")?.takeIf { it.isNotBlank() } ?: "java",
+        maskWordReplacement = o.stringOrNull("maskWordReplacement")?.takeIf { it.isNotBlank() } ?: "j*ava",
+        highlightEntireCrashGroup = o.boolOrDefault("highlightEntireCrashGroup", false),
+        ctrlFTarget = o.stringOrNull("ctrlFTarget")?.let { runCatching { CtrlFTarget.valueOf(it) }.getOrNull() }
+            ?: CtrlFTarget.KEYWORD_REGEX,
+        openNewFilesWithUnfiltered = o.boolOrDefault("openNewFilesWithUnfiltered", false),
+        openUnfilteredOnCtrlF = o.boolOrDefault("openUnfilteredOnCtrlF", false),
+        sourceFolders = o.stringArray("sourceFolders"),
+        editorCommand = o.stringOrNull("editorCommand").orEmpty(),
+        aiProviderProfiles = o.aiProviderProfilesFromJson("aiProviderProfiles"),
+        aiMaxToolRounds = o.intOrDefault("aiMaxToolRounds", DEFAULT_AI_MAX_TOOL_ROUNDS)
+            .coerceIn(MIN_AI_MAX_TOOL_ROUNDS, MAX_AI_MAX_TOOL_ROUNDS),
+        sourceFolderInfo = o.sourceFolderInfoFromJson("sourceFolderInfo"),
+        sourceLogConfigurations = o.sourceLogConfigurationsFromJson("sourceLogConfigurations"),
+        sourceFolderConfigurationIds = o.sourceFolderConfigurationIdsFromJson("sourceFolderConfigurationIds"),
+        sourceAutoDiscoveryEnabled = o.boolOrDefault("sourceAutoDiscoveryEnabled", true),
+        copyMaskRules = o.copyMaskRulesFromJson("copyMaskRules"),
+        mcpAllowBrowserClients = o.boolOrDefault("mcpAllowBrowserClients", false),
     )
 }.getOrNull()
 
