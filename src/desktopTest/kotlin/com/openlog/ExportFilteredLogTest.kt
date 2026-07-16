@@ -5,6 +5,7 @@ import com.openlog.model.FilterMode
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
 import com.openlog.model.LogTab
+import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.buildFilteredCsv
 import com.openlog.utils.buildFilteredTxt
 import com.openlog.utils.exportFilteredToFile
@@ -97,6 +98,29 @@ class ExportFilteredLogTest {
         // The embedded newline splits the quoted field across two physical lines, so check the
         // joined content rather than a single `lines()` entry.
         assertTrue(csv.contains("\"has\na newline\""))
+    }
+
+    @Test
+    @Suppress("MagicNumber")
+    fun filteredBuildersAndStreamingExportBoundCatastrophicRegexPerOperation() {
+        val message = "a".repeat(40) + "!"
+        val logs = (1..200).map { id ->
+            LogEntry(id, "10:00:00.000", LogLevel.I, "App", message)
+        }
+        val filtered = tab(
+            logs,
+            Filter(mode = FilterMode.KEYWORD, kwText = "(a+)+$", kwRegex = true),
+        )
+        val builderContext = RegexEvaluationContext(matchBudgetNanos = 1L)
+        val streamingContext = RegexEvaluationContext(matchBudgetNanos = 1L)
+        val destination = File(createTempDirectory("openlog-regex-export").toFile(), "out.txt")
+
+        assertEquals("", buildFilteredTxt(filtered, builderContext))
+        exportFilteredToFile(filtered, destination, csv = false, regexContext = streamingContext)
+
+        assertEquals("", destination.readText())
+        assertEquals(1, builderContext.timeoutCountForTesting)
+        assertEquals(1, streamingContext.timeoutCountForTesting)
     }
 
     // ── Streaming export parity (P-03) ──────────────────────────────────

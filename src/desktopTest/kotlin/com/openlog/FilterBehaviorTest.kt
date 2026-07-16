@@ -13,8 +13,10 @@ import com.openlog.model.MessageRule
 import com.openlog.model.SequenceDef
 import com.openlog.ui.buildFullLineAnnotation
 import com.openlog.ui.keywordRegexHighlightRanges
+import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.computeItems
 import com.openlog.utils.passesFilter
+import com.openlog.utils.visibleEntries
 import com.openlog.utils.visibleLogLineText
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -282,11 +284,79 @@ class FilterBehaviorTest {
     }
 
     @Test
+    @Suppress("MagicNumber")
+    fun logHighlightBatchQuarantinesCatastrophicPattern() {
+        val regexContext = RegexEvaluationContext(matchBudgetNanos = 1L)
+        val highlighter = Highlighter("h1", "(a+)+$", true, Color.Yellow, true)
+
+        repeat(100) { id ->
+            buildFullLineAnnotation(
+                entry = LogEntry(id, "10:00:00.000", LogLevel.I, "App", "a".repeat(40) + "!"),
+                highlighters = listOf(highlighter),
+                tsColor = Color.Gray,
+                pidColor = Color.Gray,
+                tagColor = Color.DarkGray,
+                msgColor = Color.Black,
+                keywordRegexFilter = null,
+                regexContext = regexContext,
+            )
+        }
+
+        assertEquals(1, regexContext.timeoutCountForTesting)
+    }
+
+    @Test
     fun invalidRegexFilterDoesNotThrowOrMatch() {
         val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "request complete")
         val filter = Filter(mode = FilterMode.KEYWORD, kwText = "[", kwRegex = true)
 
         assertFalse(passesFilter(entry, filter))
+    }
+
+    @Test
+    @Suppress("MagicNumber")
+    fun bulkFilteringQuarantinesCatastrophicPatternForWholeOperation() {
+        val catastrophicMessage = "a".repeat(40) + "!"
+        val logs = (1..200).map { id ->
+            LogEntry(id, "10:00:00.000", LogLevel.I, "App", catastrophicMessage)
+        }
+        val tab = LogTab(
+            id = "regex-timeout",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(mode = FilterMode.KEYWORD, kwText = "(a+)+$", kwRegex = true),
+        )
+        val regexContext = RegexEvaluationContext(matchBudgetNanos = 1L)
+
+        val visible = visibleEntries(tab, applyFilter = true, regexContext = regexContext)
+
+        assertTrue(visible.isEmpty())
+        assertEquals(1, regexContext.timeoutCountForTesting)
+    }
+
+    @Test
+    @Suppress("MagicNumber")
+    fun timedOutComputeResultDoesNotPoisonLaterOperationCache() {
+        val catastrophicMessage = "a".repeat(40) + "!"
+        val logs = (1..20).map { id ->
+            LogEntry(id, "10:00:00.000", LogLevel.I, "App", catastrophicMessage)
+        }
+        val tab = LogTab(
+            id = "regex-timeout-cache",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(mode = FilterMode.KEYWORD, kwText = "(a+)+$", kwRegex = true),
+        )
+        val firstOperation = RegexEvaluationContext(matchBudgetNanos = 1L)
+        val secondOperation = RegexEvaluationContext(matchBudgetNanos = 1L)
+
+        assertTrue(computeItems(tab, applyFilter = true, regexContext = firstOperation).isEmpty())
+        assertTrue(computeItems(tab, applyFilter = true, regexContext = secondOperation).isEmpty())
+
+        assertEquals(1, firstOperation.timeoutCountForTesting)
+        assertEquals(1, secondOperation.timeoutCountForTesting)
     }
 
     @Test

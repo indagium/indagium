@@ -36,6 +36,7 @@ import com.openlog.ui.ManualCollapseAvailability
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SettingsSection
 import com.openlog.ui.SplitMode
+import com.openlog.ui.annotationsToken
 import com.openlog.ui.blockOrderDuringDrag
 import com.openlog.ui.consumeFilterSearchRequest
 import com.openlog.ui.cumulativeBlockOffsets
@@ -56,6 +57,7 @@ import com.openlog.ui.themeColors
 import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
+import com.openlog.utils.listArchiveLogCandidates
 import kotlinx.coroutines.delay
 import java.io.File
 import java.io.RandomAccessFile
@@ -1624,8 +1626,113 @@ class AppStateBehaviorTest {
         assertEquals("hello", restoredTab.logData.single().msg)
     }
 
+    @Test
+    fun autosaveRestoreRefreshesReplacedArchiveContentMetadataAndLargeFileMode() {
+        val dir = createTempDirectory("openlog-zip-refresh").toFile()
+        val entryPath = "FS/data/anr/main_log.txt"
+        val zip = buildZipFixture(
+            dir,
+            "bugreport.zip",
+            mapOf(entryPath to "06-26 10:00:00.000  123  456 I App: old\n"),
+        )
+        val cacheFile = File(dir, "state.cache")
+        val original = AppState(cacheFile)
+        original.openZipFile(zip)
+        waitUntil { original.tabs.size == 1 && !original.isLoading }
+        val persistedSize = original.tabs.single().archiveCandidate!!.sizeBytes
+        original.autosaveNow()
+
+        val newMessage = "replacement-${"x".repeat(160)}"
+        buildZipFixture(
+            dir,
+            "bugreport.zip",
+            mapOf(entryPath to "06-26 10:00:00.000  123  456 I App: $newMessage\n"),
+        )
+        val resolverCalls = AtomicInteger()
+        val restored = AppState(
+            autosaveFile = cacheFile,
+            restoreOnCreate = true,
+            restoredArchiveLargeFileModeBytes = 100L,
+            restoredArchiveCandidateResolver = { archiveFile, path ->
+                resolverCalls.incrementAndGet()
+                listArchiveLogCandidates(archiveFile).firstOrNull { it.entryPath == path }
+            },
+        )
+
+        // Construction is metadata-only: the persisted candidate is visible, but current archive
+        // metadata is not resolved until the queued IO load starts.
+        assertEquals(0, resolverCalls.get())
+        assertEquals(persistedSize, restored.tabs.single().archiveCandidate?.sizeBytes)
+        assertFalse(restored.tabs.single().largeFileMode)
+
+        restored.startPendingRestoredTabLoads()
+        waitUntil { restored.tabs.size == 1 && !restored.isLoading }
+
+        val tab = restored.tabs.single()
+        val refreshedCandidate = requireNotNull(tab.archiveCandidate)
+        assertEquals(1, resolverCalls.get())
+        assertEquals(newMessage, tab.logData.single().msg)
+        assertTrue(refreshedCandidate.sizeBytes > persistedSize)
+        assertTrue(refreshedCandidate.sizeBytes >= 100L)
+        assertTrue(tab.largeFileMode)
+
+        restored.autosaveNow()
+        val persistedAgain = AppState(cacheFile, restoreOnCreate = true)
+        assertEquals(refreshedCandidate, persistedAgain.tabs.single().archiveCandidate)
+    }
+
+    @Test
+    fun autosaveRestoreKeepsGenuinelyEmptyArchiveEntry() {
+        val dir = createTempDirectory("openlog-zip-empty-restore").toFile()
+        val entryPath = "FS/data/anr/main_log.txt"
+        val zip = buildZipFixture(dir, "bugreport.zip", mapOf(entryPath to ""))
+        val cacheFile = File(dir, "state.cache")
+        val original = AppState(cacheFile)
+        original.openZipFile(zip)
+        waitUntil { original.tabs.size == 1 && !original.isLoading }
+        original.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        restored.startPendingRestoredTabLoads()
+        waitUntil { restored.tabs.size == 1 && !restored.isLoading }
+
+        assertTrue(restored.tabs.single().logData.isEmpty())
+        assertEquals(entryPath, restored.tabs.single().archiveCandidate?.entryPath)
+        assertEquals(null, restored.openError)
+    }
+
+    @Test
+    fun autosaveRestoreDropsArchiveTabWhenSavedEntryIsMissing() {
+        val dir = createTempDirectory("openlog-zip-missing-restore").toFile()
+        val entryPath = "FS/data/anr/main_log.txt"
+        val zip = buildZipFixture(
+            dir,
+            "bugreport.zip",
+            mapOf(entryPath to "06-26 10:00:00.000  123  456 I App: old\n"),
+        )
+        val cacheFile = File(dir, "state.cache")
+        val original = AppState(cacheFile)
+        original.openZipFile(zip)
+        waitUntil { original.tabs.size == 1 && !original.isLoading }
+        original.autosaveNow()
+
+        buildZipFixture(
+            dir,
+            "bugreport.zip",
+            mapOf("FS/data/anr/renamed_log.txt" to "06-26 10:00:00.000  123  456 I App: new\n"),
+        )
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        assertEquals(1, restored.tabs.size)
+
+        restored.startPendingRestoredTabLoads()
+        waitUntil { restored.tabs.isEmpty() && !restored.isLoading }
+
+        assertEquals("Restored archive entry is unavailable", restored.openError?.title)
+        assertTrue(restored.openError?.path.orEmpty().endsWith("!$entryPath"))
+    }
+
     // Backward compatibility: an archive tab token written before PERF-3b (no trailing candidate
-    // field) must still restore, via the legacy synchronous listArchiveLogCandidates() path.
+    // field) must still restore without bringing archive listing back onto construction.
     @Test
     fun autosaveRestoresArchiveTabFromLegacyTokenWithoutCandidateField() {
         val dir = createTempDirectory("openlog-zip-legacy").toFile()
@@ -1649,10 +1756,22 @@ class AppStateBehaviorTest {
         }
         cacheFile.writeText(rewritten.joinToString("\n"))
 
-        val restored = AppState(cacheFile, restoreOnCreate = true)
+        val resolverCalls = AtomicInteger()
+        val restored = AppState(
+            autosaveFile = cacheFile,
+            restoreOnCreate = true,
+            restoredArchiveCandidateResolver = { archiveFile, path ->
+                resolverCalls.incrementAndGet()
+                listArchiveLogCandidates(archiveFile).firstOrNull { it.entryPath == path }
+            },
+        )
+        assertEquals(0, resolverCalls.get())
+        assertEquals(null, restored.tabs.single().archiveCandidate)
         restored.startPendingRestoredTabLoads()
         waitUntil { restored.tabs.size == 1 && !restored.isLoading }
+        assertEquals(1, resolverCalls.get())
         assertEquals("hello", restored.tabs.single().logData.single().msg)
+        assertEquals("FS/data/anr/main_log.txt", restored.tabs.single().archiveCandidate?.entryPath)
     }
 
     // PERF-4: a selection-only change must not alter what autosave persists, so the debounced
@@ -2204,6 +2323,100 @@ class AppStateBehaviorTest {
         // No sourcePath to compare against (e.g. a merged tab) — can't prove a mismatch, so it
         // still matches by name, same as before fingerprinting existed.
         assertEquals(listOf(noteFile.absolutePath), state.recentNotesForTab(unknownTab))
+    }
+
+    @Test
+    fun recentNotesUseLegacyFingerprintWhenEmbeddedNoteFingerprintIsMalformed() {
+        val dir = createTempDirectory("openlog-malformed-note-fingerprint-legacy").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val noteFile = File(notesDir, "sample_analysis.md").apply { writeText("legacy owner") }
+        val legacySourcePath = File(dir, "folder_a/sample.log").absolutePath
+        File(notesDir, "sample_analysis.ann").writeText(
+            Annotations().annotationsToken(legacySourcePath).withMalformedAnnotationField(4),
+        )
+        File(notesDir, "sample_analysis.md.src").writeText(legacySourcePath)
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir).apply {
+            recentNotes = listOf(noteFile.absolutePath)
+        }
+
+        val legacyOwner = mkTab("same", "sample.log", emptyList()).copy(sourcePath = legacySourcePath)
+        val differentOwner = mkTab("other", "sample.log", emptyList())
+            .copy(sourcePath = File(dir, "folder_b/sample.log").absolutePath)
+
+        assertEquals(listOf(noteFile.absolutePath), state.recentNotesForTab(legacyOwner))
+        assertTrue(state.recentNotesForTab(differentOwner).isEmpty())
+    }
+
+    @Test
+    fun malformedAnnotationFieldsDoNotBreakRecentNotePositiveEvidenceFiltering() {
+        val dir = createTempDirectory("openlog-malformed-note-fields").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val noteFile = File(notesDir, "sample_analysis.md").apply { writeText("unknown owner") }
+        val annFile = File(notesDir, "sample_analysis.ann")
+        val sourcePath = File(dir, "folder_a/sample.log").absolutePath
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir).apply {
+            recentNotes = listOf(noteFile.absolutePath)
+        }
+        val tab = mkTab("log", "sample.log", emptyList()).copy(sourcePath = sourcePath)
+        val validToken = Annotations().annotationsToken(File(dir, "different/sample.log").absolutePath)
+
+        // tokenFields decodes every field eagerly. Corrupting any one of them must be contained,
+        // including fields before the fingerprint and the fingerprint field itself.
+        repeat(5) { fieldIndex ->
+            annFile.writeText(validToken.withMalformedAnnotationField(fieldIndex))
+            assertEquals(
+                listOf(noteFile.absolutePath),
+                state.recentNotesForTab(tab),
+                "malformed field $fieldIndex must behave as an absent fingerprint",
+            )
+        }
+    }
+
+    @Test
+    fun validEmbeddedNoteFingerprintTakesPrecedenceOverLegacyFingerprint() {
+        val dir = createTempDirectory("openlog-embedded-note-fingerprint-precedence").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val noteFile = File(notesDir, "sample_analysis.md").apply { writeText("embedded owner") }
+        val embeddedSourcePath = File(dir, "folder_a/sample.log").absolutePath
+        val legacySourcePath = File(dir, "folder_b/sample.log").absolutePath
+        File(notesDir, "sample_analysis.ann").writeText(Annotations().annotationsToken(embeddedSourcePath))
+        File(notesDir, "sample_analysis.md.src").writeText(legacySourcePath)
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir).apply {
+            recentNotes = listOf(noteFile.absolutePath)
+        }
+
+        val embeddedOwner = mkTab("embedded", "sample.log", emptyList()).copy(sourcePath = embeddedSourcePath)
+        val legacyOwner = mkTab("legacy", "sample.log", emptyList()).copy(sourcePath = legacySourcePath)
+
+        assertEquals(listOf(noteFile.absolutePath), state.recentNotesForTab(embeddedOwner))
+        assertTrue(state.recentNotesForTab(legacyOwner).isEmpty())
+    }
+
+    @Test
+    fun autoExportNoteCollisionFallsBackAfterMalformedEmbeddedFingerprint() {
+        val dir = createTempDirectory("openlog-malformed-note-auto-export").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val originalNote = File(notesDir, "sample_analysis.md").apply { writeText("keep original") }
+        val originalSourcePath = File(dir, "folder_a/sample.log").absolutePath
+        val malformedToken = Annotations().annotationsToken(originalSourcePath).withMalformedAnnotationField(0)
+        val malformedAnn = File(notesDir, "sample_analysis.ann").apply { writeText(malformedToken) }
+        val legacyFingerprint = File(notesDir, "sample_analysis.md.src").apply { writeText(originalSourcePath) }
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = File(dir, "folder_b/sample.log").absolutePath),
+        )
+
+        state.confirmAddAnn("log", "log", listOf(1), "new owner", null)
+        waitUntil {
+            File(notesDir, "sample_analysis_2.md").exists() &&
+                File(notesDir, "sample_analysis_2.ann").exists()
+        }
+
+        assertEquals("keep original", originalNote.readText())
+        assertEquals(malformedToken, malformedAnn.readText())
+        assertEquals(originalSourcePath, legacyFingerprint.readText())
+        assertEquals(listOf(File(notesDir, "sample_analysis_2.md").absolutePath), state.recentNotes)
     }
 
     @Test
@@ -5125,6 +5338,9 @@ class AppStateBehaviorTest {
             .build()
         return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString()).statusCode()
     }
+
+    private fun String.withMalformedAnnotationField(index: Int): String =
+        split("|").toMutableList().also { fields -> fields[index] = "%%%" }.joinToString("|")
 
     private fun waitUntil(timeoutMs: Long = 2_000, condition: () -> Boolean) {
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)

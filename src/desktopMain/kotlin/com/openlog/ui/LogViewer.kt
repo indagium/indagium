@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.*
+import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.computeItems
 import com.openlog.utils.passesFilter
 import com.openlog.utils.regexRanges
@@ -67,9 +68,13 @@ private const val SPLICE_SUMMARY_GUARD_MIN_ITEMS = 4096
 internal fun isCrashGroupRow(groupColor: Color?, highlightEntireCrashGroup: Boolean): Boolean =
     highlightEntireCrashGroup && groupColor == DANGER_RED
 
-private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
+private fun hlRanges(
+    msg: String,
+    hl: Highlighter,
+    regexContext: RegexEvaluationContext,
+): List<Pair<Int, Int>> =
     if (hl.regex) {
-        regexRanges(msg, hl.pattern)
+        regexRanges(msg, hl.pattern, regexContext = regexContext)
     } else {
         buildList {
             var i = 0
@@ -81,14 +86,18 @@ private fun hlRanges(msg: String, hl: Highlighter): List<Pair<Int, Int>> =
         }
     }
 
-internal fun keywordRegexHighlightRanges(lineText: String, filter: Filter): List<Pair<Int, Int>> =
+internal fun keywordRegexHighlightRanges(
+    lineText: String,
+    filter: Filter,
+    regexContext: RegexEvaluationContext = RegexEvaluationContext(),
+): List<Pair<Int, Int>> =
     if (
         filter.mode == FilterMode.KEYWORD &&
         filter.kwRegex &&
         filter.kwText.isNotBlank() &&
         filter.kwHighlightEnabled
     ) {
-        regexRanges(lineText, filter.kwText)
+        regexRanges(lineText, filter.kwText, regexContext = regexContext)
     } else {
         emptyList()
     }
@@ -364,16 +373,17 @@ internal fun expansionAndIndexForEntry(
     entryId: Int,
     currentItems: List<LogItem>? = null,
 ): ExpansionAndIndexTarget? {
+    val regexContext = RegexEvaluationContext()
     // An entry excluded by the filter itself (not merely folded inside a collapsed group) can
     // never be surfaced by expanding groups — bail before the loop below instead of burning up to
     // 24 rounds of full computeItems() recomputation trying every collapsed header in the file,
     // which on a large log made a bulk exclude/hide action feel like a hang.
     if (applyFilter) {
         val entry = tab.rmap[entryId] ?: return null
-        if (!passesFilter(entry, tab.filter)) return null
+        if (!passesFilter(entry, tab.filter, regexContext)) return null
     }
     var expanded = tab.expanded
-    var candidateItems = currentItems ?: computeItems(tab.copy(expanded = expanded), applyFilter)
+    var candidateItems = currentItems ?: computeItems(tab.copy(expanded = expanded), applyFilter, regexContext)
     repeat(24) {
         val visibleIdx = candidateItems.indexOfEntry(entryId)
         if (visibleIdx >= 0) return ExpansionAndIndexTarget(expanded, visibleIdx)
@@ -388,10 +398,10 @@ internal fun expansionAndIndexForEntry(
         }
         val ranked = rankCollapsedHeadersByProximity(collapsedHeaders, entryId)
         val groupToOpen = ranked.firstOrNull { gid ->
-            computeItems(tab.copy(expanded = expanded + gid), applyFilter).anyEntry(entryId)
+            computeItems(tab.copy(expanded = expanded + gid), applyFilter, regexContext).anyEntry(entryId)
         } ?: ranked.firstOrNull() ?: return null
         expanded = expanded + groupToOpen
-        candidateItems = computeItems(tab.copy(expanded = expanded), applyFilter)
+        candidateItems = computeItems(tab.copy(expanded = expanded), applyFilter, regexContext)
     }
     return null
 }
@@ -438,6 +448,26 @@ fun buildFullLineAnnotation(
     tagColor: Color,
     msgColor: Color,
     keywordRegexFilter: Filter? = null,
+): AnnotatedString = buildFullLineAnnotation(
+    entry,
+    highlighters,
+    tsColor,
+    pidColor,
+    tagColor,
+    msgColor,
+    keywordRegexFilter,
+    RegexEvaluationContext(),
+)
+
+internal fun buildFullLineAnnotation(
+    entry: LogEntry,
+    highlighters: List<Highlighter>,
+    tsColor: Color,
+    pidColor: Color,
+    tagColor: Color,
+    msgColor: Color,
+    keywordRegexFilter: Filter?,
+    regexContext: RegexEvaluationContext,
 ): AnnotatedString = buildAnnotatedString {
     withStyle(SpanStyle(color = tsColor)) { append(entry.ts) }
     if (entry.pid > 0) {
@@ -458,13 +488,13 @@ fun buildFullLineAnnotation(
     withStyle(SpanStyle(color = msgColor)) { append(entry.msg) }
     val lineText = visibleLogLineText(entry)
     for (hl in highlighters.filter { it.on && it.pattern.isNotBlank() }) {
-        hlRanges(lineText, hl).forEach { (s, e) ->
+        hlRanges(lineText, hl, regexContext).forEach { (s, e) ->
             if (s < e && e <= lineText.length)
                 addStyle(SpanStyle(background = hl.color.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold), s, e)
         }
     }
     keywordRegexFilter?.let { filter ->
-        keywordRegexHighlightRanges(lineText, filter).forEach { (s, e) ->
+        keywordRegexHighlightRanges(lineText, filter, regexContext).forEach { (s, e) ->
             if (s < e && e <= lineText.length) {
                 addStyle(
                     SpanStyle(background = filter.kwHighlightColor.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold),
@@ -704,6 +734,9 @@ fun LogViewer(
                     EmptyState(tc, totalCnt, onClearFilter)
                 }
                 return
+            }
+            val highlightRegexContext = remember(panelKey, effectiveTab.filter, listSummary) {
+                RegexEvaluationContext()
             }
             val lazyState = listState ?: scrollStates.lazyState(panelKey)
             val hScroll   = scrollStates.scrollState(panelKey)
@@ -946,6 +979,7 @@ fun LogViewer(
                                             onCtxMenu = itemOnCtxMenu,
                                             onSelectedTextChange = { selectedTextForCopy = it },
                                             rowBoundsAbs = boundsMap,
+                                            regexContext = highlightRegexContext,
                                             highlightEntireCrashGroup = settings.highlightEntireCrashGroup,
                                             autoWrap = settings.autoLogRowWrap,
                                         )
@@ -1388,6 +1422,7 @@ private fun LogRow(
     onCtxMenu: (Int, Float, Float, String) -> Unit,
     onSelectedTextChange: (String) -> Unit,
     rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
+    regexContext: RegexEvaluationContext,
     highlightEntireCrashGroup: Boolean = false,
     // Auto mode's whole point is "use the real available width" — BasicTextField's own softWrap
     // already does that with zero estimation error, using the real font metrics Skia will render
@@ -1420,6 +1455,7 @@ private fun LogRow(
             tagColor,
             msgColor,
             tab.filter,
+            regexContext,
         )
         if (autoWrap) built else visualLogLineForWrapLimit(built, wrapLimitChars)
     }

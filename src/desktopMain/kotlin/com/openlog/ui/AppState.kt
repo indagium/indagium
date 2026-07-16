@@ -33,6 +33,7 @@ import com.openlog.utils.ArchiveBudgetExceededException
 import com.openlog.utils.EntryIdMap
 import com.openlog.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.openlog.utils.MergeSourceFile
+import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.buildMd
@@ -423,6 +424,13 @@ class AppState(
     // 500MB default so tests can exercise the ArchiveBudgetExceededException/showOpenError path
     // with small fixtures instead of needing multi-hundred-MB archives.
     private val archiveEntryByteBudget: Long = MAX_ARCHIVE_ENTRY_BYTES,
+    // Restore-only seams: refreshed archive metadata must be resolved off the UI thread before
+    // publishing parsed rows. Keeping the production threshold unchanged while injecting both
+    // pieces lets tests cross it with tiny fixtures and prove construction never lists archives.
+    private val restoredArchiveLargeFileModeBytes: Long = LARGE_FILE_MODE_BYTES,
+    private val restoredArchiveCandidateResolver: (File, String) -> ZipLogCandidate? = { archiveFile, entryPath ->
+        listArchiveLogCandidates(archiveFile).firstOrNull { it.entryPath == entryPath }
+    },
     // Where the control-server auth token is persisted across restarts (loadOrCreateControlToken)
     // so the user doesn't have to re-copy the MCP client config after every launch. Injectable so
     // tests that actually start a control server via the default factory below don't touch the
@@ -1850,8 +1858,12 @@ class AppState(
     fun selRowRange(tabId: String, fromId: Int, toId: Int) = upTab(tabId) { t ->
         // Prefer the summary LogViewer already computed (same rationale as selRow's range case
         // above) instead of re-filtering the full logData on every shift-click.
+        val regexContext = RegexEvaluationContext()
         val ids = visibleItemsByTab[tabId]?.allIds
-            ?: t.logData.filter { passesFilter(it, t.filter) }.map { it.id }.ifEmpty { t.logData.map { it.id } }.toIntArray()
+            ?: t.logData.filter { passesFilter(it, t.filter, regexContext) }
+                .map { it.id }
+                .ifEmpty { t.logData.map { it.id } }
+                .toIntArray()
         val a = ids.indexOfId(fromId)
         val b = ids.indexOfId(toId)
         if (a < 0 || b < 0) return@upTab t
@@ -1924,10 +1936,11 @@ class AppState(
     }
 
     private fun visibleExpandableGroupIds(t: LogTab): Set<String> {
+        val regexContext = RegexEvaluationContext()
         var expanded = t.expanded
         while (true) {
             fun idsFrom(applyFilter: Boolean): Set<String> =
-                computeItems(t.copy(expanded = expanded), applyFilter)
+                computeItems(t.copy(expanded = expanded), applyFilter, regexContext)
                     .mapNotNull { item ->
                         when (item) {
                             is LogItem.SeqHeader -> item.gid
@@ -3015,9 +3028,14 @@ class AppState(
     private fun readSourceFingerprint(mdFile: File): String? {
         val annFile = File(mdFile.parent, "${mdFile.nameWithoutExtension}.ann")
         val fromAnn = annFile.takeIf { it.exists() }
-            ?.let { runCatching { it.readText() }.getOrNull() }
-            ?.tokenFields()?.getOrNull(4)
-            ?.takeIf { it.isNotBlank() }
+            ?.let { file ->
+                runCatching {
+                    file.readText()
+                        .tokenFields()
+                        .getOrNull(4)
+                        ?.takeIf { it.isNotBlank() }
+                }.getOrNull()
+            }
         if (fromAnn != null) return fromAnn
         return legacySourceFingerprintFile(mdFile).takeIf { it.exists() }
             ?.let { runCatching { it.readText().trim() }.getOrNull() }
@@ -3543,13 +3561,39 @@ class AppState(
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
             var published = false
             try {
-                val logData = runCatching { source.load(parser) }.getOrElse { emptyList() }
+                val result = loadRestoredTab(source)
+                if (result is RestoredTabLoadResult.MissingArchiveEntry) {
+                    ensureActive()
+                    // Remove this job before closeTab() so closing an unavailable shell does not
+                    // cancel the coroutine currently performing that cleanup.
+                    finishActiveLoad(activeLoads.remove(tabId))
+                    closeTab(tabId)
+                    showOpenError(
+                        title = "Restored archive entry is unavailable",
+                        path = "${result.archiveFile.absolutePath}!${result.entryPath}",
+                        message = "The saved archive entry no longer exists or is no longer a readable log.",
+                    )
+                    published = true
+                    return@launch
+                }
+                result as RestoredTabLoadResult.Loaded
                 ensureActive()
-                val rmap = mkRmap(logData)
-                upTab(tabId) { it.copy(logData = logData, rmap = rmap, analysis = pendingAnalysis(logData)) }
+                val rmap = mkRmap(result.logData)
+                // Rows and the metadata that controls their Compose computation become visible in
+                // one snapshot update; a regenerated archive cannot expose new large content under
+                // the persisted small-file classification.
+                upTab(tabId) {
+                    it.copy(
+                        logData = result.logData,
+                        rmap = rmap,
+                        analysis = pendingAnalysis(result.logData),
+                        archiveCandidate = result.archiveCandidate,
+                        largeFileMode = result.largeFileMode,
+                    )
+                }
                 markActiveLoadFinished(tabId)
                 published = true
-                val full = buildLogAnalysis(logData)
+                val full = buildLogAnalysis(result.logData)
                 ensureActive()
                 upTab(tabId) { it.copy(analysis = full) }
             } finally {
@@ -3559,6 +3603,31 @@ class AppState(
         }
         activeLoads[tabId] = ActiveLoad(job)
         job.start()
+    }
+
+    private fun loadRestoredTab(source: RestoredTabSource): RestoredTabLoadResult {
+        return when (source) {
+            is RestoredTabSource.FileSource -> {
+                val logData = runCatching { parser(source.file) }.getOrElse { emptyList() }
+                RestoredTabLoadResult.Loaded(
+                    logData = logData,
+                    archiveCandidate = null,
+                    largeFileMode = source.file.length() >= LARGE_FILE_MODE_BYTES,
+                )
+            }
+            is RestoredTabSource.ArchiveSource -> {
+                val currentCandidate = restoredArchiveCandidateResolver(source.archiveFile, source.entryPath)
+                    ?: return RestoredTabLoadResult.MissingArchiveEntry(source.archiveFile, source.entryPath)
+                val logData = runCatching {
+                    extractCandidate(source.archiveFile, currentCandidate, archiveEntryByteBudget)
+                }.getOrElse { emptyList() }
+                RestoredTabLoadResult.Loaded(
+                    logData = logData,
+                    archiveCandidate = currentCandidate,
+                    largeFileMode = currentCandidate.sizeBytes >= restoredArchiveLargeFileModeBytes,
+                )
+            }
+        }
     }
 
     private fun serializeAutosave(): String = buildString {

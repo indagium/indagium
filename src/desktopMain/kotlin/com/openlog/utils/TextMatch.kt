@@ -31,13 +31,58 @@ internal fun regexCacheSizeForTesting(): Int = regexCache.size
 // no built-in step/time budget, so a catastrophic-backtracking pattern like "(a+)+$" against a
 // long non-matching line can pin a thread indefinitely — the filter's own cancellation check only
 // runs between entries, never inside a single Matcher call. DeadlineCharSequence wraps the real
-// haystack and throws once a wall-clock budget elapses, checked periodically inside charAt() —
+// haystack and throws once a monotonic-clock budget elapses, checked periodically inside charAt() —
 // the exact call java.util.regex.Matcher drives per character it inspects, backtracking included.
 // 100ms is generous for any legitimate pattern/line combination in this app (interactive filter
 // typing already debounces well above that) while bounding the worst case to "one slow frame,"
 // never "the thread never comes back."
 private const val REGEX_MATCH_BUDGET_MS = 100L
+private const val REGEX_MATCH_BUDGET_NANOS = REGEX_MATCH_BUDGET_MS * 1_000_000L
 private const val DEADLINE_CHECK_INTERVAL = 1024
+internal const val MAX_REGEX_TIMEOUTS_PER_OPERATION = 3
+
+/**
+ * Computation-local containment for user-authored regexes.
+ *
+ * A pattern that times out is skipped for the rest of this one operation, and after a small
+ * number of distinct patterns time out all further regex evaluation is skipped. Instances must
+ * stay local to one filter/export/render/tool computation: a new operation gets a new instance
+ * and retries patterns that timed out previously.
+ */
+internal class RegexEvaluationContext(
+    // Overridden only by deterministic tests; every production operation uses the 100ms default.
+    internal val matchBudgetNanos: Long = REGEX_MATCH_BUDGET_NANOS,
+) {
+    private val timedOutPatterns = HashSet<RegexKey>()
+    private var timeoutCount = 0
+
+    internal val timeoutCountForTesting: Int get() = timeoutCount
+
+    internal val hasTimedOut: Boolean get() = timeoutCount > 0
+
+    private fun canEvaluate(key: RegexKey): Boolean =
+        timeoutCount < MAX_REGEX_TIMEOUTS_PER_OPERATION && key !in timedOutPatterns
+
+    private fun recordTimeout(key: RegexKey) {
+        if (timedOutPatterns.add(key)) timeoutCount++
+    }
+
+    internal fun <T> evaluate(
+        pattern: String,
+        ignoreCase: Boolean,
+        timedOutResult: T,
+        block: () -> T,
+    ): T {
+        val key = RegexKey(pattern, ignoreCase)
+        if (!canEvaluate(key)) return timedOutResult
+        return try {
+            block()
+        } catch (ignoredTimeout: RegexTimeoutException) {
+            recordTimeout(key)
+            timedOutResult
+        }
+    }
+}
 
 private class RegexTimeoutException : RuntimeException() {
     // This is a control-flow signal thrown on a hot path, not a real exceptional condition worth
@@ -46,12 +91,12 @@ private class RegexTimeoutException : RuntimeException() {
 }
 
 // length must stay exact (the regex engine relies on it for bounds/anchors); only charAt (and, for
-// safety, subSequence) does the deadline check. deadlineAtMs is computed once per top-level
+// safety, subSequence) does the deadline check. deadlineAtNanos is computed once per top-level
 // containsPattern/firstRegexMatch/regexRanges call and shared by every charAt during that one
 // match/find/findAll pass — NOT reset per character — so the budget bounds the whole operation.
 private class DeadlineCharSequence(
     private val real: CharSequence,
-    private val deadlineAtMs: Long,
+    private val deadlineAtNanos: Long,
 ) : CharSequence {
     private var calls = 0
 
@@ -59,7 +104,7 @@ private class DeadlineCharSequence(
 
     override fun get(index: Int): Char {
         calls++
-        if (calls % DEADLINE_CHECK_INTERVAL == 0 && System.currentTimeMillis() > deadlineAtMs) {
+        if (calls % DEADLINE_CHECK_INTERVAL == 0 && System.nanoTime() - deadlineAtNanos >= 0L) {
             throw RegexTimeoutException()
         }
         return real[index]
@@ -71,8 +116,8 @@ private class DeadlineCharSequence(
     override fun subSequence(startIndex: Int, endIndex: Int): CharSequence = real.subSequence(startIndex, endIndex).toString()
 }
 
-private fun deadlineWrap(haystack: String): CharSequence =
-    DeadlineCharSequence(haystack, System.currentTimeMillis() + REGEX_MATCH_BUDGET_MS)
+private fun deadlineWrap(haystack: String, regexContext: RegexEvaluationContext): CharSequence =
+    DeadlineCharSequence(haystack, System.nanoTime() + regexContext.matchBudgetNanos)
 
 // This is the exact text presented by LogViewer. Keyword-regex filtering and its visual
 // highlight must use one representation so punctuation at the tag/message boundary cannot make
@@ -98,16 +143,15 @@ internal fun containsPattern(
     pattern: String,
     regex: Boolean,
     ignoreCase: Boolean = true,
+    regexContext: RegexEvaluationContext = RegexEvaluationContext(),
 ): Boolean {
     if (!regex) return haystack.contains(pattern, ignoreCase = ignoreCase)
     val options = if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet()
     val compiled = regexCache.getOrPut(RegexKey(pattern, ignoreCase)) {
         runCatching { Regex(pattern, options) }
     }.getOrNull() ?: return false
-    return try {
-        compiled.containsMatchIn(deadlineWrap(haystack))
-    } catch (ignoredTimeout: RegexTimeoutException) {
-        false
+    return regexContext.evaluate(pattern, ignoreCase, timedOutResult = false) {
+        compiled.containsMatchIn(deadlineWrap(haystack, regexContext))
     }
 }
 
@@ -121,8 +165,11 @@ internal fun tagMsgContainsPattern(
     pattern: String,
     regex: Boolean,
     ignoreCase: Boolean = true,
+    regexContext: RegexEvaluationContext = RegexEvaluationContext(),
 ): Boolean {
-    if (regex) return containsPattern("$tag $msg", pattern, regex = true, ignoreCase = ignoreCase)
+    if (regex) {
+        return containsPattern("$tag $msg", pattern, regex = true, ignoreCase = ignoreCase, regexContext = regexContext)
+    }
     if (pattern.isEmpty()) return true
     val tagLen = tag.length
     val total = tagLen + 1 + msg.length
@@ -150,15 +197,14 @@ internal fun firstRegexMatch(
     haystack: String,
     pattern: String,
     ignoreCase: Boolean = true,
+    regexContext: RegexEvaluationContext = RegexEvaluationContext(),
 ): String? {
     val options = if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet()
     val compiled = regexCache.getOrPut(RegexKey(pattern, ignoreCase)) {
         runCatching { Regex(pattern, options) }
     }.getOrNull() ?: return null
-    return try {
-        compiled.find(deadlineWrap(haystack))?.value
-    } catch (ignoredTimeout: RegexTimeoutException) {
-        null
+    return regexContext.evaluate(pattern, ignoreCase, timedOutResult = null) {
+        compiled.find(deadlineWrap(haystack, regexContext))?.value
     }
 }
 
@@ -166,16 +212,15 @@ internal fun regexRanges(
     haystack: String,
     pattern: String,
     ignoreCase: Boolean = true,
+    regexContext: RegexEvaluationContext = RegexEvaluationContext(),
 ): List<Pair<Int, Int>> {
     val options = if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet()
     val compiled = regexCache.getOrPut(RegexKey(pattern, ignoreCase)) {
         runCatching { Regex(pattern, options) }
     }.getOrNull() ?: return emptyList()
-    return try {
-        compiled.findAll(deadlineWrap(haystack))
+    return regexContext.evaluate(pattern, ignoreCase, timedOutResult = emptyList()) {
+        compiled.findAll(deadlineWrap(haystack, regexContext))
             .map { it.range.first to it.range.last + 1 }
             .toList()
-    } catch (ignoredTimeout: RegexTimeoutException) {
-        emptyList()
     }
 }

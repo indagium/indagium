@@ -47,6 +47,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.openlog.model.*
+import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.containsPattern
 import com.openlog.utils.crashSitesForCategory
 import com.openlog.utils.firstRegexMatch
@@ -79,12 +80,13 @@ internal fun contextualMessageRuleCandidates(
     entries: List<LogEntry>,
     query: String,
     regex: Boolean,
+    regexContext: RegexEvaluationContext = RegexEvaluationContext(),
 ): List<ContextualMessageRuleCandidate> = entries.asSequence()
     .filter { entry ->
         val matchesTagAndMessage =
-            containsPattern("${entry.tag}: ${entry.msg}", query, regex) ||
-                containsPattern("${entry.tag} : ${entry.msg}", query, regex)
-        !containsPattern(entry.msg, query, regex) && matchesTagAndMessage
+            containsPattern("${entry.tag}: ${entry.msg}", query, regex, regexContext = regexContext) ||
+                containsPattern("${entry.tag} : ${entry.msg}", query, regex, regexContext = regexContext)
+        !containsPattern(entry.msg, query, regex, regexContext = regexContext) && matchesTagAndMessage
     }
     .flatMap { entry ->
         messageRuleVariantsForEntry(entry).asSequence().map { variant ->
@@ -510,6 +512,7 @@ internal fun FilterPanel(
         if (msgRuleSearch.isBlank()) {
             emptyList()
         } else {
+            val regexContext = RegexEvaluationContext()
             val candidateEntries = if (tab.largeFileMode) {
                 tab.logData.asSequence().take(LARGE_FILE_CANDIDATE_SCAN_LIMIT).toList()
             } else {
@@ -519,7 +522,7 @@ internal fun FilterPanel(
             val relaxedFilter = baseFilter.copy(activeTags = emptySet(), pkgPrefixes = emptySet())
 
             fun contextualCandidatesOf(entries: List<LogEntry>, inScope: Boolean) =
-                contextualMessageRuleCandidates(entries, msgRuleSearch, filter.kwInTagRegex)
+                contextualMessageRuleCandidates(entries, msgRuleSearch, filter.kwInTagRegex, regexContext)
                     .map { candidate ->
                         MsgCandidate(
                             pattern = candidate.pattern,
@@ -532,12 +535,14 @@ internal fun FilterPanel(
                     }
 
             val inScopeContextual = contextualCandidatesOf(
-                candidateEntries.filter { passesFilter(it, baseFilter) },
+                candidateEntries.filter { passesFilter(it, baseFilter, regexContext) },
                 inScope = true,
             )
             val contextualKeys = inScopeContextual.map { Triple(it.label, it.pattern, it.tag) }.toSet()
             val outOfScopeContextual = contextualCandidatesOf(
-                candidateEntries.filter { !passesFilter(it, baseFilter) && passesFilter(it, relaxedFilter) },
+                candidateEntries.filter {
+                    !passesFilter(it, baseFilter, regexContext) && passesFilter(it, relaxedFilter, regexContext)
+                },
                 inScope = false,
             ).filter { Triple(it.label, it.pattern, it.tag) !in contextualKeys }
             val contextualCandidates = (inScopeContextual + outOfScopeContextual).take(8)
@@ -545,7 +550,7 @@ internal fun FilterPanel(
             // PIDs only when the search looks like a number
             val pidCandidates = if (msgRuleSearch.any { it.isDigit() })
                 candidateEntries
-                    .filter { entry -> passesFilter(entry, relaxedFilter) && entry.pid != 0 }
+                    .filter { entry -> passesFilter(entry, relaxedFilter, regexContext) && entry.pid != 0 }
                     .map { it.pid.toString() }.distinct()
                     .filter { it.contains(msgRuleSearch) }
                     .take(3)
@@ -553,12 +558,16 @@ internal fun FilterPanel(
             else emptyList()
 
             fun matchingMsgsOf(entries: List<LogEntry>) = entries
-                .filter { containsPattern(it.msg, msgRuleSearch, regex = filter.kwInTagRegex) }
+                .filter {
+                    containsPattern(it.msg, msgRuleSearch, regex = filter.kwInTagRegex, regexContext = regexContext)
+                }
                 .map { it.msg }
 
-            val inScopeMsgs = matchingMsgsOf(candidateEntries.filter { passesFilter(it, baseFilter) })
+            val inScopeMsgs = matchingMsgsOf(candidateEntries.filter { passesFilter(it, baseFilter, regexContext) })
             val outOfScopeMsgs = matchingMsgsOf(
-                candidateEntries.filter { !passesFilter(it, baseFilter) && passesFilter(it, relaxedFilter) },
+                candidateEntries.filter {
+                    !passesFilter(it, baseFilter, regexContext) && passesFilter(it, relaxedFilter, regexContext)
+                },
             )
 
             // In regex mode, lead with what the pattern actually matched (e.g. "avc.*denied"
@@ -566,7 +575,8 @@ internal fun FilterPanel(
             // the plain-text stem heuristic, which only makes sense for non-regex prefix search.
             fun stemsAndFulls(msgs: List<String>): List<String> {
                 val leads = if (filter.kwInTagRegex) {
-                    msgs.mapNotNull { msg -> firstRegexMatch(msg, msgRuleSearch)?.take(80) }.distinct()
+                    msgs.mapNotNull { msg -> firstRegexMatch(msg, msgRuleSearch, regexContext = regexContext)?.take(80) }
+                        .distinct()
                 } else {
                     msgs.map { msg ->
                         val sepIdx = msg.indexOfFirst { it == ':' || it == '(' }
@@ -600,6 +610,7 @@ internal fun FilterPanel(
         if (pending == null) {
             null
         } else {
+            val regexContext = RegexEvaluationContext()
             val candidateEntries = if (tab.largeFileMode) {
                 tab.logData.asSequence().take(LARGE_FILE_CANDIDATE_SCAN_LIMIT).toList()
             } else {
@@ -612,7 +623,9 @@ internal fun FilterPanel(
                     .map { it.tag }.toSet()
             } else {
                 candidateEntries.asSequence()
-                    .filter { entry -> containsPattern(entry.msg, pending.pattern, pending.regex) }
+                    .filter { entry ->
+                        containsPattern(entry.msg, pending.pattern, pending.regex, regexContext = regexContext)
+                    }
                     .map { it.tag }.toSet()
             }
         }

@@ -23,13 +23,17 @@ private fun csvLine(r: LogEntry): String {
 
 // String-returning builders — kept for callers that want the content in memory (existing tests
 // use these as the parity oracle for exportFilteredToFile below).
-fun buildFilteredTxt(tab: LogTab): String = buildString {
-    visibleEntries(tab).forEach { r -> appendLine(txtLine(r)) }
+fun buildFilteredTxt(tab: LogTab): String = buildFilteredTxt(tab, RegexEvaluationContext())
+
+internal fun buildFilteredTxt(tab: LogTab, regexContext: RegexEvaluationContext): String = buildString {
+    visibleEntries(tab, applyFilter = true, regexContext = regexContext).forEach { r -> appendLine(txtLine(r)) }
 }
 
-fun buildFilteredCsv(tab: LogTab): String = buildString {
+fun buildFilteredCsv(tab: LogTab): String = buildFilteredCsv(tab, RegexEvaluationContext())
+
+internal fun buildFilteredCsv(tab: LogTab, regexContext: RegexEvaluationContext): String = buildString {
     appendLine("ts,level,tag,pid,tid,msg")
-    visibleEntries(tab).forEach { r -> appendLine(csvLine(r)) }
+    visibleEntries(tab, applyFilter = true, regexContext = regexContext).forEach { r -> appendLine(csvLine(r)) }
 }
 
 // Streams the same content buildFilteredTxt/buildFilteredCsv produce straight to [destination] —
@@ -38,9 +42,19 @@ fun buildFilteredCsv(tab: LogTab): String = buildString {
 // write is also crash-safe: writeFileAtomically only replaces destination once every row has been
 // written successfully, so a failure or cancellation partway through never corrupts or truncates
 // an existing export at that path.
-fun exportFilteredToFile(tab: LogTab, destination: File, csv: Boolean) {
+fun exportFilteredToFile(tab: LogTab, destination: File, csv: Boolean) =
+    exportFilteredToFile(tab, destination, csv, RegexEvaluationContext())
+
+internal fun exportFilteredToFile(
+    tab: LogTab,
+    destination: File,
+    csv: Boolean,
+    regexContext: RegexEvaluationContext,
+) {
     writeFileAtomically(destination) { writer ->
         if (csv) writer.appendLine("ts,level,tag,pid,tid,msg")
-        visibleEntries(tab).forEach { r -> writer.appendLine(if (csv) csvLine(r) else txtLine(r)) }
+        visibleEntries(tab, applyFilter = true, regexContext = regexContext).forEach { r ->
+            writer.appendLine(if (csv) csvLine(r) else txtLine(r))
+        }
     }
 }

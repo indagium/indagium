@@ -10,23 +10,31 @@ import com.openlog.ui.SEQ_COLORS
 // base tag filter. Regex/Keyword mode is intentionally just kwText + kwRegex; persisted
 // KEYWORD-mode rules are ignored so hidden rules cannot silently affect results.
 // Negative rules and exclusions apply only when their owning feature is active.
-fun passesFilter(entry: LogEntry, filter: Filter): Boolean {
+fun passesFilter(entry: LogEntry, filter: Filter): Boolean =
+    passesFilter(entry, filter, RegexEvaluationContext())
+
+internal fun passesFilter(entry: LogEntry, filter: Filter, regexContext: RegexEvaluationContext): Boolean {
     val enabledRules = if (filter.mode == FilterMode.TAGS) {
         filter.messageRules.filter { it.enabled && it.pattern.isNotBlank() && it.mode == FilterMode.TAGS }
     } else {
         emptyList()
     }
-    if (!passesExclusions(entry, filter, enabledRules.filter { !it.include })) return false
+    if (!passesExclusions(entry, filter, enabledRules.filter { !it.include }, regexContext)) return false
     val posRules = enabledRules.filter { it.include }
     val hasKwInTag = filter.mode == FilterMode.TAGS && filter.kwInTag.isNotBlank()
     val hasPosPidTid = filter.pidTidFilter.isNotBlank()
     if (posRules.isNotEmpty() || hasKwInTag || hasPosPidTid) {
-        return matchesPositiveSelectors(entry, posRules, hasKwInTag, hasPosPidTid, filter)
+        return matchesPositiveSelectors(entry, posRules, hasKwInTag, hasPosPidTid, filter, regexContext)
     }
-    return passesTagOrKeywordFilter(entry, filter)
+    return passesTagOrKeywordFilter(entry, filter, regexContext)
 }
 
-private fun passesExclusions(entry: LogEntry, filter: Filter, negativeRules: List<MessageRule>): Boolean {
+private fun passesExclusions(
+    entry: LogEntry,
+    filter: Filter,
+    negativeRules: List<MessageRule>,
+    regexContext: RegexEvaluationContext,
+): Boolean {
     if (entry.level !in filter.levels) return false
     // Tag/package exclusion is a Tags-mode-flavored concept — kept out of Regex/Keyword mode so
     // it can't silently narrow results there, matching the same independence as message rules.
@@ -35,8 +43,8 @@ private fun passesExclusions(entry: LogEntry, filter: Filter, negativeRules: Lis
         if (filter.excludePkgPrefixes.any { pfx -> tagMatchesPrefix(entry.tag, pfx) }) return false
     }
     if (filter.excludeKw.isNotBlank() &&
-        tagMsgContainsPattern(entry.tag, entry.msg, filter.excludeKw, filter.excludeKwRegex)) return false
-    return negativeRules.none { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule) }
+        tagMsgContainsPattern(entry.tag, entry.msg, filter.excludeKw, filter.excludeKwRegex, regexContext = regexContext)) return false
+    return negativeRules.none { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule, regexContext) }
 }
 
 private fun matchesPositiveSelectors(
@@ -45,12 +53,13 @@ private fun matchesPositiveSelectors(
     hasKwInTag: Boolean,
     hasPosPidTid: Boolean,
     filter: Filter,
+    regexContext: RegexEvaluationContext,
 ): Boolean {
     // ruleScopeMatches is a no-op (always true) for unscoped rules, so this covers both.
-    if (posRules.any { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule) }) return true
-    if (hasKwInTag && containsPattern(entry.msg, filter.kwInTag, filter.kwInTagRegex)) return true
+    if (posRules.any { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule, regexContext) }) return true
+    if (hasKwInTag && containsPattern(entry.msg, filter.kwInTag, filter.kwInTagRegex, regexContext = regexContext)) return true
     if (hasPosPidTid && matchesPidTidFilter(entry, filter.pidTidFilter)) return true
-    return hasActiveBaseFilter(filter) && passesTagOrKeywordFilter(entry, filter)
+    return hasActiveBaseFilter(filter) && passesTagOrKeywordFilter(entry, filter, regexContext)
 }
 
 private fun hasActiveBaseFilter(filter: Filter): Boolean = when (filter.mode) {
@@ -63,7 +72,7 @@ private fun matchesPidTidFilter(entry: LogEntry, pidTidFilter: String): Boolean 
     return tokens.any { it == entry.pid.toString() || it == entry.tid.toString() }
 }
 
-private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter): Boolean =
+private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter, regexContext: RegexEvaluationContext): Boolean =
     when (filter.mode) {
         FilterMode.TAGS -> {
             if (filter.activeTags.isEmpty() && filter.pkgPrefixes.isEmpty()) {
@@ -87,9 +96,9 @@ private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter): Boolean =
             if (filter.kwText.isBlank()) {
                 true
             } else if (filter.kwRegex) {
-                containsPattern(visibleLogLineText(entry), filter.kwText, regex = true)
+                containsPattern(visibleLogLineText(entry), filter.kwText, regex = true, regexContext = regexContext)
             } else {
-                tagMsgContainsPattern(entry.tag, entry.msg, filter.kwText, filter.kwRegex)
+                tagMsgContainsPattern(entry.tag, entry.msg, filter.kwText, filter.kwRegex, regexContext = regexContext)
             }
         }
     }
@@ -97,13 +106,13 @@ private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter): Boolean =
 private fun tagMatchesPrefix(tag: String, prefix: String): Boolean =
     tag == prefix || tag.startsWith("$prefix.")
 
-private fun matchesRule(entry: LogEntry, rule: MessageRule): Boolean = when (rule.target) {
+private fun matchesRule(entry: LogEntry, rule: MessageRule, regexContext: RegexEvaluationContext): Boolean = when (rule.target) {
     RuleTarget.PID_TID -> {
         val tokens = rule.pattern.split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
         tokens.any { it == entry.pid.toString() || it == entry.tid.toString() }
     }
 
-    RuleTarget.MESSAGE -> rulePatternMatches(entry, rule)
+    RuleTarget.MESSAGE -> rulePatternMatches(entry, rule, regexContext)
 }
 
 private fun ruleScopeMatches(entry: LogEntry, rule: MessageRule): Boolean {
@@ -114,14 +123,21 @@ private fun ruleScopeMatches(entry: LogEntry, rule: MessageRule): Boolean {
     return true
 }
 
-private fun rulePatternMatches(entry: LogEntry, rule: MessageRule): Boolean =
-    containsPattern(entry.msg, rule.pattern, rule.regex)
+private fun rulePatternMatches(entry: LogEntry, rule: MessageRule, regexContext: RegexEvaluationContext): Boolean =
+    containsPattern(entry.msg, rule.pattern, rule.regex, regexContext = regexContext)
 
 // Single source of truth for "what counts as currently visible" — used by both computeItems()
 // (applyFilter = true, the normal rendering path) and log export, so a filtered export always
 // matches exactly what computeItems() would show before any collapse/expand folding.
 fun visibleEntries(tab: LogTab, applyFilter: Boolean = true): List<LogEntry> =
-    if (applyFilter) tab.logData.filter { passesFilter(it, tab.filter) } else tab.logData
+    visibleEntries(tab, applyFilter, RegexEvaluationContext())
+
+internal fun visibleEntries(
+    tab: LogTab,
+    applyFilter: Boolean,
+    regexContext: RegexEvaluationContext,
+): List<LogEntry> =
+    if (applyFilter) tab.logData.filter { passesFilter(it, tab.filter, regexContext) } else tab.logData
 
 // Ids are strictly increasing within a tab (parser, merge, and tailing all guarantee it) and
 // dense enough that a BitSet id-set is ~1 bit/entry — the boxed HashSet<Int> equivalents these
@@ -282,8 +298,22 @@ internal const val CANCELLATION_CHECK_INTERVAL = 4096
 
 // Complexity is inherent: sequence detection, manual-collapse interleaving, and recursive
 // container rendering are all coupled — splitting them would require passing shared mutable state.
+fun computeItems(tab: LogTab, applyFilter: Boolean, cancellationCheck: CancellationCheck = NoCancellationCheck): List<LogItem> =
+    computeItems(tab, applyFilter, cancellationCheck, RegexEvaluationContext())
+
+internal fun computeItems(
+    tab: LogTab,
+    applyFilter: Boolean,
+    regexContext: RegexEvaluationContext,
+): List<LogItem> = computeItems(tab, applyFilter, NoCancellationCheck, regexContext)
+
 @Suppress("CyclomaticComplexMethod", "LongMethod")
-fun computeItems(tab: LogTab, applyFilter: Boolean, cancellationCheck: CancellationCheck = NoCancellationCheck): List<LogItem> {
+internal fun computeItems(
+    tab: LogTab,
+    applyFilter: Boolean,
+    cancellationCheck: CancellationCheck,
+    regexContext: RegexEvaluationContext,
+): List<LogItem> {
     val sequences = tab.filter.sequences
     val cacheKey = "${tab.id}#$applyFilter"
     val prior = computeCacheByTab[cacheKey]?.takeIf {
@@ -291,13 +321,17 @@ fun computeItems(tab: LogTab, applyFilter: Boolean, cancellationCheck: Cancellat
             it.stackGroupsRef === tab.analysis.stackTraceGroups &&
             it.filter == tab.filter
     }
-    val data = prior?.visible ?: visibleEntries(tab, applyFilter)
+    val data = prior?.visible ?: visibleEntries(tab, applyFilter, regexContext)
     var fullSeqGroups: List<SeqGroup>? = prior?.seqGroups
     var fullFilteredStackGroups: List<StackTraceGroup>? = prior?.filteredStackGroups
     var fullSeqOwner: Map<Int, String>? = prior?.seqOwnerBySwallowed
     var fullSeqChildBits: java.util.BitSet? = prior?.seqChildBits
 
     fun storeCache(items: List<LogItem>) {
+        if (regexContext.hasTimedOut) {
+            computeCacheByTab.remove(cacheKey)
+            return
+        }
         computeCacheByTab[cacheKey] = TabComputeCache(
             logData = tab.logData,
             stackGroupsRef = tab.analysis.stackTraceGroups,
@@ -325,7 +359,7 @@ fun computeItems(tab: LogTab, applyFilter: Boolean, cancellationCheck: Cancellat
     // an auto-detected sequence that spans across it; manual-block interleaving is handled purely
     // as a rendering/nesting concern below, layered on top of this single ground-truth pass.
     val seqGroups: List<SeqGroup> = if (tab.filter.seqOn && sequences.any { it.enabled }) {
-        fullSeqGroups ?: computeSeqGroups(data, sequences, cancellationCheck).also { fullSeqGroups = it }
+        fullSeqGroups ?: computeSeqGroups(data, sequences, cancellationCheck, regexContext).also { fullSeqGroups = it }
     } else {
         emptyList()
     }

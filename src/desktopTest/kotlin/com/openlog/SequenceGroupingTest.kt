@@ -11,6 +11,8 @@ import com.openlog.model.ManualCollapseDirection
 import com.openlog.model.SequenceDef
 import com.openlog.ui.DANGER_RED
 import com.openlog.ui.mkTab
+import com.openlog.utils.CancellationCheck
+import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeSeqGroups
 import kotlin.test.Test
@@ -519,6 +521,22 @@ class SequenceGroupingTest {
         val groups = computeSeqGroups(logs, listOf(seq))
 
         assertTrue(groups.isEmpty())
+    }
+
+    @Test
+    @Suppress("MagicNumber")
+    fun sequenceScanSharesOneRegexContextAcrossAllEntries() {
+        val catastrophicMessage = "a".repeat(40) + "!"
+        val logs = (1..200).map { id ->
+            LogEntry(id, "10:00:00.000", LogLevel.I, "App", catastrophicMessage)
+        }
+        val seq = SequenceDef("bad", "(a+)+$", isRegex = true, priority = 1, color = Color.Blue)
+        val regexContext = RegexEvaluationContext(matchBudgetNanos = 1L)
+
+        val groups = computeSeqGroups(logs, listOf(seq), CancellationCheck {}, regexContext)
+
+        assertTrue(groups.isEmpty())
+        assertEquals(1, regexContext.timeoutCountForTesting)
     }
 
     @Test

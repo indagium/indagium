@@ -1,5 +1,7 @@
 package com.openlog
 
+import com.openlog.utils.MAX_REGEX_TIMEOUTS_PER_OPERATION
+import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.containsPattern
 import com.openlog.utils.firstRegexMatch
 import com.openlog.utils.regexCacheSizeForTesting
@@ -149,6 +151,69 @@ class TextMatchTest {
         assertTrue(containsPattern("error code 404", """\d+""", regex = true))
         assertEquals("404", firstRegexMatch("error code 404", """\d+"""))
         assertEquals(listOf(11 to 14), regexRanges("error code 404", """\d+"""))
+    }
+
+    @Test
+    @Suppress("MagicNumber")
+    fun repeatedCatastrophicPatternTimesOutOnlyOncePerOperation() {
+        val regexContext = RegexEvaluationContext(matchBudgetNanos = 1L)
+        val start = System.nanoTime()
+
+        repeat(100) {
+            assertFalse(
+                containsPattern(catastrophicHaystack(), catastrophicPattern, regex = true, regexContext = regexContext),
+            )
+        }
+
+        val elapsedMs = (System.nanoTime() - start) / 1_000_000
+        assertEquals(1, regexContext.timeoutCountForTesting)
+        assertTrue(elapsedMs < timeoutTestBudgetMs, "one operation repaid the timeout, took ${elapsedMs}ms")
+    }
+
+    @Test
+    @Suppress("MagicNumber")
+    fun independentOperationRetriesPreviouslyTimedOutPattern() {
+        val firstOperation = RegexEvaluationContext(matchBudgetNanos = 1L)
+        val secondOperation = RegexEvaluationContext(matchBudgetNanos = 1L)
+
+        assertFalse(
+            containsPattern(catastrophicHaystack(), catastrophicPattern, regex = true, regexContext = firstOperation),
+        )
+        assertFalse(
+            containsPattern(catastrophicHaystack(), catastrophicPattern, regex = true, regexContext = secondOperation),
+        )
+
+        assertEquals(1, firstOperation.timeoutCountForTesting)
+        assertEquals(1, secondOperation.timeoutCountForTesting)
+    }
+
+    @Test
+    @Suppress("MagicNumber")
+    fun normalRegexStillRunsAfterOneDifferentPatternTimesOut() {
+        val regexContext = RegexEvaluationContext(matchBudgetNanos = 1L)
+
+        assertFalse(
+            containsPattern(catastrophicHaystack(), catastrophicPattern, regex = true, regexContext = regexContext),
+        )
+
+        assertTrue(containsPattern("error code 404", """\d+""", regex = true, regexContext = regexContext))
+        assertEquals(1, regexContext.timeoutCountForTesting)
+    }
+
+    @Test
+    @Suppress("MagicNumber")
+    fun distinctCatastrophicPatternsStopAtOperationTimeoutCap() {
+        val regexContext = RegexEvaluationContext(matchBudgetNanos = 1L)
+        val patterns = (0..MAX_REGEX_TIMEOUTS_PER_OPERATION).map { wrapperCount ->
+            "(".repeat(wrapperCount) + catastrophicPattern + ")".repeat(wrapperCount)
+        }
+
+        patterns.forEach { pattern ->
+            assertFalse(containsPattern(catastrophicHaystack(), pattern, regex = true, regexContext = regexContext))
+        }
+
+        assertEquals(MAX_REGEX_TIMEOUTS_PER_OPERATION, regexContext.timeoutCountForTesting)
+        assertFalse(containsPattern("error code 404", """\d+""", regex = true, regexContext = regexContext))
     }
 
     // ── SEC-3: bounded regex cache ─────────────────────────────────────────────

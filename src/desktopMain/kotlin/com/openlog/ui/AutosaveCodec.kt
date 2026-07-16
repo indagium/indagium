@@ -5,8 +5,6 @@ import com.openlog.ai.normalizeAiProviderProfiles
 import com.openlog.model.*
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.ZipLogCandidateKind
-import com.openlog.utils.extractCandidate
-import com.openlog.utils.listArchiveLogCandidates
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -35,6 +33,8 @@ import java.util.Base64
 internal const val MIN_LOG_ROW_WRAP_LIMIT_CHARS = 80
 internal const val MAX_LOG_ROW_WRAP_LIMIT_CHARS = 20_000
 internal const val DEFAULT_LOG_ROW_WRAP_LIMIT_CHARS = 480
+private const val LEGACY_SETTINGS_OPEN_UNFILTERED_ON_CTRL_F_OFFSET = 17
+private const val LEGACY_SETTINGS_MCP_ALLOW_BROWSER_CLIENTS_OFFSET = 18
 
 // ── JSON helpers (small reader for exported filter files) ─────────────
 internal fun String.jsonStr(): String = buildString {
@@ -496,8 +496,10 @@ internal fun settingsFromToken(token: String): AppSettings? = runCatching {
         sourceFolderConfigurationIds = p.getOrNull(mcpIndex + 14)?.sourceFolderConfigurationIdsFromToken() ?: emptyMap(),
         sourceAutoDiscoveryEnabled = p.getOrNull(mcpIndex + 15)?.toBooleanStrictOrNull() ?: true,
         copyMaskRules = copyMaskRules,
-        openUnfilteredOnCtrlF = p.getOrNull(mcpIndex + 17)?.toBooleanStrictOrNull() ?: false,
-        mcpAllowBrowserClients = p.getOrNull(mcpIndex + 18)?.toBooleanStrictOrNull() ?: false,
+        openUnfilteredOnCtrlF = p.getOrNull(mcpIndex + LEGACY_SETTINGS_OPEN_UNFILTERED_ON_CTRL_F_OFFSET)
+            ?.toBooleanStrictOrNull() ?: false,
+        mcpAllowBrowserClients = p.getOrNull(mcpIndex + LEGACY_SETTINGS_MCP_ALLOW_BROWSER_CLIENTS_OFFSET)
+            ?.toBooleanStrictOrNull() ?: false,
     )
 }.getOrNull()
 
@@ -1042,7 +1044,7 @@ internal fun LogTab.tabToken(): String {
         // RestoredTabSource.ArchiveSource straight from the persisted candidate instead of calling
         // listArchiveLogCandidates() (which opens and scans the whole archive) synchronously during
         // AppState init. Empty for non-archive tabs and for tokens written before this field
-        // existed — tabShellFromToken() falls back to the old synchronous-listing path for both.
+        // existed — those legacy tokens resolve current metadata on the background restore path.
         archiveCandidate?.archiveCandidateToken().orEmpty(),
     )
 }
@@ -1052,34 +1054,29 @@ internal fun LogTab.tabToken(): String {
 // stay here so tabs whose backing file/archive vanished are dropped before they ever appear.
 internal class RestoredTabShell(val tab: LogTab, val source: RestoredTabSource)
 
+internal sealed interface RestoredTabLoadResult {
+    data class Loaded(
+        val logData: List<LogEntry>,
+        val archiveCandidate: ZipLogCandidate?,
+        val largeFileMode: Boolean,
+    ) : RestoredTabLoadResult
+
+    data class MissingArchiveEntry(val archiveFile: File, val entryPath: String) : RestoredTabLoadResult
+}
+
 internal sealed class RestoredTabSource {
     abstract val largeFileMode: Boolean
 
-    abstract fun load(parser: (File) -> List<LogEntry>): List<LogEntry>
-
     data class FileSource(val file: File) : RestoredTabSource() {
         override val largeFileMode: Boolean = file.length() >= LARGE_FILE_MODE_BYTES
-
-        override fun load(parser: (File) -> List<LogEntry>): List<LogEntry> = parser(file)
     }
 
-    data class ArchiveSource(val archiveFile: File, val candidate: ZipLogCandidate) : RestoredTabSource() {
-        override val largeFileMode: Boolean = candidate.sizeBytes >= LARGE_FILE_MODE_BYTES
-
-        // Runs on ioScope (scheduleRestoredTabLoad), never during AppState init, so the fallback
-        // re-list below is cheap to allow here even though avoiding exactly this scan during init is
-        // the whole point of PERF-3b. The fallback exists because extractCandidate silently returns
-        // emptyList() both for "this entry is genuinely empty" and "this entryPath doesn't exist in
-        // the archive anymore" (e.g. the archive was regenerated since the tab was opened) — without
-        // it, a stale persisted candidate would quietly restore as an empty tab instead of surfacing
-        // the current entry with the same path.
-        override fun load(parser: (File) -> List<LogEntry>): List<LogEntry> {
-            val direct = extractCandidate(archiveFile, candidate)
-            if (direct.isNotEmpty()) return direct
-            val refreshed = listArchiveLogCandidates(archiveFile).firstOrNull { it.entryPath == candidate.entryPath }
-                ?: return direct
-            return extractCandidate(archiveFile, refreshed)
-        }
+    data class ArchiveSource(
+        val archiveFile: File,
+        val entryPath: String,
+        val persistedCandidate: ZipLogCandidate?,
+    ) : RestoredTabSource() {
+        override val largeFileMode: Boolean = persistedCandidate?.sizeBytes?.let { it >= LARGE_FILE_MODE_BYTES } ?: false
     }
 }
 
@@ -1103,25 +1100,24 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             manualBlocks = p[8].encodedList().mapNotNull { it.manualBlockFromToken() },
             sourcePath = sourcePath,
             largeFileMode = source.largeFileMode,
-            archiveCandidate = (source as? RestoredTabSource.ArchiveSource)?.candidate,
+            archiveCandidate = (source as? RestoredTabSource.ArchiveSource)?.persistedCandidate,
         ),
         source,
     )
 }.getOrNull()
 
 // [persistedCandidate] comes from the tab token's trailing field (PERF-3b) — when present for an
-// archive-backed sourcePath, it lets restore skip listArchiveLogCandidates() entirely (which opens
-// and scans the whole archive) and rebuild the ArchiveSource directly. Absent for non-archive tabs
-// and for tokens written before this field existed, in which case this falls back to the original
-// synchronous-listing behavior unchanged.
+// archive-backed sourcePath, it supplies the initial shell metadata without opening the archive.
+// Legacy archive tokens have no candidate, so their shell starts with unknown size metadata and
+// resolves it together with content on the queued IO restore path. Neither form scans an archive
+// synchronously during AppState construction.
 private fun String.restoredTabSource(persistedCandidate: ZipLogCandidate? = null): RestoredTabSource? {
     val bangIndex = indexOf('!')
     if (bangIndex > 0) {
         val archiveFile = File(substring(0, bangIndex)).takeIf { it.exists() } ?: return null
-        if (persistedCandidate != null) return RestoredTabSource.ArchiveSource(archiveFile, persistedCandidate)
         val entryPath = substring(bangIndex + 1).takeIf { it.isNotBlank() } ?: return null
-        val candidate = listArchiveLogCandidates(archiveFile).firstOrNull { it.entryPath == entryPath } ?: return null
-        return RestoredTabSource.ArchiveSource(archiveFile, candidate)
+        val matchingPersistedCandidate = persistedCandidate?.takeIf { it.entryPath == entryPath }
+        return RestoredTabSource.ArchiveSource(archiveFile, entryPath, matchingPersistedCandidate)
     }
     return File(this).takeIf { it.exists() }?.let { RestoredTabSource.FileSource(it) }
 }

@@ -15,7 +15,12 @@ private class SeqCandidate(val idx: Int, val def: SequenceDef) {
     var parent: Int = -1
 }
 
-private class SeqScan(logData: List<LogEntry>, enabled: List<SequenceDef>, cancellationCheck: CancellationCheck) {
+private class SeqScan(
+    logData: List<LogEntry>,
+    enabled: List<SequenceDef>,
+    cancellationCheck: CancellationCheck,
+    regexContext: RegexEvaluationContext,
+) {
     val candidates = ArrayList<SeqCandidate>()
 
     // def.id -> ascending indices of entries matching that def's end pattern
@@ -34,11 +39,13 @@ private class SeqScan(logData: List<LogEntry>, enabled: List<SequenceDef>, cance
             }
             val entry = logData[idx]
             val hay = "${entry.tag} ${entry.msg}"
-            val startDef = enabled.firstOrNull { matchesSeqText(entry, hay, it.matchText, it.isRegex, it.tag) }
+            val startDef = enabled.firstOrNull {
+                matchesSeqText(entry, hay, it.matchText, it.isRegex, it.tag, regexContext)
+            }
             if (startDef != null) candidates += SeqCandidate(idx, startDef)
             for (def in endDefs) {
                 val endText = def.endMatchText ?: continue
-                if (matchesSeqText(entry, hay, endText, def.endIsRegex, def.endTag)) {
+                if (matchesSeqText(entry, hay, endText, def.endIsRegex, def.endTag, regexContext)) {
                     endIdxByDef.getOrPut(def.id) { mutableListOf() } += idx
                 }
             }
@@ -46,9 +53,16 @@ private class SeqScan(logData: List<LogEntry>, enabled: List<SequenceDef>, cance
     }
 }
 
-private fun matchesSeqText(entry: LogEntry, hay: String, text: String, isRegex: Boolean, tag: String?): Boolean {
+private fun matchesSeqText(
+    entry: LogEntry,
+    hay: String,
+    text: String,
+    isRegex: Boolean,
+    tag: String?,
+    regexContext: RegexEvaluationContext,
+): Boolean {
     if (tag != null && entry.tag != tag) return false
-    return containsPattern(hay, text, isRegex)
+    return containsPattern(hay, text, isRegex, regexContext = regexContext)
 }
 
 // First element of the ascending list strictly greater than idx, or null.
@@ -66,11 +80,18 @@ fun computeSeqGroups(
     logData: List<LogEntry>,
     defs: List<SequenceDef>,
     cancellationCheck: CancellationCheck = CancellationCheck {},
+): List<SeqGroup> = computeSeqGroups(logData, defs, cancellationCheck, RegexEvaluationContext())
+
+internal fun computeSeqGroups(
+    logData: List<LogEntry>,
+    defs: List<SequenceDef>,
+    cancellationCheck: CancellationCheck,
+    regexContext: RegexEvaluationContext,
 ): List<SeqGroup> {
     val enabled = defs.filter { it.enabled }.sortedBy { it.priority }
     if (enabled.isEmpty()) return emptyList()
 
-    val scan = SeqScan(logData, enabled, cancellationCheck)
+    val scan = SeqScan(logData, enabled, cancellationCheck, regexContext)
     val candidates = scan.candidates
     if (candidates.isEmpty()) return emptyList()
 

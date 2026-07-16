@@ -167,6 +167,24 @@ class ControlServerTest {
     }
 
     @Test
+    @Suppress("MagicNumber")
+    fun getVisibleLinesBoundsCatastrophicRegexAcrossMcpOperation() {
+        val message = "a".repeat(200) + "!"
+        val entries = (1..50).map { id ->
+            LogEntry(id, "10:00:00.000", LogLevel.I, "App", message)
+        }
+        state.tabs = listOf(mkTab("t1", "test.log", entries))
+        post("/filter", """{"tabId":"t1","kwText":"(a+)+$","kwRegex":true,"mode":"KEYWORD"}""")
+
+        val start = System.nanoTime()
+        val body = get("/visible?tabId=t1")
+        val elapsedMs = (System.nanoTime() - start) / 1_000_000
+
+        assertTrue(body.contains("\"totalCount\":0"), body)
+        assertTrue(elapsedMs < 2_000, "MCP filtering repaid the timeout per entry: ${elapsedMs}ms")
+    }
+
+    @Test
     fun setFilterAppliesPartialUpdate() {
         state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
         post("/filter", """{"tabId":"t1","kwText":"hello","mode":"KEYWORD"}""")
