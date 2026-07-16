@@ -5,10 +5,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.openlog.utils.writeFileAtomically
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 // Debounce for saveInBackground() — long enough to collapse a rapid splitter drag (many
 // pointer-move events per second) into one write, short enough that the save still feels
@@ -26,10 +29,26 @@ internal class AutosaveScheduler(
     private val autosaveFile: File,
     private val scope: CoroutineScope,
     private val serialize: () -> String,
+    private val backgroundDelayMs: Long = BACKGROUND_AUTOSAVE_DEBOUNCE_MS,
+    private val write: (File, String) -> Unit = { file, content ->
+        writeFileAtomically(file) { writer -> writer.write(content) }
+    },
+    private val onBackgroundJobStarted: () -> Unit = {},
+    private val onBackgroundWriteReady: () -> Unit = {},
+    private val onBackgroundWriterContended: () -> Unit = {},
+    private val onBackgroundJobFinished: () -> Unit = {},
+    private val onSynchronousSaveReady: () -> Unit = {},
 ) {
+    // Scheduling and writing are separate locks on purpose. schedulingLock is held only while
+    // replacing/invalidating the current debounce job; writerLock covers serialization + disk I/O
+    // so every caller observes one total write order without ever holding AppState.stateLock.
+    private val schedulingLock = Any()
+    private val writerLock = ReentrantLock(true)
+
     // Job backing saveInBackground()'s debounce — cancelling and relaunching it on every call is
     // what collapses a rapid burst (e.g. dragging a splitter) into a single write.
     private var backgroundJob: Job? = null
+    private var backgroundGeneration = 0L
 
     // Set when a write fails (disk full, permissions, etc.); shown as a small inline hint rather
     // than a blocking dialog, since a failed autosave shouldn't interrupt the user's work. Cleared
@@ -43,8 +62,22 @@ internal class AutosaveScheduler(
     // the destination only once the write fully succeeds, so a failure here can never corrupt an
     // existing autosave file — it only fails to update it, which autosaveError then surfaces.
     fun saveNow() {
+        cancelPending()
+        onSynchronousSaveReady()
+        writerLock.withLock { writeCurrentState() }
+    }
+
+    fun cancelPending() {
+        val pendingJob = synchronized(schedulingLock) {
+            backgroundGeneration += 1
+            backgroundJob.also { backgroundJob = null }
+        }
+        pendingJob?.cancel()
+    }
+
+    private fun writeCurrentState() {
         runCatching {
-            writeFileAtomically(autosaveFile) { writer -> writer.write(serialize()) }
+            write(autosaveFile, serialize())
         }.fold(
             onSuccess = { autosaveError = null },
             onFailure = { error ->
@@ -58,10 +91,32 @@ internal class AutosaveScheduler(
     // completing synchronously, so it can debounce (cancel-and-relaunch) and run entirely off the
     // UI thread instead of doing file I/O on every pointer-move event of a drag.
     fun saveInBackground() {
-        backgroundJob?.cancel()
-        backgroundJob = scope.launch {
-            delay(BACKGROUND_AUTOSAVE_DEBOUNCE_MS)
-            saveNow()
+        lateinit var newJob: Job
+        val generation: Long
+        synchronized(schedulingLock) {
+            backgroundJob?.cancel()
+            generation = ++backgroundGeneration
+            newJob = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    onBackgroundJobStarted()
+                    delay(backgroundDelayMs)
+                    onBackgroundWriteReady()
+                    if (writerLock.isLocked) onBackgroundWriterContended()
+                    writerLock.withLock {
+                        val stillCurrent = synchronized(schedulingLock) {
+                            backgroundGeneration == generation
+                        }
+                        if (stillCurrent) writeCurrentState()
+                    }
+                } finally {
+                    synchronized(schedulingLock) {
+                        if (backgroundJob === newJob) backgroundJob = null
+                    }
+                    onBackgroundJobFinished()
+                }
+            }
+            backgroundJob = newJob
         }
+        newJob.start()
     }
 }

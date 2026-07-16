@@ -145,7 +145,11 @@ fun main(args: Array<String>) {
             // since exitApplication() tears down the whole composition (and that pending
             // LaunchedEffect delay along with it) immediately. Flushing synchronously here first
             // guarantees the latest state — including whatever filter was just set — survives.
-            onCloseRequest = { appState.autosaveNow(); exitApplication() },
+            onCloseRequest = {
+                appState.autosaveNow()
+                appState.close()
+                exitApplication()
+            },
             title = "openLog",
             icon = painterResource("icons/openlog.png"),
             state = windowState,

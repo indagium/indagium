@@ -721,6 +721,7 @@ class AppState(
 
     private val ioJob = SupervisorJob()
     private val ioScope = CoroutineScope(ioJob + Dispatchers.IO)
+    private val closed = AtomicBoolean(false)
 
     // internal, not private: TailCoordinator (Task 12 slice 2) synchronizes on this exact monitor
     // object so its tabs-list writes stay atomic with AppState's own — see upTab's doc comment.
@@ -880,6 +881,8 @@ class AppState(
     // ── Helpers ─────────────────────────────────────────────────────
 
     fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        autosaveScheduler.cancelPending()
         aiProviderApiKeys.clear()
         aiSidebarRuntime.close()
         aiSessions.clear()
