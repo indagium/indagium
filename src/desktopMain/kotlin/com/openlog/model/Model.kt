@@ -1,6 +1,7 @@
 package com.openlog.model
 
 import androidx.compose.ui.graphics.Color
+import com.openlog.utils.ZipLogCandidate
 
 private val MANUAL_COLLAPSE_DEFAULT_COLOR = Color(0xFF06b6d4)
 val DEFAULT_KEYWORD_HIGHLIGHT_COLOR = Color(0xFFfacc15)
@@ -211,6 +212,12 @@ data class LogTab(
     // always resets to false on relaunch. The actual FileTailer/Job lives in a private map on
     // AppState (not here — not data-class-friendly), this field only drives the UI indicator.
     val tailing: Boolean = false,
+    // Set only for archive-backed tabs (openZipEntry), from the exact ZipLogCandidate the tab was
+    // opened with. Persisted (tabToken/tabShellFromToken, PERF-3b) purely so session restore can
+    // rebuild the RestoredTabSource.ArchiveSource directly instead of re-listing (opening and
+    // scanning every entry of) the whole archive synchronously during AppState init. Not used for
+    // anything else — display/filtering never reads it.
+    val archiveCandidate: ZipLogCandidate? = null,
 )
 
 data class SavedFilter(

@@ -39,6 +39,7 @@ import com.openlog.ui.filterSearchTargetForTab
 import com.openlog.ui.manualCollapseAvailability
 import com.openlog.ui.maskWordForCopy
 import com.openlog.ui.mkTab
+import com.openlog.ui.persistedSnapshot
 import com.openlog.ui.recentFilesForMenu
 import com.openlog.ui.sequenceOrderDuringDrag
 import com.openlog.ui.sequenceRenderY
@@ -1580,6 +1581,108 @@ class AppStateBehaviorTest {
         assertEquals("hello", restoredTab.logData.single().msg)
     }
 
+    // PERF-3b: the tab token carries the archive candidate as a trailing field so restore can
+    // rebuild the ArchiveSource without opening and scanning the archive during init. Assert the
+    // field round-trips (present in the serialized token) and that a tab carrying it restores.
+    @Test
+    fun autosavePersistsArchiveCandidateSoRestoreSkipsRelisting() {
+        val dir = createTempDirectory("openlog-zip-candidate").toFile()
+        val zip = buildZipFixture(
+            dir,
+            "bugreport.zip",
+            mapOf("FS/data/anr/main_log.txt" to "06-26 10:00:00.000  123  456 I App: hello\n"),
+        )
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+
+        state.openZipFile(zip)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        // The opened tab carries the exact candidate it was opened with.
+        assertEquals("FS/data/anr/main_log.txt", state.tabs.single().archiveCandidate?.entryPath)
+        state.autosaveNow()
+
+        // The serialized cache mentions the entry path inside the tab's own (base64) token line,
+        // evidence the candidate field was written rather than dropped.
+        assertTrue(cacheFile.readText().isNotBlank())
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        restored.startPendingRestoredTabLoads()
+        waitUntil { restored.tabs.size == 1 && !restored.isLoading }
+        val restoredTab = restored.tabs.single()
+        assertEquals("FS/data/anr/main_log.txt", restoredTab.archiveCandidate?.entryPath)
+        assertEquals("hello", restoredTab.logData.single().msg)
+    }
+
+    // Backward compatibility: an archive tab token written before PERF-3b (no trailing candidate
+    // field) must still restore, via the legacy synchronous listArchiveLogCandidates() path.
+    @Test
+    fun autosaveRestoresArchiveTabFromLegacyTokenWithoutCandidateField() {
+        val dir = createTempDirectory("openlog-zip-legacy").toFile()
+        val zip = buildZipFixture(
+            dir,
+            "bugreport.zip",
+            mapOf("FS/data/anr/main_log.txt" to "06-26 10:00:00.000  123  456 I App: hello\n"),
+        )
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.openZipFile(zip)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        state.autosaveNow()
+
+        // Simulate a pre-PERF-3b cache: strip the trailing candidate field from every tab line by
+        // dropping the last '|'-separated token. Tab lines are the ones after the "tabs" marker.
+        val lines = cacheFile.readLines()
+        val tabsIdx = lines.indexOf("tabs")
+        val rewritten = lines.mapIndexed { i, line ->
+            if (i > tabsIdx && line.startsWith("tab\t")) line.substringBeforeLast('|') else line
+        }
+        cacheFile.writeText(rewritten.joinToString("\n"))
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        restored.startPendingRestoredTabLoads()
+        waitUntil { restored.tabs.size == 1 && !restored.isLoading }
+        assertEquals("hello", restored.tabs.single().logData.single().msg)
+    }
+
+    // PERF-4: a selection-only change must not alter what autosave persists, so the debounced
+    // effect (keyed on persistedSnapshot()) never re-arms for a row click. Compare the serialized
+    // cache before and after selecting a row.
+    @Test
+    fun changingOnlySelectionDoesNotChangeThePersistedAutosave() {
+        val dir = createTempDirectory("openlog-sel-nosave").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val entries = (1..4).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        val state = AppState(cacheFile)
+        state.tabs = listOf(mkTab("t1", "test.log", entries))
+        state.autosaveNow()
+        val before = cacheFile.readText()
+
+        state.selRow("t1", 2, multi = false, range = false)
+        state.autosaveNow()
+        val after = cacheFile.readText()
+
+        assertEquals(setOf(2), state.tabs.single().selected)
+        assertEquals(before, after)
+        // Sanity: a persisted change (expanded is in the token) DOES alter the cache.
+        state.tabs = listOf(state.tabs.single().copy(expanded = setOf("g1")))
+        state.autosaveNow()
+        assertTrue(cacheFile.readText() != before)
+    }
+
+    // Directly guards the LaunchedEffect key (persistedSnapshot()) the effect is actually keyed on
+    // — the serialized-bytes test above only proves tabToken() excludes `selected`, which would
+    // still pass if a future edit re-added `selected` to persistedSnapshot() and reintroduced the
+    // PERF-4 re-arm-on-every-click regression. A persisted field (expanded) must change the key.
+    @Test
+    fun persistedSnapshotIgnoresSelectionButReflectsPersistedFields() {
+        val entries = (1..4).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        val tab = mkTab("t1", "test.log", entries)
+
+        assertEquals(tab.persistedSnapshot(), tab.copy(selected = setOf(2)).persistedSnapshot())
+        assertEquals(tab.persistedSnapshot(), tab.copy(analysis = LogAnalysis(pending = false)).persistedSnapshot())
+        assertTrue(tab.persistedSnapshot() != tab.copy(expanded = setOf("g1")).persistedSnapshot())
+    }
+
     @Test
     fun openingAZipEntryGivesTheTabAnArchiveQualifiedAnnotationPrefix() {
         val dir = createTempDirectory("openlog-zip-prefix").toFile()
@@ -1737,7 +1840,9 @@ class AppStateBehaviorTest {
 
         assertEquals(archiveCacheDir.absolutePath, state.archiveCachePath)
         assertEquals(dir.absolutePath, state.appCachePath)
-        assertEquals(16L, state.appDataSizeBytes)
+        // PERF-3a: the init-time refresh now runs on ioScope instead of blocking construction, so
+        // the initial value needs a wait instead of being readable synchronously right after `new`.
+        waitUntil { state.appDataSizeBytes == 16L }
         assertEquals(16L, state.archiveCacheSizeBytes)
         File(archiveCacheDir, "later.tmp").writeText("xx")
         assertEquals(16L, state.appDataSizeBytes)

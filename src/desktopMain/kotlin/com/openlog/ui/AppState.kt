@@ -35,6 +35,7 @@ import com.openlog.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.openlog.utils.MergeSourceFile
 import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.ZipLogCandidate
+import com.openlog.utils.ZipLogCandidateKind
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
@@ -859,7 +860,13 @@ class AppState(
     private var annotationNavigationCounter = 0L
 
     init {
-        refreshAppDataSizeInfo()
+        // PERF-3a: refreshAppDataSizeInfo() recursively walks the whole app-data dir
+        // (File.totalFileSize()) — on ioScope so a large archive-cache/notes tree can't add to
+        // startup latency before first frame. appDataSizeBytes is mutableStateOf, so this is
+        // snapshot-safe to publish from off the UI thread like every other ioScope write in this
+        // file. The Settings-triggered path (requestClearCache -> refreshArchiveCacheInfo) stays
+        // synchronous — that one is already user-initiated from an explicit click, not startup.
+        ioScope.launch { refreshAppDataSizeInfo() }
         if (restoreOnCreate) restoreAutosave()
         loadPersistedSourceIndex()
         loadCustomAiCommands()
@@ -2610,6 +2617,7 @@ class AppState(
                         annotations = Annotations(prefix = "$prefixLabel $prefixName"),
                         largeFileMode = largeFile,
                         showUnfiltered = settings.openNewFilesWithUnfiltered,
+                        archiveCandidate = candidate,
                     )
                 synchronized(stateLock) {
                     ensureActive()
@@ -4327,6 +4335,33 @@ private fun String.manualBlockFromToken(): ManualCollapseBlock? = runCatching {
     )
 }.getOrNull()
 
+// Field-for-field mirror of exactly what tabToken() below serializes. Used to key the
+// debounced-autosave LaunchedEffect in App.kt (PERF-4): `selected`/`analysis`/`tailing`/`logData`/
+// `rmap`/`largeFileMode` are NOT here (and never end up in tabToken() either), so a row click —
+// which only flips `selected` — no longer identity-changes the effect's key and no longer triggers
+// a serialize+write. Keep this in sync if tabToken()'s field list changes.
+internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
+    id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
+)
+
+private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
+    entryPath,
+    displayName,
+    sizeBytes.toString(),
+    kind.name,
+)
+
+private fun String.archiveCandidateFromToken(): ZipLogCandidate? = runCatching {
+    val p = tokenFields()
+    if (p.size < 4) return@runCatching null
+    ZipLogCandidate(
+        entryPath = p[0],
+        displayName = p[1],
+        sizeBytes = p[2].toLongOrNull() ?: return@runCatching null,
+        kind = runCatching { ZipLogCandidateKind.valueOf(p[3]) }.getOrElse { ZipLogCandidateKind.LOGCAT },
+    )
+}.getOrNull()
+
 private fun LogTab.tabToken(): String {
     val filter = SavedFilter(
         "tab", "tab", filter.levels, filter.activeTags, filter.kwText, filter.kwRegex,
@@ -4344,6 +4379,12 @@ private fun LogTab.tabToken(): String {
         showUnfiltered.toString(),
         expanded.joinToString(",") { it.b64() },
         manualBlocks.joinToString(",") { it.manualBlockToken().b64() },
+        // Trailing field (position 9, PERF-3b): lets restore rebuild an archive tab's
+        // RestoredTabSource.ArchiveSource straight from the persisted candidate instead of calling
+        // listArchiveLogCandidates() (which opens and scans the whole archive) synchronously during
+        // AppState init. Empty for non-archive tabs and for tokens written before this field
+        // existed — tabShellFromToken() falls back to the old synchronous-listing path for both.
+        archiveCandidate?.archiveCandidateToken().orEmpty(),
     )
 }
 
@@ -4366,7 +4407,20 @@ private sealed class RestoredTabSource {
     data class ArchiveSource(val archiveFile: File, val candidate: ZipLogCandidate) : RestoredTabSource() {
         override val largeFileMode: Boolean = candidate.sizeBytes >= LARGE_FILE_MODE_BYTES
 
-        override fun load(parser: (File) -> List<LogEntry>): List<LogEntry> = extractCandidate(archiveFile, candidate)
+        // Runs on ioScope (scheduleRestoredTabLoad), never during AppState init, so the fallback
+        // re-list below is cheap to allow here even though avoiding exactly this scan during init is
+        // the whole point of PERF-3b. The fallback exists because extractCandidate silently returns
+        // emptyList() both for "this entry is genuinely empty" and "this entryPath doesn't exist in
+        // the archive anymore" (e.g. the archive was regenerated since the tab was opened) — without
+        // it, a stale persisted candidate would quietly restore as an empty tab instead of surfacing
+        // the current entry with the same path.
+        override fun load(parser: (File) -> List<LogEntry>): List<LogEntry> {
+            val direct = extractCandidate(archiveFile, candidate)
+            if (direct.isNotEmpty()) return direct
+            val refreshed = listArchiveLogCandidates(archiveFile).firstOrNull { it.entryPath == candidate.entryPath }
+                ?: return direct
+            return extractCandidate(archiveFile, refreshed)
+        }
     }
 }
 
@@ -4374,7 +4428,8 @@ private fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
     val p = tokenFields()
     if (p.size < 9) return@runCatching null
     val sourcePath = p[2].takeIf { it.isNotBlank() }
-    val source = sourcePath?.restoredTabSource() ?: return@runCatching null
+    val persistedCandidate = p.getOrNull(9)?.takeIf { it.isNotBlank() }?.archiveCandidateFromToken()
+    val source = sourcePath?.restoredTabSource(persistedCandidate) ?: return@runCatching null
     RestoredTabShell(
         LogTab(
             id = p[0],
@@ -4389,15 +4444,22 @@ private fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             manualBlocks = p[8].encodedList().mapNotNull { it.manualBlockFromToken() },
             sourcePath = sourcePath,
             largeFileMode = source.largeFileMode,
+            archiveCandidate = (source as? RestoredTabSource.ArchiveSource)?.candidate,
         ),
         source,
     )
 }.getOrNull()
 
-private fun String.restoredTabSource(): RestoredTabSource? {
+// [persistedCandidate] comes from the tab token's trailing field (PERF-3b) — when present for an
+// archive-backed sourcePath, it lets restore skip listArchiveLogCandidates() entirely (which opens
+// and scans the whole archive) and rebuild the ArchiveSource directly. Absent for non-archive tabs
+// and for tokens written before this field existed, in which case this falls back to the original
+// synchronous-listing behavior unchanged.
+private fun String.restoredTabSource(persistedCandidate: ZipLogCandidate? = null): RestoredTabSource? {
     val bangIndex = indexOf('!')
     if (bangIndex > 0) {
         val archiveFile = File(substring(0, bangIndex)).takeIf { it.exists() } ?: return null
+        if (persistedCandidate != null) return RestoredTabSource.ArchiveSource(archiveFile, persistedCandidate)
         val entryPath = substring(bangIndex + 1).takeIf { it.isNotBlank() } ?: return null
         val candidate = listArchiveLogCandidates(archiveFile).firstOrNull { it.entryPath == entryPath } ?: return null
         return RestoredTabSource.ArchiveSource(archiveFile, candidate)

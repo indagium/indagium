@@ -67,8 +67,16 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
         LocalUseMono provides state.settings.fontMono,
     ) {
         val tc = tc()
+        // PERF-4: keyed on each tab's persistedSnapshot() (id/filename/sourcePath/filter/
+        // annotations/showAnnMd/showUnfiltered/expanded/manualBlocks/archiveCandidate — exactly
+        // what tabToken() serializes), not on state.tabs itself. state.tabs changes identity on
+        // ANY tab field write, including session-only ones like `selected`/`analysis` that
+        // tabToken() never persists — keying on the raw list meant every row click re-armed this
+        // effect and, 400ms later, did a synchronous full-session serialize+write on the UI
+        // thread. The .map { } preserves tab order, which is itself part of the persisted state
+        // (tabs serialize in list order).
         LaunchedEffect(
-            state.tabs,
+            state.tabs.map { it.persistedSnapshot() },
             state.savedFilters,
             state.settings,
             state.activeSavedFilterIds,
@@ -80,7 +88,10 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
             // otherwise keep rewriting the whole autosave.cache every ~400ms for the tailing
             // session's entire duration. stopTailing() explicitly autosaveNow()s once the tab
             // settles, so nothing is lost, just deferred.
-            if (state.tabs.none { it.tailing }) state.autosaveNow()
+            // autosaveInBackground (not autosaveNow): nothing here needs the write to complete
+            // synchronously — Main.kt's onCloseRequest already flushes synchronously on exit, so
+            // this path can debounce and run entirely off the UI thread instead.
+            if (state.tabs.none { it.tailing }) state.autosaveInBackground()
         }
         LaunchedEffect(Unit) {
             runCatching { rootFocusRequester.requestFocus() }
