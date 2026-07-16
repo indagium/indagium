@@ -19,6 +19,7 @@ import com.openlog.utils.computeItems
 import com.openlog.utils.indexOfEntryId
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
+import com.openlog.utils.newId
 import java.io.File
 
 /**
@@ -470,7 +471,7 @@ internal class OpenLogToolOperations(
                 }
             }
             MessageRule(
-                id = m.str("id")?.takeIf { it.isNotBlank() } ?: "rule${System.currentTimeMillis()}_$idx",
+                id = m.str("id")?.takeIf { it.isNotBlank() } ?: "${newId("rule")}_$idx",
                 include = m.bool("include") ?: true,
                 pattern = pattern,
                 regex = m.bool("regex") ?: false,
@@ -489,7 +490,7 @@ internal class OpenLogToolOperations(
             val matchText = m.str("matchText")?.takeIf { it.isNotBlank() }
                 ?: error("sequences[$idx]: missing or blank 'matchText'")
             SequenceDef(
-                id = m.str("id")?.takeIf { it.isNotBlank() } ?: "seq${System.currentTimeMillis()}_$idx",
+                id = m.str("id")?.takeIf { it.isNotBlank() } ?: "${newId("seq")}_$idx",
                 matchText = matchText,
                 isRegex = m.bool("isRegex") ?: false,
                 priority = m.int("priority") ?: (idx + 1),

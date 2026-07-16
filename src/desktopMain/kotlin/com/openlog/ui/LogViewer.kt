@@ -93,8 +93,6 @@ internal fun keywordRegexHighlightRanges(lineText: String, filter: Filter): List
         emptyList()
     }
 
-internal fun nextOriginalSelectionAfterFilteredSelection(filteredSelection: Set<Int>): Set<Int> = filteredSelection
-
 // Derived once per item-list computation (off the UI thread for large tabs) so recompositions
 // never pay an O(n) pass over millions of items: entry ids in display order (drag-select and
 // navigation), row-only ids (select-all), a BitSet for pruning stale row bounds, and the
@@ -1133,9 +1131,7 @@ fun LogViewer(
                         itemOnSelRow = { id, multi, range ->
                             onSelRow(id, multi, range)
                             if (!multi && !range) {
-                                localAllSelected = nextOriginalSelectionAfterFilteredSelection(
-                                    filteredSelection = setOf(id),
-                                )
+                                localAllSelected = setOf(id)
                                 val target = expansionAndIndexForEntry(tab, applyFilter = false, entryId = id, currentItems = allItems)
                                 if (target != null) syncScope.launch {
                                     (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
@@ -1146,9 +1142,7 @@ fun LogViewer(
                         },
                         itemOnSelRowRange = { ids ->
                             onSelRowRange(ids)
-                            localAllSelected = nextOriginalSelectionAfterFilteredSelection(
-                                filteredSelection = ids.toSet(),
-                            )
+                            localAllSelected = ids.toSet()
                         },
                         panelKey = "${tab.id}:main",
                         listState = filteredLazyState,

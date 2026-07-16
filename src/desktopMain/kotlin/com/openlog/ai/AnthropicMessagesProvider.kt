@@ -438,8 +438,17 @@ class AnthropicMessagesProvider(
         // thinkingBudgetFor. Anthropic exposes no per-model effort list, so this is a fixed set.
         val THINKING_EFFORTS = listOf("low", "medium", "high")
 
-        // Extended thinking is available on Claude 3.7 and the Claude 4 family (opus/sonnet/haiku).
-        val THINKING_MODEL_REGEX = Regex("claude-(opus|sonnet|haiku)-4")
+        // Extended thinking is available on Claude 3.7 (matched by the explicit contains() check
+        // in supportsExtendedThinking below, since its version number sits before the family name:
+        // "claude-3-7-sonnet") and on every family/major-version-4-or-later model since ("claude-
+        // opus-4", "claude-sonnet-4-5", "claude-opus-4-8", "claude-sonnet-5", "claude-fable-5", ...).
+        // (QUAL-3) The old "claude-(opus|sonnet|haiku)-4" pattern only matched major version 4
+        // exactly, so it silently stopped matching as soon as a "claude-sonnet-5"-shaped id showed
+        // up from listModels. Matching >=4 (single digit 4-9, or two-plus digits for a future
+        // double-digit major) plus any family name errs toward "supports thinking" for a newer
+        // model, which is safe: the effort param is only ever sent when the user picks a reasoning
+        // level, and Anthropic is the one returning these ids from listModels in the first place.
+        val THINKING_MODEL_REGEX = Regex("claude-(opus|sonnet|haiku|fable)-([4-9]|\\d{2,})")
         val json = Json { ignoreUnknownKeys = true }
     }
 }

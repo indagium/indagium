@@ -48,6 +48,7 @@ import com.openlog.utils.isLikelyTextFile
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.mergeLogs
+import com.openlog.utils.newId
 import com.openlog.utils.openArchiveCandidateStream
 import com.openlog.utils.parseLogcat
 import com.openlog.utils.passesFilter
@@ -1230,7 +1231,7 @@ class AppState(
         if (pattern.isBlank()) return
         upFlt(tabId) { f ->
             val rule = MessageRule(
-                id = "mr${System.currentTimeMillis()}_${pattern.hashCode()}",
+                id = "${newId("mr")}_${pattern.hashCode()}",
                 include = include,
                 pattern = pattern,
                 regex = regex,
@@ -1269,7 +1270,7 @@ class AppState(
         upFlt(tabId) { f ->
             f.copy(
                 highlighters = f.highlighters + Highlighter(
-                    "hl${System.currentTimeMillis()}",
+                    newId("hl"),
                     pat,
                     rx,
                     color,
@@ -1364,7 +1365,7 @@ class AppState(
             newSeqColor = colorAfterSequenceColor(assignedColor)
             f.copy(
                 sequences = f.sequences + SequenceDef(
-                    "seq${System.currentTimeMillis()}",
+                    newId("seq"),
                     text,
                     isRegex,
                     maxP + 1,
@@ -2128,7 +2129,7 @@ class AppState(
         val tab = tab(tabId) ?: return false
         if (manualCollapseAvailability(tab, anchorId, direction, endId) != ManualCollapseAvailability.AVAILABLE) return false
         upTab(tabId) { t ->
-            val id = "mc${System.currentTimeMillis()}_${anchorId}_${direction.name}"
+            val id = "${newId("mc")}_${anchorId}_${direction.name}"
             t.copy(manualBlocks = t.manualBlocks + ManualCollapseBlock(id, anchorId, direction, endId = endId))
         }
         return true
@@ -2902,7 +2903,7 @@ class AppState(
         // Fallback: load raw text as a single note block (e.g. plain .md without sidecar)
         val text = runCatching { file.readText() }.getOrElse { return }
         upTab(tabId) { t ->
-            val block = AnnBlock.Note("n${System.currentTimeMillis()}", text)
+            val block = AnnBlock.Note(newId("n"), text)
             t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block))
         }
     }

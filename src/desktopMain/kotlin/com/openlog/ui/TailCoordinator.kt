@@ -91,10 +91,22 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                     // instead of re-running on every single tail batch (P-04); pending = true
                     // reuses the same "still analyzing" rendering FilterPanel/Filter.kt already
                     // have for a freshly-opened file (see buildLogAnalysis/pendingAnalysis).
+                    //
+                    // (PERF-6) tagCounts is updated incrementally from the existing map, not
+                    // recomputed by regrouping the whole (ever-growing) nextData — a full rescan
+                    // every ~500ms batch turned an hours-long tail session into an O(n^2) cost
+                    // over the file's total line count. merge(..., Int::plus) adds the new
+                    // batch's counts onto the running totals instead of the map `+` operator,
+                    // which would overwrite rather than sum an existing tag's count.
                     cur.copy(
                         logData = nextData,
                         rmap = mkRmap(nextData),
-                        analysis = cur.analysis.copy(tagCounts = nextData.groupingBy { it.tag }.eachCount(), pending = true),
+                        analysis = cur.analysis.copy(
+                            tagCounts = cur.analysis.tagCounts.toMutableMap().apply {
+                                newEntries.forEach { merge(it.tag, 1, Int::plus) }
+                            },
+                            pending = true,
+                        ),
                     )
                 } else {
                     cur

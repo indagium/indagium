@@ -182,6 +182,40 @@ class AnthropicMessagesProviderTest {
         }
     }
 
+    // (QUAL-3) THINKING_MODEL_REGEX used to require an exact "-4" major version, so it silently
+    // stopped matching as soon as Anthropic started returning newer ids (claude-sonnet-5,
+    // claude-opus-4-8, a hypothetical claude-fable-5) from /v1/models. Exercised through
+    // listModels() rather than calling the private supportsExtendedThinking directly, matching
+    // discoversModelsFromModelsEndpointWithThinkingEfforts above.
+    @Test
+    fun supportsExtendedThinkingForCurrentAndFutureModelIds() = runBlocking {
+        val client = HttpClient(MockEngine { request ->
+            respond(
+                """{"data":[
+                    {"type":"model","id":"claude-3-7-sonnet","display_name":"Claude 3.7 Sonnet"},
+                    {"type":"model","id":"claude-opus-4-8","display_name":"Claude Opus 4.8"},
+                    {"type":"model","id":"claude-sonnet-5","display_name":"Claude Sonnet 5"},
+                    {"type":"model","id":"claude-fable-5","display_name":"Claude Fable 5"},
+                    {"type":"model","id":"claude-3-5-sonnet","display_name":"Claude 3.5 Sonnet"},
+                    {"type":"model","id":"claude-instant","display_name":"Claude Instant"}
+                ]}""",
+                HttpStatusCode.OK,
+                headersOf("Content-Type", "application/json"),
+            )
+        }) { expectSuccess = false }
+
+        AnthropicMessagesProvider(baseUrl = "https://api.anthropic.com", apiKey = "k", httpClient = client).use { provider ->
+            val available = assertIs<ModelDiscoveryResult.Available>(provider.listModels())
+            val effortsById = available.models.associate { it.id to it.reasoningEfforts }
+            assertEquals(listOf("low", "medium", "high"), effortsById["claude-3-7-sonnet"])
+            assertEquals(listOf("low", "medium", "high"), effortsById["claude-opus-4-8"])
+            assertEquals(listOf("low", "medium", "high"), effortsById["claude-sonnet-5"])
+            assertEquals(listOf("low", "medium", "high"), effortsById["claude-fable-5"])
+            assertEquals(emptyList(), effortsById["claude-3-5-sonnet"])
+            assertEquals(emptyList(), effortsById["claude-instant"])
+        }
+    }
+
     @Test
     fun enablesThinkingBlockWhenReasoningEffortSet() = runBlocking {
         var capturedRequest: HttpRequestData? = null

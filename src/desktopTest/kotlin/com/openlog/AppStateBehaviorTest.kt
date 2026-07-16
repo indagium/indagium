@@ -2605,6 +2605,37 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun startTailingAccumulatesTagCountsAcrossBatchesInsteadOfOverwriting() {
+        // PERF-6: tagCounts used to be recomputed by regrouping the tab's entire (ever-growing)
+        // logData on every ~500ms tail batch. It's now built incrementally from the previous
+        // batch's counts via merge(tag, 1, Int::plus) — pin that the running totals actually sum
+        // across several separate batches, including a tag ("App") that appears in more than one
+        // batch, rather than the map `+` operator silently overwriting its count each time.
+        val dir = createTempDirectory("openlog-tailing-tagcounts").toFile()
+        val file = File(dir, "tail.log").apply { writeText("06-26 10:00:00.000  100  100 I App: first\n") }
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.openFile(file)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        val tabId = state.tabs.single().id
+        assertEquals(mapOf("App" to 1), state.tab(tabId)!!.analysis.tagCounts)
+
+        state.startTailing(tabId)
+
+        file.appendText("06-26 10:00:01.000  100  100 I App: second\n")
+        waitUntil { state.tab(tabId)!!.logData.size == 2 }
+        assertEquals(mapOf("App" to 2), state.tab(tabId)!!.analysis.tagCounts)
+
+        file.appendText(
+            "06-26 10:00:02.000  100  100 I Binder: third\n" +
+                "06-26 10:00:02.001  100  100 I Binder: fourth\n",
+        )
+        waitUntil { state.tab(tabId)!!.logData.size == 4 }
+        assertEquals(mapOf("App" to 2, "Binder" to 2), state.tab(tabId)!!.analysis.tagCounts)
+
+        state.stopTailing(tabId)
+    }
+
+    @Test
     fun tailedCrashDataStaysPendingDuringABurstThenResolvesOnceItSettles() {
         // P-04: appendTailedLines used to call buildLogAnalysis() — the full crash/stack-trace
         // scan — on every single tail batch. It's now debounced instead, reusing the same

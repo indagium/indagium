@@ -21,7 +21,6 @@ import com.openlog.ui.isCrashGroupRow
 import com.openlog.ui.keyboardCopyTextForLogPanel
 import com.openlog.ui.logItemStableKey
 import com.openlog.ui.mkTab
-import com.openlog.ui.nextOriginalSelectionAfterFilteredSelection
 import com.openlog.ui.orderedTabsForComparePicker
 import com.openlog.ui.panelCopySelectionIds
 import com.openlog.ui.splitTabsForVisibility
@@ -51,33 +50,6 @@ class SplitViewAndTabRegressionTest {
         state.reorderTabs("a", beforeId = null)
 
         assertEquals(listOf("b", "c", "a"), state.tabs.map { it.id })
-    }
-
-    @Test
-    fun filteredRangeSelectionMirrorsIntoOriginalPanel() {
-        val next = nextOriginalSelectionAfterFilteredSelection(
-            filteredSelection = setOf(4, 5, 6),
-        )
-
-        assertEquals(setOf(4, 5, 6), next)
-    }
-
-    @Test
-    fun filteredSingleClickReplacesExistingOriginalRangeSelection() {
-        val next = nextOriginalSelectionAfterFilteredSelection(
-            filteredSelection = setOf(4),
-        )
-
-        assertEquals(setOf(4), next)
-    }
-
-    @Test
-    fun filteredSingleClickMirrorsWhenOriginalSelectionIsNotARange() {
-        val next = nextOriginalSelectionAfterFilteredSelection(
-            filteredSelection = setOf(4),
-        )
-
-        assertEquals(setOf(4), next)
     }
 
     @Test
