@@ -41,6 +41,7 @@ import com.openlog.utils.computeItems
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.exportFilteredToFile
 import com.openlog.utils.extractCandidate
+import com.openlog.utils.indexOfEntryId
 import com.openlog.utils.invalidateComputeCache
 import com.openlog.utils.isLikelyTextFile
 import com.openlog.utils.isSupportedArchiveFile
@@ -324,13 +325,12 @@ private fun isTransientRegexOnlyChange(before: Filter, after: Filter): Boolean {
 enum class ManualCollapseAvailability { AVAILABLE, MISSING_ROW, NOOP_RANGE, OVERLAPS_EXISTING }
 
 private fun manualCollapseRange(tab: LogTab, anchorId: Int, direction: ManualCollapseDirection, endId: Int? = null): IntRange? {
-    val dataIds = tab.logData.map { it.id }
-    val anchor = dataIds.indexOf(anchorId).takeIf { it >= 0 } ?: return null
+    val anchor = tab.logData.indexOfEntryId(anchorId).takeIf { it >= 0 } ?: return null
     return when (direction) {
         ManualCollapseDirection.TO_START -> 0..anchor
-        ManualCollapseDirection.TO_END -> anchor..dataIds.lastIndex
+        ManualCollapseDirection.TO_END -> anchor..tab.logData.lastIndex
         ManualCollapseDirection.RANGE -> {
-            val end = endId?.let { dataIds.indexOf(it) }?.takeIf { it >= 0 } ?: return null
+            val end = endId?.let { tab.logData.indexOfEntryId(it) }?.takeIf { it >= 0 } ?: return null
             minOf(anchor, end)..maxOf(anchor, end)
         }
     }
@@ -1800,12 +1800,12 @@ class AppState(
                 // has reported one yet (e.g. headless/control-server callers).
                 val visIds = visibleItemsByTab[tabId]?.allIds
                     ?: computeItems(t, true).let { items -> IntArray(items.size) { logItemEntryId(items[it]) } }
-                val last = t.selected.lastOrNull { visIds.contains(it) } ?: t.selected.maxOrNull()
+                val last = t.selected.lastOrNull { visIds.indexOfId(it) >= 0 } ?: t.selected.maxOrNull()
                 if (last == null) {
                     setOf(id)
                 } else {
-                    val a = visIds.indexOf(last)
-                    val b = visIds.indexOf(id)
+                    val a = visIds.indexOfId(last)
+                    val b = visIds.indexOfId(id)
                     if (a >= 0 && b >= 0) (minOf(a, b)..maxOf(a, b)).map { visIds[it] }.toSet() else t.selected + id
                 }
             }
@@ -1816,11 +1816,14 @@ class AppState(
     }
 
     fun selRowRange(tabId: String, fromId: Int, toId: Int) = upTab(tabId) { t ->
-        val ids = t.logData.filter { passesFilter(it, t.filter) }.map { it.id }.ifEmpty { t.logData.map { it.id } }
-        val a = ids.indexOf(fromId)
-        val b = ids.indexOf(toId)
+        // Prefer the summary LogViewer already computed (same rationale as selRow's range case
+        // above) instead of re-filtering the full logData on every shift-click.
+        val ids = visibleItemsByTab[tabId]?.allIds
+            ?: t.logData.filter { passesFilter(it, t.filter) }.map { it.id }.ifEmpty { t.logData.map { it.id } }.toIntArray()
+        val a = ids.indexOfId(fromId)
+        val b = ids.indexOfId(toId)
         if (a < 0 || b < 0) return@upTab t
-        t.copy(selected = ids.subList(minOf(a, b), maxOf(a, b) + 1).toSet())
+        t.copy(selected = (minOf(a, b)..maxOf(a, b)).map { ids[it] }.toSet())
     }
 
     fun setSelectedRows(tabId: String, ids: List<Int>) = upTab(tabId) { t ->

@@ -236,18 +236,24 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                         // with its own local selection (e.g. the "Original" unfiltered panel).
                         val selectedIds = ctx.panelSelectedIds.ifEmpty { ctxTab.selected }
                         val selCount = selectedIds.size
-                        val canCollapseToStart = ctxTab.let {
-                            manualCollapseAvailability(it, ctx.entryId, ManualCollapseDirection.TO_START) ==
+                        // manualCollapseAvailability re-derives a range (and re-scans every existing
+                        // manual block) each call — remember it per menu-open so unrelated
+                        // recompositions of this scope (e.g. AI sidebar state ticking) don't re-pay
+                        // that cost. Keyed on ctxTab + entryId + selectedIds so a genuine change to
+                        // any of those (new manual block, selection edited from another panel while
+                        // the menu is open) still recomputes.
+                        val canCollapseToStart = remember(ctxTab, ctx.entryId) {
+                            manualCollapseAvailability(ctxTab, ctx.entryId, ManualCollapseDirection.TO_START) ==
                                 ManualCollapseAvailability.AVAILABLE
                         }
-                        val canCollapseToEnd = ctxTab.let {
-                            manualCollapseAvailability(it, ctx.entryId, ManualCollapseDirection.TO_END) ==
+                        val canCollapseToEnd = remember(ctxTab, ctx.entryId) {
+                            manualCollapseAvailability(ctxTab, ctx.entryId, ManualCollapseDirection.TO_END) ==
                                 ManualCollapseAvailability.AVAILABLE
                         }
-                        val canCollapseSelection = ctxTab.let { tab ->
+                        val canCollapseSelection = remember(ctxTab, ctx.entryId, selectedIds) {
                             selectedIds.size > 1 &&
                                 manualCollapseAvailability(
-                                    tab,
+                                    ctxTab,
                                     selectedIds.minOrNull() ?: ctx.entryId,
                                     ManualCollapseDirection.RANGE,
                                     selectedIds.maxOrNull(),

@@ -16,6 +16,7 @@ import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitSource
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.computeItems
+import com.openlog.utils.indexOfEntryId
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import java.io.File
@@ -497,7 +498,7 @@ internal class OpenLogToolOperations(
     // is unaffected by the active filter or any folding, and needs no filter-widen/restore dance.
     private fun getLineContext(tabId: String, lineId: Int, before: Int, after: Int, fields: Set<String>?, compact: Boolean): Map<String, Any?> {
         val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
-        val idx = tab.logData.indexOfFirst { it.id == lineId }
+        val idx = tab.logData.indexOfEntryId(lineId)
         if (idx < 0) return mapOf("error" to "no such line id $lineId in tab $tabId")
         val from = (idx - before.coerceAtLeast(0)).coerceAtLeast(0)
         val to = (idx + after.coerceAtLeast(0)).coerceAtMost(tab.logData.lastIndex)

@@ -38,3 +38,25 @@ class EntryIdMap(private val data: List<LogEntry>) : AbstractMap<Int, LogEntry>(
                     .iterator()
         }
 }
+
+// Same dense-guess-then-binary-search technique as EntryIdMap.get, but returning the index into
+// the list rather than the entry itself — for call sites that need the position (right-click
+// manual-collapse ranges, MCP get_line_context) instead of the entry, so they don't have to pay
+// for an intermediate EntryIdMap or a linear indexOfFirst over a possibly multi-million-row list.
+internal fun List<LogEntry>.indexOfEntryId(id: Int): Int {
+    if (isEmpty()) return -1
+    val guess = id - this[0].id
+    if (guess in indices && this[guess].id == id) return guess
+    var lo = 0
+    var hi = lastIndex
+    while (lo <= hi) {
+        val mid = (lo + hi) ushr 1
+        val midId = this[mid].id
+        when {
+            midId < id -> lo = mid + 1
+            midId > id -> hi = mid - 1
+            else -> return mid
+        }
+    }
+    return -1
+}

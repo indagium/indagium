@@ -6,8 +6,8 @@ import com.openlog.model.AnnBlock
 import com.openlog.model.AnnotationLogBlockStyle
 import com.openlog.model.Annotations
 import com.openlog.model.AppSettings
-import com.openlog.model.CrashCategory
 import com.openlog.model.CopyMaskRule
+import com.openlog.model.CrashCategory
 import com.openlog.model.CtrlFTarget
 import com.openlog.model.CtxMenuState
 import com.openlog.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
@@ -32,8 +32,8 @@ import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SettingsSection
 import com.openlog.ui.SplitMode
 import com.openlog.ui.blockOrderDuringDrag
-import com.openlog.ui.cumulativeBlockOffsets
 import com.openlog.ui.consumeFilterSearchRequest
+import com.openlog.ui.cumulativeBlockOffsets
 import com.openlog.ui.emptyWorkspaceTab
 import com.openlog.ui.filterSearchTargetForTab
 import com.openlog.ui.manualCollapseAvailability
@@ -44,6 +44,7 @@ import com.openlog.ui.sequenceOrderDuringDrag
 import com.openlog.ui.sequenceRenderY
 import com.openlog.ui.sequenceRowBaseBackground
 import com.openlog.ui.shouldSyncSequenceVisualOrder
+import com.openlog.ui.summarizeItems
 import com.openlog.ui.tabDisplayLabel
 import com.openlog.ui.themeColors
 import com.openlog.utils.SPLIT_PROMPT_BYTES
@@ -3666,6 +3667,46 @@ class AppStateBehaviorTest {
         state.selRowRange("t1", 1, 3)
 
         assertEquals(setOf(1, 2, 3), state.tabs.single().selected)
+    }
+
+    // PERF-5: selRowRange used to always re-filter the full logData; it now prefers the
+    // ItemsSummary LogViewer already noted (same fallback rule selRow's range branch uses) and
+    // must produce the same selection either way.
+    @Test
+    fun selRowRangeMatchesWithAndWithoutANotedSummary() {
+        val entries = (1..6).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+
+        val stateWithoutSummary = AppState()
+        stateWithoutSummary.tabs = listOf(mkTab("t1", "test.log", entries))
+        stateWithoutSummary.selRowRange("t1", 2, 5)
+
+        val stateWithSummary = AppState()
+        stateWithSummary.tabs = listOf(mkTab("t1", "test.log", entries))
+        val tab = stateWithSummary.tabs.single()
+        stateWithSummary.noteVisibleItems("t1", summarizeItems(computeItems(tab, true)))
+        stateWithSummary.selRowRange("t1", 2, 5)
+
+        assertEquals(setOf(2, 3, 4, 5), stateWithoutSummary.tabs.single().selected)
+        assertEquals(stateWithoutSummary.tabs.single().selected, stateWithSummary.tabs.single().selected)
+    }
+
+    // The case where the summary path genuinely diverges from a raw filter pass: a collapsed
+    // manual block hides its interior rows, and a range spanning the fold must select only what
+    // is actually visible (header included) rather than expanding through the collapsed block —
+    // the same rule selRow's range branch documents for shift-click.
+    @Test
+    fun selRowRangeWithSummaryDoesNotExpandThroughCollapsedBlock() {
+        val entries = (1..8).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        val state = AppState()
+        val block = ManualCollapseBlock("mc1", anchorId = 3, direction = ManualCollapseDirection.RANGE, endId = 6)
+        state.tabs = listOf(mkTab("t1", "test.log", entries).copy(manualBlocks = listOf(block)))
+        val tab = state.tabs.single()
+        state.noteVisibleItems("t1", summarizeItems(computeItems(tab, true)))
+
+        state.selRowRange("t1", 2, 7)
+
+        // Ids 4..6 sit inside the collapsed block (3 is its always-visible header row).
+        assertEquals(setOf(2, 3, 7), state.tabs.single().selected)
     }
 
     @Test

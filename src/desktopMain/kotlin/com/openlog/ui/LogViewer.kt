@@ -824,7 +824,7 @@ fun LogViewer(
                             }
                         }
                         if (ev.type == KeyEventType.KeyDown && ev.key == Key.DirectionUp && !ev.isShiftPressed) {
-                            val firstRow = listItems.filterIsInstance<LogItem.Row>().firstOrNull()?.entry?.id
+                            val firstRow = listSummary.rowIds.firstOrNull()
                             val current = selCursor.effectiveCursorId(effectiveTab)
                             if (firstRow != null && current == firstRow) {
                                 toolbarIndex = rovingMove(toolbarRovingItems(), 0, +1, wrap = true)
@@ -1298,26 +1298,30 @@ private fun handleNavKey(
     onSelectRow: (Int) -> Unit,
 ): Boolean {
     if (ev.type != KeyEventType.KeyDown) return false
-    val rows = items.filterIsInstance<LogItem.Row>()
-    if (rows.isEmpty()) return false
+    if (summary.rowCount == 0) return false
 
     fun cursorIdx(): Int = cursorRowIndex(cursor.effectiveCursorId(tab), lazyState.firstVisibleItemIndex, items, summary)
 
+    // summary.rowIds[i] is the i-th LogItem.Row's entry id in display order — summarizeItems
+    // builds it by walking `items` picking out just the Row entries, and spliceSummarize
+    // preserves that shape — so row-index math runs on the IntArray directly instead of
+    // materializing a Row-only list of (potentially) millions of items on every keypress (P-02).
     fun moveTo(rowIdx: Int) {
-        val i = rowIdx.coerceIn(0, rows.lastIndex)
+        val i = rowIdx.coerceIn(0, summary.rowCount - 1)
         cursor.onAnchorChange(null)
+        val id = summary.rowIds[i]
         // Always replace the selection outright (never toggle): keyboard nav must stay
         // idempotent even if the same target row is selected again by a duplicate key event.
-        onSelectRow(rows[i].entry.id)
-        cursor.onCursorChange(rows[i].entry.id)
-        scrollForCursor(lazyState, scope, summary.allIds.indexOfId(rows[i].entry.id), scrollMargin)
+        onSelectRow(id)
+        cursor.onCursorChange(id)
+        scrollForCursor(lazyState, scope, summary.allIds.indexOfId(id), scrollMargin)
     }
 
     return when {
         (ev.isMetaPressed || ev.isCtrlPressed) && ev.key == Key.DirectionUp   -> { moveTo(0); true }
-        (ev.isMetaPressed || ev.isCtrlPressed) && ev.key == Key.DirectionDown -> { moveTo(rows.lastIndex); true }
+        (ev.isMetaPressed || ev.isCtrlPressed) && ev.key == Key.DirectionDown -> { moveTo(summary.rowCount - 1); true }
         ev.key == Key.MoveHome   -> { moveTo(0); true }
-        ev.key == Key.MoveEnd    -> { moveTo(rows.lastIndex); true }
+        ev.key == Key.MoveEnd    -> { moveTo(summary.rowCount - 1); true }
         ev.key == Key.DirectionUp   && !ev.isShiftPressed -> { moveTo(cursorIdx() - 1); true }
         ev.key == Key.DirectionDown && !ev.isShiftPressed -> { moveTo(cursorIdx() + 1); true }
         ev.key == Key.PageUp     && !ev.isShiftPressed -> { moveTo(cursorIdx() - PAGE_JUMP_ROWS); true }
@@ -1347,23 +1351,24 @@ private fun handleSelKey(
     actions: SelKeyActions,
 ): Boolean {
     if (ev.type != KeyEventType.KeyDown) return false
-    val rows = items.filterIsInstance<LogItem.Row>()
     val isAction = if (isMacOs) ev.isMetaPressed else ev.isCtrlPressed
 
     fun cursorIdx(): Int = cursorRowIndex(cursor.effectiveCursorId(tab), lazyState.firstVisibleItemIndex, items, summary)
 
+    // See handleNavKey's moveTo — row-index math runs on summary.rowIds directly, never
+    // materializing a Row-only list per keypress (P-02).
     fun extendTo(newRowIdx: Int) {
-        if (rows.isEmpty()) return
-        val clamped = newRowIdx.coerceIn(0, rows.lastIndex)
-        val target = rows[clamped].entry.id
+        if (summary.rowCount == 0) return
+        val clamped = newRowIdx.coerceIn(0, summary.rowCount - 1)
+        val target = summary.rowIds[clamped]
         val anchor = cursor.anchorId ?: tab.selected.minOrNull() ?: target
         cursor.onAnchorChange(anchor)
         cursor.onCursorChange(target)
         val anchorIdx = summary.rowIds.indexOfId(anchor).coerceAtLeast(0)
         val lo = minOf(anchorIdx, clamped)
         val hi = maxOf(anchorIdx, clamped)
-        onSelRowRange(rows.subList(lo, hi + 1).map { it.entry.id })
-        scrollForCursor(lazyState, scope, summary.allIds.indexOfId(rows[clamped].entry.id), scrollMargin)
+        onSelRowRange((lo..hi).map { summary.rowIds[it] })
+        scrollForCursor(lazyState, scope, summary.allIds.indexOfId(target), scrollMargin)
     }
 
     return when {
