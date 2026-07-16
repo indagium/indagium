@@ -1,10 +1,13 @@
 package com.openlog
 
 import com.openlog.utils.containsPattern
+import com.openlog.utils.firstRegexMatch
+import com.openlog.utils.regexCacheSizeForTesting
 import com.openlog.utils.regexRanges
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class TextMatchTest {
@@ -101,5 +104,66 @@ class TextMatchTest {
         val ranges = regexRanges("Hello World", "hello")
         assertEquals(1, ranges.size)
         assertEquals(0 to 5, ranges.single())
+    }
+
+    // ── SEC-2: catastrophic-backtracking regex must not hang the caller ───────
+
+    // A classic ReDoS pattern: against a run of 'a's with no trailing match for "$", a naive
+    // backtracking engine explodes exponentially. Without the DeadlineCharSequence guard in
+    // TextMatch.kt this call does not return in any reasonable time.
+    private val catastrophicPattern = "(a+)+$"
+    private val timeoutTestBudgetMs = 2_000L
+
+    private fun catastrophicHaystack() = "a".repeat(40) + "!"
+
+    @Test
+    fun catastrophicRegexContainsPatternReturnsFalsePromptlyInsteadOfHanging() {
+        val start = System.currentTimeMillis()
+        val matched = containsPattern(catastrophicHaystack(), catastrophicPattern, regex = true)
+        val elapsed = System.currentTimeMillis() - start
+        assertFalse(matched)
+        assertTrue(elapsed < timeoutTestBudgetMs, "expected a prompt return, took ${elapsed}ms")
+    }
+
+    @Test
+    fun catastrophicRegexFirstMatchReturnsNullPromptlyInsteadOfHanging() {
+        val start = System.currentTimeMillis()
+        val match = firstRegexMatch(catastrophicHaystack(), catastrophicPattern)
+        val elapsed = System.currentTimeMillis() - start
+        assertNull(match)
+        assertTrue(elapsed < timeoutTestBudgetMs, "expected a prompt return, took ${elapsed}ms")
+    }
+
+    @Test
+    fun catastrophicRegexRangesReturnsEmptyPromptlyInsteadOfHanging() {
+        val start = System.currentTimeMillis()
+        val ranges = regexRanges(catastrophicHaystack(), catastrophicPattern)
+        val elapsed = System.currentTimeMillis() - start
+        assertTrue(ranges.isEmpty())
+        assertTrue(elapsed < timeoutTestBudgetMs, "expected a prompt return, took ${elapsed}ms")
+    }
+
+    @Test
+    fun normalRegexPatternsStillMatchCorrectlyAfterTimeoutGuardAdded() {
+        // The timeout machinery must be invisible for any legitimate pattern/line combination.
+        assertTrue(containsPattern("error code 404", """\d+""", regex = true))
+        assertEquals("404", firstRegexMatch("error code 404", """\d+"""))
+        assertEquals(listOf(11 to 14), regexRanges("error code 404", """\d+"""))
+    }
+
+    // ── SEC-3: bounded regex cache ─────────────────────────────────────────────
+
+    @Test
+    fun regexCacheStaysBoundedAfterManyDistinctPatterns() {
+        repeat(300) { i -> containsPattern("line $i", "pattern-$i-[0-9]+", regex = true) }
+        assertTrue(regexCacheSizeForTesting() <= 256, "cache grew to ${regexCacheSizeForTesting()}, expected <= 256")
+    }
+
+    @Test
+    fun regexCacheEvictionDoesNotBreakSubsequentMatching() {
+        repeat(300) { i -> containsPattern("line $i", "pattern-$i-[0-9]+", regex = true) }
+        // A pattern evicted long ago (or never cached) must still compile and match correctly.
+        assertTrue(containsPattern("Hello World", "hello", regex = true))
+        assertFalse(containsPattern("Hello World", "xyz", regex = true))
     }
 }

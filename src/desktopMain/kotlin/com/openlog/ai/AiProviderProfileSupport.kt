@@ -7,7 +7,14 @@ import java.net.URI
 
 enum class AiProviderUrlProblem(val message: String) {
     MALFORMED("Enter a complete HTTP or HTTPS endpoint URL."),
-    REMOTE_DISCLOSURE_REQUIRED("Acknowledge that logs and source context may leave this device."),
+
+    // (SEC-4) The original wording only mentioned logs/source context — it didn't say the API key
+    // itself also travels in the clear whenever the endpoint is plain HTTP (as opposed to HTTPS),
+    // which is a materially different risk (a credential, not just log content) to leave unstated.
+    REMOTE_DISCLOSURE_REQUIRED(
+        "Acknowledge that logs and source context may leave this device, and that a plain HTTP " +
+            "(non-HTTPS) endpoint also sends your API key unencrypted.",
+    ),
 }
 
 data class AiProviderUrlValidation(val problem: AiProviderUrlProblem? = null) {

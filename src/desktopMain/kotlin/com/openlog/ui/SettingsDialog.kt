@@ -742,6 +742,23 @@ private fun AutomationSettingsSection(state: AppState) {
     state.mcpControlError?.let { message ->
         AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
     }
+    // (SEC-1) Off by default: CORS lets any origin a browser has open issue cross-origin requests
+    // to this loopback server. Bearer-token auth still gates every request either way — this only
+    // controls whether a browser is additionally allowed to do that at all. Opt-in for the
+    // uncommon case of a browser-based MCP inspector.
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CompactSetting("Allow browser-based MCP clients (CORS)") {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.mcpAllowBrowserClients) 0 else 1),
+                onToggle = { idx -> state.setMcpAllowBrowserClients(idx == 0) },
+            )
+        }
+    }
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1394,11 +1411,15 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
         val endpointHost = runCatching { java.net.URI(endpoint.trim()).host.orEmpty() }.getOrDefault("")
         if (kind.usesHttpEndpoint && endpoint.isNotBlank() && !com.openlog.ai.isLoopbackHost(endpointHost)) {
             CheckRow(acknowledged, { ackState = endpoint.trim() to !acknowledged }) {
+                // (SEC-4) Plain-HTTP-only clause added: the original text covered log/source
+                // content leaving the device but not that a non-HTTPS endpoint also puts the API
+                // key itself on the wire unencrypted — a distinct, credential-level risk.
                 AppText(
-                    "I understand logs, source code, paths, and tool results may leave this device.",
+                    "I understand logs, source code, paths, and tool results may leave this " +
+                        "device, and that a plain HTTP (non-HTTPS) endpoint also sends my API key unencrypted.",
                     color = tc.td,
                     fontSize = 10.sp,
-                    maxLines = 2,
+                    maxLines = 3,
                 )
             }
         }

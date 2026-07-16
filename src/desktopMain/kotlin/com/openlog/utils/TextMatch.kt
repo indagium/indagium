@@ -1,11 +1,78 @@
 package com.openlog.utils
 
 import com.openlog.model.LogEntry
-import java.util.concurrent.ConcurrentHashMap
+import java.util.Collections
 
 private data class RegexKey(val pattern: String, val ignoreCase: Boolean)
 
-private val regexCache = ConcurrentHashMap<RegexKey, Result<Regex>>()
+// (SEC-3) Unbounded ConcurrentHashMap here previously meant every distinct pattern a user or an
+// authenticated MCP client (set_filter) ever typed stayed cached for the life of the process — a
+// slow but real per-session memory leak on a long-running instance fed a stream of one-off
+// patterns. LinkedHashMap in access-order mode + removeEldestEntry gives a plain LRU; wrapping in
+// Collections.synchronizedMap keeps every individual get/put call thread-safe against the filter
+// hot path calling in from multiple threads, matching the ConcurrentHashMap it replaces. getOrPut
+// below (like the ConcurrentHashMap.getOrPut it replaces) is still only get-then-put, not a single
+// atomic op — a rare concurrent-miss race recompiles the same pattern twice, which is harmless
+// (compiling the same pattern string is deterministic) and was already possible before this change.
+private const val REGEX_CACHE_CAPACITY = 256
+
+private val regexCache: MutableMap<RegexKey, Result<Regex>> = Collections.synchronizedMap(
+    object : LinkedHashMap<RegexKey, Result<Regex>>(REGEX_CACHE_CAPACITY, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<RegexKey, Result<Regex>>): Boolean =
+            size > REGEX_CACHE_CAPACITY
+    },
+)
+
+/** Test-only peephole into cache bounding — the cache itself stays private, only its size leaks. */
+internal fun regexCacheSizeForTesting(): Int = regexCache.size
+
+// (SEC-2) User-authored and MCP-authored (set_filter) regex patterns run against arbitrary log
+// text on compute threads (and synchronously on the UI thread on some paths). java.util.regex has
+// no built-in step/time budget, so a catastrophic-backtracking pattern like "(a+)+$" against a
+// long non-matching line can pin a thread indefinitely — the filter's own cancellation check only
+// runs between entries, never inside a single Matcher call. DeadlineCharSequence wraps the real
+// haystack and throws once a wall-clock budget elapses, checked periodically inside charAt() —
+// the exact call java.util.regex.Matcher drives per character it inspects, backtracking included.
+// 100ms is generous for any legitimate pattern/line combination in this app (interactive filter
+// typing already debounces well above that) while bounding the worst case to "one slow frame,"
+// never "the thread never comes back."
+private const val REGEX_MATCH_BUDGET_MS = 100L
+private const val DEADLINE_CHECK_INTERVAL = 1024
+
+private class RegexTimeoutException : RuntimeException() {
+    // This is a control-flow signal thrown on a hot path, not a real exceptional condition worth
+    // paying for a stack trace capture on every catastrophic-backtracking match attempt.
+    override fun fillInStackTrace(): Throwable = this
+}
+
+// length must stay exact (the regex engine relies on it for bounds/anchors); only charAt (and, for
+// safety, subSequence) does the deadline check. deadlineAtMs is computed once per top-level
+// containsPattern/firstRegexMatch/regexRanges call and shared by every charAt during that one
+// match/find/findAll pass — NOT reset per character — so the budget bounds the whole operation.
+private class DeadlineCharSequence(
+    private val real: CharSequence,
+    private val deadlineAtMs: Long,
+) : CharSequence {
+    private var calls = 0
+
+    override val length: Int get() = real.length
+
+    override fun get(index: Int): Char {
+        calls++
+        if (calls % DEADLINE_CHECK_INTERVAL == 0 && System.currentTimeMillis() > deadlineAtMs) {
+            throw RegexTimeoutException()
+        }
+        return real[index]
+    }
+
+    // Matcher.group()/MatchResult.value slice a small already-matched span via subSequence, not a
+    // new pass over the whole haystack — materializing it directly is simplest and doesn't need
+    // its own deadline check.
+    override fun subSequence(startIndex: Int, endIndex: Int): CharSequence = real.subSequence(startIndex, endIndex).toString()
+}
+
+private fun deadlineWrap(haystack: String): CharSequence =
+    DeadlineCharSequence(haystack, System.currentTimeMillis() + REGEX_MATCH_BUDGET_MS)
 
 // This is the exact text presented by LogViewer. Keyword-regex filtering and its visual
 // highlight must use one representation so punctuation at the tag/message boundary cannot make
@@ -37,7 +104,11 @@ internal fun containsPattern(
     val compiled = regexCache.getOrPut(RegexKey(pattern, ignoreCase)) {
         runCatching { Regex(pattern, options) }
     }.getOrNull() ?: return false
-    return compiled.containsMatchIn(haystack)
+    return try {
+        compiled.containsMatchIn(deadlineWrap(haystack))
+    } catch (ignoredTimeout: RegexTimeoutException) {
+        false
+    }
 }
 
 // Exactly containsPattern("$tag $msg", ...) without materializing the concatenation — a full-file
@@ -84,7 +155,11 @@ internal fun firstRegexMatch(
     val compiled = regexCache.getOrPut(RegexKey(pattern, ignoreCase)) {
         runCatching { Regex(pattern, options) }
     }.getOrNull() ?: return null
-    return compiled.find(haystack)?.value
+    return try {
+        compiled.find(deadlineWrap(haystack))?.value
+    } catch (ignoredTimeout: RegexTimeoutException) {
+        null
+    }
 }
 
 internal fun regexRanges(
@@ -96,7 +171,11 @@ internal fun regexRanges(
     val compiled = regexCache.getOrPut(RegexKey(pattern, ignoreCase)) {
         runCatching { Regex(pattern, options) }
     }.getOrNull() ?: return emptyList()
-    return compiled.findAll(haystack)
-        .map { it.range.first to it.range.last + 1 }
-        .toList()
+    return try {
+        compiled.findAll(deadlineWrap(haystack))
+            .map { it.range.first to it.range.last + 1 }
+            .toList()
+    } catch (ignoredTimeout: RegexTimeoutException) {
+        emptyList()
+    }
 }

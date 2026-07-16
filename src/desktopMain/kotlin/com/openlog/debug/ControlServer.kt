@@ -222,6 +222,14 @@ class ControlServer(
     // `ControlServer(appState, port)` construction — mainly tests — is unaffected. AppState's real
     // usage passes an explicit token loaded via loadOrCreateControlToken() so it survives restarts.
     val token: String = generateAuthToken(),
+    // (SEC-1) Off by default: installing CORS with anyHost() unconditionally let any web page open
+    // in the user's browser issue cross-origin requests to 127.0.0.1:<port>. The Host-allowlist +
+    // bearer-token intercept below still gates every request regardless of this flag — CORS is
+    // strictly about whether a *browser* is additionally allowed to read the response across
+    // origins, which only matters for the (uncommon) browser-based MCP inspector use case. Default
+    // false keeps every existing `ControlServer(appState, port)` construction (mainly tests)
+    // behaviorally unchanged (no CORS block at all, same as fully closed).
+    private val allowBrowserClients: Boolean = false,
 ) {
     private var engine: EmbeddedServer<*, *>? = null
     private var mcpServer: Server? = null
@@ -313,21 +321,32 @@ class ControlServer(
         val mcp = buildMcpServer()
         mcpServer = mcp
         val server = embeddedServer(CIO, host = "127.0.0.1", port = port) {
-            // Browser-based MCP inspectors need CORS with the MCP-specific session/version headers.
-            install(CORS) {
-                anyHost()
-                allowHeader("Mcp-Session-Id")
-                allowHeader("Mcp-Protocol-Version")
-                allowHeader("Content-Type")
+            // (SEC-1) Browser-based MCP inspectors need CORS with the MCP-specific session/version
+            // headers — but installing it unconditionally let any origin a browser had open issue
+            // cross-origin requests to this loopback port (the intercept below still authenticates
+            // them, but a browser would happily let unauthenticated preflight/simple requests
+            // through and let script read the response once authenticated). Gated behind Settings
+            // now; only installed when the user opts in. Note this block still doesn't
+            // allowHeader("Authorization") — an authenticated browser call needs that too, so this
+            // flag alone doesn't yet make a browser-based client fully functional; it only bounds
+            // the blast radius of leaving it on.
+            if (allowBrowserClients) {
+                install(CORS) {
+                    anyHost()
+                    allowHeader("Mcp-Session-Id")
+                    allowHeader("Mcp-Protocol-Version")
+                    allowHeader("Content-Type")
+                }
             }
             // Native MCP over Streamable HTTP at /mcp — what LM Studio, Claude Code, and Codex
             // connect to by URL with nothing to install. Same shared server for every connection;
             // its tools are stateless (they read live appState).
             // Runs for every real request (REST and /mcp alike) but never for the CORS plugin's own
-            // OPTIONS preflight handling, which completes at the Plugins phase above before routing
-            // is reached — browsers can still preflight without a token, exactly as required, while
-            // every actual request is rejected before any route/tool logic runs. Host is checked
-            // first and fails closed even for a well-formed token reached via DNS rebinding.
+            // OPTIONS preflight handling (when allowBrowserClients installed it above), which
+            // completes at the Plugins phase before routing is reached — browsers can still
+            // preflight without a token, exactly as required, while every actual request is
+            // rejected before any route/tool logic runs. Host is checked first and fails closed
+            // even for a well-formed token reached via DNS rebinding.
             routing {
                 intercept(ApplicationCallPipeline.Call) {
                     val host = call.request.header("Host")?.substringBefore(":")?.lowercase()

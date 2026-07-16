@@ -139,15 +139,19 @@ internal class OpenLogToolOperations(
             return splitLogRoute(path, entryPath = null, destinationDir = destinationDir, postfix = postfix, partCount = partCount)
         }
         val absPath = file.absolutePath
-        if (splitMode.equals("open_as_is", ignoreCase = true)) appState.openFileAsIs(file) else appState.openFile(file)
+        val tabId = if (splitMode.equals("open_as_is", ignoreCase = true)) appState.openFileAsIs(file) else appState.openFile(file)
         appState.pendingSplitPrompt?.sources?.firstOrNull { source ->
             source is SplitSource.RealFile && source.file.absolutePath == absPath
         }?.let { source ->
             return splitSourceToMap(source)
         }
-        awaitLoad()
-        val tab = appState.tabs.find { it.sourcePath == absPath }
-            ?: return mapOf("error" to "file did not load: $path")
+        // (ARCH-3) openFile/openFileAsIs already return the specific tabId this call triggered (or
+        // reused, via the "already open" dedup fast path) — scope the wait to that tab instead of
+        // the global isLoading flag, so a concurrent unrelated open on another tab can't make this
+        // call wait on, or misreport completion for, a load it didn't start.
+        if (tabId == null) return mapOf("error" to "file did not load: $path")
+        awaitLoad(tabId)
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "file did not load: $path")
         return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size)
     }
 
@@ -175,11 +179,10 @@ internal class OpenLogToolOperations(
         if (splitMode.equals("split", ignoreCase = true)) {
             return splitLogRoute(file.absolutePath, target.entryPath, destinationDir, postfix, partCount)
         }
-        val sourcePath = "${file.absolutePath}!${target.entryPath}"
-        if (splitMode.equals("open_as_is", ignoreCase = true)) {
+        val tabId = if (splitMode.equals("open_as_is", ignoreCase = true)) {
             appState.openZipEntryAsIs(file, target)
         } else {
-            appState.openZipEntries(file, listOf(target))
+            appState.openZipEntries(file, listOf(target)).firstOrNull()
         }
         appState.pendingSplitPrompt?.sources?.firstOrNull { source ->
             source is SplitSource.ArchiveEntry &&
@@ -188,9 +191,11 @@ internal class OpenLogToolOperations(
         }?.let { source ->
             return splitSourceToMap(source)
         }
-        awaitLoad()
-        val tab = appState.tabs.find { it.sourcePath == sourcePath }
-            ?: return mapOf("error" to "entry did not load: ${target.entryPath}")
+        // (ARCH-3) See openLogFile's matching comment above — scope to the specific tabId
+        // openZipEntryAsIs/openZipEntries already hand back, instead of the global isLoading flag.
+        if (tabId == null) return mapOf("error" to "entry did not load: ${target.entryPath}")
+        awaitLoad(tabId)
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "entry did not load: ${target.entryPath}")
         return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size)
     }
 
@@ -227,12 +232,26 @@ internal class OpenLogToolOperations(
         return splitSourceToMap(source)
     }
 
-    // openFile/openZipEntries are async (launched on ioScope); block this request thread until
-    // isLoading settles back to false. If the target was already open, the call returns
-    // synchronously and isLoading never toggles true, so this loop exits immediately.
+    // Merge/split routes don't have one concrete tabId to scope to up front the way open_log_file
+    // does — mergeTabsRoute only learns the new tab's id after mergeTabs() returns (it doesn't
+    // register into AppState.activeLoads at all, just the plain pendingLoads counter), and
+    // splitLogRoute's splitSourceAndOpen call is synchronous on this same thread with no async
+    // load to await. Kept on the global flag rather than force-fitting a scoping mechanism these
+    // callers can't cleanly supply a key for; see awaitLoad(tabId) below for the scoped version
+    // used by routes that do have a concrete tabId.
     private fun awaitLoad() {
         val deadline = System.currentTimeMillis() + OPEN_FILE_TIMEOUT_MS
         while (appState.isLoading && System.currentTimeMillis() < deadline) Thread.sleep(OPEN_FILE_POLL_INTERVAL_MS)
+    }
+
+    // (ARCH-3) openFile/openZipEntries are async (launched on ioScope); block this request thread
+    // until this SPECIFIC tab's load finishes, rather than polling the global isLoading flag above
+    // — a concurrent unrelated load on another tab must not make this call wait on, or
+    // mis-attribute completion to, a load it didn't trigger. If the target was already open (the
+    // dedup fast path), isLoadInFlight is false immediately and this loop exits on the first check.
+    private fun awaitLoad(tabId: String) {
+        val deadline = System.currentTimeMillis() + OPEN_FILE_TIMEOUT_MS
+        while (appState.isLoadInFlight(tabId) && System.currentTimeMillis() < deadline) Thread.sleep(OPEN_FILE_POLL_INTERVAL_MS)
     }
 
     private fun mergeTabsRoute(tabIds: List<String>, newTabName: String): Map<String, Any?> {

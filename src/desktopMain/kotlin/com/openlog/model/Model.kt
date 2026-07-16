@@ -418,6 +418,12 @@ data class AppSettings(
     val aiMaxToolRounds: Int = DEFAULT_AI_MAX_TOOL_ROUNDS,
     /** Ordered copy-mask rules. An empty list intentionally means no replacements. */
     val copyMaskRules: List<CopyMaskRule> = listOf(CopyMaskRule("java", "j*ava")),
+    // (SEC-1) The control server's CORS block previously installed unconditionally with
+    // anyHost() — any web page open in the user's browser could issue cross-origin requests to
+    // 127.0.0.1:<mcpControlPort>. Bearer-token auth already blocks anything unauthenticated, but
+    // CORS is defense-in-depth on top of that: off by default, opt-in for the (uncommon) case of a
+    // browser-based MCP inspector. Trailing with a default so old settings tokens still parse.
+    val mcpAllowBrowserClients: Boolean = false,
 )
 
 enum class ThemePreset(val label: String) {

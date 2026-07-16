@@ -2297,6 +2297,45 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun isLoadInFlightScopesToOneTabInsteadOfTheGlobalLoadingFlag() {
+        // ARCH-3: OpenLogToolOperations.awaitLoad scopes to isLoadInFlight(tabId) rather than the
+        // global isLoading flag precisely so a concurrent unrelated load can't make an
+        // open_log_file call wait on, or misreport completion for, a load it didn't trigger. This
+        // exercises the AppState-level primitive that guarantee rests on directly.
+        val dir = createTempDirectory("openlog-load-in-flight").toFile()
+        val slow = File(dir, "slow.log").apply { writeText("slow") }
+        val fast = File(dir, "fast.log").apply { writeText("fast") }
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            parser = { file ->
+                if (file.name == "slow.log") {
+                    started.countDown()
+                    release.await(2, TimeUnit.SECONDS)
+                }
+                listOf(LogEntry(1, "", LogLevel.I, file.nameWithoutExtension, file.name))
+            },
+        )
+
+        val slowTabId = requireNotNull(state.openFile(slow))
+        assertTrue(started.await(2, TimeUnit.SECONDS))
+        assertTrue(state.isLoadInFlight(slowTabId))
+
+        val fastTabId = requireNotNull(state.openFile(fast))
+        waitUntil { !state.isLoadInFlight(fastTabId) }
+        // The unrelated fast load already finished, but the still-blocked slow load must still
+        // report in-flight for its own tabId — a caller scoped to fastTabId must not be told to
+        // keep waiting, and a caller scoped to slowTabId must not be told it's already done.
+        assertTrue(state.isLoadInFlight(slowTabId))
+        assertTrue(state.isLoading, "global flag stays true while the slow load is still pending")
+
+        release.countDown()
+        waitUntil { !state.isLoadInFlight(slowTabId) }
+        assertFalse(state.isLoading)
+    }
+
+    @Test
     fun closeCancelsPendingFileLoadBeforeItMutatesTabs() {
         val dir = createTempDirectory("openlog-cancel").toFile()
         val file = File(dir, "slow.log").apply { writeText("slow") }
@@ -3170,6 +3209,7 @@ class AppStateBehaviorTest {
                 highlightEntireCrashGroup = true,
                 openNewFilesWithUnfiltered = true,
                 openUnfilteredOnCtrlF = true,
+                mcpAllowBrowserClients = true,
             )
         }
 
@@ -3194,6 +3234,7 @@ class AppStateBehaviorTest {
         assertEquals(true, restored.settings.highlightEntireCrashGroup)
         assertEquals(true, restored.settings.openNewFilesWithUnfiltered)
         assertEquals(true, restored.settings.openUnfilteredOnCtrlF)
+        assertEquals(true, restored.settings.mcpAllowBrowserClients)
     }
 
     @Test
@@ -3206,13 +3247,13 @@ class AppStateBehaviorTest {
         }
         state.autosaveNow()
 
-        // Drop only the two fields appended by the multi-rule/Ctrl+F change, preserving the
-        // legacy pair in its historic token positions.
+        // Drop only the three fields appended after the legacy pair (multi-rule/Ctrl+F/SEC-1
+        // browser-CORS), preserving the legacy pair in its historic token positions.
         val lines = cacheFile.readLines()
         val settingsLine = lines.single { it.startsWith("settings\t") }
         val encoded = settingsLine.removePrefix("settings\t")
         val rawToken = String(java.util.Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8)
-        val legacyRawToken = rawToken.split("|").dropLast(2).joinToString("|")
+        val legacyRawToken = rawToken.split("|").dropLast(3).joinToString("|")
         val legacyEncoded = java.util.Base64.getUrlEncoder().withoutPadding()
             .encodeToString(legacyRawToken.toByteArray(Charsets.UTF_8))
         cacheFile.writeText(lines.joinToString("\n") { line ->

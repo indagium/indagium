@@ -437,7 +437,12 @@ class AppState(
     // suspend factory (e.g. one that delays before starting) to exercise enable/disable ordering
     // without needing a fake ControlServer subclass.
     private val controlServerFactory: suspend (AppState, Int) -> ControlServer = { s, p ->
-        ControlServer(s, p, token = loadOrCreateControlToken(controlTokenFile)).also { it.start() }
+        // Read fresh at factory-invocation time (every start/restart), not captured once at
+        // AppState construction — CORS is a Ktor plugin installed once per server instance, so a
+        // settings change only takes effect on the next start; ControlServerManager's
+        // setMcpAllowBrowserClients forces exactly that restart when the server is already running.
+        ControlServer(s, p, token = loadOrCreateControlToken(controlTokenFile), allowBrowserClients = s.settings.mcpAllowBrowserClients)
+            .also { it.start() }
     },
 ) {
     // ── Settings ────────────────────────────────────────────────────
@@ -904,6 +909,10 @@ class AppState(
     // rationale these forward to unchanged.
     fun setMcpControlEnabled(enabled: Boolean, port: Int) = controlServerManager.setMcpControlEnabled(enabled, port)
 
+    // (SEC-1) Settings UI toggle for the control server's CORS block — see
+    // ControlServerManager.setMcpAllowBrowserClients for why this needs to force a restart.
+    fun setMcpAllowBrowserClients(enabled: Boolean) = controlServerManager.setMcpAllowBrowserClients(enabled)
+
     // Main.kt's OPENLOG_DEBUG_CONTROL/-Dopenlog.debugControl path: an ephemeral dev/CI override
     // for this run only — deliberately never touches persisted settings, so a one-off env-var
     // launch doesn't silently turn the server on for every future normal launch.
@@ -972,6 +981,19 @@ class AppState(
         finishActiveLoad(load)
         load.job.cancel()
     }
+
+    // (ARCH-3) Scoped alternative to polling the global `isLoading` flag: a caller (e.g.
+    // OpenLogToolOperations.awaitLoad) that triggered one specific tab's load must not block on —
+    // or worse, mis-attribute completion to — some unrelated concurrent load finishing first.
+    // "In flight" tracks the same publish boundary the global isLoading flag does — not the
+    // coroutine's full lifetime. A load's countsAsLoading flips false at markActiveLoadFinished,
+    // the moment the tab is published and queryable; the coroutine then keeps running the
+    // crash/stack analysis pass (as costly as the parse on multi-GB files) before its `finally`
+    // removes the activeLoads entry. Keying on countsAsLoading (not mere map presence) lets a
+    // scoped awaitLoad(tabId) return as soon as the tab is usable, matching the old global-flag
+    // timing instead of needlessly blocking the request thread through analysis. Returns false
+    // immediately for a tabId that was never registered (the "already open" fast paths).
+    fun isLoadInFlight(tabId: String): Boolean = activeLoads[tabId]?.countsAsLoading?.get() == true
 
     fun updateFilterVisible(visible: Boolean) {
         if (filterVisible == visible) return
@@ -2550,7 +2572,11 @@ class AppState(
         }
     }
 
-    fun openZipEntries(zipFile: File, selected: List<ZipLogCandidate>) {
+    // Returns the tabId allocated for each selected entry that actually started loading (in the
+    // same order as `selected`), so a caller with a concrete tabId to scope awaitLoad-style
+    // polling to (ARCH-3: OpenLogToolOperations) doesn't have to re-derive it from sourcePath
+    // matching afterward. Empty when every candidate got deferred into a split prompt instead.
+    fun openZipEntries(zipFile: File, selected: List<ZipLogCandidate>): List<String> {
         val (oversized, normal) = selected.partition { requiresSplitPrompt(it.sizeBytes) }
         if (oversized.isNotEmpty()) {
             pendingSplitPrompt = PendingSplitPrompt(
@@ -2558,15 +2584,15 @@ class AppState(
                 deferredArchiveEntries = normal.map { DeferredArchiveEntry(zipFile, it) },
             )
             pendingZipPicker = null
-            return
+            return emptyList()
         }
-        selected.forEach { openZipEntry(zipFile, it, bypassSplitPrompt = false) }
+        val tabIds = selected.mapNotNull { openZipEntry(zipFile, it, bypassSplitPrompt = false) }
         pendingZipPicker = null
+        return tabIds
     }
 
-    fun openZipEntryAsIs(zipFile: File, candidate: ZipLogCandidate) {
+    fun openZipEntryAsIs(zipFile: File, candidate: ZipLogCandidate): String? =
         openZipEntry(zipFile, candidate, bypassSplitPrompt = true)
-    }
 
     fun cancelZipPicker() {
         pendingZipPicker = null
@@ -2574,15 +2600,19 @@ class AppState(
 
     // Jar-URL-style "!" separator for the source path — for display/dedup only (a zip-extracted
     // tab can't be re-opened from this path directly), matching openFile()'s sourcePath dedup.
-    private fun openZipEntry(zipFile: File, candidate: ZipLogCandidate, bypassSplitPrompt: Boolean) {
+    // Returns the tabId that now owns (or will own, once loading finishes) this entry — the
+    // existing tab's id on the dedup fast path, the newly allocated id once a load is launched, or
+    // null when nothing was launched (deferred into a split prompt instead). See openZipEntries'
+    // doc comment for why callers want this rather than re-deriving it from sourcePath.
+    private fun openZipEntry(zipFile: File, candidate: ZipLogCandidate, bypassSplitPrompt: Boolean): String? {
         val path = "${zipFile.absolutePath}!${candidate.entryPath}"
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) {
-            activateTab(existing.id); return
+            activateTab(existing.id); return existing.id
         }
         if (!bypassSplitPrompt && requiresSplitPrompt(candidate.sizeBytes)) {
             pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.ArchiveEntry(zipFile, candidate)))
-            return
+            return null
         }
         val n = tabCounter.getAndIncrement()
         val tabId = "t$n"
@@ -2636,6 +2666,7 @@ class AppState(
         }
         activeLoads[tabId] = ActiveLoad(job)
         job.start()
+        return tabId
     }
 
     fun requestSplitForFile(file: File) {
@@ -3865,6 +3896,7 @@ private fun AppSettings.settingsToken(): String = tokenFields(
     sourceAutoDiscoveryEnabled.toString(),
     copyMaskRulesToken(),
     openUnfilteredOnCtrlF.toString(),
+    mcpAllowBrowserClients.toString(),
 )
 
 private fun AppSettings.copyMaskRulesToken(): String = copyMaskRules
@@ -4076,6 +4108,7 @@ private fun settingsFromToken(token: String): AppSettings? = runCatching {
         sourceAutoDiscoveryEnabled = p.getOrNull(mcpIndex + 15)?.toBooleanStrictOrNull() ?: true,
         copyMaskRules = copyMaskRules,
         openUnfilteredOnCtrlF = p.getOrNull(mcpIndex + 17)?.toBooleanStrictOrNull() ?: false,
+        mcpAllowBrowserClients = p.getOrNull(mcpIndex + 18)?.toBooleanStrictOrNull() ?: false,
     )
 }.getOrNull()
 

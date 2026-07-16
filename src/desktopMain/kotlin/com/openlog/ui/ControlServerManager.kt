@@ -128,6 +128,24 @@ internal class ControlServerManager(
         applyControlServerState(enabled, clamped)
     }
 
+    // (SEC-1) CORS is a Ktor plugin installed once at server start — toggling the setting while
+    // the server is already running has no effect until the server restarts, so this forces
+    // exactly that restart, the same disable-then-re-enable-on-the-same-port trick
+    // rotateControlToken() below uses. controlServerFactory reads the new setting value fresh on
+    // that restart (see AppState's factory default). A no-op restart-wise when the server isn't
+    // currently running — the next real start already reads the persisted setting.
+    fun setMcpAllowBrowserClients(enabled: Boolean) {
+        if (appState.settings.mcpAllowBrowserClients != enabled) {
+            appState.settings = appState.settings.copy(mcpAllowBrowserClients = enabled)
+            appState.autosaveNow()
+        }
+        if (controlServer != null) {
+            val port = appState.settings.mcpControlPort
+            applyControlServerState(enabled = false, port = 0)
+            applyControlServerState(enabled = true, port = port)
+        }
+    }
+
     // Read/mutated by the Settings "Connection info" popup — in-process passthrough to the
     // running ControlServer, no HTTP round trip needed since both live in the same JVM.
     fun connectedMcpClients() = controlServer?.connectedClients() ?: emptyList()
