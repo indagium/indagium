@@ -3,17 +3,17 @@
   <ManuallySuppressedIssues></ManuallySuppressedIssues>
   <CurrentIssues>
     <ID>CyclomaticComplexMethod:App.kt$private fun handleGlobalKey( ev: KeyEvent, state: AppState, onFocusPanel: (KeyboardPanel) -&gt; Unit, onFocusFilterSearch: () -&gt; Unit, ): Boolean</ID>
-    <ID>CyclomaticComplexMethod:AppState.kt$private fun settingsFromToken(token: String): AppSettings?</ID>
+    <ID>CyclomaticComplexMethod:AutosaveCodec.kt$internal fun settingsFromToken(token: String): AppSettings?</ID>
     <ID>CyclomaticComplexMethod:ControlServer.kt$ControlServer$private fun parseFilterUpdate(body: Map&lt;String, Any?&gt;): Result&lt;ParsedFilterUpdate&gt;</ID>
     <ID>CyclomaticComplexMethod:LogViewer.kt$private fun handleNavKey( ev: KeyEvent, items: List&lt;LogItem&gt;, tab: LogTab, lazyState: LazyListState, scope: CoroutineScope, scrollMargin: Int, cursor: SelectionCursor, summary: ItemsSummary, onSelectRow: (Int) -&gt; Unit, ): Boolean</ID>
     <ID>CyclomaticComplexMethod:LogViewer.kt$private fun handleSelKey( ev: KeyEvent, items: List&lt;LogItem&gt;, tab: LogTab, lazyState: LazyListState, scope: CoroutineScope, scrollMargin: Int, onSelRowRange: (List&lt;Int&gt;) -&gt; Unit, cursor: SelectionCursor, summary: ItemsSummary, actions: SelKeyActions, ): Boolean</ID>
     <ID>LargeClass:AppState.kt$AppState</ID>
     <ID>LargeClass:AppStateBehaviorTest.kt$AppStateBehaviorTest</ID>
-    <ID>MagicNumber:AppState.kt$11</ID>
-    <ID>MagicNumber:AppState.kt$15</ID>
-    <ID>MagicNumber:AppState.kt$19</ID>
-    <ID>MagicNumber:AppState.kt$20_000</ID>
-    <ID>MagicNumber:AppState.kt$80</ID>
+    <ID>MagicNumber:AutosaveCodec.kt$11</ID>
+    <ID>MagicNumber:AutosaveCodec.kt$15</ID>
+    <ID>MagicNumber:AutosaveCodec.kt$19</ID>
+    <ID>MagicNumber:AutosaveCodec.kt$20_000</ID>
+    <ID>MagicNumber:AutosaveCodec.kt$80</ID>
     <ID>MagicNumber:ControlServerMcpTest.kt$ControlServerMcpTest$200</ID>
     <ID>MagicNumber:ControlServerMcpTest.kt$ControlServerMcpTest$299</ID>
     <ID>ReturnCount:ControlServer.kt$ControlServer$private fun openLogFile( path: String, entryPath: String?, splitMode: String?, destinationDir: String?, postfix: String, partCount: Int?, ): Map&lt;String, Any?&gt;</ID>
