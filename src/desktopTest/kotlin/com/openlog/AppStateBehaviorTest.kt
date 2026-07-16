@@ -59,8 +59,14 @@ import com.openlog.utils.computeItems
 import kotlinx.coroutines.delay
 import java.io.File
 import java.io.RandomAccessFile
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -4812,6 +4818,312 @@ class AppStateBehaviorTest {
         state.stopControlServerForShutdown()
         Thread.sleep(600)
         assertEquals(null, state.controlServerToken(), "shutdown must invalidate an in-flight start")
+    }
+
+    @Test
+    fun mcpControlServerCorsToggleSupersedesAnInFlightStartThatCapturedTheOldSetting() {
+        val dir = createTempDirectory("openlog-mcp-cors-race").toFile()
+        val tokenFile = File(dir, "control-token")
+        val firstCaptured = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val firstCompleted = CountDownLatch(1)
+        val captures = CopyOnWriteArrayList<Boolean>()
+        val calls = AtomicInteger()
+        val port = java.net.ServerSocket(0).use { it.localPort }
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            controlTokenFile = tokenFile,
+            controlServerFactory = { s, p ->
+                val call = calls.getAndIncrement()
+                val allowBrowserClients = s.settings.mcpAllowBrowserClients
+                captures += allowBrowserClients
+                if (call == 0) {
+                    firstCaptured.countDown()
+                    check(releaseFirst.await(2, TimeUnit.SECONDS))
+                }
+                try {
+                    ControlServer(
+                        s,
+                        p,
+                        token = s.connectionInfoToken(),
+                        allowBrowserClients = allowBrowserClients,
+                    ).also { it.start() }
+                } finally {
+                    if (call == 0) firstCompleted.countDown()
+                }
+            },
+        )
+
+        try {
+            state.setMcpControlEnabled(true, port)
+            assertTrue(firstCaptured.await(2, TimeUnit.SECONDS))
+            assertEquals(listOf(false), captures.toList())
+
+            state.setMcpAllowBrowserClients(true)
+
+            waitUntil { state.controlServerToken() != null }
+            assertEquals(listOf(false, true), captures.toList())
+            assertTrue(state.settings.mcpAllowBrowserClients)
+
+            releaseFirst.countDown()
+            assertTrue(firstCompleted.await(2, TimeUnit.SECONDS))
+            assertTrue(state.controlServerToken() != null, "the stale start must not clear the replacement")
+        } finally {
+            releaseFirst.countDown()
+            state.stopControlServerForShutdown()
+        }
+    }
+
+    @Test
+    fun mcpControlServerDisableDuringAnInFlightReplacementWinsOverBothStarts() {
+        val dir = createTempDirectory("openlog-mcp-disable-replacement").toFile()
+        val captured = List(2) { CountDownLatch(1) }
+        val release = List(2) { CountDownLatch(1) }
+        val completed = CountDownLatch(2)
+        val calls = AtomicInteger()
+        val port = java.net.ServerSocket(0).use { it.localPort }
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            controlTokenFile = File(dir, "control-token"),
+            controlServerFactory = { s, p ->
+                val call = calls.getAndIncrement()
+                captured[call].countDown()
+                check(release[call].await(2, TimeUnit.SECONDS))
+                try {
+                    ControlServer(
+                        s,
+                        p,
+                        token = "replacement-$call",
+                        allowBrowserClients = s.settings.mcpAllowBrowserClients,
+                    ).also { it.start() }
+                } finally {
+                    completed.countDown()
+                }
+            },
+        )
+
+        try {
+            state.setMcpControlEnabled(true, port)
+            assertTrue(captured[0].await(2, TimeUnit.SECONDS))
+            state.setMcpAllowBrowserClients(true)
+            assertTrue(captured[1].await(2, TimeUnit.SECONDS))
+
+            state.setMcpControlEnabled(false, port)
+            release.forEach { it.countDown() }
+
+            assertTrue(completed.await(2, TimeUnit.SECONDS))
+            assertEquals(null, state.controlServerToken())
+            assertFalse(state.settings.mcpControlEnabled)
+        } finally {
+            release.forEach { it.countDown() }
+            state.stopControlServerForShutdown()
+        }
+    }
+
+    @Test
+    fun mcpControlServerSessionOnlyRestartRetainsItsRuntimePortWithoutPersistingEnablement() {
+        val dir = createTempDirectory("openlog-mcp-session-restart").toFile()
+        val firstCaptured = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val firstCompleted = CountDownLatch(1)
+        val capturedPorts = CopyOnWriteArrayList<Int>()
+        val calls = AtomicInteger()
+        val runtimePort = java.net.ServerSocket(0).use { it.localPort }
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            controlTokenFile = File(dir, "control-token"),
+            controlServerFactory = { s, p ->
+                val call = calls.getAndIncrement()
+                capturedPorts += p
+                if (call == 0) {
+                    firstCaptured.countDown()
+                    check(releaseFirst.await(2, TimeUnit.SECONDS))
+                }
+                try {
+                    ControlServer(
+                        s,
+                        p,
+                        token = s.connectionInfoToken(),
+                        allowBrowserClients = s.settings.mcpAllowBrowserClients,
+                    ).also { it.start() }
+                } finally {
+                    if (call == 0) firstCompleted.countDown()
+                }
+            },
+        )
+        val persistedPort = state.settings.mcpControlPort
+
+        try {
+            state.startControlServerForThisSessionOnly(runtimePort)
+            assertTrue(firstCaptured.await(2, TimeUnit.SECONDS))
+            assertFalse(state.settings.mcpControlEnabled)
+            assertEquals(persistedPort, state.settings.mcpControlPort)
+
+            state.setMcpAllowBrowserClients(true)
+
+            waitUntil { state.controlServerToken() != null }
+            assertEquals(listOf(runtimePort, runtimePort), capturedPorts.toList())
+            assertFalse(state.settings.mcpControlEnabled)
+            assertEquals(persistedPort, state.settings.mcpControlPort)
+
+            releaseFirst.countDown()
+            assertTrue(firstCompleted.await(2, TimeUnit.SECONDS))
+        } finally {
+            releaseFirst.countDown()
+            state.stopControlServerForShutdown()
+        }
+    }
+
+    @Test
+    fun mcpControlServerTokenRotationSupersedesAnInFlightStartThatCapturedTheOldToken() {
+        val dir = createTempDirectory("openlog-mcp-token-race").toFile()
+        val tokenFile = File(dir, "control-token")
+        val firstCaptured = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        val firstCompleted = CountDownLatch(1)
+        val capturedTokens = CopyOnWriteArrayList<String>()
+        val calls = AtomicInteger()
+        val port = java.net.ServerSocket(0).use { it.localPort }
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            controlTokenFile = tokenFile,
+            controlServerFactory = { s, p ->
+                val call = calls.getAndIncrement()
+                val token = s.connectionInfoToken()
+                capturedTokens += token
+                if (call == 0) {
+                    firstCaptured.countDown()
+                    check(releaseFirst.await(2, TimeUnit.SECONDS))
+                }
+                try {
+                    ControlServer(s, p, token = token).also { it.start() }
+                } finally {
+                    if (call == 0) firstCompleted.countDown()
+                }
+            },
+        )
+
+        try {
+            state.setMcpControlEnabled(true, port)
+            assertTrue(firstCaptured.await(2, TimeUnit.SECONDS))
+            val oldToken = capturedTokens.single()
+
+            state.rotateControlToken()
+
+            waitUntil { capturedTokens.size == 2 && state.controlServerToken() == capturedTokens[1] }
+            val newToken = capturedTokens[1]
+            assertNotEquals(oldToken, newToken)
+            assertEquals(401, controlServerRequestStatus(port, oldToken))
+            assertEquals(200, controlServerRequestStatus(port, newToken))
+
+            releaseFirst.countDown()
+            assertTrue(firstCompleted.await(2, TimeUnit.SECONDS))
+            assertEquals(newToken, state.controlServerToken())
+        } finally {
+            releaseFirst.countDown()
+            state.stopControlServerForShutdown()
+        }
+    }
+
+    @Test
+    fun mcpControlServerRapidCorsTogglesPublishOnlyTheLatestGeneration() {
+        val dir = createTempDirectory("openlog-mcp-rapid-cors").toFile()
+        val captured = List(2) { CountDownLatch(1) }
+        val release = List(2) { CountDownLatch(1) }
+        val completed = CountDownLatch(2)
+        val capturedCors = CopyOnWriteArrayList<Boolean>()
+        val calls = AtomicInteger()
+        val port = java.net.ServerSocket(0).use { it.localPort }
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            controlTokenFile = File(dir, "control-token"),
+            controlServerFactory = { s, p ->
+                val call = calls.getAndIncrement()
+                val allowBrowserClients = s.settings.mcpAllowBrowserClients
+                capturedCors += allowBrowserClients
+                if (call < 2) {
+                    captured[call].countDown()
+                    check(release[call].await(2, TimeUnit.SECONDS))
+                }
+                try {
+                    ControlServer(
+                        s,
+                        p,
+                        token = "generation-$call",
+                        allowBrowserClients = allowBrowserClients,
+                    ).also { it.start() }
+                } finally {
+                    if (call < 2) completed.countDown()
+                }
+            },
+        )
+
+        try {
+            state.setMcpControlEnabled(true, port)
+            assertTrue(captured[0].await(2, TimeUnit.SECONDS))
+            state.setMcpAllowBrowserClients(true)
+            assertTrue(captured[1].await(2, TimeUnit.SECONDS))
+            state.setMcpAllowBrowserClients(false)
+
+            waitUntil { state.controlServerToken() == "generation-2" }
+            assertEquals(listOf(false, true, false), capturedCors.toList())
+
+            release.forEach { it.countDown() }
+            assertTrue(completed.await(2, TimeUnit.SECONDS))
+            assertEquals("generation-2", state.controlServerToken())
+        } finally {
+            release.forEach { it.countDown() }
+            state.stopControlServerForShutdown()
+        }
+    }
+
+    @Test
+    fun mcpControlServerCurrentSessionFailureClearsStartBookkeepingWithoutChangingPersistedEnablement() {
+        val dir = createTempDirectory("openlog-mcp-session-failure").toFile()
+        val firstCaptured = CountDownLatch(1)
+        val releaseFailure = CountDownLatch(1)
+        val calls = AtomicInteger()
+        val port = java.net.ServerSocket(0).use { it.localPort }
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            controlTokenFile = File(dir, "control-token"),
+            controlServerFactory = { s, p ->
+                if (calls.getAndIncrement() == 0) {
+                    firstCaptured.countDown()
+                    check(releaseFailure.await(2, TimeUnit.SECONDS))
+                    error("controlled start failure")
+                }
+                ControlServer(s, p, token = "recovered").also { it.start() }
+            },
+        )
+        state.settings = state.settings.copy(mcpControlEnabled = true)
+        val persistedPort = state.settings.mcpControlPort
+
+        try {
+            state.startControlServerForThisSessionOnly(port)
+            assertTrue(firstCaptured.await(2, TimeUnit.SECONDS))
+            releaseFailure.countDown()
+            waitUntil { state.mcpControlError?.contains("controlled start failure") == true }
+
+            assertTrue(state.settings.mcpControlEnabled)
+            assertEquals(persistedPort, state.settings.mcpControlPort)
+
+            state.startControlServerForThisSessionOnly(port)
+            waitUntil { state.controlServerToken() == "recovered" }
+            assertEquals(null, state.mcpControlError)
+            assertTrue(state.settings.mcpControlEnabled)
+        } finally {
+            releaseFailure.countDown()
+            state.stopControlServerForShutdown()
+        }
+    }
+
+    private fun controlServerRequestStatus(port: Int, token: String): Int {
+        val request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:$port/tabs"))
+            .header("Authorization", "Bearer $token")
+            .GET()
+            .build()
+        return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString()).statusCode()
     }
 
     private fun waitUntil(timeoutMs: Long = 2_000, condition: () -> Boolean) {

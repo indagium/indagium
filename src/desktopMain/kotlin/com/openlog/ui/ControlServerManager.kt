@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import com.openlog.debug.ControlServer
 import com.openlog.debug.regenerateControlToken
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.io.File
@@ -24,28 +25,41 @@ internal class ControlServerManager(
     private val controlTokenFile: File,
     private val controlServerFactory: suspend (AppState, Int) -> ControlServer,
 ) {
+    private enum class RuntimeSource {
+        PERSISTED,
+        SESSION_ONLY,
+    }
+
+    private data class RuntimeRequest(
+        val port: Int,
+        val source: RuntimeSource,
+    )
+
+    private val lifecycleLock = Any()
+
     // Same "private resource handle, guarded start, idempotent stop" shape as AppState's
-    // activeTails. @Volatile (A-01): published by applyControlServerState's ioScope completion
-    // handler, read by the calling thread elsewhere — guarantees the reader sees the latest write.
+    // activeTails. @Volatile (A-01): published by the ioScope completion handler and read by
+    // Settings/UI callers — guarantees those readers see the latest write.
     @Volatile
     private var controlServer: ControlServer? = null
 
-    // Guards applyControlServerState's async enable path (S-02): every call — enable or disable —
-    // bumps this before doing anything else, so a start that was already in flight becomes provably
-    // stale. Its completion handler only publishes/keeps the server if the generation it captured is
-    // still current; otherwise it stops the now-unwanted server itself. controlServerStartJob is
-    // tracked purely so stopControlServerForShutdown() can cancel a still-binding start rather than
-    // let it complete after shutdown began — the generation check is what actually prevents a stale
-    // publish even if cancellation doesn't interrupt a synchronous bind in progress. AtomicInteger,
-    // not a plain Int (A-01): the increment/compare happens across the calling thread and an
-    // ioScope completion callback with no other memory barrier between them.
+    // Guards the async enable path (S-02): every replacement or disable bumps this, so a start
+    // already in flight becomes provably stale. Its completion handler only publishes/keeps the
+    // server if the generation it captured is still current; otherwise it stops the unwanted
+    // server itself. The Job lets shutdown cancel a still-binding start, while the generation
+    // remains the authority when cancellation cannot interrupt a synchronous factory/bind.
     private val controlServerStartGeneration = AtomicInteger(0)
 
-    @Volatile
     private var controlServerStartJob: Job? = null
 
-    // Set when applyControlServerState fails to bind (e.g. port already in use); shown next to
-    // the Settings toggle. Cleared on the next successful start.
+    // The requested runtime state is deliberately separate from the published server handle.
+    // In particular, a still-binding start is already "desired and active" for restart purposes:
+    // CORS/token changes must supersede it using this exact port/source instead of consulting the
+    // persisted settings (which would silently change a session-only server's semantics).
+    private var desiredRuntime: RuntimeRequest? = null
+
+    // Set when the current desired start fails to bind (e.g. port already in use); shown next to
+    // the Settings toggle. Cleared when a new start begins and on its successful publication.
     var mcpControlError by mutableStateOf<String?>(null)
         private set
 
@@ -69,80 +83,122 @@ internal class ControlServerManager(
     // (no network I/O to block on) and must stay synchronous so the Main.kt shutdown path
     // (stopControlServerForShutdown, called from onDispose right before the process exits) can't
     // race a fire-and-forget coroutine that might never get scheduled before exit.
-    fun applyControlServerState(enabled: Boolean, port: Int) {
-        if (enabled) {
-            val running = controlServer
-            if (running != null && running.boundPort == port) return
-            running?.stop()
-            controlServer = null
-            mcpControlError = null
-            val myGeneration = controlServerStartGeneration.incrementAndGet()
-            controlServerStartJob = scope.launch {
-                val started = runCatching { controlServerFactory(appState, port) }
-                started.fold(
-                    onSuccess = { server ->
-                        // A later enable/disable call already bumped the generation while this bind
-                        // was in flight — this start lost the race, so publishing it now would
-                        // resurrect a server the caller believes is stopped or superseded. Close it
-                        // instead of leaking a live listener nobody references anymore.
-                        if (myGeneration == controlServerStartGeneration.get()) {
+    private fun startDesiredLocked(request: RuntimeRequest, forceRestart: Boolean = false) {
+        val existingJob = controlServerStartJob
+        if (!forceRestart &&
+            desiredRuntime == request &&
+            (existingJob?.isActive == true || controlServer?.boundPort == request.port)
+        ) {
+            return
+        }
+
+        desiredRuntime = request
+        mcpControlError = null
+        val myGeneration = controlServerStartGeneration.incrementAndGet()
+        existingJob?.cancel()
+        controlServerStartJob = null
+        controlServer?.stop()
+        controlServer = null
+
+        // LAZY makes assignment deterministic: even a factory that returns immediately cannot
+        // finish and clear the current job before this field points at its generation.
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            val started = runCatching { controlServerFactory(appState, request.port) }
+            started.fold(
+                onSuccess = { server ->
+                    val isCurrent = synchronized(lifecycleLock) {
+                        if (myGeneration == controlServerStartGeneration.get() && desiredRuntime == request) {
                             controlServer = server
+                            controlServerStartJob = null
                             mcpControlError = null
+                            true
                         } else {
-                            server.stop()
+                            false
                         }
-                    },
-                    onFailure = { error ->
-                        if (myGeneration != controlServerStartGeneration.get()) return@fold
-                        mcpControlError = "Could not start automation server on port $port: " +
+                    }
+                    // Cancellation cannot interrupt every synchronous bind/factory. If an older
+                    // generation nevertheless succeeds, it owns cleanup of its unpublishable
+                    // listener and must not touch any newer generation's fields.
+                    if (!isCurrent) server.stop()
+                },
+                onFailure = { error ->
+                    synchronized(lifecycleLock) {
+                        if (myGeneration != controlServerStartGeneration.get() || desiredRuntime != request) {
+                            return@fold
+                        }
+                        controlServerStartJob = null
+                        desiredRuntime = null
+                        mcpControlError = "Could not start automation server on port ${request.port}: " +
                             (error.message ?: error::class.simpleName.orEmpty().ifBlank { "unknown error" })
-                        // Only the persisted (Settings-toggle) path needs undoing — the ephemeral
-                        // debug-env-var path never sets this in the first place, so this is a
-                        // no-op there and doesn't touch the setting it deliberately keeps out of.
-                        if (appState.settings.mcpControlEnabled) {
+                        // A session/environment request never owns the persisted toggle, even if
+                        // settings happen to say enabled for some separate saved configuration.
+                        if (request.source == RuntimeSource.PERSISTED && appState.settings.mcpControlEnabled) {
                             appState.settings = appState.settings.copy(mcpControlEnabled = false)
                             appState.autosaveNow()
                         }
-                    },
-                )
+                    }
+                },
+            )
+        }
+        controlServerStartJob = job
+        job.start()
+    }
+
+    private fun restartDesiredLocked() {
+        desiredRuntime?.let { startDesiredLocked(it, forceRestart = true) }
+    }
+
+    private fun stopDesiredLocked() {
+        desiredRuntime = null
+        controlServerStartGeneration.incrementAndGet()
+        controlServerStartJob?.cancel()
+        controlServerStartJob = null
+        controlServer?.stop()
+        controlServer = null
+    }
+
+    // Settings-UI path: persists the toggle (autosaved) AND applies it immediately. If this
+    // persisted enable request fails, startDesiredLocked reverts settings.mcpControlEnabled and
+    // reports the failure via mcpControlError.
+    fun setMcpControlEnabled(enabled: Boolean, port: Int) {
+        val clamped = port.coerceIn(MIN_PORT, MAX_PORT)
+        synchronized(lifecycleLock) {
+            if (appState.settings.mcpControlEnabled != enabled || appState.settings.mcpControlPort != clamped) {
+                appState.settings = appState.settings.copy(mcpControlEnabled = enabled, mcpControlPort = clamped)
+                appState.autosaveNow()
             }
-        } else {
-            controlServerStartGeneration.incrementAndGet() // invalidate any start still in flight from a prior enable
-            controlServerStartJob?.cancel()
-            controlServerStartJob = null
-            controlServer?.stop()
-            controlServer = null
+            if (enabled) {
+                startDesiredLocked(RuntimeRequest(clamped, RuntimeSource.PERSISTED))
+            } else {
+                stopDesiredLocked()
+            }
         }
     }
 
-    // Settings-UI path: persists the toggle (autosaved) AND applies it immediately. If the bind
-    // fails, applyControlServerState reverts settings.mcpControlEnabled and reports the failure
-    // via mcpControlError — re-read here so the just-written autosave reflects the outcome that
-    // actually happened, not the request.
-    fun setMcpControlEnabled(enabled: Boolean, port: Int) {
-        val clamped = port.coerceIn(MIN_PORT, MAX_PORT)
-        if (appState.settings.mcpControlEnabled != enabled || appState.settings.mcpControlPort != clamped) {
-            appState.settings = appState.settings.copy(mcpControlEnabled = enabled, mcpControlPort = clamped)
-            appState.autosaveNow()
+    fun startControlServerForThisSessionOnly(port: Int) {
+        synchronized(lifecycleLock) {
+            startDesiredLocked(RuntimeRequest(port.coerceIn(MIN_PORT, MAX_PORT), RuntimeSource.SESSION_ONLY))
         }
-        applyControlServerState(enabled, clamped)
+    }
+
+    fun stopControlServer() {
+        synchronized(lifecycleLock) {
+            stopDesiredLocked()
+        }
     }
 
     // (SEC-1) CORS is a Ktor plugin installed once at server start — toggling the setting while
-    // the server is already running has no effect until the server restarts, so this forces
-    // exactly that restart, the same disable-then-re-enable-on-the-same-port trick
-    // rotateControlToken() below uses. controlServerFactory reads the new setting value fresh on
-    // that restart (see AppState's factory default). A no-op restart-wise when the server isn't
-    // currently running — the next real start already reads the persisted setting.
+    // the server is active has no effect until the server restarts, so this replaces the current
+    // desired generation even while its bind is still in flight. controlServerFactory reads the
+    // new setting value fresh on that restart (see AppState's factory default). A no-op
+    // restart-wise when no runtime server is desired.
     fun setMcpAllowBrowserClients(enabled: Boolean) {
-        if (appState.settings.mcpAllowBrowserClients != enabled) {
-            appState.settings = appState.settings.copy(mcpAllowBrowserClients = enabled)
-            appState.autosaveNow()
-        }
-        if (controlServer != null) {
-            val port = appState.settings.mcpControlPort
-            applyControlServerState(enabled = false, port = 0)
-            applyControlServerState(enabled = true, port = port)
+        synchronized(lifecycleLock) {
+            if (appState.settings.mcpAllowBrowserClients != enabled) {
+                appState.settings = appState.settings.copy(mcpAllowBrowserClients = enabled)
+                appState.autosaveNow()
+            }
+            restartDesiredLocked()
         }
     }
 
@@ -165,15 +221,12 @@ internal class ControlServerManager(
     // Settings "Regenerate token" action: writes a brand-new persisted token (invalidating every
     // previously-copied MCP client config), then restarts the live server so it actually starts
     // enforcing the new token immediately — otherwise the old one would stay valid until the next
-    // natural restart, defeating the point of a user-triggered rotation. A plain re-enable on the
-    // same port is a no-op in applyControlServerState (it already treats "same port, already bound"
-    // as nothing to do), so this disables first to force the restart through.
+    // natural restart, defeating the point of a user-triggered rotation. The forced replacement
+    // also supersedes an in-flight start that may already have captured the old token.
     fun rotateControlToken() {
-        regenerateControlToken(controlTokenFile)
-        if (controlServer != null) {
-            val port = appState.settings.mcpControlPort
-            applyControlServerState(enabled = false, port = 0)
-            applyControlServerState(enabled = true, port = port)
+        synchronized(lifecycleLock) {
+            regenerateControlToken(controlTokenFile)
+            restartDesiredLocked()
         }
     }
 }

@@ -886,10 +886,10 @@ class AppState(
         aiProviderApiKeys.clear()
         aiSidebarRuntime.close()
         aiSessions.clear()
+        controlServerManager.stopControlServer()
         ioJob.cancel() // also cancels every active FileTailer's Job — each is started on ioScope
         tailCoordinator.clear()
         activeLoads.clear()
-        controlServerManager.applyControlServerState(enabled = false, port = 0)
         synchronized(stateLock) {
             pendingRestoredLoads.clear()
             pendingLoads = 0
@@ -920,12 +920,12 @@ class AppState(
     // for this run only — deliberately never touches persisted settings, so a one-off env-var
     // launch doesn't silently turn the server on for every future normal launch.
     fun startControlServerForThisSessionOnly(port: Int) =
-        controlServerManager.applyControlServerState(true, port.coerceIn(MIN_PORT, MAX_PORT))
+        controlServerManager.startControlServerForThisSessionOnly(port)
 
     // Main.kt's shutdown path — stops the server without touching persisted settings, for the
     // same reason: closing the app must not silently flip a user's saved "enabled" preference to
     // false, or it would never auto-start again on the next launch.
-    fun stopControlServerForShutdown() = controlServerManager.applyControlServerState(enabled = false, port = 0)
+    fun stopControlServerForShutdown() = controlServerManager.stopControlServer()
 
     fun connectedMcpClients() = controlServerManager.connectedMcpClients()
 
