@@ -1,7 +1,7 @@
 package com.openlog.ai
 
-import com.openlog.model.AiProviderProfile
 import com.openlog.model.AiProviderKind
+import com.openlog.model.AiProviderProfile
 import com.openlog.model.DEFAULT_AI_MAX_TOOL_ROUNDS
 import com.openlog.model.defaultAiProviderProfile
 import com.openlog.ui.AppState

@@ -822,9 +822,11 @@ class AppState(
     var cacheClearConfirmOpen by mutableStateOf(false)
     val archiveCachePath: String = archiveCacheDir.absolutePath
     val appCachePath: String = archiveCacheDir.parentFile?.absolutePath ?: archiveCacheDir.absolutePath
+
     /** Recursive size of the app-data directory displayed in Settings. */
     var appDataSizeBytes by mutableStateOf(0L)
         private set
+
     /** Compatibility alias for callers that still use the previous cache-only name. */
     val archiveCacheSizeBytes: Long get() = appDataSizeBytes
     var pendingSequenceStart by mutableStateOf<PendingSequenceStart?>(null)

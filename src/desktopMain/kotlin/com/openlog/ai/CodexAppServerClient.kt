@@ -1,22 +1,15 @@
 package com.openlog.ai
 
 import com.openlog.model.AiProviderKind
-import java.io.BufferedReader
-import java.io.BufferedWriter
-import java.io.Closeable
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -30,6 +23,13 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import java.io.BufferedReader
+import java.io.BufferedWriter
+import java.io.Closeable
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /** The small process surface needed by the JSONL transport, suitable for deterministic fakes. */
 interface CodexAppServerProcess : Closeable {
@@ -530,6 +530,7 @@ class CodexAppServerClient(
             "app-server",
             "--stdio",
         )
+
         val DEFAULT_CLIENT_INFO = CodexClientInfo(
             name = "openlog2",
             title = "openLog2",

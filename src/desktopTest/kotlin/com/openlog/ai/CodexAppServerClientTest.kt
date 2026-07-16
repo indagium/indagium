@@ -1,16 +1,16 @@
 package com.openlog.ai
 
-import java.util.concurrent.LinkedBlockingQueue
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import java.util.concurrent.LinkedBlockingQueue
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -80,8 +80,14 @@ class CodexAppServerClientTest {
                     process.notify("""{"method":"turn/started","params":{"turn":{"id":"turn-1","threadId":"thread-1","status":{"type":"inProgress"}}}}""")
                     process.notify("""{"method":"mcpServer/startupStatus/updated","params":{"name":"openlog","status":"ready","error":null}}""")
                     process.notify("""{"method":"item/mcpToolCall/progress","params":{"threadId":"thread-1","message":"Calling get_issue_description"}}""")
-                    process.notify("""{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"It starts with "}}""")
-                    process.notify("""{"method":"item/agentMessage/delta","params":{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1","delta":"the parser."}}""")
+                    process.notify(
+                        """{"method":"item/agentMessage/delta","params":{"threadId":"thread-1",""" +
+                            """"turnId":"turn-1","itemId":"item-1","delta":"It starts with "}}""",
+                    )
+                    process.notify(
+                        """{"method":"item/agentMessage/delta","params":{"threadId":"thread-1",""" +
+                            """"turnId":"turn-1","itemId":"item-1","delta":"the parser."}}""",
+                    )
                     process.notify("""{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":{"type":"completed"}}}}""")
                 }
                 "turn/interrupt" -> process.respond("""{"id":${message["id"]},"result":{}}""")
@@ -135,7 +141,8 @@ class CodexAppServerClientTest {
                 "turn/start" -> {
                     process.respond("""{"id":${message["id"]},"result":{"turn":{"id":"turn-1","threadId":"thread-1"}}}""")
                     process.notify(
-                        """{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":{"type":"failed","error":{"message":"upstream unavailable"}}}}}""",
+                        """{"method":"turn/completed","params":{"threadId":"thread-1",""" +
+                            """"turn":{"id":"turn-1","status":{"type":"failed","error":{"message":"upstream unavailable"}}}}}""",
                     )
                 }
             }
@@ -217,6 +224,7 @@ class CodexAppServerClientTest {
     ) : CodexAppServerProcess {
         private val output = LinkedBlockingQueue<String>()
         private val writes = mutableListOf<String>()
+
         @Volatile private var alive = true
 
         val sentMethods: List<String>

@@ -47,6 +47,7 @@ import java.util.UUID
 // right, so growing any one section (e.g. AI providers) no longer pushes every other
 // section down a shared scroll. There's no standalone "About" entry — its former content
 // (keyboard shortcuts, version, author) now lives in Editor behavior and the footer.
+
 /** Published by [AiProviderSettingsSection] each recomposition so [SettingsDialog] can gate
  *  section switches and closing the dialog behind an unsaved-changes prompt without hoisting the
  *  section's entire edit-draft state up to the dialog. */
@@ -1221,6 +1222,7 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
     var pendingNavigation by remember { mutableStateOf<(() -> Unit)?>(null) }
     var navigationSaveError by remember { mutableStateOf<String?>(null) }
     var pendingDeleteProfileId by remember { mutableStateOf<String?>(null) }
+
     fun navigateOrConfirm(action: () -> Unit) {
         if (isDirty) {
             navigationSaveError = null

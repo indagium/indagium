@@ -2,9 +2,11 @@
 <SmellBaseline>
   <ManuallySuppressedIssues></ManuallySuppressedIssues>
   <CurrentIssues>
+    <ID>CyclomaticComplexMethod:AccountAgentRunner.kt$AccountAgentRunner$private suspend fun runCodex( run: AiRun, profile: AiProviderProfile, prompt: String, systemPrompt: String, workspace: Path, lease: ManagedMcpServerLease, )</ID>
     <ID>CyclomaticComplexMethod:App.kt$private fun handleGlobalKey( ev: KeyEvent, state: AppState, onFocusPanel: (KeyboardPanel) -&gt; Unit, onFocusFilterSearch: () -&gt; Unit, ): Boolean</ID>
     <ID>CyclomaticComplexMethod:AutosaveCodec.kt$internal fun settingsFromToken(token: String): AppSettings?</ID>
-    <ID>CyclomaticComplexMethod:ControlServer.kt$ControlServer$private fun parseFilterUpdate(body: Map&lt;String, Any?&gt;): Result&lt;ParsedFilterUpdate&gt;</ID>
+    <ID>CyclomaticComplexMethod:ClaudeCodeClient.kt$ClaudeCodeClient$fun stream(request: ClaudeCodeRequest): Flow&lt;ClaudeCodeEvent&gt;</ID>
+    <ID>CyclomaticComplexMethod:CodexAppServerClient.kt$CodexAppServerClient$private fun notification(method: String, params: JsonObject): CodexAppServerEvent?</ID>
     <ID>CyclomaticComplexMethod:LogViewer.kt$private fun handleNavKey( ev: KeyEvent, items: List&lt;LogItem&gt;, tab: LogTab, lazyState: LazyListState, scope: CoroutineScope, scrollMargin: Int, cursor: SelectionCursor, summary: ItemsSummary, onSelectRow: (Int) -&gt; Unit, ): Boolean</ID>
     <ID>CyclomaticComplexMethod:LogViewer.kt$private fun handleSelKey( ev: KeyEvent, items: List&lt;LogItem&gt;, tab: LogTab, lazyState: LazyListState, scope: CoroutineScope, scrollMargin: Int, onSelRowRange: (List&lt;Int&gt;) -&gt; Unit, cursor: SelectionCursor, summary: ItemsSummary, actions: SelKeyActions, ): Boolean</ID>
     <ID>LargeClass:AppState.kt$AppState</ID>
@@ -14,12 +16,21 @@
     <ID>MagicNumber:AutosaveCodec.kt$19</ID>
     <ID>MagicNumber:AutosaveCodec.kt$20_000</ID>
     <ID>MagicNumber:AutosaveCodec.kt$80</ID>
+    <ID>MagicNumber:ClaudeCodeClientTest.kt$ClaudeCodeClientTest.ReleasingInputStream$0xff</ID>
+    <ID>MagicNumber:CodexAppServerClient.kt$CodexAppServerClient$32000</ID>
     <ID>MagicNumber:ControlServerMcpTest.kt$ControlServerMcpTest$200</ID>
     <ID>MagicNumber:ControlServerMcpTest.kt$ControlServerMcpTest$299</ID>
-    <ID>ReturnCount:ControlServer.kt$ControlServer$private fun openLogFile( path: String, entryPath: String?, splitMode: String?, destinationDir: String?, postfix: String, partCount: Int?, ): Map&lt;String, Any?&gt;</ID>
-    <ID>ReturnCount:ControlServer.kt$ControlServer$private fun openZipRoute( file: File, entryPath: String?, splitMode: String?, destinationDir: String?, postfix: String, partCount: Int?, ): Map&lt;String, Any?&gt;</ID>
+    <ID>ReturnCount:AiSidebarRuntime.kt$AiSidebarRuntime$@Suppress("TooGenericExceptionCaught") fun start( tabId: String, profile: AiProviderProfile, apiKey: String, prompt: String, context: AiInvestigationContext = AiInvestigationContext(tabId), ): AiStartResult</ID>
+    <ID>TooGenericExceptionCaught:AccountAgentRunner.kt$AccountAgentRunner$error: Exception</ID>
+    <ID>TooGenericExceptionCaught:AccountCliCheck.kt$error: Exception</ID>
+    <ID>TooGenericExceptionCaught:AiToolExecutionCoordinator.kt$AiToolExecutionCoordinator$error: Exception</ID>
+    <ID>TooGenericExceptionCaught:ClaudeCodeClient.kt$ClaudeCodeClient$error: Exception</ID>
+    <ID>TooGenericExceptionCaught:CodexAppServerClient.kt$CodexAppServerClient$error: Throwable</ID>
+    <ID>TooGenericExceptionCaught:ControlServer.kt$ControlServer$error: Exception</ID>
+    <ID>TooGenericExceptionCaught:ManagedMcpServerLease.kt$ManagedMcpServerLease.Companion$error: Exception</ID>
     <ID>TooGenericExceptionThrown:AppStateBehaviorTest.kt$AppStateBehaviorTest$throw RuntimeException("disk error")</ID>
     <ID>TooManyFunctions:AppState.kt$AppState</ID>
     <ID>TooManyFunctions:AppStateBehaviorTest.kt$AppStateBehaviorTest</ID>
+    <ID>UseCheckOrError:AccountAgentRunner.kt$AccountAgentRunner$throw IllegalStateException("Claude Code ended before the response completed.")</ID>
   </CurrentIssues>
 </SmellBaseline>

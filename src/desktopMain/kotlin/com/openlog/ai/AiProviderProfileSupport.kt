@@ -1,7 +1,7 @@
 package com.openlog.ai
 
-import com.openlog.model.AiProviderProfile
 import com.openlog.model.AiProviderKind
+import com.openlog.model.AiProviderProfile
 import com.openlog.model.defaultAiProviderProfile
 import java.net.URI
 
