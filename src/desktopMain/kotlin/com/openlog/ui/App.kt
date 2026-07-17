@@ -31,6 +31,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
@@ -78,6 +79,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
         LaunchedEffect(
             state.tabs.map { it.persistedSnapshot() },
             state.savedFilters,
+            state.savedFilterFolders,
             state.settings,
             state.activeSavedFilterIds,
             state.recentFiles,
@@ -724,7 +726,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
 
             // ── Save filter dialog ────────────────────────────────────
             if (state.sfDialog) {
-                Dialog(onDismissRequest = { state.sfDialog = false }) {
+                Dialog(onDismissRequest = { state.sfDialog = false; state.sfFolderId = null }) {
                     val tc2 = tc()
                     Column(
                         Modifier.width(340.dp).background(tc2.p, RoundedCornerShape(8.dp))
@@ -744,7 +746,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                         Spacer(Modifier.height(14.dp))
                         val trySaveFilter = {
                             val tid = state.sfTabId
-                            if (tid != null && state.sfName.isNotBlank()) state.saveFilter(tid, state.sfName)
+                            if (tid != null && state.sfName.isNotBlank()) {
+                                state.saveFilter(tid, state.sfName, state.sfFolderId)
+                            }
                         }
                         InlineField(
                             state.sfName,
@@ -754,10 +758,21 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             fontSize = 13.sp,
                             onSubmit = trySaveFilter,
                         )
+                        Spacer(Modifier.height(10.dp))
+                        AppText("Folder", color = tc2.td, fontSize = 10.sp)
+                        Spacer(Modifier.height(4.dp))
+                        SavedFilterFolderPicker(
+                            folders = state.savedFilterFolders,
+                            selectedFolderId = state.sfFolderId,
+                            onSelect = { state.sfFolderId = it },
+                        )
                         Spacer(Modifier.height(12.dp))
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
                             DialogActionButton("Save", active = state.sfName.isNotBlank()) { trySaveFilter() }
-                            DialogActionButton("Cancel", active = false) { state.sfDialog = false }
+                            DialogActionButton("Cancel", active = false) {
+                                state.sfDialog = false
+                                state.sfFolderId = null
+                            }
                         }
                     }
                 }
@@ -990,6 +1005,37 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                         ) {
                             DialogActionButton("Delete", active = true, danger = true) { state.confirmDeleteSF() }
                             DialogActionButton("Cancel", active = false) { state.cancelDeleteSF() }
+                        }
+                    }
+                }
+            }
+
+            state.pendingDeleteSavedFilterFolderId?.let { folderId ->
+                val folderName = state.savedFilterFolders.firstOrNull { it.id == folderId }?.name ?: "this folder"
+                Dialog(onDismissRequest = { state.cancelDeleteSavedFilterFolder() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(380.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Delete filter folder?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "Delete “$folderName”? Its saved filters will move to Ungrouped; no filters will be deleted.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 3,
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton("Delete folder", active = true, danger = true) {
+                                state.confirmDeleteSavedFilterFolder()
+                            }
+                            DialogActionButton("Cancel", active = false) { state.cancelDeleteSavedFilterFolder() }
                         }
                     }
                 }
@@ -1576,6 +1622,73 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
             state.sourceFolderInfoEditorTarget?.let { path ->
                 Dialog(onDismissRequest = { state.sourceFolderInfoEditorTarget = null }) {
                     SourceFolderInfoDialog(state = state, path = path) { state.sourceFolderInfoEditorTarget = null }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterFolderPicker(
+    folders: List<SavedFilterFolder>,
+    selectedFolderId: String?,
+    onSelect: (String?) -> Unit,
+) {
+    val tc = tc()
+    var open by remember { mutableStateOf(false) }
+    val selectedName = folders.firstOrNull { it.id == selectedFolderId }?.name ?: "Ungrouped"
+    Box(Modifier.fillMaxWidth()) {
+        HoverBox(
+            modifier = Modifier.fillMaxWidth().height(28.dp)
+                .clip(CORNER_SM)
+                .background(tc.bg, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM),
+            onClick = { open = !open },
+        ) {
+            Row(
+                Modifier.fillMaxSize().padding(horizontal = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                AppText(selectedName, color = tc.tx, fontSize = 11.sp, overflow = TextOverflow.Ellipsis)
+                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 8.sp)
+            }
+        }
+        if (open) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, 30),
+                onDismissRequest = { open = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.width(300.dp).heightIn(max = 220.dp)
+                        .verticalScroll(rememberScrollState())
+                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                ) {
+                    (listOf<SavedFilterFolder?>(null) + folders).forEach { folder ->
+                        val selected = folder?.id == selectedFolderId
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                            baseBg = if (selected) tc.abg else Color.Transparent,
+                            onClick = {
+                                onSelect(folder?.id)
+                                open = false
+                            },
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                            ) {
+                                AppText(if (selected) "✓" else "", color = tc.ac, fontSize = 10.sp, modifier = Modifier.width(10.dp))
+                                AppText(folder?.name ?: "Ungrouped", color = tc.tx, fontSize = 11.sp, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -40,6 +40,7 @@ internal fun BoundFilterPanel(
     if (!state.filterVisible) return
     FilterPanel(
         tab = tab, savedFilters = state.savedFiltersForTab(tab.id),
+        savedFilterFolders = state.savedFilterFolders,
         activeFilterItemId = state.activeFilterItemId(tab.id),
         tagUsage = state.tagUsage, fpState = state.fpState,
         newHlPat = state.newHlPat, newHlRx = state.newHlRx, newHlColor = state.newHlColor,
@@ -91,7 +92,19 @@ internal fun BoundFilterPanel(
         onLoadFilter = { state.requestLoadFilter(tab.id, it) },
         onDeleteSF = { state.requestDeleteSF(it) },
         onRenameSF = { state.beginRenameFilter(it) },
-        onOpenSFDialog = { state.sfDialog = true; state.sfTabId = tab.id; state.sfName = "" },
+        onToggleSFFavorite = { state.toggleSavedFilterFavorite(it) },
+        onMoveSFToFolder = { id, folderId -> state.moveSavedFilter(id, folderId) },
+        onReorderSFWithinFolder = { id, index -> state.reorderSavedFilterWithinFolder(id, index) },
+        onReorderSFFolder = { id, index -> state.reorderSavedFilterFolder(id, index) },
+        onCreateSFFolder = { state.createSavedFilterFolder(it) },
+        onRenameSFFolder = { id, name -> state.renameSavedFilterFolder(id, name) },
+        onDeleteSFFolder = { state.requestDeleteSavedFilterFolder(it) },
+        onOpenSFDialog = {
+            state.sfDialog = true
+            state.sfTabId = tab.id
+            state.sfName = ""
+            state.sfFolderId = null
+        },
         onSetKwInTag = { state.setKwInTag(tab.id, it) },
         onAddPkgPrefix = { state.addPkgPrefix(tab.id, it) },
         onRemovePkgPrefix = { state.removePkgPrefix(tab.id, it) },

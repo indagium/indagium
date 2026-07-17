@@ -895,7 +895,9 @@ class AppState(
     var sfDialog by mutableStateOf(false)
     var sfName by mutableStateOf("")
     var sfTabId by mutableStateOf<String?>(null)
+    var sfFolderId by mutableStateOf<String?>(null)
     var savedFilters by mutableStateOf<List<SavedFilter>>(emptyList())
+    var savedFilterFolders by mutableStateOf<List<SavedFilterFolder>>(emptyList())
     var tagUsage by mutableStateOf<Map<String, Int>>(emptyMap())
     var settingsOpen by mutableStateOf(false)
 
@@ -927,10 +929,12 @@ class AppState(
     var filterRenameName by mutableStateOf("")
     var filterRenameError by mutableStateOf<String?>(null)
     var pendingImportReview by mutableStateOf<PendingImportReview?>(null)
+    private var pendingImportedFilterFolders: List<SavedFilterFolder> = emptyList()
     var importError by mutableStateOf<String?>(null)
     var filterExportDialogOpen by mutableStateOf(false)
     var filterExportSelectedIds by mutableStateOf<Set<String>>(emptySet())
     var pendingDeleteFilterId by mutableStateOf<String?>(null)
+    var pendingDeleteSavedFilterFolderId by mutableStateOf<String?>(null)
     var pendingClearFilterTabId by mutableStateOf<String?>(null)
     var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
     var filterDraftsByTab by mutableStateOf<Map<String, SavedFilter>>(emptyMap())
@@ -1588,7 +1592,7 @@ class AppState(
         return savedFilters.any { it.id != exceptId && it.name.trim().equals(clean, ignoreCase = true) }
     }
 
-    fun saveFilter(tabId: String, name: String) {
+    fun saveFilter(tabId: String, name: String, folderId: String? = sfFolderId) {
         val cleanName = name.trim()
         if (cleanName.isBlank()) return
         val existing = savedFilters.find { it.name.trim().equals(cleanName, ignoreCase = true) }
@@ -1596,12 +1600,14 @@ class AppState(
             pendingDuplicateFilterSave = PendingDuplicateFilterSave(tabId, existing.id, existing.name, cleanName)
             return
         }
-        val sf = snapshotFilter(tabId, "sf${System.nanoTime()}_${savedFilters.size}", cleanName) ?: return
+        val validFolderId = folderId?.takeIf { id -> savedFilterFolders.any { it.id == id } }
+        val sf = snapshotFilter(tabId, "sf${System.nanoTime()}_${savedFilters.size}", cleanName)
+            ?.copy(folderId = validFolderId) ?: return
         savedFilters = savedFilters + sf
         activeSavedFilterIds = activeSavedFilterIds + (tabId to sf.id)
         clearDraftForTab(tabId)
         transientRegexSearchTabIds = transientRegexSearchTabIds - tabId
-        sfDialog = false; sfName = ""
+        sfDialog = false; sfName = ""; sfFolderId = null
         writeFilterBackup()
         loadPendingFilterAfterSaving(tabId)
     }
@@ -1616,6 +1622,7 @@ class AppState(
         pendingDuplicateFilterSave = null
         sfDialog = false
         sfName = ""
+        sfFolderId = null
         writeFilterBackup()
         loadPendingFilterAfterSaving(pending.tabId)
     }
@@ -1686,6 +1693,7 @@ class AppState(
         val pending = pendingFilterLoad ?: return
         sfDialog = true
         sfTabId = pending.tabId
+        sfFolderId = null
         val currentName = pending.currentFilterId?.let { id -> savedFilters.find { it.id == id }?.name }
         sfName = currentName?.let { "$it copy" } ?: ""
     }
@@ -1693,11 +1701,14 @@ class AppState(
     private fun snapshotFilter(tabId: String, id: String, name: String): SavedFilter? {
         val t = tab(tabId) ?: return null
         val f = t.filter
+        val libraryMetadata = savedFilters.firstOrNull { it.id == id }
         return SavedFilter(
             id, name, f.levels, f.activeTags, f.kwText, f.kwRegex,
             f.mode, f.excludeTags, f.excludeKw, f.excludeKwRegex, f.highlighters, f.seqOn,
             f.kwInTag, f.kwInTagRegex, f.pkgPrefixes, f.pidTidFilter, f.sequences, f.messageRules,
             f.excludePkgPrefixes, f.kwHighlightEnabled, f.kwHighlightColor,
+            folderId = libraryMetadata?.folderId,
+            favorite = libraryMetadata?.favorite ?: false,
         )
     }
 
@@ -1772,6 +1783,71 @@ class AppState(
         writeFilterBackup()
     }
 
+    fun createSavedFilterFolder(name: String) {
+        val clean = name.trim()
+        if (clean.isBlank() || savedFilterFolders.any { it.name.equals(clean, ignoreCase = true) }) return
+        savedFilterFolders = savedFilterFolders + SavedFilterFolder("sff${System.nanoTime()}", clean)
+        autosaveNow()
+    }
+
+    fun renameSavedFilterFolder(id: String, name: String) {
+        val clean = name.trim()
+        if (clean.isBlank() || savedFilterFolders.any { it.id != id && it.name.equals(clean, ignoreCase = true) }) return
+        savedFilterFolders = savedFilterFolders.map { if (it.id == id) it.copy(name = clean) else it }
+        autosaveNow()
+    }
+
+    fun requestDeleteSavedFilterFolder(id: String) {
+        if (savedFilterFolders.any { it.id == id }) pendingDeleteSavedFilterFolderId = id
+    }
+
+    fun cancelDeleteSavedFilterFolder() { pendingDeleteSavedFilterFolderId = null }
+
+    fun confirmDeleteSavedFilterFolder() {
+        val id = pendingDeleteSavedFilterFolderId ?: return
+        savedFilters = savedFilters.map { if (it.folderId == id) it.copy(folderId = null) else it }
+        savedFilterFolders = savedFilterFolders.filterNot { it.id == id }
+        pendingDeleteSavedFilterFolderId = null
+        writeFilterBackup()
+    }
+
+    fun toggleSavedFilterFavorite(id: String) {
+        savedFilters = savedFilters.map { if (it.id == id) it.copy(favorite = !it.favorite) else it }
+        writeFilterBackup()
+    }
+
+    fun moveSavedFilter(id: String, folderId: String?) {
+        val validFolder = folderId?.takeIf { target -> savedFilterFolders.any { it.id == target } }
+        if (savedFilters.none { it.id == id }) return
+        savedFilters = savedFilters.map { if (it.id == id) it.copy(folderId = validFolder) else it }
+        writeFilterBackup()
+    }
+
+    fun reorderSavedFilterWithinFolder(id: String, toIndex: Int) {
+        val filter = savedFilters.firstOrNull { it.id == id } ?: return
+        val siblings = savedFilters.filter { it.folderId == filter.folderId }
+        val fromIndex = siblings.indexOfFirst { it.id == id }
+        if (fromIndex < 0) return
+        val reordered = siblings.toMutableList().apply {
+            val moved = removeAt(fromIndex)
+            add(toIndex.coerceIn(0, size), moved)
+        }
+        val iterator = reordered.iterator()
+        savedFilters = savedFilters.map { if (it.folderId == filter.folderId) iterator.next() else it }
+        writeFilterBackup()
+    }
+
+    fun reorderSavedFilterFolder(id: String, toIndex: Int) {
+        val fromIndex = savedFilterFolders.indexOfFirst { it.id == id }
+        if (fromIndex < 0) return
+        val reordered = savedFilterFolders.toMutableList().apply {
+            val folder = removeAt(fromIndex)
+            add(toIndex.coerceIn(0, size), folder)
+        }
+        savedFilterFolders = reordered
+        autosaveNow()
+    }
+
     fun beginRenameFilter(id: String) {
         val draftEntry = filterDraftsByTab.entries.firstOrNull { it.value.id == id }
         val current = draftEntry?.value ?: savedFilters.find { it.id == id } ?: return
@@ -1833,22 +1909,26 @@ class AppState(
 
     fun exportFilters(selectedIds: Set<String>? = null): String {
         val filters = selectedIds?.let { ids -> savedFilters.filter { it.id in ids } } ?: savedFilters
-        return exportFiltersList(filters)
+        return exportFiltersList(filters, savedFilterFolders, includeEmptyFolders = selectedIds == null)
     }
 
     fun importFilters(json: String) {
-        val imported = decodeFilters(json).getOrElse { return }
-        if (imported.isEmpty()) return
-        savedFilters = savedFilters + imported
+        val library = decodeFilterLibrary(json).getOrElse { return }
+        if (library.filters.isEmpty()) return
+        val prepared = prepareImportedLibrary(library)
+        savedFilterFolders = savedFilterFolders + prepared.folders
+        savedFilters = savedFilters + prepared.filters
     }
 
     fun beginImportFilters(json: String, sourceName: String? = null) {
-        val imported = decodeFilters(json).getOrElse {
+        val library = decodeFilterLibrary(json).getOrElse {
             importError = "Could not read filter file."
             pendingImportReview = null
             return
         }
-        beginImportFilterList(imported, sourceName)
+        val prepared = prepareImportedLibrary(library)
+        pendingImportedFilterFolders = prepared.folders
+        beginImportFilterList(prepared.filters, sourceName)
     }
 
     private fun beginImportFilterList(imported: List<SavedFilter>, sourceName: String? = null) {
@@ -1864,6 +1944,7 @@ class AppState(
 
     fun cancelImportFilters() {
         pendingImportReview = null
+        pendingImportedFilterFolders = emptyList()
     }
 
     fun setImportFilterAction(rowId: String, action: ImportFilterAction) {
@@ -1903,8 +1984,31 @@ class AppState(
             }
         }
         savedFilters = next
+        if (changed && pendingImportedFilterFolders.isNotEmpty()) {
+            savedFilterFolders = savedFilterFolders + pendingImportedFilterFolders
+        }
         pendingImportReview = null
+        pendingImportedFilterFolders = emptyList()
         if (changed) writeFilterBackup()
+    }
+
+    /** Maps imported folder ids onto this library by folder name, adding non-conflicting folders. */
+    private fun prepareImportedLibrary(library: DecodedFilterLibrary): DecodedFilterLibrary {
+        val mappedIds = mutableMapOf<String, String>()
+        val additions = mutableListOf<SavedFilterFolder>()
+        library.folders.forEach { imported ->
+            val local = (savedFilterFolders + additions).firstOrNull { it.name.equals(imported.name, ignoreCase = true) }
+            val target = local ?: run {
+                val id = imported.id.takeIf { candidate -> savedFilterFolders.none { it.id == candidate } && additions.none { it.id == candidate } }
+                    ?: "sff${System.nanoTime()}_${additions.size}"
+                SavedFilterFolder(id, imported.name).also(additions::add)
+            }
+            mappedIds[imported.id] = target.id
+        }
+        return DecodedFilterLibrary(
+            filters = library.filters.map { it.copy(folderId = it.folderId?.let(mappedIds::get)) },
+            folders = additions,
+        )
     }
 
     private fun writeFilterBackup() {

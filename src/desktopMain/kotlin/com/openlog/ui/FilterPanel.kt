@@ -2,6 +2,10 @@ package com.openlog.ui
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.material3.Icon
 import androidx.compose.foundation.*
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.layout.*
@@ -23,6 +27,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
@@ -163,6 +168,9 @@ class FilterPanelUiState {
     var crashExpanded       by mutableStateOf(true)
     var crashCategory       by mutableStateOf(CrashCategory.ALL)
     var sfExpanded          by mutableStateOf(true)
+    var sfFavoritesExpanded by mutableStateOf(true)
+    var sfSearch            by mutableStateOf("")
+    var sfCollapsedFolderIds by mutableStateOf<Set<String>>(emptySet())
     var incPillsExpanded    by mutableStateOf(true)
     var incMsgPillsExpanded by mutableStateOf(true)
     var excMsgPillsExpanded by mutableStateOf(true)
@@ -178,6 +186,7 @@ internal fun FilterPanel(
     tab: LogTab,
     fpState: FilterPanelUiState,
     savedFilters: List<SavedFilter>,
+    savedFilterFolders: List<SavedFilterFolder>,
     activeFilterItemId: String?,
     tagUsage: Map<String, Int>,
     newHlPat: String, newHlRx: Boolean, newHlColor: Color,
@@ -228,6 +237,13 @@ internal fun FilterPanel(
     onLoadFilter: (SavedFilter) -> Unit,
     onDeleteSF: (String) -> Unit,
     onRenameSF: (String) -> Unit,
+    onToggleSFFavorite: (String) -> Unit,
+    onMoveSFToFolder: (String, String?) -> Unit,
+    onReorderSFWithinFolder: (String, Int) -> Unit,
+    onReorderSFFolder: (String, Int) -> Unit,
+    onCreateSFFolder: (String) -> Unit,
+    onRenameSFFolder: (String, String) -> Unit,
+    onDeleteSFFolder: (String) -> Unit,
     onOpenSFDialog: () -> Unit,
     onSetKwInTag: (String) -> Unit,
     onAddPkgPrefix: (String) -> Unit,
@@ -290,6 +306,9 @@ internal fun FilterPanel(
     var regexEditorText by remember { mutableStateOf("") }
     var colorPickerManualId by remember { mutableStateOf<String?>(null) }
     var editingSeqId by remember { mutableStateOf<String?>(null) }
+    var createSavedFilterFolderOpen by remember { mutableStateOf(false) }
+    var renameSavedFilterFolderId by remember { mutableStateOf<String?>(null) }
+    var savedFilterFolderNameDraft by remember { mutableStateOf("") }
 
     LaunchedEffect(tagInput) {
         kotlinx.coroutines.delay(120)
@@ -454,6 +473,21 @@ internal fun FilterPanel(
         if (target.kind != KeyboardTargetKind.FilterSequence) return false
         val id = target.id.removePrefix("sequence:")
         if (delta < 0) onMoveSeqUp(id) else onMoveSeqDown(id)
+        return true
+    }
+
+    fun moveSavedFilterTarget(delta: Int): Boolean {
+        if (fpState.sfSearch.isNotBlank()) return false
+        val target = navTargets.getOrNull(navIndex) ?: return false
+        if (target.kind != KeyboardTargetKind.FilterSavedFilter) return false
+        val id = target.id.removePrefix("saved:")
+        val item = savedFilters.firstOrNull { it.id == id } ?: return false
+        if (item.id.startsWith("draft_")) return false
+        val siblings = savedFilters.filter { !it.id.startsWith("draft_") && it.folderId == item.folderId }
+        val fromIndex = siblings.indexOfFirst { it.id == id }
+        val toIndex = (fromIndex + delta).coerceIn(0, siblings.lastIndex)
+        if (fromIndex < 0 || fromIndex == toIndex) return true
+        onReorderSFWithinFolder(id, toIndex)
         return true
     }
 
@@ -747,8 +781,10 @@ internal fun FilterPanel(
                     }
                 } else {
                     when {
-                        ev.isAltPressed && ev.key == Key.DirectionUp -> moveSequenceTarget(-1)
-                        ev.isAltPressed && ev.key == Key.DirectionDown -> moveSequenceTarget(+1)
+                        ev.isAltPressed && ev.key == Key.DirectionUp ->
+                            moveSavedFilterTarget(-1) || moveSequenceTarget(-1)
+                        ev.isAltPressed && ev.key == Key.DirectionDown ->
+                            moveSavedFilterTarget(+1) || moveSequenceTarget(+1)
                         ev.key == Key.DirectionUp -> { moveFilterFocus(-1); true }
                         ev.key == Key.DirectionDown -> { moveFilterFocus(+1); true }
                         ev.key == Key.DirectionLeft -> { moveFilterFocus(-1); true }
@@ -1901,50 +1937,52 @@ internal fun FilterPanel(
             onUiStateChanged()
         })
         if (fpState.sfExpanded) {
-            if (savedFilters.isNotEmpty()) {
-                ScrollableItems(savedFilters.size) {
-                    savedFilters.forEach { sf ->
-                        val active = activeFilterItemId == sf.id
-                        HoverBox(modifier = Modifier.fillMaxWidth(), baseBg = if (active) tc.abg else Color.Transparent) {
-                            Row(
-                                Modifier.fillMaxWidth().clickable { onLoadFilter(sf) }.padding(horizontal = 12.dp, vertical = 5.dp),
-                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                                // Own click handler (separate from the row's onLoadFilter click below):
-                                // clicking while already active clears the live filter — the same effect
-                                // as "Clear filters" — without deleting this saved preset.
-                                RoundIndicator(
-                                    active = active, color = tc.ac,
-                                    onClick = { if (active) onClearFilter() else onLoadFilter(sf) },
-                                )
-                                TooltipArea(
-                                    tooltip = {
-                                        Box(
-                                            Modifier.background(tc.p2, RoundedCornerShape(4.dp))
-                                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                                        ) {
-                                            AppText(sf.name, color = tc.tx, fontSize = 11.sp)
-                                        }
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                ) {
-                                    AppText(
-                                        sf.name,
-                                        color = if (active) tc.tx else tc.ts,
-                                        fontSize = 11.sp,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                                SquareIconButton("✎", fontSize = 12.sp, onClick = { onRenameSF(sf.id) })
-                                SquareIconButton("×", fontSize = 14.sp, onClick = { onDeleteSF(sf.id) })
-                            }
-                        }
+            SavedFilterLibrary(
+                savedFilters = savedFilters,
+                folders = savedFilterFolders,
+                activeFilterItemId = activeFilterItemId,
+                search = fpState.sfSearch,
+                favoritesExpanded = fpState.sfFavoritesExpanded,
+                collapsedFolderIds = fpState.sfCollapsedFolderIds,
+                filterListRows = filterListRows,
+                onSearchChanged = { fpState.sfSearch = it },
+                onToggleFavorites = {
+                    fpState.sfFavoritesExpanded = !fpState.sfFavoritesExpanded
+                    onUiStateChanged()
+                },
+                onToggleFolder = { id ->
+                    fpState.sfCollapsedFolderIds = if (id in fpState.sfCollapsedFolderIds) {
+                        fpState.sfCollapsedFolderIds - id
+                    } else {
+                        fpState.sfCollapsedFolderIds + id
                     }
-                }
-            }
+                    onUiStateChanged()
+                },
+                onLoad = onLoadFilter,
+                onClearActive = onClearFilter,
+                onToggleFavorite = onToggleSFFavorite,
+                onMoveToFolder = onMoveSFToFolder,
+                onReorderWithinFolder = onReorderSFWithinFolder,
+                onReorderFolder = onReorderSFFolder,
+                onRename = onRenameSF,
+                onDelete = onDeleteSF,
+                onBeginRenameFolder = { folder ->
+                    renameSavedFilterFolderId = folder.id
+                    savedFilterFolderNameDraft = folder.name
+                },
+                onDeleteFolder = onDeleteSFFolder,
+            )
             Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 AppButton("+ Save current filter…", onClick = onOpenSFDialog, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth())
+                AppButton(
+                    "+ New folder…",
+                    onClick = {
+                        savedFilterFolderNameDraft = ""
+                        createSavedFilterFolderOpen = true
+                    },
+                    variant = ButtonVariant.Ghost,
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 AppButton("Clear filters", onClick = onClearFilter, variant = ButtonVariant.Secondary, isDanger = true, modifier = Modifier.fillMaxWidth())
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
                     AppButton("Export", onClick = onExportFilters)
@@ -1993,6 +2031,674 @@ internal fun FilterPanel(
                     }, variant = ButtonVariant.Primary)
                     AppButton("Cancel", onClick = { regexEditorOpen = false }, variant = ButtonVariant.Secondary)
                 }
+            }
+        }
+    }
+
+    if (createSavedFilterFolderOpen || renameSavedFilterFolderId != null) {
+        val renameId = renameSavedFilterFolderId
+        SavedFilterFolderNameDialog(
+            title = if (renameId == null) "New filter folder" else "Rename filter folder",
+            value = savedFilterFolderNameDraft,
+            onValueChange = { savedFilterFolderNameDraft = it },
+            onConfirm = {
+                val name = savedFilterFolderNameDraft.trim()
+                if (name.isNotEmpty()) {
+                    if (renameId == null) onCreateSFFolder(name) else onRenameSFFolder(renameId, name)
+                    createSavedFilterFolderOpen = false
+                    renameSavedFilterFolderId = null
+                    savedFilterFolderNameDraft = ""
+                }
+            },
+            onDismiss = {
+                createSavedFilterFolderOpen = false
+                renameSavedFilterFolderId = null
+                savedFilterFolderNameDraft = ""
+            },
+        )
+    }
+}
+
+@Composable
+private fun SavedFilterLibrary(
+    savedFilters: List<SavedFilter>,
+    folders: List<SavedFilterFolder>,
+    activeFilterItemId: String?,
+    search: String,
+    favoritesExpanded: Boolean,
+    collapsedFolderIds: Set<String>,
+    filterListRows: Int,
+    onSearchChanged: (String) -> Unit,
+    onToggleFavorites: () -> Unit,
+    onToggleFolder: (String) -> Unit,
+    onLoad: (SavedFilter) -> Unit,
+    onClearActive: () -> Unit,
+    onToggleFavorite: (String) -> Unit,
+    onMoveToFolder: (String, String?) -> Unit,
+    onReorderWithinFolder: (String, Int) -> Unit,
+    onReorderFolder: (String, Int) -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onBeginRenameFolder: (SavedFilterFolder) -> Unit,
+    onDeleteFolder: (String) -> Unit,
+) {
+    val tc = tc()
+    val query = search.trim()
+    val folderById = remember(folders) { folders.associateBy { it.id } }
+    val searchResults = remember(savedFilters, folders, query) {
+        if (query.isEmpty()) emptyList() else savedFilters.filter { filter ->
+            filter.name.contains(query, ignoreCase = true) ||
+                folderById[filter.folderId]?.name?.contains(query, ignoreCase = true) == true
+        }
+    }
+    Column(Modifier.fillMaxWidth()) {
+        InlineField(
+            value = search,
+            onValue = onSearchChanged,
+            placeholder = "Search all saved filters…",
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            fontSize = 11.sp,
+            onClear = { onSearchChanged("") },
+        )
+
+        if (query.isNotEmpty()) {
+            SavedFilterGroupHeader(
+                title = "Search results",
+                count = searchResults.size,
+                expanded = true,
+                collapsible = false,
+            )
+            if (searchResults.isEmpty()) {
+                AppText(
+                    "No saved filters match “$query”",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                    maxLines = 2,
+                )
+            } else {
+                ScrollableItems(
+                    itemCount = searchResults.size,
+                    rowDp = 30,
+                    maxDp = filterListRows.coerceAtLeast(1) * 30,
+                ) {
+                    searchResults.forEach { filter ->
+                        SavedFilterLibraryRow(
+                            filter = filter,
+                            folders = folders,
+                            folderLabel = null,
+                            active = activeFilterItemId == filter.id,
+                            isProjection = true,
+                            onLoad = onLoad,
+                            onClearActive = onClearActive,
+                            onToggleFavorite = onToggleFavorite,
+                            onMoveToFolder = onMoveToFolder,
+                            onRename = onRename,
+                            onDelete = onDelete,
+                        )
+                    }
+                }
+            }
+            return@Column
+        }
+
+        val favorites = savedFilters.filter { it.favorite }
+        if (favorites.isNotEmpty()) {
+            SavedFilterGroupHeader(
+                title = "Favorites",
+                icon = Icons.Outlined.StarBorder,
+                count = favorites.size,
+                expanded = favoritesExpanded,
+                onToggle = onToggleFavorites,
+            )
+            if (favoritesExpanded) {
+                ScrollableItems(
+                    itemCount = favorites.size,
+                    rowDp = 30,
+                    maxDp = filterListRows.coerceAtLeast(1) * 30,
+                ) {
+                    favorites.forEach { filter ->
+                        SavedFilterLibraryRow(
+                            filter = filter,
+                            folders = folders,
+                            folderLabel = null,
+                            active = activeFilterItemId == filter.id,
+                            isProjection = true,
+                            onLoad = onLoad,
+                            onClearActive = onClearActive,
+                            onToggleFavorite = onToggleFavorite,
+                            onMoveToFolder = onMoveToFolder,
+                            onRename = onRename,
+                            onDelete = onDelete,
+                        )
+                    }
+                }
+            }
+        }
+
+        folders.forEachIndexed { folderIndex, folder ->
+            val items = savedFilters.filter { it.folderId == folder.id }
+            val expanded = folder.id !in collapsedFolderIds
+            SavedFilterGroupHeader(
+                title = folder.name,
+                icon = Icons.Outlined.Folder,
+                count = items.size,
+                expanded = expanded,
+                onToggle = { onToggleFolder(folder.id) },
+                onRename = { onBeginRenameFolder(folder) },
+                onDelete = { onDeleteFolder(folder.id) },
+                canMoveUp = folderIndex > 0,
+                canMoveDown = folderIndex < folders.lastIndex,
+                onMoveUp = { onReorderFolder(folder.id, folderIndex - 1) },
+                onMoveDown = { onReorderFolder(folder.id, folderIndex + 1) },
+            )
+            if (expanded) {
+                SavedFilterCanonicalList(
+                    filters = items,
+                    folders = folders,
+                    activeFilterItemId = activeFilterItemId,
+                    maxRows = filterListRows,
+                    onLoad = onLoad,
+                    onClearActive = onClearActive,
+                    onToggleFavorite = onToggleFavorite,
+                    onMoveToFolder = onMoveToFolder,
+                    onReorderWithinFolder = onReorderWithinFolder,
+                    onRename = onRename,
+                    onDelete = onDelete,
+                )
+            }
+        }
+
+        val ungrouped = savedFilters.filter { it.folderId == null || it.folderId !in folderById }
+        val ungroupedKey = "__ungrouped__"
+        val ungroupedExpanded = ungroupedKey !in collapsedFolderIds
+        SavedFilterGroupHeader(
+            title = "Ungrouped",
+            icon = Icons.Outlined.Folder,
+            count = ungrouped.size,
+            expanded = ungroupedExpanded,
+            onToggle = { onToggleFolder(ungroupedKey) },
+        )
+        if (ungroupedExpanded) {
+            SavedFilterCanonicalList(
+                filters = ungrouped,
+                folders = folders,
+                activeFilterItemId = activeFilterItemId,
+                maxRows = filterListRows,
+                onLoad = onLoad,
+                onClearActive = onClearActive,
+                onToggleFavorite = onToggleFavorite,
+                onMoveToFolder = onMoveToFolder,
+                onReorderWithinFolder = onReorderWithinFolder,
+                onRename = onRename,
+                onDelete = onDelete,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterGroupHeader(
+    title: String,
+    count: Int,
+    expanded: Boolean,
+    icon: ImageVector? = null,
+    collapsible: Boolean = true,
+    onToggle: () -> Unit = {},
+    onRename: (() -> Unit)? = null,
+    onDelete: (() -> Unit)? = null,
+    canMoveUp: Boolean = false,
+    canMoveDown: Boolean = false,
+    onMoveUp: (() -> Unit)? = null,
+    onMoveDown: (() -> Unit)? = null,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onToggle.takeIf { collapsible },
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            AppText(
+                if (!collapsible) "⌕" else if (expanded) "▾" else "▸",
+                color = tc.td,
+                fontSize = if (!collapsible) 15.sp else 10.sp,
+            )
+            icon?.let {
+                Icon(it, contentDescription = null, tint = tc.td, modifier = Modifier.size(14.dp))
+            }
+            AppText(
+                title,
+                color = tc.ts,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+                overflow = TextOverflow.Ellipsis,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.width(18.dp), contentAlignment = Alignment.CenterEnd) {
+                    AppText(count.toString(), color = tc.td, fontSize = 9.sp)
+                }
+                // Always reserve the same trailing action slot, including Favorites/Ungrouped.
+                // That keeps every count and every overflow button on one shared right edge.
+                Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                    if (onRename != null && onDelete != null) {
+                        SavedFilterFolderOptionsMenu(
+                            canMoveUp = canMoveUp,
+                            canMoveDown = canMoveDown,
+                            onMoveUp = onMoveUp,
+                            onMoveDown = onMoveDown,
+                            onRename = onRename,
+                            onDelete = onDelete,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterCanonicalList(
+    filters: List<SavedFilter>,
+    folders: List<SavedFilterFolder>,
+    activeFilterItemId: String?,
+    maxRows: Int,
+    onLoad: (SavedFilter) -> Unit,
+    onClearActive: () -> Unit,
+    onToggleFavorite: (String) -> Unit,
+    onMoveToFolder: (String, String?) -> Unit,
+    onReorderWithinFolder: (String, Int) -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    if (filters.isEmpty()) return
+    val reorderable = filters.filterNot { it.id.startsWith("draft_") }
+    val rowHeightDp = 30.dp
+    val density = LocalDensity.current.density
+    val rowHeightPx = 30f * density
+    var dragId by remember { mutableStateOf<String?>(null) }
+    var dragStartIndex by remember { mutableStateOf(-1) }
+    var dragOffsetY by remember { mutableStateOf(0f) }
+    var justReleasedSavedFilterId by remember { mutableStateOf<String?>(null) }
+    var visualIds by remember { mutableStateOf(filters.map { it.id }) }
+    val canonicalIds = filters.map { it.id }
+    LaunchedEffect(canonicalIds, dragId, justReleasedSavedFilterId) {
+        if (dragId == null && justReleasedSavedFilterId == null) {
+            visualIds = canonicalIds
+        }
+    }
+    LaunchedEffect(justReleasedSavedFilterId) {
+        if (justReleasedSavedFilterId != null) {
+            kotlinx.coroutines.delay(120)
+            justReleasedSavedFilterId = null
+        }
+    }
+    val currentVisualIds = rememberUpdatedState(visualIds)
+    val currentDragId = rememberUpdatedState(dragId)
+    ScrollableItems(
+        itemCount = filters.size,
+        rowDp = 30,
+        maxDp = maxRows.coerceAtLeast(1) * 30,
+    ) {
+        Box(
+            Modifier.fillMaxWidth().height(rowHeightDp * filters.size)
+                .pointerInput(canonicalIds, rowHeightPx) {
+                    var down = Offset.Zero
+                    var downId: String? = null
+                    var dragging = false
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val change = event.changes.firstOrNull() ?: continue
+                            when (event.type) {
+                                PointerEventType.Press -> {
+                                    down = change.position
+                                    downId = canonicalIds.getOrNull((change.position.y / rowHeightPx).toInt())
+                                        ?.takeIf { id -> reorderable.any { it.id == id } }
+                                    dragging = false
+                                }
+                                PointerEventType.Move -> {
+                                    if (!dragging && downId != null && (change.position - down).getDistance() > 8f) {
+                                        dragging = true
+                                        dragId = downId
+                                        dragStartIndex = canonicalIds.indexOf(downId)
+                                        dragOffsetY = 0f
+                                        justReleasedSavedFilterId = null
+                                        visualIds = canonicalIds
+                                    }
+                                    if (dragging && dragId != null) {
+                                        change.consume()
+                                        dragOffsetY = change.position.y - down.y
+                                        visualIds = sequenceOrderDuringDrag(
+                                            visibleIds = canonicalIds,
+                                            draggedId = dragId,
+                                            dragStartIndex = dragStartIndex,
+                                            dragOffsetY = dragOffsetY,
+                                            rowHeight = rowHeightPx,
+                                        )
+                                    }
+                                }
+                                PointerEventType.Release -> {
+                                    if (dragging && dragId != null) {
+                                        val id = currentDragId.value ?: dragId
+                                        val releasedOrder = currentVisualIds.value
+                                        val toIndex = releasedOrder.filterNot { it.startsWith("draft_") }.indexOf(id)
+                                        val fromIndex = canonicalIds
+                                            .filterNot { it.startsWith("draft_") }
+                                            .indexOf(id)
+                                        if (id != null && toIndex >= 0 && toIndex != fromIndex) {
+                                            visualIds = releasedOrder
+                                            onReorderWithinFolder(id, toIndex)
+                                        }
+                                        justReleasedSavedFilterId = id
+                                    }
+                                    dragId = null
+                                    dragStartIndex = -1
+                                    dragOffsetY = 0f
+                                    downId = null
+                                    dragging = false
+                                }
+                                else -> Unit
+                            }
+                        }
+                    }
+                },
+        ) {
+            filters.forEach { filter ->
+                key(filter.id) {
+                    val isDragging = dragId == filter.id
+                    val targetIndex = visualIds.indexOf(filter.id).takeIf { it >= 0 } ?: filters.indexOf(filter)
+                    val targetY = targetIndex * rowHeightPx
+                    val animatedY by animateFloatAsState(
+                        targetValue = targetY,
+                        animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
+                        label = "saved-filter-y-${filter.id}",
+                    )
+                    val y = sequenceRenderY(
+                        isDragging = isDragging,
+                        isJustReleased = justReleasedSavedFilterId == filter.id,
+                        pointerY = dragStartIndex * rowHeightPx + dragOffsetY,
+                        targetY = targetY,
+                        animatedY = animatedY,
+                    )
+                    Box(
+                        Modifier.fillMaxWidth().height(rowHeightDp)
+                            .offset { IntOffset(0, y.roundToInt()) }
+                            .zIndex(if (isDragging) 1f else 0f)
+                            .graphicsLayer {
+                                if (isDragging) {
+                                    scaleX = 1.02f
+                                    scaleY = 1.02f
+                                }
+                            }
+                            .shadow(if (isDragging) 5.dp else 0.dp),
+                    ) {
+                        SavedFilterLibraryRow(
+                            filter = filter,
+                            folders = folders,
+                            folderLabel = null,
+                            active = activeFilterItemId == filter.id,
+                            isProjection = false,
+                            dragging = isDragging,
+                            dragSuppressHover = dragId != null,
+                            onLoad = onLoad,
+                            onClearActive = onClearActive,
+                            onToggleFavorite = onToggleFavorite,
+                            onMoveToFolder = onMoveToFolder,
+                            onRename = onRename,
+                            onDelete = onDelete,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun SavedFilterLibraryRow(
+    filter: SavedFilter,
+    folders: List<SavedFilterFolder>,
+    folderLabel: String?,
+    active: Boolean,
+    isProjection: Boolean,
+    dragging: Boolean = false,
+    dragSuppressHover: Boolean = false,
+    onLoad: (SavedFilter) -> Unit,
+    onClearActive: () -> Unit,
+    onToggleFavorite: (String) -> Unit,
+    onMoveToFolder: (String, String?) -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    val tc = tc()
+    val isDraft = filter.id.startsWith("draft_")
+    HoverBox(
+        modifier = Modifier.fillMaxWidth().height(30.dp),
+        baseBg = when {
+            dragging -> tc.p
+            active -> tc.abg
+            else -> Color.Transparent
+        },
+        hoverEnabled = !dragSuppressHover,
+    ) {
+        Row(
+            Modifier.fillMaxSize()
+                .background(if (dragging) tc.ac.copy(.12f) else Color.Transparent)
+                .clickable { onLoad(filter) }.padding(start = 28.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (!isProjection && !isDraft) AppText("⠿", color = tc.td, fontSize = 12.sp)
+            RoundIndicator(
+                active = active,
+                color = tc.ac,
+                onClick = { if (active) onClearActive() else onLoad(filter) },
+            )
+            TooltipArea(
+                tooltip = {
+                    Box(
+                        Modifier.background(tc.p2, RoundedCornerShape(4.dp))
+                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        AppText(
+                            if (folderLabel == null) filter.name else "${filter.name} · $folderLabel",
+                            color = tc.tx,
+                            fontSize = 11.sp,
+                        )
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    AppText(
+                        filter.name,
+                        color = if (active) tc.tx else tc.ts,
+                        fontSize = 11.sp,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (folderLabel != null) {
+                        AppText("  $folderLabel", color = tc.td, fontSize = 9.sp, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            if (!isDraft) {
+                SavedFilterOptionsMenu(
+                    filter = filter,
+                    folders = folders,
+                    onToggleFavorite = onToggleFavorite,
+                    onMoveToFolder = onMoveToFolder,
+                    onRename = onRename,
+                    onDelete = onDelete,
+                )
+            } else {
+                SquareIconButton("✎", 11.sp, { onRename(filter.id) })
+                SquareIconButton("×", 13.sp, { onDelete(filter.id) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterOptionsMenu(
+    filter: SavedFilter,
+    folders: List<SavedFilterFolder>,
+    onToggleFavorite: (String) -> Unit,
+    onMoveToFolder: (String, String?) -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    val tc = tc()
+    var open by remember(filter.id) { mutableStateOf(false) }
+    Box {
+        SquareIconButton("⋮", 14.sp, { open = !open })
+        if (open) {
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, 20),
+                onDismissRequest = { open = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.widthIn(min = 140.dp, max = 220.dp)
+                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                ) {
+                    SavedFilterOption(
+                        label = if (filter.favorite) "Remove from Favorites" else "Add to Favorites",
+                        onClick = {
+                            open = false
+                            onToggleFavorite(filter.id)
+                        },
+                    )
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                    (listOf<SavedFilterFolder?>(null) + folders).forEach { folder ->
+                        val folderId = folder?.id
+                        val selected = filter.folderId == folderId
+                        SavedFilterOption(
+                            label = "Move to ${folder?.name ?: "Ungrouped"}",
+                            selected = selected,
+                            enabled = !selected,
+                            onClick = {
+                                open = false
+                                onMoveToFolder(filter.id, folderId)
+                            },
+                        )
+                    }
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                    SavedFilterOption("Rename", onClick = { open = false; onRename(filter.id) })
+                    SavedFilterOption("Delete", danger = true, onClick = { open = false; onDelete(filter.id) })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterOption(
+    label: String,
+    selected: Boolean = false,
+    enabled: Boolean = true,
+    danger: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+        baseBg = if (selected) tc.abg else Color.Transparent,
+        onClick = onClick.takeIf { enabled },
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            AppText(if (selected) "✓" else "", color = tc.ac, fontSize = 10.sp, modifier = Modifier.width(10.dp))
+            AppText(label, color = if (danger) DANGER_RED else if (enabled) tc.tx else tc.td, fontSize = 10.sp, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterFolderOptionsMenu(
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    onMoveUp: (() -> Unit)?,
+    onMoveDown: (() -> Unit)?,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val tc = tc()
+    var open by remember { mutableStateOf(false) }
+    Box {
+        SquareIconButton("⋮", 14.sp, { open = !open }, size = 18.dp)
+        if (open) {
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, 18),
+                onDismissRequest = { open = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.widthIn(min = 140.dp, max = 200.dp)
+                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                ) {
+                    SavedFilterOption("Move up", enabled = canMoveUp, onClick = { open = false; onMoveUp?.invoke() })
+                    SavedFilterOption("Move down", enabled = canMoveDown, onClick = { open = false; onMoveDown?.invoke() })
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                    SavedFilterOption("Rename", onClick = { open = false; onRename() })
+                    SavedFilterOption("Delete", danger = true, onClick = { open = false; onDelete() })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterFolderNameDialog(
+    title: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        val tc = tc()
+        Column(
+            Modifier.width(340.dp).background(tc.p, RoundedCornerShape(8.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(20.dp),
+        ) {
+            AppText(title, color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(12.dp))
+            InlineField(
+                value = value,
+                onValue = onValueChange,
+                placeholder = "Folder name…",
+                modifier = Modifier.fillMaxWidth(),
+                fontSize = 13.sp,
+                onSubmit = onConfirm,
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            ) {
+                DialogActionButton(if (title.startsWith("New")) "Create" else "Rename", active = value.isNotBlank()) {
+                    onConfirm()
+                }
+                DialogActionButton("Cancel", active = false) { onDismiss() }
             }
         }
     }

@@ -220,6 +220,18 @@ data class LogTab(
     val archiveCandidate: ZipLogCandidate? = null,
 )
 
+/**
+ * A single, non-nesting group in the saved-filter library.
+ *
+ * Filters with a null [SavedFilter.folderId] live at the library root. Folder ids are kept as
+ * metadata on filters instead of embedding child collections so moves and ordering stay cheap and
+ * old flat saved-filter data remains source-compatible.
+ */
+data class SavedFilterFolder(
+    val id: String,
+    val name: String,
+)
+
 data class SavedFilter(
     val id: String, val name: String,
     val levels: Set<LogLevel>, val activeTags: Set<String>,
@@ -233,6 +245,8 @@ data class SavedFilter(
     val excludePkgPrefixes: Set<String> = emptySet(),
     val kwHighlightEnabled: Boolean = true,
     val kwHighlightColor: Color = DEFAULT_KEYWORD_HIGHLIGHT_COLOR,
+    val folderId: String? = null,
+    val favorite: Boolean = false,
 )
 
 // ── Settings ───────────────────────────────────────────────────────

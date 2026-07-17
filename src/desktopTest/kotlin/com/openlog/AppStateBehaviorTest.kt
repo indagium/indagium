@@ -575,6 +575,49 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun savedFilterLibraryMovesFavoritesAndReordersWithinFolder() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.createSavedFilterFolder("QA")
+        val folderId = state.savedFilterFolders.single().id
+
+        state.saveFilter(tabId, "first", folderId)
+        state.saveFilter(tabId, "second", folderId)
+        val first = state.savedFilters.first { it.name == "first" }
+        val second = state.savedFilters.first { it.name == "second" }
+
+        state.toggleSavedFilterFavorite(second.id)
+        state.reorderSavedFilterWithinFolder(second.id, 0)
+
+        assertEquals(listOf(second.id, first.id), state.savedFilters.filter { it.folderId == folderId }.map { it.id })
+        assertTrue(state.savedFilters.first { it.id == second.id }.favorite)
+
+        state.requestDeleteSavedFilterFolder(folderId)
+        state.confirmDeleteSavedFilterFolder()
+
+        assertTrue(state.savedFilterFolders.isEmpty())
+        assertTrue(state.savedFilters.all { it.folderId == null })
+    }
+
+    @Test
+    fun exportedSavedFilterLibraryPreservesFolderAndFavorite() {
+        val source = AppState()
+        source.addTab()
+        source.createSavedFilterFolder("Release")
+        val folderId = source.savedFilterFolders.single().id
+        source.saveFilter(source.tabs.single().id, "production", folderId)
+        source.toggleSavedFilterFavorite(source.savedFilters.single().id)
+
+        val target = AppState()
+        target.importFilters(source.exportFilters())
+
+        assertEquals(listOf("Release"), target.savedFilterFolders.map { it.name })
+        assertEquals("Release", target.savedFilterFolders.single { it.id == target.savedFilters.single().folderId }.name)
+        assertTrue(target.savedFilters.single().favorite)
+    }
+
+    @Test
     fun exportedFiltersRoundTripSequences() {
         val source = AppState()
         source.addTab()

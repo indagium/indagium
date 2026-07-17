@@ -870,6 +870,8 @@ private fun SavedFilter.savedFilterToken(): String = tokenFields(
     excludePkgPrefixes.joinToString(",") { it.b64() },
     kwHighlightEnabled.toString(),
     kwHighlightColor.value.toString(),
+    folderId.orEmpty(),
+    favorite.toString(),
 )
 
 private fun String.savedFilterFromToken(): SavedFilter? = runCatching {
@@ -898,6 +900,8 @@ private fun String.savedFilterFromToken(): SavedFilter? = runCatching {
         excludePkgPrefixes = p.getOrNull(18)?.encodedSet() ?: emptySet(),
         kwHighlightEnabled = p.getOrNull(19)?.toBooleanStrictOrNull() ?: true,
         kwHighlightColor = p.getOrNull(20)?.toULongOrNull()?.let(::Color) ?: DEFAULT_KEYWORD_HIGHLIGHT_COLOR,
+        folderId = p.getOrNull(21)?.takeIf { it.isNotBlank() },
+        favorite = p.getOrNull(22)?.toBooleanStrictOrNull() ?: false,
     )
 }.getOrNull()
 
