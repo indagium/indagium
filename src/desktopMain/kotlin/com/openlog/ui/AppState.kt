@@ -2855,7 +2855,7 @@ class AppState(
     fun saveAnalysis(tabId: String) {
         val t = tab(tabId) ?: return
         val dlg = FileDialog(null as Frame?, "Save Analysis", FileDialog.SAVE).apply {
-            file = analysisNoteMarkdownName(t.filename)
+            file = analysisNoteMarkdownName(t.filename, t.sourcePath)
             settings.defaultSaveDir?.let { directory = it }
             isVisible = true
         }
@@ -2944,8 +2944,14 @@ class AppState(
         ).distinctBy { it.absolutePath }
     }
 
-    private fun noteNamesForFilename(filename: String): List<String> {
-        return listOf(analysisNoteMarkdownName(filename))
+    // Includes the plain-filename name alongside the (possibly archive-qualified) one so notes
+    // exported before the archive-qualified naming — plain "logcat_analysis.md" — still resolve
+    // for their tab.
+    private fun noteNamesForFilename(filename: String, sourcePath: String? = null): List<String> {
+        return listOf(
+            analysisNoteMarkdownName(filename, sourcePath),
+            analysisNoteMarkdownName(filename),
+        ).distinct()
     }
 
     // Two tabs can share a bare filename while being entirely different files (different
@@ -2955,7 +2961,7 @@ class AppState(
     // differ); a note saved before this fingerprinting existed (no .src sidecar) or a tab with no
     // sourcePath (e.g. a merged tab) still matches by name as before — see resolveNoteTarget.
     fun recentNotesForTab(tab: LogTab): List<String> {
-        val relatedNames = noteNamesForFilename(tab.filename).toSet()
+        val relatedNames = noteNamesForFilename(tab.filename, tab.sourcePath).toSet()
         return recentNotes.filter { path ->
             val f = File(path)
             if (f.name !in relatedNames) return@filter false
@@ -3051,7 +3057,7 @@ class AppState(
     // slot with no conflicting fingerprint, so a genuine collision no longer silently overwrites
     // an unrelated file's saved notes.
     private fun resolveNoteTarget(targetDir: File, filename: String, sourcePath: String?): File {
-        val baseName = analysisNoteMarkdownName(filename)
+        val baseName = analysisNoteMarkdownName(filename, sourcePath)
         if (sourcePath == null) return File(targetDir, baseName)
         var candidateName = baseName
         var suffix = 2
