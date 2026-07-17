@@ -179,16 +179,81 @@ internal const val MIN_PORT = 1
 internal const val MAX_PORT = 65535
 internal const val DEFAULT_MCP_PORT = 8991
 
-// Auto-detect fallback chain for AppState.openInEditor, tried in order when settings.editorCommand
-// is blank — the first one whose CLI is actually on PATH (i.e. ProcessBuilder.start() succeeds)
-// wins. Each template supports jumping straight to a line, unlike plain Desktop.open().
-private val AUTO_EDITOR_COMMANDS = listOf(
-    "code -g {file}:{line}",
-    "idea --line {line} {file}",
-    "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea --line {line} {file}",
-    "cursor -g {file}:{line}",
-    "subl {file}:{line}",
+// One entry in the editor catalog offered by the Settings → Source code editor-choice dropdown.
+// [id] is the stable key persisted in AppSettings.editorChoice; [candidates] are command templates
+// tried in order (mac/Windows/Linux variants coexist in one list — resolveExecutable naturally only
+// resolves the ones actually installed, so no OS branching is needed here).
+data class EditorPreset(
+    val id: String,
+    val displayName: String,
+    val candidates: List<String>,
 )
+
+// Recommended-editor catalog: superset of the old flat AUTO_EDITOR_COMMANDS list, now structured so
+// the Settings UI can offer a named dropdown choice per app instead of one opaque free-text field.
+// Each preset lists a bare CLI candidate first (works when the editor's shell command is on PATH,
+// incl. Linux/Windows), then macOS .app bundle absolute paths as a fallback. The bundle fallback
+// matters because a GUI app doesn't inherit the interactive shell PATH, and most macOS users never
+// run the editor's "Install shell command in PATH" step — so `code`/`cursor`/`subl` aren't on PATH
+// even though the CLI ships inside the bundle. splitEditorCommand resolves the space-containing
+// bundle paths correctly.
+internal val EDITOR_CATALOG = listOf(
+    EditorPreset(
+        "vscode",
+        "VS Code",
+        listOf(
+            "code -g {file}:{line}",
+            "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code -g {file}:{line}",
+        ),
+    ),
+    EditorPreset(
+        "intellij",
+        "IntelliJ IDEA",
+        listOf(
+            "idea --line {line} {file}",
+            "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea --line {line} {file}",
+            "idea64 --line {line} {file}",
+        ),
+    ),
+    EditorPreset(
+        "studio",
+        "Android Studio",
+        listOf(
+            "studio --line {line} {file}",
+            "/Applications/Android Studio.app/Contents/MacOS/studio --line {line} {file}",
+        ),
+    ),
+    EditorPreset(
+        "cursor",
+        "Cursor",
+        listOf(
+            "cursor -g {file}:{line}",
+            "/Applications/Cursor.app/Contents/Resources/app/bin/cursor -g {file}:{line}",
+        ),
+    ),
+    EditorPreset(
+        "sublime",
+        "Sublime Text",
+        listOf(
+            "subl {file}:{line}",
+            "/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl {file}:{line}",
+        ),
+    ),
+    EditorPreset(
+        "zed",
+        "Zed",
+        listOf(
+            "zed {file}:{line}",
+            "/Applications/Zed.app/Contents/MacOS/cli {file}:{line}",
+        ),
+    ),
+)
+
+// Auto-detect fallback chain for AppState.openInEditor's "auto"/blank editorChoice path: every
+// catalog candidate template, in catalog order — the first one whose CLI is actually on PATH (i.e.
+// ProcessBuilder.start() succeeds) wins. Each template supports jumping straight to a line, unlike
+// plain Desktop.open().
+private val AUTO_EDITOR_COMMANDS = EDITOR_CATALOG.flatMap { it.candidates }
 
 // Extra places to look for an editor CLI besides $PATH. A GUI app (and the Gradle daemon in dev)
 // doesn't inherit the user's interactive shell PATH, so `code`/`idea`/etc. are typically missing
@@ -267,6 +332,18 @@ internal fun splitEditorCommand(template: String, dirs: List<File> = executableS
     }
     return null
 }
+
+// First candidate template in [preset] whose executable actually resolves (i.e. is installed) under
+// [dirs], or null if none do. Reuses [splitEditorCommand] — no new process/exec logic; this is just
+// "does any candidate resolve", checked in catalog order.
+internal fun detectedTemplate(preset: EditorPreset, dirs: List<File> = executableSearchDirs()): String? =
+    preset.candidates.firstOrNull { splitEditorCommand(it, dirs) != null }
+
+// EDITOR_CATALOG filtered down to installed editors, each paired with its resolved command
+// template (the first matching candidate) — the ordered list of choices the Settings dropdown
+// offers, and the read-only "resolved command" shown once one is selected.
+internal fun detectInstalledEditors(dirs: List<File> = executableSearchDirs()): List<Pair<EditorPreset, String>> =
+    EDITOR_CATALOG.mapNotNull { preset -> detectedTemplate(preset, dirs)?.let { preset to it } }
 
 // Resolves an editor template and substitutes its location placeholders. Keeping this separate
 // from [launchEditor] makes the exact process arguments testable, especially for the Toolbox
@@ -697,6 +774,19 @@ class AppState(
     var sourceIndex by mutableStateOf<SourceIndex?>(null)
         private set
     var sourceCodeView by mutableStateOf<SourceCodeView?>(null)
+
+    // Cache of installed editors for the Settings → Source code editor-choice dropdown, populated
+    // by [rescanEditors]. Null means "not scanned yet" (shows a "Detecting…" placeholder in the UI),
+    // distinct from an empty list (scanned, nothing found).
+    var detectedEditors by mutableStateOf<List<Pair<EditorPreset, String>>?>(null)
+
+    // Runs detectInstalledEditors() off the UI thread and publishes the result. Compose
+    // mutableStateOf is snapshot-safe to write from any thread (see CLAUDE.md) so no
+    // withContext(Dispatchers.Main) is needed. Safe to call repeatedly (e.g. a Settings "Rescan"
+    // button, or first-open of the Source code section) — each call simply re-scans and overwrites.
+    fun rescanEditors() {
+        ioScope.launch { detectedEditors = detectInstalledEditors() }
+    }
 
     // Reindexing is per source folder (see reindexSources) — this tracks which folder paths
     // (absolute) currently have a scan in flight, purely so the Settings UI can disable that
@@ -3375,31 +3465,55 @@ class AppState(
         if (matches.isNotEmpty()) sourceCodeView = SourceCodeView(matches)
     }
 
-    // Opens filePath at line in an editor: settings.editorCommand if set, else the first working
-    // AUTO_EDITOR_COMMANDS entry. There is deliberately no Desktop.open() fallback: that can open
-    // the correct file but cannot honour the requested source line, which is worse than reporting
-    // a missing editor launcher. Runs on ioScope so editor process startup never blocks the UI.
+    // Opens filePath at line in an editor, dispatched on settings.editorChoice:
+    //  - "auto" / "" (default, also the migration default for a never-configured install): tries
+    //    every AUTO_EDITOR_COMMANDS entry (every catalog candidate) in order.
+    //  - "custom": uses settings.editorCommand verbatim, exactly as the old single-field behavior.
+    //  - anything else is an EditorPreset.id: resolved fresh via detectedTemplate (not the cached
+    //    detectedEditors snapshot, so an editor installed/uninstalled since the last Settings scan
+    //    is still honoured correctly) rather than a stored command, so a Toolbox-relocated or
+    //    reinstalled editor keeps resolving without the user re-typing anything.
+    // There is deliberately no Desktop.open() fallback in any branch: that can open the correct file
+    // but cannot honour the requested source line, which is worse than reporting a missing editor
+    // launcher. Runs on ioScope so editor process startup never blocks the UI.
     fun openInEditor(filePath: String, line: Int) {
         val file = File(filePath)
         ioScope.launch {
-            val custom = settings.editorCommand
-            if (custom.isNotBlank()) {
-                if (launchEditor(custom, file, line)) return@launch
-                showOpenError(
-                    title = "Could not open code location",
-                    path = filePath,
-                    message = "The configured Open command could not be launched. The file was not opened without its line " +
-                        "location; check the executable path and the {file} and {line} placeholders in Settings.",
-                )
-                return@launch
+            when (val choice = settings.editorChoice) {
+                "auto", "" -> {
+                    if (AUTO_EDITOR_COMMANDS.any { launchEditor(it, file, line) }) return@launch
+                    showOpenError(
+                        title = "Could not open code location",
+                        path = filePath,
+                        message = "No supported editor launcher was found. Pick an installed editor or a custom " +
+                            "command in Settings.",
+                    )
+                }
+                "custom" -> {
+                    val custom = settings.editorCommand
+                    if (custom.isNotBlank() && launchEditor(custom, file, line)) return@launch
+                    showOpenError(
+                        title = "Could not open code location",
+                        path = filePath,
+                        message = "The configured Open command could not be launched. The file was not opened without its line " +
+                            "location; check the executable path and the {file} and {line} placeholders in Settings.",
+                    )
+                }
+                else -> {
+                    val preset = EDITOR_CATALOG.find { it.id == choice }
+                    val template = preset?.let { detectedTemplate(it) }
+                    if (template != null && launchEditor(template, file, line)) return@launch
+                    showOpenError(
+                        title = "Could not open code location",
+                        path = filePath,
+                        message = if (preset != null) {
+                            "${preset.displayName} is no longer detected — pick another app or a custom command in Settings."
+                        } else {
+                            "The selected editor is not recognised — pick another app or a custom command in Settings."
+                        },
+                    )
+                }
             }
-            if (AUTO_EDITOR_COMMANDS.any { launchEditor(it, file, line) }) return@launch
-            showOpenError(
-                title = "Could not open code location",
-                path = filePath,
-                message = "No supported editor launcher was found. Configure an Open command with {file} and {line} " +
-                    "placeholders in Settings.",
-            )
         }
     }
 

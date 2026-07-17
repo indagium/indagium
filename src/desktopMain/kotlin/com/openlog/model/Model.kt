@@ -411,6 +411,12 @@ data class AppSettings(
     // AppState.openInEditor. Blank (the default) means auto-detect a common editor CLI, falling
     // back to Desktop.open(). Trailing with a default so old settings tokens still parse.
     val editorCommand: String = "",
+    // Selects which editor openInEditor uses: "" / "auto" = auto-detect the first installed editor
+    // from the catalog (see AppState's EditorPreset/EDITOR_CATALOG); an EditorPreset.id picks that
+    // specific detected app; "custom" uses [editorCommand] verbatim. Trailing with a default so old
+    // settings tokens (without this field) still parse — AutosaveCodec applies a migration default
+    // there instead (blank stays "auto", a non-blank editorCommand becomes "custom").
+    val editorChoice: String = "",
     // API keys stay in AppState's session-only credential store and are never serialized.
     val aiProviderProfiles: List<AiProviderProfile> = listOf(defaultAiProviderProfile()),
     // Caps tool-call round trips per AI request (see AiAgentRunner). Trailing with a default so

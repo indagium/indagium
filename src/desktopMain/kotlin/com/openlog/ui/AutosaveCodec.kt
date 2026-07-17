@@ -551,6 +551,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("openUnfilteredOnCtrlF", openUnfilteredOnCtrlF)
     put("sourceFolders", buildJsonArray { sourceFolders.forEach { add(it) } })
     put("editorCommand", editorCommand)
+    put("editorChoice", editorChoice)
     put("aiMaxToolRounds", aiMaxToolRounds)
     put("sourceAutoDiscoveryEnabled", sourceAutoDiscoveryEnabled)
     put("sourceFolderInfo", sourceFolderInfoJson(sourceFolderInfo))
@@ -710,6 +711,7 @@ private fun JsonObject.copyMaskRulesFromJson(key: String): List<CopyMaskRule> =
 // settingsFromToken() above.
 internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
     val o = Json.parseToJsonElement(raw).jsonObject
+    val editorCommandValue = o.stringOrNull("editorCommand").orEmpty()
     AppSettings(
         theme = o.stringOrNull("theme")?.let { runCatching { ThemePreset.valueOf(it) }.getOrNull() } ?: ThemePreset.LIGHT,
         fontSize = o.intOrDefault("fontSize", 12),
@@ -740,7 +742,12 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         openNewFilesWithUnfiltered = o.boolOrDefault("openNewFilesWithUnfiltered", false),
         openUnfilteredOnCtrlF = o.boolOrDefault("openUnfilteredOnCtrlF", false),
         sourceFolders = o.stringArray("sourceFolders"),
-        editorCommand = o.stringOrNull("editorCommand").orEmpty(),
+        editorCommand = editorCommandValue,
+        // Migration default: a legacy blob (predates editorChoice) with a typed editorCommand keeps
+        // behaving exactly as before by reading back as "custom"; a legacy blank command reads back
+        // as "auto" — see AppSettings.editorChoice doc.
+        editorChoice = o.stringOrNull("editorChoice")
+            ?: if (editorCommandValue.isNotBlank()) "custom" else "auto",
         aiProviderProfiles = o.aiProviderProfilesFromJson("aiProviderProfiles"),
         aiMaxToolRounds = o.intOrDefault("aiMaxToolRounds", DEFAULT_AI_MAX_TOOL_ROUNDS)
             .coerceIn(MIN_AI_MAX_TOOL_ROUNDS, MAX_AI_MAX_TOOL_ROUNDS),

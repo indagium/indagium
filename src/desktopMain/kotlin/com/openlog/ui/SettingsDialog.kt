@@ -20,17 +20,23 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.openlog.ai.CustomAiCommand
 import com.openlog.ai.ModelDiscoveryResult
 import com.openlog.ai.OpenAiCompatibleProvider
@@ -809,41 +815,33 @@ private fun SourceCodeSettingsSection(state: AppState) {
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        TooltipArea(
-            tooltip = {
-                Box(
-                    Modifier
-                        .background(tc.p2, RoundedCornerShape(4.dp))
-                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                ) {
-                    AppText(
-                        "Command to open a file at a line. Use {file} and {line} placeholders, e.g. " +
-                            "idea --line {line} {file} or code -g {file}:{line}. Leave blank to " +
-                            "auto-detect a common editor (VS Code, IntelliJ, Cursor, Sublime) or fall " +
-                            "back to the default app. A configured command is not replaced by that fallback.",
-                        color = tc.tx,
-                        fontSize = 11.sp,
-                        maxLines = 4,
-                    )
-                }
-            },
-        ) {
-            AppText(
-                "Open command",
-                color = tc.td,
-                fontSize = 10.sp,
-                fontFamily = UI,
-                fontWeight = FontWeight.SemiBold,
-            )
+        // Scans lazily, the first time this section is composed (not eagerly at AppState
+        // construction) — a subprocess probe per catalog candidate is wasted work for a session
+        // that never opens Settings. Re-entering the section after a scan is already cached
+        // (detectedEditors != null) is then a no-op; the Rescan button below is the only way to
+        // force a fresh probe, e.g. after installing an editor mid-session.
+        LaunchedEffect(Unit) {
+            if (state.detectedEditors == null) state.rescanEditors()
         }
-        InlineField(
-            state.settings.editorCommand,
-            { value -> state.updateSettings { it.copy(editorCommand = value) } },
-            "idea --line {line} {file}",
-            Modifier.fillMaxWidth(),
-            fontSize = 12.sp,
-        )
+        CompactSettingWithTooltip(
+            label = "Open command",
+            tooltip = "Editor used by \"Show in code\" to open a file at the logged line. Automatic " +
+                "uses the first installed app found (VS Code, IntelliJ IDEA, Android Studio, Cursor, " +
+                "Sublime Text, or Zed); pick one by name, or choose Custom command… to type a raw " +
+                "command with {file} and {line} placeholders, e.g. idea --line {line} {file} or " +
+                "code -g {file}:{line}. There is no fallback to the system's default-app opener: " +
+                "that can open the file but not jump to the line.",
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.weight(1f)) { EditorChoiceDropdown(state) }
+                AppButton("Rescan", onClick = { state.rescanEditors() }, variant = ButtonVariant.Secondary)
+            }
+        }
+        EditorChoiceDetail(state)
     }
     TooltipArea(
         tooltip = {
@@ -877,6 +875,166 @@ private fun SourceCodeSettingsSection(state: AppState) {
         }
     }
     SourceLoggingConfigurations(state)
+}
+
+private fun editorChoiceLabel(choice: String): String = when (choice) {
+    "", "auto" -> "Automatic (first installed)"
+    "custom" -> "Custom command…"
+    else -> EDITOR_CATALOG.find { it.id == choice }?.displayName ?: "Automatic (first installed)"
+}
+
+// Hand-rolled dropdown for settings.editorChoice, modeled on FilterPanel.kt's
+// CrashCategoryDropdown: a clickable field showing the current choice that opens a themed option
+// list on click, with the popup width measured from the field itself so it lines up exactly.
+@Composable
+private fun EditorChoiceDropdown(state: AppState) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var open by remember { mutableStateOf(false) }
+    var fieldWidth by remember { mutableStateOf(0.dp) }
+    // See CrashCategoryDropdown's identical guard: the Popup's own dismissOnClickOutside also fires
+    // for a click back on the field itself, so without suppressing the toggle briefly after a
+    // dismiss, that dismiss and the field's own onClick can both fire for the same press and net out
+    // to "stayed open" instead of closing.
+    var suppressToggleUntilMs by remember { mutableStateOf(0L) }
+    val choice = state.settings.editorChoice
+    val detected = state.detectedEditors
+    Box(
+        Modifier.fillMaxWidth().onGloballyPositioned { coords ->
+            fieldWidth = with(density) { coords.size.width.toDp() }
+        },
+    ) {
+        HoverBox(
+            modifier = Modifier.fillMaxWidth().height(26.dp)
+                .clip(CORNER_SM)
+                .background(tc.p2, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM),
+            onClick = {
+                if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open
+            },
+        ) {
+            Row(
+                Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                AppText(editorChoiceLabel(choice), color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
+            }
+        }
+        if (open) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
+                onDismissRequest = {
+                    open = false
+                    suppressToggleUntilMs = System.currentTimeMillis() + 200
+                },
+                properties = PopupProperties(focusable = false),
+            ) {
+                Column(
+                    Modifier.width(fieldWidth)
+                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    EditorChoiceOptionRow(
+                        label = "Automatic (first installed)",
+                        active = choice == "" || choice == "auto",
+                        onClick = { open = false; state.updateSettings { it.copy(editorChoice = "auto") } },
+                    )
+                    detected?.forEach { (preset, _) ->
+                        EditorChoiceOptionRow(
+                            label = preset.displayName,
+                            active = choice == preset.id,
+                            onClick = { open = false; state.updateSettings { it.copy(editorChoice = preset.id) } },
+                        )
+                    }
+                    EditorChoiceOptionRow(
+                        label = "Custom command…",
+                        active = choice == "custom",
+                        onClick = { open = false; state.updateSettings { it.copy(editorChoice = "custom") } },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EditorChoiceOptionRow(label: String, active: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+        baseBg = if (active) tc.abg else Color.Transparent,
+        onClick = onClick,
+    ) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp)) {
+            AppText(
+                label,
+                color = if (active) tc.ac else tc.tx,
+                fontSize = 11.sp,
+                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+            )
+        }
+    }
+}
+
+// Below the dropdown: the custom-command field when "Custom command…" is chosen, or a read-only
+// hint showing what Automatic/a named app resolves to right now (per detectedEditors' latest scan).
+@Composable
+private fun EditorChoiceDetail(state: AppState) {
+    val tc = tc()
+    val choice = state.settings.editorChoice
+    val detected = state.detectedEditors
+    when (choice) {
+        "custom" -> InlineField(
+            state.settings.editorCommand,
+            { value -> state.updateSettings { it.copy(editorCommand = value) } },
+            "idea --line {line} {file}",
+            Modifier.fillMaxWidth(),
+            fontSize = 12.sp,
+        )
+        "", "auto" -> when {
+            detected == null -> AppText("Detecting installed editors…", color = tc.td, fontSize = 10.sp)
+            detected.isEmpty() -> AppText(
+                "No known editor detected on this machine — install one above, or pick Custom " +
+                    "command… to type your own.",
+                color = tc.td,
+                fontSize = 10.sp,
+                maxLines = 2,
+            )
+            else -> {
+                val (preset, template) = detected.first()
+                AppText(
+                    "Will use ${preset.displayName}: $template",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    fontFamily = MONO,
+                )
+            }
+        }
+        else -> when {
+            detected == null -> AppText("Detecting installed editors…", color = tc.td, fontSize = 10.sp)
+            else -> {
+                val resolved = detected.find { it.first.id == choice }
+                if (resolved != null) {
+                    AppText(resolved.second, color = tc.td, fontSize = 11.sp, fontFamily = MONO)
+                } else {
+                    val name = EDITOR_CATALOG.find { it.id == choice }?.displayName ?: "This app"
+                    AppText(
+                        "$name is no longer detected — pick another option above, or Custom command… " +
+                            "to type your own.",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        maxLines = 2,
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable

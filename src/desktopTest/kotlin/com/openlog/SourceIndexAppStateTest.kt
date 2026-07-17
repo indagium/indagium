@@ -6,6 +6,8 @@ import com.openlog.model.SourceLogConfiguration
 import com.openlog.model.SourceWrapperRule
 import com.openlog.source.SourceIndexStore
 import com.openlog.ui.AppState
+import com.openlog.ui.EditorPreset
+import com.openlog.ui.detectedTemplate
 import com.openlog.ui.editorCommandArguments
 import com.openlog.ui.mkTab
 import com.openlog.ui.resolveExecutable
@@ -630,7 +632,9 @@ class SourceIndexAppStateTest {
     fun invalidConfiguredEditorCommandDoesNotFallBackToOpeningWithoutALine() {
         val dir = createTempDirectory("openlog-editor-failure").toFile()
         val state = newState(dir)
-        state.updateSettings { it.copy(editorCommand = "not-an-editor --line {line} {file}") }
+        state.updateSettings {
+            it.copy(editorChoice = "custom", editorCommand = "not-an-editor --line {line} {file}")
+        }
 
         state.openInEditor(File(dir, "Source.kt").absolutePath, 37)
         waitUntil { state.openError != null }
@@ -659,6 +663,57 @@ class SourceIndexAppStateTest {
 
         assertNull(splitEditorCommand("no-such-editor --line {line} {file}", listOf(dir)))
     }
+
+    @Test
+    fun detectedTemplateReturnsFirstCandidateThatResolves() {
+        val dir = createTempDirectory("openlog-detected-template").toFile()
+        // Only the second candidate's executable actually exists in `dir`.
+        File(dir, "real-editor").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+        val preset = EditorPreset(
+            id = "fake",
+            displayName = "Fake Editor",
+            candidates = listOf(
+                "missing-editor --line {line} {file}",
+                "real-editor --line {line} {file}",
+            ),
+        )
+
+        assertEquals("real-editor --line {line} {file}", detectedTemplate(preset, listOf(dir)))
+    }
+
+    @Test
+    fun detectedTemplateReturnsNullWhenNoCandidateResolves() {
+        val dir = createTempDirectory("openlog-detected-template-missing").toFile()
+        val preset = EditorPreset(
+            id = "fake",
+            displayName = "Fake Editor",
+            candidates = listOf("missing-editor --line {line} {file}"),
+        )
+
+        assertNull(detectedTemplate(preset, listOf(dir)))
+    }
+
+    @Test
+    fun detectInstalledEditorsFiltersCatalogToOnlyResolvedPresets() {
+        val dir = createTempDirectory("openlog-detect-installed").toFile()
+        File(dir, "found-editor").apply { writeText("#!/bin/sh\n"); setExecutable(true) }
+        val installed = EditorPreset("found", "Found Editor", listOf("found-editor {file}:{line}"))
+        val missing = EditorPreset("missing", "Missing Editor", listOf("missing-editor {file}:{line}"))
+
+        val result = detectInstalledEditorsForTest(listOf(installed, missing), listOf(dir))
+
+        assertEquals(listOf(installed to "found-editor {file}:{line}"), result)
+    }
+
+    // detectInstalledEditors() itself always scans the real EDITOR_CATALOG, which would make this
+    // test depend on whichever editors happen to be installed on the machine running it. This
+    // mirrors its filtering logic exactly (mapNotNull over detectedTemplate) against a controlled
+    // catalog instead, so the test is deterministic regardless of the host machine's installed apps.
+    private fun detectInstalledEditorsForTest(
+        catalog: List<EditorPreset>,
+        dirs: List<File>,
+    ): List<Pair<EditorPreset, String>> =
+        catalog.mapNotNull { preset -> detectedTemplate(preset, dirs)?.let { preset to it } }
 }
 
 private fun String.legacyB64(): String =

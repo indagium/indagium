@@ -3558,6 +3558,7 @@ class AppStateBehaviorTest {
         openUnfilteredOnCtrlF = true,
         sourceFolders = listOf("/tmp/openlog-rt-src-a", "/tmp/openlog-rt-src-b"),
         editorCommand = "code -g {file}:{line}",
+        editorChoice = "custom",
         aiProviderProfiles = listOf(
             AiProviderProfile(
                 id = "anthropic-rt",
@@ -3633,6 +3634,59 @@ class AppStateBehaviorTest {
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
         assertEquals(expected, restored.settings)
+    }
+
+    // Migration default (AutosaveCodec.settingsFromJson): a JSON settings blob written before
+    // editorChoice existed had a typed editorCommand but no editorChoice key at all. That must read
+    // back as "custom" so the user's existing command keeps being used unchanged (shown as "Custom
+    // command…" in Settings) rather than silently switching them to auto-detect.
+    @Test
+    fun legacyJsonSettingsWithTypedEditorCommandMigratesToCustomEditorChoice() {
+        val dir = createTempDirectory("openlog-editor-choice-migrate-custom").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val legacyJson = """{"editorCommand":"idea --line {line} {file}"}"""
+        val encoded = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(legacyJson.toByteArray(Charsets.UTF_8))
+        cacheFile.writeText("openLog2-cache-v1\nsettings\t$encoded\n")
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals("custom", restored.settings.editorChoice)
+        assertEquals("idea --line {line} {file}", restored.settings.editorCommand)
+    }
+
+    // Same migration, the other branch: a legacy JSON blob with no editorCommand typed (blank, the
+    // pre-existing default) and no editorChoice key must read back as "auto" — the same behavior a
+    // blank Open command always had.
+    @Test
+    fun legacyJsonSettingsWithBlankEditorCommandMigratesToAutoEditorChoice() {
+        val dir = createTempDirectory("openlog-editor-choice-migrate-auto").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val legacyJson = """{"theme":"DRACULA"}"""
+        val encoded = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(legacyJson.toByteArray(Charsets.UTF_8))
+        cacheFile.writeText("openLog2-cache-v1\nsettings\t$encoded\n")
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals("auto", restored.settings.editorChoice)
+        assertEquals("", restored.settings.editorCommand)
+    }
+
+    // Once editorChoice is written explicitly (current format), it round-trips as-is rather than
+    // being recomputed from editorCommand — proves the migration default only kicks in when the key
+    // is absent, not whenever editorCommand happens to be non-blank.
+    @Test
+    fun editorChoiceSurvivesAutosaveRoundTrip() {
+        val dir = createTempDirectory("openlog-editor-choice-roundtrip").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.updateSettings { it.copy(editorChoice = "vscode", editorCommand = "should be ignored") }
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals("vscode", restored.settings.editorChoice)
     }
 
     @Test
