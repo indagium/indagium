@@ -430,6 +430,11 @@ data class AppSettings(
     // CORS is defense-in-depth on top of that: off by default, opt-in for the (uncommon) case of a
     // browser-based MCP inspector. Trailing with a default so old settings tokens still parse.
     val mcpAllowBrowserClients: Boolean = false,
+    // When enabled, LogViewer renders a left gutter with each row's original (parse-order) row
+    // number. The number is the entry's id, so it stays fixed when the view is filtered/folded and
+    // cross-references the full file. Off by default. Trailing with a default so old settings tokens
+    // (without this field) still parse.
+    val showRowNumbers: Boolean = false,
 )
 
 enum class ThemePreset(val label: String) {

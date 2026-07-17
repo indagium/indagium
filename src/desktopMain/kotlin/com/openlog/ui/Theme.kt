@@ -5,6 +5,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.openlog.model.ThemePreset
 
@@ -197,3 +198,14 @@ val CORNER_MD = RoundedCornerShape(4.dp)   // buttons (PillBtn, ToolbarBtn), not
 val INDENT_STEP   = 18.dp   // per-level nesting indent
 val ROW_START_PAD = 11.dp   // base horizontal start padding before indent
 val ROW_V_PAD     =  3.dp   // vertical (top/bottom) padding for all log rows
+val ROW_NUM_GAP = 8.dp   // gap between the optional row-number gutter and the row content (Settings → Row number)
+
+// Approximate monospace digit advance as a fraction of font size, used to size the optional
+// row-number gutter (LogRow) and its "#" header cell (ColHeader) to their digit count, so short
+// numbers hug the left edge instead of floating in a fixed-width cell. Shared by both so the header
+// cell and the row gutter below it use the same width formula. Slightly generous so the last digit
+// never clips under overflow=Clip.
+private const val MONO_DIGIT_EM = 0.65f
+
+fun rowNumberColumnWidth(fontSizeSp: Float, digitCount: Int): Dp =
+    (digitCount.coerceAtLeast(1) * fontSizeSp * MONO_DIGIT_EM).dp

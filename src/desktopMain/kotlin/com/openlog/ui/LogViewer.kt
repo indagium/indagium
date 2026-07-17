@@ -564,6 +564,7 @@ private const val MAX_WRAP_LIMIT_CHARS = 20_000
 private const val ROW_HORIZONTAL_CHROME_DP = 24f
 private const val MIN_CHAR_WIDTH_DP = 1f
 private const val CONTENT_WIDTH_PADDING_DP = 80f
+
 private const val MIN_LOG_CONTENT_WIDTH_DP = 2000
 
 fun effectiveLogWrapLimitChars(
@@ -982,6 +983,7 @@ fun LogViewer(
                                             regexContext = highlightRegexContext,
                                             highlightEntireCrashGroup = settings.highlightEntireCrashGroup,
                                             autoWrap = settings.autoLogRowWrap,
+                                            showRowNumbers = settings.showRowNumbers,
                                         )
                                         is LogItem.SeqHeader ->
                                             SeqHeaderRow(item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
@@ -1130,7 +1132,7 @@ fun LogViewer(
                 // Fixed height for Panel1 → cursor drag adds directly to splitDp → 1:1 tracking.
                 Column(Modifier.fillMaxWidth().height(effectiveSplitDp.dp)) {
                     SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
-                    ColHeader(hasPidTid)
+                    ColHeader(hasPidTid, showRowNumbers = settings.showRowNumbers, rowNumDigits = tab.logData.size.toString().length)
                     ItemList(
                         listItems = allItems,
                         listSummary = computedAllItems.summary,
@@ -1156,7 +1158,7 @@ fun LogViewer(
                 // Clicking a row here scrolls the Original panel to the same entry.
                 Column(Modifier.fillMaxWidth().weight(1f)) {
                     SectionBanner("Filtered — $visCnt lines", tc.ac, tc)
-                    ColHeader(hasPidTid)
+                    ColHeader(hasPidTid, showRowNumbers = settings.showRowNumbers, rowNumDigits = tab.logData.size.toString().length)
                     ItemList(
                         listItems = items,
                         listSummary = computedItems.summary,
@@ -1197,7 +1199,7 @@ fun LogViewer(
                 }
                 onConsumeAnnotationNavigation(request.id)
             }
-            ColHeader(hasPidTid)
+            ColHeader(hasPidTid, showRowNumbers = settings.showRowNumbers, rowNumDigits = tab.logData.size.toString().length)
             ItemList(
                 items, computedItems.summary, rowBoundsAbs, boxPosY,
                 panelKey = "${tab.id}:main", listState = mainLazyState,
@@ -1431,6 +1433,7 @@ private fun LogRow(
     // wherever the estimate was even slightly off, the manually-inserted break landed before the
     // real available width was used up, so the line wrapped one row earlier than necessary.
     autoWrap: Boolean = false,
+    showRowNumbers: Boolean = false,
 ) {
     val density  = LocalDensity.current.density
     val entry    = item.entry
@@ -1557,6 +1560,24 @@ private fun LogRow(
             .padding(start = ROW_START_PAD + INDENT_STEP * item.indent, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Optional left gutter showing the row's original (parse-order) row number — entry.id,
+        // which is stable under filtering/folding so it always points at the same spot in the full
+        // file. Right-aligned in a fixed-width cell so numbers form a clean column; group/fold
+        // headers deliberately omit it and span the gutter (like an IDE's fold-region header).
+        if (showRowNumbers) {
+            // Size the number column to the widest row number in this tab (see ColHeader's "#" cell
+            // for the matching header-side width), so a small-/mid-size log gets a tight gutter that
+            // hugs the left edge instead of a fixed-width cell the number floats inside.
+            val numColWidth = rowNumberColumnWidth(fontSize.value, tab.logData.size.toString().length)
+            Box(Modifier.width(numColWidth + ROW_NUM_GAP).padding(end = ROW_NUM_GAP)) {
+                AppText(
+                    entry.id.toString(),
+                    color = tc.td, fontSize = fontSize, fontFamily = mono, maxLines = 1,
+                    overflow = TextOverflow.Clip,
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                )
+            }
+        }
         // Only merged tabs (utils/LogMerge.kt) ever set sourceTag — a small pinned (non-scrolling)
         // badge naming which original file a row came from, since a merged tab otherwise gives no
         // visual way to tell which buffer (main/system/crash/...) a given line was in.

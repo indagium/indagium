@@ -168,6 +168,19 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                     )
                 }
             }
+            // Sits just above the existing footer divider (bottom-up: Done → footer divider →
+            // Show shortcuts). The caption is stacked directly on top of the button, right-aligned.
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                Column(horizontalAlignment = Alignment.Start, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    AppText("Keyboard shortcuts", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                    // Deliberately doesn't close Settings first — stacks on top instead, so closing
+                    // this popup returns you to Settings rather than to the main window.
+                    AppButton("Show shortcuts…", onClick = { state.shortcutsOpen = true }, variant = ButtonVariant.Secondary)
+                }
+            }
             Divider()
             Row(
                 Modifier.fillMaxWidth().padding(16.dp),
@@ -595,15 +608,16 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             onToggle = { idx -> state.updateSettings { it.copy(openUnfilteredOnCtrlF = idx == 0) } },
         )
     }
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
+    CompactSettingWithTooltip(
+        label = "Row number",
+        tooltip = "Shows a left gutter with each row's original row number. The number stays fixed when " +
+            "you filter or fold rows, so it always points back to the same spot in the full log.",
     ) {
-        AppText("Keyboard shortcuts", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-        // Deliberately doesn't close Settings first — stacks on top instead, so closing
-        // this popup returns you to Settings rather than to the main window.
-        AppButton("Show shortcuts…", onClick = { state.shortcutsOpen = true }, variant = ButtonVariant.Secondary)
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.showRowNumbers) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(showRowNumbers = idx == 0) } },
+        )
     }
 }
 

@@ -563,6 +563,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("aiProviderProfiles", aiProviderProfilesJson(normalizeAiProviderProfiles(aiProviderProfiles)))
     put("copyMaskRules", copyMaskRulesJson(copyMaskRules))
     put("mcpAllowBrowserClients", mcpAllowBrowserClients)
+    put("showRowNumbers", showRowNumbers)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -757,6 +758,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         sourceAutoDiscoveryEnabled = o.boolOrDefault("sourceAutoDiscoveryEnabled", true),
         copyMaskRules = o.copyMaskRulesFromJson("copyMaskRules"),
         mcpAllowBrowserClients = o.boolOrDefault("mcpAllowBrowserClients", false),
+        showRowNumbers = o.boolOrDefault("showRowNumbers", false),
     )
 }.getOrNull()
 

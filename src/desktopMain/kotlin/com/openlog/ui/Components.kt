@@ -252,8 +252,12 @@ fun LevelBadge(level: LogLevel) {
     ) { AppText(level.key.toString(), color = color, fontSize = 10.sp, fontFamily = MONO, fontWeight = FontWeight.SemiBold) }
 }
 
+// Header font size for ColHeader's column labels — kept in sync with the "#" cell's own width
+// formula (rowNumberColumnWidth) so it lines up reasonably with the row gutter below it.
+private const val COL_HEADER_FONT_SP = 9f
+
 @Composable
-fun ColHeader(hasPidTid: Boolean = false) {
+fun ColHeader(hasPidTid: Boolean = false, showRowNumbers: Boolean = false, rowNumDigits: Int = 1) {
     val tc = tc()
     Row(
         Modifier.fillMaxWidth().background(tc.p2).border(BorderStroke(1.dp, tc.br))
@@ -261,6 +265,15 @@ fun ColHeader(hasPidTid: Boolean = false) {
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (showRowNumbers) {
+            val numColWidth = rowNumberColumnWidth(COL_HEADER_FONT_SP, rowNumDigits)
+            Box(Modifier.width(numColWidth)) {
+                AppText(
+                    "#", color = tc.td, fontSize = COL_HEADER_FONT_SP.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                )
+            }
+        }
         AppText("TIMESTAMP", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(90.dp))
         if (hasPidTid) {
             AppText("PID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(40.dp))
