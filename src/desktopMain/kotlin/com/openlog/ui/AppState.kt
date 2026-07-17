@@ -444,7 +444,11 @@ data class ImportFilterReviewRow(
     val skippedReason: String? = null,
 )
 
-data class PendingImportReview(val rows: List<ImportFilterReviewRow>, val sourceName: String? = null)
+data class PendingImportReview(
+    val rows: List<ImportFilterReviewRow>,
+    val stagedFolders: List<SavedFilterFolder> = emptyList(),
+    val sourceName: String? = null,
+)
 
 data class OpenFileError(val title: String, val path: String?, val message: String)
 
@@ -929,7 +933,6 @@ class AppState(
     var filterRenameName by mutableStateOf("")
     var filterRenameError by mutableStateOf<String?>(null)
     var pendingImportReview by mutableStateOf<PendingImportReview?>(null)
-    private var pendingImportedFilterFolders: List<SavedFilterFolder> = emptyList()
     var importError by mutableStateOf<String?>(null)
     var filterExportDialogOpen by mutableStateOf(false)
     var filterExportSelectedIds by mutableStateOf<Set<String>>(emptySet())
@@ -1927,24 +1930,26 @@ class AppState(
             return
         }
         val prepared = prepareImportedLibrary(library)
-        pendingImportedFilterFolders = prepared.folders
-        beginImportFilterList(prepared.filters, sourceName)
+        beginImportFilterList(prepared.filters, prepared.folders, sourceName)
     }
 
-    private fun beginImportFilterList(imported: List<SavedFilter>, sourceName: String? = null) {
+    private fun beginImportFilterList(
+        imported: List<SavedFilter>,
+        stagedFolders: List<SavedFilterFolder> = emptyList(),
+        sourceName: String? = null,
+    ) {
         if (imported.isEmpty()) {
             importError = "No saved filters found."
             pendingImportReview = null
             return
         }
         val rows = buildImportRows(savedFilters, imported)
-        pendingImportReview = PendingImportReview(rows, sourceName)
+        pendingImportReview = PendingImportReview(rows, stagedFolders, sourceName)
         importError = null
     }
 
     fun cancelImportFilters() {
         pendingImportReview = null
-        pendingImportedFilterFolders = emptyList()
     }
 
     fun setImportFilterAction(rowId: String, action: ImportFilterAction) {
@@ -1961,15 +1966,29 @@ class AppState(
         })
     }
 
+    /** Bulk-checks/unchecks rows: checking restores each row's natural default action (ADD for a
+     * brand-new filter, RENAME for a name conflict); unchecking sets SKIP. Backs both the per-row
+     * and per-folder/dialog-level "select all" checkboxes in the import review dialog. */
+    fun setImportRowsChecked(rowIds: Set<String>, checked: Boolean) {
+        val review = pendingImportReview ?: return
+        pendingImportReview = review.copy(rows = review.rows.map { row ->
+            if (row.rowId !in rowIds) row
+            else if (checked) row.withImportAction(savedFilters, if (row.targetId == null) ImportFilterAction.ADD else ImportFilterAction.RENAME)
+            else row.withImportAction(savedFilters, ImportFilterAction.SKIP)
+        })
+    }
+
     fun confirmImportFilters() {
         val review = pendingImportReview ?: return
         var next = savedFilters
         var changed = false
+        val survivingFolderIds = mutableSetOf<String>()
         review.rows.forEach { row ->
             when (row.action) {
                 ImportFilterAction.ADD, ImportFilterAction.RENAME -> {
                     next = next + row.incoming.copy(id = freshSavedFilterId(savedFilters), name = uniqueNameAgainst(row.resolvedName, next))
                     changed = true
+                    row.incoming.folderId?.let(survivingFolderIds::add)
                 }
 
                 ImportFilterAction.REPLACE -> {
@@ -1978,17 +1997,18 @@ class AppState(
                         if (existing.id == targetId) row.incoming.copy(id = existing.id, name = existing.name) else existing
                     }
                     changed = true
+                    row.incoming.folderId?.let(survivingFolderIds::add)
                 }
 
                 ImportFilterAction.SKIP -> Unit
             }
         }
         savedFilters = next
-        if (changed && pendingImportedFilterFolders.isNotEmpty()) {
-            savedFilterFolders = savedFilterFolders + pendingImportedFilterFolders
+        val foldersToAdd = review.stagedFolders.filter { it.id in survivingFolderIds }
+        if (foldersToAdd.isNotEmpty()) {
+            savedFilterFolders = savedFilterFolders + foldersToAdd
         }
         pendingImportReview = null
-        pendingImportedFilterFolders = emptyList()
         if (changed) writeFilterBackup()
     }
 
@@ -3663,7 +3683,7 @@ class AppState(
         ioScope.launch {
             val decoded = files.mapNotNull { file -> runCatching { decodeFilters(file.readText()).getOrNull() }.getOrNull() }
             val imported = decoded.flatten()
-            beginImportFilterList(imported, files.joinToString(", ") { it.name })
+            beginImportFilterList(imported, sourceName = files.joinToString(", ") { it.name })
         }
     }
 

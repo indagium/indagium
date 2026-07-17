@@ -20,6 +20,8 @@ import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1163,64 +1165,131 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             fontSize = 11.sp,
                             maxLines = 2,
                         )
-                        Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(8.dp))
+                        val folderNameFor: (String?) -> String = { folderId ->
+                            folderId?.let { id ->
+                                state.savedFilterFolders.firstOrNull { it.id == id }?.name
+                                    ?: review.stagedFolders.firstOrNull { it.id == id }?.name
+                            } ?: "Ungrouped"
+                        }
+                        val toggleableIds: (List<ImportFilterReviewRow>) -> Set<String> = { rows ->
+                            rows.filter { it.skippedReason == null }.map { it.rowId }.toSet()
+                        }
+                        val grouped = review.rows.groupBy { folderNameFor(it.incoming.folderId) }.toList()
+                            .sortedWith(compareBy { (name, _) -> name == "Ungrouped" })
+                        val allToggleableIds = toggleableIds(review.rows)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            AppText(
+                                "Select all",
+                                color = tc2.ac,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.clickable { state.setImportRowsChecked(allToggleableIds, true) },
+                            )
+                            AppText(
+                                "Select none",
+                                color = tc2.ac,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.clickable { state.setImportRowsChecked(allToggleableIds, false) },
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
                         Column(
                             Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            review.rows.forEach { row ->
-                                Column(
-                                    Modifier.fillMaxWidth().background(tc2.bg, CORNER_MD)
-                                        .border(1.dp, tc2.br, CORNER_MD).padding(10.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                                ) {
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                        AppText(
-                                            row.incoming.name,
-                                            color = tc2.tx,
-                                            fontSize = 11.sp,
-                                            modifier = Modifier.weight(1f),
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        AppText(
-                                            when (row.action) {
-                                                ImportFilterAction.ADD -> "add"
-                                                ImportFilterAction.RENAME -> "rename"
-                                                ImportFilterAction.REPLACE -> "replace"
-                                                ImportFilterAction.SKIP -> "skip"
-                                            },
-                                            color = if (row.action == ImportFilterAction.SKIP) tc2.td else tc2.ac,
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                        )
+                            grouped.forEach { (folderName, rowsInFolder) ->
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    val groupToggleableIds = toggleableIds(rowsInFolder)
+                                    val allChecked = groupToggleableIds.isNotEmpty() &&
+                                        rowsInFolder.filter { it.rowId in groupToggleableIds }.all { it.action != ImportFilterAction.SKIP }
+                                    Row(
+                                        Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        if (groupToggleableIds.isNotEmpty()) {
+                                            Checkbox(
+                                                checked = allChecked,
+                                                onCheckedChange = { state.setImportRowsChecked(groupToggleableIds, it) },
+                                                colors = CheckboxDefaults.colors(checkedColor = tc2.ac, uncheckedColor = tc2.td, checkmarkColor = tc2.bg),
+                                                modifier = Modifier.size(16.dp),
+                                            )
+                                        }
+                                        AppText(folderName, color = tc2.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                                     }
-                                    if (row.action == ImportFilterAction.RENAME) {
-                                        InlineField(
-                                            row.resolvedName,
-                                            { state.setImportFilterRename(row.rowId, it) },
-                                            "Imported name…",
-                                            Modifier.fillMaxWidth(),
-                                            fontSize = 12.sp,
-                                        )
-                                    } else {
-                                        AppText(
-                                            row.skippedReason?.let { "Skipped: $it" } ?: "Will import as \"${row.resolvedName}\".",
-                                            color = tc2.td,
-                                            fontSize = 10.sp,
-                                            maxLines = 2,
-                                        )
-                                    }
-                                    if (row.targetId != null && row.skippedReason == null) {
-                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            AppButton("Rename", onClick = {
-                                                state.setImportFilterAction(row.rowId, ImportFilterAction.RENAME)
-                                            }, variant = if (row.action == ImportFilterAction.RENAME) ButtonVariant.Primary else ButtonVariant.Secondary)
-                                            AppButton("Replace", onClick = {
-                                                state.setImportFilterAction(row.rowId, ImportFilterAction.REPLACE)
-                                            }, variant = if (row.action == ImportFilterAction.REPLACE) ButtonVariant.Primary else ButtonVariant.Secondary)
-                                            AppButton("Skip", onClick = {
-                                                state.setImportFilterAction(row.rowId, ImportFilterAction.SKIP)
-                                            }, variant = if (row.action == ImportFilterAction.SKIP) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                    rowsInFolder.forEach { row ->
+                                        Column(
+                                            Modifier.fillMaxWidth().background(tc2.bg, CORNER_MD)
+                                                .border(1.dp, tc2.br, CORNER_MD).padding(10.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            Row(
+                                                Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            ) {
+                                                if (row.skippedReason == null) {
+                                                    Checkbox(
+                                                        checked = row.action != ImportFilterAction.SKIP,
+                                                        onCheckedChange = { state.setImportRowsChecked(setOf(row.rowId), it) },
+                                                        colors = CheckboxDefaults.colors(checkedColor = tc2.ac, uncheckedColor = tc2.td, checkmarkColor = tc2.bg),
+                                                        modifier = Modifier.size(16.dp),
+                                                    )
+                                                }
+                                                AppText(
+                                                    row.incoming.name,
+                                                    color = tc2.tx,
+                                                    fontSize = 11.sp,
+                                                    modifier = Modifier.weight(1f),
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                                AppText(
+                                                    when (row.action) {
+                                                        ImportFilterAction.ADD -> "add"
+                                                        ImportFilterAction.RENAME -> "rename"
+                                                        ImportFilterAction.REPLACE -> "replace"
+                                                        ImportFilterAction.SKIP -> "skip"
+                                                    },
+                                                    color = if (row.action == ImportFilterAction.SKIP) tc2.td else tc2.ac,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                )
+                                            }
+                                            if (row.action == ImportFilterAction.RENAME) {
+                                                InlineField(
+                                                    row.resolvedName,
+                                                    { state.setImportFilterRename(row.rowId, it) },
+                                                    "Imported name…",
+                                                    Modifier.fillMaxWidth(),
+                                                    fontSize = 12.sp,
+                                                )
+                                            } else {
+                                                AppText(
+                                                    if (row.action == ImportFilterAction.SKIP) {
+                                                        row.skippedReason?.let { "Skipped: $it" } ?: "Skipped."
+                                                    } else {
+                                                        "Will import as \"${row.resolvedName}\"."
+                                                    },
+                                                    color = tc2.td,
+                                                    fontSize = 10.sp,
+                                                    maxLines = 2,
+                                                )
+                                            }
+                                            if (row.targetId != null && row.skippedReason == null) {
+                                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                    AppButton("Rename", onClick = {
+                                                        state.setImportFilterAction(row.rowId, ImportFilterAction.RENAME)
+                                                    }, variant = if (row.action == ImportFilterAction.RENAME) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                                    AppButton("Replace", onClick = {
+                                                        state.setImportFilterAction(row.rowId, ImportFilterAction.REPLACE)
+                                                    }, variant = if (row.action == ImportFilterAction.REPLACE) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                                    AppButton("Skip", onClick = {
+                                                        state.setImportFilterAction(row.rowId, ImportFilterAction.SKIP)
+                                                    }, variant = if (row.action == ImportFilterAction.SKIP) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                                }
+                                            }
                                         }
                                     }
                                 }

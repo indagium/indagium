@@ -1250,6 +1250,100 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun uncheckingNewFilterExcludesItFromImport() {
+        val target = AppState()
+        val source = AppState().apply {
+            addTab()
+            saveFilter(tabs.single().id, "brand new")
+        }
+        target.beginImportFilters(source.exportFilters())
+        val rowId = target.pendingImportReview!!.rows.single().rowId
+
+        target.setImportRowsChecked(setOf(rowId), false)
+        assertEquals(ImportFilterAction.SKIP, target.pendingImportReview!!.rows.single().action)
+
+        target.confirmImportFilters()
+        assertTrue(target.savedFilters.isEmpty())
+    }
+
+    @Test
+    fun recheckingSkippedNewFilterRestoresAddAction() {
+        val target = AppState()
+        val source = AppState().apply {
+            addTab()
+            saveFilter(tabs.single().id, "brand new")
+        }
+        target.beginImportFilters(source.exportFilters())
+        val rowId = target.pendingImportReview!!.rows.single().rowId
+
+        target.setImportRowsChecked(setOf(rowId), false)
+        target.setImportRowsChecked(setOf(rowId), true)
+        assertEquals(ImportFilterAction.ADD, target.pendingImportReview!!.rows.single().action)
+
+        target.confirmImportFilters()
+        assertEquals(listOf("brand new"), target.savedFilters.map { it.name })
+    }
+
+    @Test
+    fun folderNotAddedWhenAllItsFiltersAreSkipped() {
+        val target = AppState()
+        val source = AppState().apply {
+            addTab()
+            createSavedFilterFolder("Release")
+            saveFilter(tabs.single().id, "production", savedFilterFolders.single().id)
+        }
+        target.beginImportFilters(source.exportFilters())
+        assertEquals(listOf("Release"), target.pendingImportReview!!.stagedFolders.map { it.name })
+        val rowId = target.pendingImportReview!!.rows.single().rowId
+
+        target.setImportRowsChecked(setOf(rowId), false)
+        target.confirmImportFilters()
+
+        assertTrue(target.savedFilterFolders.isEmpty())
+        assertTrue(target.savedFilters.isEmpty())
+    }
+
+    @Test
+    fun folderAddedWhenAtLeastOneOfItsFiltersSurvives() {
+        val target = AppState()
+        val source = AppState().apply {
+            addTab()
+            createSavedFilterFolder("Release")
+            val folderId = savedFilterFolders.single().id
+            saveFilter(tabs.single().id, "production", folderId)
+            saveFilter(tabs.single().id, "staging", folderId)
+        }
+        target.beginImportFilters(source.exportFilters())
+        target.confirmImportFilters()
+
+        assertEquals(listOf("Release"), target.savedFilterFolders.map { it.name })
+        val folderId = target.savedFilterFolders.single().id
+        assertEquals(setOf("production", "staging"), target.savedFilters.map { it.name }.toSet())
+        assertTrue(target.savedFilters.all { it.folderId == folderId })
+    }
+
+    @Test
+    fun selectAllAndSelectNoneToggleAllToggleableRows() {
+        val target = AppState()
+        val source = AppState().apply {
+            addTab()
+            saveFilter(tabs.single().id, "one")
+            saveFilter(tabs.single().id, "two")
+        }
+        target.beginImportFilters(source.exportFilters())
+        val ids = target.pendingImportReview!!.rows.map { it.rowId }.toSet()
+
+        target.setImportRowsChecked(ids, false)
+        assertTrue(target.pendingImportReview!!.rows.all { it.action == ImportFilterAction.SKIP })
+
+        target.setImportRowsChecked(ids, true)
+        assertTrue(target.pendingImportReview!!.rows.all { it.action == ImportFilterAction.ADD })
+
+        target.confirmImportFilters()
+        assertEquals(setOf("one", "two"), target.savedFilters.map { it.name }.toSet())
+    }
+
+    @Test
     fun filterBackupsDefaultOnAndKeepLatestTwenty() {
         val dir = createTempDirectory("openlog-filter-backups").toFile()
         val state = AppState(File(dir, "state.cache"), filterBackupsDir = File(dir, "filter-backups"))
