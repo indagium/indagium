@@ -2242,6 +2242,12 @@ class AppState(
         return true
     }
 
+    // Public entry for the MCP/AI control surface: fold an arbitrary inclusive line-id range into
+    // one manual block, regardless of argument order. Mirrors collapseSelectedLinesFromCtx but
+    // takes explicit ids instead of relying on the right-click ctx / current selection.
+    fun collapseRange(tabId: String, startId: Int, endId: Int): Boolean =
+        addManualCollapse(tabId, minOf(startId, endId), ManualCollapseDirection.RANGE, endId = maxOf(startId, endId))
+
     // Collapses an arbitrary multi-line selection into one block — unlike collapseTo{Start,End}Ctx
     // (anchored to a file edge), this covers exactly [min(ids), max(ids)] regardless of which of
     // the selected rows was right-clicked.

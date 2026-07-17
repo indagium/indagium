@@ -827,6 +827,66 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
             "starting a code-level investigation.",
         schema(),
     ),
+    McpTool(
+        "set_highlighters",
+        "Replace a tab's highlighter list — the patterns whose matches are color-marked in the log " +
+            "view. Highlighters do NOT hide or fold rows; they only tint matching text, so they are " +
+            "safe to add freely while investigating. A supplied highlighters list replaces the " +
+            "current one wholesale; clearHighlighters removes all of them. Each highlighters item is " +
+            "an object: { pattern (required), regex (default false), color (optional hex like " +
+            "\"#FF8800\" — omit to auto-assign from the palette), enabled (default true) }.",
+        schema(
+            "tabId" to "string", "highlighters" to "array", "clearHighlighters" to "boolean",
+            required = listOf("tabId"),
+            descriptions = mapOf(
+                "highlighters" to "Highlighters to set (replaces the current list). Each item is an " +
+                    "object: pattern (string, required), regex (boolean, default false), color " +
+                    "(string, optional hex e.g. \"#FF8800\" or \"#AAFF8800\"), enabled (boolean, default true).",
+                "clearHighlighters" to "If true, remove every highlighter from the tab.",
+            ),
+        ),
+    ),
+    McpTool(
+        "reindex_sources",
+        "Rebuild the source-code index that resolve_log_source and get_project_info depend on. Pass " +
+            "a single folder path to reindex just that registered source folder, or omit folder to " +
+            "reindex every registered source folder. Indexing runs in the background and returns " +
+            "immediately with the folders it started — poll resolve_log_source / get_project_info and " +
+            "retry until the index is ready.",
+        schema(
+            "folder" to "string",
+            descriptions = mapOf(
+                "folder" to "Absolute path of a registered source folder to reindex; omit to reindex all of them.",
+            ),
+        ),
+    ),
+    McpTool(
+        "add_manual_collapse",
+        "Fold an arbitrary inclusive range of log lines [startLineId..endLineId] into a single " +
+            "collapsible manual block — the same as selecting those rows and choosing “Collapse” in " +
+            "the UI. Line ids are the entry ids reported by get_visible_lines / get_line_context; " +
+            "argument order doesn't matter. Returns { ok: false } when the range can't be collapsed " +
+            "(e.g. ids not present in the tab, or it overlaps an existing block).",
+        schema(
+            "tabId" to "string", "startLineId" to "integer", "endLineId" to "integer",
+            required = listOf("tabId", "startLineId", "endLineId"),
+            descriptions = mapOf(
+                "startLineId" to "First line id of the range to fold (order relative to endLineId doesn't matter).",
+                "endLineId" to "Last line id of the range to fold.",
+            ),
+        ),
+    ),
+    McpTool(
+        "save_filter_preset",
+        "Save a tab's current filter as a named, reusable preset (it then appears in " +
+            "list_filter_presets and can be re-applied with apply_filter_preset). Returns an error if " +
+            "a preset with the same name already exists — pick a different name. There is no " +
+            "overwrite or delete over this API; manage or remove existing presets in the UI.",
+        schema(
+            "tabId" to "string", "name" to "string", required = listOf("tabId", "name"),
+            descriptions = mapOf("name" to "Unique preset name; must not match an existing preset (case-insensitive)."),
+        ),
+    ),
 )
 
 // REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl
@@ -867,4 +927,8 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/tail/start", "start_tailing"),
     Triple(HttpMethod.Post, "/tail/stop", "stop_tailing"),
     Triple(HttpMethod.Post, "/resolve_log_source", "resolve_log_source"),
+    Triple(HttpMethod.Post, "/highlighters", "set_highlighters"),
+    Triple(HttpMethod.Post, "/reindex-sources", "reindex_sources"),
+    Triple(HttpMethod.Post, "/manual-collapse", "add_manual_collapse"),
+    Triple(HttpMethod.Post, "/filter/save-preset", "save_filter_preset"),
 )

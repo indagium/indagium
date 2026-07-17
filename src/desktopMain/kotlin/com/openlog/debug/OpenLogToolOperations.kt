@@ -1,8 +1,10 @@
 package com.openlog.debug
 
+import androidx.compose.ui.graphics.Color
 import com.openlog.model.CrashSite
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
+import com.openlog.model.Highlighter
 import com.openlog.model.LogEntry
 import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
@@ -12,6 +14,7 @@ import com.openlog.model.SavedFilter
 import com.openlog.model.SequenceDef
 import com.openlog.source.SourceMatch
 import com.openlog.ui.AppState
+import com.openlog.ui.HL_COLORS
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitSource
 import com.openlog.utils.ZipLogCandidate
@@ -21,6 +24,15 @@ import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.newId
 import java.io.File
+import kotlin.math.roundToInt
+
+// Hex-color parsing constants for set_highlighters (parseHexColor / colorToHex).
+private const val OPAQUE_ALPHA_MASK = 0xFF000000L
+private const val COLOR_CHANNEL_MAX = 255
+private const val COLOR_CHANNEL_MAX_F = 255f
+private const val HEX_RGB_LEN = 6
+private const val HEX_ARGB_LEN = 8
+private const val HEX_RADIX = 16
 
 /**
  * Transport-neutral AppState operations behind the openLog MCP catalog.
@@ -102,6 +114,12 @@ internal class OpenLogToolOperations(
         "stop_tailing" to { a -> stopTailingRoute(a.str("tabId") ?: "") },
         "resolve_log_source" to { a -> resolveLogSourceRoute(a) },
         "get_project_info" to { getProjectInfoRoute() },
+        "set_highlighters" to { a -> setHighlightersRoute(a.str("tabId") ?: "", a) },
+        "reindex_sources" to { a -> reindexSourcesRoute(a.str("folder")) },
+        "add_manual_collapse" to { a ->
+            addManualCollapseRoute(a.str("tabId") ?: "", a.anyInt("startLineId"), a.anyInt("endLineId"))
+        },
+        "save_filter_preset" to { a -> saveFilterPresetRoute(a.str("tabId") ?: "", a.str("name") ?: "") },
     )
 
     // Direct in-process entry point shared by MCP/REST and the future AI runner.
@@ -333,6 +351,105 @@ internal class OpenLogToolOperations(
         }
         return mapOf("folders" to folders)
     }
+
+    // ── New tool routes: highlighters / reindex / manual collapse / save preset ──
+
+    // Replace a tab's highlighters wholesale (mirrors set_filter's replace-semantics for sequences).
+    // Highlighters only tint matching text — they never hide/fold rows — so this is a view-only
+    // mutation, classified AUTOMATIC alongside set_filter rather than confirmation-gated.
+    private fun setHighlightersRoute(tabId: String, body: Map<String, Any?>): Map<String, Any?> {
+        if (tabId.isBlank()) return mapOf("error" to "missing tabId")
+        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        val newList: List<Highlighter> = when {
+            body.bool("clearHighlighters") == true -> emptyList()
+            body.containsKey("highlighters") ->
+                parseHighlighters(body.mapList("highlighters") ?: emptyList())
+                    .getOrElse { return mapOf("error" to (it.message ?: "invalid highlighters")) }
+            else -> return mapOf("error" to "provide highlighters (a list) or clearHighlighters:true")
+        }
+        appState.upFlt(tabId) { f -> f.copy(highlighters = newList) }
+        return mapOf(
+            "ok" to true,
+            "highlighters" to (appState.tab(tabId)?.filter?.highlighters ?: newList).map { highlighterToMap(it) },
+        )
+    }
+
+    // Parse client-supplied highlighters. Colors are optional as hex ("#RRGGBB"/"#AARRGGBB"); a
+    // missing color is assigned round-robin from HL_COLORS (the same palette the UI's add form
+    // cycles), so a client never has to know the palette to get visually distinct highlighters.
+    private fun parseHighlighters(raw: List<Map<String, Any?>>): Result<List<Highlighter>> = runCatching {
+        raw.mapIndexed { idx, m ->
+            val pattern = m.str("pattern")?.takeIf { it.isNotBlank() }
+                ?: error("highlighters[$idx]: missing or blank 'pattern'")
+            val color = m.str("color")?.takeIf { it.isNotBlank() }?.let {
+                parseHexColor(it) ?: error("highlighters[$idx]: invalid hex color '$it' (expected #RRGGBB or #AARRGGBB)")
+            } ?: HL_COLORS[idx % HL_COLORS.size]
+            Highlighter(
+                id = m.str("id")?.takeIf { it.isNotBlank() } ?: "${newId("hl")}_$idx",
+                pattern = pattern,
+                regex = m.bool("regex") ?: false,
+                color = color,
+                on = m.bool("enabled") ?: true,
+            )
+        }
+    }
+
+    private fun highlighterToMap(h: Highlighter): Map<String, Any?> = mapOf(
+        "id" to h.id, "pattern" to h.pattern, "regex" to h.regex,
+        "color" to colorToHex(h.color), "enabled" to h.on,
+    )
+
+    // Kick off a (background) source-index rebuild. Non-destructive but I/O-heavy, so it is
+    // classified CONFIRMATION_REQUIRED. reindexSources is async — this returns the folders it
+    // started, and the caller polls resolve_log_source / get_project_info until the index lands.
+    private fun reindexSourcesRoute(folder: String?): Map<String, Any?> {
+        val folders = if (!folder.isNullOrBlank()) listOf(folder) else appState.settings.sourceFolders.toList()
+        if (folders.isEmpty()) {
+            return mapOf("error" to "no source folders configured — add one in Settings → Source code")
+        }
+        folders.forEach { appState.reindexSources(it) }
+        return mapOf("started" to true, "folders" to folders)
+    }
+
+    private fun addManualCollapseRoute(tabId: String, startLineId: Int?, endLineId: Int?): Map<String, Any?> {
+        if (tabId.isBlank()) return mapOf("error" to "missing tabId")
+        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        if (startLineId == null || endLineId == null) return mapOf("error" to "provide startLineId and endLineId")
+        return mapOf("ok" to appState.collapseRange(tabId, startLineId, endLineId))
+    }
+
+    private fun saveFilterPresetRoute(tabId: String, name: String): Map<String, Any?> {
+        if (tabId.isBlank()) return mapOf("error" to "missing tabId")
+        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        val clean = name.trim()
+        if (clean.isBlank()) return mapOf("error" to "missing or blank name")
+        // Pre-check duplicates and error out rather than invoking saveFilter's interactive
+        // duplicate-name dialog path (which would pop a UI dialog and persist nothing here).
+        if (appState.savedFilters.any { it.name.trim().equals(clean, ignoreCase = true) }) {
+            return mapOf("error" to "preset name already exists: $clean")
+        }
+        appState.saveFilter(tabId, clean)
+        val saved = appState.savedFilters.find { it.name.trim().equals(clean, ignoreCase = true) }
+            ?: return mapOf("error" to "preset was not saved")
+        return mapOf("ok" to true, "preset" to filterPresetToMap(saved))
+    }
+
+    // Hex "#RRGGBB" / "#AARRGGBB" (leading # optional) → Compose Color; null when malformed.
+    private fun parseHexColor(hex: String): Color? {
+        val h = hex.removePrefix("#")
+        val argb = when (h.length) {
+            HEX_RGB_LEN -> OPAQUE_ALPHA_MASK or (h.toLongOrNull(HEX_RADIX) ?: return null)
+            HEX_ARGB_LEN -> h.toLongOrNull(HEX_RADIX) ?: return null
+            else -> return null
+        }
+        return Color(argb.toInt())
+    }
+
+    private fun colorToHex(c: Color): String = "#%02X%02X%02X%02X".format(
+        c.alpha.toColorChannel(), c.red.toColorChannel(), c.green.toColorChannel(), c.blue.toColorChannel(),
+    )
+
+    private fun Float.toColorChannel(): Int = (this * COLOR_CHANNEL_MAX_F).roundToInt().coerceIn(0, COLOR_CHANNEL_MAX)
 
     private fun closeTab(tabId: String): Map<String, Any?> {
         if (tabId.isBlank()) return mapOf("error" to "missing tabId")

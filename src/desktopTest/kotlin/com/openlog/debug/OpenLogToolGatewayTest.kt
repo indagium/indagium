@@ -44,7 +44,7 @@ class OpenLogToolGatewayTest {
             "add_text_note", "add_log_note", "update_note_block", "move_note_block",
             "delete_note_block", "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing", "resolve_log_source",
-            "get_project_info",
+            "get_project_info", "set_highlighters", "reindex_sources", "add_manual_collapse", "save_filter_preset",
         )
         assertEquals(expected, operations.toolGateway.tools.map { it.name }.toSet())
         assertEquals(expected.size, operations.toolGateway.tools.size)
