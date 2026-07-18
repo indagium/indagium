@@ -19,6 +19,7 @@ import kotlin.concurrent.withLock
  */
 internal object AppLogger {
     private const val LOG_TAG = "openLog"
+    private const val MAX_MESSAGE_CHARS = 2_000
     private val lock = ReentrantLock()
     private val timestampFormat = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss.SSS", Locale.ROOT)
     private var writer: Writer? = null
@@ -111,7 +112,7 @@ internal object AppLogger {
         .replace(Regex("(?<![A-Za-z0-9])/(?:[^\\s,;]+)"), "[PATH]")
         .replace(Regex("\\s+"), " ")
         .trim()
-        .take(2_000)
+        .take(MAX_MESSAGE_CHARS)
         .ifBlank { "(no detail)" }
 
     private fun closeLocked() {
