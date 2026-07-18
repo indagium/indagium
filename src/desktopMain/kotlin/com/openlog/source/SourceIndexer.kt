@@ -1,5 +1,6 @@
 package com.openlog.source
 
+import com.openlog.debug.AppLogger
 import com.openlog.model.SourceWrapperRule
 import java.io.File
 
@@ -22,7 +23,10 @@ object SourceIndexer {
         val fileMeta = mutableMapOf<String, FileMeta>()
         val texts = mutableMapOf<String, String>()
 
-        files.forEach { file -> runCatching { texts[file.absolutePath] = file.readText() } }
+        files.forEach { file ->
+            runCatching { texts[file.absolutePath] = file.readText() }
+                .onFailure { e -> AppLogger.error("source-index", "Failed to read source file", e) }
+        }
         val globalConstants = buildGlobalConstants(texts)
         val discoveredRules = if (options.autoDiscover) discoverWrapperRules(texts) else emptyList()
         val wrapperRules = (options.wrapperRules + discoveredRules).distinct()
@@ -44,7 +48,7 @@ object SourceIndexer {
                     wrapperRules = wrapperRules,
                     globalConstants = globalConstants,
                 )
-            }
+            }.onFailure { e -> AppLogger.error("source-index", "Failed to index source file", e) }
             progress?.invoke(idx + 1, files.size)
         }
 

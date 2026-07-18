@@ -465,6 +465,13 @@ data class AppSettings(
     // Last folder the user picked in the update-download folder dialog, offered as the default the
     // next time (see AppState.downloadUpdate, modeled on defaultSaveDir/pickSaveFolder).
     val updateDownloadDir: String? = null,
+    // Opt-in diagnostic logging of the app's own behavior (see debug/AppLogger.kt) — off by
+    // default so packaged builds never write anything unless a user explicitly enables it to help
+    // diagnose an issue. Trailing with a default so old settings tokens still parse.
+    val debugLoggingEnabled: Boolean = false,
+    // Where debug log lines are appended. Null until the user first enables logging or picks a
+    // location via AppState.pickDebugLogFile (see DesktopStorage.debugLogFile for the default).
+    val debugLogFilePath: String? = null,
 )
 
 enum class ThemePreset(val label: String) {

@@ -1,5 +1,6 @@
 package com.openlog.ui
 
+import com.openlog.debug.AppLogger
 import com.openlog.utils.FileTailer
 import com.openlog.utils.parseLogcatLines
 import kotlinx.coroutines.CoroutineScope
@@ -49,11 +50,13 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         val job = tailer.start(scope)
         activeTails[tabId] = ActiveTail(tailer, job)
         appState.upTab(tabId) { it.copy(tailing = true) }
+        AppLogger.info("tail", "Started tailing tab")
     }
 
     fun stopTailing(tabId: String) {
         activeTails.remove(tabId)?.job?.cancel()
         appState.upTab(tabId) { it.copy(tailing = false) }
+        AppLogger.info("tail", "Stopped tailing tab")
         // Content-triggered autosave is suppressed while any tab is actively tailing (see the
         // LaunchedEffect in App.kt) to avoid rewriting a fast-growing logData every ~400ms —
         // explicitly save now that this tab has settled.
@@ -113,6 +116,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                 }
             }
         }
+        AppLogger.debug("tail", "Appended ${newRawLines.size} parsed diagnostic rows")
         scheduleTailAnalysisRefresh(tabId)
     }
 

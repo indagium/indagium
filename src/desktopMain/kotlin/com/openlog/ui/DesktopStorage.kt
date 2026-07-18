@@ -35,6 +35,8 @@ object DesktopStorage {
 
     fun sourceIndexFile(): File = File(appDataDir(), "source-index")
 
+    fun debugLogFile(): File = File(appDataDir(), "openlog-debug.log")
+
     fun legacyNotesDir(userHome: String = System.getProperty("user.home").orEmpty()): File =
         File(userHome, ".openlog2/notes")
 }

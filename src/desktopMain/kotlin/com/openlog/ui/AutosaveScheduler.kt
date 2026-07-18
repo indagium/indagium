@@ -3,6 +3,7 @@ package com.openlog.ui
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.openlog.debug.AppLogger
 import com.openlog.utils.writeFileAtomically
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -79,10 +80,14 @@ internal class AutosaveScheduler(
         runCatching {
             write(autosaveFile, serialize())
         }.fold(
-            onSuccess = { autosaveError = null },
+            onSuccess = {
+                autosaveError = null
+                AppLogger.debug("autosave", "Session autosave completed")
+            },
             onFailure = { error ->
                 autosaveError = "Could not save your session: " +
                     (error.message ?: error::class.simpleName.orEmpty().ifBlank { "unknown error" })
+                AppLogger.error("autosave", "Failed to write autosave file", error)
             },
         )
     }
