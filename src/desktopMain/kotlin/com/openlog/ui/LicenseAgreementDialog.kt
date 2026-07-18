@@ -3,6 +3,7 @@ package com.openlog.ui
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.runtime.Composable
@@ -59,14 +60,16 @@ internal fun LicenseAgreementDialog(
             AppText("openLog License Agreement", color = colors.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             AppText("Terms version $LICENSE_VERSION", color = colors.td, fontSize = 10.sp, fontFamily = MONO)
             Box(Modifier.weight(1f).fillMaxWidth().border(1.dp, colors.br, shape)) {
-                AppText(
-                    agreement,
-                    color = colors.ts,
-                    fontSize = 10.sp,
-                    fontFamily = MONO,
-                    modifier = Modifier.fillMaxSize().verticalScroll(scroll).padding(14.dp).padding(end = 8.dp),
-                    maxLines = Int.MAX_VALUE,
-                )
+                SelectionContainer {
+                    AppText(
+                        agreement,
+                        color = colors.ts,
+                        fontSize = 10.sp,
+                        fontFamily = MONO,
+                        modifier = Modifier.fillMaxSize().verticalScroll(scroll).padding(14.dp).padding(end = 8.dp),
+                        maxLines = Int.MAX_VALUE,
+                    )
+                }
                 VerticalScrollbar(
                     adapter = rememberScrollbarAdapter(scroll),
                     modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
