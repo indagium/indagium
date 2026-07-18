@@ -143,6 +143,27 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                             onClick = { requestSectionSwitch(section) },
                         )
                     }
+                    Spacer(Modifier.weight(1f))
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        AppText(
+                            "Keyboard shortcuts",
+                            color = tc.td,
+                            fontSize = 10.sp,
+                            fontFamily = UI,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        // Deliberately doesn't close Settings first — stacks on top instead, so closing
+                        // this popup returns you to Settings rather than to the main window.
+                        AppButton(
+                            "Show shortcuts…",
+                            onClick = { state.shortcutsOpen = true },
+                            variant = ButtonVariant.Secondary,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
                 }
                 Box(Modifier.width(1.dp).fillMaxHeight().background(tc.br))
                 val contentScroll = rememberScrollState()
@@ -166,19 +187,6 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                         modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
                         style = appScrollbarStyle(tc),
                     )
-                }
-            }
-            // Sits just above the existing footer divider (bottom-up: Done → footer divider →
-            // Show shortcuts). The caption is stacked directly on top of the button, right-aligned.
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                Column(horizontalAlignment = Alignment.Start, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    AppText("Keyboard shortcuts", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                    // Deliberately doesn't close Settings first — stacks on top instead, so closing
-                    // this popup returns you to Settings rather than to the main window.
-                    AppButton("Show shortcuts…", onClick = { state.shortcutsOpen = true }, variant = ButtonVariant.Secondary)
                 }
             }
             Divider()
@@ -491,18 +499,18 @@ private fun AppearanceSettingsSection(state: AppState) {
                 onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
             )
         }
-        CompactSettingWithTooltip(
-            label = "Toolbar labels",
-            tooltip = "Hides text on the main toolbar buttons, leaving only their icons.",
-            modifier = Modifier.weight(1f),
-            horizontalAlignment = Alignment.Start,
-        ) {
-            SegmentedControl(
-                options = listOf("Show", "Icons only"),
-                selectedIndices = setOf(if (state.settings.toolbarIconOnlyButtons) 1 else 0),
-                onToggle = { idx -> state.updateSettings { it.copy(toolbarIconOnlyButtons = idx == 1) } },
-            )
-        }
+        Spacer(Modifier.weight(1f))
+    }
+    CompactSettingWithTooltip(
+        label = "Toolbar labels",
+        tooltip = "Hides text on the main toolbar buttons, leaving only their icons.",
+        horizontalAlignment = Alignment.Start,
+    ) {
+        SegmentedControl(
+            options = listOf("Show", "Icons only"),
+            selectedIndices = setOf(if (state.settings.toolbarIconOnlyButtons) 1 else 0),
+            onToggle = { idx -> state.updateSettings { it.copy(toolbarIconOnlyButtons = idx == 1) } },
+        )
     }
 }
 
