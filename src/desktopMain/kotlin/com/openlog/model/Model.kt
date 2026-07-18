@@ -452,6 +452,9 @@ data class AppSettings(
     // When enabled, the main toolbar keeps only the semantic icons for Filter/Notes/AI/Compare/Open.
     // On by default to keep the toolbar compact; users can restore text labels from Appearance.
     val toolbarIconOnlyButtons: Boolean = true,
+    // The version of the openLog license agreement the user explicitly accepted. A changed terms
+    // version prompts again; null keeps existing installs gated until they accept once.
+    val acceptedLicenseVersion: String? = null,
 )
 
 enum class ThemePreset(val label: String) {

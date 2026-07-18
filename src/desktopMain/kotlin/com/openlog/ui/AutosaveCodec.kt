@@ -565,6 +565,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("mcpAllowBrowserClients", mcpAllowBrowserClients)
     put("showRowNumbers", showRowNumbers)
     put("toolbarIconOnlyButtons", toolbarIconOnlyButtons)
+    acceptedLicenseVersion?.let { put("acceptedLicenseVersion", it) }
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -761,6 +762,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         mcpAllowBrowserClients = o.boolOrDefault("mcpAllowBrowserClients", false),
         showRowNumbers = o.boolOrDefault("showRowNumbers", false),
         toolbarIconOnlyButtons = o.boolOrDefault("toolbarIconOnlyButtons", true),
+        acceptedLicenseVersion = o.stringOrNull("acceptedLicenseVersion"),
     )
 }.getOrNull()
 

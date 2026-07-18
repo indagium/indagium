@@ -181,4 +181,8 @@ Pushing a `v*.*.*` tag there builds the Linux `.deb` automatically; Windows `.ms
 
 ## License
 
-Copyright © 2026 Roman Arnaut
+openLog is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE). It is free for permitted personal and other non-commercial use.
+
+Any business or work-related use, including use by a company, employee, contractor, consultant, freelancer, or sole proprietor, requires a separate written commercial license. Start a commercial-license request in [GitHub Discussions](https://github.com/rarnaut-dev/openLog2/discussions).
+
+The openLog name, logo, icon, and branding are reserved; see [NOTICE](NOTICE). Third-party component notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

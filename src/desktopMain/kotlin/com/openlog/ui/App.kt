@@ -57,7 +57,10 @@ import kotlin.math.roundToInt
 internal fun recentFilesForMenu(recentFiles: List<String>): List<String> = recentFiles
 
 @Composable
-fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) }) {
+fun App(
+    state: AppState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) },
+    onLicenseDeclined: () -> Unit = {},
+) {
     val theme = themeColors(state.settings.theme)
     val rootFocusRequester = remember { FocusRequester() }
     var pendingPanelFocus by remember { mutableStateOf<KeyboardPanel?>(null) }
@@ -1617,6 +1620,18 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                         onRequestCloseChanged = { settingsRequestClose = it },
                     )
                 }
+            }
+
+            if (state.licenseAgreementOpen && !state.needsLicenseAcceptance) {
+                LicenseAgreementDialog(mandatory = false, onDismiss = { state.licenseAgreementOpen = false })
+            }
+
+            if (state.needsLicenseAcceptance) {
+                LicenseAgreementDialog(
+                    mandatory = true,
+                    onAccept = state::acceptLicenseAgreement,
+                    onDecline = onLicenseDeclined,
+                )
             }
 
             // ── Source code popup ─────────────────────────────────────

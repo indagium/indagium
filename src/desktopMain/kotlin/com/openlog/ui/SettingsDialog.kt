@@ -211,7 +211,10 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                         AppText(BuildInfo.APP_AUTHOR, color = tc.ts, fontSize = 10.sp, fontFamily = MONO)
                     }
                 }
-                AppButton("Done", onClick = ::requestClose, variant = ButtonVariant.Primary)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AppButton("License…", onClick = { state.licenseAgreementOpen = true }, variant = ButtonVariant.Secondary)
+                    AppButton("Done", onClick = ::requestClose, variant = ButtonVariant.Primary)
+                }
             }
         }
     }

@@ -172,7 +172,13 @@ fun main(args: Array<String>) {
                     onDispose { Toolkit.getDefaultToolkit().removeAWTEventListener(listener) }
                 }
             }
-            App(appState)
+            App(
+                appState,
+                onLicenseDeclined = {
+                    appState.close()
+                    exitApplication()
+                },
+            )
         }
     }
 }
