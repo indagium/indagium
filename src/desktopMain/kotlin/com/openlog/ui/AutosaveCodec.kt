@@ -317,10 +317,23 @@ private fun AppSettings.effectiveCopyMaskRules(): List<CopyMaskRule> {
     return if (copyMaskRules == listOf(defaultRule) && legacyRule != defaultRule) listOf(legacyRule) else copyMaskRules
 }
 
-internal fun analysisNoteMarkdownName(filename: String): String {
-    val base = filename.substringBeforeLast('.', filename)
-    val safeBase = base.replace(Regex("[^a-zA-Z0-9_-]"), "_").ifBlank { "analysis" }
+internal fun analysisNoteMarkdownName(filename: String, sourcePath: String? = null): String {
+    val safeBase = noteBaseName(filename, sourcePath).replace(Regex("[^a-zA-Z0-9_-]"), "_").ifBlank { "analysis" }
     return "${safeBase}_analysis.md"
+}
+
+// For archive-sourced tabs (sourcePath "<absZipPath>!<entryPath>"), fold the archive filename
+// into the note's base name so two different archives' identically-named entries — every bug
+// report's "logcat.log" — don't all collapse to one "logcat_analysis.md" and then get pushed
+// apart into opaque "_2".."_10" suffixes (resolveNoteTarget's collision walk) that carry no hint
+// of which archive/ticket they belong to. Plain files keep their bare filename base unchanged.
+private fun noteBaseName(filename: String, sourcePath: String?): String {
+    val entryBase = filename.substringBeforeLast('.', filename)
+    val bangIdx = sourcePath?.indexOf('!') ?: -1
+    if (bangIdx < 0) return entryBase
+    val zipName = sourcePath!!.substring(0, bangIdx).substringAfterLast('/')
+    val zipBase = zipName.substringBeforeLast('.', zipName)
+    return if (zipBase.isBlank()) entryBase else "${zipBase}_$entryBase"
 }
 
 private fun String.tokenList(): List<String> =
@@ -538,6 +551,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("openUnfilteredOnCtrlF", openUnfilteredOnCtrlF)
     put("sourceFolders", buildJsonArray { sourceFolders.forEach { add(it) } })
     put("editorCommand", editorCommand)
+    put("editorChoice", editorChoice)
     put("aiMaxToolRounds", aiMaxToolRounds)
     put("sourceAutoDiscoveryEnabled", sourceAutoDiscoveryEnabled)
     put("sourceFolderInfo", sourceFolderInfoJson(sourceFolderInfo))
@@ -549,6 +563,12 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("aiProviderProfiles", aiProviderProfilesJson(normalizeAiProviderProfiles(aiProviderProfiles)))
     put("copyMaskRules", copyMaskRulesJson(copyMaskRules))
     put("mcpAllowBrowserClients", mcpAllowBrowserClients)
+    put("showRowNumbers", showRowNumbers)
+    put("toolbarIconOnlyButtons", toolbarIconOnlyButtons)
+    acceptedLicenseVersion?.let { put("acceptedLicenseVersion", it) }
+    put("autoCheckUpdates", autoCheckUpdates)
+    skippedUpdateVersion?.let { put("skippedUpdateVersion", it) }
+    updateDownloadDir?.let { put("updateDownloadDir", it) }
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -697,6 +717,7 @@ private fun JsonObject.copyMaskRulesFromJson(key: String): List<CopyMaskRule> =
 // settingsFromToken() above.
 internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
     val o = Json.parseToJsonElement(raw).jsonObject
+    val editorCommandValue = o.stringOrNull("editorCommand").orEmpty()
     AppSettings(
         theme = o.stringOrNull("theme")?.let { runCatching { ThemePreset.valueOf(it) }.getOrNull() } ?: ThemePreset.LIGHT,
         fontSize = o.intOrDefault("fontSize", 12),
@@ -727,7 +748,12 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         openNewFilesWithUnfiltered = o.boolOrDefault("openNewFilesWithUnfiltered", false),
         openUnfilteredOnCtrlF = o.boolOrDefault("openUnfilteredOnCtrlF", false),
         sourceFolders = o.stringArray("sourceFolders"),
-        editorCommand = o.stringOrNull("editorCommand").orEmpty(),
+        editorCommand = editorCommandValue,
+        // Migration default: a legacy blob (predates editorChoice) with a typed editorCommand keeps
+        // behaving exactly as before by reading back as "custom"; a legacy blank command reads back
+        // as "auto" — see AppSettings.editorChoice doc.
+        editorChoice = o.stringOrNull("editorChoice")
+            ?: if (editorCommandValue.isNotBlank()) "custom" else "auto",
         aiProviderProfiles = o.aiProviderProfilesFromJson("aiProviderProfiles"),
         aiMaxToolRounds = o.intOrDefault("aiMaxToolRounds", DEFAULT_AI_MAX_TOOL_ROUNDS)
             .coerceIn(MIN_AI_MAX_TOOL_ROUNDS, MAX_AI_MAX_TOOL_ROUNDS),
@@ -737,6 +763,12 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         sourceAutoDiscoveryEnabled = o.boolOrDefault("sourceAutoDiscoveryEnabled", true),
         copyMaskRules = o.copyMaskRulesFromJson("copyMaskRules"),
         mcpAllowBrowserClients = o.boolOrDefault("mcpAllowBrowserClients", false),
+        showRowNumbers = o.boolOrDefault("showRowNumbers", false),
+        toolbarIconOnlyButtons = o.boolOrDefault("toolbarIconOnlyButtons", true),
+        acceptedLicenseVersion = o.stringOrNull("acceptedLicenseVersion"),
+        autoCheckUpdates = o.boolOrDefault("autoCheckUpdates", true),
+        skippedUpdateVersion = o.stringOrNull("skippedUpdateVersion"),
+        updateDownloadDir = o.stringOrNull("updateDownloadDir"),
     )
 }.getOrNull()
 
@@ -848,6 +880,8 @@ private fun SavedFilter.savedFilterToken(): String = tokenFields(
     excludePkgPrefixes.joinToString(",") { it.b64() },
     kwHighlightEnabled.toString(),
     kwHighlightColor.value.toString(),
+    folderId.orEmpty(),
+    favorite.toString(),
 )
 
 private fun String.savedFilterFromToken(): SavedFilter? = runCatching {
@@ -876,6 +910,8 @@ private fun String.savedFilterFromToken(): SavedFilter? = runCatching {
         excludePkgPrefixes = p.getOrNull(18)?.encodedSet() ?: emptySet(),
         kwHighlightEnabled = p.getOrNull(19)?.toBooleanStrictOrNull() ?: true,
         kwHighlightColor = p.getOrNull(20)?.toULongOrNull()?.let(::Color) ?: DEFAULT_KEYWORD_HIGHLIGHT_COLOR,
+        folderId = p.getOrNull(21)?.takeIf { it.isNotBlank() },
+        favorite = p.getOrNull(22)?.toBooleanStrictOrNull() ?: false,
     )
 }.getOrNull()
 

@@ -7,6 +7,7 @@ import com.openlog.ai.ManagedMcpRunRegistry
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.LogLevel
+import com.openlog.model.RuleTarget
 import com.openlog.ui.AppState
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
@@ -520,11 +521,23 @@ private typealias McpTool = OpenLogToolDescriptor
 // per-property JSON-Schema description. Both are opt-in so untouched call sites are unaffected —
 // but for enum-shaped fields (levels, mode, format) declaring them lets a compliant client avoid
 // sending values the handler would otherwise reject (see setFilter's level/mode validation).
+// Item schema for an "array of objects" property (sequences, messageRules, ...) — plug one of
+// these into schema()'s `objectArrays` map to replace that property's default array-of-string
+// shape with a real object schema, so a client sees the actual fields it must send instead of
+// guessing (or, worse, quoting a whole object as a string).
+private data class ObjectArrayItemSchema(
+    val props: List<Pair<String, String>>,
+    val required: List<String> = emptyList(),
+    val enums: Map<String, List<String>> = emptyMap(),
+    val descriptions: Map<String, String> = emptyMap(),
+)
+
 private fun schema(
     vararg props: Pair<String, String>,
     required: List<String> = emptyList(),
     enums: Map<String, List<String>> = emptyMap(),
     descriptions: Map<String, String> = emptyMap(),
+    objectArrays: Map<String, ObjectArrayItemSchema> = emptyMap(),
 ): ToolSchema =
     ToolSchema(
         properties = buildJsonObject {
@@ -533,7 +546,8 @@ private fun schema(
                     name,
                     buildJsonObject {
                         when (type) {
-                            "array" -> arrayOfItems("string", enums[name])
+                            "array" -> objectArrays[name]?.let { arrayOfObjectItems(it) }
+                                ?: arrayOfItems("string", enums[name])
                             "array<integer>" -> arrayOfItems("integer")
                             else -> {
                                 put("type", type)
@@ -556,9 +570,78 @@ private fun kotlinx.serialization.json.JsonObjectBuilder.arrayOfItems(itemType: 
     })
 }
 
+private fun kotlinx.serialization.json.JsonObjectBuilder.arrayOfObjectItems(item: ObjectArrayItemSchema) {
+    put("type", "array")
+    put(
+        "items",
+        buildJsonObject {
+            put("type", "object")
+            put(
+                "properties",
+                buildJsonObject {
+                    item.props.forEach { (name, type) ->
+                        put(
+                            name,
+                            buildJsonObject {
+                                put("type", type)
+                                item.enums[name]?.let { putEnum(it) }
+                                item.descriptions[name]?.let { put("description", it) }
+                            },
+                        )
+                    }
+                },
+            )
+            if (item.required.isNotEmpty()) put("required", buildJsonArray { item.required.forEach { add(it) } })
+        },
+    )
+}
+
 private fun kotlinx.serialization.json.JsonObjectBuilder.putEnum(values: List<String>) {
     put("enum", buildJsonArray { values.forEach { add(it) } })
 }
+
+// Object-array item schemas for set_filter's `sequences` / `messageRules` — kept beside schema()
+// so both the property list and its item shape live in one place. Property sets and semantics
+// mirror OpenLogToolOperations.parseSequences / parseMessageRules exactly; keep them in sync if
+// either parser's accepted fields change. Sequence colors are always server-assigned (round-robin
+// from the app's own palette), so `color` is deliberately not a documented item property.
+private val SEQUENCE_ITEM_SCHEMA = ObjectArrayItemSchema(
+    props = listOf(
+        "matchText" to "string", "isRegex" to "boolean", "endMatchText" to "string",
+        "endIsRegex" to "boolean", "tag" to "string", "endTag" to "string",
+        "priority" to "integer", "enabled" to "boolean", "id" to "string",
+    ),
+    required = listOf("matchText"),
+    descriptions = mapOf(
+        "matchText" to "Text (or regex, if isRegex) that starts a run — required.",
+        "isRegex" to "Whether matchText is a regex (default false).",
+        "endMatchText" to "Text (or regex, if endIsRegex) that closes the run; omit for a single-line sequence.",
+        "endIsRegex" to "Whether endMatchText is a regex (default false).",
+        "tag" to "Restrict matchText matching to this tag only (optional).",
+        "endTag" to "Restrict endMatchText matching to this tag only (optional).",
+        "priority" to "Nesting priority among sequences; defaults to list order when omitted.",
+        "enabled" to "Whether the sequence is active (default true).",
+        "id" to "Stable id; auto-generated when omitted. Color is always server-assigned, not client-supplied.",
+    ),
+)
+
+private val MESSAGE_RULE_ITEM_SCHEMA = ObjectArrayItemSchema(
+    props = listOf(
+        "pattern" to "string", "include" to "boolean", "regex" to "boolean",
+        "tag" to "string", "packagePrefix" to "string", "enabled" to "boolean", "target" to "string",
+    ),
+    required = listOf("pattern"),
+    enums = mapOf("target" to RuleTarget.entries.map { it.name }),
+    descriptions = mapOf(
+        "pattern" to "Text (or regex, if regex) to match — required.",
+        "include" to "true keeps matches, false hides them (default true).",
+        "regex" to "Whether pattern is a regex (default false).",
+        "tag" to "Restrict matching to this tag only (optional).",
+        "packagePrefix" to "Restrict matching to this package prefix only (optional).",
+        "enabled" to "Whether the rule is active (default true).",
+        "target" to "What the rule matches against: ${RuleTarget.entries.joinToString(",") { it.name }} (default MESSAGE).",
+    ),
+)
 
 // Single-char keys the levels filter accepts, in display order. Shared by the schema enum and
 // setFilter's validation so the two can never disagree on what a valid level is.
@@ -639,7 +722,13 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
                 "levels" to "Single-char level keys to KEEP: ${LEVEL_KEYS.joinToString(",")} (V=Verbose … A=Assert). An empty or malformed list is rejected.",
                 "mode" to "Base filter mode: TAGS or KEYWORD. Leave unset to let activeTags/pkgPrefixes or kwText/kwRegex auto-select it.",
                 "pidTidFilter" to "Comma-separated PIDs/TIDs to include.",
+                "messageRules" to "Scoped include/exclude rules; see each item's own field descriptions. " +
+                    "REPLACES the tab's whole messageRules list — there is no append-one operation for this field.",
+                "sequences" to "Runs of lines to fold into a collapsible group; see each item's own field " +
+                    "descriptions. REPLACES the tab's whole sequences list — to add a single sequence without " +
+                    "disturbing existing ones, use add_sequence instead.",
             ),
+            objectArrays = mapOf("sequences" to SEQUENCE_ITEM_SCHEMA, "messageRules" to MESSAGE_RULE_ITEM_SCHEMA),
         ),
     ),
     McpTool(
@@ -827,6 +916,90 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
             "starting a code-level investigation.",
         schema(),
     ),
+    McpTool(
+        "set_highlighters",
+        "Replace a tab's highlighter list — the patterns whose matches are color-marked in the log " +
+            "view. Highlighters do NOT hide or fold rows; they only tint matching text, so they are " +
+            "safe to add freely while investigating. A supplied highlighters list replaces the " +
+            "current one wholesale; clearHighlighters removes all of them. Each highlighters item is " +
+            "an object: { pattern (required), regex (default false), color (optional hex like " +
+            "\"#FF8800\" — omit to auto-assign from the palette), enabled (default true) }.",
+        schema(
+            "tabId" to "string", "highlighters" to "array", "clearHighlighters" to "boolean",
+            required = listOf("tabId"),
+            descriptions = mapOf(
+                "highlighters" to "Highlighters to set (replaces the current list). Each item is an " +
+                    "object: pattern (string, required), regex (boolean, default false), color " +
+                    "(string, optional hex e.g. \"#FF8800\" or \"#AAFF8800\"), enabled (boolean, default true).",
+                "clearHighlighters" to "If true, remove every highlighter from the tab.",
+            ),
+        ),
+    ),
+    McpTool(
+        "reindex_sources",
+        "Rebuild the source-code index that resolve_log_source and get_project_info depend on. Pass " +
+            "a single folder path to reindex just that registered source folder, or omit folder to " +
+            "reindex every registered source folder. Indexing runs in the background and returns " +
+            "immediately with the folders it started — poll resolve_log_source / get_project_info and " +
+            "retry until the index is ready.",
+        schema(
+            "folder" to "string",
+            descriptions = mapOf(
+                "folder" to "Absolute path of a registered source folder to reindex; omit to reindex all of them.",
+            ),
+        ),
+    ),
+    McpTool(
+        "add_manual_collapse",
+        "Fold an arbitrary inclusive range of log lines [startLineId..endLineId] into a single " +
+            "collapsible manual block — the same as selecting those rows and choosing “Collapse” in " +
+            "the UI. Line ids are the entry ids reported by get_visible_lines / get_line_context; " +
+            "argument order doesn't matter. Returns { ok: false } when the range can't be collapsed " +
+            "(e.g. ids not present in the tab, or it overlaps an existing block).",
+        schema(
+            "tabId" to "string", "startLineId" to "integer", "endLineId" to "integer",
+            required = listOf("tabId", "startLineId", "endLineId"),
+            descriptions = mapOf(
+                "startLineId" to "First line id of the range to fold (order relative to endLineId doesn't matter).",
+                "endLineId" to "Last line id of the range to fold.",
+            ),
+        ),
+    ),
+    McpTool(
+        "add_sequence",
+        "Append one sequence to a tab's existing sequences list — the same as adding a sequence in " +
+            "the UI's filter panel. Unlike set_filter's `sequences` field (which REPLACES the whole " +
+            "list), this only adds one, leaving every existing sequence untouched, and picks a fresh " +
+            "palette color and a priority after the existing ones automatically. Returns " +
+            "{ ok: false, error } for a blank/missing matchText or an unknown tabId.",
+        schema(
+            "tabId" to "string", "matchText" to "string", "isRegex" to "boolean",
+            "endMatchText" to "string", "endIsRegex" to "boolean", "tag" to "string",
+            "endTag" to "string", "priority" to "integer", "enabled" to "boolean",
+            required = listOf("tabId", "matchText"),
+            descriptions = mapOf(
+                "matchText" to SEQUENCE_ITEM_SCHEMA.descriptions.getValue("matchText"),
+                "isRegex" to SEQUENCE_ITEM_SCHEMA.descriptions.getValue("isRegex"),
+                "endMatchText" to SEQUENCE_ITEM_SCHEMA.descriptions.getValue("endMatchText"),
+                "endIsRegex" to SEQUENCE_ITEM_SCHEMA.descriptions.getValue("endIsRegex"),
+                "tag" to SEQUENCE_ITEM_SCHEMA.descriptions.getValue("tag"),
+                "endTag" to SEQUENCE_ITEM_SCHEMA.descriptions.getValue("endTag"),
+                "priority" to "Nesting priority; defaults to after every existing sequence when omitted.",
+                "enabled" to SEQUENCE_ITEM_SCHEMA.descriptions.getValue("enabled"),
+            ),
+        ),
+    ),
+    McpTool(
+        "save_filter_preset",
+        "Save a tab's current filter as a named, reusable preset (it then appears in " +
+            "list_filter_presets and can be re-applied with apply_filter_preset). Returns an error if " +
+            "a preset with the same name already exists — pick a different name. There is no " +
+            "overwrite or delete over this API; manage or remove existing presets in the UI.",
+        schema(
+            "tabId" to "string", "name" to "string", required = listOf("tabId", "name"),
+            descriptions = mapOf("name" to "Unique preset name; must not match an existing preset (case-insensitive)."),
+        ),
+    ),
 )
 
 // REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl
@@ -867,4 +1040,9 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/tail/start", "start_tailing"),
     Triple(HttpMethod.Post, "/tail/stop", "stop_tailing"),
     Triple(HttpMethod.Post, "/resolve_log_source", "resolve_log_source"),
+    Triple(HttpMethod.Post, "/highlighters", "set_highlighters"),
+    Triple(HttpMethod.Post, "/reindex-sources", "reindex_sources"),
+    Triple(HttpMethod.Post, "/manual-collapse", "add_manual_collapse"),
+    Triple(HttpMethod.Post, "/sequence", "add_sequence"),
+    Triple(HttpMethod.Post, "/filter/save-preset", "save_filter_preset"),
 )

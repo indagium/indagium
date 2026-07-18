@@ -220,6 +220,18 @@ data class LogTab(
     val archiveCandidate: ZipLogCandidate? = null,
 )
 
+/**
+ * A single, non-nesting group in the saved-filter library.
+ *
+ * Filters with a null [SavedFilter.folderId] live at the library root. Folder ids are kept as
+ * metadata on filters instead of embedding child collections so moves and ordering stay cheap and
+ * old flat saved-filter data remains source-compatible.
+ */
+data class SavedFilterFolder(
+    val id: String,
+    val name: String,
+)
+
 data class SavedFilter(
     val id: String, val name: String,
     val levels: Set<LogLevel>, val activeTags: Set<String>,
@@ -233,6 +245,8 @@ data class SavedFilter(
     val excludePkgPrefixes: Set<String> = emptySet(),
     val kwHighlightEnabled: Boolean = true,
     val kwHighlightColor: Color = DEFAULT_KEYWORD_HIGHLIGHT_COLOR,
+    val folderId: String? = null,
+    val favorite: Boolean = false,
 )
 
 // ── Settings ───────────────────────────────────────────────────────
@@ -411,6 +425,12 @@ data class AppSettings(
     // AppState.openInEditor. Blank (the default) means auto-detect a common editor CLI, falling
     // back to Desktop.open(). Trailing with a default so old settings tokens still parse.
     val editorCommand: String = "",
+    // Selects which editor openInEditor uses: "" / "auto" = auto-detect the first installed editor
+    // from the catalog (see AppState's EditorPreset/EDITOR_CATALOG); an EditorPreset.id picks that
+    // specific detected app; "custom" uses [editorCommand] verbatim. Trailing with a default so old
+    // settings tokens (without this field) still parse — AutosaveCodec applies a migration default
+    // there instead (blank stays "auto", a non-blank editorCommand becomes "custom").
+    val editorChoice: String = "",
     // API keys stay in AppState's session-only credential store and are never serialized.
     val aiProviderProfiles: List<AiProviderProfile> = listOf(defaultAiProviderProfile()),
     // Caps tool-call round trips per AI request (see AiAgentRunner). Trailing with a default so
@@ -424,6 +444,27 @@ data class AppSettings(
     // CORS is defense-in-depth on top of that: off by default, opt-in for the (uncommon) case of a
     // browser-based MCP inspector. Trailing with a default so old settings tokens still parse.
     val mcpAllowBrowserClients: Boolean = false,
+    // When enabled, LogViewer renders a left gutter with each row's original (parse-order) row
+    // number. The number is the entry's id, so it stays fixed when the view is filtered/folded and
+    // cross-references the full file. Off by default. Trailing with a default so old settings tokens
+    // (without this field) still parse.
+    val showRowNumbers: Boolean = false,
+    // When enabled, the main toolbar keeps only the semantic icons for Filter/Notes/AI/Compare/Open.
+    // On by default to keep the toolbar compact; users can restore text labels from Appearance.
+    val toolbarIconOnlyButtons: Boolean = true,
+    // The version of the openLog license agreement the user explicitly accepted. A changed terms
+    // version prompts again; null keeps existing installs gated until they accept once.
+    val acceptedLicenseVersion: String? = null,
+    // In-app "Check for updates" (see update/UpdateChecker.kt, AppState.checkForUpdates). On by
+    // default; a packaged build silently checks GitHub Releases once at startup unless disabled
+    // here. Trailing with a default so old settings tokens still parse.
+    val autoCheckUpdates: Boolean = true,
+    // The release version the user chose "Skip this version" for — AppState.updateDialogVisible
+    // suppresses the popup for that exact version only, so the next real release still prompts.
+    val skippedUpdateVersion: String? = null,
+    // Last folder the user picked in the update-download folder dialog, offered as the default the
+    // next time (see AppState.downloadUpdate, modeled on defaultSaveDir/pickSaveFolder).
+    val updateDownloadDir: String? = null,
 )
 
 enum class ThemePreset(val label: String) {

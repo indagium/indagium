@@ -575,6 +575,49 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun savedFilterLibraryMovesFavoritesAndReordersWithinFolder() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.createSavedFilterFolder("QA")
+        val folderId = state.savedFilterFolders.single().id
+
+        state.saveFilter(tabId, "first", folderId)
+        state.saveFilter(tabId, "second", folderId)
+        val first = state.savedFilters.first { it.name == "first" }
+        val second = state.savedFilters.first { it.name == "second" }
+
+        state.toggleSavedFilterFavorite(second.id)
+        state.reorderSavedFilterWithinFolder(second.id, 0)
+
+        assertEquals(listOf(second.id, first.id), state.savedFilters.filter { it.folderId == folderId }.map { it.id })
+        assertTrue(state.savedFilters.first { it.id == second.id }.favorite)
+
+        state.requestDeleteSavedFilterFolder(folderId)
+        state.confirmDeleteSavedFilterFolder()
+
+        assertTrue(state.savedFilterFolders.isEmpty())
+        assertTrue(state.savedFilters.all { it.folderId == null })
+    }
+
+    @Test
+    fun exportedSavedFilterLibraryPreservesFolderAndFavorite() {
+        val source = AppState()
+        source.addTab()
+        source.createSavedFilterFolder("Release")
+        val folderId = source.savedFilterFolders.single().id
+        source.saveFilter(source.tabs.single().id, "production", folderId)
+        source.toggleSavedFilterFavorite(source.savedFilters.single().id)
+
+        val target = AppState()
+        target.importFilters(source.exportFilters())
+
+        assertEquals(listOf("Release"), target.savedFilterFolders.map { it.name })
+        assertEquals("Release", target.savedFilterFolders.single { it.id == target.savedFilters.single().folderId }.name)
+        assertTrue(target.savedFilters.single().favorite)
+    }
+
+    @Test
     fun exportedFiltersRoundTripSequences() {
         val source = AppState()
         source.addTab()
@@ -1204,6 +1247,100 @@ class AppStateBehaviorTest {
 
         assertEquals(existingId, target.savedFilters.single().id)
         assertEquals(setOf("com.replacement"), target.savedFilters.single().pkgPrefixes)
+    }
+
+    @Test
+    fun uncheckingNewFilterExcludesItFromImport() {
+        val target = AppState()
+        val source = AppState().apply {
+            addTab()
+            saveFilter(tabs.single().id, "brand new")
+        }
+        target.beginImportFilters(source.exportFilters())
+        val rowId = target.pendingImportReview!!.rows.single().rowId
+
+        target.setImportRowsChecked(setOf(rowId), false)
+        assertEquals(ImportFilterAction.SKIP, target.pendingImportReview!!.rows.single().action)
+
+        target.confirmImportFilters()
+        assertTrue(target.savedFilters.isEmpty())
+    }
+
+    @Test
+    fun recheckingSkippedNewFilterRestoresAddAction() {
+        val target = AppState()
+        val source = AppState().apply {
+            addTab()
+            saveFilter(tabs.single().id, "brand new")
+        }
+        target.beginImportFilters(source.exportFilters())
+        val rowId = target.pendingImportReview!!.rows.single().rowId
+
+        target.setImportRowsChecked(setOf(rowId), false)
+        target.setImportRowsChecked(setOf(rowId), true)
+        assertEquals(ImportFilterAction.ADD, target.pendingImportReview!!.rows.single().action)
+
+        target.confirmImportFilters()
+        assertEquals(listOf("brand new"), target.savedFilters.map { it.name })
+    }
+
+    @Test
+    fun folderNotAddedWhenAllItsFiltersAreSkipped() {
+        val target = AppState()
+        val source = AppState().apply {
+            addTab()
+            createSavedFilterFolder("Release")
+            saveFilter(tabs.single().id, "production", savedFilterFolders.single().id)
+        }
+        target.beginImportFilters(source.exportFilters())
+        assertEquals(listOf("Release"), target.pendingImportReview!!.stagedFolders.map { it.name })
+        val rowId = target.pendingImportReview!!.rows.single().rowId
+
+        target.setImportRowsChecked(setOf(rowId), false)
+        target.confirmImportFilters()
+
+        assertTrue(target.savedFilterFolders.isEmpty())
+        assertTrue(target.savedFilters.isEmpty())
+    }
+
+    @Test
+    fun folderAddedWhenAtLeastOneOfItsFiltersSurvives() {
+        val target = AppState()
+        val source = AppState().apply {
+            addTab()
+            createSavedFilterFolder("Release")
+            val folderId = savedFilterFolders.single().id
+            saveFilter(tabs.single().id, "production", folderId)
+            saveFilter(tabs.single().id, "staging", folderId)
+        }
+        target.beginImportFilters(source.exportFilters())
+        target.confirmImportFilters()
+
+        assertEquals(listOf("Release"), target.savedFilterFolders.map { it.name })
+        val folderId = target.savedFilterFolders.single().id
+        assertEquals(setOf("production", "staging"), target.savedFilters.map { it.name }.toSet())
+        assertTrue(target.savedFilters.all { it.folderId == folderId })
+    }
+
+    @Test
+    fun selectAllAndSelectNoneToggleAllToggleableRows() {
+        val target = AppState()
+        val source = AppState().apply {
+            addTab()
+            saveFilter(tabs.single().id, "one")
+            saveFilter(tabs.single().id, "two")
+        }
+        target.beginImportFilters(source.exportFilters())
+        val ids = target.pendingImportReview!!.rows.map { it.rowId }.toSet()
+
+        target.setImportRowsChecked(ids, false)
+        assertTrue(target.pendingImportReview!!.rows.all { it.action == ImportFilterAction.SKIP })
+
+        target.setImportRowsChecked(ids, true)
+        assertTrue(target.pendingImportReview!!.rows.all { it.action == ImportFilterAction.ADD })
+
+        target.confirmImportFilters()
+        assertEquals(setOf("one", "two"), target.savedFilters.map { it.name }.toSet())
     }
 
     @Test
@@ -3558,6 +3695,7 @@ class AppStateBehaviorTest {
         openUnfilteredOnCtrlF = true,
         sourceFolders = listOf("/tmp/openlog-rt-src-a", "/tmp/openlog-rt-src-b"),
         editorCommand = "code -g {file}:{line}",
+        editorChoice = "custom",
         aiProviderProfiles = listOf(
             AiProviderProfile(
                 id = "anthropic-rt",
@@ -3606,6 +3744,11 @@ class AppStateBehaviorTest {
         sourceAutoDiscoveryEnabled = false,
         copyMaskRules = listOf(CopyMaskRule("java", "j*ava"), CopyMaskRule("secret", "s3cret")),
         mcpAllowBrowserClients = true,
+        showRowNumbers = true,
+        toolbarIconOnlyButtons = false,
+        autoCheckUpdates = false,
+        skippedUpdateVersion = "1.4.0",
+        updateDownloadDir = "/tmp/openlog-rt-downloads",
     )
 
     // (ARCH-2/Batch 5) Proves the migration end to end: every AppSettings field pushed off its
@@ -3633,6 +3776,60 @@ class AppStateBehaviorTest {
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
         assertEquals(expected, restored.settings)
+    }
+
+    // Migration default (AutosaveCodec.settingsFromJson): a JSON settings blob written before
+    // editorChoice existed had a typed editorCommand but no editorChoice key at all. That must read
+    // back as "custom" so the user's existing command keeps being used unchanged (shown as "Custom
+    // command…" in Settings) rather than silently switching them to auto-detect.
+    @Test
+    fun legacyJsonSettingsWithTypedEditorCommandMigratesToCustomEditorChoice() {
+        val dir = createTempDirectory("openlog-editor-choice-migrate-custom").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val legacyJson = """{"editorCommand":"idea --line {line} {file}"}"""
+        val encoded = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(legacyJson.toByteArray(Charsets.UTF_8))
+        cacheFile.writeText("openLog2-cache-v1\nsettings\t$encoded\n")
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals("custom", restored.settings.editorChoice)
+        assertEquals("idea --line {line} {file}", restored.settings.editorCommand)
+    }
+
+    // Same migration, the other branch: a legacy JSON blob with no editorCommand typed (blank, the
+    // pre-existing default) and no editorChoice key must read back as "auto" — the same behavior a
+    // blank Open command always had.
+    @Test
+    fun legacyJsonSettingsWithBlankEditorCommandMigratesToAutoEditorChoice() {
+        val dir = createTempDirectory("openlog-editor-choice-migrate-auto").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val legacyJson = """{"theme":"DRACULA"}"""
+        val encoded = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(legacyJson.toByteArray(Charsets.UTF_8))
+        cacheFile.writeText("openLog2-cache-v1\nsettings\t$encoded\n")
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals("auto", restored.settings.editorChoice)
+        assertEquals("", restored.settings.editorCommand)
+        assertTrue(restored.settings.toolbarIconOnlyButtons)
+    }
+
+    // Once editorChoice is written explicitly (current format), it round-trips as-is rather than
+    // being recomputed from editorCommand — proves the migration default only kicks in when the key
+    // is absent, not whenever editorCommand happens to be non-blank.
+    @Test
+    fun editorChoiceSurvivesAutosaveRoundTrip() {
+        val dir = createTempDirectory("openlog-editor-choice-roundtrip").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.updateSettings { it.copy(editorChoice = "vscode", editorCommand = "should be ignored") }
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals("vscode", restored.settings.editorChoice)
     }
 
     @Test

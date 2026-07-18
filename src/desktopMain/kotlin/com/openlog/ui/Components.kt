@@ -111,13 +111,14 @@ fun HoverBox(
     baseBg: Color = Color.Transparent,
     hoverBg: Color = LocalTheme.current.hv,
     forceHover: Boolean = false,
+    hoverEnabled: Boolean = true,
     onClick: (() -> Unit)? = null,
     content: @Composable BoxScope.() -> Unit,
 ) {
     var hovered by remember { mutableStateOf(false) }
     Box(
         modifier = modifier
-            .background(if (hovered || forceHover) hoverBg else baseBg)
+            .background(if ((hovered && hoverEnabled) || forceHover) hoverBg else baseBg)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
@@ -252,8 +253,12 @@ fun LevelBadge(level: LogLevel) {
     ) { AppText(level.key.toString(), color = color, fontSize = 10.sp, fontFamily = MONO, fontWeight = FontWeight.SemiBold) }
 }
 
+// Header font size for ColHeader's column labels — kept in sync with the "#" cell's own width
+// formula (rowNumberColumnWidth) so it lines up reasonably with the row gutter below it.
+private const val COL_HEADER_FONT_SP = 9f
+
 @Composable
-fun ColHeader(hasPidTid: Boolean = false) {
+fun ColHeader(hasPidTid: Boolean = false, showRowNumbers: Boolean = false, rowNumDigits: Int = 1) {
     val tc = tc()
     Row(
         Modifier.fillMaxWidth().background(tc.p2).border(BorderStroke(1.dp, tc.br))
@@ -261,6 +266,15 @@ fun ColHeader(hasPidTid: Boolean = false) {
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (showRowNumbers) {
+            val numColWidth = rowNumberColumnWidth(COL_HEADER_FONT_SP, rowNumDigits)
+            Box(Modifier.width(numColWidth)) {
+                AppText(
+                    "#", color = tc.td, fontSize = COL_HEADER_FONT_SP.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                )
+            }
+        }
         AppText("TIMESTAMP", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(90.dp))
         if (hasPidTid) {
             AppText("PID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(40.dp))
@@ -291,6 +305,9 @@ fun PillBtn(label: String, active: Boolean, onClick: () -> Unit) {
 @Composable
 fun ToolbarBtn(
     label: String,
+    icon: ImageVector? = null,
+    showLabel: Boolean = true,
+    tooltip: String? = null,
     active: Boolean = false,
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
@@ -300,32 +317,67 @@ fun ToolbarBtn(
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
+    val contentColor = if (!enabled) tc.td.copy(.5f) else if (active) Color.White else tc.ts
     // Solid fill (matching AppButton's Primary variant) rather than a translucent accent tint, so
     // an active toggle in this row reads the same way the AI/Notes panel toggle does.
+    val button: @Composable () -> Unit = {
+        Box(
+            modifier
+                .border(1.dp, if (active && enabled) tc.ac else tc.br, shape)
+                .background(
+                    when {
+                        active && enabled -> tc.ac
+                        hovered && enabled -> tc.hv
+                        else -> Color.Transparent
+                    },
+                    shape,
+                )
+                .clip(shape)
+                .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+                .onPointerEvent(PointerEventType.Enter) { hovered = true }
+                .onPointerEvent(PointerEventType.Exit) { hovered = false }
+                .padding(contentPadding),
+            contentAlignment = Alignment.Center,
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (icon != null) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = if (showLabel) null else tooltip ?: label,
+                        tint = contentColor,
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
+                if (showLabel || icon == null) {
+                    AppText(
+                        label,
+                        color = contentColor,
+                        fontSize = 12.sp,
+                        fontWeight = if (active && enabled) FontWeight.Medium else FontWeight.Normal,
+                    )
+                }
+            }
+        }
+    }
+    if (tooltip != null) {
+        TooltipArea(tooltip = { ToolbarTooltip(tooltip) }) { button() }
+    } else {
+        button()
+    }
+}
+
+@Composable
+internal fun ToolbarTooltip(text: String) {
+    val tc = tc()
     Box(
-        modifier
-            .border(1.dp, if (active && enabled) tc.ac else tc.br, shape)
-            .background(
-                when {
-                    active && enabled -> tc.ac
-                    hovered && enabled -> tc.hv
-                    else -> Color.Transparent
-                },
-                shape,
-            )
-            .clip(shape)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
-            .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(contentPadding),
-        contentAlignment = Alignment.Center,
+        Modifier.background(tc.p2, RoundedCornerShape(4.dp))
+            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
     ) {
-        AppText(
-            label,
-            color = if (!enabled) tc.td.copy(.5f) else if (active) Color.White else tc.ts,
-            fontSize = 12.sp,
-            fontWeight = if (active && enabled) FontWeight.Medium else FontWeight.Normal,
-        )
+        AppText(text, color = tc.tx, fontSize = 11.sp, maxLines = 2)
     }
 }
 

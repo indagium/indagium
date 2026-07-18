@@ -16,6 +16,7 @@ import com.openlog.ai.validateAiProviderProfile
 import com.openlog.debug.ControlServer
 import com.openlog.debug.OpenLogToolOperations
 import com.openlog.debug.loadOrCreateControlToken
+import com.openlog.generated.BuildInfo
 import com.openlog.model.*
 import com.openlog.source.FileMeta
 import com.openlog.source.LogCallSite
@@ -29,6 +30,11 @@ import com.openlog.source.SourceIndexStore
 import com.openlog.source.SourceIndexer
 import com.openlog.source.SourceMatch
 import com.openlog.source.sourceConfigurationFingerprint
+import com.openlog.update.ReleaseInfo
+import com.openlog.update.UpdateCheckResult
+import com.openlog.update.UpdateChecker
+import com.openlog.update.assetForCurrentOs
+import com.openlog.update.revealInFileManager
 import com.openlog.utils.ArchiveBudgetExceededException
 import com.openlog.utils.EntryIdMap
 import com.openlog.utils.MAX_ARCHIVE_ENTRY_BYTES
@@ -179,16 +185,81 @@ internal const val MIN_PORT = 1
 internal const val MAX_PORT = 65535
 internal const val DEFAULT_MCP_PORT = 8991
 
-// Auto-detect fallback chain for AppState.openInEditor, tried in order when settings.editorCommand
-// is blank — the first one whose CLI is actually on PATH (i.e. ProcessBuilder.start() succeeds)
-// wins. Each template supports jumping straight to a line, unlike plain Desktop.open().
-private val AUTO_EDITOR_COMMANDS = listOf(
-    "code -g {file}:{line}",
-    "idea --line {line} {file}",
-    "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea --line {line} {file}",
-    "cursor -g {file}:{line}",
-    "subl {file}:{line}",
+// One entry in the editor catalog offered by the Settings → Source code editor-choice dropdown.
+// [id] is the stable key persisted in AppSettings.editorChoice; [candidates] are command templates
+// tried in order (mac/Windows/Linux variants coexist in one list — resolveExecutable naturally only
+// resolves the ones actually installed, so no OS branching is needed here).
+data class EditorPreset(
+    val id: String,
+    val displayName: String,
+    val candidates: List<String>,
 )
+
+// Recommended-editor catalog: superset of the old flat AUTO_EDITOR_COMMANDS list, now structured so
+// the Settings UI can offer a named dropdown choice per app instead of one opaque free-text field.
+// Each preset lists a bare CLI candidate first (works when the editor's shell command is on PATH,
+// incl. Linux/Windows), then macOS .app bundle absolute paths as a fallback. The bundle fallback
+// matters because a GUI app doesn't inherit the interactive shell PATH, and most macOS users never
+// run the editor's "Install shell command in PATH" step — so `code`/`cursor`/`subl` aren't on PATH
+// even though the CLI ships inside the bundle. splitEditorCommand resolves the space-containing
+// bundle paths correctly.
+internal val EDITOR_CATALOG = listOf(
+    EditorPreset(
+        "vscode",
+        "VS Code",
+        listOf(
+            "code -g {file}:{line}",
+            "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code -g {file}:{line}",
+        ),
+    ),
+    EditorPreset(
+        "intellij",
+        "IntelliJ IDEA",
+        listOf(
+            "idea --line {line} {file}",
+            "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea --line {line} {file}",
+            "idea64 --line {line} {file}",
+        ),
+    ),
+    EditorPreset(
+        "studio",
+        "Android Studio",
+        listOf(
+            "studio --line {line} {file}",
+            "/Applications/Android Studio.app/Contents/MacOS/studio --line {line} {file}",
+        ),
+    ),
+    EditorPreset(
+        "cursor",
+        "Cursor",
+        listOf(
+            "cursor -g {file}:{line}",
+            "/Applications/Cursor.app/Contents/Resources/app/bin/cursor -g {file}:{line}",
+        ),
+    ),
+    EditorPreset(
+        "sublime",
+        "Sublime Text",
+        listOf(
+            "subl {file}:{line}",
+            "/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl {file}:{line}",
+        ),
+    ),
+    EditorPreset(
+        "zed",
+        "Zed",
+        listOf(
+            "zed {file}:{line}",
+            "/Applications/Zed.app/Contents/MacOS/cli {file}:{line}",
+        ),
+    ),
+)
+
+// Auto-detect fallback chain for AppState.openInEditor's "auto"/blank editorChoice path: every
+// catalog candidate template, in catalog order — the first one whose CLI is actually on PATH (i.e.
+// ProcessBuilder.start() succeeds) wins. Each template supports jumping straight to a line, unlike
+// plain Desktop.open().
+private val AUTO_EDITOR_COMMANDS = EDITOR_CATALOG.flatMap { it.candidates }
 
 // Extra places to look for an editor CLI besides $PATH. A GUI app (and the Gradle daemon in dev)
 // doesn't inherit the user's interactive shell PATH, so `code`/`idea`/etc. are typically missing
@@ -267,6 +338,18 @@ internal fun splitEditorCommand(template: String, dirs: List<File> = executableS
     }
     return null
 }
+
+// First candidate template in [preset] whose executable actually resolves (i.e. is installed) under
+// [dirs], or null if none do. Reuses [splitEditorCommand] — no new process/exec logic; this is just
+// "does any candidate resolve", checked in catalog order.
+internal fun detectedTemplate(preset: EditorPreset, dirs: List<File> = executableSearchDirs()): String? =
+    preset.candidates.firstOrNull { splitEditorCommand(it, dirs) != null }
+
+// EDITOR_CATALOG filtered down to installed editors, each paired with its resolved command
+// template (the first matching candidate) — the ordered list of choices the Settings dropdown
+// offers, and the read-only "resolved command" shown once one is selected.
+internal fun detectInstalledEditors(dirs: List<File> = executableSearchDirs()): List<Pair<EditorPreset, String>> =
+    EDITOR_CATALOG.mapNotNull { preset -> detectedTemplate(preset, dirs)?.let { preset to it } }
 
 // Resolves an editor template and substitutes its location placeholders. Keeping this separate
 // from [launchEditor] makes the exact process arguments testable, especially for the Toolbox
@@ -367,7 +450,11 @@ data class ImportFilterReviewRow(
     val skippedReason: String? = null,
 )
 
-data class PendingImportReview(val rows: List<ImportFilterReviewRow>, val sourceName: String? = null)
+data class PendingImportReview(
+    val rows: List<ImportFilterReviewRow>,
+    val stagedFolders: List<SavedFilterFolder> = emptyList(),
+    val sourceName: String? = null,
+)
 
 data class OpenFileError(val title: String, val path: String?, val message: String)
 
@@ -405,6 +492,33 @@ data class PendingSplitPrompt(
     val deferredFiles: List<File> = emptyList(),
     val deferredArchiveEntries: List<DeferredArchiveEntry> = emptyList(),
 )
+
+// Update-check status shown next to Settings' "Check now" button (AutomationSettingsSection).
+// Deliberately has no "an update is available" case of its own — AppState.availableUpdate already
+// carries that (and drives the update dialog), so a caller checks availableUpdate first and only
+// falls back to this for the plain checked-and-current / still-checking / failed states.
+sealed interface UpdateStatus {
+    data object Idle : UpdateStatus
+
+    data object Checking : UpdateStatus
+
+    data class UpToDate(val version: String) : UpdateStatus
+
+    /** Only ever set for a manual check (AppState.checkForUpdates) — a silent startup check that
+     *  fails leaves this at [Idle] instead, so it never surfaces an error the user didn't ask for. */
+    data class Failed(val reason: String) : UpdateStatus
+}
+
+/** Download progress for the release asset picked by [assetForCurrentOs], driven by [AppState.downloadUpdate]. */
+sealed interface UpdateDownloadState {
+    data object Idle : UpdateDownloadState
+
+    data class InProgress(val fraction: Float) : UpdateDownloadState
+
+    data class Done(val file: File) : UpdateDownloadState
+
+    data class Failed(val reason: String) : UpdateDownloadState
+}
 
 // Every parameter beyond the first few is a test seam with a real-default value (autosaveFile,
 // archiveEntryByteBudget, sourceIndexFile, etc. — see their own doc comments below), not
@@ -698,6 +812,19 @@ class AppState(
         private set
     var sourceCodeView by mutableStateOf<SourceCodeView?>(null)
 
+    // Cache of installed editors for the Settings → Source code editor-choice dropdown, populated
+    // by [rescanEditors]. Null means "not scanned yet" (shows a "Detecting…" placeholder in the UI),
+    // distinct from an empty list (scanned, nothing found).
+    var detectedEditors by mutableStateOf<List<Pair<EditorPreset, String>>?>(null)
+
+    // Runs detectInstalledEditors() off the UI thread and publishes the result. Compose
+    // mutableStateOf is snapshot-safe to write from any thread (see CLAUDE.md) so no
+    // withContext(Dispatchers.Main) is needed. Safe to call repeatedly (e.g. a Settings "Rescan"
+    // button, or first-open of the Source code section) — each call simply re-scans and overwrites.
+    fun rescanEditors() {
+        ioScope.launch { detectedEditors = detectInstalledEditors() }
+    }
+
     // Reindexing is per source folder (see reindexSources) — this tracks which folder paths
     // (absolute) currently have a scan in flight, purely so the Settings UI can disable that
     // folder's own "Reindex" button and no other's while a build runs.
@@ -805,9 +932,12 @@ class AppState(
     var sfDialog by mutableStateOf(false)
     var sfName by mutableStateOf("")
     var sfTabId by mutableStateOf<String?>(null)
+    var sfFolderId by mutableStateOf<String?>(null)
     var savedFilters by mutableStateOf<List<SavedFilter>>(emptyList())
+    var savedFilterFolders by mutableStateOf<List<SavedFilterFolder>>(emptyList())
     var tagUsage by mutableStateOf<Map<String, Int>>(emptyMap())
     var settingsOpen by mutableStateOf(false)
+    var licenseAgreementOpen by mutableStateOf(false)
 
     /** One-shot Settings destination for contextual controls such as the AI provider picker. */
     internal var requestedSettingsSection by mutableStateOf<SettingsSection?>(null)
@@ -841,6 +971,7 @@ class AppState(
     var filterExportDialogOpen by mutableStateOf(false)
     var filterExportSelectedIds by mutableStateOf<Set<String>>(emptySet())
     var pendingDeleteFilterId by mutableStateOf<String?>(null)
+    var pendingDeleteSavedFilterFolderId by mutableStateOf<String?>(null)
     var pendingClearFilterTabId by mutableStateOf<String?>(null)
     var activeSavedFilterIds by mutableStateOf<Map<String, String>>(emptyMap())
     var filterDraftsByTab by mutableStateOf<Map<String, SavedFilter>>(emptyMap())
@@ -1077,6 +1208,92 @@ class AppState(
         if (settings == next) return
         settings = next
         autosaveNow()
+    }
+
+    val needsLicenseAcceptance: Boolean
+        get() = settings.acceptedLicenseVersion != LICENSE_VERSION
+
+    fun acceptLicenseAgreement() {
+        updateSettings { it.copy(acceptedLicenseVersion = LICENSE_VERSION) }
+    }
+
+    // ── Update check (see update/UpdateChecker.kt) ─────────────────────
+    var availableUpdate by mutableStateOf<ReleaseInfo?>(null)
+    var updateCheckStatus by mutableStateOf<UpdateStatus>(UpdateStatus.Idle)
+    var updateDownload by mutableStateOf<UpdateDownloadState>(UpdateDownloadState.Idle)
+    private val updateChecker = UpdateChecker()
+
+    // skipUpdate() only records the skipped version — it never clears availableUpdate — so this
+    // stays the single source of truth for whether the popup should be showing right now, both
+    // right after a check and after the app restarts with a still-current availableUpdate.
+    val updateDialogVisible: Boolean
+        get() = availableUpdate?.let { it.version != settings.skippedUpdateVersion } == true
+
+    // manual distinguishes a user-initiated "Check now" (Settings) from the silent startup check
+    // (Main.kt): only a manual check surfaces a failure via updateCheckStatus, so a flaky network
+    // at launch never shows the user an error they didn't ask about.
+    fun checkForUpdates(manual: Boolean) {
+        updateCheckStatus = UpdateStatus.Checking
+        ioScope.launch {
+            when (val result = updateChecker.fetchLatest()) {
+                is UpdateCheckResult.Available -> {
+                    availableUpdate = result.release
+                    // The "an update exists" fact lives in availableUpdate itself (and drives the
+                    // dialog); status returns to Idle rather than a misleading "UpToDate".
+                    updateCheckStatus = UpdateStatus.Idle
+                }
+                UpdateCheckResult.UpToDate -> {
+                    availableUpdate = null
+                    updateCheckStatus = UpdateStatus.UpToDate(BuildInfo.APP_VERSION)
+                }
+                is UpdateCheckResult.Unavailable -> {
+                    updateCheckStatus = if (manual) UpdateStatus.Failed(result.reason) else UpdateStatus.Idle
+                }
+            }
+        }
+    }
+
+    fun skipUpdate() {
+        updateSettings { it.copy(skippedUpdateVersion = availableUpdate?.version) }
+        availableUpdate = null
+    }
+
+    fun dismissUpdateForNow() {
+        availableUpdate = null
+    }
+
+    // No OS-matching asset (assetForCurrentOs) is a no-op here: UpdateDialog shows "View on
+    // GitHub" instead of "Download" in that case, so this is never called without one.
+    fun downloadUpdate() {
+        val release = availableUpdate ?: return
+        val asset = assetForCurrentOs(release.assets) ?: return
+        System.setProperty("apple.awt.fileDialogForDirectories", "true")
+        try {
+            val dlg = FileDialog(null as Frame?, "Choose Download Folder", FileDialog.LOAD)
+            settings.updateDownloadDir?.let { dlg.directory = it }
+            dlg.isVisible = true
+            val dir = dlg.directory ?: return
+            val name = dlg.file ?: return
+            val chosenDir = File(dir, name)
+            updateSettings { it.copy(updateDownloadDir = chosenDir.absolutePath) }
+            updateDownload = UpdateDownloadState.InProgress(0f)
+            ioScope.launch {
+                runCatching {
+                    updateChecker.downloadAsset(asset, chosenDir) { bytesRead, total ->
+                        val fraction = if (total > 0) (bytesRead.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+                        updateDownload = UpdateDownloadState.InProgress(fraction)
+                    }
+                }.onSuccess { file ->
+                    updateDownload = UpdateDownloadState.Done(file)
+                    revealInFileManager(file)
+                }.onFailure { error ->
+                    if (error is CancellationException) throw error
+                    updateDownload = UpdateDownloadState.Failed(error.message ?: "Download failed.")
+                }
+            }
+        } finally {
+            System.setProperty("apple.awt.fileDialogForDirectories", "false")
+        }
     }
 
     fun openAiProviderSettings() {
@@ -1498,7 +1715,7 @@ class AppState(
         return savedFilters.any { it.id != exceptId && it.name.trim().equals(clean, ignoreCase = true) }
     }
 
-    fun saveFilter(tabId: String, name: String) {
+    fun saveFilter(tabId: String, name: String, folderId: String? = sfFolderId) {
         val cleanName = name.trim()
         if (cleanName.isBlank()) return
         val existing = savedFilters.find { it.name.trim().equals(cleanName, ignoreCase = true) }
@@ -1506,12 +1723,14 @@ class AppState(
             pendingDuplicateFilterSave = PendingDuplicateFilterSave(tabId, existing.id, existing.name, cleanName)
             return
         }
-        val sf = snapshotFilter(tabId, "sf${System.nanoTime()}_${savedFilters.size}", cleanName) ?: return
+        val validFolderId = folderId?.takeIf { id -> savedFilterFolders.any { it.id == id } }
+        val sf = snapshotFilter(tabId, "sf${System.nanoTime()}_${savedFilters.size}", cleanName)
+            ?.copy(folderId = validFolderId) ?: return
         savedFilters = savedFilters + sf
         activeSavedFilterIds = activeSavedFilterIds + (tabId to sf.id)
         clearDraftForTab(tabId)
         transientRegexSearchTabIds = transientRegexSearchTabIds - tabId
-        sfDialog = false; sfName = ""
+        sfDialog = false; sfName = ""; sfFolderId = null
         writeFilterBackup()
         loadPendingFilterAfterSaving(tabId)
     }
@@ -1526,6 +1745,7 @@ class AppState(
         pendingDuplicateFilterSave = null
         sfDialog = false
         sfName = ""
+        sfFolderId = null
         writeFilterBackup()
         loadPendingFilterAfterSaving(pending.tabId)
     }
@@ -1596,6 +1816,7 @@ class AppState(
         val pending = pendingFilterLoad ?: return
         sfDialog = true
         sfTabId = pending.tabId
+        sfFolderId = null
         val currentName = pending.currentFilterId?.let { id -> savedFilters.find { it.id == id }?.name }
         sfName = currentName?.let { "$it copy" } ?: ""
     }
@@ -1603,11 +1824,14 @@ class AppState(
     private fun snapshotFilter(tabId: String, id: String, name: String): SavedFilter? {
         val t = tab(tabId) ?: return null
         val f = t.filter
+        val libraryMetadata = savedFilters.firstOrNull { it.id == id }
         return SavedFilter(
             id, name, f.levels, f.activeTags, f.kwText, f.kwRegex,
             f.mode, f.excludeTags, f.excludeKw, f.excludeKwRegex, f.highlighters, f.seqOn,
             f.kwInTag, f.kwInTagRegex, f.pkgPrefixes, f.pidTidFilter, f.sequences, f.messageRules,
             f.excludePkgPrefixes, f.kwHighlightEnabled, f.kwHighlightColor,
+            folderId = libraryMetadata?.folderId,
+            favorite = libraryMetadata?.favorite ?: false,
         )
     }
 
@@ -1682,6 +1906,71 @@ class AppState(
         writeFilterBackup()
     }
 
+    fun createSavedFilterFolder(name: String) {
+        val clean = name.trim()
+        if (clean.isBlank() || savedFilterFolders.any { it.name.equals(clean, ignoreCase = true) }) return
+        savedFilterFolders = savedFilterFolders + SavedFilterFolder("sff${System.nanoTime()}", clean)
+        autosaveNow()
+    }
+
+    fun renameSavedFilterFolder(id: String, name: String) {
+        val clean = name.trim()
+        if (clean.isBlank() || savedFilterFolders.any { it.id != id && it.name.equals(clean, ignoreCase = true) }) return
+        savedFilterFolders = savedFilterFolders.map { if (it.id == id) it.copy(name = clean) else it }
+        autosaveNow()
+    }
+
+    fun requestDeleteSavedFilterFolder(id: String) {
+        if (savedFilterFolders.any { it.id == id }) pendingDeleteSavedFilterFolderId = id
+    }
+
+    fun cancelDeleteSavedFilterFolder() { pendingDeleteSavedFilterFolderId = null }
+
+    fun confirmDeleteSavedFilterFolder() {
+        val id = pendingDeleteSavedFilterFolderId ?: return
+        savedFilters = savedFilters.map { if (it.folderId == id) it.copy(folderId = null) else it }
+        savedFilterFolders = savedFilterFolders.filterNot { it.id == id }
+        pendingDeleteSavedFilterFolderId = null
+        writeFilterBackup()
+    }
+
+    fun toggleSavedFilterFavorite(id: String) {
+        savedFilters = savedFilters.map { if (it.id == id) it.copy(favorite = !it.favorite) else it }
+        writeFilterBackup()
+    }
+
+    fun moveSavedFilter(id: String, folderId: String?) {
+        val validFolder = folderId?.takeIf { target -> savedFilterFolders.any { it.id == target } }
+        if (savedFilters.none { it.id == id }) return
+        savedFilters = savedFilters.map { if (it.id == id) it.copy(folderId = validFolder) else it }
+        writeFilterBackup()
+    }
+
+    fun reorderSavedFilterWithinFolder(id: String, toIndex: Int) {
+        val filter = savedFilters.firstOrNull { it.id == id } ?: return
+        val siblings = savedFilters.filter { it.folderId == filter.folderId }
+        val fromIndex = siblings.indexOfFirst { it.id == id }
+        if (fromIndex < 0) return
+        val reordered = siblings.toMutableList().apply {
+            val moved = removeAt(fromIndex)
+            add(toIndex.coerceIn(0, size), moved)
+        }
+        val iterator = reordered.iterator()
+        savedFilters = savedFilters.map { if (it.folderId == filter.folderId) iterator.next() else it }
+        writeFilterBackup()
+    }
+
+    fun reorderSavedFilterFolder(id: String, toIndex: Int) {
+        val fromIndex = savedFilterFolders.indexOfFirst { it.id == id }
+        if (fromIndex < 0) return
+        val reordered = savedFilterFolders.toMutableList().apply {
+            val folder = removeAt(fromIndex)
+            add(toIndex.coerceIn(0, size), folder)
+        }
+        savedFilterFolders = reordered
+        autosaveNow()
+    }
+
     fun beginRenameFilter(id: String) {
         val draftEntry = filterDraftsByTab.entries.firstOrNull { it.value.id == id }
         val current = draftEntry?.value ?: savedFilters.find { it.id == id } ?: return
@@ -1743,32 +2032,39 @@ class AppState(
 
     fun exportFilters(selectedIds: Set<String>? = null): String {
         val filters = selectedIds?.let { ids -> savedFilters.filter { it.id in ids } } ?: savedFilters
-        return exportFiltersList(filters)
+        return exportFiltersList(filters, savedFilterFolders, includeEmptyFolders = selectedIds == null)
     }
 
     fun importFilters(json: String) {
-        val imported = decodeFilters(json).getOrElse { return }
-        if (imported.isEmpty()) return
-        savedFilters = savedFilters + imported
+        val library = decodeFilterLibrary(json).getOrElse { return }
+        if (library.filters.isEmpty()) return
+        val prepared = prepareImportedLibrary(library)
+        savedFilterFolders = savedFilterFolders + prepared.folders
+        savedFilters = savedFilters + prepared.filters
     }
 
     fun beginImportFilters(json: String, sourceName: String? = null) {
-        val imported = decodeFilters(json).getOrElse {
+        val library = decodeFilterLibrary(json).getOrElse {
             importError = "Could not read filter file."
             pendingImportReview = null
             return
         }
-        beginImportFilterList(imported, sourceName)
+        val prepared = prepareImportedLibrary(library)
+        beginImportFilterList(prepared.filters, prepared.folders, sourceName)
     }
 
-    private fun beginImportFilterList(imported: List<SavedFilter>, sourceName: String? = null) {
+    private fun beginImportFilterList(
+        imported: List<SavedFilter>,
+        stagedFolders: List<SavedFilterFolder> = emptyList(),
+        sourceName: String? = null,
+    ) {
         if (imported.isEmpty()) {
             importError = "No saved filters found."
             pendingImportReview = null
             return
         }
         val rows = buildImportRows(savedFilters, imported)
-        pendingImportReview = PendingImportReview(rows, sourceName)
+        pendingImportReview = PendingImportReview(rows, stagedFolders, sourceName)
         importError = null
     }
 
@@ -1790,15 +2086,29 @@ class AppState(
         })
     }
 
+    /** Bulk-checks/unchecks rows: checking restores each row's natural default action (ADD for a
+     * brand-new filter, RENAME for a name conflict); unchecking sets SKIP. Backs both the per-row
+     * and per-folder/dialog-level "select all" checkboxes in the import review dialog. */
+    fun setImportRowsChecked(rowIds: Set<String>, checked: Boolean) {
+        val review = pendingImportReview ?: return
+        pendingImportReview = review.copy(rows = review.rows.map { row ->
+            if (row.rowId !in rowIds) row
+            else if (checked) row.withImportAction(savedFilters, if (row.targetId == null) ImportFilterAction.ADD else ImportFilterAction.RENAME)
+            else row.withImportAction(savedFilters, ImportFilterAction.SKIP)
+        })
+    }
+
     fun confirmImportFilters() {
         val review = pendingImportReview ?: return
         var next = savedFilters
         var changed = false
+        val survivingFolderIds = mutableSetOf<String>()
         review.rows.forEach { row ->
             when (row.action) {
                 ImportFilterAction.ADD, ImportFilterAction.RENAME -> {
                     next = next + row.incoming.copy(id = freshSavedFilterId(savedFilters), name = uniqueNameAgainst(row.resolvedName, next))
                     changed = true
+                    row.incoming.folderId?.let(survivingFolderIds::add)
                 }
 
                 ImportFilterAction.REPLACE -> {
@@ -1807,14 +2117,38 @@ class AppState(
                         if (existing.id == targetId) row.incoming.copy(id = existing.id, name = existing.name) else existing
                     }
                     changed = true
+                    row.incoming.folderId?.let(survivingFolderIds::add)
                 }
 
                 ImportFilterAction.SKIP -> Unit
             }
         }
         savedFilters = next
+        val foldersToAdd = review.stagedFolders.filter { it.id in survivingFolderIds }
+        if (foldersToAdd.isNotEmpty()) {
+            savedFilterFolders = savedFilterFolders + foldersToAdd
+        }
         pendingImportReview = null
         if (changed) writeFilterBackup()
+    }
+
+    /** Maps imported folder ids onto this library by folder name, adding non-conflicting folders. */
+    private fun prepareImportedLibrary(library: DecodedFilterLibrary): DecodedFilterLibrary {
+        val mappedIds = mutableMapOf<String, String>()
+        val additions = mutableListOf<SavedFilterFolder>()
+        library.folders.forEach { imported ->
+            val local = (savedFilterFolders + additions).firstOrNull { it.name.equals(imported.name, ignoreCase = true) }
+            val target = local ?: run {
+                val id = imported.id.takeIf { candidate -> savedFilterFolders.none { it.id == candidate } && additions.none { it.id == candidate } }
+                    ?: "sff${System.nanoTime()}_${additions.size}"
+                SavedFilterFolder(id, imported.name).also(additions::add)
+            }
+            mappedIds[imported.id] = target.id
+        }
+        return DecodedFilterLibrary(
+            filters = library.filters.map { it.copy(folderId = it.folderId?.let(mappedIds::get)) },
+            folders = additions,
+        )
     }
 
     private fun writeFilterBackup() {
@@ -2151,6 +2485,12 @@ class AppState(
         }
         return true
     }
+
+    // Public entry for the MCP/AI control surface: fold an arbitrary inclusive line-id range into
+    // one manual block, regardless of argument order. Mirrors collapseSelectedLinesFromCtx but
+    // takes explicit ids instead of relying on the right-click ctx / current selection.
+    fun collapseRange(tabId: String, startId: Int, endId: Int): Boolean =
+        addManualCollapse(tabId, minOf(startId, endId), ManualCollapseDirection.RANGE, endId = maxOf(startId, endId))
 
     // Collapses an arbitrary multi-line selection into one block — unlike collapseTo{Start,End}Ctx
     // (anchored to a file edge), this covers exactly [min(ids), max(ids)] regardless of which of
@@ -2855,7 +3195,7 @@ class AppState(
     fun saveAnalysis(tabId: String) {
         val t = tab(tabId) ?: return
         val dlg = FileDialog(null as Frame?, "Save Analysis", FileDialog.SAVE).apply {
-            file = analysisNoteMarkdownName(t.filename)
+            file = analysisNoteMarkdownName(t.filename, t.sourcePath)
             settings.defaultSaveDir?.let { directory = it }
             isVisible = true
         }
@@ -2944,8 +3284,14 @@ class AppState(
         ).distinctBy { it.absolutePath }
     }
 
-    private fun noteNamesForFilename(filename: String): List<String> {
-        return listOf(analysisNoteMarkdownName(filename))
+    // Includes the plain-filename name alongside the (possibly archive-qualified) one so notes
+    // exported before the archive-qualified naming — plain "logcat_analysis.md" — still resolve
+    // for their tab.
+    private fun noteNamesForFilename(filename: String, sourcePath: String? = null): List<String> {
+        return listOf(
+            analysisNoteMarkdownName(filename, sourcePath),
+            analysisNoteMarkdownName(filename),
+        ).distinct()
     }
 
     // Two tabs can share a bare filename while being entirely different files (different
@@ -2955,7 +3301,7 @@ class AppState(
     // differ); a note saved before this fingerprinting existed (no .src sidecar) or a tab with no
     // sourcePath (e.g. a merged tab) still matches by name as before — see resolveNoteTarget.
     fun recentNotesForTab(tab: LogTab): List<String> {
-        val relatedNames = noteNamesForFilename(tab.filename).toSet()
+        val relatedNames = noteNamesForFilename(tab.filename, tab.sourcePath).toSet()
         return recentNotes.filter { path ->
             val f = File(path)
             if (f.name !in relatedNames) return@filter false
@@ -3051,7 +3397,7 @@ class AppState(
     // slot with no conflicting fingerprint, so a genuine collision no longer silently overwrites
     // an unrelated file's saved notes.
     private fun resolveNoteTarget(targetDir: File, filename: String, sourcePath: String?): File {
-        val baseName = analysisNoteMarkdownName(filename)
+        val baseName = analysisNoteMarkdownName(filename, sourcePath)
         if (sourcePath == null) return File(targetDir, baseName)
         var candidateName = baseName
         var suffix = 2
@@ -3369,31 +3715,55 @@ class AppState(
         if (matches.isNotEmpty()) sourceCodeView = SourceCodeView(matches)
     }
 
-    // Opens filePath at line in an editor: settings.editorCommand if set, else the first working
-    // AUTO_EDITOR_COMMANDS entry. There is deliberately no Desktop.open() fallback: that can open
-    // the correct file but cannot honour the requested source line, which is worse than reporting
-    // a missing editor launcher. Runs on ioScope so editor process startup never blocks the UI.
+    // Opens filePath at line in an editor, dispatched on settings.editorChoice:
+    //  - "auto" / "" (default, also the migration default for a never-configured install): tries
+    //    every AUTO_EDITOR_COMMANDS entry (every catalog candidate) in order.
+    //  - "custom": uses settings.editorCommand verbatim, exactly as the old single-field behavior.
+    //  - anything else is an EditorPreset.id: resolved fresh via detectedTemplate (not the cached
+    //    detectedEditors snapshot, so an editor installed/uninstalled since the last Settings scan
+    //    is still honoured correctly) rather than a stored command, so a Toolbox-relocated or
+    //    reinstalled editor keeps resolving without the user re-typing anything.
+    // There is deliberately no Desktop.open() fallback in any branch: that can open the correct file
+    // but cannot honour the requested source line, which is worse than reporting a missing editor
+    // launcher. Runs on ioScope so editor process startup never blocks the UI.
     fun openInEditor(filePath: String, line: Int) {
         val file = File(filePath)
         ioScope.launch {
-            val custom = settings.editorCommand
-            if (custom.isNotBlank()) {
-                if (launchEditor(custom, file, line)) return@launch
-                showOpenError(
-                    title = "Could not open code location",
-                    path = filePath,
-                    message = "The configured Open command could not be launched. The file was not opened without its line " +
-                        "location; check the executable path and the {file} and {line} placeholders in Settings.",
-                )
-                return@launch
+            when (val choice = settings.editorChoice) {
+                "auto", "" -> {
+                    if (AUTO_EDITOR_COMMANDS.any { launchEditor(it, file, line) }) return@launch
+                    showOpenError(
+                        title = "Could not open code location",
+                        path = filePath,
+                        message = "No supported editor launcher was found. Pick an installed editor or a custom " +
+                            "command in Settings.",
+                    )
+                }
+                "custom" -> {
+                    val custom = settings.editorCommand
+                    if (custom.isNotBlank() && launchEditor(custom, file, line)) return@launch
+                    showOpenError(
+                        title = "Could not open code location",
+                        path = filePath,
+                        message = "The configured Open command could not be launched. The file was not opened without its line " +
+                            "location; check the executable path and the {file} and {line} placeholders in Settings.",
+                    )
+                }
+                else -> {
+                    val preset = EDITOR_CATALOG.find { it.id == choice }
+                    val template = preset?.let { detectedTemplate(it) }
+                    if (template != null && launchEditor(template, file, line)) return@launch
+                    showOpenError(
+                        title = "Could not open code location",
+                        path = filePath,
+                        message = if (preset != null) {
+                            "${preset.displayName} is no longer detected — pick another app or a custom command in Settings."
+                        } else {
+                            "The selected editor is not recognised — pick another app or a custom command in Settings."
+                        },
+                    )
+                }
             }
-            if (AUTO_EDITOR_COMMANDS.any { launchEditor(it, file, line) }) return@launch
-            showOpenError(
-                title = "Could not open code location",
-                path = filePath,
-                message = "No supported editor launcher was found. Configure an Open command with {file} and {line} " +
-                    "placeholders in Settings.",
-            )
         }
     }
 
@@ -3433,7 +3803,7 @@ class AppState(
         ioScope.launch {
             val decoded = files.mapNotNull { file -> runCatching { decodeFilters(file.readText()).getOrNull() }.getOrNull() }
             val imported = decoded.flatten()
-            beginImportFilterList(imported, files.joinToString(", ") { it.name })
+            beginImportFilterList(imported, sourceName = files.joinToString(", ") { it.name })
         }
     }
 

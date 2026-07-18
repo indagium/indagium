@@ -139,6 +139,11 @@ fun main(args: Array<String>) {
             }
             onDispose { appState.stopControlServerForShutdown() }
         }
+        // One-shot startup update check (see update/UpdateChecker.kt, AppState.checkForUpdates).
+        DisposableEffect(Unit) {
+            maybeAutoCheckForUpdates(appState, isPackaged)
+            onDispose {}
+        }
         Window(
             // Autosave is debounced 400ms behind tab/filter/settings changes (see App.kt) — a
             // change made shortly before closing the window would otherwise never get written,
@@ -172,9 +177,23 @@ fun main(args: Array<String>) {
                     onDispose { Toolkit.getDefaultToolkit().removeAWTEventListener(listener) }
                 }
             }
-            App(appState)
+            App(
+                appState,
+                onLicenseDeclined = {
+                    appState.close()
+                    exitApplication()
+                },
+            )
         }
     }
+}
+
+// Packaged builds only, and only when the user hasn't disabled it (Settings' automatic-update
+// toggle) — desktopRun/IDE runs never hit GitHub uninvited. manual = false, so a failed/offline
+// check stays silent; Settings' "Check now" still works either way. Split out from main() to keep
+// it under detekt's cyclomatic-complexity threshold.
+private fun maybeAutoCheckForUpdates(appState: AppState, isPackaged: Boolean) {
+    if (isPackaged && appState.settings.autoCheckUpdates) appState.checkForUpdates(manual = false)
 }
 
 // GNOME/Mutter routinely ignores a bare toFront() under focus-stealing prevention; the brief

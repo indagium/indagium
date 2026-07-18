@@ -20,6 +20,8 @@ import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,6 +33,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
@@ -54,7 +57,10 @@ import kotlin.math.roundToInt
 internal fun recentFilesForMenu(recentFiles: List<String>): List<String> = recentFiles
 
 @Composable
-fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) }) {
+fun App(
+    state: AppState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) },
+    onLicenseDeclined: () -> Unit = {},
+) {
     val theme = themeColors(state.settings.theme)
     val rootFocusRequester = remember { FocusRequester() }
     var pendingPanelFocus by remember { mutableStateOf<KeyboardPanel?>(null) }
@@ -78,6 +84,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
         LaunchedEffect(
             state.tabs.map { it.persistedSnapshot() },
             state.savedFilters,
+            state.savedFilterFolders,
             state.settings,
             state.activeSavedFilterIds,
             state.recentFiles,
@@ -724,7 +731,7 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
 
             // ── Save filter dialog ────────────────────────────────────
             if (state.sfDialog) {
-                Dialog(onDismissRequest = { state.sfDialog = false }) {
+                Dialog(onDismissRequest = { state.sfDialog = false; state.sfFolderId = null }) {
                     val tc2 = tc()
                     Column(
                         Modifier.width(340.dp).background(tc2.p, RoundedCornerShape(8.dp))
@@ -744,7 +751,9 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                         Spacer(Modifier.height(14.dp))
                         val trySaveFilter = {
                             val tid = state.sfTabId
-                            if (tid != null && state.sfName.isNotBlank()) state.saveFilter(tid, state.sfName)
+                            if (tid != null && state.sfName.isNotBlank()) {
+                                state.saveFilter(tid, state.sfName, state.sfFolderId)
+                            }
                         }
                         InlineField(
                             state.sfName,
@@ -754,10 +763,21 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             fontSize = 13.sp,
                             onSubmit = trySaveFilter,
                         )
+                        Spacer(Modifier.height(10.dp))
+                        AppText("Folder", color = tc2.td, fontSize = 10.sp)
+                        Spacer(Modifier.height(4.dp))
+                        SavedFilterFolderPicker(
+                            folders = state.savedFilterFolders,
+                            selectedFolderId = state.sfFolderId,
+                            onSelect = { state.sfFolderId = it },
+                        )
                         Spacer(Modifier.height(12.dp))
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
                             DialogActionButton("Save", active = state.sfName.isNotBlank()) { trySaveFilter() }
-                            DialogActionButton("Cancel", active = false) { state.sfDialog = false }
+                            DialogActionButton("Cancel", active = false) {
+                                state.sfDialog = false
+                                state.sfFolderId = null
+                            }
                         }
                     }
                 }
@@ -995,6 +1015,37 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                 }
             }
 
+            state.pendingDeleteSavedFilterFolderId?.let { folderId ->
+                val folderName = state.savedFilterFolders.firstOrNull { it.id == folderId }?.name ?: "this folder"
+                Dialog(onDismissRequest = { state.cancelDeleteSavedFilterFolder() }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(380.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Delete filter folder?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "Delete “$folderName”? Its saved filters will move to Ungrouped; no filters will be deleted.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 3,
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton("Delete folder", active = true, danger = true) {
+                                state.confirmDeleteSavedFilterFolder()
+                            }
+                            DialogActionButton("Cancel", active = false) { state.cancelDeleteSavedFilterFolder() }
+                        }
+                    }
+                }
+            }
+
             state.pendingFilterRename?.let { pending ->
                 Dialog(onDismissRequest = { state.cancelRenameFilter() }) {
                     val tc2 = tc()
@@ -1117,64 +1168,143 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                             fontSize = 11.sp,
                             maxLines = 2,
                         )
-                        Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(8.dp))
+                        val folderNameFor: (String?) -> String = { folderId ->
+                            folderId?.let { id ->
+                                state.savedFilterFolders.firstOrNull { it.id == id }?.name
+                                    ?: review.stagedFolders.firstOrNull { it.id == id }?.name
+                            } ?: "Ungrouped"
+                        }
+                        val toggleableIds: (List<ImportFilterReviewRow>) -> Set<String> = { rows ->
+                            rows.filter { it.skippedReason == null }.map { it.rowId }.toSet()
+                        }
+                        val grouped = review.rows.groupBy { folderNameFor(it.incoming.folderId) }.toList()
+                            .sortedWith(compareBy { (name, _) -> name == "Ungrouped" })
+                        val allToggleableIds = toggleableIds(review.rows)
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            AppText(
+                                "Select all",
+                                color = tc2.ac,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.clickable { state.setImportRowsChecked(allToggleableIds, true) },
+                            )
+                            AppText(
+                                "Select none",
+                                color = tc2.ac,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.clickable { state.setImportRowsChecked(allToggleableIds, false) },
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
                         Column(
                             Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            review.rows.forEach { row ->
-                                Column(
-                                    Modifier.fillMaxWidth().background(tc2.bg, CORNER_MD)
-                                        .border(1.dp, tc2.br, CORNER_MD).padding(10.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                                ) {
-                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                        AppText(
-                                            row.incoming.name,
-                                            color = tc2.tx,
-                                            fontSize = 11.sp,
-                                            modifier = Modifier.weight(1f),
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        AppText(
-                                            when (row.action) {
-                                                ImportFilterAction.ADD -> "add"
-                                                ImportFilterAction.RENAME -> "rename"
-                                                ImportFilterAction.REPLACE -> "replace"
-                                                ImportFilterAction.SKIP -> "skip"
-                                            },
-                                            color = if (row.action == ImportFilterAction.SKIP) tc2.td else tc2.ac,
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                        )
+                            grouped.forEach { (folderName, rowsInFolder) ->
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    val groupToggleableIds = toggleableIds(rowsInFolder)
+                                    val allChecked = groupToggleableIds.isNotEmpty() &&
+                                        rowsInFolder.filter { it.rowId in groupToggleableIds }.all { it.action != ImportFilterAction.SKIP }
+                                    Row(
+                                        Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        if (groupToggleableIds.isNotEmpty()) {
+                                            Checkbox(
+                                                checked = allChecked,
+                                                onCheckedChange = { state.setImportRowsChecked(groupToggleableIds, it) },
+                                                colors = CheckboxDefaults.colors(checkedColor = tc2.ac, uncheckedColor = tc2.td, checkmarkColor = tc2.bg),
+                                                modifier = Modifier.size(16.dp),
+                                            )
+                                        }
+                                        AppText(folderName, color = tc2.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                                     }
-                                    if (row.action == ImportFilterAction.RENAME) {
-                                        InlineField(
-                                            row.resolvedName,
-                                            { state.setImportFilterRename(row.rowId, it) },
-                                            "Imported name…",
-                                            Modifier.fillMaxWidth(),
-                                            fontSize = 12.sp,
-                                        )
-                                    } else {
-                                        AppText(
-                                            row.skippedReason?.let { "Skipped: $it" } ?: "Will import as \"${row.resolvedName}\".",
-                                            color = tc2.td,
-                                            fontSize = 10.sp,
-                                            maxLines = 2,
-                                        )
-                                    }
-                                    if (row.targetId != null && row.skippedReason == null) {
-                                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                            AppButton("Rename", onClick = {
-                                                state.setImportFilterAction(row.rowId, ImportFilterAction.RENAME)
-                                            }, variant = if (row.action == ImportFilterAction.RENAME) ButtonVariant.Primary else ButtonVariant.Secondary)
-                                            AppButton("Replace", onClick = {
-                                                state.setImportFilterAction(row.rowId, ImportFilterAction.REPLACE)
-                                            }, variant = if (row.action == ImportFilterAction.REPLACE) ButtonVariant.Primary else ButtonVariant.Secondary)
-                                            AppButton("Skip", onClick = {
-                                                state.setImportFilterAction(row.rowId, ImportFilterAction.SKIP)
-                                            }, variant = if (row.action == ImportFilterAction.SKIP) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                    rowsInFolder.forEach { row ->
+                                        Column(
+                                            Modifier.fillMaxWidth().background(tc2.bg, CORNER_MD)
+                                                .border(1.dp, tc2.br, CORNER_MD).padding(10.dp),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            Row(
+                                                Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                            ) {
+                                                if (row.skippedReason == null) {
+                                                    Checkbox(
+                                                        checked = row.action != ImportFilterAction.SKIP,
+                                                        onCheckedChange = { state.setImportRowsChecked(setOf(row.rowId), it) },
+                                                        colors = CheckboxDefaults.colors(
+                                                            checkedColor = tc2.ac,
+                                                            uncheckedColor = tc2.td,
+                                                            checkmarkColor = tc2.bg,
+                                                        ),
+                                                        modifier = Modifier.size(16.dp),
+                                                    )
+                                                }
+                                                AppText(
+                                                    row.incoming.name,
+                                                    color = tc2.tx,
+                                                    fontSize = 11.sp,
+                                                    modifier = Modifier.weight(1f),
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
+                                                AppText(
+                                                    when (row.action) {
+                                                        ImportFilterAction.ADD -> "add"
+                                                        ImportFilterAction.RENAME -> "rename"
+                                                        ImportFilterAction.REPLACE -> "replace"
+                                                        ImportFilterAction.SKIP -> "skip"
+                                                    },
+                                                    color = if (row.action == ImportFilterAction.SKIP) tc2.td else tc2.ac,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                )
+                                            }
+                                            if (row.action == ImportFilterAction.RENAME) {
+                                                InlineField(
+                                                    row.resolvedName,
+                                                    { state.setImportFilterRename(row.rowId, it) },
+                                                    "Imported name…",
+                                                    Modifier.fillMaxWidth(),
+                                                    fontSize = 12.sp,
+                                                )
+                                            } else {
+                                                AppText(
+                                                    if (row.action == ImportFilterAction.SKIP) {
+                                                        row.skippedReason?.let { "Skipped: $it" } ?: "Skipped."
+                                                    } else {
+                                                        "Will import as \"${row.resolvedName}\"."
+                                                    },
+                                                    color = tc2.td,
+                                                    fontSize = 10.sp,
+                                                    maxLines = 2,
+                                                )
+                                            }
+                                            if (row.targetId != null && row.skippedReason == null) {
+                                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                    AppButton("Rename", onClick = {
+                                                        state.setImportFilterAction(row.rowId, ImportFilterAction.RENAME)
+                                                    }, variant = if (row.action == ImportFilterAction.RENAME) {
+                                                        ButtonVariant.Primary
+                                                    } else {
+                                                        ButtonVariant.Secondary
+                                                    })
+                                                    AppButton("Replace", onClick = {
+                                                        state.setImportFilterAction(row.rowId, ImportFilterAction.REPLACE)
+                                                    }, variant = if (row.action == ImportFilterAction.REPLACE) {
+                                                        ButtonVariant.Primary
+                                                    } else {
+                                                        ButtonVariant.Secondary
+                                                    })
+                                                    AppButton("Skip", onClick = {
+                                                        state.setImportFilterAction(row.rowId, ImportFilterAction.SKIP)
+                                                    }, variant = if (row.action == ImportFilterAction.SKIP) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1504,6 +1634,22 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
                 }
             }
 
+            if (state.licenseAgreementOpen && !state.needsLicenseAcceptance) {
+                LicenseAgreementDialog(mandatory = false, onDismiss = { state.licenseAgreementOpen = false })
+            }
+
+            if (state.needsLicenseAcceptance) {
+                LicenseAgreementDialog(
+                    mandatory = true,
+                    onAccept = state::acceptLicenseAgreement,
+                    onDecline = onLicenseDeclined,
+                )
+            }
+
+            if (state.updateDialogVisible) {
+                UpdateDialog(state)
+            }
+
             // ── Source code popup ─────────────────────────────────────
             state.sourceCodeView?.let { view ->
                 SourceCodeDialog(state, view, onDismiss = { state.sourceCodeView = null })
@@ -1576,6 +1722,73 @@ fun App(state: AppState = remember { AppState(restoreOnCreate = true, filterBack
             state.sourceFolderInfoEditorTarget?.let { path ->
                 Dialog(onDismissRequest = { state.sourceFolderInfoEditorTarget = null }) {
                     SourceFolderInfoDialog(state = state, path = path) { state.sourceFolderInfoEditorTarget = null }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterFolderPicker(
+    folders: List<SavedFilterFolder>,
+    selectedFolderId: String?,
+    onSelect: (String?) -> Unit,
+) {
+    val tc = tc()
+    var open by remember { mutableStateOf(false) }
+    val selectedName = folders.firstOrNull { it.id == selectedFolderId }?.name ?: "Ungrouped"
+    Box(Modifier.fillMaxWidth()) {
+        HoverBox(
+            modifier = Modifier.fillMaxWidth().height(28.dp)
+                .clip(CORNER_SM)
+                .background(tc.bg, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM),
+            onClick = { open = !open },
+        ) {
+            Row(
+                Modifier.fillMaxSize().padding(horizontal = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                AppText(selectedName, color = tc.tx, fontSize = 11.sp, overflow = TextOverflow.Ellipsis)
+                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 8.sp)
+            }
+        }
+        if (open) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, 30),
+                onDismissRequest = { open = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.width(300.dp).heightIn(max = 220.dp)
+                        .verticalScroll(rememberScrollState())
+                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                ) {
+                    (listOf<SavedFilterFolder?>(null) + folders).forEach { folder ->
+                        val selected = folder?.id == selectedFolderId
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                            baseBg = if (selected) tc.abg else Color.Transparent,
+                            onClick = {
+                                onSelect(folder?.id)
+                                open = false
+                            },
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                            ) {
+                                AppText(if (selected) "✓" else "", color = tc.ac, fontSize = 10.sp, modifier = Modifier.width(10.dp))
+                                AppText(folder?.name ?: "Ungrouped", color = tc.tx, fontSize = 11.sp, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                    }
                 }
             }
         }

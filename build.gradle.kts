@@ -23,11 +23,14 @@ val ktorVersion = "3.4.3"
 
 val appVersion: String = providers.gradleProperty("app.version").get()
 val appAuthor = "Roman Arnaut"
+val licenseVersion = "2026-07-18"
 val generatedBuildInfoDir = layout.buildDirectory.dir("generated/openlogBuildInfo/desktopMain/kotlin")
+val generatedLicenseResourcesDir = layout.buildDirectory.dir("generated/openlogLicenseResources/desktopMain/resources")
 
 val generateBuildInfo by tasks.registering {
     inputs.property("appVersion", appVersion)
     inputs.property("appAuthor", appAuthor)
+    inputs.property("licenseVersion", licenseVersion)
     outputs.dir(generatedBuildInfoDir)
     doLast {
         val outputFile = generatedBuildInfoDir.get().file("com/openlog/generated/BuildInfo.kt").asFile
@@ -39,9 +42,26 @@ val generateBuildInfo by tasks.registering {
             object BuildInfo {
                 const val APP_VERSION: String = "$appVersion"
                 const val APP_AUTHOR: String = "$appAuthor"
+                const val LICENSE_VERSION: String = "$licenseVersion"
             }
             """.trimIndent() + "\n"
         )
+    }
+}
+
+// Keep the in-app agreement derived from the repository's canonical legal documents. This avoids
+// displaying one set of terms in packaged builds while publishing different terms at the project root.
+val generateLicenseResources by tasks.registering {
+    val licenseDocuments = listOf("LICENSE", "COMMERCIAL.md", "NOTICE")
+    inputs.files(licenseDocuments.map(::file))
+    outputs.dir(generatedLicenseResourcesDir)
+    doLast {
+        val outputFile = generatedLicenseResourcesDir.get().file("licenses/openlog-license-agreement.md").asFile
+        outputFile.parentFile.mkdirs()
+        val agreement = licenseDocuments.joinToString(separator = "\n\n---\n\n") { path ->
+            file(path).readText().trimEnd()
+        }
+        outputFile.writeText("# openLog License Agreement\n\nTerms version: $licenseVersion\n\n---\n\n$agreement\n")
     }
 }
 
@@ -63,6 +83,7 @@ kotlin {
     sourceSets {
         val desktopMain by getting {
             kotlin.srcDir(generatedBuildInfoDir)
+            resources.srcDir(generatedLicenseResourcesDir)
             dependencies {
                 implementation(compose.desktop.currentOs)
                 implementation(compose.material3)
@@ -164,6 +185,11 @@ compose.desktop {
 
 tasks.named("compileKotlinDesktop") {
     dependsOn(generateBuildInfo)
+    dependsOn(generateLicenseResources)
+}
+
+tasks.matching { it.name.contains("ProcessResources", ignoreCase = true) }.configureEach {
+    dependsOn(generateLicenseResources)
 }
 
 // jpackage/jlink bundle whatever JVM is running Gradle ITSELF into the native distribution's
