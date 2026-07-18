@@ -119,6 +119,7 @@ internal class OpenLogToolOperations(
         "add_manual_collapse" to { a ->
             addManualCollapseRoute(a.str("tabId") ?: "", a.anyInt("startLineId"), a.anyInt("endLineId"))
         },
+        "add_sequence" to { a -> addSequenceRoute(a.str("tabId") ?: "", a) },
         "save_filter_preset" to { a -> saveFilterPresetRoute(a.str("tabId") ?: "", a.str("name") ?: "") },
     )
 
@@ -619,6 +620,35 @@ internal class OpenLogToolOperations(
                 endTag = m.str("endTag")?.takeIf { it.isNotBlank() },
             )
         }
+    }
+
+    // Appends one sequence to a tab's existing list, unlike set_filter's `sequences` field which
+    // replaces the whole list wholesale — this is what "add a sequence" over MCP was missing.
+    // Reuses parseSequences on a single-element list so field validation, id auto-assignment, and
+    // required-field checking stay identical to set_filter's; only color and (unless the caller
+    // explicitly supplied one) priority are then overridden from the tab's CURRENT sequence count,
+    // so the appended sequence lands after existing ones with its own fresh palette slot instead of
+    // parseSequences' single-item default of index 0.
+    private fun addSequenceRoute(tabId: String, body: Map<String, Any?>): Map<String, Any?> {
+        if (tabId.isBlank()) return mapOf("ok" to false, "error" to "missing tabId")
+        val tab = appState.tab(tabId) ?: return mapOf("ok" to false, "error" to "no such tab: $tabId")
+        val existing = tab.filter.sequences
+
+        val base = parseSequences(listOf(body)).getOrElse {
+            return mapOf("ok" to false, "error" to (it.message ?: "invalid sequence"))
+        }.single()
+        val newSeq = base.copy(
+            color = SEQ_COLORS[existing.size % SEQ_COLORS.size],
+            priority = if (body.containsKey("priority")) base.priority else existing.size + 1,
+        )
+
+        appState.upFlt(tabId) { f -> f.copy(sequences = f.sequences + newSeq) }
+
+        return mapOf(
+            "ok" to true,
+            "sequence" to sequenceDefToMap(newSeq),
+            "sequenceCount" to appState.tab(tabId)!!.filter.sequences.size,
+        )
     }
 
     private fun getVisibleLines(tabId: String, limit: Int, offset: Int, fields: Set<String>?, compact: Boolean): Map<String, Any?> {

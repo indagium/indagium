@@ -54,8 +54,8 @@ private val CONFIRMATION_REQUIRED_TOOLS = setOf(
     "open_log_file", "split_log_file", "close_tab", "export_analysis",
     "export_filtered_log", "save_annotations", "load_annotations", "merge_tabs", "start_tailing", "stop_tailing",
     // reindex_sources kicks off a heavy background disk scan; save_filter_preset persists a preset
-    // (and writes the filter backup to disk). set_highlighters / add_manual_collapse are view-only
-    // mutations, left AUTOMATIC to match set_filter / toggle_group.
+    // (and writes the filter backup to disk). set_highlighters / add_manual_collapse / add_sequence
+    // are view-only mutations, left AUTOMATIC to match set_filter / toggle_group.
     "reindex_sources", "save_filter_preset",
 )
 

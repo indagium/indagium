@@ -2,16 +2,16 @@ package com.openlog.ui
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Folder
-import androidx.compose.material.icons.outlined.StarBorder
-import androidx.compose.material3.Icon
 import androidx.compose.foundation.*
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -486,8 +486,7 @@ internal fun FilterPanel(
         val siblings = savedFilters.filter { !it.id.startsWith("draft_") && it.folderId == item.folderId }
         val fromIndex = siblings.indexOfFirst { it.id == id }
         val toIndex = (fromIndex + delta).coerceIn(0, siblings.lastIndex)
-        if (fromIndex < 0 || fromIndex == toIndex) return true
-        onReorderSFWithinFolder(id, toIndex)
+        if (fromIndex >= 0 && fromIndex != toIndex) onReorderSFWithinFolder(id, toIndex)
         return true
     }
 

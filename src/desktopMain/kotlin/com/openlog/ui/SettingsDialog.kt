@@ -813,6 +813,35 @@ private fun AutomationSettingsSection(state: AppState) {
         // this popup returns you to Settings rather than to the main window.
         AppButton("Connection info…", onClick = { state.mcpInfoOpen = true }, variant = ButtonVariant.Secondary)
     }
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CompactSetting("Check for updates automatically") {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.autoCheckUpdates) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(autoCheckUpdates = idx == 0) } },
+            )
+        }
+        AppButton("Check now", onClick = { state.checkForUpdates(manual = true) }, variant = ButtonVariant.Secondary)
+    }
+    // availableUpdate is checked first: once a release is known, that fact takes priority over
+    // whatever the last raw check status happened to be (e.g. a stale UpToDate from a previous run).
+    val updateStatusText = when {
+        state.availableUpdate != null -> "Update available"
+        else -> when (val s = state.updateCheckStatus) {
+            UpdateStatus.Idle -> null
+            UpdateStatus.Checking -> "Checking…"
+            is UpdateStatus.UpToDate -> "Up to date (v${s.version})"
+            is UpdateStatus.Failed -> "Couldn't reach GitHub"
+        }
+    }
+    updateStatusText?.let { text ->
+        val isError = state.availableUpdate == null && state.updateCheckStatus is UpdateStatus.Failed
+        AppText(text, color = if (isError) DANGER_RED else tc.td, fontSize = 11.sp)
+    }
 }
 
 @Composable

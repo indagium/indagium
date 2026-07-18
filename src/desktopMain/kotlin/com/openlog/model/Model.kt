@@ -455,6 +455,16 @@ data class AppSettings(
     // The version of the openLog license agreement the user explicitly accepted. A changed terms
     // version prompts again; null keeps existing installs gated until they accept once.
     val acceptedLicenseVersion: String? = null,
+    // In-app "Check for updates" (see update/UpdateChecker.kt, AppState.checkForUpdates). On by
+    // default; a packaged build silently checks GitHub Releases once at startup unless disabled
+    // here. Trailing with a default so old settings tokens still parse.
+    val autoCheckUpdates: Boolean = true,
+    // The release version the user chose "Skip this version" for — AppState.updateDialogVisible
+    // suppresses the popup for that exact version only, so the next real release still prompts.
+    val skippedUpdateVersion: String? = null,
+    // Last folder the user picked in the update-download folder dialog, offered as the default the
+    // next time (see AppState.downloadUpdate, modeled on defaultSaveDir/pickSaveFolder).
+    val updateDownloadDir: String? = null,
 )
 
 enum class ThemePreset(val label: String) {

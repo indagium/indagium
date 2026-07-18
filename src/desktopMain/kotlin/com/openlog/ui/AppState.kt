@@ -16,6 +16,7 @@ import com.openlog.ai.validateAiProviderProfile
 import com.openlog.debug.ControlServer
 import com.openlog.debug.OpenLogToolOperations
 import com.openlog.debug.loadOrCreateControlToken
+import com.openlog.generated.BuildInfo
 import com.openlog.model.*
 import com.openlog.source.FileMeta
 import com.openlog.source.LogCallSite
@@ -29,6 +30,11 @@ import com.openlog.source.SourceIndexStore
 import com.openlog.source.SourceIndexer
 import com.openlog.source.SourceMatch
 import com.openlog.source.sourceConfigurationFingerprint
+import com.openlog.update.ReleaseInfo
+import com.openlog.update.UpdateCheckResult
+import com.openlog.update.UpdateChecker
+import com.openlog.update.assetForCurrentOs
+import com.openlog.update.revealInFileManager
 import com.openlog.utils.ArchiveBudgetExceededException
 import com.openlog.utils.EntryIdMap
 import com.openlog.utils.MAX_ARCHIVE_ENTRY_BYTES
@@ -486,6 +492,33 @@ data class PendingSplitPrompt(
     val deferredFiles: List<File> = emptyList(),
     val deferredArchiveEntries: List<DeferredArchiveEntry> = emptyList(),
 )
+
+// Update-check status shown next to Settings' "Check now" button (AutomationSettingsSection).
+// Deliberately has no "an update is available" case of its own — AppState.availableUpdate already
+// carries that (and drives the update dialog), so a caller checks availableUpdate first and only
+// falls back to this for the plain checked-and-current / still-checking / failed states.
+sealed interface UpdateStatus {
+    data object Idle : UpdateStatus
+
+    data object Checking : UpdateStatus
+
+    data class UpToDate(val version: String) : UpdateStatus
+
+    /** Only ever set for a manual check (AppState.checkForUpdates) — a silent startup check that
+     *  fails leaves this at [Idle] instead, so it never surfaces an error the user didn't ask for. */
+    data class Failed(val reason: String) : UpdateStatus
+}
+
+/** Download progress for the release asset picked by [assetForCurrentOs], driven by [AppState.downloadUpdate]. */
+sealed interface UpdateDownloadState {
+    data object Idle : UpdateDownloadState
+
+    data class InProgress(val fraction: Float) : UpdateDownloadState
+
+    data class Done(val file: File) : UpdateDownloadState
+
+    data class Failed(val reason: String) : UpdateDownloadState
+}
 
 // Every parameter beyond the first few is a test seam with a real-default value (autosaveFile,
 // archiveEntryByteBudget, sourceIndexFile, etc. — see their own doc comments below), not
@@ -1182,6 +1215,85 @@ class AppState(
 
     fun acceptLicenseAgreement() {
         updateSettings { it.copy(acceptedLicenseVersion = LICENSE_VERSION) }
+    }
+
+    // ── Update check (see update/UpdateChecker.kt) ─────────────────────
+    var availableUpdate by mutableStateOf<ReleaseInfo?>(null)
+    var updateCheckStatus by mutableStateOf<UpdateStatus>(UpdateStatus.Idle)
+    var updateDownload by mutableStateOf<UpdateDownloadState>(UpdateDownloadState.Idle)
+    private val updateChecker = UpdateChecker()
+
+    // skipUpdate() only records the skipped version — it never clears availableUpdate — so this
+    // stays the single source of truth for whether the popup should be showing right now, both
+    // right after a check and after the app restarts with a still-current availableUpdate.
+    val updateDialogVisible: Boolean
+        get() = availableUpdate?.let { it.version != settings.skippedUpdateVersion } == true
+
+    // manual distinguishes a user-initiated "Check now" (Settings) from the silent startup check
+    // (Main.kt): only a manual check surfaces a failure via updateCheckStatus, so a flaky network
+    // at launch never shows the user an error they didn't ask about.
+    fun checkForUpdates(manual: Boolean) {
+        updateCheckStatus = UpdateStatus.Checking
+        ioScope.launch {
+            when (val result = updateChecker.fetchLatest()) {
+                is UpdateCheckResult.Available -> {
+                    availableUpdate = result.release
+                    // The "an update exists" fact lives in availableUpdate itself (and drives the
+                    // dialog); status returns to Idle rather than a misleading "UpToDate".
+                    updateCheckStatus = UpdateStatus.Idle
+                }
+                UpdateCheckResult.UpToDate -> {
+                    availableUpdate = null
+                    updateCheckStatus = UpdateStatus.UpToDate(BuildInfo.APP_VERSION)
+                }
+                is UpdateCheckResult.Unavailable -> {
+                    updateCheckStatus = if (manual) UpdateStatus.Failed(result.reason) else UpdateStatus.Idle
+                }
+            }
+        }
+    }
+
+    fun skipUpdate() {
+        updateSettings { it.copy(skippedUpdateVersion = availableUpdate?.version) }
+        availableUpdate = null
+    }
+
+    fun dismissUpdateForNow() {
+        availableUpdate = null
+    }
+
+    // No OS-matching asset (assetForCurrentOs) is a no-op here: UpdateDialog shows "View on
+    // GitHub" instead of "Download" in that case, so this is never called without one.
+    fun downloadUpdate() {
+        val release = availableUpdate ?: return
+        val asset = assetForCurrentOs(release.assets) ?: return
+        System.setProperty("apple.awt.fileDialogForDirectories", "true")
+        try {
+            val dlg = FileDialog(null as Frame?, "Choose Download Folder", FileDialog.LOAD)
+            settings.updateDownloadDir?.let { dlg.directory = it }
+            dlg.isVisible = true
+            val dir = dlg.directory ?: return
+            val name = dlg.file ?: return
+            val chosenDir = File(dir, name)
+            updateSettings { it.copy(updateDownloadDir = chosenDir.absolutePath) }
+            updateDownload = UpdateDownloadState.InProgress(0f)
+            ioScope.launch {
+                runCatching {
+                    updateChecker.downloadAsset(asset, chosenDir) { bytesRead, total ->
+                        val fraction = if (total > 0) (bytesRead.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+                        updateDownload = UpdateDownloadState.InProgress(fraction)
+                    }
+                }.onSuccess { file ->
+                    updateDownload = UpdateDownloadState.Done(file)
+                    revealInFileManager(file)
+                }.onFailure { error ->
+                    if (error is CancellationException) throw error
+                    updateDownload = UpdateDownloadState.Failed(error.message ?: "Download failed.")
+                }
+            }
+        } finally {
+            System.setProperty("apple.awt.fileDialogForDirectories", "false")
+        }
     }
 
     fun openAiProviderSettings() {

@@ -3746,6 +3746,9 @@ class AppStateBehaviorTest {
         mcpAllowBrowserClients = true,
         showRowNumbers = true,
         toolbarIconOnlyButtons = false,
+        autoCheckUpdates = false,
+        skippedUpdateVersion = "1.4.0",
+        updateDownloadDir = "/tmp/openlog-rt-downloads",
     )
 
     // (ARCH-2/Batch 5) Proves the migration end to end: every AppSettings field pushed off its

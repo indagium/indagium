@@ -1237,7 +1237,11 @@ fun App(
                                                     Checkbox(
                                                         checked = row.action != ImportFilterAction.SKIP,
                                                         onCheckedChange = { state.setImportRowsChecked(setOf(row.rowId), it) },
-                                                        colors = CheckboxDefaults.colors(checkedColor = tc2.ac, uncheckedColor = tc2.td, checkmarkColor = tc2.bg),
+                                                        colors = CheckboxDefaults.colors(
+                                                            checkedColor = tc2.ac,
+                                                            uncheckedColor = tc2.td,
+                                                            checkmarkColor = tc2.bg,
+                                                        ),
                                                         modifier = Modifier.size(16.dp),
                                                     )
                                                 }
@@ -1284,10 +1288,18 @@ fun App(
                                                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                                     AppButton("Rename", onClick = {
                                                         state.setImportFilterAction(row.rowId, ImportFilterAction.RENAME)
-                                                    }, variant = if (row.action == ImportFilterAction.RENAME) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                                    }, variant = if (row.action == ImportFilterAction.RENAME) {
+                                                        ButtonVariant.Primary
+                                                    } else {
+                                                        ButtonVariant.Secondary
+                                                    })
                                                     AppButton("Replace", onClick = {
                                                         state.setImportFilterAction(row.rowId, ImportFilterAction.REPLACE)
-                                                    }, variant = if (row.action == ImportFilterAction.REPLACE) ButtonVariant.Primary else ButtonVariant.Secondary)
+                                                    }, variant = if (row.action == ImportFilterAction.REPLACE) {
+                                                        ButtonVariant.Primary
+                                                    } else {
+                                                        ButtonVariant.Secondary
+                                                    })
                                                     AppButton("Skip", onClick = {
                                                         state.setImportFilterAction(row.rowId, ImportFilterAction.SKIP)
                                                     }, variant = if (row.action == ImportFilterAction.SKIP) ButtonVariant.Primary else ButtonVariant.Secondary)
@@ -1632,6 +1644,10 @@ fun App(
                     onAccept = state::acceptLicenseAgreement,
                     onDecline = onLicenseDeclined,
                 )
+            }
+
+            if (state.updateDialogVisible) {
+                UpdateDialog(state)
             }
 
             // ── Source code popup ─────────────────────────────────────

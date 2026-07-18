@@ -566,6 +566,9 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("showRowNumbers", showRowNumbers)
     put("toolbarIconOnlyButtons", toolbarIconOnlyButtons)
     acceptedLicenseVersion?.let { put("acceptedLicenseVersion", it) }
+    put("autoCheckUpdates", autoCheckUpdates)
+    skippedUpdateVersion?.let { put("skippedUpdateVersion", it) }
+    updateDownloadDir?.let { put("updateDownloadDir", it) }
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -763,6 +766,9 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         showRowNumbers = o.boolOrDefault("showRowNumbers", false),
         toolbarIconOnlyButtons = o.boolOrDefault("toolbarIconOnlyButtons", true),
         acceptedLicenseVersion = o.stringOrNull("acceptedLicenseVersion"),
+        autoCheckUpdates = o.boolOrDefault("autoCheckUpdates", true),
+        skippedUpdateVersion = o.stringOrNull("skippedUpdateVersion"),
+        updateDownloadDir = o.stringOrNull("updateDownloadDir"),
     )
 }.getOrNull()
 

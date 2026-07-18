@@ -12,6 +12,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -44,7 +45,8 @@ class OpenLogToolGatewayTest {
             "add_text_note", "add_log_note", "update_note_block", "move_note_block",
             "delete_note_block", "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing", "resolve_log_source",
-            "get_project_info", "set_highlighters", "reindex_sources", "add_manual_collapse", "save_filter_preset",
+            "get_project_info", "set_highlighters", "reindex_sources", "add_manual_collapse", "add_sequence",
+            "save_filter_preset",
         )
         assertEquals(expected, operations.toolGateway.tools.map { it.name }.toSet())
         assertEquals(expected.size, operations.toolGateway.tools.size)
@@ -71,6 +73,68 @@ class OpenLogToolGatewayTest {
         assertEquals(true, result["ok"])
         assertEquals(FilterMode.KEYWORD, state.tab("t1")!!.filter.mode)
         assertEquals(OpenLogToolActionPolicy.AUTOMATIC, operations.toolGateway.actionPolicy("set_filter"))
+    }
+
+    @Test
+    fun addSequenceAppendsToExistingSequencesWithoutDroppingThem() {
+        // set_filter's sequences field REPLACES the whole list — add_sequence is the gap that left,
+        // an append that leaves an existing sequence (from a prior set_filter call) untouched.
+        operations.toolGateway.execute(
+            "set_filter",
+            mapOf("tabId" to "t1", "sequences" to listOf(mapOf("matchText" to "boot"))),
+        )
+        assertEquals(1, state.tab("t1")!!.filter.sequences.size)
+
+        val result = operations.toolGateway.execute(
+            "add_sequence",
+            mapOf("tabId" to "t1", "matchText" to "shutdown"),
+        ) as Map<*, *>
+
+        assertEquals(true, result["ok"])
+        assertEquals(2, result["sequenceCount"])
+        val sequences = state.tab("t1")!!.filter.sequences
+        assertEquals(2, sequences.size)
+        assertEquals("boot", sequences[0].matchText)
+        assertEquals("shutdown", sequences[1].matchText)
+        assertEquals(OpenLogToolActionPolicy.AUTOMATIC, operations.toolGateway.actionPolicy("add_sequence"))
+    }
+
+    @Test
+    fun addSequenceRejectsBlankOrMissingMatchTextWithoutChangingSequences() {
+        val blank = operations.toolGateway.execute("add_sequence", mapOf("tabId" to "t1", "matchText" to "  ")) as Map<*, *>
+        val missing = operations.toolGateway.execute("add_sequence", mapOf("tabId" to "t1")) as Map<*, *>
+
+        assertEquals(false, blank["ok"])
+        assertEquals(false, missing["ok"])
+        assertTrue(state.tab("t1")!!.filter.sequences.isEmpty())
+    }
+
+    @Test
+    fun addSequenceRejectsUnknownTab() {
+        val result = operations.toolGateway.execute(
+            "add_sequence", mapOf("tabId" to "missing", "matchText" to "boot"),
+        ) as Map<*, *>
+
+        assertEquals(false, result["ok"])
+        assertTrue((result["error"] as String).contains("no such tab: missing"))
+    }
+
+    @Test
+    fun successiveAddSequenceCallsProduceDistinctIdsAndColorsWithIncreasingCount() {
+        val first = operations.toolGateway.execute("add_sequence", mapOf("tabId" to "t1", "matchText" to "boot")) as Map<*, *>
+        val second = operations.toolGateway.execute("add_sequence", mapOf("tabId" to "t1", "matchText" to "shutdown")) as Map<*, *>
+
+        assertEquals(1, first["sequenceCount"])
+        assertEquals(2, second["sequenceCount"])
+
+        val firstSeq = first["sequence"] as Map<*, *>
+        val secondSeq = second["sequence"] as Map<*, *>
+        assertNotEquals(firstSeq["id"], secondSeq["id"])
+
+        val sequences = state.tab("t1")!!.filter.sequences
+        assertEquals(2, sequences.size)
+        assertNotEquals(sequences[0].id, sequences[1].id)
+        assertNotEquals(sequences[0].color, sequences[1].color)
     }
 
     @Test

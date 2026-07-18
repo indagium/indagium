@@ -221,9 +221,9 @@ class ControlServerMcpTest {
             "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing",
             "resolve_log_source", "get_project_info",
-            "set_highlighters", "reindex_sources", "add_manual_collapse", "save_filter_preset",
+            "set_highlighters", "reindex_sources", "add_manual_collapse", "add_sequence", "save_filter_preset",
         )
-        assertEquals(40, expected.size)
+        assertEquals(41, expected.size)
         expected.forEach { name -> assertTrue(body.contains("\"$name\""), "tools/list missing $name:\n$body") }
     }
 
@@ -293,6 +293,70 @@ class ControlServerMcpTest {
         // content, so ids/filenames appear as e.g. \"id\":\"t1\" — match on the plain substrings.
         assertTrue(body.contains("sample.log"), "list_tabs didn't reflect AppState:\n$body")
         assertTrue(body.contains("id\\\":\\\"t1"), "list_tabs missing tab id:\n$body")
+    }
+
+    @Test
+    fun toolsListDeclaresSequencesAndMessageRulesAsObjectArraysNotStrings() {
+        // Regression: sequences/messageRules used to be declared as items:{type:string} even though
+        // the backend (OpenLogToolOperations.parseSequences/parseMessageRules) requires objects with
+        // named fields — every object a compliant client sent was silently dropped by Json.mapList,
+        // so the AI could observe nothing happen and report it "can't" add a sequence. If this
+        // schema regresses to string items, that failure mode is back.
+        val session = initSession()
+        val body = mcp("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""", session).body()
+
+        val sequences = jsonPropertyValue(body, "sequences")
+        assertTrue(sequences.contains("\"items\":{\"type\":\"object\""), "sequences items should be objects:\n$sequences")
+        assertTrue(sequences.contains("\"matchText\""), "sequences item missing matchText:\n$sequences")
+        assertTrue(sequences.contains("\"required\":[\"matchText\"]"), "sequences item missing required matchText:\n$sequences")
+        assertTrue(!sequences.contains("\"color\""), "sequences item should not document server-assigned color:\n$sequences")
+
+        val messageRules = jsonPropertyValue(body, "messageRules")
+        assertTrue(messageRules.contains("\"items\":{\"type\":\"object\""), "messageRules items should be objects:\n$messageRules")
+        assertTrue(messageRules.contains("\"pattern\""), "messageRules item missing pattern:\n$messageRules")
+        assertTrue(messageRules.contains("\"required\":[\"pattern\"]"), "messageRules item missing required pattern:\n$messageRules")
+    }
+
+    // Extracts the raw JSON object literal for a top-level `"key":{...}` property by brace-counting
+    // from its first `{`, rather than a regex — the sequences/messageRules item schemas nest several
+    // levels deep (array -> object -> properties -> per-field objects), too deep for the bracket-
+    // depth-1 regexes the simpler schema tests above use.
+    private fun jsonPropertyValue(body: String, key: String): String {
+        val marker = "\"$key\":"
+        val markerIdx = body.indexOf(marker)
+        if (markerIdx < 0) error("no \"$key\" property found in tools/list:\n$body")
+        val start = markerIdx + marker.length
+        require(body.getOrNull(start) == '{') { "expected an object value for $key at index $start:\n$body" }
+        var depth = 0
+        for (i in start until body.length) {
+            when (body[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return body.substring(start, i + 1)
+                }
+            }
+        }
+        error("unterminated object for $key:\n$body")
+    }
+
+    @Test
+    fun setFilterAddsSequencesSuppliedAsObjectsOverMcp() {
+        // The actual reproduction of the original bug: an MCP client sending sequences as an array
+        // of objects (per the schema) through the real JSON-RPC tools/call transport — not just the
+        // REST body decode path — must land as real SequenceDefs, not be silently dropped.
+        state.tabs = listOf(mkTab("t1", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        val session = initSession()
+        val body = mcp(
+            """{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"set_filter",""" +
+                """"arguments":{"tabId":"t1","sequences":[{"matchText":"boot","tag":"App"}]}}}""",
+            session,
+        ).body()
+        // The tool result is JSON-encoded then embedded as escaped text content (see
+        // toolCallReadsLiveAppState above) — match the escaped form, not a bare "ok":true.
+        assertTrue(body.contains("\\\"ok\\\":true"), body)
+        assertEquals(1, state.tab("t1")!!.filter.sequences.size)
+        assertEquals("boot", state.tab("t1")!!.filter.sequences.single().matchText)
     }
 
     @Test
