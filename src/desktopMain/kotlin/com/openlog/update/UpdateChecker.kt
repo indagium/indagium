@@ -5,9 +5,11 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.request.prepareGet
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpHeaders
+import io.ktor.http.contentLength
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.CancellationException
@@ -100,7 +102,8 @@ class UpdateChecker(
      * moved into place once the whole download completes — mirroring
      * [com.openlog.utils.writeFileAtomically]'s temp-file-then-atomic-move shape (that helper is
      * text-Writer only, so this duplicates rather than reuses it). [onProgress] is called after
-     * every chunk with the running byte count and [ReleaseAsset.size] as the total.
+     * every chunk with the running byte count and the response's Content-Length as the total,
+     * falling back to [ReleaseAsset.size] when that header is missing or non-positive.
      */
     suspend fun downloadAsset(
         asset: ReleaseAsset,
@@ -110,19 +113,22 @@ class UpdateChecker(
         destDir.mkdirs()
         val dest = File(destDir, asset.name)
         val tmp = File(destDir, ".${asset.name}.part")
-        val channel = httpClient.get(asset.downloadUrl).bodyAsChannel()
         val buffer = ByteArray(DOWNLOAD_BUFFER_BYTES)
         var totalRead = 0L
         var moved = false
         try {
-            tmp.outputStream().use { out ->
-                while (true) {
-                    coroutineContext.ensureActive()
-                    val bytesRead = channel.readAvailable(buffer, 0, buffer.size)
-                    if (bytesRead == -1) break
-                    out.write(buffer, 0, bytesRead)
-                    totalRead += bytesRead
-                    onProgress(totalRead, asset.size)
+            httpClient.prepareGet(asset.downloadUrl).execute { response ->
+                val total = response.contentLength()?.takeIf { it > 0 } ?: asset.size
+                val channel = response.bodyAsChannel()
+                tmp.outputStream().use { out ->
+                    while (true) {
+                        coroutineContext.ensureActive()
+                        val bytesRead = channel.readAvailable(buffer, 0, buffer.size)
+                        if (bytesRead == -1) break
+                        out.write(buffer, 0, bytesRead)
+                        totalRead += bytesRead
+                        onProgress(totalRead, total)
+                    }
                 }
             }
             moveAtomicallyIfPossible(tmp, dest)

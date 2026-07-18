@@ -38,7 +38,7 @@ internal fun UpdateDialog(state: AppState) {
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
         Column(
-            Modifier.width(600.dp).height(540.dp)
+            Modifier.width(600.dp).heightIn(max = 560.dp)
                 .background(colors.p, shape)
                 .border(1.dp, colors.br, shape)
                 .padding(20.dp),
@@ -52,22 +52,22 @@ internal fun UpdateDialog(state: AppState) {
                 fontFamily = MONO,
             )
             if (release.body.isNotBlank()) {
-                Box(Modifier.weight(1f).fillMaxWidth().border(1.dp, colors.br, shape)) {
+                Box(Modifier.heightIn(max = 340.dp).fillMaxWidth().border(1.dp, colors.br, shape)) {
                     val markdownState = rememberMarkdownState(content = release.body)
                     Markdown(
                         markdownState,
                         colors = updateMarkdownColors(colors),
                         typography = updateMarkdownTypography(colors),
-                        modifier = Modifier.fillMaxSize().verticalScroll(scroll).padding(14.dp).padding(end = 8.dp),
+                        modifier = Modifier.fillMaxWidth().verticalScroll(scroll).padding(14.dp).padding(end = 8.dp),
                     )
-                    VerticalScrollbar(
-                        adapter = rememberScrollbarAdapter(scroll),
-                        modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
-                        style = appScrollbarStyle(colors),
-                    )
+                    Box(Modifier.matchParentSize()) {
+                        VerticalScrollbar(
+                            adapter = rememberScrollbarAdapter(scroll),
+                            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+                            style = appScrollbarStyle(colors),
+                        )
+                    }
                 }
-            } else {
-                Spacer(Modifier.weight(1f))
             }
             when (download) {
                 is UpdateDownloadState.InProgress -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
