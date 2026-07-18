@@ -818,6 +818,58 @@ private fun AutomationSettingsSection(state: AppState) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        CompactSetting("Debug logging") {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.debugLoggingEnabled) 0 else 1),
+                onToggle = { idx -> state.setDebugLoggingEnabled(idx == 0) },
+            )
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        val fullPath = state.settings.debugLogFilePath
+        val pathText: @Composable () -> Unit = {
+            AppText(
+                fullPath?.let { truncatePathForDisplay(it) } ?: "(not set)",
+                color = tc.ts, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (fullPath != null) {
+            TooltipArea(
+                tooltip = {
+                    Box(
+                        Modifier
+                            .background(tc.p2, RoundedCornerShape(4.dp))
+                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        AppText(fullPath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) { pathText() }
+        } else {
+            Box(Modifier.weight(1f)) { pathText() }
+        }
+        AppButton("Browse", onClick = { state.pickDebugLogFile() })
+        AppButton(
+            "Open current log",
+            onClick = { state.openCurrentDebugLog() },
+            variant = ButtonVariant.Secondary,
+            enabled = fullPath?.let { File(it).isFile } == true,
+        )
+    }
+    state.debugLoggingError?.let { message ->
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            AppText("Diagnostic logging unavailable: $message", color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+            AppButton("Retry", onClick = { state.retryDebugLoggingConfiguration() }, variant = ButtonVariant.Secondary)
+        }
+    }
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         CompactSetting("Check for updates automatically") {
             SegmentedControl(
                 options = listOf("On", "Off"),

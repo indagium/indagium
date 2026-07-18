@@ -1569,6 +1569,65 @@ class AppStateBehaviorTest {
         assertEquals("hello after restart", restoredTab.logData.single().msg)
     }
 
+    // End-to-end exercise of the Settings "Debug logging" toggle: enabling it should log the file
+    // opened through the normal openFile path and the "could not open" error path, and disabling
+    // it should stop further writes (see AppState.setDebugLoggingEnabled, debug/AppLogger.kt).
+    @Test
+    fun debugLoggingCapturesLifecycleAndErrorEventsUntilDisabled() {
+        val dir = createTempDirectory("openlog-debug-logging").toFile()
+        val debugLogFile = File(dir, "debug.log")
+        val state = AppState(File(dir, "state.cache"))
+        state.updateSettings { it.copy(debugLogFilePath = debugLogFile.absolutePath) }
+
+        state.setDebugLoggingEnabled(true)
+        assertTrue(state.settings.debugLoggingEnabled)
+
+        val logFile = File(dir, "app.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I App: hello\n")
+        }
+        state.openFile(logFile)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        state.openFile(File(dir, "missing.log"))
+
+        val whileEnabled = debugLogFile.readText()
+        assertTrue(whileEnabled.contains("Diagnostic logging enabled"))
+        assertTrue(whileEnabled.contains("openLog.open: [INFO][open] Opened app.log (1 entries)"))
+        assertTrue(whileEnabled.contains("Could not open file"))
+
+        // The app's own diagnostic file is a regular structured Logcat source, not a RAW-text
+        // special case, so opening it through Settings must expose its tags/levels normally.
+        state.openCurrentDebugLog()
+        waitUntil { state.tabs.size == 2 && !state.isLoading }
+        val diagnosticTab = state.tabs.single { it.sourcePath == debugLogFile.absolutePath }
+        assertTrue(diagnosticTab.logData.isNotEmpty())
+        assertTrue(diagnosticTab.logData.all { it.tag.startsWith("openLog.") })
+        assertTrue(diagnosticTab.logData.any { it.level == LogLevel.E && it.tag == "openLog.open" })
+
+        state.setDebugLoggingEnabled(false)
+        assertFalse(state.settings.debugLoggingEnabled)
+        val sizeAfterDisable = debugLogFile.length()
+        state.openFile(File(dir, "second.log").apply { writeText("x\n") })
+        waitUntil { state.tabs.size == 3 && !state.isLoading }
+
+        assertTrue(debugLogFile.readText().contains("Debug logging disabled"))
+        assertEquals(sizeAfterDisable, debugLogFile.length())
+    }
+
+    @Test
+    fun failedDiagnosticLogConfigurationRemainsVisibleAndCanBeRetried() {
+        val dir = createTempDirectory("openlog-debug-log-failure").toFile()
+        val blocker = File(dir, "not-a-folder").apply { writeText("file") }
+        val state = AppState(File(dir, "state.cache"))
+        state.updateSettings { it.copy(debugLogFilePath = File(blocker, "debug.log").absolutePath) }
+
+        state.setDebugLoggingEnabled(true)
+
+        assertTrue(state.settings.debugLoggingEnabled)
+        assertTrue(state.debugLoggingError != null)
+        state.retryDebugLoggingConfiguration()
+        assertTrue(state.debugLoggingError != null)
+    }
+
     @Test
     fun newlyOpenedFileUsesUnfilteredDefaultSetting() {
         val dir = createTempDirectory("openlog-open-unfiltered-default").toFile()
@@ -3749,6 +3808,8 @@ class AppStateBehaviorTest {
         autoCheckUpdates = false,
         skippedUpdateVersion = "1.4.0",
         updateDownloadDir = "/tmp/openlog-rt-downloads",
+        debugLoggingEnabled = true,
+        debugLogFilePath = "/tmp/openlog-rt-debug.log",
     )
 
     // (ARCH-2/Batch 5) Proves the migration end to end: every AppSettings field pushed off its

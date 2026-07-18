@@ -3,6 +3,7 @@ package com.openlog.ui
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.openlog.debug.AppLogger
 import com.openlog.debug.ControlServer
 import com.openlog.debug.regenerateControlToken
 import kotlinx.coroutines.CoroutineScope
@@ -119,7 +120,7 @@ internal class ControlServerManager(
                     // Cancellation cannot interrupt every synchronous bind/factory. If an older
                     // generation nevertheless succeeds, it owns cleanup of its unpublishable
                     // listener and must not touch any newer generation's fields.
-                    if (!isCurrent) server.stop()
+                    if (!isCurrent) server.stop() else AppLogger.info("control-server", "Started on port ${request.port}")
                 },
                 onFailure = { error ->
                     synchronized(lifecycleLock) {
@@ -130,6 +131,7 @@ internal class ControlServerManager(
                         desiredRuntime = null
                         mcpControlError = "Could not start automation server on port ${request.port}: " +
                             (error.message ?: error::class.simpleName.orEmpty().ifBlank { "unknown error" })
+                        AppLogger.error("control-server", "Failed to start on port ${request.port}", error)
                         // A session/environment request never owns the persisted toggle, even if
                         // settings happen to say enabled for some separate saved configuration.
                         if (request.source == RuntimeSource.PERSISTED && appState.settings.mcpControlEnabled) {
@@ -153,6 +155,7 @@ internal class ControlServerManager(
         controlServerStartGeneration.incrementAndGet()
         controlServerStartJob?.cancel()
         controlServerStartJob = null
+        if (controlServer != null) AppLogger.info("control-server", "Stopped")
         controlServer?.stop()
         controlServer = null
     }

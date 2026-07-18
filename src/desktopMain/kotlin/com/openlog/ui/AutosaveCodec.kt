@@ -569,6 +569,8 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("autoCheckUpdates", autoCheckUpdates)
     skippedUpdateVersion?.let { put("skippedUpdateVersion", it) }
     updateDownloadDir?.let { put("updateDownloadDir", it) }
+    put("debugLoggingEnabled", debugLoggingEnabled)
+    debugLogFilePath?.let { put("debugLogFilePath", it) }
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -769,6 +771,8 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         autoCheckUpdates = o.boolOrDefault("autoCheckUpdates", true),
         skippedUpdateVersion = o.stringOrNull("skippedUpdateVersion"),
         updateDownloadDir = o.stringOrNull("updateDownloadDir"),
+        debugLoggingEnabled = o.boolOrDefault("debugLoggingEnabled", false),
+        debugLogFilePath = o.stringOrNull("debugLogFilePath"),
     )
 }.getOrNull()
 

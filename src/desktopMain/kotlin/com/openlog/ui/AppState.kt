@@ -13,6 +13,7 @@ import com.openlog.ai.CustomAiCommand
 import com.openlog.ai.CustomAiCommandName
 import com.openlog.ai.normalizeAiProviderProfiles
 import com.openlog.ai.validateAiProviderProfile
+import com.openlog.debug.AppLogger
 import com.openlog.debug.ControlServer
 import com.openlog.debug.OpenLogToolOperations
 import com.openlog.debug.loadOrCreateControlToken
@@ -570,6 +571,12 @@ class AppState(
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
 
+    // Session-only outcome of configuring the diagnostic writer.  The preference remains enabled
+    // after a failure so the Settings retry action can repair a transient permission/disk problem
+    // without making the user rediscover their chosen destination.
+    var debugLoggingError by mutableStateOf<String?>(null)
+        private set
+
     // Session-only by construction: AppSettings is the only settings object serialized into
     // autosave.cache, so pasted API keys cannot reach an autosave or exported-settings path.
     private val aiProviderApiKeys = ConcurrentHashMap<String, String>()
@@ -1017,12 +1024,16 @@ class AppState(
         if (restoreOnCreate) restoreAutosave()
         loadPersistedSourceIndex()
         loadCustomAiCommands()
+        AppLogger.setFailureReporter { reason -> debugLoggingError = reason }
+        debugLoggingError = AppLogger.configure(settings.debugLoggingEnabled, settings.debugLogFilePath)
+        AppLogger.info("app", "openLog started (v${BuildInfo.APP_VERSION})")
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
 
     fun close() {
         if (!closed.compareAndSet(false, true)) return
+        AppLogger.info("app", "openLog shutting down")
         autosaveScheduler.cancelPending()
         aiProviderApiKeys.clear()
         aiSidebarRuntime.close()
@@ -1036,6 +1047,8 @@ class AppState(
             pendingLoads = 0
             isLoading = false
         }
+        AppLogger.close()
+        AppLogger.setFailureReporter(null)
     }
 
     // Manual escape hatch for the "still loading" prompt the UI shows after a long stretch of
@@ -1084,6 +1097,58 @@ class AppState(
     // client configuration first, then enable the switch. Read the running server's token when
     // available; otherwise load the same persisted token the next server start will use.
     fun connectionInfoToken(): String = controlServerManager.controlServerToken() ?: loadOrCreateControlToken(controlTokenFile)
+
+    // Settings UI toggle for opt-in diagnostic logging (see debug/AppLogger.kt). Defaults the log
+    // location to DesktopStorage.debugLogFile() the first time a user enables it, so "On" always
+    // works without forcing a Browse first.
+    fun setDebugLoggingEnabled(enabled: Boolean) {
+        val path = settings.debugLogFilePath ?: DesktopStorage.debugLogFile().absolutePath
+        updateSettings { it.copy(debugLoggingEnabled = enabled, debugLogFilePath = path) }
+        // Log "disabled" before configure() closes the file (otherwise the line would target an
+        // already-closed writer and silently never be written); "enabled" logs after configure()
+        // opens the new one, for the same reason in reverse.
+        if (!enabled) AppLogger.info("app", "Debug logging disabled")
+        debugLoggingError = AppLogger.configure(enabled, path)
+        if (enabled && debugLoggingError == null) AppLogger.info("app", "Diagnostic logging enabled")
+    }
+
+    fun retryDebugLoggingConfiguration() {
+        val path = settings.debugLogFilePath
+        debugLoggingError = AppLogger.configure(settings.debugLoggingEnabled, path)
+        if (debugLoggingError == null && settings.debugLoggingEnabled) {
+            AppLogger.info("app", "Diagnostic logging configuration recovered")
+        }
+    }
+
+    /** Opens the active diagnostic file in a normal log tab, never passing its contents to AI. */
+    fun openCurrentDebugLog() {
+        val path = settings.debugLogFilePath ?: return
+        val file = File(path)
+        if (!file.isFile) {
+            debugLoggingError = "The diagnostic log has not been created yet."
+            return
+        }
+        openFile(file)
+    }
+
+    // Same FileDialog.SAVE pattern as saveAnalysis/exportFilteredTxt — seeded with the current
+    // path (or the DesktopStorage default) so re-opening the picker starts from wherever logging
+    // already points.
+    fun pickDebugLogFile() {
+        val current = settings.debugLogFilePath?.let { File(it) } ?: DesktopStorage.debugLogFile()
+        val dlg = FileDialog(null as Frame?, "Choose Debug Log File", FileDialog.SAVE).apply {
+            file = current.name
+            directory = current.parent
+            isVisible = true
+        }
+        val path = dlg.file ?: return
+        val dir = dlg.directory ?: return
+        val chosen = File(dir, path).absolutePath
+        updateSettings { it.copy(debugLogFilePath = chosen) }
+        if (settings.debugLoggingEnabled) {
+            debugLoggingError = AppLogger.configure(true, chosen)
+        }
+    }
 
     fun rotateControlToken() = controlServerManager.rotateControlToken()
 
@@ -1241,13 +1306,16 @@ class AppState(
                     // The "an update exists" fact lives in availableUpdate itself (and drives the
                     // dialog); status returns to Idle rather than a misleading "UpToDate".
                     updateCheckStatus = UpdateStatus.Idle
+                    AppLogger.info("update", "Update available: v${result.release.version}")
                 }
                 UpdateCheckResult.UpToDate -> {
                     availableUpdate = null
                     updateCheckStatus = UpdateStatus.UpToDate(BuildInfo.APP_VERSION)
+                    AppLogger.info("update", "Up to date (v${BuildInfo.APP_VERSION})")
                 }
                 is UpdateCheckResult.Unavailable -> {
                     updateCheckStatus = if (manual) UpdateStatus.Failed(result.reason) else UpdateStatus.Idle
+                    AppLogger.error("update", "Update check failed: ${result.reason}")
                 }
             }
         }
@@ -1277,6 +1345,7 @@ class AppState(
             val chosenDir = File(dir, name)
             updateSettings { it.copy(updateDownloadDir = chosenDir.absolutePath) }
             updateDownload = UpdateDownloadState.InProgress(0f)
+            AppLogger.info("update", "Update download started")
             ioScope.launch {
                 runCatching {
                     updateChecker.downloadAsset(asset, chosenDir) { bytesRead, total ->
@@ -1285,10 +1354,12 @@ class AppState(
                     }
                 }.onSuccess { file ->
                     updateDownload = UpdateDownloadState.Done(file)
+                    AppLogger.info("update", "Update download completed")
                     revealInFileManager(file)
                 }.onFailure { error ->
                     if (error is CancellationException) throw error
                     updateDownload = UpdateDownloadState.Failed(error.message ?: "Download failed.")
+                    AppLogger.error("update", "Update download failed", error)
                 }
             }
         } finally {
@@ -2832,6 +2903,7 @@ class AppState(
                     tabs = tabs + t
                     activeTabId = t.id
                 }
+                AppLogger.info("open", "Opened ${file.name} (${logData.size} entries)")
                 markActiveLoadFinished(tabId)
                 published = true
                 val full = buildLogAnalysis(logData)
@@ -2887,6 +2959,7 @@ class AppState(
     }
 
     private fun showOpenError(title: String, path: String?, message: String) {
+        AppLogger.error("open", "$title: $message (path=$path)")
         openError = OpenFileError(title = title, path = path, message = message)
     }
 
@@ -2906,7 +2979,12 @@ class AppState(
             )
             return
         }
-        val candidates = listArchiveLogCandidates(file)
+        val candidates = runCatching { listArchiveLogCandidates(file) }.getOrElse { error ->
+            AppLogger.error("archive", "Archive scan failed", error)
+            showOpenError("Could not open archive", path, "The archive could not be scanned.")
+            return
+        }
+        AppLogger.info("archive", "Archive scan found ${candidates.size} candidates")
         when {
             candidates.size == 1 -> {
                 rememberRecentFile(file)
@@ -2980,6 +3058,7 @@ class AppState(
             var published = false
             try {
                 val logData = runCatching { extractCandidate(zipFile, candidate, archiveEntryByteBudget) }.getOrElse { error ->
+                    AppLogger.error("archive", "Archive entry extraction failed", error)
                     // A budget breach (S-03: bounded archive extraction) is a real, actionable
                     // failure — surface it instead of silently opening an empty tab, which used to
                     // look indistinguishable from "this entry legitimately has nothing in it."
@@ -3012,6 +3091,7 @@ class AppState(
                     tabs = tabs + t
                     activeTabId = t.id
                 }
+                AppLogger.info("open", "Opened ${candidate.displayName} from archive (${logData.size} entries)")
                 markActiveLoadFinished(tabId)
                 published = true
                 val full = buildLogAnalysis(logData)
@@ -3208,7 +3288,10 @@ class AppState(
                 saved.writeText(buildMd(t, settings))
                 File(saved.parent, saved.nameWithoutExtension + ".ann").writeText(t.annotations.annotationsToken(t.sourcePath))
                 rememberRecentNote(saved)
-            }
+            }.fold(
+                onSuccess = { AppLogger.info("export", "Saved analysis to ${saved.absolutePath}") },
+                onFailure = { e -> AppLogger.error("export", "Failed to save analysis to ${saved.absolutePath}", e) },
+            )
         }
     }
 
@@ -3223,7 +3306,12 @@ class AppState(
         val dir = dlg.directory ?: return
         settings = settings.copy(defaultSaveDir = dir)
         val saved = File(dir, path)
-        ioScope.launch { runCatching { exportFilteredToFile(t, saved, csv = false) } }
+        ioScope.launch {
+            runCatching { exportFilteredToFile(t, saved, csv = false) }.fold(
+                onSuccess = { AppLogger.info("export", "Exported filtered log to ${saved.absolutePath}") },
+                onFailure = { e -> AppLogger.error("export", "Failed to export filtered log to ${saved.absolutePath}", e) },
+            )
+        }
     }
 
     fun exportFilteredCsv(tabId: String) {
@@ -3237,7 +3325,12 @@ class AppState(
         val dir = dlg.directory ?: return
         settings = settings.copy(defaultSaveDir = dir)
         val saved = File(dir, path)
-        ioScope.launch { runCatching { exportFilteredToFile(t, saved, csv = true) } }
+        ioScope.launch {
+            runCatching { exportFilteredToFile(t, saved, csv = true) }.fold(
+                onSuccess = { AppLogger.info("export", "Exported filtered log to ${saved.absolutePath}") },
+                onFailure = { e -> AppLogger.error("export", "Failed to export filtered log to ${saved.absolutePath}", e) },
+            )
+        }
     }
 
     fun openNoteFile(tabId: String, file: File) {
@@ -3608,6 +3701,7 @@ class AppState(
             }
         }
         if (!started) return
+        AppLogger.info("source-index", "Source reindex started")
         beginLoading("Indexing source…")
         ioScope.launch {
             try {
@@ -3625,7 +3719,7 @@ class AppState(
                             ),
                         ),
                     )
-                }.getOrNull()
+                }.onFailure { error -> AppLogger.error("source-index", "Source reindex failed", error) }.getOrNull()
                 if (partial != null) {
                     val mergedAt = System.currentTimeMillis()
                     val merged = synchronized(stateLock) {
@@ -3647,7 +3741,9 @@ class AppState(
                         )
                     }
                     runCatching { SourceIndexStore.save(merged, sourceIndexFile) }
+                        .onFailure { error -> AppLogger.error("source-index", "Failed to save source index", error) }
                     publishSourceIndex(merged)
+                    AppLogger.info("source-index", "Source reindex completed (${partial.sites.size} call sites)")
                 }
             } finally {
                 synchronized(stateLock) { indexingFolders = indexingFolders - rootAbs }
@@ -3774,7 +3870,12 @@ class AppState(
         val path = dlg.file ?: return
         val dir = dlg.directory ?: return
         val file = File(dir, path)
-        ioScope.launch { runCatching { file.writeText(exportFilters(selectedIds)) } }
+        ioScope.launch {
+            runCatching { file.writeText(exportFilters(selectedIds)) }.fold(
+                onSuccess = { AppLogger.info("filters", "Exported filters to ${file.absolutePath}") },
+                onFailure = { e -> AppLogger.error("filters", "Failed to export filters to ${file.absolutePath}", e) },
+            )
+        }
         cancelExportFilters()
     }
 
@@ -3789,10 +3890,14 @@ class AppState(
 
     fun importFiltersFromFile(file: File) {
         runCatching { beginImportFilters(file.readText(), file.name) }
-            .onFailure {
-                importError = "Could not read filter file."
-                pendingImportReview = null
-            }
+            .fold(
+                onSuccess = { AppLogger.info("filters", "Imported filters from ${file.absolutePath}") },
+                onFailure = { e ->
+                    importError = "Could not read filter file."
+                    pendingImportReview = null
+                    AppLogger.error("filters", "Failed to import filters from ${file.absolutePath}", e)
+                },
+            )
     }
 
     fun importFiltersFromFileAsync(file: File) {

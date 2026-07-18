@@ -1,5 +1,6 @@
 package com.openlog.ai
 
+import com.openlog.debug.AppLogger
 import com.openlog.debug.OpenLogToolGateway
 import com.openlog.model.AiProviderKind
 import com.openlog.model.AiProviderProfile
@@ -104,7 +105,10 @@ internal class AiSidebarRuntime(
         prompt: String,
         context: AiInvestigationContext = AiInvestigationContext(tabId),
     ): AiStartResult {
-        startProblem(tabId, profile, prompt, context)?.let { return AiStartResult.Rejected(it) }
+        startProblem(tabId, profile, prompt, context)?.let {
+            AppLogger.warn("ai", "AI request rejected before start")
+            return AiStartResult.Rejected(it)
+        }
 
         val session = sessions.sessionFor(tabId)
         if (profile.kind == AiProviderKind.CODEX_ACCOUNT || profile.kind == AiProviderKind.CLAUDE_CODE_ACCOUNT) {
@@ -115,14 +119,17 @@ internal class AiSidebarRuntime(
                 runner.start(session, profile, prompt.trim(), systemPrompt(context), context)
             } catch (error: Exception) {
                 resourcesForRun.close()
+                AppLogger.error("ai", "Account AI request could not start", error)
                 return AiStartResult.Rejected(error.message ?: "Unable to start the account agent.")
             }
             retainRun(run, resourcesForRun, profile.id)
+            AppLogger.info("ai", "Account AI request started")
             return AiStartResult.Started(run)
         }
         val provider = try {
             providerFactory.create(profile, apiKey)
         } catch (error: Exception) {
+            AppLogger.error("ai", "AI provider could not be prepared", error)
             return AiStartResult.Rejected(error.message ?: "Unable to prepare the model provider.")
         }
         val resourcesForRun = ProviderRunResources(
@@ -140,9 +147,11 @@ internal class AiSidebarRuntime(
             )
         } catch (error: Exception) {
             resourcesForRun.close()
+            AppLogger.error("ai", "AI request could not start", error)
             return AiStartResult.Rejected(error.message ?: "Unable to start the AI request.")
         }
         retainRun(run, resourcesForRun, profile.id)
+        AppLogger.info("ai", "AI request started")
         return AiStartResult.Started(run)
     }
 
@@ -155,6 +164,7 @@ internal class AiSidebarRuntime(
 
     fun cancel(run: AiRun) {
         resources[run.id]?.cancel(run) ?: run.cancel()
+        AppLogger.info("ai", "AI request cancelled")
         scheduleUiUpdate()
     }
 
@@ -248,6 +258,7 @@ internal class AiSidebarRuntime(
             run.history.lastOrNull()?.let { updateConnectionState(profileId, it) }
             observers.remove(run.id)?.cancel()
             resources.remove(run.id)?.close()
+            AppLogger.info("ai", "AI request finished")
             scheduleUiUpdate()
         }
         scheduleUiUpdate()
@@ -256,7 +267,10 @@ internal class AiSidebarRuntime(
     private fun updateConnectionState(profileId: String, event: AiRunEvent) {
         when (event) {
             AiRunEvent.Done -> connectionStates[profileId] = AiConnectionState.Ready
-            is AiRunEvent.Error -> connectionStates[profileId] = AiConnectionState.Failed(event.message)
+            is AiRunEvent.Error -> {
+                connectionStates[profileId] = AiConnectionState.Failed(event.message)
+                AppLogger.warn("ai", "AI request reported an error")
+            }
             AiRunEvent.Cancelled -> if (connectionStates[profileId] == AiConnectionState.Checking) {
                 connectionStates[profileId] = AiConnectionState.NotChecked
             }
