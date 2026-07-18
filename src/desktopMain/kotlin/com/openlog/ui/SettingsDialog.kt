@@ -484,11 +484,23 @@ private fun AppearanceSettingsSection(state: AppState) {
                 onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
             )
         }
-        CompactSetting("Font size", Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+        CompactSetting("Font size", Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
             ListStepper(
                 options = (10..16).toList(),
                 value = state.settings.fontSize,
                 onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Toolbar labels",
+            tooltip = "Hides text on the main toolbar buttons, leaving only their icons.",
+            modifier = Modifier.weight(1f),
+            horizontalAlignment = Alignment.Start,
+        ) {
+            SegmentedControl(
+                options = listOf("Show", "Icons only"),
+                selectedIndices = setOf(if (state.settings.toolbarIconOnlyButtons) 1 else 0),
+                onToggle = { idx -> state.updateSettings { it.copy(toolbarIconOnlyButtons = idx == 1) } },
             )
         }
     }

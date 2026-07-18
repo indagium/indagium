@@ -7,6 +7,12 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.CompareArrows
+import androidx.compose.material.icons.automirrored.outlined.StickyNote2
+import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.FilterList
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -75,6 +81,7 @@ internal fun TabBar(state: AppState) {
     val rightShape = RoundedCornerShape(topEnd = 7.dp, bottomEnd = 7.dp)
     val standaloneShape = RoundedCornerShape(7.dp)
     val hasRecentFiles = state.recentFiles.isNotEmpty()
+    val showToolbarText = !state.settings.toolbarIconOnlyButtons
     Row(
         Modifier.fillMaxWidth().height(36.dp).background(tc.p2).border(BorderStroke(1.dp, tc.br)).padding(vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -82,25 +89,37 @@ internal fun TabBar(state: AppState) {
         TabOverflowRow(state = state, modifier = Modifier.weight(1f).fillMaxHeight())
         Spacer(Modifier.width(toolbarGap))
         ToolbarBtn(
-            if (state.filterVisible) "⊟ Filter" else "⊞ Filter",
+            "Filter",
+            icon = Icons.Outlined.FilterList,
+            showLabel = showToolbarText,
+            tooltip = "Toggle filter panel",
             active = state.filterVisible,
             modifier = Modifier.fillMaxHeight(),
             shape = leftShape,
         ) { state.updateFilterVisible(!state.filterVisible) }
         ToolbarBtn(
-            if (state.annotationVisible) "⊟ Notes" else "⊞ Notes",
+            "Notes",
+            icon = Icons.AutoMirrored.Outlined.StickyNote2,
+            showLabel = showToolbarText,
+            tooltip = "Toggle notes panel",
             active = state.annotationVisible,
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
         ) { state.updateAnnotationVisible(!state.annotationVisible) }
         ToolbarBtn(
-            if (state.aiPanelVisible) "⊟ AI" else "⊞ AI",
+            "AI",
+            icon = Icons.Outlined.AutoAwesome,
+            showLabel = showToolbarText,
+            tooltip = "Toggle AI panel",
             active = state.aiPanelVisible,
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
         ) { state.updateAiPanelVisible(!state.aiPanelVisible) }
         ToolbarBtn(
-            if (state.compareMode) "⊟ Compare" else "⊠ Compare",
+            "Compare",
+            icon = Icons.AutoMirrored.Outlined.CompareArrows,
+            showLabel = showToolbarText,
+            tooltip = "Toggle compare view",
             active = state.compareMode,
             enabled = state.canCompare,
             modifier = Modifier.fillMaxHeight(),
@@ -108,6 +127,9 @@ internal fun TabBar(state: AppState) {
         ) { state.updateCompareMode(!state.compareMode) }
         ToolbarBtn(
             "Open",
+            icon = Icons.Outlined.FolderOpen,
+            showLabel = showToolbarText,
+            tooltip = "Open log file",
             modifier = Modifier.fillMaxHeight(),
             shape = if (hasRecentFiles) middleShape else rightShape,
         ) {
@@ -122,6 +144,7 @@ internal fun TabBar(state: AppState) {
             ToolbarBtn(
                 "▾",
                 active = state.recentMenuOpen,
+                tooltip = "Recent files",
                 modifier = Modifier.fillMaxHeight().width(18.dp),
                 shape = rightShape,
                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 5.dp),
@@ -130,6 +153,7 @@ internal fun TabBar(state: AppState) {
         Spacer(Modifier.width(toolbarGap))
         ToolbarBtn(
             "⚙",
+            tooltip = "Settings",
             modifier = Modifier.fillMaxHeight().width(36.dp),
             shape = standaloneShape
         ) { state.settingsOpen = true }

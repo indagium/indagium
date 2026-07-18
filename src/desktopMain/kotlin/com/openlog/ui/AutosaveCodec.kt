@@ -564,6 +564,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("copyMaskRules", copyMaskRulesJson(copyMaskRules))
     put("mcpAllowBrowserClients", mcpAllowBrowserClients)
     put("showRowNumbers", showRowNumbers)
+    put("toolbarIconOnlyButtons", toolbarIconOnlyButtons)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -759,6 +760,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         copyMaskRules = o.copyMaskRulesFromJson("copyMaskRules"),
         mcpAllowBrowserClients = o.boolOrDefault("mcpAllowBrowserClients", false),
         showRowNumbers = o.boolOrDefault("showRowNumbers", false),
+        toolbarIconOnlyButtons = o.boolOrDefault("toolbarIconOnlyButtons", true),
     )
 }.getOrNull()
 

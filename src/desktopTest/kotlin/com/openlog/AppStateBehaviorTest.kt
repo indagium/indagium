@@ -3744,6 +3744,8 @@ class AppStateBehaviorTest {
         sourceAutoDiscoveryEnabled = false,
         copyMaskRules = listOf(CopyMaskRule("java", "j*ava"), CopyMaskRule("secret", "s3cret")),
         mcpAllowBrowserClients = true,
+        showRowNumbers = true,
+        toolbarIconOnlyButtons = false,
     )
 
     // (ARCH-2/Batch 5) Proves the migration end to end: every AppSettings field pushed off its
@@ -3808,6 +3810,7 @@ class AppStateBehaviorTest {
 
         assertEquals("auto", restored.settings.editorChoice)
         assertEquals("", restored.settings.editorCommand)
+        assertTrue(restored.settings.toolbarIconOnlyButtons)
     }
 
     // Once editorChoice is written explicitly (current format), it round-trips as-is rather than

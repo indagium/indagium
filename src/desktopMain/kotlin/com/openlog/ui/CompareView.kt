@@ -7,6 +7,9 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.FilterList
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -16,6 +19,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
@@ -179,7 +183,8 @@ internal fun CompareView(
                         modifier = Modifier.weight(1f).fillMaxHeight(),
                     )
                     CompareTabPill(
-                        label = if (state.compareFilterRight) "⊟ Filter" else "⊞ Filter",
+                        label = "Filter",
+                        icon = Icons.Outlined.FilterList,
                         active = state.compareFilterRight,
                         tooltip = "Toggle right-side filtering",
                         modifier = Modifier.fillMaxHeight(),
@@ -509,6 +514,7 @@ internal fun comparePickerOrderAfterOverflowSelection(orderIds: List<String>, ta
 @Composable
 internal fun CompareTabPill(
     label: String,
+    icon: ImageVector? = null,
     active: Boolean,
     dragging: Boolean = false,
     tooltip: String,
@@ -531,13 +537,27 @@ internal fun CompareTabPill(
                 .padding(horizontal = 6.dp, vertical = 0.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
-            AppText(
-                label,
-                color = if (active) tc.ac else tc.ts,
-                fontSize = 9.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            val contentColor = if (active) tc.ac else tc.ts
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (icon != null) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = contentColor,
+                        modifier = Modifier.size(12.dp),
+                    )
+                }
+                AppText(
+                    label,
+                    color = contentColor,
+                    fontSize = 9.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }

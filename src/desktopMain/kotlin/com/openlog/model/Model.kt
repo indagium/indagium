@@ -449,6 +449,9 @@ data class AppSettings(
     // cross-references the full file. Off by default. Trailing with a default so old settings tokens
     // (without this field) still parse.
     val showRowNumbers: Boolean = false,
+    // When enabled, the main toolbar keeps only the semantic icons for Filter/Notes/AI/Compare/Open.
+    // On by default to keep the toolbar compact; users can restore text labels from Appearance.
+    val toolbarIconOnlyButtons: Boolean = true,
 )
 
 enum class ThemePreset(val label: String) {
