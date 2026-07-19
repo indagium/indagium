@@ -1000,6 +1000,67 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
             descriptions = mapOf("name" to "Unique preset name; must not match an existing preset (case-insensitive)."),
         ),
     ),
+    McpTool(
+        "search_similar_cases",
+        "Search past saved analysis notes (the ones written via add_text_note/save note, or " +
+            "hand-copied .ann/.md files) for issues similar to the one currently being investigated. " +
+            "ONLY call this when the user explicitly asks whether something like this has happened " +
+            "before, or as part of the /similar quick action — never as a routine step of every " +
+            "investigation. Matches on tag overlap and normalized text overlap against a query built " +
+            "from the current issue's description and active tags; results are ranked, and a match " +
+            "whose recorded appVersion is older than the newest version seen across indexed notes is " +
+            "down-weighted (but still returned) since it may no longer be relevant. Returns a small " +
+            "set of compact summaries — read them, then call get_case for only the 1-3 that look " +
+            "actually relevant rather than every result. An empty `matches` list means no similar " +
+            "past issue was found, not an error.",
+        schema(
+            "query" to "string", "tags" to "array", "excludeSourcePath" to "string", "limit" to "integer",
+            required = listOf("query"),
+            descriptions = mapOf(
+                "query" to "Free text describing the current issue (e.g. the issueDescription from get_issue_description).",
+                "tags" to "Log tags currently active/relevant, to boost notes that reference the same tags.",
+                "excludeSourcePath" to "Absolute sourcePath to exclude from results — use the current tab's " +
+                    "own sourcePath so a note isn't matched against itself.",
+                "limit" to "Maximum number of results to return (default 8, capped at 20).",
+            ),
+        ),
+    ),
+    McpTool(
+        "get_case",
+        "Fetch the full text of one past analysis note returned by search_similar_cases, by its " +
+            "`id`. Returns the note's Markdown verbatim when a .md file exists; for a note that is " +
+            "only an .ann sidecar (no paired .md — e.g. hand-copied into the notes folder), returns " +
+            "reconstructed readable text (prefix + note blocks + suffix) instead. Also returns " +
+            "decisiveTags and appVersion recorded on the note. Treat what this returns as a LEAD, not " +
+            "a conclusion — verify against this investigation's own tool-returned evidence before " +
+            "reusing a prior root cause.",
+        schema("id" to "string", required = listOf("id")),
+    ),
+    McpTool(
+        "set_case_metadata",
+        "Record which app/build version and which tags/filters were decisive for this tab's root " +
+            "cause, so a future search_similar_cases can surface this note for a recurring issue and " +
+            "correctly judge whether it's still relevant. Call this near the end of an investigation, " +
+            "after add_text_note has written the analysis — it only tags metadata onto the tab's " +
+            "existing annotations (persisted the same way as the rest of the note), it does not write " +
+            "a note itself. Both fields are optional; omit whichever wasn't determined.",
+        schema(
+            "tabId" to "string", "appVersion" to "string", "decisiveTags" to "array",
+            required = listOf("tabId"),
+            descriptions = mapOf(
+                "appVersion" to "The app/build version this issue was observed on, if known.",
+                "decisiveTags" to "Log tags/filters that were decisive in finding this issue's root cause.",
+            ),
+        ),
+    ),
+    McpTool(
+        "reindex_cases",
+        "Force a full rebuild of the past-issues search index from disk, ignoring the cached " +
+            "index. Not normally needed — search_similar_cases already auto-rescans the notes " +
+            "folders on every call, so a note added, edited, or removed since the last search is " +
+            "picked up automatically. Use this only as an escape hatch if results look stale despite that.",
+        schema(),
+    ),
 )
 
 // REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl

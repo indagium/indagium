@@ -1001,6 +1001,9 @@ internal fun Annotations.annotationsToken(sourcePath: String? = null): String = 
     blocks.joinToString(",") { it.annBlockToken().b64() },
     issueDescription,
     sourcePath.orEmpty(),
+    // Appended — indices 5/6. Old readers (getOrNull(0..4)) never see these; never reorder.
+    appVersion,
+    decisiveTags.joinToString(","),
 )
 
 internal fun String.annotationsFromToken(): Annotations? = runCatching {
@@ -1011,6 +1014,11 @@ internal fun String.annotationsFromToken(): Annotations? = runCatching {
         suffix = p[1],
         blocks = p[2].encodedList().mapNotNull { it.annBlockFromToken() },
         issueDescription = p.getOrNull(3) ?: "",
+        // Fields 5/6 (index 4 is sourcePath, read separately by readSourceFingerprint —
+        // AppState.kt — which must stay unaffected by this addition). Absent on legacy
+        // (5-field) tokens -> default to empty, exactly like a note that never set them.
+        appVersion = p.getOrNull(5) ?: "",
+        decisiveTags = p.getOrNull(6)?.split(",")?.filter { it.isNotBlank() } ?: emptyList(),
     )
 }.getOrNull()
 

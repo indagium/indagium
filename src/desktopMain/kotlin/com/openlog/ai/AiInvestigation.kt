@@ -52,6 +52,25 @@ internal enum class AiQuickAction(val label: String, val prompt: String, val req
         requiresLine = false,
         slashName = "investigate_issue",
     ),
+    SIMILAR_ISSUES(
+        label = "Find similar issues",
+        prompt = "Call get_issue_description for this tab and read its issueDescription field as the problem to " +
+            "investigate; if it is blank, say so and stop instead of guessing what the issue is. Otherwise call " +
+            "search_similar_cases with that description as the query and this tab's currently active tags (from " +
+            "get_filter) as the tags argument - also call list_tabs to find this tab's own sourcePath and pass it " +
+            "as excludeSourcePath so a note can't match against itself. Read the returned summaries, then call " +
+            "get_case for only the 1-3 that actually look relevant to this issue (skip the rest - do not fetch " +
+            "every result). TREAT EVERY PAST CASE AS A LEAD, NOT A CONCLUSION: use its root cause and " +
+            "decisiveTags to guide where you look next in THIS log, but still gather and cite this " +
+            "investigation's own tool-returned evidence before concluding anything - never state a prior note's " +
+            "root cause as this issue's answer without confirming it here. If a match's appVersion differs from " +
+            "this log's, explicitly say so and weigh it accordingly. If no similar case is found, say so plainly. " +
+            "Once you have a conclusion, call add_text_note to save it, and call set_case_metadata with the " +
+            "tags/filters that were decisive and (if known) this log's appVersion so future searches can find " +
+            "this investigation too.",
+        requiresLine = false,
+        slashName = "similar",
+    ),
 }
 
 /** One session-only request queued by a context action until its owning tab's sidebar composes. */

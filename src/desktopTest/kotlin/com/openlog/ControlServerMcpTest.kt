@@ -222,8 +222,9 @@ class ControlServerMcpTest {
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing",
             "resolve_log_source", "get_project_info",
             "set_highlighters", "reindex_sources", "add_manual_collapse", "add_sequence", "save_filter_preset",
+            "search_similar_cases", "get_case", "set_case_metadata", "reindex_cases",
         )
-        assertEquals(41, expected.size)
+        assertEquals(45, expected.size)
         expected.forEach { name -> assertTrue(body.contains("\"$name\""), "tools/list missing $name:\n$body") }
     }
 

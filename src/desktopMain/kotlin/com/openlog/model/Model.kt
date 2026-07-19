@@ -190,6 +190,16 @@ data class Annotations(
     val prefix: String = "",
     val suffix: String = "",
     val issueDescription: String = "",
+    // Best-effort app/build version extracted from the log at save time (e.g. from a
+    // "versionName=" marker) — empty when not detected. Used only to down-weight stale matches in
+    // "similar past issues" retrieval (com.openlog.cases). Persisted (.ann sidecar + autosave) as
+    // token field index 5 — APPENDED after the original 5 fields, so old readers (getOrNull-based)
+    // simply never see it and new readers default to "" for legacy notes. Never reordered.
+    val appVersion: String = "",
+    // Tags/filters the AI (or user) judged decisive for this issue's root cause, recorded via the
+    // set_case_metadata MCP tool at the end of an investigation. Optional; empty when absent.
+    // Persisted as token field index 6, appended the same way as [appVersion] above.
+    val decisiveTags: List<String> = emptyList(),
 )
 
 // ── Tab ────────────────────────────────────────────────────────────

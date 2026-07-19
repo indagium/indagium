@@ -48,6 +48,7 @@ import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.exportFilteredToFile
+import com.openlog.utils.extractAppVersionHeuristic
 import com.openlog.utils.extractCandidate
 import com.openlog.utils.indexOfEntryId
 import com.openlog.utils.invalidateComputeCache
@@ -3262,9 +3263,16 @@ class AppState(
         val t = tab(tabId) ?: return false
         return runCatching {
             file.parentFile?.mkdirs()
-            file.writeText(t.annotations.annotationsToken())
+            file.writeText(t.annotations.withDetectedAppVersion(t.logData).annotationsToken())
         }.isSuccess
     }
+
+    // Best-effort app/build version fill-in at save time (com.openlog.cases' "similar past
+    // issues" retrieval uses it only to down-weight stale matches — see
+    // utils/AppVersionHeuristic.kt). Never overwrites a value already set (e.g. by the user or by
+    // the AI via set_case_metadata); a scan that finds nothing simply leaves it "" as before.
+    private fun Annotations.withDetectedAppVersion(logData: List<LogEntry>): Annotations =
+        if (appVersion.isNotBlank()) this else copy(appVersion = extractAppVersionHeuristic(logData))
 
     fun loadAnnotationsFrom(tabId: String, file: File): Boolean {
         val annotations = runCatching { file.readText().annotationsFromToken() }.getOrNull() ?: return false
@@ -3286,7 +3294,8 @@ class AppState(
         ioScope.launch {
             runCatching {
                 saved.writeText(buildMd(t, settings))
-                File(saved.parent, saved.nameWithoutExtension + ".ann").writeText(t.annotations.annotationsToken(t.sourcePath))
+                File(saved.parent, saved.nameWithoutExtension + ".ann")
+                    .writeText(t.annotations.withDetectedAppVersion(t.logData).annotationsToken(t.sourcePath))
                 rememberRecentNote(saved)
             }.fold(
                 onSuccess = { AppLogger.info("export", "Saved analysis to ${saved.absolutePath}") },
@@ -3369,7 +3378,11 @@ class AppState(
 
     private fun activeNotesDir(): File = userNotesDir() ?: notesDir
 
-    private fun noteLookupDirs(): List<File> {
+    // internal (not private): OpenLogToolOperations' CaseSearch instance (com.openlog.cases)
+    // reuses this exact directory set for search_similar_cases/reindex_cases, so "similar past
+    // issues" retrieval always looks in the same places notes actually get saved/loaded from —
+    // including in tests, where notesDir is injected away from the real ~/.openlog2-equivalent.
+    internal fun noteLookupDirs(): List<File> {
         return listOfNotNull(
             userNotesDir(),
             notesDir,
@@ -3449,7 +3462,7 @@ class AppState(
                 // Sidecar stores full block state for restoration, plus the sourcePath
                 // fingerprint (5th token field) used to disambiguate same-named notes.
                 File(targetDir, "${mdFile.nameWithoutExtension}.ann")
-                    .writeText(tab.annotations.annotationsToken(tab.sourcePath))
+                    .writeText(tab.annotations.withDetectedAppVersion(tab.logData).annotationsToken(tab.sourcePath))
                 legacySourceFingerprintFile(mdFile).delete()
                 rememberRecentNote(mdFile)
             }

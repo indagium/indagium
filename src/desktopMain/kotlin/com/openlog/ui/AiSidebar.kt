@@ -608,6 +608,7 @@ private fun AiQuickActionsContent(
                 AiQuickAction.ROOT_CAUSE,
                 AiQuickAction.TIMELINE,
                 AiQuickAction.ISSUE_INVESTIGATION,
+                AiQuickAction.SIMILAR_ISSUES,
             ).forEach { action ->
                 AppButton(
                     action.label,

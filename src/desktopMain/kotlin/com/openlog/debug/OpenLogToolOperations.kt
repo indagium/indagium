@@ -1,6 +1,9 @@
 package com.openlog.debug
 
 import androidx.compose.ui.graphics.Color
+import com.openlog.cases.CaseIndexer
+import com.openlog.cases.CaseSearch
+import com.openlog.cases.CaseSummary
 import com.openlog.model.CrashSite
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
@@ -14,6 +17,7 @@ import com.openlog.model.SavedFilter
 import com.openlog.model.SequenceDef
 import com.openlog.source.SourceMatch
 import com.openlog.ui.AppState
+import com.openlog.ui.DesktopStorage
 import com.openlog.ui.HL_COLORS
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitSource
@@ -33,6 +37,10 @@ private const val COLOR_CHANNEL_MAX_F = 255f
 private const val HEX_RGB_LEN = 6
 private const val HEX_ARGB_LEN = 8
 private const val HEX_RADIX = 16
+
+// Mirrors CaseSearch's own DEFAULT_SEARCH_LIMIT (private to that class) — kept in sync manually
+// since it's only reached here when the caller omits `limit` entirely.
+private const val DEFAULT_CASE_SEARCH_LIMIT = 8
 
 /**
  * Transport-neutral AppState operations behind the openLog MCP catalog.
@@ -121,7 +129,22 @@ internal class OpenLogToolOperations(
         },
         "add_sequence" to { a -> addSequenceRoute(a.str("tabId") ?: "", a) },
         "save_filter_preset" to { a -> saveFilterPresetRoute(a.str("tabId") ?: "", a.str("name") ?: "") },
+        "search_similar_cases" to { a ->
+            searchSimilarCasesRoute(a.str("query") ?: "", a.strList("tags") ?: emptyList(), a.str("excludeSourcePath"), a.anyInt("limit"))
+        },
+        "get_case" to { a -> getCaseRoute(a.str("id") ?: "") },
+        "set_case_metadata" to { a ->
+            setCaseMetadataRoute(a.str("tabId") ?: "", a.str("appVersion"), a.strList("decisiveTags"))
+        },
+        "reindex_cases" to { reindexCasesRoute() },
     )
+
+    // Built lazily (not at construction) so tests/hosts that never touch case-search tools never
+    // pay for a CaseSearch instance; noteDirs() is re-evaluated on every search, so a
+    // Settings -> defaultSaveDir change afterward is picked up without rebuilding this.
+    private val caseSearch: CaseSearch by lazy {
+        CaseSearch(noteDirs = appState::noteLookupDirs, indexFile = DesktopStorage.caseIndexFile())
+    }
 
     // Direct in-process entry point shared by MCP/REST and the future AI runner.
     internal val toolGateway = OpenLogToolGateway(MCP_TOOLS, operationHandlers)
@@ -434,6 +457,73 @@ internal class OpenLogToolOperations(
             ?: return mapOf("error" to "preset was not saved")
         return mapOf("ok" to true, "preset" to filterPresetToMap(saved))
     }
+
+    // ── Similar past issues (com.openlog.cases) ─────────────────────────
+
+    private fun searchSimilarCasesRoute(query: String, tags: List<String>, excludeSourcePath: String?, limit: Int?): Map<String, Any?> {
+        if (query.isBlank()) return mapOf("error" to "missing or blank query")
+        val results = caseSearch.search(
+            query = query,
+            tags = tags,
+            excludeSourcePath = excludeSourcePath?.takeIf { it.isNotBlank() },
+            limit = limit ?: DEFAULT_CASE_SEARCH_LIMIT,
+        )
+        return mapOf("matches" to results.map { caseSummaryToMap(it) })
+    }
+
+    private fun getCaseRoute(id: String): Map<String, Any?> {
+        if (id.isBlank()) return mapOf("error" to "missing id")
+        val record = caseSearch.getCase(id) ?: return mapOf("error" to "no such case: $id")
+        val text = CaseIndexer.readCaseText(record) ?: return mapOf("error" to "case note is no longer readable on disk: $id")
+        return mapOf(
+            "id" to record.id,
+            "title" to record.title,
+            "text" to text,
+            "sourcePath" to record.sourcePath,
+            "appVersion" to record.appVersion,
+            "decisiveTags" to record.decisiveTags,
+        )
+    }
+
+    // Writes onto the tab's existing Annotations via the same upAnn path every other annotation
+    // mutation uses, so autosave and note re-export pick it up exactly like any other edit — this
+    // does not itself write a note (add_text_note is what does that).
+    private fun setCaseMetadataRoute(tabId: String, appVersion: String?, decisiveTags: List<String>?): Map<String, Any?> {
+        if (tabId.isBlank()) return mapOf("error" to "missing tabId")
+        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        if (appVersion == null && decisiveTags == null) {
+            return mapOf("error" to "provide appVersion and/or decisiveTags")
+        }
+        appState.upAnn(tabId) { t ->
+            t.copy(
+                annotations = t.annotations.copy(
+                    appVersion = appVersion?.takeIf { it.isNotBlank() } ?: t.annotations.appVersion,
+                    decisiveTags = decisiveTags ?: t.annotations.decisiveTags,
+                ),
+            )
+        }
+        val updated = appState.tab(tabId)?.annotations
+        return mapOf(
+            "ok" to true,
+            "tabId" to tabId,
+            "appVersion" to updated?.appVersion,
+            "decisiveTags" to updated?.decisiveTags,
+        )
+    }
+
+    private fun reindexCasesRoute(): Map<String, Any?> {
+        caseSearch.reindexAll()
+        return mapOf("ok" to true)
+    }
+
+    private fun caseSummaryToMap(summary: CaseSummary): Map<String, Any?> = mapOf(
+        "id" to summary.id,
+        "title" to summary.title,
+        "description" to summary.descriptionSnippet,
+        "matchedTags" to summary.matchedTags,
+        "score" to summary.score,
+        "appVersion" to summary.appVersion,
+    )
 
     // Hex "#RRGGBB" / "#AARRGGBB" (leading # optional) → Compose Color; null when malformed.
     private fun parseHexColor(hex: String): Color? {
