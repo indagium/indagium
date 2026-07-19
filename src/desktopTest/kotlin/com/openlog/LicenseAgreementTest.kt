@@ -53,10 +53,12 @@ class LicenseAgreementTest {
     fun packagedAgreementContainsTheRequiredTerms() {
         val agreement = loadLicenseAgreement()
 
-        assertContains(agreement, "PolyForm Noncommercial License 1.0.0")
-        assertContains(agreement, "Any business or work-related use requires a separate written commercial license")
+        assertContains(agreement, "PolyForm Perimeter License 1.0.0")
+        assertContains(agreement, "Any purpose is a permitted purpose, except for providing to others any product that competes with the software.")
+        assertContains(agreement, "Required Notice: Copyright 2026 Roman Arnaut")
         assertContains(agreement, "The openLog name, logo, icon, and branding")
-        assertContains(agreement, "https://github.com/rarnaut-dev/openLog2/discussions")
+        assertFalse(agreement.contains("PolyForm Noncommercial License"))
+        assertFalse(agreement.contains("separate written commercial license"))
     }
 
     private fun com.openlog.model.AppSettings?.orEmpty() = this ?: com.openlog.model.AppSettings()

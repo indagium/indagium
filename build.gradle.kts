@@ -23,7 +23,7 @@ val ktorVersion = "3.4.3"
 
 val appVersion: String = providers.gradleProperty("app.version").get()
 val appAuthor = "Roman Arnaut"
-val licenseVersion = "2026-07-18"
+val licenseVersion = "2026-07-19"
 val generatedBuildInfoDir = layout.buildDirectory.dir("generated/openlogBuildInfo/desktopMain/kotlin")
 val generatedLicenseResourcesDir = layout.buildDirectory.dir("generated/openlogLicenseResources/desktopMain/resources")
 
@@ -52,7 +52,7 @@ val generateBuildInfo by tasks.registering {
 // Keep the in-app agreement derived from the repository's canonical legal documents. This avoids
 // displaying one set of terms in packaged builds while publishing different terms at the project root.
 val generateLicenseResources by tasks.registering {
-    val licenseDocuments = listOf("LICENSE", "COMMERCIAL.md", "NOTICE")
+    val licenseDocuments = listOf("LICENSE", "NOTICE")
     inputs.files(licenseDocuments.map(::file))
     outputs.dir(generatedLicenseResourcesDir)
     doLast {

@@ -1,0 +1,41 @@
+name: Validate contributor agreement
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    name: Validate contributor acknowledgements
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require contributor acknowledgements
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request.body || "";
+            const requiredAcknowledgements = [
+              {
+                label: "the Contributor License Grant",
+                pattern: /-\s*\[[xX]\]\s*I have read and agree to the Contributor License Grant/i,
+              },
+              {
+                label: "authority to submit the contribution",
+                pattern: /-\s*\[[xX]\]\s*I confirm that I created this contribution or have authority to submit it/i,
+              },
+            ];
+
+            const missing = requiredAcknowledgements
+              .filter(({ pattern }) => !pattern.test(body))
+              .map(({ label }) => label);
+
+            if (missing.length > 0) {
+              core.setFailed(
+                `Please check the pull request template acknowledgement for: ${missing.join(", ")}. ` +
+                "See CONTRIBUTING.md for the full Contributor License Grant.",
+              );
+            }
