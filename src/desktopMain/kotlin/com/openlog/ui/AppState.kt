@@ -568,6 +568,12 @@ class AppState(
         ControlServer(s, p, token = loadOrCreateControlToken(controlTokenFile), allowBrowserClients = s.settings.mcpAllowBrowserClients)
             .also { it.start() }
     },
+    // Directory selection needs a different native implementation than FileDialog's file picker.
+    // Keep it injectable so folder-selection flows remain testable without opening a Swing window.
+    private val directoryPicker: (String, File?) -> File? = { title, initialDirectory ->
+        PlatformDirectoryPicker.pick(title, initialDirectory)
+    },
+    private val updateChecker: UpdateChecker = UpdateChecker(),
 ) {
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
@@ -1293,7 +1299,6 @@ class AppState(
     var availableUpdate by mutableStateOf<ReleaseInfo?>(null)
     var updateCheckStatus by mutableStateOf<UpdateStatus>(UpdateStatus.Idle)
     var updateDownload by mutableStateOf<UpdateDownloadState>(UpdateDownloadState.Idle)
-    private val updateChecker = UpdateChecker()
 
     // skipUpdate() only records the skipped version — it never clears availableUpdate — so this
     // stays the single source of truth for whether the popup should be showing right now, both
@@ -1342,37 +1347,30 @@ class AppState(
     fun downloadUpdate() {
         val release = availableUpdate ?: return
         val asset = assetForCurrentOs(release.assets) ?: return
-        System.setProperty("apple.awt.fileDialogForDirectories", "true")
-        try {
-            val dlg = FileDialog(null as Frame?, "Choose Download Folder", FileDialog.LOAD)
-            settings.updateDownloadDir?.let { dlg.directory = it }
-            dlg.isVisible = true
-            val dir = dlg.directory ?: return
-            val name = dlg.file ?: return
-            val chosenDir = File(dir, name)
-            updateSettings { it.copy(updateDownloadDir = chosenDir.absolutePath) }
-            updateDownload = UpdateDownloadState.InProgress(0f)
-            AppLogger.info("update", "Update download started")
-            ioScope.launch {
-                runCatching {
-                    updateChecker.downloadAsset(asset, chosenDir) { bytesRead, total ->
-                        val fraction = if (total > 0) (bytesRead.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
-                        updateDownload = UpdateDownloadState.InProgress(fraction)
-                    }
-                }.onSuccess { file ->
-                    updateDownload = UpdateDownloadState.Done(file)
-                    AppLogger.info("update", "Update download completed")
-                    revealInFileManager(file)
-                }.onFailure { error ->
-                    if (error is CancellationException) throw error
-                    updateDownload = UpdateDownloadState.Failed(error.message ?: "Download failed.")
-                    AppLogger.error("update", "Update download failed", error)
+        val chosenDir = pickDirectory("Choose Download Folder", settings.updateDownloadDir?.let(::File)) ?: return
+        updateSettings { it.copy(updateDownloadDir = chosenDir.absolutePath) }
+        updateDownload = UpdateDownloadState.InProgress(0f)
+        AppLogger.info("update", "Update download started")
+        ioScope.launch {
+            runCatching {
+                updateChecker.downloadAsset(asset, chosenDir) { bytesRead, total ->
+                    val fraction = if (total > 0) (bytesRead.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+                    updateDownload = UpdateDownloadState.InProgress(fraction)
                 }
+            }.onSuccess { file ->
+                updateDownload = UpdateDownloadState.Done(file)
+                AppLogger.info("update", "Update download completed")
+                revealInFileManager(file)
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                updateDownload = UpdateDownloadState.Failed(error.message ?: "Download failed.")
+                AppLogger.error("update", "Update download failed", error)
             }
-        } finally {
-            System.setProperty("apple.awt.fileDialogForDirectories", "false")
         }
     }
+
+    internal fun pickDirectory(title: String, initialDirectory: File? = null): File? =
+        directoryPicker(title, initialDirectory)
 
     fun openAiProviderSettings() {
         requestedSettingsSection = SettingsSection.AiProviders
@@ -3532,31 +3530,13 @@ class AppState(
     }
 
     fun pickSaveFolder() {
-        System.setProperty("apple.awt.fileDialogForDirectories", "true")
-        try {
-            val dlg = FileDialog(null as Frame?, "Choose Save Folder", FileDialog.LOAD)
-            dlg.isVisible = true
-            val dir = dlg.directory ?: return
-            val file = dlg.file ?: return
-            val chosen = java.io.File(dir, file)
-            updateSettings { it.copy(defaultSaveDir = chosen.absolutePath) }
-        } finally {
-            System.setProperty("apple.awt.fileDialogForDirectories", "false")
-        }
+        val chosen = pickDirectory("Choose Save Folder", settings.defaultSaveDir?.let(::File)) ?: return
+        updateSettings { it.copy(defaultSaveDir = chosen.absolutePath) }
     }
 
     fun pickSourceFolder() {
-        System.setProperty("apple.awt.fileDialogForDirectories", "true")
-        try {
-            val dlg = FileDialog(null as Frame?, "Choose Source Folder", FileDialog.LOAD)
-            dlg.isVisible = true
-            val dir = dlg.directory ?: return
-            val file = dlg.file ?: return
-            val chosen = java.io.File(dir, file)
-            updateSettings { it.copy(sourceFolders = (it.sourceFolders + chosen.absolutePath).distinct()) }
-        } finally {
-            System.setProperty("apple.awt.fileDialogForDirectories", "false")
-        }
+        val chosen = pickDirectory("Choose Source Folder") ?: return
+        updateSettings { it.copy(sourceFolders = (it.sourceFolders + chosen.absolutePath).distinct()) }
     }
 
     fun removeSourceFolder(path: String) {

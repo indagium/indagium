@@ -12,8 +12,12 @@ import io.ktor.client.request.HttpRequestData
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.runBlocking
+import java.io.File
+import java.io.IOException
+import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -92,6 +96,33 @@ class UpdateCheckerTest {
         val onlyDeb = listOf(ReleaseAsset("openLog_1.5.0.deb", "https://example.test/deb", 2L))
         assertNull(assetForCurrentOs(onlyDeb, osName = "Mac OS X"))
         assertNull(assetForCurrentOs(emptyList(), osName = "Linux"))
+    }
+
+    @Test
+    fun downloadAssetWritesTheReleaseAssetIntoTheDestinationDirectory() = runBlocking {
+        val client = HttpClient(MockEngine {
+            respond("package", HttpStatusCode.OK, headersOf("Content-Length", "7"))
+        }) { expectSuccess = false }
+        val destination = createTempDirectory("openlog-update-download").toFile()
+        val asset = ReleaseAsset("openLog.deb", "https://example.test/openLog.deb", 7L)
+
+        val result = UpdateChecker(httpClient = client).downloadAsset(asset, destination)
+
+        assertEquals(File(destination, asset.name), result)
+        assertEquals("package", result.readText())
+    }
+
+    @Test
+    fun downloadAssetRejectsAFileAsTheDestinationDirectory() = runBlocking {
+        val destination = File(createTempDirectory("openlog-update-destination-file").toFile(), "selected-file")
+            .apply { writeText("not a directory") }
+        val asset = ReleaseAsset("openLog.deb", "https://example.test/openLog.deb", 7L)
+
+        val error = assertFailsWith<IOException> {
+            UpdateChecker().downloadAsset(asset, destination)
+        }
+
+        assertTrue(error.message.orEmpty().contains("not a directory"))
     }
 
     private companion object {

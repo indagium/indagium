@@ -20,8 +20,6 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.openlog.ai.CustomAiCommand
 import com.openlog.model.*
-import java.awt.FileDialog
-import java.awt.Frame
 import java.io.File
 
 // ── Add annotation dialog ─────────────────────────────────────────────
@@ -270,17 +268,8 @@ internal fun SplitPromptDialog(
     }
 
     fun chooseDestination() {
-        System.setProperty("apple.awt.fileDialogForDirectories", "true")
-        try {
-            val dlg = FileDialog(null as Frame?, "Choose Split Destination", FileDialog.LOAD).apply {
-                directory = destination
-                isVisible = true
-            }
-            val dir = dlg.directory ?: return
-            val file = dlg.file ?: return
-            destination = File(dir, file).absolutePath
-        } finally {
-            System.setProperty("apple.awt.fileDialogForDirectories", "false")
+        state.pickDirectory("Choose Split Destination", File(destination))?.let { chosen ->
+            destination = chosen.absolutePath
         }
     }
 

@@ -23,6 +23,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import java.io.File
+import java.io.IOException
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -110,7 +111,12 @@ class UpdateChecker(
         destDir: File,
         onProgress: (bytesRead: Long, total: Long) -> Unit = { _, _ -> },
     ): File {
-        destDir.mkdirs()
+        if (destDir.exists() && !destDir.isDirectory) {
+            throw IOException("Download destination is not a directory: ${destDir.absolutePath}")
+        }
+        if (!destDir.exists() && !destDir.mkdirs() && !destDir.isDirectory) {
+            throw IOException("Could not create download directory: ${destDir.absolutePath}")
+        }
         val dest = File(destDir, asset.name)
         val tmp = File(destDir, ".${asset.name}.part")
         val buffer = ByteArray(DOWNLOAD_BUFFER_BYTES)
