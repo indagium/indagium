@@ -2461,7 +2461,8 @@ class AppStateBehaviorTest {
         state.confirmAddAnn("log", "log", listOf(1), "save this", null)
         waitUntil {
             File(notesDir, "sample_analysis.md").exists() &&
-                File(notesDir, "sample_analysis.ann").exists()
+                File(notesDir, "sample_analysis.ann").exists() &&
+                state.recentNotes.isNotEmpty()
         }
 
         assertTrue(File(notesDir, "sample_analysis.ann").exists())
@@ -2687,7 +2688,8 @@ class AppStateBehaviorTest {
         state.confirmAddAnn("log", "log", listOf(1), "save this", null)
         waitUntil {
             File(notesDir, "sample_analysis.md").exists() &&
-                File(notesDir, "sample_analysis.ann").exists()
+                File(notesDir, "sample_analysis.ann").exists() &&
+                state.recentNotes.isNotEmpty()
         }
 
         assertTrue(File(notesDir, "sample_analysis.ann").exists())
