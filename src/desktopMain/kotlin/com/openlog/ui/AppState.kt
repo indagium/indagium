@@ -958,6 +958,8 @@ class AppState(
     var recentNotes by mutableStateOf<List<String>>(emptyList())
     var recentNotesMenuOpen by mutableStateOf(false)
     var cacheClearConfirmOpen by mutableStateOf(false)
+    var resetAppDataConfirmOpen by mutableStateOf(false)
+    var resetAppDataError by mutableStateOf<String?>(null)
     val archiveCachePath: String = archiveCacheDir.absolutePath
     val appCachePath: String = archiveCacheDir.parentFile?.absolutePath ?: archiveCacheDir.absolutePath
 
@@ -965,8 +967,12 @@ class AppState(
     var appDataSizeBytes by mutableStateOf(0L)
         private set
 
+    /** Size of the data removed by the user-facing "Clear temporary data" action. */
+    var temporaryDataSizeBytes by mutableStateOf(0L)
+        private set
+
     /** Compatibility alias for callers that still use the previous cache-only name. */
-    val archiveCacheSizeBytes: Long get() = appDataSizeBytes
+    val archiveCacheSizeBytes: Long get() = temporaryDataSizeBytes
     var pendingSequenceStart by mutableStateOf<PendingSequenceStart?>(null)
     var pendingFilterLoad by mutableStateOf<PendingFilterLoad?>(null)
     var updateExistingPickerOpen by mutableStateOf(false)
@@ -1021,7 +1027,7 @@ class AppState(
         // snapshot-safe to publish from off the UI thread like every other ioScope write in this
         // file. The Settings-triggered path (requestClearCache -> refreshArchiveCacheInfo) stays
         // synchronous — that one is already user-initiated from an explicit click, not startup.
-        ioScope.launch { refreshAppDataSizeInfo() }
+        ioScope.launch { refreshStorageSizeInfo() }
         if (restoreOnCreate) restoreAutosave()
         loadPersistedSourceIndex()
         loadCustomAiCommands()
@@ -1032,9 +1038,9 @@ class AppState(
 
     // ── Helpers ─────────────────────────────────────────────────────
 
-    fun close() {
+    fun close(forAppDataReset: Boolean = false) {
         if (!closed.compareAndSet(false, true)) return
-        AppLogger.info("app", "openLog shutting down")
+        if (!forAppDataReset) AppLogger.info("app", "openLog shutting down")
         autosaveScheduler.cancelPending()
         aiProviderApiKeys.clear()
         aiSidebarRuntime.close()
@@ -3554,13 +3560,15 @@ class AppState(
     }
 
     fun removeSourceFolder(path: String) {
+        val rootAbs = File(path).absolutePath
         updateSettings {
             it.copy(
-                sourceFolders = it.sourceFolders - path,
-                sourceFolderInfo = it.sourceFolderInfo - path,
-                sourceFolderConfigurationIds = it.sourceFolderConfigurationIds - path,
+                sourceFolders = it.sourceFolders.filterNot { folder -> File(folder).absolutePath == rootAbs },
+                sourceFolderInfo = it.sourceFolderInfo.filterKeys { folder -> File(folder).absolutePath != rootAbs },
+                sourceFolderConfigurationIds = it.sourceFolderConfigurationIds.filterKeys { folder -> File(folder).absolutePath != rootAbs },
             )
         }
+        pruneSourceIndexForRegisteredFolders()
     }
 
     fun updateSourceFolderInfo(path: String, info: SourceFolderInfo) {
@@ -3677,6 +3685,26 @@ class AppState(
         return !file.exists() || file.lastModified() != meta.mtime || file.length() != meta.size
     }
 
+    /** Removes index records that no longer belong to a registered source root. */
+    private fun pruneSourceIndexForRegisteredFolders() {
+        val pruned = synchronized(stateLock) {
+            val current = sourceIndex ?: return
+            val registeredRoots = settings.sourceFolders.map { File(it).absolutePath }.toSet()
+            SourceIndex(
+                version = SOURCE_INDEX_VERSION,
+                roots = settings.sourceFolders,
+                sites = current.sites.filter { sourceRootForPath(it.filePath) != null },
+                fileMeta = current.fileMeta.filterKeys { sourceRootForPath(it) != null },
+                builtAt = current.builtAt,
+                rootBuiltAt = current.rootBuiltAt.filterKeys { it in registeredRoots },
+                rootConfigFingerprints = current.rootConfigFingerprints.filterKeys { it in registeredRoots },
+            )
+        }
+        runCatching { SourceIndexStore.save(pruned, sourceIndexFile) }
+            .onFailure { error -> AppLogger.error("source-index", "Failed to save pruned source index", error) }
+        publishSourceIndex(pruned)
+    }
+
     // Derived from the current combined sourceIndex rather than stored separately — every site/
     // fileMeta entry already carries its absolute file path, so a folder's own slice is just a
     // filter. Never indexed yet (no rootBuiltAt entry) reads as the zero-value status.
@@ -3706,7 +3734,7 @@ class AppState(
     fun reindexSources(folder: String) {
         val rootAbs = File(folder).absolutePath
         val started = synchronized(stateLock) {
-            if (rootAbs in indexingFolders) {
+            if (rootAbs !in settings.sourceFolders.map { File(it).absolutePath } || rootAbs in indexingFolders) {
                 false
             } else {
                 indexingFolders = indexingFolders + rootAbs
@@ -3736,27 +3764,39 @@ class AppState(
                 if (partial != null) {
                     val mergedAt = System.currentTimeMillis()
                     val merged = synchronized(stateLock) {
+                        val registeredRoots = settings.sourceFolders.map { File(it).absolutePath }.toSet()
+                        if (rootAbs !in registeredRoots) return@synchronized null
                         val current = sourceIndex
-                        val keptSites = current?.sites.orEmpty().filterNot { isUnderSourceRoot(it.filePath, rootAbs) }
-                        val keptMeta = current?.fileMeta.orEmpty().filterKeys { !isUnderSourceRoot(it, rootAbs) }
+                        // Preserve sites from another still-registered root, including a nested
+                        // root with its own configuration, while dropping stale removed folders.
+                        val keptSites = current?.sites.orEmpty().filter {
+                            sourceRootForPath(it.filePath)?.let { owner -> owner != rootAbs } == true
+                        }
+                        val keptMeta = current?.fileMeta.orEmpty().filterKeys {
+                            sourceRootForPath(it)?.let { owner -> owner != rootAbs } == true
+                        }
+                        val rebuiltSites = partial.sites.filter { sourceRootForPath(it.filePath) == rootAbs }
+                        val rebuiltMeta = partial.fileMeta.filterKeys { sourceRootForPath(it) == rootAbs }
                         SourceIndex(
                             version = SOURCE_INDEX_VERSION,
                             roots = settings.sourceFolders,
-                            sites = keptSites + partial.sites,
-                            fileMeta = keptMeta + partial.fileMeta,
+                            sites = keptSites + rebuiltSites,
+                            fileMeta = keptMeta + rebuiltMeta,
                             builtAt = mergedAt,
-                            rootBuiltAt = current?.rootBuiltAt.orEmpty() + (rootAbs to mergedAt),
-                            rootConfigFingerprints = current?.rootConfigFingerprints.orEmpty() +
+                            rootBuiltAt = current?.rootBuiltAt.orEmpty().filterKeys { it in registeredRoots } + (rootAbs to mergedAt),
+                            rootConfigFingerprints = current?.rootConfigFingerprints.orEmpty().filterKeys { it in registeredRoots } +
                                 (rootAbs to sourceConfigurationFingerprint(
                                     sourceConfigurationsForFolder(rootAbs),
                                     settings.sourceAutoDiscoveryEnabled,
                                 )),
                         )
                     }
-                    runCatching { SourceIndexStore.save(merged, sourceIndexFile) }
-                        .onFailure { error -> AppLogger.error("source-index", "Failed to save source index", error) }
-                    publishSourceIndex(merged)
-                    AppLogger.info("source-index", "Source reindex completed (${partial.sites.size} call sites)")
+                    if (merged != null) {
+                        runCatching { SourceIndexStore.save(merged, sourceIndexFile) }
+                            .onFailure { error -> AppLogger.error("source-index", "Failed to save source index", error) }
+                        publishSourceIndex(merged)
+                        AppLogger.info("source-index", "Source reindex completed (${partial.sites.size} call sites)")
+                    }
                 }
             } finally {
                 synchronized(stateLock) { indexingFolders = indexingFolders - rootAbs }
@@ -3930,16 +3970,27 @@ class AppState(
         appDataSizeBytes = File(appCachePath).totalFileSize()
     }
 
+    fun refreshTemporaryDataSizeInfo() {
+        temporaryDataSizeBytes = archiveCacheDir.totalFileSize() + notesDir.totalFileSize()
+    }
+
+    fun refreshStorageSizeInfo() {
+        refreshTemporaryDataSizeInfo()
+        // Publish the total last so callers observing it can rely on the temporary-data figure
+        // from the same refresh already being available.
+        refreshAppDataSizeInfo()
+    }
+
     /** Compatibility entry point; the Settings counter now reports all app data. */
     fun refreshArchiveCacheInfo() {
-        refreshAppDataSizeInfo()
+        refreshStorageSizeInfo()
     }
 
     fun clearArchiveCache() {
         archiveCacheDir.listFiles().orEmpty().forEach { file -> runCatching { file.deleteRecursively() } }
         notesDir.listFiles().orEmpty().forEach { file -> runCatching { file.deleteRecursively() } }
         pruneMissingRecentNotes()
-        refreshArchiveCacheInfo()
+        refreshStorageSizeInfo()
     }
 
     fun requestClearCache() {
@@ -3954,6 +4005,32 @@ class AppState(
     fun confirmClearCache() {
         cacheClearConfirmOpen = false
         clearArchiveCache()
+    }
+
+    fun requestResetAppData() {
+        resetAppDataError = null
+        refreshStorageSizeInfo()
+        resetAppDataConfirmOpen = true
+    }
+
+    fun cancelResetAppData() {
+        resetAppDataConfirmOpen = false
+        resetAppDataError = null
+    }
+
+    /** Deletes only openLog's managed app-data root; callers exit immediately after success. */
+    fun deleteAllAppData(): Boolean {
+        val root = File(appCachePath)
+        val deleted = runCatching { !root.exists() || root.deleteRecursively() }.getOrElse { false }
+        if (!deleted || root.exists()) {
+            resetAppDataError = "Could not remove all app data. Check permissions and try again."
+            return false
+        }
+        resetAppDataConfirmOpen = false
+        resetAppDataError = null
+        appDataSizeBytes = 0L
+        temporaryDataSizeBytes = 0L
+        return true
     }
 
     // ── Autosave ─────────────────────────────────────────────────────

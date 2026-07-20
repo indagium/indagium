@@ -478,7 +478,7 @@ internal fun StuckLoadingDialog(
             Spacer(Modifier.height(6.dp))
             AppButton("Close all tabs", onClick = onCloseAllTabs, isDanger = true, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(6.dp))
-            AppButton("Clear cache…", onClick = onClearCache, modifier = Modifier.fillMaxWidth())
+            AppButton("Clear temporary data…", onClick = onClearCache, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(10.dp))
             AppButton("Keep waiting", onClick = onKeepWaiting, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth())
         }

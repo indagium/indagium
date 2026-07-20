@@ -61,6 +61,7 @@ internal fun recentFilesForMenu(recentFiles: List<String>): List<String> = recen
 fun App(
     state: AppState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) },
     onLicenseDeclined: () -> Unit = {},
+    onResetAppData: () -> Unit = {},
 ) {
     val theme = themeColors(state.settings.theme)
     val platformDensity = LocalDensity.current
@@ -1675,14 +1676,15 @@ fun App(
                         Modifier.width(400.dp).background(tc2.p, RoundedCornerShape(8.dp))
                             .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
                     ) {
-                        AppText("Clear cache?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        AppText("Clear temporary data?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(6.dp))
                         AppText(
-                            "Deletes cached archive data and app-managed auto-saved notes in " +
-                                "\"${state.appCachePath}\". Notes in the Default save folder are kept.",
+                            "Deletes cached archive data and app-managed notes. Keeps settings, the current " +
+                                "session/autosave, saved filters, source and case indexes, diagnostics, and " +
+                                "integration data. It does not reset openLog.",
                             color = tc2.td,
                             fontSize = 11.sp,
-                            maxLines = 4,
+                            maxLines = 6,
                         )
                         Spacer(Modifier.height(14.dp))
                         Row(
@@ -1691,11 +1693,63 @@ fun App(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             DialogActionButton(
-                                "Clear cache",
+                                "Clear temporary data",
                                 active = true,
                                 danger = true,
                             ) { state.confirmClearCache() }
                             DialogActionButton("Cancel", active = false) { state.cancelClearCache() }
+                        }
+                    }
+                }
+            }
+
+            if (state.resetAppDataConfirmOpen) {
+                Dialog(onDismissRequest = { state.cancelResetAppData() }) {
+                    val tc2 = tc()
+                    var confirmation by remember { mutableStateOf("") }
+                    Column(
+                        Modifier.width(440.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Reset app data?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "Permanently deletes all data stored by openLog in \"${state.appCachePath}\" and then closes " +
+                                "the app. Your logs, source folders, exports, and Default save folder are kept.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 5,
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        AppText("Type RESET to continue", color = tc2.td, fontSize = 11.sp)
+                        Spacer(Modifier.height(4.dp))
+                        androidx.compose.foundation.text.BasicTextField(
+                            value = confirmation,
+                            onValueChange = { confirmation = it },
+                            singleLine = true,
+                            textStyle = androidx.compose.ui.text.TextStyle(color = tc2.tx, fontSize = 12.sp),
+                            cursorBrush = androidx.compose.ui.graphics.SolidColor(tc2.ac),
+                            modifier = Modifier.fillMaxWidth().border(1.dp, tc2.br, RoundedCornerShape(5.dp)).padding(8.dp),
+                        )
+                        state.resetAppDataError?.let {
+                            Spacer(Modifier.height(8.dp))
+                            AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton(
+                                "Reset app data",
+                                active = true,
+                                enabled = confirmation == "RESET",
+                                danger = true,
+                            ) {
+                                if (state.deleteAllAppData()) onResetAppData()
+                            }
+                            DialogActionButton("Cancel", active = false) { state.cancelResetAppData() }
                         }
                     }
                 }

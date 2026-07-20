@@ -187,6 +187,12 @@ fun main(args: Array<String>) {
                     appState.close()
                     exitApplication()
                 },
+                onResetAppData = {
+                    // deleteAllAppData() has already succeeded. Do not autosave here: the point
+                    // of a reset is for the next launch to have no restored session or settings.
+                    appState.close(forAppDataReset = true)
+                    exitApplication()
+                },
             )
         }
     }

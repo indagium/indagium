@@ -2145,7 +2145,7 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun appCacheInfoRefreshesOnDemandAndClearDeletesAppManagedCacheOnlyAfterConfirmation() {
+    fun storageInfoSeparatesTemporaryDataAndClearDeletesOnlyTemporaryDataAfterConfirmation() {
         val dir = createTempDirectory("openlog-archive-cache").toFile()
         val archiveCacheDir = File(dir, "archive-cache").apply { mkdirs() }
         val notesDir = File(dir, "notes").apply { mkdirs() }
@@ -2172,7 +2172,8 @@ class AppStateBehaviorTest {
         // PERF-3a: the init-time refresh now runs on ioScope instead of blocking construction, so
         // the initial value needs a wait instead of being readable synchronously right after `new`.
         waitUntil { state.appDataSizeBytes == 16L }
-        assertEquals(16L, state.archiveCacheSizeBytes)
+        assertEquals(12L, state.temporaryDataSizeBytes)
+        assertEquals(12L, state.archiveCacheSizeBytes)
         File(archiveCacheDir, "later.tmp").writeText("xx")
         assertEquals(16L, state.appDataSizeBytes)
 
@@ -2186,7 +2187,7 @@ class AppStateBehaviorTest {
 
         state.confirmClearCache()
         assertFalse(state.cacheClearConfirmOpen)
-        // Clear cache intentionally leaves other app data (including the autosave it refreshes).
+        // Clearing temporary data intentionally leaves other app data (including the autosave it refreshes).
         val recursiveAppDataSize = dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
         assertEquals(recursiveAppDataSize, state.appDataSizeBytes)
         assertTrue(state.appDataSizeBytes > 0L)
@@ -2194,6 +2195,33 @@ class AppStateBehaviorTest {
         assertTrue(notesDir.listFiles().orEmpty().isEmpty())
         assertTrue(File(userNotesDir, "saved_analysis.md").exists())
         assertEquals(listOf(File(userNotesDir, "saved_analysis.md").absolutePath), state.recentNotes)
+    }
+
+    @Test
+    fun resetAppDataDeletesOnlyTheManagedRootAndPreservesExternalFiles() {
+        val appDataDir = createTempDirectory("openlog-reset-app-data").toFile()
+        val archiveCacheDir = File(appDataDir, "archive-cache").apply { mkdirs() }
+        val notesDir = File(appDataDir, "notes").apply { mkdirs() }
+        val externalSaveDir = createTempDirectory("openlog-reset-external").toFile()
+        File(archiveCacheDir, "archive.tmp").writeText("cache")
+        File(notesDir, "note.md").writeText("note")
+        File(appDataDir, "source-index").writeText("index")
+        File(externalSaveDir, "saved_analysis.md").writeText("keep")
+        val state = AppState(
+            autosaveFile = File(appDataDir, "autosave.cache"),
+            archiveCacheDir = archiveCacheDir,
+            notesDir = notesDir,
+        )
+        state.settings = state.settings.copy(defaultSaveDir = externalSaveDir.absolutePath)
+
+        state.requestResetAppData()
+
+        assertTrue(state.resetAppDataConfirmOpen)
+        assertTrue(state.deleteAllAppData())
+        assertFalse(appDataDir.exists())
+        assertTrue(File(externalSaveDir, "saved_analysis.md").exists())
+        assertEquals(0L, state.appDataSizeBytes)
+        assertEquals(0L, state.temporaryDataSizeBytes)
     }
 
     @Test

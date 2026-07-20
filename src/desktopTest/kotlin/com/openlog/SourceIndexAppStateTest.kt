@@ -203,6 +203,40 @@ class SourceIndexAppStateTest {
         assertEquals(1, state.resolveLogSource("Module", "module message").size)
     }
 
+    @Test
+    fun removingAnIndexedFolderPrunesItsSitesBeforeAnotherCopyIsIndexed() {
+        val dir = createTempDirectory("openlog-src-remove-index").toFile()
+        val first = File(dir, "first").apply { mkdirs() }
+        val second = File(dir, "second").apply { mkdirs() }
+        fun writeFixture(folder: File) {
+            File(folder, "Feature.kt").writeText(
+                """
+                class Feature {
+                    fun run() { Log.d("Duplicate", "same message") }
+                }
+                """.trimIndent(),
+            )
+        }
+        writeFixture(first)
+        writeFixture(second)
+        val indexFile = File(dir, "source-index")
+        val state = newState(dir, indexFile)
+        state.updateSettings { it.copy(sourceFolders = listOf(first.absolutePath)) }
+        state.reindexSources(first.absolutePath)
+        waitUntil { state.resolveLogSource("Duplicate", "same message").singleOrNull()?.site?.filePath?.startsWith(first.absolutePath) == true }
+
+        state.removeSourceFolder(first.absolutePath)
+        state.updateSettings { it.copy(sourceFolders = listOf(second.absolutePath)) }
+        state.reindexSources(second.absolutePath)
+        waitUntil { state.resolveLogSource("Duplicate", "same message").singleOrNull()?.site?.filePath?.startsWith(second.absolutePath) == true }
+
+        assertEquals(listOf(second.absolutePath), state.resolveLogSource("Duplicate", "same message").map { File(it.site.filePath).parentFile.absolutePath })
+        val persisted = SourceIndexStore.load(indexFile)!!
+        assertTrue(persisted.sites.all { it.filePath.startsWith(second.absolutePath) })
+        assertTrue(persisted.fileMeta.keys.all { it.startsWith(second.absolutePath) })
+        assertEquals(listOf(second.absolutePath), persisted.roots)
+    }
+
     private fun waitUntil(timeoutMs: Long = 5_000, condition: () -> Boolean) {
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
         while (System.nanoTime() < deadline) {

@@ -389,6 +389,49 @@ private fun AppearanceSettingsSection(state: AppState) {
         AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         ThemeGallery(state)
     }
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        CompactSetting("Font family", Modifier.weight(1f)) {
+            SegmentedControl(
+                options = listOf("Monospace", "Proportional"),
+                selectedIndices = setOf(if (state.settings.fontMono) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
+                modifier = Modifier.fillMaxWidth(),
+                fillWidth = true,
+            )
+        }
+        CompactSetting("Log font size", Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+            ListStepper(
+                options = (10..24).toList(),
+                value = state.settings.fontSize,
+                onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
+            )
+        }
+        CompactSetting("Interface scale", Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+            ListStepper(
+                options = (MIN_INTERFACE_SCALE_PERCENT..MAX_INTERFACE_SCALE_PERCENT step 10).toList(),
+                value = state.settings.interfaceScalePercent,
+                onChange = { v -> state.updateSettings { it.copy(interfaceScalePercent = v) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Toolbar labels",
+            tooltip = "Hides text on the main toolbar buttons, leaving only their icons.",
+            modifier = Modifier.weight(1f),
+            horizontalAlignment = Alignment.Start,
+        ) {
+            SegmentedControl(
+                options = listOf("Show", "Icons only"),
+                selectedIndices = setOf(if (state.settings.toolbarIconOnlyButtons) 1 else 0),
+                onToggle = { idx -> state.updateSettings { it.copy(toolbarIconOnlyButtons = idx == 1) } },
+                modifier = Modifier.fillMaxWidth(),
+                fillWidth = true,
+            )
+        }
+    }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         TooltipArea(
             tooltip = {
@@ -399,7 +442,7 @@ private fun AppearanceSettingsSection(state: AppState) {
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                 ) {
                     AppText(
-                        "Auto-saved notes are written here when this folder exists. Clear cache keeps this folder.",
+                        "Auto-saved notes are written here when this folder exists. Clear temporary data keeps this folder.",
                         color = tc.tx,
                         fontSize = 11.sp,
                         maxLines = 2,
@@ -448,78 +491,88 @@ private fun AppearanceSettingsSection(state: AppState) {
     }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
-            "App data",
+            "Storage",
             color = tc.td,
             fontSize = 10.sp,
             fontFamily = UI,
             fontWeight = FontWeight.SemiBold,
         )
+        val appDataPath = state.appCachePath
+        TooltipArea(
+            tooltip = {
+                Box(
+                    Modifier
+                        .background(tc.p2, RoundedCornerShape(4.dp))
+                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    AppText(appDataPath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                }
+            },
+        ) {
+            AppText(
+                truncatePathForDisplay(appDataPath),
+                color = tc.ts,
+                fontSize = 11.sp,
+                fontFamily = MONO,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            val cachePath = state.appCachePath
             TooltipArea(
                 tooltip = {
-                    Box(
-                        Modifier
-                            .background(tc.p2, RoundedCornerShape(4.dp))
-                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                    ) {
-                        AppText(cachePath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
-                    }
+                    StorageInfoTooltip(
+                        "Downloaded archive cache and app-managed notes. Clear temporary data removes these items.",
+                    )
                 },
                 modifier = Modifier.weight(1f),
             ) {
                 AppText(
-                    "${truncatePathForDisplay(cachePath)} · ${formatByteSize(state.appDataSizeBytes)}",
+                    "Temporary data · ${formatByteSize(state.temporaryDataSizeBytes)}  ⓘ",
+                    color = tc.ts,
+                    fontSize = 11.sp,
+                    fontFamily = MONO,
+                )
+            }
+            AppButton("Clear temporary data", onClick = { state.requestClearCache() }, variant = ButtonVariant.Secondary)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            TooltipArea(
+                tooltip = {
+                    StorageInfoTooltip(
+                        "Everything openLog stores in this folder: temporary data, settings, current session/autosave, " +
+                            "saved filters, source and case indexes, diagnostics, and integration data.",
+                    )
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                AppText(
+                    "App data · ${formatByteSize(state.appDataSizeBytes)}  ⓘ",
                     color = tc.ts,
                     fontSize = 11.sp,
                     fontFamily = MONO,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            AppButton("Clear cache", onClick = { state.requestClearCache() }, variant = ButtonVariant.Secondary)
+            AppButton("Reset app data…", onClick = { state.requestResetAppData() }, variant = ButtonVariant.Secondary, isDanger = true)
         }
     }
     state.autosaveError?.let { message ->
         AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
     }
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.Top,
+}
+
+@Composable
+private fun StorageInfoTooltip(text: String) {
+    val tc = tc()
+    Box(
+        Modifier
+            .width(330.dp)
+            .background(tc.p2, RoundedCornerShape(4.dp))
+            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp, vertical = 5.dp),
     ) {
-        CompactSetting("Font family", Modifier.weight(1f)) {
-            SegmentedControl(
-                options = listOf("Monospace", "Proportional"),
-                selectedIndices = setOf(if (state.settings.fontMono) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
-            )
-        }
-        CompactSetting("Log font size", Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
-            ListStepper(
-                options = (10..24).toList(),
-                value = state.settings.fontSize,
-                onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
-            )
-        }
-        CompactSetting("Interface scale", Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
-            ListStepper(
-                options = (MIN_INTERFACE_SCALE_PERCENT..MAX_INTERFACE_SCALE_PERCENT step 10).toList(),
-                value = state.settings.interfaceScalePercent,
-                onChange = { v -> state.updateSettings { it.copy(interfaceScalePercent = v) } },
-            )
-        }
-    }
-    CompactSettingWithTooltip(
-        label = "Toolbar labels",
-        tooltip = "Hides text on the main toolbar buttons, leaving only their icons.",
-        horizontalAlignment = Alignment.Start,
-    ) {
-        SegmentedControl(
-            options = listOf("Show", "Icons only"),
-            selectedIndices = setOf(if (state.settings.toolbarIconOnlyButtons) 1 else 0),
-            onToggle = { idx -> state.updateSettings { it.copy(toolbarIconOnlyButtons = idx == 1) } },
-        )
+        AppText(text, color = tc.tx, fontSize = 11.sp, maxLines = 4)
     }
 }
 
