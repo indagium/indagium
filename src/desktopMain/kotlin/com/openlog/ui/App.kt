@@ -163,11 +163,22 @@ fun App(
                             state.keyboardFocusVisible = true
                             // Settings.ctrlFTarget (FIND_BAR by default) routes Ctrl/Cmd+F to the
                             // non-destructive in-view Find bar instead of focusing a filter input —
-                            // see AppState.openSearch and ui/SearchBar.kt. TAGS/KEYWORD_REGEX
-                            // (and the still-routable-but-not-selectable MESSAGE_RULE) fall through
-                            // to exactly the pre-existing filter-focus path below, openUnfilteredOnCtrlF
-                            // included — that setting only ever applies to this branch, never FIND_BAR.
+                            // see AppState.openSearch and ui/SearchBar.kt. TAGS/KEYWORD_REGEX (and
+                            // the still-routable-but-not-selectable MESSAGE_RULE) fall through to
+                            // exactly the pre-existing filter-focus path below. openUnfilteredOnCtrlF
+                            // applies to BOTH branches now — it means "Ctrl+F reveals the Original
+                            // split", independent of which of the two things Ctrl+F then does with
+                            // that revealed panel.
                             if (state.settings.ctrlFTarget == CtrlFTarget.FIND_BAR) {
+                                // Single-tab mode only: ensureActiveTabUnfiltered operates on
+                                // activeTabId, and compare mode has no Original/Filtered split to
+                                // reveal in the first place (its left/right panels are two whole
+                                // separate tabs, not one tab's showUnfiltered flag) — the Find bar
+                                // still opens fine there via searchFocusTabId-aware targetTabId
+                                // below, just without this step.
+                                if (state.settings.openUnfilteredOnCtrlF && !state.compareMode) {
+                                    state.ensureActiveTabUnfiltered()
+                                }
                                 // No pendingPanelFocus here (unlike the filter-focus branch below):
                                 // the Find bar isn't one of FileView's F6-roving panel targets, and
                                 // ui/SearchBar.kt's own LaunchedEffect(focusNonce) already requests

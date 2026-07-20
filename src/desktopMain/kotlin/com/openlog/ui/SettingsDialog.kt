@@ -687,7 +687,7 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             label = "Ctrl+F opens",
             tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
                 "any rows. Tags/Regex instead focuses the corresponding filter field and hides " +
-                "non-matching rows — see \"Ctrl+F opens Original\" below, which only applies to those two.",
+                "non-matching rows. \"Ctrl+F opens Original\" below applies to all three.",
         ) {
             // Rules (CtrlFTarget.MESSAGE_RULE) dropped from the selector, not the enum —
             // a settings token saved before this change can still hold it, so indexOf
@@ -703,8 +703,9 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
     }
     CompactSettingWithTooltip(
         label = "Ctrl+F opens Original",
-        tooltip = "When Ctrl+F opens Tags or Regex above (never for Find bar), this reveals the active " +
-            "file's unfiltered Original panel first, before focusing the configured search field.",
+        tooltip = "Reveals the active file's unfiltered Original panel whenever Ctrl+F opens, whichever " +
+            "of Find bar / Tags / Regex it opens with above. Single-tab view only — compare mode has no " +
+            "Original/Filtered split to reveal.",
     ) {
         SegmentedControl(
             options = listOf("On", "Off"),

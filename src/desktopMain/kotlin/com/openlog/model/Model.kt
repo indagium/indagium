@@ -483,12 +483,13 @@ data class AppSettings(
     val highlightEntireCrashGroup: Boolean = false,
     // FIND_BAR (the default) routes Ctrl/Cmd+F to the non-destructive in-view Find bar
     // (ui/SearchBar.kt, AppState.openSearch); TAGS/KEYWORD_REGEX instead focus the corresponding
-    // filter input (see CtrlFTarget's own doc comment) and, unlike Find bar, respect
-    // openUnfilteredOnCtrlF below.
+    // filter input (see CtrlFTarget's own doc comment). Both respect openUnfilteredOnCtrlF below.
     val ctrlFTarget: CtrlFTarget = CtrlFTarget.FIND_BAR,
     val openNewFilesWithUnfiltered: Boolean = false,
-    /** When enabled, Ctrl/Cmd+F first reveals the active tab's Original panel — only when
-     *  [ctrlFTarget] is TAGS or KEYWORD_REGEX; FIND_BAR ignores this entirely. */
+    /** When enabled, Ctrl/Cmd+F first reveals the active tab's Original panel, regardless of what
+     *  [ctrlFTarget] then does with it — Find bar included (it renders over the Filtered panel in
+     *  that split, see LogViewer.kt). Single-tab mode only: compare mode has no Original/Filtered
+     *  split for one tab to reveal (see App.kt's onFocusFilterSearch). */
     val openUnfilteredOnCtrlF: Boolean = false,
     // Source roots scanned by SourceIndexer to resolve a log line back to the Log/Timber call site
     // that could have emitted it (source/SourceIndexer.kt, AppState.reindexSources). Trailing with

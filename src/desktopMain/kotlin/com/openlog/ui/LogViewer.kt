@@ -624,6 +624,12 @@ fun LogViewer(
     scrollStateStore: LogViewerScrollStateStore? = null,
     annotationNavigationRequest: AnnotationNavigationRequest? = null,
     onConsumeAnnotationNavigation: (Long) -> Unit = {},
+    // Find bar's own navigation channel — deliberately separate from annotationNavigationRequest
+    // above (see SearchNavigationRequest's doc comment in AppState.kt): it drives a minimal-scroll
+    // LaunchedEffect instead of always centering, so Enter/Next/Prev doesn't visibly flash when the
+    // match is already on screen.
+    searchNavigationRequest: SearchNavigationRequest? = null,
+    onConsumeSearchNavigation: (Long) -> Unit = {},
     onSelectAll: (() -> Unit)? = null,
     onClearSelection: (() -> Unit)? = null,
     onCopySelection: ((Set<Int>?) -> Unit)? = null,
@@ -1154,6 +1160,36 @@ fun LogViewer(
                 onConsumeAnnotationNavigation(request.id)
             }
 
+            // Find bar's own navigation channel (see SearchNavigationRequest's doc comment) — only
+            // ever targets the Filtered panel, unlike annotation nav above: search matches are
+            // computed against the filtered item list only (utils/LogSearch.kt), so there's never
+            // an Original-panel target to also resolve. tab.expanded as a key (matching the
+            // annotation-nav effect above, unlike the single-view search-nav effect below) is what
+            // makes the expand-then-scroll sequence converge correctly: toggling a group here
+            // changes tab.expanded, which restarts this same effect — the restart's own
+            // expansionAndIndexForEntry call then finds the target already visible with no further
+            // expansion needed, so it falls straight to the centering branch instead of looping.
+            LaunchedEffect(searchNavigationRequest?.id, itemsVersion, tab.expanded) {
+                val request = searchNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
+                val target = expansionAndIndexForEntry(tab, applyFilter = true, entryId = request.entryId, currentItems = items)
+                if (target != null) {
+                    if (target.expanded != tab.expanded) {
+                        // A collapsed group had to open to reveal the match at all — a real
+                        // enough change that centering (like any other reveal-and-jump) reads
+                        // right, unlike the minimal-scroll branch below.
+                        (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
+                        kotlinx.coroutines.delay(80)
+                        filteredLazyState.centerOnItem(target.index)
+                    } else {
+                        // Already expanded: scroll only the minimum needed to keep navScrollMargin
+                        // rows of context around the target (scrollForCursor), a no-op if it's
+                        // already comfortably on screen — no top-then-recenter flash.
+                        scrollForCursor(filteredLazyState, syncScope, target.index, navScrollMargin)
+                    }
+                }
+                onConsumeSearchNavigation(request.id)
+            }
+
             // Fires once each time the split view is freshly opened (Compose disposes/recreates
             // this whole branch on every showUnfiltered toggle, so LaunchedEffect(Unit) re-runs
             // on every open) — centers both panels on whatever was already selected before
@@ -1270,6 +1306,7 @@ fun LogViewer(
             }
         } else {
             val mainLazyState = scrollStates.lazyState("${tab.id}:main")
+            val searchNavScope = rememberCoroutineScope()
             LaunchedEffect(annotationNavigationRequest?.id, itemsVersion) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
                 val target = request.logIds.firstNotNullOfOrNull { entryId ->
@@ -1281,6 +1318,23 @@ fun LogViewer(
                     mainLazyState.centerOnItem(target.index)
                 }
                 onConsumeAnnotationNavigation(request.id)
+            }
+            // Find bar's own navigation channel — see SearchNavigationRequest's doc comment and
+            // the split-view LaunchedEffect above for why this stays separate from
+            // annotationNavigationRequest and scrolls minimally instead of always centering.
+            LaunchedEffect(searchNavigationRequest?.id, itemsVersion) {
+                val request = searchNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
+                val target = expansionAndIndexForEntry(tab, applyFilter = true, entryId = request.entryId, currentItems = items)
+                if (target != null) {
+                    if (target.expanded != tab.expanded) {
+                        (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
+                        kotlinx.coroutines.delay(80)
+                        mainLazyState.centerOnItem(target.index)
+                    } else {
+                        scrollForCursor(mainLazyState, searchNavScope, target.index, navScrollMargin)
+                    }
+                }
+                onConsumeSearchNavigation(request.id)
             }
             if (tab.search.active) {
                 SearchBar(

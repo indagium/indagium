@@ -469,6 +469,18 @@ data class OpenFileError(val title: String, val path: String?, val message: Stri
 
 data class AnnotationNavigationRequest(val id: Long, val tabId: String, val logIds: List<Int>)
 
+// Search next/prev's own navigation request — deliberately separate from
+// AnnotationNavigationRequest above rather than reusing it. Annotation/crash/ctx-anchor jumps are
+// infrequent, one-off moves where a full center-the-viewport reorientation is the right feel; Find
+// bar Enter/Next/Prev is a frequent, often-repeated action where the same two-phase
+// scroll-to-top-then-recenter reads as a jarring flash — including, absurdly, when the match is
+// already fully on screen. LogViewer.kt's searchNavigationRequest-handling LaunchedEffect instead
+// only scrolls the minimum needed (scrollForCursor's existing margin logic), a no-op when the
+// target is already comfortably visible; centering is reserved for when a collapsed group actually
+// had to be expanded to reveal the match at all, i.e. a real state change big enough that jumping
+// to it deserves recentering the same way expand-all or annotation navigation does.
+data class SearchNavigationRequest(val id: Long, val tabId: String, val entryId: Int)
+
 data class PendingZipPicker(val zipFile: File, val candidates: List<ZipLogCandidate>)
 
 enum class SplitMode { SPLIT, OPEN_AS_IS }
@@ -1024,6 +1036,11 @@ class AppState(
     private var transientRegexSearchTabIds by mutableStateOf<Set<String>>(emptySet())
     var pendingAnnotationNavigation by mutableStateOf<AnnotationNavigationRequest?>(null)
         private set
+
+    // Find bar's own navigation channel — see SearchNavigationRequest's doc comment for why this
+    // is separate from pendingAnnotationNavigation above rather than reusing it.
+    var pendingSearchNavigation by mutableStateOf<SearchNavigationRequest?>(null)
+        private set
     var pendingZipPicker by mutableStateOf<PendingZipPicker?>(null)
     var pendingSplitPrompt by mutableStateOf<PendingSplitPrompt?>(null)
         private set
@@ -1047,6 +1064,7 @@ class AppState(
     var newSeqEndTag by mutableStateOf("")
     var newSeqColor by mutableStateOf(SEQ_COLORS[0])
     private var annotationNavigationCounter = 0L
+    private var searchNavigationCounter = 0L
 
     init {
         // PERF-3a: refreshAppDataSizeInfo() recursively walks the whole app-data dir
@@ -2350,6 +2368,10 @@ class AppState(
         if (pendingAnnotationNavigation?.id == id) pendingAnnotationNavigation = null
     }
 
+    fun consumeSearchNavigation(id: Long) {
+        if (pendingSearchNavigation?.id == id) pendingSearchNavigation = null
+    }
+
     // Reuses the same jump-to-log-lines mechanism as annotation navigation — a crash-panel entry
     // is just "select and scroll to a log id", the exact thing pendingAnnotationNavigation already
     // does (including auto-expanding whatever collapsed header, sequence or stack-trace, owns it).
@@ -2573,9 +2595,20 @@ class AppState(
         // Python-style floor-mod) — the extra `+ n) % n` wraps it back into [0, n).
         val newIdx = ((t.search.currentIdx + delta) % n + n) % n
         upTab(tabId) { it.copy(search = it.search.copy(currentIdx = newIdx)) }
-        // requestScrollAnchor already selects the row, auto-expands whatever collapsed group owns
-        // it, and centers the viewport — exactly what a Find-bar jump needs, for free.
-        requestScrollAnchor(tabId, matches[newIdx])
+        // Deliberately NOT requestScrollAnchor/pendingAnnotationNavigation: that path always
+        // centers via the two-phase scroll-to-top-then-recenter centerOnItem, which reads as a
+        // jarring flash for a frequent, often-repeated action like Enter/Next/Prev — including
+        // when the match is already fully on screen (e.g. a single match, currentIdx wrapping
+        // back to itself). requestSearchScrollAnchor still selects the row and auto-expands
+        // whatever collapsed group owns it, but scrolls only the minimum needed (or not at all)
+        // — see SearchNavigationRequest's doc comment and LogViewer.kt's handling LaunchedEffect.
+        requestSearchScrollAnchor(tabId, matches[newIdx])
+    }
+
+    private fun requestSearchScrollAnchor(tabId: String, entryId: Int) {
+        setSelectedRows(tabId, listOf(entryId))
+        searchNavigationCounter += 1
+        pendingSearchNavigation = SearchNavigationRequest(searchNavigationCounter, tabId, entryId)
     }
 
     // Compare mode's right panel never renders its own stored `.filter` — CompareView.kt's

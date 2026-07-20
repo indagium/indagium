@@ -199,6 +199,8 @@ internal fun FileView(
             scrollStateStore = state.logViewerScrollStateStore,
             annotationNavigationRequest = state.pendingAnnotationNavigation,
             onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
+            searchNavigationRequest = state.pendingSearchNavigation,
+            onConsumeSearchNavigation = { state.consumeSearchNavigation(it) },
             onSelectAll = { state.selectAll(tab.id) },
             onClearSelection = { state.clearSelection(tab.id) },
             onCopySelection = { selectedIds -> state.copySelectedLines(tab.id, selectedIds) },

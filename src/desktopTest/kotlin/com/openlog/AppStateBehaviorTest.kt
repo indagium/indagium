@@ -4890,6 +4890,42 @@ class AppStateBehaviorTest {
         assertFalse(state.tab("other")!!.showUnfiltered)
     }
 
+    // Issue A (Ctrl+F opens Original + Find bar together): App.kt's onFocusFilterSearch FIND_BAR
+    // branch now calls ensureActiveTabUnfiltered() before openSearch() whenever openUnfilteredOnCtrlF
+    // is on and compare mode isn't active — mirrored here at the AppState level, since the actual
+    // branch itself is a couple of inline Composable-lambda lines with no Compose test harness in
+    // this project to drive a real key event through. Previously this setting only ever applied to
+    // the Tags/Regex filter-focus path; Ctrl+F opening the Find bar left the Original split closed.
+    @Test
+    fun findBarWithOpenUnfilteredOnCtrlFRevealsTheOriginalSplitAlongsideTheFindBar() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "boom"))))
+        state.activeTabId = "log"
+        state.updateSettings { it.copy(ctrlFTarget = CtrlFTarget.FIND_BAR, openUnfilteredOnCtrlF = true) }
+        assertFalse(state.tab("log")!!.showUnfiltered)
+
+        // The exact sequence App.kt's onFocusFilterSearch now runs for this combination.
+        if (state.settings.openUnfilteredOnCtrlF) state.ensureActiveTabUnfiltered()
+        state.openSearch("log")
+
+        assertTrue(state.tab("log")!!.showUnfiltered)
+        assertTrue(state.tab("log")!!.search.active)
+    }
+
+    @Test
+    fun findBarWithOpenUnfilteredOnCtrlFOffLeavesTheOriginalSplitClosed() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "boom"))))
+        state.activeTabId = "log"
+        state.updateSettings { it.copy(ctrlFTarget = CtrlFTarget.FIND_BAR, openUnfilteredOnCtrlF = false) }
+
+        if (state.settings.openUnfilteredOnCtrlF) state.ensureActiveTabUnfiltered()
+        state.openSearch("log")
+
+        assertFalse(state.tab("log")!!.showUnfiltered)
+        assertTrue(state.tab("log")!!.search.active)
+    }
+
     @Test
     fun buildMdIndentedStyleUsesFourSpaceLinePrefix() {
         val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")
@@ -5740,21 +5776,26 @@ class AppStateBehaviorTest {
 
         state.searchNext("log")
         assertEquals(1, state.tab("log")!!.search.currentIdx)
-        assertEquals(listOf(3), state.pendingAnnotationNavigation?.logIds)
+        assertEquals(3, state.pendingSearchNavigation?.entryId)
+        assertEquals(setOf(3), state.tab("log")!!.selected)
+        // Search nav uses its own channel now, never the always-centering annotation one — see
+        // SearchNavigationRequest's doc comment (AppState.kt) for why.
+        assertEquals(null, state.pendingAnnotationNavigation)
 
         state.searchNext("log")
         assertEquals(2, state.tab("log")!!.search.currentIdx)
-        assertEquals(listOf(4), state.pendingAnnotationNavigation?.logIds)
+        assertEquals(4, state.pendingSearchNavigation?.entryId)
 
         // Next from the last match wraps back to the first.
         state.searchNext("log")
         assertEquals(0, state.tab("log")!!.search.currentIdx)
-        assertEquals(listOf(1), state.pendingAnnotationNavigation?.logIds)
+        assertEquals(1, state.pendingSearchNavigation?.entryId)
 
         // Prev from the first match wraps back to the last.
         state.searchPrev("log")
         assertEquals(2, state.tab("log")!!.search.currentIdx)
-        assertEquals(listOf(4), state.pendingAnnotationNavigation?.logIds)
+        assertEquals(4, state.pendingSearchNavigation?.entryId)
+        assertEquals(null, state.pendingAnnotationNavigation)
     }
 
     @Test
@@ -5816,11 +5857,50 @@ class AppStateBehaviorTest {
         assertEquals(listOf(2), state.tab("log")!!.search.matchIds.toList())
         assertTrue(state.tab("log")!!.expanded.isEmpty(), "the real tab.expanded must stay untouched by the search computation itself")
 
-        // Jumping to it requests exactly the same expand+select+center navigation as any other
-        // collapsed-group jump — requestScrollAnchor's pendingAnnotationNavigation, consumed by
-        // LogViewer's own LaunchedEffect which auto-expands whichever group owns the target id.
+        // Jumping to it requests a pendingSearchNavigation (search's own channel, not
+        // pendingAnnotationNavigation — see SearchNavigationRequest's doc comment) that
+        // LogViewer's own LaunchedEffect resolves via the exact same expansionAndIndexForEntry
+        // auto-expand-owning-group logic annotation navigation uses, before deciding how to
+        // scroll — so this collapsed-group case still auto-expands correctly.
         state.searchNext("log")
-        assertEquals(listOf(2), state.pendingAnnotationNavigation?.logIds)
+        assertEquals(2, state.pendingSearchNavigation?.entryId)
+        assertEquals("log", state.pendingSearchNavigation?.tabId)
+        assertEquals(null, state.pendingAnnotationNavigation)
+        assertEquals(setOf(2), state.tab("log")!!.selected)
+    }
+
+    @Test
+    fun searchNavigationRequestIdsIncrementAndConsumeOnlyClearsTheMatchingId() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "log", "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle one"),
+                    LogEntry(2, "10:00:00.100", LogLevel.I, "App", "needle two"),
+                ),
+            ),
+        )
+        state.openSearch("log")
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.size == 2 }
+
+        state.searchNext("log")
+        val first = state.pendingSearchNavigation
+        assertEquals("log", first?.tabId)
+
+        // A stale (already-superseded) id must not clear the current request — LogViewer.kt's
+        // LaunchedEffect always consumes by the id it actually saw, but this guards the AppState
+        // side of that contract directly.
+        state.consumeSearchNavigation(first!!.id - 1)
+        assertEquals(first, state.pendingSearchNavigation)
+
+        state.consumeSearchNavigation(first.id)
+        assertEquals(null, state.pendingSearchNavigation)
+
+        state.searchNext("log")
+        val second = state.pendingSearchNavigation
+        assertTrue(second!!.id > first.id)
     }
 
     @Test
@@ -5891,12 +5971,14 @@ class AppStateBehaviorTest {
         state.searchNext("left")
         assertEquals(1, state.tab("left")!!.search.currentIdx)
         assertEquals(0, state.tab("right")!!.search.currentIdx)
-        assertEquals(listOf(2), state.pendingAnnotationNavigation?.logIds)
+        assertEquals("left", state.pendingSearchNavigation?.tabId)
+        assertEquals(2, state.pendingSearchNavigation?.entryId)
 
         state.searchNext("right")
         assertEquals(1, state.tab("left")!!.search.currentIdx, "right's navigation must not perturb left's cursor")
         assertEquals(0, state.tab("right")!!.search.currentIdx, "right's only match wraps back to itself")
-        assertEquals(listOf(1), state.pendingAnnotationNavigation?.logIds)
+        assertEquals("right", state.pendingSearchNavigation?.tabId)
+        assertEquals(1, state.pendingSearchNavigation?.entryId)
     }
 
     @Test
