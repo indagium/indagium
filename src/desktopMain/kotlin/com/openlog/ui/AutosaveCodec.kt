@@ -819,6 +819,8 @@ internal fun FilterPanelUiState.filterPanelToken(): String = tokenFields(
     excMsgPillsExpanded.toString(),
     crashExpanded.toString(),
     crashCategory.name,
+    sfCollapsedFolderIds.sorted().joinToString(",") { it.b64() },
+    sfFavoritesExpanded.toString(),
 )
 
 internal fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
@@ -833,6 +835,12 @@ internal fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
     excMsgPillsExpanded = p[6].toBoolean()
     crashExpanded = p.getOrNull(7)?.toBooleanStrictOrNull() ?: crashExpanded
     crashCategory = p.getOrNull(8)?.let { runCatching { CrashCategory.valueOf(it) }.getOrNull() } ?: crashCategory
+    sfCollapsedFolderIds = p.getOrNull(9)
+        ?.split(',')
+        ?.mapNotNull { encoded -> runCatching { encoded.unb64() }.getOrNull() }
+        ?.toSet()
+        ?: emptySet()
+    sfFavoritesExpanded = p.getOrNull(10)?.toBooleanStrictOrNull() ?: sfFavoritesExpanded
 }
 
 internal fun AppState.activeFilterMapToken(): String =

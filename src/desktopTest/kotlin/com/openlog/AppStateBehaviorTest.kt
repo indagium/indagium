@@ -2400,10 +2400,12 @@ class AppStateBehaviorTest {
             lvlExpanded = false
             seqExpanded = false
             sfExpanded = false
+            sfFavoritesExpanded = false
             incPillsExpanded = false
             incMsgPillsExpanded = false
             excMsgPillsExpanded = true
             crashCategory = CrashCategory.FATAL_EXCEPTIONS
+            sfCollapsedFolderIds = setOf("folder-a", "__ungrouped__")
         }
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
@@ -2412,10 +2414,12 @@ class AppStateBehaviorTest {
         assertEquals(false, restored.fpState.lvlExpanded)
         assertEquals(false, restored.fpState.seqExpanded)
         assertEquals(false, restored.fpState.sfExpanded)
+        assertEquals(false, restored.fpState.sfFavoritesExpanded)
         assertEquals(false, restored.fpState.incPillsExpanded)
         assertEquals(false, restored.fpState.incMsgPillsExpanded)
         assertEquals(true, restored.fpState.excMsgPillsExpanded)
         assertEquals(CrashCategory.FATAL_EXCEPTIONS, restored.fpState.crashCategory)
+        assertEquals(setOf("folder-a", "__ungrouped__"), restored.fpState.sfCollapsedFolderIds)
     }
 
     @Test
