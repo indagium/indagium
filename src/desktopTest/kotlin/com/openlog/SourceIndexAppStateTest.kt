@@ -208,6 +208,7 @@ class SourceIndexAppStateTest {
         val dir = createTempDirectory("openlog-src-remove-index").toFile()
         val first = File(dir, "first").apply { mkdirs() }
         val second = File(dir, "second").apply { mkdirs() }
+
         fun writeFixture(folder: File) {
             File(folder, "Feature.kt").writeText(
                 """
