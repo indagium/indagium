@@ -45,7 +45,9 @@ import com.openlog.generated.BuildInfo
 import com.openlog.model.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.awt.Desktop
 import java.io.File
+import java.net.URI
 import java.util.UUID
 
 // ── Settings dialog ───────────────────────────────────────────────────
@@ -203,6 +205,15 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                             AppText("Version", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
                         }
                         AppText(BuildInfo.APP_VERSION, color = tc.ts, fontSize = 10.sp, fontFamily = MONO)
+                        AppText("  |  ", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                        HoverBox(
+                            modifier = Modifier.clip(RoundedCornerShape(4.dp)),
+                            onClick = ::openProjectRepository,
+                        ) {
+                            Box(Modifier.padding(horizontal = 4.dp, vertical = 2.dp)) {
+                                AppText("GitHub repository ↗", color = tc.ac, fontSize = 10.sp, fontFamily = UI)
+                            }
+                        }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.width(52.dp)) {
@@ -268,6 +279,14 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                 onDismiss()
             }
             DialogActionButton("Cancel", active = false) { pendingClose = false; guardSaveError = null }
+        }
+    }
+}
+
+private fun openProjectRepository() {
+    runCatching {
+        if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
+            Desktop.getDesktop().browse(URI("https://github.com/rarnaut-dev/openLog2"))
         }
     }
 }
