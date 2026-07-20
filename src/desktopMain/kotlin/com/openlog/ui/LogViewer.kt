@@ -1160,31 +1160,54 @@ fun LogViewer(
                 onConsumeAnnotationNavigation(request.id)
             }
 
-            // Find bar's own navigation channel (see SearchNavigationRequest's doc comment) — only
-            // ever targets the Filtered panel, unlike annotation nav above: search matches are
-            // computed against the filtered item list only (utils/LogSearch.kt), so there's never
-            // an Original-panel target to also resolve. tab.expanded as a key (matching the
-            // annotation-nav effect above, unlike the single-view search-nav effect below) is what
-            // makes the expand-then-scroll sequence converge correctly: toggling a group here
-            // changes tab.expanded, which restarts this same effect — the restart's own
-            // expansionAndIndexForEntry call then finds the target already visible with no further
-            // expansion needed, so it falls straight to the centering branch instead of looping.
-            LaunchedEffect(searchNavigationRequest?.id, itemsVersion, tab.expanded) {
+            // Find bar's own navigation channel (see SearchNavigationRequest's doc comment). Unlike
+            // the single-view version below, split view also has to sync the Original panel to the
+            // same entry — mirroring the Filtered ItemList's own itemOnSelRow row-click sync
+            // further down (find `target = expansionAndIndexForEntry(tab, applyFilter = false, ...)`)
+            // and the annotation-nav effect above — search matches are only ever computed against
+            // the filtered item list (utils/LogSearch.kt), but the entry a match belongs to always
+            // exists in the unfiltered one too, so the Original panel always has a target to follow
+            // to. `var opened` accumulates across both panels within one invocation, same shape as
+            // the annotation-nav effect's dual-target handling above, so a group toggled for one
+            // panel isn't redundantly re-toggled resolving the other. allItemsVersion/tab.expanded
+            // as keys (matching the annotation-nav effect, unlike the single-view search-nav effect
+            // below, which has no Original panel to key on) is what makes the expand-then-scroll
+            // sequence converge: toggling a group changes tab.expanded, restarting this effect —
+            // the restart's own expansionAndIndexForEntry calls then find their targets already
+            // visible with no further expansion needed, falling straight to centering instead of
+            // looping.
+            LaunchedEffect(searchNavigationRequest?.id, itemsVersion, allItemsVersion, tab.expanded) {
                 val request = searchNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
-                val target = expansionAndIndexForEntry(tab, applyFilter = true, entryId = request.entryId, currentItems = items)
-                if (target != null) {
-                    if (target.expanded != tab.expanded) {
+                var opened = tab.expanded
+                val filteredTarget = expansionAndIndexForEntry(tab, applyFilter = true, entryId = request.entryId, currentItems = items)
+                if (filteredTarget != null) {
+                    if (filteredTarget.expanded != opened) {
                         // A collapsed group had to open to reveal the match at all — a real
                         // enough change that centering (like any other reveal-and-jump) reads
                         // right, unlike the minimal-scroll branch below.
-                        (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
+                        (filteredTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
                         kotlinx.coroutines.delay(80)
-                        filteredLazyState.centerOnItem(target.index)
+                        opened = opened + filteredTarget.expanded
+                        filteredLazyState.centerOnItem(filteredTarget.index)
                     } else {
                         // Already expanded: scroll only the minimum needed to keep navScrollMargin
                         // rows of context around the target (scrollForCursor), a no-op if it's
                         // already comfortably on screen — no top-then-recenter flash.
-                        scrollForCursor(filteredLazyState, syncScope, target.index, navScrollMargin)
+                        scrollForCursor(filteredLazyState, syncScope, filteredTarget.index, navScrollMargin)
+                    }
+                }
+                val originalTarget = expansionAndIndexForEntry(tab, applyFilter = false, entryId = request.entryId, currentItems = allItems)
+                if (originalTarget != null) {
+                    // Original panel has its own independent selection (localAllSelected) — keep it
+                    // in sync with the match too, same as a Filtered-panel row click does.
+                    localAllSelected = setOf(request.entryId)
+                    if (originalTarget.expanded != opened) {
+                        (originalTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
+                        kotlinx.coroutines.delay(80)
+                        opened = opened + originalTarget.expanded
+                        allLazyState.centerOnItem(originalTarget.index)
+                    } else {
+                        scrollForCursor(allLazyState, syncScope, originalTarget.index, navScrollMargin)
                     }
                 }
                 onConsumeSearchNavigation(request.id)

@@ -5903,6 +5903,38 @@ class AppStateBehaviorTest {
         assertTrue(second!!.id > first.id)
     }
 
+    // LogViewer.kt's split-view (tab.showUnfiltered) search-navigation LaunchedEffect resolves the
+    // *same* pendingSearchNavigation.entryId against both the Filtered and Original item lists to
+    // keep both panels in sync — see its doc comment. That dual-panel scrolling itself is Compose/
+    // LazyListState-bound UI code with no test harness in this project (same reasoning as
+    // LogViewerIndexingTest's own doc comment: handleNavKey/handleSelKey aren't practical to drive
+    // from a plain unit test either). What IS verified here, at the AppState level, is the one
+    // thing both single-view and split-view LaunchedEffects actually consume: that showUnfiltered
+    // being on doesn't change what request searchNext/searchPrev emit.
+    @Test
+    fun searchNavigationRequestIsEmittedTheSameWayRegardlessOfSplitUnfilteredView() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "log", "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle one"),
+                    LogEntry(2, "10:00:00.100", LogLevel.I, "App", "needle two"),
+                ),
+            ).copy(showUnfiltered = true),
+        )
+        state.openSearch("log")
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.size == 2 }
+
+        state.searchNext("log")
+
+        assertEquals("log", state.pendingSearchNavigation?.tabId)
+        assertEquals(2, state.pendingSearchNavigation?.entryId)
+        assertEquals(setOf(2), state.tab("log")!!.selected)
+        assertEquals(null, state.pendingAnnotationNavigation)
+    }
+
     @Test
     fun closeSearchDeactivatesButKeepsQueryAndMatchesForReopen() {
         val state = AppState()
