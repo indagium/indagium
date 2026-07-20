@@ -1,8 +1,8 @@
 package com.openlog.ui
 
-import java.io.File
 import java.awt.FileDialog
 import java.awt.Frame
+import java.io.File
 import javax.swing.JFileChooser
 
 /** Cross-platform directory picker used whenever the app needs a folder rather than a file. */
