@@ -438,12 +438,15 @@ class LogViewerScrollStateStore {
 }
 
 // In-view "Find" bar match info for one line (ui/SearchBar.kt, AppState.LogSearchState) —
-// isCurrentRow picks which of the two theme-agnostic backgrounds (Theme.kt's SEARCH_MATCH_BG /
-// SEARCH_CURRENT_MATCH_BG) buildFullLineAnnotation paints every match span in this line with.
+// isCurrentRow picks which of the two theme-derived backgrounds (ThemeColors.searchMatchBg /
+// searchCurrentBg, passed in from the call site's tc) buildFullLineAnnotation paints every match
+// span in this line with.
 internal data class SearchHighlight(
     val query: String,
     val caseSensitive: Boolean,
     val isCurrentRow: Boolean,
+    val matchBg: Color,
+    val currentBg: Color,
 )
 
 // Full selectable line matching raw logcat threadtime layout:
@@ -518,7 +521,7 @@ internal fun buildFullLineAnnotation(
     // visually — addStyle layers are painted in the order added, later spans on top.
     searchHighlight?.let { sh ->
         if (sh.query.isNotEmpty()) {
-            val bg = if (sh.isCurrentRow) SEARCH_CURRENT_MATCH_BG else SEARCH_MATCH_BG
+            val bg = if (sh.isCurrentRow) sh.currentBg else sh.matchBg
             regexRanges(lineText, sh.query, ignoreCase = !sh.caseSensitive, regexContext = regexContext).forEach { (s, e) ->
                 if (s < e && e <= lineText.length) {
                     addStyle(SpanStyle(background = bg, fontWeight = FontWeight.SemiBold), s, e)
@@ -1036,7 +1039,10 @@ fun LogViewer(
                                             autoWrap = settings.autoLogRowWrap,
                                             showRowNumbers = settings.showRowNumbers,
                                             searchHighlight = if (isSearchMatch) {
-                                                SearchHighlight(search.query, search.caseSensitive, isCurrentSearchMatch)
+                                                SearchHighlight(
+                                                    search.query, search.caseSensitive, isCurrentSearchMatch,
+                                                    matchBg = tc.searchMatchBg, currentBg = tc.searchCurrentBg,
+                                                )
                                             } else {
                                                 null
                                             },
@@ -1842,8 +1848,8 @@ private fun SeqHeaderRow(
             .fillMaxWidth()
             .background(when {
                 isSel -> tc.sl
-                isCurrentSearchMatch -> SEARCH_CURRENT_MATCH_BG
-                isSearchMatch -> SEARCH_MATCH_BG
+                isCurrentSearchMatch -> tc.searchCurrentBg
+                isSearchMatch -> tc.searchMatchBg
                 hov -> sc.copy(.15f)
                 else -> sc.copy(.07f)
             })
@@ -1934,8 +1940,8 @@ private fun ManualHeaderRow(
             .fillMaxWidth()
             .background(when {
                 isSel -> tc.sl
-                isCurrentSearchMatch -> SEARCH_CURRENT_MATCH_BG
-                isSearchMatch -> SEARCH_MATCH_BG
+                isCurrentSearchMatch -> tc.searchCurrentBg
+                isSearchMatch -> tc.searchMatchBg
                 hov -> sc.copy(.13f)
                 else -> sc.copy(.06f)
             })
@@ -2026,8 +2032,8 @@ private fun StackTraceHeaderRow(
             .fillMaxWidth()
             .background(when {
                 isSel -> tc.sl
-                isCurrentSearchMatch -> SEARCH_CURRENT_MATCH_BG
-                isSearchMatch -> SEARCH_MATCH_BG
+                isCurrentSearchMatch -> tc.searchCurrentBg
+                isSearchMatch -> tc.searchMatchBg
                 hov -> sc.copy(.15f)
                 else -> sc.copy(.07f)
             })

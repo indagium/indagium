@@ -4,6 +4,7 @@ import androidx.compose.foundation.ScrollbarStyle
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -13,24 +14,50 @@ private const val ALPHA_HOVER = 0.04f
 private const val ALPHA_ACCENT_BG = 0.15f
 private const val ALPHA_SELECTION = 0.18f
 
+// Search highlights derive from the active theme's own palette so they stay on-theme in every
+// preset (a rose theme gets rose/teal, not a fixed blue/orange): the current match uses the accent
+// colour, other matches the secondary sequence colour. Alpha is tuned per light/dark (dark panels
+// need more opacity to register), and the current match gets more than the others so it dominates.
+private const val LIGHT_LUMINANCE_THRESHOLD = 0.5f
+private const val ALPHA_SEARCH_MATCH_LIGHT = 0.26f
+private const val ALPHA_SEARCH_MATCH_DARK = 0.34f
+private const val ALPHA_SEARCH_CURRENT_LIGHT = 0.42f
+private const val ALPHA_SEARCH_CURRENT_DARK = 0.55f
+
 data class ThemeColors(
     val bg: Color, val p: Color, val p2: Color, val br: Color,
     val tx: Color, val ts: Color, val td: Color,
     val ac: Color, val abg: Color, val sl: Color, val hv: Color,
     val seq1: Color, val seq2: Color,
+    // In-view "Find" bar match backgrounds (ui/SearchBar.kt, buildFullLineAnnotation in LogViewer.kt):
+    // searchMatchBg tints every match, searchCurrentBg the one Enter/Next/Prev last landed on. Derived
+    // per-theme (see theme()) so both read correctly on light vs dark backgrounds instead of the old
+    // fixed constants that looked identical in every palette.
+    val searchMatchBg: Color, val searchCurrentBg: Color,
 )
+
+// Relative luminance of a packed 0xAARRGGBB background — lets theme() pick light- vs dark-tuned
+// search-highlight alphas without every preset having to declare which family it belongs to.
+private fun bgIsLight(argb: Long): Boolean = Color(argb).luminance() > LIGHT_LUMINANCE_THRESHOLD
 
 private fun theme(
     bg: Long, p: Long, p2: Long, br: Long,
     tx: Long, ts: Long, td: Long,
     ac: Long, seq1: Long, seq2: Long,
     hv: Color = Color.White.copy(ALPHA_HOVER),
-) = ThemeColors(
-    bg = Color(bg), p = Color(p), p2 = Color(p2), br = Color(br),
-    tx = Color(tx), ts = Color(ts), td = Color(td),
-    ac = Color(ac), abg = Color(ac).copy(ALPHA_ACCENT_BG), sl = Color(ac).copy(ALPHA_SELECTION), hv = hv,
-    seq1 = Color(seq1), seq2 = Color(seq2),
-)
+): ThemeColors {
+    val light = bgIsLight(bg)
+    return ThemeColors(
+        bg = Color(bg), p = Color(p), p2 = Color(p2), br = Color(br),
+        tx = Color(tx), ts = Color(ts), td = Color(td),
+        ac = Color(ac), abg = Color(ac).copy(ALPHA_ACCENT_BG), sl = Color(ac).copy(ALPHA_SELECTION), hv = hv,
+        seq1 = Color(seq1), seq2 = Color(seq2),
+        // Other matches: the theme's secondary sequence colour. Current match: the theme's accent,
+        // at higher alpha so it stands out. Both track the palette, so every preset stays on-theme.
+        searchMatchBg = Color(seq2).copy(alpha = if (light) ALPHA_SEARCH_MATCH_LIGHT else ALPHA_SEARCH_MATCH_DARK),
+        searchCurrentBg = Color(ac).copy(alpha = if (light) ALPHA_SEARCH_CURRENT_LIGHT else ALPHA_SEARCH_CURRENT_DARK),
+    )
+}
 
 val DARK_GITHUB = theme(
     0xFF0d1117, 0xFF161b22, 0xFF1c2128, 0xFF21262d, 0xFFc9d1d9, 0xFF8b949e,
@@ -189,15 +216,6 @@ val UI   = FontFamily.Default
 // Semantic colour constants (theme-agnostic — same across all themes)
 val DANGER_RED = Color(0xFFf85149)   // error / danger / exclude
 val PKG_CYAN   = Color(0xFF06b6d4)   // package-prefix indicator
-
-// In-view search highlight (ui/SearchBar.kt, buildFullLineAnnotation in LogViewer.kt) — theme-
-// agnostic like DANGER_RED/PKG_CYAN above rather than per-ThemeColors-preset fields, so adding this
-// didn't require touching all twenty theme() palette calls. Every match gets the muted background
-// so a row reads as "found" without fighting the keyword/highlighter spans it's layered on top of;
-// the current match (wherever Enter/Next/Prev last landed) gets the stronger, more saturated one so
-// keyboard navigation stays easy to track against a page of otherwise-identical matches.
-val SEARCH_MATCH_BG = Color(0xFF38bdf8).copy(alpha = 0.30f)
-val SEARCH_CURRENT_MATCH_BG = Color(0xFFf97316).copy(alpha = 0.55f)
 
 // Corner radius tokens
 val CORNER_SM = RoundedCornerShape(3.dp)   // badges, text fields, small pills
