@@ -375,9 +375,15 @@ data class CopyMaskRule(
     val replacement: String = "",
 )
 
+const val MIN_INTERFACE_SCALE_PERCENT = 80
+const val MAX_INTERFACE_SCALE_PERCENT = 200
+const val DEFAULT_INTERFACE_SCALE_PERCENT = 100
+
 data class AppSettings(
     val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
+    /** Scales the entire Compose interface relative to the platform's density and font scale. */
+    val interfaceScalePercent: Int = DEFAULT_INTERFACE_SCALE_PERCENT,
     val fontMono: Boolean = true,
     val defaultSaveDir: String? = null,
     val mostUsedTagLimit: Int = 5,

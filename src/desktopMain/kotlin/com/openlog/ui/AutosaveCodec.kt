@@ -527,6 +527,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("formatVersion", 1)
     put("theme", theme.name)
     put("fontSize", fontSize)
+    put("interfaceScalePercent", interfaceScalePercent)
     put("fontMono", fontMono)
     defaultSaveDir?.let { put("defaultSaveDir", it) }
     put("mostUsedTagLimit", mostUsedTagLimit)
@@ -723,6 +724,8 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
     AppSettings(
         theme = o.stringOrNull("theme")?.let { runCatching { ThemePreset.valueOf(it) }.getOrNull() } ?: ThemePreset.LIGHT,
         fontSize = o.intOrDefault("fontSize", 12),
+        interfaceScalePercent = o.intOrDefault("interfaceScalePercent", DEFAULT_INTERFACE_SCALE_PERCENT)
+            .coerceIn(MIN_INTERFACE_SCALE_PERCENT, MAX_INTERFACE_SCALE_PERCENT),
         fontMono = o.boolOrDefault("fontMono", true),
         defaultSaveDir = o.stringOrNull("defaultSaveDir"),
         mostUsedTagLimit = o.intOrDefault("mostUsedTagLimit", 5),

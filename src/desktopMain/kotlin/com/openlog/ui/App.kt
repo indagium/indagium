@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -62,6 +63,17 @@ fun App(
     onLicenseDeclined: () -> Unit = {},
 ) {
     val theme = themeColors(state.settings.theme)
+    val platformDensity = LocalDensity.current
+    val interfaceScale = state.settings.interfaceScalePercent / 100f
+    val scaledDensity = remember(platformDensity, interfaceScale) {
+        Density(
+            density = platformDensity.density * interfaceScale,
+            // `sp` converts through both density and fontScale. Scaling density once makes text
+            // and dp-based UI geometry grow by the same percentage while preserving the platform
+            // accessibility font preference; multiplying fontScale too would scale text twice.
+            fontScale = platformDensity.fontScale,
+        )
+    }
     val rootFocusRequester = remember { FocusRequester() }
     var pendingPanelFocus by remember { mutableStateOf<KeyboardPanel?>(null) }
     var nextFilterSearchRequestNonce by remember { mutableStateOf(0L) }
@@ -71,6 +83,7 @@ fun App(
         LocalTheme provides theme,
         LocalFontBase provides state.settings.fontSize,
         LocalUseMono provides state.settings.fontMono,
+        LocalDensity provides scaledDensity,
     ) {
         val tc = tc()
         // PERF-4: keyed on each tab's persistedSnapshot() (id/filename/sourcePath/filter/

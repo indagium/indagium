@@ -495,14 +495,20 @@ private fun AppearanceSettingsSection(state: AppState) {
                 onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
             )
         }
-        CompactSetting("Font size", Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+        CompactSetting("Log font size", Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
             ListStepper(
-                options = (10..16).toList(),
+                options = (10..24).toList(),
                 value = state.settings.fontSize,
                 onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
             )
         }
-        Spacer(Modifier.weight(1f))
+        CompactSetting("Interface scale", Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+            ListStepper(
+                options = (MIN_INTERFACE_SCALE_PERCENT..MAX_INTERFACE_SCALE_PERCENT step 10).toList(),
+                value = state.settings.interfaceScalePercent,
+                onChange = { v -> state.updateSettings { it.copy(interfaceScalePercent = v) } },
+            )
+        }
     }
     CompactSettingWithTooltip(
         label = "Toolbar labels",

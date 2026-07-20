@@ -20,6 +20,8 @@ import com.openlog.model.LogAnalysis
 import com.openlog.model.LogEntry
 import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
+import com.openlog.model.MAX_INTERFACE_SCALE_PERCENT
+import com.openlog.model.MIN_INTERFACE_SCALE_PERCENT
 import com.openlog.model.ManualCollapseBlock
 import com.openlog.model.ManualCollapseDirection
 import com.openlog.model.SequenceDef
@@ -50,6 +52,7 @@ import com.openlog.ui.recentFilesForMenu
 import com.openlog.ui.sequenceOrderDuringDrag
 import com.openlog.ui.sequenceRenderY
 import com.openlog.ui.sequenceRowBaseBackground
+import com.openlog.ui.settingsFromJson
 import com.openlog.ui.shouldSyncSequenceVisualOrder
 import com.openlog.ui.summarizeItems
 import com.openlog.ui.tabDisplayLabel
@@ -3730,6 +3733,7 @@ class AppStateBehaviorTest {
     private fun offDefaultSettingsForJsonRoundTripTest() = AppSettings(
         theme = ThemePreset.DRACULA,
         fontSize = 18,
+        interfaceScalePercent = 130,
         fontMono = false,
         defaultSaveDir = "/tmp/openlog-rt-saves",
         mostUsedTagLimit = 11,
@@ -3837,6 +3841,19 @@ class AppStateBehaviorTest {
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
         assertEquals(expected, restored.settings)
+    }
+
+    @Test
+    fun interfaceScaleJsonDefaultsAndClampsToSupportedRange() {
+        assertEquals(100, settingsFromJson("{}")!!.interfaceScalePercent)
+        assertEquals(
+            MIN_INTERFACE_SCALE_PERCENT,
+            settingsFromJson("{\"interfaceScalePercent\":1}")!!.interfaceScalePercent,
+        )
+        assertEquals(
+            MAX_INTERFACE_SCALE_PERCENT,
+            settingsFromJson("{\"interfaceScalePercent\":999}")!!.interfaceScalePercent,
+        )
     }
 
     // Migration default (AutosaveCodec.settingsFromJson): a JSON settings blob written before

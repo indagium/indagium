@@ -53,6 +53,7 @@ class AutosaveGoldenV1Test {
         val s = restored.settings
         assertEquals(ThemePreset.DRACULA, s.theme)
         assertEquals(16, s.fontSize)
+        assertEquals(100, s.interfaceScalePercent)
         assertEquals(false, s.fontMono)
         assertEquals("/nonexistent/openlog-golden-fixture/saves", s.defaultSaveDir)
         assertEquals(7, s.mostUsedTagLimit)

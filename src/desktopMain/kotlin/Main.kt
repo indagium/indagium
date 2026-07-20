@@ -1,8 +1,10 @@
 @file:Suppress("DEPRECATION") // painterResource(String) — Compose resources Res class not generated for single-JVM-target projects
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.awt.ComposeWindow
+import androidx.compose.ui.configureSwingGlobalsForCompose
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
@@ -28,6 +30,8 @@ import java.awt.event.MouseEvent
 import java.io.File
 
 fun main(args: Array<String>) {
+    configureSwingGlobalsForCompose()
+
     // On Linux, AWT/X11 derives the window's WM_CLASS from the *bottom stack frame's class name*
     // ("MainKt" here) at toolkit construction — sun.awt.X11.XToolkit reads the main class off a
     // Throwable stack trace, so no system property can change it (v1.0.5 shipped a
