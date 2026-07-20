@@ -3451,6 +3451,28 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun manualCollapseAvailabilityAllowsRewritingSameDirectionButRejectsOtherDirections() {
+        val entries = (1..6).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        val tab = mkTab("log", "test.log", entries).copy(
+            manualBlocks = listOf(
+                ManualCollapseBlock("ts", 2, ManualCollapseDirection.TO_START),
+                ManualCollapseBlock("te", 5, ManualCollapseDirection.TO_END),
+            ),
+        )
+
+        // Overlapping only the existing TO_START block (which it will rewrite) is allowed.
+        assertEquals(
+            ManualCollapseAvailability.AVAILABLE,
+            manualCollapseAvailability(tab, anchorId = 4, direction = ManualCollapseDirection.TO_START),
+        )
+        // Growing far enough to also overlap the unrelated TO_END block is still rejected.
+        assertEquals(
+            ManualCollapseAvailability.OVERLAPS_EXISTING,
+            manualCollapseAvailability(tab, anchorId = 6, direction = ManualCollapseDirection.TO_START),
+        )
+    }
+
+    @Test
     fun manualCollapseAvailabilityAllowsRangeInsideSequence() {
         val entries = (1..5).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
         val sequence = SequenceDef(
@@ -3524,6 +3546,49 @@ class AppStateBehaviorTest {
         state.collapseToEndFromCtx()
 
         assertEquals(listOf("existing"), state.tabs.single().manualBlocks.map { it.id })
+    }
+
+    @Test
+    fun repeatedCollapseToStartRewritesExistingBlockAndClearsExpandedState() {
+        val state = AppState()
+        val entries = (1..5).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        state.tabs = listOf(mkTab("log", "test.log", entries))
+        state.activeTabId = "log"
+
+        state.ctx = CtxMenuState("log", 2, 0f, 0f, "")
+        state.collapseToStartFromCtx()
+        val firstBlock = state.tabs.single().manualBlocks.single()
+        assertEquals(2, firstBlock.anchorId)
+        // Simulate the block being expanded before the boundary gets moved.
+        state.tabs = state.tabs.map { it.copy(expanded = it.expanded + firstBlock.id) }
+
+        state.ctx = CtxMenuState("log", 4, 0f, 0f, "")
+        state.collapseToStartFromCtx()
+
+        val blocks = state.tabs.single().manualBlocks
+        assertEquals(1, blocks.size)
+        assertEquals(4, blocks.single().anchorId)
+        assertTrue(firstBlock.id !in state.tabs.single().expanded)
+    }
+
+    @Test
+    fun repeatedCollapseToEndPreservesCustomColor() {
+        val state = AppState()
+        val entries = (1..5).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        state.tabs = listOf(mkTab("log", "test.log", entries))
+        state.activeTabId = "log"
+
+        state.ctx = CtxMenuState("log", 4, 0f, 0f, "")
+        state.collapseToEndFromCtx()
+        val blockId = state.tabs.single().manualBlocks.single().id
+        state.setManualBlockColor("log", blockId, Color.Red)
+
+        state.ctx = CtxMenuState("log", 2, 0f, 0f, "")
+        state.collapseToEndFromCtx()
+
+        val block = state.tabs.single().manualBlocks.single()
+        assertEquals(2, block.anchorId)
+        assertEquals(Color.Red, block.color)
     }
 
     @Test

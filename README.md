@@ -2,7 +2,7 @@
 
 A desktop log viewer for Android logcat files, built with Kotlin and Compose Multiplatform.
 
-![Version](https://img.shields.io/badge/version-1.5.5-blue)
+![Version](https://img.shields.io/badge/version-1.5.7-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
 ## Features
@@ -164,7 +164,7 @@ clients such as LM Studio, Codex, and Claude Code; see [the MCP guide](docs/mcp/
 Push a version tag to trigger the GitHub Actions build, which produces Linux, Windows, and macOS packages and creates a GitHub Release automatically:
 
 ```bash
-git tag v1.5.5 && git push --tags
+git tag v1.5.7 && git push --tags
 ```
 
 The macOS build is unsigned (no Apple Developer certificate in CI) — see the Installation section above for the Gatekeeper workaround.

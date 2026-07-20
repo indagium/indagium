@@ -444,7 +444,11 @@ internal fun manualCollapseAvailability(
     if (range.first == range.last) return ManualCollapseAvailability.NOOP_RANGE
     // Disabled blocks remain part of the document and may be re-enabled later, so allowing a
     // new overlapping range here would create an invalid block layout on the next toggle.
+    // Exception: a TO_START/TO_END request is allowed to overlap the existing block of that same
+    // direction — there's at most one (two same-direction blocks always overlap each other), and
+    // addManualCollapse rewrites it with the new boundary instead of rejecting the request.
     val overlapsExisting = tab.manualBlocks
+        .filterNot { direction != ManualCollapseDirection.RANGE && it.direction == direction }
         .mapNotNull { manualCollapseRange(tab, it.anchorId, it.direction, it.endId) }
         .any { existing -> rangesOverlap(existing, range) }
     return if (overlapsExisting) ManualCollapseAvailability.OVERLAPS_EXISTING else ManualCollapseAvailability.AVAILABLE
@@ -2756,7 +2760,19 @@ class AppState(
         if (manualCollapseAvailability(tab, anchorId, direction, endId) != ManualCollapseAvailability.AVAILABLE) return false
         upTab(tabId) { t ->
             val id = "${newId("mc")}_${anchorId}_${direction.name}"
-            t.copy(manualBlocks = t.manualBlocks + ManualCollapseBlock(id, anchorId, direction, endId = endId))
+            // A repeat TO_START/TO_END rewrites the tab's existing block of that same direction
+            // (manualCollapseAvailability let it through despite the overlap for this reason)
+            // rather than stacking a second one — carry its color forward so nudging the boundary
+            // doesn't reset a color the user picked.
+            val replaced = if (direction == ManualCollapseDirection.RANGE) emptyList()
+                else t.manualBlocks.filter { it.direction == direction }
+            val replacedIds = replaced.map { it.id }.toSet()
+            val newBlock = replaced.firstOrNull()?.color?.let { ManualCollapseBlock(id, anchorId, direction, color = it, endId = endId) }
+                ?: ManualCollapseBlock(id, anchorId, direction, endId = endId)
+            t.copy(
+                manualBlocks = t.manualBlocks.filterNot { it.id in replacedIds } + newBlock,
+                expanded = t.expanded - replacedIds,
+            )
         }
         return true
     }
