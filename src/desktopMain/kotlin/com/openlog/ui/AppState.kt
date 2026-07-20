@@ -2764,8 +2764,11 @@ class AppState(
             // (manualCollapseAvailability let it through despite the overlap for this reason)
             // rather than stacking a second one — carry its color forward so nudging the boundary
             // doesn't reset a color the user picked.
-            val replaced = if (direction == ManualCollapseDirection.RANGE) emptyList()
-                else t.manualBlocks.filter { it.direction == direction }
+            val replaced = if (direction == ManualCollapseDirection.RANGE) {
+                emptyList()
+            } else {
+                t.manualBlocks.filter { it.direction == direction }
+            }
             val replacedIds = replaced.map { it.id }.toSet()
             val newBlock = replaced.firstOrNull()?.color?.let { ManualCollapseBlock(id, anchorId, direction, color = it, endId = endId) }
                 ?: ManualCollapseBlock(id, anchorId, direction, endId = endId)
