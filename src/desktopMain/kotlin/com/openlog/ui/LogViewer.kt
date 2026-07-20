@@ -437,6 +437,15 @@ class LogViewerScrollStateStore {
     }
 }
 
+// In-view "Find" bar match info for one line (ui/SearchBar.kt, AppState.LogSearchState) —
+// isCurrentRow picks which of the two theme-agnostic backgrounds (Theme.kt's SEARCH_MATCH_BG /
+// SEARCH_CURRENT_MATCH_BG) buildFullLineAnnotation paints every match span in this line with.
+internal data class SearchHighlight(
+    val query: String,
+    val caseSensitive: Boolean,
+    val isCurrentRow: Boolean,
+)
+
 // Full selectable line matching raw logcat threadtime layout:
 //   ts  pid  tid  L  tag: msg
 // Level key sits at its natural position (after pid/tid) and is coloured by level.
@@ -468,6 +477,7 @@ internal fun buildFullLineAnnotation(
     msgColor: Color,
     keywordRegexFilter: Filter?,
     regexContext: RegexEvaluationContext,
+    searchHighlight: SearchHighlight? = null,
 ): AnnotatedString = buildAnnotatedString {
     withStyle(SpanStyle(color = tsColor)) { append(entry.ts) }
     if (entry.pid > 0) {
@@ -501,6 +511,18 @@ internal fun buildFullLineAnnotation(
                     s,
                     e,
                 )
+            }
+        }
+    }
+    // Appended last (after highlighter + keyword-regex spans above) so a Find match always wins
+    // visually — addStyle layers are painted in the order added, later spans on top.
+    searchHighlight?.let { sh ->
+        if (sh.query.isNotEmpty()) {
+            val bg = if (sh.isCurrentRow) SEARCH_CURRENT_MATCH_BG else SEARCH_MATCH_BG
+            regexRanges(lineText, sh.query, ignoreCase = !sh.caseSensitive, regexContext = regexContext).forEach { (s, e) ->
+                if (s < e && e <= lineText.length) {
+                    addStyle(SpanStyle(background = bg, fontWeight = FontWeight.SemiBold), s, e)
+                }
             }
         }
     }
@@ -618,6 +640,16 @@ fun LogViewer(
     // its own to resolve which panel a button-6/7 press should scroll. Default no-op keeps every
     // other LogViewer call site (previews, other tests) unaffected.
     onHoverPanelKey: (String?) -> Unit = {},
+    // In-view "Find" bar (ui/SearchBar.kt, Settings.ctrlFTarget == FIND_BAR) — wired to
+    // AppState.setSearchQuery/toggleSearchCase/searchNext/searchPrev/closeSearch by FileView.kt and
+    // CompareView.kt. Defaults keep every other call site (previews, tests) unaffected:
+    // tab.search.active stays false unless AppState.openSearch was actually called, so SearchBar
+    // simply never renders for them.
+    onSearchQueryChange: (String) -> Unit = {},
+    onSearchToggleCase: () -> Unit = {},
+    onSearchNext: () -> Unit = {},
+    onSearchPrev: () -> Unit = {},
+    onSearchClose: () -> Unit = {},
 ) {
     val tc        = tc()
     val mono      = monoFont()
@@ -969,6 +1001,19 @@ fun LogViewer(
                                     items = listItems,
                                     key = { item -> logItemStableKey(effectiveTab.id, item) }
                                 ) { item ->
+                                    // O(log n) per row via the same ascending-id IntArray lookup
+                                    // ItemsSummary.rowIds uses (indexOfId) — matchIds is built in
+                                    // display order by computeSearchMatches, so it's sorted too.
+                                    // Only rows that ARE matches pay for a SearchHighlight/regex
+                                    // pass at all; everything else passes null and skips it.
+                                    val search = effectiveTab.search
+                                    val matchIdx = if (search.active && search.matchIds.isNotEmpty()) {
+                                        search.matchIds.indexOfId(logItemEntryId(item))
+                                    } else {
+                                        -1
+                                    }
+                                    val isSearchMatch = matchIdx >= 0
+                                    val isCurrentSearchMatch = isSearchMatch && matchIdx == search.currentIdx
                                     when (item) {
                                         is LogItem.Row -> LogRow(
                                             item = item,
@@ -984,13 +1029,27 @@ fun LogViewer(
                                             highlightEntireCrashGroup = settings.highlightEntireCrashGroup,
                                             autoWrap = settings.autoLogRowWrap,
                                             showRowNumbers = settings.showRowNumbers,
+                                            searchHighlight = if (isSearchMatch) {
+                                                SearchHighlight(search.query, search.caseSensitive, isCurrentSearchMatch)
+                                            } else {
+                                                null
+                                            },
                                         )
                                         is LogItem.SeqHeader ->
-                                            SeqHeaderRow(item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
+                                            SeqHeaderRow(
+                                                item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
+                                                isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
+                                            )
                                         is LogItem.ManualHeader ->
-                                            ManualHeaderRow(item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
+                                            ManualHeaderRow(
+                                                item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
+                                                isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
+                                            )
                                         is LogItem.StackTraceHeader ->
-                                            StackTraceHeaderRow(item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap)
+                                            StackTraceHeaderRow(
+                                                item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
+                                                isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
+                                            )
                                     }
                                 }
                                 item(key = "tail-space") {
@@ -1158,6 +1217,28 @@ fun LogViewer(
                 // Clicking a row here scrolls the Original panel to the same entry.
                 Column(Modifier.fillMaxWidth().weight(1f)) {
                     SectionBanner("Filtered — $visCnt lines", tc.ac, tc)
+                    // Split view shows the Find bar over the Filtered panel only (not Original) —
+                    // one search state per tab (see LogTab.search), no independent per-panel state
+                    // in v1 (plan's explicit scope note in AppState.openSearch's doc comment).
+                    if (tab.search.active) {
+                        SearchBar(
+                            search = tab.search,
+                            onQueryChange = onSearchQueryChange,
+                            onToggleCase = onSearchToggleCase,
+                            onNext = onSearchNext,
+                            onPrev = onSearchPrev,
+                            // Same fix as the single-view branch below: Escape removes the
+                            // focused find field entirely, so without an explicit refocus here
+                            // keyboard focus falls off the tree and App.kt's root
+                            // onPreviewKeyEvent/handleGlobalKey stops receiving Ctrl+F until a
+                            // click restores focus somewhere — reusing this panel's own
+                            // externalFr (wired to the Filtered ItemList below) fixes that.
+                            onClose = {
+                                onSearchClose()
+                                runCatching { focusRequester?.requestFocus() }
+                            },
+                        )
+                    }
                     ColHeader(hasPidTid, showRowNumbers = settings.showRowNumbers, rowNumDigits = tab.logData.size.toString().length)
                     ItemList(
                         listItems = items,
@@ -1182,6 +1263,8 @@ fun LogViewer(
                         },
                         panelKey = "${tab.id}:main",
                         listState = filteredLazyState,
+                        externalFr = focusRequester,
+                        onFocusChangedExternal = onPanelFocusChanged,
                     )
                 }
             }
@@ -1198,6 +1281,22 @@ fun LogViewer(
                     mainLazyState.centerOnItem(target.index)
                 }
                 onConsumeAnnotationNavigation(request.id)
+            }
+            if (tab.search.active) {
+                SearchBar(
+                    search = tab.search,
+                    onQueryChange = onSearchQueryChange,
+                    onToggleCase = onSearchToggleCase,
+                    onNext = onSearchNext,
+                    onPrev = onSearchPrev,
+                    // Escape (SearchBar's own key handler) closes and returns focus to the log
+                    // row list — reusing this view's own externalFr rather than a second
+                    // FocusRequester the caller would otherwise need to hoist and manage.
+                    onClose = {
+                        onSearchClose()
+                        runCatching { focusRequester?.requestFocus() }
+                    },
+                )
             }
             ColHeader(hasPidTid, showRowNumbers = settings.showRowNumbers, rowNumDigits = tab.logData.size.toString().length)
             ItemList(
@@ -1434,6 +1533,7 @@ private fun LogRow(
     // real available width was used up, so the line wrapped one row earlier than necessary.
     autoWrap: Boolean = false,
     showRowNumbers: Boolean = false,
+    searchHighlight: SearchHighlight? = null,
 ) {
     val density  = LocalDensity.current.density
     val entry    = item.entry
@@ -1447,7 +1547,9 @@ private fun LogRow(
     }
 
     val isCrashGroupRow = isCrashGroupRow(item.groupColor, highlightEntireCrashGroup)
-    val annoLine = remember(tab.id, entry, tab.filter, tc.td, tc.ts, tc.tx, wrapLimitChars, isCrashGroupRow, autoWrap) {
+    val annoLine = remember(
+        tab.id, entry, tab.filter, tc.td, tc.ts, tc.tx, wrapLimitChars, isCrashGroupRow, autoWrap, searchHighlight,
+    ) {
         val tagColor = if (isCrashGroupRow) DANGER_RED else tc.ts
         val msgColor = if (isCrashGroupRow) DANGER_RED else tc.tx
         val built = buildFullLineAnnotation(
@@ -1459,6 +1561,7 @@ private fun LogRow(
             msgColor,
             tab.filter,
             regexContext,
+            searchHighlight,
         )
         if (autoWrap) built else visualLogLineForWrapLimit(built, wrapLimitChars)
     }
@@ -1640,6 +1743,13 @@ private fun SeqHeaderRow(
     onCtxMenu: (Int, Float, Float, String) -> Unit,
     onToggleGroup: (String) -> Unit,
     rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
+    // Header rows render tag/msg as plain AppText, not an AnnotatedString built by
+    // buildFullLineAnnotation, so a Find match here gets a whole-row background tint instead of
+    // the per-substring span a LogRow match gets — a coarser but much simpler way to still surface
+    // "this header's line matched" (computeSearchMatches walks header entries too, see
+    // utils/LogSearch.kt) without reworking every header composable onto AnnotatedString rendering.
+    isSearchMatch: Boolean = false,
+    isCurrentSearchMatch: Boolean = false,
 ) {
     val density = LocalDensity.current.density
     val sc  = item.color
@@ -1655,6 +1765,8 @@ private fun SeqHeaderRow(
             .fillMaxWidth()
             .background(when {
                 isSel -> tc.sl
+                isCurrentSearchMatch -> SEARCH_CURRENT_MATCH_BG
+                isSearchMatch -> SEARCH_MATCH_BG
                 hov -> sc.copy(.15f)
                 else -> sc.copy(.07f)
             })
@@ -1728,6 +1840,8 @@ private fun ManualHeaderRow(
     onCtxMenu: (Int, Float, Float, String) -> Unit,
     onToggleGroup: (String) -> Unit,
     rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
+    isSearchMatch: Boolean = false,
+    isCurrentSearchMatch: Boolean = false,
 ) {
     val density = LocalDensity.current.density
     val sc = item.color
@@ -1743,6 +1857,8 @@ private fun ManualHeaderRow(
             .fillMaxWidth()
             .background(when {
                 isSel -> tc.sl
+                isCurrentSearchMatch -> SEARCH_CURRENT_MATCH_BG
+                isSearchMatch -> SEARCH_MATCH_BG
                 hov -> sc.copy(.13f)
                 else -> sc.copy(.06f)
             })
@@ -1816,6 +1932,8 @@ private fun StackTraceHeaderRow(
     onCtxMenu: (Int, Float, Float, String) -> Unit,
     onToggleGroup: (String) -> Unit,
     rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
+    isSearchMatch: Boolean = false,
+    isCurrentSearchMatch: Boolean = false,
 ) {
     val density = LocalDensity.current.density
     val sc = DANGER_RED
@@ -1831,6 +1949,8 @@ private fun StackTraceHeaderRow(
             .fillMaxWidth()
             .background(when {
                 isSel -> tc.sl
+                isCurrentSearchMatch -> SEARCH_CURRENT_MATCH_BG
+                isSearchMatch -> SEARCH_MATCH_BG
                 hov -> sc.copy(.15f)
                 else -> sc.copy(.07f)
             })

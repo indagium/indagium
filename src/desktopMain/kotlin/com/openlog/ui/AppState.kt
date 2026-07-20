@@ -42,10 +42,12 @@ import com.openlog.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.openlog.utils.MergeSourceFile
 import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.SPLIT_PROMPT_BYTES
+import com.openlog.utils.SearchComputeResult
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
+import com.openlog.utils.computeSearchMatches
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.exportFilteredToFile
 import com.openlog.utils.extractAppVersionHeuristic
@@ -387,6 +389,11 @@ private fun launchEditor(template: String, file: File, line: Int): Boolean = run
 // starts exceeding a frame budget by orders of magnitude; the old 512MB threshold left files in
 // the 100-512MB range freezing the UI on every filter keystroke.
 internal const val LARGE_FILE_MODE_BYTES = 64L * 1024L * 1024L
+
+// Debounce for in-view search recompute (AppState.scheduleSearchRecompute) — matches the keyword
+// filter's own debounce (see FilterPanel's kwDisplay LaunchedEffect) so typing into the Find bar
+// feels the same as typing into the filter's keyword field.
+internal const val SEARCH_RECOMPUTE_DEBOUNCE_MS = 150L
 
 data class PendingSequenceStart(val text: String, val tag: String)
 
@@ -868,9 +875,24 @@ class AppState(
     // recomposition.
     var hoveredLogPanelKey: String? = null
 
+    // Which tab's log panel most recently held keyboard focus — set from FileView.kt's single
+    // panel and both of CompareView.kt's left/right panels' onPanelFocusChanged. Consulted only in
+    // compare mode (see App.kt's onFocusFilterSearch): activeTabId always names the left panel
+    // there, so this is what lets Ctrl+F open the Find bar on whichever of the two panels the user
+    // was actually in, instead of always the left one. Session-only, never persisted; single-tab
+    // (non-compare) mode always resolves via activeTab() instead, regardless of this value, since a
+    // tab switch there doesn't necessarily re-focus the log panel and would otherwise go stale.
+    var searchFocusTabId: String? by mutableStateOf(null)
+
     private val ioJob = SupervisorJob()
     private val ioScope = CoroutineScope(ioJob + Dispatchers.IO)
     private val closed = AtomicBoolean(false)
+
+    // Debounce jobs backing in-view search recompute (openSearch/setSearchQuery/... below) — keyed
+    // by tabId, same cancel-and-relaunch shape as TailCoordinator's tailAnalysisJobs and AppState's
+    // own autosave debounce. ConcurrentHashMap since a tab can be closed (removing its job) from the
+    // UI thread while a previously-scheduled recompute for that same tabId is still in flight.
+    private val searchJobs = ConcurrentHashMap<String, Job>()
 
     // internal, not private: TailCoordinator (Task 12 slice 2) synchronizes on this exact monitor
     // object so its tabs-list writes stay atomic with AppState's own — see upTab's doc comment.
@@ -1388,7 +1410,23 @@ class AppState(
     // `tabs = tabs + t` racing one of those could lose either update (observed as a flaky
     // "restored tab counter" test once autosave restore became async).
     fun upTab(tabId: String, fn: (LogTab) -> LogTab) = synchronized(stateLock) {
+        val before = tab(tabId)
         tabs = tabs.map { if (it.id == tabId) fn(it) else it }
+        val after = tab(tabId)
+        if (before != null && after != null && searchNeedsRecompute(before, after)) {
+            scheduleSearchRecompute(tabId)
+        }
+    }
+
+    // In-view search matches (LogSearchState.matchIds) go stale whenever the entries a tab's
+    // active search was computed over change shape — a filter edit, an expand/collapse, or new
+    // (e.g. tailed) logData. Gated on `after.search.active` (not `before`) so the extremely
+    // common case — a tab that never opened Find — costs one boolean check, and so opening Find
+    // itself (which only touches the `search` field, not filter/expanded/logData) never schedules
+    // a redundant recompute of an as-yet-empty query.
+    private fun searchNeedsRecompute(before: LogTab, after: LogTab): Boolean {
+        if (!after.search.active) return false
+        return before.filter != after.filter || before.expanded != after.expanded || before.logData !== after.logData
     }
 
     fun upFlt(tabId: String, fn: (Filter) -> Filter) = upFlt(tabId, trackDraft = true, fn)
@@ -2488,6 +2526,134 @@ class AppState(
         setSelectedRows(tabId, listOf(entryId))
         annotationNavigationCounter += 1
         pendingAnnotationNavigation = AnnotationNavigationRequest(annotationNavigationCounter, tabId, listOf(entryId))
+    }
+
+    // ── In-view search ("Find" bar, ui/SearchBar.kt) ──────────────────
+    // Non-destructive alternative to the filter's own keyword/regex search: highlights matches in
+    // place instead of hiding non-matching rows. See onFocusFilterSearch in App.kt for the
+    // Settings.ctrlFTarget == FIND_BAR branch that routes Ctrl/Cmd+F here instead of to a filter
+    // field.
+
+    // Reopening an already-open bar (a repeat Ctrl/Cmd+F) deliberately keeps the existing
+    // query/matches — only `active` and `focusNonce` change — so ui/SearchBar.kt's
+    // LaunchedEffect(focusNonce) can refocus + select-all without losing what was already found.
+    fun openSearch(tabId: String) = upTab(tabId) { t ->
+        t.copy(search = t.search.copy(active = true, focusNonce = t.search.focusNonce + 1))
+    }
+
+    // Deliberately keeps query/matchIds (only flips `active` off) rather than resetting to
+    // LogSearchState.EMPTY — reopening the bar later in the same session restores exactly where
+    // the user left off instead of forcing them to retype. Session-only either way: LogTab.search
+    // is never persisted (see AutosaveCodec.persistedSnapshot), so a relaunch always starts blank.
+    fun closeSearch(tabId: String) {
+        searchJobs.remove(tabId)?.cancel()
+        upTab(tabId) { it.copy(search = it.search.copy(active = false)) }
+    }
+
+    fun setSearchQuery(tabId: String, query: String) {
+        upTab(tabId) { t -> t.copy(search = t.search.copy(query = query, active = true)) }
+        scheduleSearchRecompute(tabId)
+    }
+
+    fun toggleSearchCase(tabId: String) {
+        upTab(tabId) { t -> t.copy(search = t.search.copy(caseSensitive = !t.search.caseSensitive)) }
+        scheduleSearchRecompute(tabId)
+    }
+
+    fun searchNext(tabId: String) = moveSearchMatch(tabId, +1)
+
+    fun searchPrev(tabId: String) = moveSearchMatch(tabId, -1)
+
+    private fun moveSearchMatch(tabId: String, delta: Int) {
+        val t = tab(tabId) ?: return
+        val matches = t.search.matchIds
+        if (matches.isEmpty()) return
+        val n = matches.size
+        // Plain modulo can return negative for delta=-1 at index 0 in Kotlin/Java (remainder, not
+        // Python-style floor-mod) — the extra `+ n) % n` wraps it back into [0, n).
+        val newIdx = ((t.search.currentIdx + delta) % n + n) % n
+        upTab(tabId) { it.copy(search = it.search.copy(currentIdx = newIdx)) }
+        // requestScrollAnchor already selects the row, auto-expands whatever collapsed group owns
+        // it, and centers the viewport — exactly what a Find-bar jump needs, for free.
+        requestScrollAnchor(tabId, matches[newIdx])
+    }
+
+    // Compare mode's right panel never renders its own stored `.filter` — CompareView.kt's
+    // effectiveRightTab mirrors the left (activeTabId) tab's filter when compareFilterRight is on,
+    // or shows everything unfiltered (Filter()) when it's off. Search must match against that same
+    // *displayed* filter or its highlights/jumps would target rows the right panel doesn't actually
+    // show. Common-case only: mirrors CompareView.kt's own leftTab/rightTab resolution
+    // (activeTabId/compareTabId) directly, without also replicating its same-tab-id collision
+    // fallback (CompareView reassigns rightTab to some other open tab if compareTabId ever collided
+    // with activeTabId) — that fallback only matters in the rare case a caller sets compareTabId
+    // equal to activeTabId without going through updateCompareMode (which already prevents it), so
+    // duplicating it here was left as a follow-up rather than done speculatively.
+    private fun effectiveSearchFilter(tabId: String, stored: LogTab): Filter {
+        if (!compareMode) return stored.filter
+        return when (tabId) {
+            compareTabId -> if (compareFilterRight) tab(activeTabId)?.filter ?: stored.filter else Filter()
+            else -> stored.filter
+        }
+    }
+
+    // CompareView.kt calls this when the right panel's *effective* displayed filter changes —
+    // compareFilterRight toggling, the left tab's filter changing while mirrored, or which tab is
+    // on the right changing. None of those mutate the right tab's own stored `.filter`, so upTab's
+    // searchNeedsRecompute hook (which only watches a tab's own fields) can't see them; this is the
+    // explicit trigger for that case. A cheap no-op if that tab's search isn't active.
+    fun notifyEffectiveFilterChanged(tabId: String) = scheduleSearchRecompute(tabId)
+
+    // Cancel-and-relaunch on ioScope, same shape as TailCoordinator's tailAnalysisJobs debounce —
+    // every call (a keystroke, a case-sensitivity toggle, the upTab hook noticing the tab's
+    // filter/expanded/logData changed, or notifyEffectiveFilterChanged above) supersedes whatever
+    // recompute was already in flight.
+    //
+    // Deliberately searches over a *fully expanded* copy of the tab (visibleExpandableGroupIds),
+    // not tab.expanded as actually rendered — a match hidden inside a currently-collapsed group
+    // must still be found so Enter/Next can jump to it (which is what then actually expands that
+    // one group, via requestScrollAnchor above). The real tab.expanded is never mutated here — nor
+    // is the real stored `.filter` (effectiveSearchFilter only affects this local computation).
+    private fun scheduleSearchRecompute(tabId: String) {
+        searchJobs[tabId]?.cancel()
+        searchJobs[tabId] = ioScope.launch {
+            delay(SEARCH_RECOMPUTE_DEBOUNCE_MS)
+            val stored = tab(tabId) ?: return@launch
+            if (!stored.search.active) return@launch
+            val t = stored.copy(filter = effectiveSearchFilter(tabId, stored))
+            val regexContext = RegexEvaluationContext()
+            val fullyExpanded = visibleExpandableGroupIds(t)
+            ensureActive()
+            val searchItems = computeItems(t.copy(expanded = fullyExpanded), applyFilter = true, regexContext)
+            ensureActive()
+            val result = computeSearchMatches(searchItems, stored.search.query, stored.search.caseSensitive, regexContext)
+            ensureActive()
+            applySearchResult(tabId, result)
+        }
+    }
+
+    private fun applySearchResult(tabId: String, result: SearchComputeResult) {
+        upTab(tabId) { cur ->
+            val old = cur.search
+            if (!old.active) return@upTab cur // closed while this recompute was in flight
+            // Sticky current match (plan requirement): if the entry the user was parked on is still
+            // among the new matches, stay on it (by id, not index — recomputation can shuffle
+            // indices even when the set of matches barely changes) instead of snapping back to 0.
+            val stickyId = old.matchIds.getOrNull(old.currentIdx)
+            val stickyIdx = stickyId?.let { result.matchIds.indexOfId(it) } ?: -1
+            val newIdx = when {
+                result.matchIds.isEmpty() -> 0
+                stickyIdx >= 0 -> stickyIdx
+                else -> old.currentIdx.coerceIn(0, result.matchIds.size - 1)
+            }
+            cur.copy(
+                search = old.copy(
+                    matchIds = result.matchIds,
+                    currentIdx = newIdx,
+                    invalidPattern = result.invalidPattern,
+                    timedOut = result.timedOut,
+                ),
+            )
+        }
     }
 
     fun addTagFilterFromCtx() {

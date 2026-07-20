@@ -138,6 +138,18 @@ internal fun visibleLogLineText(entry: LogEntry): String = buildString {
     append(entry.msg)
 }
 
+// Distinguishes "syntactically invalid pattern" from "valid pattern, zero matches" — a distinction
+// containsPattern/regexRanges deliberately collapse into a single `false`/`emptyList()` result
+// (SEC-2/3 above), but ui/SearchBar.kt's find bar wants to show the pattern itself as invalid (e.g.
+// red) rather than just "0 matches". Reuses the same cache/key as every other lookup here so
+// checking validity never compiles a pattern twice.
+internal fun isValidRegexPattern(pattern: String, ignoreCase: Boolean = true): Boolean {
+    val options = if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet()
+    return regexCache.getOrPut(RegexKey(pattern, ignoreCase)) {
+        runCatching { Regex(pattern, options) }
+    }.isSuccess
+}
+
 internal fun containsPattern(
     haystack: String,
     pattern: String,

@@ -87,6 +87,16 @@ internal fun CompareView(
     else
         rightTab.copy(filter = Filter())
 
+    // AppState.scheduleSearchRecompute mirrors this same effective-filter logic (see its
+    // effectiveSearchFilter) when computing the right panel's Find-bar matches, but nothing on the
+    // AppState side observes compareFilterRight toggling or the left tab's filter changing while
+    // mirrored — neither mutates rightTab's own stored `.filter`, so upTab's own staleness hook
+    // never fires for them. This is the explicit, reactive trigger for exactly that gap: it re-runs
+    // whenever the *effective* filter this panel actually displays changes, for whatever reason.
+    LaunchedEffect(effectiveRightTab.filter, rightTab.id) {
+        state.notifyEffectiveFilterChanged(rightTab.id)
+    }
+
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val totalWidthDp = maxWidth.value
 
@@ -154,11 +164,22 @@ internal fun CompareView(
                         navScrollMargin = state.settings.navScrollMargin,
                         focusRequester = leftLogFr,
                         onPanelFocusChanged = { focused ->
-                            if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == leftLogFr }
+                            if (focused) {
+                                focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == leftLogFr }
+                                state.searchFocusTabId = leftTab.id
+                            }
                         },
                         keyboardFocusVisible = state.keyboardFocusVisible,
                         onVisibleItems = { summary -> state.noteVisibleItems(leftTab.id, summary) },
                         onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
+                        onSearchQueryChange = { query -> state.setSearchQuery(leftTab.id, query) },
+                        onSearchToggleCase = { state.toggleSearchCase(leftTab.id) },
+                        onSearchNext = { state.searchNext(leftTab.id) },
+                        onSearchPrev = { state.searchPrev(leftTab.id) },
+                        onSearchClose = {
+                            state.closeSearch(leftTab.id)
+                            runCatching { leftLogFr.requestFocus() }
+                        },
                     )
                 }
             }
@@ -217,13 +238,27 @@ internal fun CompareView(
                         navScrollMargin = state.settings.navScrollMargin,
                         focusRequester = rightLogFr,
                         onPanelFocusChanged = { focused ->
-                            if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == rightLogFr }
+                            if (focused) {
+                                focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == rightLogFr }
+                                state.searchFocusTabId = rightTab.id
+                            }
                         },
                         keyboardFocusVisible = state.keyboardFocusVisible,
                         // Keyed by rightTab (not effectiveRightTab): the summary reflects what
                         // this pane displays, which is what selRow/selectAll on rightTab.id need.
                         onVisibleItems = { summary -> state.noteVisibleItems(rightTab.id, summary) },
                         onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
+                        // tab.search lives on rightTab (LogTab.search), unaffected by
+                        // effectiveRightTab's filter override — see AppState.effectiveSearchFilter
+                        // for how the recompute itself accounts for that override.
+                        onSearchQueryChange = { query -> state.setSearchQuery(rightTab.id, query) },
+                        onSearchToggleCase = { state.toggleSearchCase(rightTab.id) },
+                        onSearchNext = { state.searchNext(rightTab.id) },
+                        onSearchPrev = { state.searchPrev(rightTab.id) },
+                        onSearchClose = {
+                            state.closeSearch(rightTab.id)
+                            runCatching { rightLogFr.requestFocus() }
+                        },
                     )
                     if (state.annotationVisible || state.aiPanelVisible) {
                         HDivider { d ->

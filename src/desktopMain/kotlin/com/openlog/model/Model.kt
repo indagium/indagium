@@ -202,6 +202,64 @@ data class Annotations(
     val decisiveTags: List<String> = emptyList(),
 )
 
+// ── In-view search (Ctrl/Cmd+F "Find" bar, ui/SearchBar.kt) ────────
+// Non-destructive: unlike Filter's kwText/kwRegex (which removes non-matching rows), this only
+// highlights matches within whatever's already visible and moves the row selection between them.
+// Transient/session-only like `selected`/`tailing` below — AutosaveCodec never persists it, only
+// the AppSettings.ctrlFTarget == FIND_BAR switch that governs whether Ctrl/Cmd+F opens this at all.
+data class LogSearchState(
+    val active: Boolean = false,
+    val query: String = "",
+    val caseSensitive: Boolean = false,
+    /** Ascending-by-id entry ids of every currently-matching row/header, computed off the UI
+     *  thread (see AppState.scheduleSearchRecompute) over the fully-expanded, filtered item list —
+     *  so a match inside a currently-collapsed group is still found; jumping to it is what expands
+     *  that group (AppState.requestScrollAnchor → LogViewer's pendingAnnotationNavigation effect). */
+    val matchIds: IntArray = IntArray(0),
+    val currentIdx: Int = 0,
+    val invalidPattern: Boolean = false,
+    val timedOut: Boolean = false,
+    /** Bumped on every openSearch() call (including while already open) so ui/SearchBar.kt's
+     *  LaunchedEffect can refocus + select-all on a repeat Ctrl/Cmd+F, not just the first open. */
+    val focusNonce: Int = 0,
+) {
+    val matchCount: Int get() = matchIds.size
+
+    // IntArray's own equals()/hashCode() are reference-based (identity), not content-based — the
+    // default data-class-generated equals() here would then treat two states with the exact same
+    // matches as unequal whenever recomputation produced a new array instance, which would defeat
+    // Compose's recomposition-skipping and any test/AppState logic that compares LogSearchState by
+    // value (see ItemsSummary in ui/LogViewer.kt, a plain, not data, class for the same reason).
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is LogSearchState) return false
+        return active == other.active &&
+            query == other.query &&
+            caseSensitive == other.caseSensitive &&
+            currentIdx == other.currentIdx &&
+            invalidPattern == other.invalidPattern &&
+            timedOut == other.timedOut &&
+            focusNonce == other.focusNonce &&
+            matchIds.contentEquals(other.matchIds)
+    }
+
+    override fun hashCode(): Int {
+        var result = active.hashCode()
+        result = 31 * result + query.hashCode()
+        result = 31 * result + caseSensitive.hashCode()
+        result = 31 * result + currentIdx
+        result = 31 * result + invalidPattern.hashCode()
+        result = 31 * result + timedOut.hashCode()
+        result = 31 * result + focusNonce
+        result = 31 * result + matchIds.contentHashCode()
+        return result
+    }
+
+    companion object {
+        val EMPTY = LogSearchState()
+    }
+}
+
 // ── Tab ────────────────────────────────────────────────────────────
 data class LogTab(
     val id: String,
@@ -228,6 +286,9 @@ data class LogTab(
     // scanning every entry of) the whole archive synchronously during AppState init. Not used for
     // anything else — display/filtering never reads it.
     val archiveCandidate: ZipLogCandidate? = null,
+    // Session-only, like `tailing` above — never persisted (see AutosaveCodec.persistedSnapshot,
+    // which deliberately omits this field) and always resets to LogSearchState.EMPTY on relaunch.
+    val search: LogSearchState = LogSearchState.EMPTY,
 )
 
 /**
@@ -262,8 +323,12 @@ data class SavedFilter(
 // ── Settings ───────────────────────────────────────────────────────
 enum class AnnotationLogBlockStyle { INDENTED, JIRA_JAVA }
 
-// Which filter input Ctrl/Cmd+F focuses (see FilterPanel's tab-scoped filter-search request).
-enum class CtrlFTarget { TAGS, MESSAGE_RULE, KEYWORD_REGEX }
+// What Ctrl/Cmd+F does. FIND_BAR (the default) opens the non-destructive in-view Find bar
+// (AppState.openSearch, ui/SearchBar.kt); TAGS/KEYWORD_REGEX instead focus the corresponding
+// filter input via FilterPanel's tab-scoped filter-search request (see FilterSearchRequest) —
+// MESSAGE_RULE is a third such input, still routable via that request/AI tooling, just no longer
+// offered in the Settings selector (see SettingsDialog's "Ctrl+F opens" control).
+enum class CtrlFTarget { TAGS, MESSAGE_RULE, KEYWORD_REGEX, FIND_BAR }
 
 /** The execution protocol behind an AI profile. Secrets never belong in [AppSettings]. */
 enum class AiProviderKind(val label: String, val usesHttpEndpoint: Boolean, val usesApiKey: Boolean) {
@@ -416,9 +481,14 @@ data class AppSettings(
     // default (see LogRow's groupColor drawBehind) — the header alone gets the full red
     // background+text tint. Enabling this extends that full tint to every row in the group.
     val highlightEntireCrashGroup: Boolean = false,
-    val ctrlFTarget: CtrlFTarget = CtrlFTarget.KEYWORD_REGEX,
+    // FIND_BAR (the default) routes Ctrl/Cmd+F to the non-destructive in-view Find bar
+    // (ui/SearchBar.kt, AppState.openSearch); TAGS/KEYWORD_REGEX instead focus the corresponding
+    // filter input (see CtrlFTarget's own doc comment) and, unlike Find bar, respect
+    // openUnfilteredOnCtrlF below.
+    val ctrlFTarget: CtrlFTarget = CtrlFTarget.FIND_BAR,
     val openNewFilesWithUnfiltered: Boolean = false,
-    /** When enabled, Ctrl/Cmd+F first reveals the active tab's Original panel. */
+    /** When enabled, Ctrl/Cmd+F first reveals the active tab's Original panel — only when
+     *  [ctrlFTarget] is TAGS or KEYWORD_REGEX; FIND_BAR ignores this entirely. */
     val openUnfilteredOnCtrlF: Boolean = false,
     // Source roots scanned by SourceIndexer to resolve a log line back to the Log/Timber call site
     // that could have emitted it (source/SourceIndexer.kt, AppState.reindexSources). Trailing with
@@ -568,3 +638,16 @@ sealed class LogItem {
         val count: Int,
     ) : LogItem()
 }
+
+// The single LogEntry every LogItem variant renders — used so in-view search (utils/LogSearch.kt)
+// and its row/header highlighting (ui/LogViewer.kt) can treat a plain row and a group header
+// uniformly, matching visibleLogLineText(entry) either way. Declared as an extension (not a member
+// of the sealed class itself) so it stays a pure data-layer accessor; inside each `is` branch below
+// `entry` resolves to that concrete subtype's own member field, not a recursive call.
+val LogItem.entry: LogEntry
+    get() = when (this) {
+        is LogItem.Row -> entry
+        is LogItem.SeqHeader -> entry
+        is LogItem.ManualHeader -> entry
+        is LogItem.StackTraceHeader -> entry
+    }

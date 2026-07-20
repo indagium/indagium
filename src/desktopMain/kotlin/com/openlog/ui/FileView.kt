@@ -206,11 +206,19 @@ internal fun FileView(
             navScrollMargin = state.settings.navScrollMargin,
             focusRequester = logViewerFr,
             onPanelFocusChanged = { focused ->
-                if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == logViewerFr }
+                if (focused) {
+                    focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == logViewerFr }
+                    state.searchFocusTabId = tab.id
+                }
             },
             keyboardFocusVisible = state.keyboardFocusVisible,
             onVisibleItems = { summary -> state.noteVisibleItems(tab.id, summary) },
             onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
+            onSearchQueryChange = { query -> state.setSearchQuery(tab.id, query) },
+            onSearchToggleCase = { state.toggleSearchCase(tab.id) },
+            onSearchNext = { state.searchNext(tab.id) },
+            onSearchPrev = { state.searchPrev(tab.id) },
+            onSearchClose = { state.closeSearch(tab.id) },
         )
         if (state.annotationVisible || state.aiPanelVisible) {
             HDivider { delta ->

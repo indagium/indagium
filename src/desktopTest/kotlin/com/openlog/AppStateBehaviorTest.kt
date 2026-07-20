@@ -53,6 +53,7 @@ import com.openlog.ui.sequenceOrderDuringDrag
 import com.openlog.ui.sequenceRenderY
 import com.openlog.ui.sequenceRowBaseBackground
 import com.openlog.ui.settingsFromJson
+import com.openlog.ui.settingsJson
 import com.openlog.ui.shouldSyncSequenceVisualOrder
 import com.openlog.ui.summarizeItems
 import com.openlog.ui.tabDisplayLabel
@@ -3928,6 +3929,52 @@ class AppStateBehaviorTest {
         assertTrue(restored.settings.toolbarIconOnlyButtons)
     }
 
+    // ── ctrlFTarget/inViewSearch consolidation (single "Ctrl+F opens" selector) ─────────────────
+    // `inViewSearch` was a short-lived separate boolean, paired with ctrlFTarget, that got folded
+    // into a single new CtrlFTarget.FIND_BAR enum value on ctrlFTarget itself (settingsFromJson's
+    // migration comment). These pin every combination of the two keys a real token can hold.
+
+    @Test
+    fun legacyInViewSearchTrueForcesFindBarRegardlessOfStoredCtrlFTarget() {
+        // A token from the intermediate (inViewSearch-boolean) format: Find bar was on, but
+        // ctrlFTarget still held whatever Tags/Regex choice was last made before Find bar existed.
+        val json = """{"inViewSearch":true,"ctrlFTarget":"KEYWORD_REGEX"}"""
+        assertEquals(CtrlFTarget.FIND_BAR, settingsFromJson(json)!!.ctrlFTarget)
+    }
+
+    @Test
+    fun legacyInViewSearchFalseKeepsWhateverCtrlFTargetWasSaved() {
+        val json = """{"inViewSearch":false,"ctrlFTarget":"TAGS"}"""
+        assertEquals(CtrlFTarget.TAGS, settingsFromJson(json)!!.ctrlFTarget)
+
+        val regexJson = """{"inViewSearch":false,"ctrlFTarget":"KEYWORD_REGEX"}"""
+        assertEquals(CtrlFTarget.KEYWORD_REGEX, settingsFromJson(regexJson)!!.ctrlFTarget)
+    }
+
+    @Test
+    fun missingBothKeysDefaultsToFindBar() {
+        // Truly ancient token (predates ctrlFTarget itself) or a brand-new blank settings blob.
+        assertEquals(CtrlFTarget.FIND_BAR, settingsFromJson("{}")!!.ctrlFTarget)
+    }
+
+    @Test
+    fun currentFormatTokenWithNoInViewSearchKeyRoundTripsCtrlFTargetAsIs() {
+        // The shape settingsJson() now actually writes: ctrlFTarget present, inViewSearch never
+        // emitted at all. Must read back exactly what was saved, not get force-migrated to
+        // FIND_BAR just because inViewSearch happens to be absent (that's the normal case now).
+        assertEquals(CtrlFTarget.TAGS, settingsFromJson("""{"ctrlFTarget":"TAGS"}""")!!.ctrlFTarget)
+        assertEquals(CtrlFTarget.KEYWORD_REGEX, settingsFromJson("""{"ctrlFTarget":"KEYWORD_REGEX"}""")!!.ctrlFTarget)
+        assertEquals(CtrlFTarget.FIND_BAR, settingsFromJson("""{"ctrlFTarget":"FIND_BAR"}""")!!.ctrlFTarget)
+    }
+
+    @Test
+    fun settingsJsonNeverWritesTheRetiredInViewSearchKey() {
+        val state = AppState()
+        state.updateSettings { it.copy(ctrlFTarget = CtrlFTarget.FIND_BAR) }
+        val json = state.settings.settingsJson()
+        assertFalse(json.contains("inViewSearch"), "settingsJson must no longer emit the retired inViewSearch key: $json")
+    }
+
     // Once editorChoice is written explicitly (current format), it round-trips as-is rather than
     // being recomputed from editorCommand — proves the migration default only kicks in when the key
     // is absent, not whenever editorCommand happens to be non-blank.
@@ -5638,6 +5685,306 @@ class AppStateBehaviorTest {
             releaseFailure.countDown()
             state.stopControlServerForShutdown()
         }
+    }
+
+    // ── In-view search ("Find" bar) ───────────────────────────────────────────
+    // openSearch/setSearchQuery/searchNext/searchPrev debounce their match recompute onto
+    // ioScope (AppState.scheduleSearchRecompute), so every assertion below that depends on the
+    // computed LogSearchState.matchIds waits for it via the same waitUntil helper the MCP/control-
+    // server tests above use for their own background work.
+
+    @Test
+    fun openSearchThenSetQueryComputesMatchesAsynchronously() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "log", "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "connection established"),
+                    LogEntry(2, "10:00:00.100", LogLevel.I, "App", "unrelated line"),
+                    LogEntry(3, "10:00:00.200", LogLevel.I, "App", "connection lost"),
+                ),
+            ),
+        )
+
+        state.openSearch("log")
+        assertTrue(state.tab("log")!!.search.active)
+
+        state.setSearchQuery("log", "connection")
+        waitUntil { state.tab("log")!!.search.matchIds.isNotEmpty() }
+
+        val search = state.tab("log")!!.search
+        assertEquals(listOf(1, 3), search.matchIds.toList())
+        assertEquals(0, search.currentIdx)
+        assertFalse(search.invalidPattern)
+    }
+
+    @Test
+    fun searchNextAndPrevWrapAroundAndReportTheRightMatch() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "log", "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle one"),
+                    LogEntry(2, "10:00:00.100", LogLevel.I, "App", "no match"),
+                    LogEntry(3, "10:00:00.200", LogLevel.I, "App", "needle two"),
+                    LogEntry(4, "10:00:00.300", LogLevel.I, "App", "needle three"),
+                ),
+            ),
+        )
+        state.openSearch("log")
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.size == 3 }
+        assertEquals(0, state.tab("log")!!.search.currentIdx)
+
+        state.searchNext("log")
+        assertEquals(1, state.tab("log")!!.search.currentIdx)
+        assertEquals(listOf(3), state.pendingAnnotationNavigation?.logIds)
+
+        state.searchNext("log")
+        assertEquals(2, state.tab("log")!!.search.currentIdx)
+        assertEquals(listOf(4), state.pendingAnnotationNavigation?.logIds)
+
+        // Next from the last match wraps back to the first.
+        state.searchNext("log")
+        assertEquals(0, state.tab("log")!!.search.currentIdx)
+        assertEquals(listOf(1), state.pendingAnnotationNavigation?.logIds)
+
+        // Prev from the first match wraps back to the last.
+        state.searchPrev("log")
+        assertEquals(2, state.tab("log")!!.search.currentIdx)
+        assertEquals(listOf(4), state.pendingAnnotationNavigation?.logIds)
+    }
+
+    @Test
+    fun stickyCurrentMatchByIdSurvivesAFilterChangeThatRemovesAnEarlierMatch() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "log", "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.W, "App", "needle zero"),
+                    LogEntry(2, "10:00:00.100", LogLevel.I, "App", "needle one"),
+                    LogEntry(3, "10:00:00.200", LogLevel.I, "App", "needle two"),
+                ),
+            ),
+        )
+        state.openSearch("log")
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.size == 3 }
+
+        // Park the current match on entry 2 (the middle one).
+        state.searchNext("log")
+        assertEquals(1, state.tab("log")!!.search.currentIdx)
+        assertEquals(2, state.tab("log")!!.search.matchIds[1])
+
+        // Toggling W off drops entry 1 — an *earlier* match — from the filtered set. A naive
+        // index-clamp (rather than sticking to entry 2 by id) would leave currentIdx=1 now
+        // pointing at entry 3 instead.
+        state.toggleLevel("log", LogLevel.W)
+        waitUntil { state.tab("log")!!.search.matchIds.size == 2 }
+
+        val after = state.tab("log")!!.search
+        assertEquals(
+            2, after.matchIds[after.currentIdx],
+            "sticky current match should still be entry 2, not whatever now sits at the old index",
+        )
+    }
+
+    @Test
+    fun searchMatchInsideACollapsedGroupIsFoundAndJumpingToItRequestsScrollAnchor() {
+        val state = AppState()
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "start marker"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "App", "the needle is hidden here"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "App", "end marker"),
+        )
+        val seqs = listOf(
+            SequenceDef("seq", "start marker", priority = 1, color = Color.Red, tag = "App", endMatchText = "end marker"),
+        )
+        state.tabs = listOf(mkTab("log", "test.log", logs).copy(filter = Filter(sequences = seqs)))
+        // expanded is empty by default, so the sequence group above starts collapsed.
+        assertTrue(state.tab("log")!!.expanded.isEmpty())
+
+        state.openSearch("log")
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.isNotEmpty() }
+
+        // Found even though its owning group is currently collapsed (search matches against a
+        // fully-expanded copy of the tab — see AppState.scheduleSearchRecompute).
+        assertEquals(listOf(2), state.tab("log")!!.search.matchIds.toList())
+        assertTrue(state.tab("log")!!.expanded.isEmpty(), "the real tab.expanded must stay untouched by the search computation itself")
+
+        // Jumping to it requests exactly the same expand+select+center navigation as any other
+        // collapsed-group jump — requestScrollAnchor's pendingAnnotationNavigation, consumed by
+        // LogViewer's own LaunchedEffect which auto-expands whichever group owns the target id.
+        state.searchNext("log")
+        assertEquals(listOf(2), state.pendingAnnotationNavigation?.logIds)
+    }
+
+    @Test
+    fun closeSearchDeactivatesButKeepsQueryAndMatchesForReopen() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle"))),
+        )
+        state.openSearch("log")
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.isNotEmpty() }
+
+        state.closeSearch("log")
+
+        val closed = state.tab("log")!!.search
+        assertFalse(closed.active)
+        assertEquals("needle", closed.query)
+        assertEquals(listOf(1), closed.matchIds.toList())
+    }
+
+    @Test
+    fun invalidSearchPatternSetsInvalidFlagThroughTheFullPipeline() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "anything"))),
+        )
+        state.openSearch("log")
+        state.setSearchQuery("log", "[unterminated")
+        waitUntil { state.tab("log")!!.search.invalidPattern }
+
+        assertTrue(state.tab("log")!!.search.matchIds.isEmpty())
+    }
+
+    // ── Compare-mode Find bar ──────────────────────────────────────────────────
+    // Each tab keeps its own independent LogSearchState (LogTab.search), so both compare-mode
+    // panels can search simultaneously via the same per-tabId AppState API CompareView.kt now wires
+    // (onSearchQueryChange/onSearchNext/... for both leftTab.id and rightTab.id — see CompareView.kt).
+
+    @Test
+    fun compareModeBothTabsCanSearchIndependentlyNextAndPrev() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "left", "left.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle in left one"),
+                    LogEntry(2, "10:00:00.100", LogLevel.I, "App", "needle in left two"),
+                ),
+            ),
+            mkTab(
+                "right", "right.log",
+                listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "single needle in right")),
+            ),
+        )
+        state.activeTabId = "left"
+        state.compareTabId = "right"
+        state.updateCompareMode(true)
+        assertTrue(state.compareMode)
+
+        state.openSearch("left")
+        state.setSearchQuery("left", "needle")
+        state.openSearch("right")
+        state.setSearchQuery("right", "needle")
+        waitUntil { state.tab("left")!!.search.matchIds.size == 2 }
+        waitUntil { state.tab("right")!!.search.matchIds.size == 1 }
+
+        // Moving the left tab's cursor must never affect the right tab's, and vice versa.
+        state.searchNext("left")
+        assertEquals(1, state.tab("left")!!.search.currentIdx)
+        assertEquals(0, state.tab("right")!!.search.currentIdx)
+        assertEquals(listOf(2), state.pendingAnnotationNavigation?.logIds)
+
+        state.searchNext("right")
+        assertEquals(1, state.tab("left")!!.search.currentIdx, "right's navigation must not perturb left's cursor")
+        assertEquals(0, state.tab("right")!!.search.currentIdx, "right's only match wraps back to itself")
+        assertEquals(listOf(1), state.pendingAnnotationNavigation?.logIds)
+    }
+
+    @Test
+    fun compareModeRightTabSearchMatchesTheEffectiveMirroredFilterNotItsOwnStoredFilter() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "left", "left.log",
+                listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle")),
+            ).copy(filter = Filter(mode = FilterMode.KEYWORD, kwText = "needle")),
+            // Tagged "App" — excluded by the right tab's own stored filter (tag "Other" only,
+            // set below), but the panel actually displays the left tab's mirrored filter
+            // (kwText="needle", no tag restriction), so entry 1 is the one that must be found —
+            // entry 2 doesn't contain "needle" at all, so it would never match either way.
+            mkTab(
+                "right", "right.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle over here too"),
+                    LogEntry(2, "10:00:00.100", LogLevel.I, "Other", "no match here"),
+                ),
+            ).copy(filter = Filter(mode = FilterMode.TAGS, activeTags = setOf("Other"))),
+        )
+        state.activeTabId = "left"
+        state.compareTabId = "right"
+        state.updateCompareMode(true)
+        state.updateCompareFilterRight(true)
+
+        state.openSearch("right")
+        state.setSearchQuery("right", "needle")
+        waitUntil { state.tab("right")!!.search.matchIds.isNotEmpty() || state.tab("right")!!.search.invalidPattern }
+
+        assertFalse(state.tab("right")!!.search.invalidPattern)
+        assertEquals(listOf(1), state.tab("right")!!.search.matchIds.toList())
+    }
+
+    @Test
+    fun compareModeRightTabSearchSeesEverythingWhenCompareFilterRightIsOff() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("left", "left.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "unrelated")))
+                .copy(filter = Filter(mode = FilterMode.KEYWORD, kwText = "unrelated")),
+            mkTab(
+                "right", "right.log",
+                listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "AnyTag", "needle regardless of tag")),
+            ).copy(filter = Filter(mode = FilterMode.TAGS, activeTags = setOf("SomethingElse"))),
+        )
+        state.activeTabId = "left"
+        state.compareTabId = "right"
+        state.updateCompareMode(true)
+        state.updateCompareFilterRight(false)
+
+        state.openSearch("right")
+        state.setSearchQuery("right", "needle")
+        waitUntil { state.tab("right")!!.search.matchIds.isNotEmpty() || state.tab("right")!!.search.invalidPattern }
+
+        // compareFilterRight=false means the right panel shows Filter() (everything, unfiltered) —
+        // neither the right tab's own restrictive tag filter nor the left tab's filter should apply.
+        assertFalse(state.tab("right")!!.search.invalidPattern)
+        assertEquals(listOf(1), state.tab("right")!!.search.matchIds.toList())
+    }
+
+    @Test
+    fun notifyEffectiveFilterChangedRecomputesAnActiveRightTabSearchWithoutTouchingItsOwnStoredFilter() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("left", "left.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "irrelevant")))
+                .copy(filter = Filter(mode = FilterMode.KEYWORD, kwText = "needle")),
+            mkTab("right", "right.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle here")))
+                .copy(filter = Filter()),
+        )
+        state.activeTabId = "left"
+        state.compareTabId = "right"
+        state.updateCompareMode(true)
+        state.updateCompareFilterRight(true)
+        state.openSearch("right")
+        state.setSearchQuery("right", "needle")
+        waitUntil { state.tab("right")!!.search.matchIds.size == 1 }
+
+        // CompareView.kt's own LaunchedEffect calls this when compareFilterRight toggles off — the
+        // right tab's own stored `.filter` never changes, so upTab's staleness hook alone can't
+        // trigger this; simulate that toggle-driven call directly here.
+        state.updateCompareFilterRight(false)
+        state.notifyEffectiveFilterChanged("right")
+        waitUntil { state.tab("right")!!.search.matchIds.size == 1 }
+
+        // The right tab's own stored filter is untouched by any of this (only the search
+        // computation used an override, per AppState.effectiveSearchFilter).
+        assertEquals(Filter(), state.tab("right")!!.filter)
     }
 
     private fun controlServerRequestStatus(port: Int, token: String): Int {

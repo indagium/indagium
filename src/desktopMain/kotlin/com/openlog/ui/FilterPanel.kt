@@ -517,6 +517,11 @@ internal fun FilterPanel(
                     runCatching { msgRuleFr.requestFocus() }
                 }
             }
+            // Never actually routed here — App.kt's onFocusFilterSearch branches FIND_BAR off to
+            // AppState.openSearch before a FilterSearchRequest is ever built (see
+            // filterSearchTargetForTab/FilterSearchRequest.target). Only present so this `when`
+            // stays exhaustive over the full CtrlFTarget enum.
+            CtrlFTarget.FIND_BAR -> Unit
         }
         onFilterSearchRequestConsumed(request)
     }
@@ -534,6 +539,8 @@ internal fun FilterPanel(
                 runCatching { msgRuleFr.requestFocus() }
                 pendingSearchFocusTarget = null
             }
+            // Never actually assigned to pendingSearchFocusTarget — see the FIND_BAR branch above.
+            CtrlFTarget.FIND_BAR -> Unit
             null -> Unit
         }
     }

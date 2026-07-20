@@ -547,6 +547,9 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("maskWordTarget", maskWordTarget)
     put("maskWordReplacement", maskWordReplacement)
     put("highlightEntireCrashGroup", highlightEntireCrashGroup)
+    // Single consolidated Ctrl+F setting (FIND_BAR/TAGS/KEYWORD_REGEX/MESSAGE_RULE) — the old,
+    // separate `inViewSearch` boolean this used to be paired with is no longer written; see
+    // settingsFromJson's migration comment for how an old token carrying it still decodes.
     put("ctrlFTarget", ctrlFTarget.name)
     put("openNewFilesWithUnfiltered", openNewFilesWithUnfiltered)
     put("openUnfilteredOnCtrlF", openUnfilteredOnCtrlF)
@@ -642,6 +645,11 @@ private fun JsonObject.stringOrNull(key: String): String? = this[key]?.jsonPrimi
 
 private fun JsonObject.boolOrDefault(key: String, default: Boolean): Boolean =
     this[key]?.jsonPrimitive?.booleanOrNull ?: default
+
+// Distinct from boolOrDefault above: null here specifically means "key absent (or unparseable)",
+// as opposed to "present and false" — needed by ctrlFTarget's migration below, where those two
+// cases must be told apart rather than collapsed into one default.
+private fun JsonObject.boolOrNull(key: String): Boolean? = this[key]?.jsonPrimitive?.booleanOrNull
 
 private fun JsonObject.intOrDefault(key: String, default: Int): Int = this[key]?.jsonPrimitive?.intOrNull ?: default
 
@@ -748,8 +756,21 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         maskWordTarget = o.stringOrNull("maskWordTarget")?.takeIf { it.isNotBlank() } ?: "java",
         maskWordReplacement = o.stringOrNull("maskWordReplacement")?.takeIf { it.isNotBlank() } ?: "j*ava",
         highlightEntireCrashGroup = o.boolOrDefault("highlightEntireCrashGroup", false),
-        ctrlFTarget = o.stringOrNull("ctrlFTarget")?.let { runCatching { CtrlFTarget.valueOf(it) }.getOrNull() }
-            ?: CtrlFTarget.KEYWORD_REGEX,
+        // Migration: `inViewSearch` was a short-lived separate boolean (Find bar on/off, paired
+        // with this same ctrlFTarget for its TAGS/KEYWORD_REGEX choice) that got folded into a
+        // single enum value, FIND_BAR, on this same field — it's no longer written (see
+        // settingsJson above) but an old token can still carry it. Only its *presence* actually
+        // matters: `true` (or, for truly ancient tokens that predate it entirely, simply absent
+        // alongside an absent/unparseable ctrlFTarget) means Find bar, so both fall back to the
+        // new default, FIND_BAR; an explicit `false` means the user had turned Find bar off, so
+        // whatever TAGS/KEYWORD_REGEX ctrlFTarget already held is exactly what should carry
+        // forward unchanged. A present-and-current-format token (no inViewSearch key, ctrlFTarget
+        // already one of TAGS/KEYWORD_REGEX/FIND_BAR from the new single selector) is read as-is
+        // either way, since boolOrNull is null and storedCtrlFTarget wins in both branches.
+        ctrlFTarget = run {
+            val storedCtrlFTarget = o.stringOrNull("ctrlFTarget")?.let { runCatching { CtrlFTarget.valueOf(it) }.getOrNull() }
+            if (o.boolOrNull("inViewSearch") == true) CtrlFTarget.FIND_BAR else storedCtrlFTarget ?: CtrlFTarget.FIND_BAR
+        },
         openNewFilesWithUnfiltered = o.boolOrDefault("openNewFilesWithUnfiltered", false),
         openUnfilteredOnCtrlF = o.boolOrDefault("openUnfilteredOnCtrlF", false),
         sourceFolders = o.stringArray("sourceFolders"),

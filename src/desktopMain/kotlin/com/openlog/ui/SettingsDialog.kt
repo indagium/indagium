@@ -684,16 +684,18 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             )
         }
         CompactSettingWithTooltip(
-            label = "Ctrl+F focuses",
-            tooltip = "Which filter input Ctrl/Cmd+F jumps to.",
+            label = "Ctrl+F opens",
+            tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
+                "any rows. Tags/Regex instead focuses the corresponding filter field and hides " +
+                "non-matching rows — see \"Ctrl+F opens Original\" below, which only applies to those two.",
         ) {
             // Rules (CtrlFTarget.MESSAGE_RULE) dropped from the selector, not the enum —
             // a settings token saved before this change can still hold it, so indexOf
             // falling through to -1 (nothing highlighted, existing behavior unaffected)
             // is the correct degrade rather than a crash.
-            val targets = listOf(CtrlFTarget.TAGS, CtrlFTarget.KEYWORD_REGEX)
+            val targets = listOf(CtrlFTarget.FIND_BAR, CtrlFTarget.TAGS, CtrlFTarget.KEYWORD_REGEX)
             SegmentedControl(
-                options = listOf("Tags", "Regex"),
+                options = listOf("Find bar", "Tags", "Regex"),
                 selectedIndices = setOf(targets.indexOf(state.settings.ctrlFTarget)),
                 onToggle = { idx -> state.updateSettings { it.copy(ctrlFTarget = targets[idx]) } },
             )
@@ -701,7 +703,8 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
     }
     CompactSettingWithTooltip(
         label = "Ctrl+F opens Original",
-        tooltip = "When enabled, Ctrl/Cmd+F reveals the active file's unfiltered Original panel before focusing the configured search field.",
+        tooltip = "When Ctrl+F opens Tags or Regex above (never for Find bar), this reveals the active " +
+            "file's unfiltered Original panel first, before focusing the configured search field.",
     ) {
         SegmentedControl(
             options = listOf("On", "Off"),

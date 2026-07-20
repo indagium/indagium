@@ -161,16 +161,49 @@ fun App(
                         onFocusPanel = { panel -> state.keyboardFocusVisible = true; pendingPanelFocus = panel },
                         onFocusFilterSearch = {
                             state.keyboardFocusVisible = true
-                            if (state.settings.openUnfilteredOnCtrlF) state.ensureActiveTabUnfiltered()
-                            state.updateFilterVisible(true)
-                            pendingPanelFocus = KeyboardPanel.FILTERS
-                            state.activeTab()?.id?.let { tabId ->
-                                nextFilterSearchRequestNonce += 1
-                                pendingFilterSearchRequest = FilterSearchRequest(
-                                    nonce = nextFilterSearchRequestNonce,
-                                    tabId = tabId,
-                                    target = state.settings.ctrlFTarget,
-                                )
+                            // Settings.ctrlFTarget (FIND_BAR by default) routes Ctrl/Cmd+F to the
+                            // non-destructive in-view Find bar instead of focusing a filter input —
+                            // see AppState.openSearch and ui/SearchBar.kt. TAGS/KEYWORD_REGEX
+                            // (and the still-routable-but-not-selectable MESSAGE_RULE) fall through
+                            // to exactly the pre-existing filter-focus path below, openUnfilteredOnCtrlF
+                            // included — that setting only ever applies to this branch, never FIND_BAR.
+                            if (state.settings.ctrlFTarget == CtrlFTarget.FIND_BAR) {
+                                // No pendingPanelFocus here (unlike the filter-focus branch below):
+                                // the Find bar isn't one of FileView's F6-roving panel targets, and
+                                // ui/SearchBar.kt's own LaunchedEffect(focusNonce) already requests
+                                // keyboard focus on the find field itself once AppState.openSearch
+                                // flips tab.search.active — routing through KeyboardPanel here too
+                                // would just race that effect for no benefit.
+                                //
+                                // In compare mode, activeTabId always names the left panel only —
+                                // searchFocusTabId (last panel to actually hold keyboard focus,
+                                // updated by both CompareView panels) is what lets this target
+                                // whichever of the two the user was actually in. Guarded to only
+                                // the two tabs compare mode currently shows so a stale value from a
+                                // previous compare session (or one whose tab has since closed) can
+                                // never silently open Find on some other, no-longer-visible tab;
+                                // single-tab mode always uses activeTab() regardless, since a plain
+                                // tab switch there doesn't necessarily refocus the log panel.
+                                val targetTabId = if (state.compareMode) {
+                                    state.searchFocusTabId
+                                        ?.takeIf { it == state.activeTabId || it == state.compareTabId }
+                                        ?: state.activeTab()?.id
+                                } else {
+                                    state.activeTab()?.id
+                                }
+                                targetTabId?.let { tabId -> state.openSearch(tabId) }
+                            } else {
+                                if (state.settings.openUnfilteredOnCtrlF) state.ensureActiveTabUnfiltered()
+                                state.updateFilterVisible(true)
+                                pendingPanelFocus = KeyboardPanel.FILTERS
+                                state.activeTab()?.id?.let { tabId ->
+                                    nextFilterSearchRequestNonce += 1
+                                    pendingFilterSearchRequest = FilterSearchRequest(
+                                        nonce = nextFilterSearchRequestNonce,
+                                        tabId = tabId,
+                                        target = state.settings.ctrlFTarget,
+                                    )
+                                }
                             }
                         },
                     )

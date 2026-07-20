@@ -190,6 +190,15 @@ val UI   = FontFamily.Default
 val DANGER_RED = Color(0xFFf85149)   // error / danger / exclude
 val PKG_CYAN   = Color(0xFF06b6d4)   // package-prefix indicator
 
+// In-view search highlight (ui/SearchBar.kt, buildFullLineAnnotation in LogViewer.kt) — theme-
+// agnostic like DANGER_RED/PKG_CYAN above rather than per-ThemeColors-preset fields, so adding this
+// didn't require touching all twenty theme() palette calls. Every match gets the muted background
+// so a row reads as "found" without fighting the keyword/highlighter spans it's layered on top of;
+// the current match (wherever Enter/Next/Prev last landed) gets the stronger, more saturated one so
+// keyboard navigation stays easy to track against a page of otherwise-identical matches.
+val SEARCH_MATCH_BG = Color(0xFF38bdf8).copy(alpha = 0.30f)
+val SEARCH_CURRENT_MATCH_BG = Color(0xFFf97316).copy(alpha = 0.55f)
+
 // Corner radius tokens
 val CORNER_SM = RoundedCornerShape(3.dp)   // badges, text fields, small pills
 val CORNER_MD = RoundedCornerShape(4.dp)   // buttons (PillBtn, ToolbarBtn), note rows
