@@ -1,6 +1,7 @@
 @file:Suppress("DEPRECATION") // painterResource(String) — Compose resources Res class not generated for single-JVM-target projects
 @file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.awt.ComposeWindow
@@ -160,11 +161,7 @@ fun main(args: Array<String>) {
                 exitApplication()
             },
             title = "openLog",
-            // On macOS, a JFrame's per-window icon becomes the miniaturized window's Dock
-            // image. Leaving it unset lets AppKit render the normal live window miniature;
-            // the packaged bundle's openLog.icns remains the application icon. Windows and
-            // Linux still need this image for their taskbar/window representation.
-            icon = if (isMacOs) null else painterResource("icons/openlog.png"),
+            icon = platformWindowIcon(),
             state = windowState,
         ) {
             // No-ops on a degraded handle (boundPort == null / macOS's null) — safe to call
@@ -209,6 +206,13 @@ fun main(args: Array<String>) {
 private fun maybeAutoCheckForUpdates(appState: AppState, isPackaged: Boolean) {
     if (isPackaged && appState.settings.autoCheckUpdates) appState.checkForUpdates(manual = false)
 }
+
+// On macOS, a JFrame's per-window icon becomes the miniaturized window's Dock image. Leaving it
+// unset lets AppKit render the normal live window miniature; the packaged bundle's openLog.icns
+// remains the application icon. Windows and Linux still need this image for their taskbar/window
+// representation. Keeping the platform branch out of main() also keeps its lifecycle code simple.
+@Composable
+private fun platformWindowIcon() = if (isMacOs) null else painterResource("icons/openlog.png")
 
 // GNOME/Mutter routinely ignores a bare toFront() under focus-stealing prevention; the brief
 // isAlwaysOnTop toggle forces the compositor to actually raise the window. Harmless no-op-ish on
