@@ -724,6 +724,17 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             onToggle = { idx -> state.updateSettings { it.copy(showRowNumbers = idx == 0) } },
         )
     }
+    CompactSettingWithTooltip(
+        label = "Minimap",
+        tooltip = "Replaces the scrollbar with a Sublime-style text minimap — a miniature of each line " +
+            "colored by level. Click or drag on it to jump to that part of the file.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.showMinimap) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(showMinimap = idx == 0) } },
+        )
+    }
 }
 
 @Composable

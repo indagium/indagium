@@ -258,7 +258,18 @@ fun LevelBadge(level: LogLevel) {
 private const val COL_HEADER_FONT_SP = 9f
 
 @Composable
-fun ColHeader(hasPidTid: Boolean = false, showRowNumbers: Boolean = false, rowNumDigits: Int = 1) {
+fun ColHeader(
+    hasPidTid: Boolean = false,
+    showRowNumbers: Boolean = false,
+    rowNumDigits: Int = 1,
+    showTimeDelta: Boolean = false,
+    // Sized to the widest Δt string actually rendered for the row gutter below (see
+    // LogViewer.kt's rememberTimeDeltaChars) — the caller passes the SAME int this and the row
+    // gutter both got it from, exactly like rowNumDigits does for the "#" cell, so this cell's own
+    // (COL_HEADER_FONT_SP-sized) width formula tracks the row's (fontSize-sized) one instead of
+    // drifting from it.
+    timeDeltaChars: Int = 1,
+) {
     val tc = tc()
     Row(
         Modifier.fillMaxWidth().background(tc.p2).border(BorderStroke(1.dp, tc.br))
@@ -271,6 +282,15 @@ fun ColHeader(hasPidTid: Boolean = false, showRowNumbers: Boolean = false, rowNu
             Box(Modifier.width(numColWidth)) {
                 AppText(
                     "#", color = tc.td, fontSize = COL_HEADER_FONT_SP.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                )
+            }
+        }
+        if (showTimeDelta) {
+            val deltaColWidth = timeDeltaColumnWidth(COL_HEADER_FONT_SP, timeDeltaChars)
+            Box(Modifier.width(deltaColWidth)) {
+                AppText(
+                    "Δt", color = tc.td, fontSize = COL_HEADER_FONT_SP.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.align(Alignment.CenterEnd),
                 )
             }

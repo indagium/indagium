@@ -194,6 +194,7 @@ internal fun FileView(
             onExpandAll = { state.expandAll(tab.id) },
             onCollapseAll = { state.collapseAll(tab.id) },
             onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
+            onToggleTimeDelta = { state.toggleTimeDelta(tab.id) },
             onExportTxt = { state.exportFilteredTxt(tab.id) },
             onExportCsv = { state.exportFilteredCsv(tab.id) },
             scrollStateStore = state.logViewerScrollStateStore,

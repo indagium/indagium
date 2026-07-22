@@ -236,3 +236,13 @@ private const val MONO_DIGIT_EM = 0.65f
 
 fun rowNumberColumnWidth(fontSizeSp: Float, digitCount: Int): Dp =
     (digitCount.coerceAtLeast(1) * fontSizeSp * MONO_DIGIT_EM).dp
+
+// Character budget for the Δt gutter cell (utils/LogTime.kt's formatDelta), sized to the widest
+// delta string actually rendered for THIS tab/mode — not a fixed worst case ("+1h02m03s" style
+// budgets left ~3 chars of permanent blank space on the common "+0.005"-shaped case). Callers
+// derive charCount once per tab/selection-anchor via LogViewer.kt's rememberTimeDeltaChars (see its
+// doc for how that's estimated cheaply without scanning every row) and pass the SAME int to both
+// this (row) and ColHeader's own call, exactly mirroring how rowNumberColumnWidth/rowNumDigits keep
+// the row gutter and its header cell in lockstep despite using different font sizes.
+fun timeDeltaColumnWidth(fontSizeSp: Float, charCount: Int): Dp =
+    (charCount.coerceAtLeast(1) * fontSizeSp * MONO_DIGIT_EM).dp

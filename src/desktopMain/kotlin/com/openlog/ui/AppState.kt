@@ -2457,6 +2457,10 @@ class AppState(
 
     fun toggleUnfiltered(tabId: String) = upTab(tabId) { it.copy(showUnfiltered = !it.showUnfiltered) }
 
+    // Per-tab Δt-column toggle (LogViewer.kt's toolbar button, beside Export) — see LogTab.showTimeDelta's
+    // doc comment for why this lives on the tab rather than in AppSettings.
+    fun toggleTimeDelta(tabId: String) = upTab(tabId) { it.copy(showTimeDelta = !it.showTimeDelta) }
+
     /** Reveals Original for the active tab without changing any already-visible panel. */
     fun ensureActiveTabUnfiltered() {
         val tabId = activeTabId

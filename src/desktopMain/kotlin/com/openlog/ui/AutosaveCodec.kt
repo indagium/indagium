@@ -575,6 +575,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     updateDownloadDir?.let { put("updateDownloadDir", it) }
     put("debugLoggingEnabled", debugLoggingEnabled)
     debugLogFilePath?.let { put("debugLogFilePath", it) }
+    put("showMinimap", showMinimap)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -797,6 +798,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         updateDownloadDir = o.stringOrNull("updateDownloadDir"),
         debugLoggingEnabled = o.boolOrDefault("debugLoggingEnabled", false),
         debugLogFilePath = o.stringOrNull("debugLogFilePath"),
+        showMinimap = o.boolOrDefault("showMinimap", true),
     )
 }.getOrNull()
 
@@ -1083,6 +1085,7 @@ private fun String.manualBlockFromToken(): ManualCollapseBlock? = runCatching {
 // a serialize+write. Keep this in sync if tabToken()'s field list changes.
 internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
+    showTimeDelta,
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1126,6 +1129,11 @@ internal fun LogTab.tabToken(): String {
         // AppState init. Empty for non-archive tabs and for tokens written before this field
         // existed — those legacy tokens resolve current metadata on the background restore path.
         archiveCandidate?.archiveCandidateToken().orEmpty(),
+        // Trailing field (position 10): the per-tab Δt-column toggle (LogViewer.kt's toolbar,
+        // AppState.toggleTimeDelta) — appended after archiveCandidate, same discipline as every
+        // other trailing field in this token, so tab tokens written before this field existed keep
+        // parsing (tabShellFromToken reads it via getOrNull and defaults to false).
+        showTimeDelta.toString(),
     )
 }
 
@@ -1181,6 +1189,7 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             sourcePath = sourcePath,
             largeFileMode = source.largeFileMode,
             archiveCandidate = (source as? RestoredTabSource.ArchiveSource)?.persistedCandidate,
+            showTimeDelta = p.getOrNull(10)?.toBoolean() ?: false,
         ),
         source,
     )

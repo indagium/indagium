@@ -289,6 +289,15 @@ data class LogTab(
     // Session-only, like `tailing` above — never persisted (see AutosaveCodec.persistedSnapshot,
     // which deliberately omits this field) and always resets to LogSearchState.EMPTY on relaunch.
     val search: LogSearchState = LogSearchState.EMPTY,
+    // Per-row "time since X" gutter column (ui/LogViewer.kt's LogRow, utils/LogTime.kt) — a
+    // per-TAB toggle (not a global AppSettings field: it's a working-set choice for whatever log
+    // you're currently staring at, same category as showUnfiltered/expanded/manualBlocks, not a
+    // standing preference every tab should inherit). Off by default, like showRowNumbers — it
+    // consumes horizontal space and is a power-user column, not something every session needs.
+    // Persisted in the tab token (AutosaveCodec.tabToken/tabShellFromToken), appended last so old
+    // tab tokens still parse. Toggled via AppState.toggleTimeDelta from a toolbar button, not
+    // Settings — see LogViewer.kt's toolbar.
+    val showTimeDelta: Boolean = false,
 )
 
 /**
@@ -559,6 +568,10 @@ data class AppSettings(
     // Where debug log lines are appended. Null until the user first enables logging or picks a
     // location via AppState.pickDebugLogFile (see DesktopStorage.debugLogFile for the default).
     val debugLogFilePath: String? = null,
+    // Sublime-style text minimap replacing the log's vertical scrollbar (ui/Minimap.kt) — on by
+    // default, since it's strictly more useful than a plain scrollbar the moment a file has any
+    // errors/crashes. Trailing with a default so old settings tokens (without this field) still parse.
+    val showMinimap: Boolean = true,
 )
 
 enum class ThemePreset(val label: String) {

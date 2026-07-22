@@ -1949,10 +1949,14 @@ class AppStateBehaviorTest {
 
         // Simulate a pre-PERF-3b cache: strip the trailing candidate field from every tab line by
         // dropping the last '|'-separated token. Tab lines are the ones after the "tabs" marker.
+        // Two drops, not one: showTimeDelta was appended AFTER archiveCandidate (position 10), so
+        // a single strip would now remove showTimeDelta and leave archiveCandidate in place —
+        // dropping both trailing fields is what actually reproduces a token from before either one
+        // existed, which is the scenario this test means to exercise.
         val lines = cacheFile.readLines()
         val tabsIdx = lines.indexOf("tabs")
         val rewritten = lines.mapIndexed { i, line ->
-            if (i > tabsIdx && line.startsWith("tab\t")) line.substringBeforeLast('|') else line
+            if (i > tabsIdx && line.startsWith("tab\t")) line.substringBeforeLast('|').substringBeforeLast('|') else line
         }
         cacheFile.writeText(rewritten.joinToString("\n"))
 
@@ -1972,6 +1976,49 @@ class AppStateBehaviorTest {
         assertEquals(1, resolverCalls.get())
         assertEquals("hello", restored.tabs.single().logData.single().msg)
         assertEquals("FS/data/anr/main_log.txt", restored.tabs.single().archiveCandidate?.entryPath)
+    }
+
+    // Regression: a token that has archiveCandidate (PERF-3b) but predates showTimeDelta is
+    // exactly what an existing user's CURRENT autosave looks like the moment they upgrade to a
+    // build that adds the Δt tab toggle — short by exactly one trailing field, not two. The test
+    // above (missing both trailing fields) doesn't cover this case: stripping only ONE field here
+    // must still restore cleanly, with showTimeDelta defaulting to false and archiveCandidate
+    // (the field that DOES survive) restoring correctly.
+    @Test
+    fun autosaveRestoresTabFromTokenMissingOnlyTheTrailingShowTimeDeltaField() {
+        val dir = createTempDirectory("openlog-missing-showtimedelta").toFile()
+        val zip = buildZipFixture(
+            dir,
+            "bugreport.zip",
+            mapOf("FS/data/anr/main_log.txt" to "06-26 10:00:00.000  123  456 I App: hello\n"),
+        )
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.openZipFile(zip)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        state.autosaveNow()
+
+        // Strip only the LAST trailing field (showTimeDelta) — archiveCandidate, the field before
+        // it, stays intact, unlike the legacy-token test above which strips both.
+        val lines = cacheFile.readLines()
+        val tabsIdx = lines.indexOf("tabs")
+        val rewritten = lines.mapIndexed { i, line ->
+            if (i > tabsIdx && line.startsWith("tab\t")) line.substringBeforeLast('|') else line
+        }
+        cacheFile.writeText(rewritten.joinToString("\n"))
+
+        val restored = AppState(
+            autosaveFile = cacheFile,
+            restoreOnCreate = true,
+            restoredArchiveCandidateResolver = { archiveFile, path ->
+                listArchiveLogCandidates(archiveFile).firstOrNull { it.entryPath == path }
+            },
+        )
+        assertEquals(false, restored.tabs.single().showTimeDelta)
+        assertEquals("FS/data/anr/main_log.txt", restored.tabs.single().archiveCandidate?.entryPath)
+        restored.startPendingRestoredTabLoads()
+        waitUntil { restored.tabs.size == 1 && !restored.isLoading }
+        assertEquals("hello", restored.tabs.single().logData.single().msg)
     }
 
     // PERF-4: a selection-only change must not alter what autosave persists, so the debounced

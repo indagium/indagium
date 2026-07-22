@@ -297,9 +297,10 @@ class AutosaveSchedulerTest {
                 ),
             ),
             base.copy(archiveCandidate = ZipLogCandidate("logs/main.txt", "main.txt", 42)),
+            base.copy(showTimeDelta = true),
         )
 
-        assertEquals(10, base.persistedSnapshot().size)
+        assertEquals(11, base.persistedSnapshot().size)
         variants.forEach { variant ->
             assertNotEquals(base.persistedSnapshot(), variant.persistedSnapshot())
             assertNotEquals(base.tabToken(), variant.tabToken())

@@ -6,7 +6,7 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -41,9 +41,15 @@ import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.*
 import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.computeItems
+import com.openlog.utils.deltaAnchorId
+import com.openlog.utils.deltaMillis
+import com.openlog.utils.formatDelta
+import com.openlog.utils.formatSignedDelta
 import com.openlog.utils.passesFilter
 import com.openlog.utils.regexRanges
 import com.openlog.utils.visibleLogLineText
+import com.openlog.utils.widestAdjacentGapMagnitudeMs
+import com.openlog.utils.widestAnchorDeltaMagnitudeMs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -51,6 +57,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
@@ -60,6 +67,11 @@ private const val CTX_MENU_KEYBOARD_X_DP = 60f
 private const val LOADING_GRACE_MS = 250L
 private const val SPLICE_SUMMARY_GUARD_MIN_ITEMS = 4096
 
+// Δt gutter cell (LogRow's deltaMs param) tints itself this color when the gap since the previous
+// visible row is at least this long — a fixed v1 threshold; a user-configurable one is out of scope
+// (see the plan's "Out of scope" list).
+private const val DELTA_WARN_THRESHOLD_MS = 1000L
+
 // DANGER_RED is only ever assigned as a LogItem.Row's groupColor for expanded crash/stack-trace
 // group members (see Filter.kt's computeItems — sequence/manual-collapse groupColors always come
 // from a different palette). By default those rows only get a thin left-edge stripe, while the
@@ -68,7 +80,10 @@ private const val SPLICE_SUMMARY_GUARD_MIN_ITEMS = 4096
 internal fun isCrashGroupRow(groupColor: Color?, highlightEntireCrashGroup: Boolean): Boolean =
     highlightEntireCrashGroup && groupColor == DANGER_RED
 
-private fun hlRanges(
+// internal (not private): reused by ui/Minimap.kt's off-thread color resolution so the minimap's
+// "does this row match a highlighter" check is the exact same logic LogRow itself uses, not a
+// second matcher that could silently drift from it.
+internal fun hlRanges(
     msg: String,
     hl: Highlighter,
     regexContext: RegexEvaluationContext,
@@ -305,6 +320,60 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
         }
     }
     return computed
+}
+
+// Seed for the gap-mode branch of rememberTimeDeltaChars below, used for the first paint while its
+// off-thread scan is still running. A plain sub-minute gap ("+0.000"-shaped, 6 chars) is the
+// overwhelmingly common case — consecutive rows in a real logcat are almost always milliseconds
+// apart — so seeding with it means the very first frame already looks like the eventual answer
+// instead of flashing some other width and then resizing once the scan lands.
+private const val GAP_MODE_SEED_CHARS = 6
+
+// Character budget for the Δt gutter (Theme.kt's timeDeltaColumnWidth), sized from the widest
+// delta string actually rendered for this tab/mode instead of a fixed worst-case width.
+// `selected` is passed in separately from `tab` (rather than reading tab.selected directly)
+// because split view's Original panel anchors off its own local selection, not the tab's — see
+// this function's call sites below.
+//
+// The two modes are NOT computed the same way — see widestAnchorDeltaMagnitudeMs/
+// widestAdjacentGapMagnitudeMs's own docs for why collapsing them back into one shortcut is
+// exactly the bug this split fixes:
+//   - Anchor mode (a row selected): O(1), bounded by the two endpoints — cheap enough to compute
+//     synchronously inside `remember`.
+//   - Gap mode (no selection): the real bound is the single largest ADJACENT-row gap anywhere in
+//     tab.logData, which needs an O(n) scan — tab.logData can be millions of rows, so this runs
+//     off the UI thread via LaunchedEffect + Dispatchers.Default, the same pattern ui/Minimap.kt
+//     already uses for its own O(n) bucket pass, and is seeded (GAP_MODE_SEED_CHARS) so the first
+//     frame isn't visibly wrong while the scan is in flight.
+//
+// Both branches key on the tab id/size (so a tailed-in append or a tab switch recomputes) and the
+// anchor id (so selecting/deselecting a line recomputes) — deliberately NOT keyed on the filter or
+// scroll position, so the column stays the same width while scrolling or typing into a filter, per
+// the explicit "a column that resizes as you scroll is worse than the bug it fixes" requirement.
+@Composable
+private fun rememberTimeDeltaChars(tab: LogTab, selected: Set<Int>): Int {
+    if (!tab.showTimeDelta) return 1
+    val anchorId = deltaAnchorId(selected)
+    if (anchorId != null) {
+        return remember(tab.id, tab.logData.size, anchorId) {
+            val firstTs = tab.logData.firstOrNull()?.ts
+            val lastTs = tab.logData.lastOrNull()?.ts
+            val anchorTs = tab.rmap[anchorId]?.ts
+            if (firstTs == null || lastTs == null || anchorTs == null) {
+                1
+            } else {
+                formatDelta(widestAnchorDeltaMagnitudeMs(firstTs, lastTs, anchorTs)).length
+            }
+        }
+    }
+
+    var gapChars by remember(tab.id, tab.logData.size) { mutableStateOf(GAP_MODE_SEED_CHARS) }
+    LaunchedEffect(tab.id, tab.logData.size) {
+        gapChars = withContext(Dispatchers.Default) {
+            formatDelta(widestAdjacentGapMagnitudeMs(tab.logData.map { it.ts })).length
+        }
+    }
+    return gapChars
 }
 
 internal data class AnnotationNavigationTarget(
@@ -622,6 +691,11 @@ fun LogViewer(
     onExpandAll: () -> Unit,
     onCollapseAll: () -> Unit,
     onToggleUnfiltered: () -> Unit,
+    // Per-tab Δt-column toggle (LogTab.showTimeDelta, AppState.toggleTimeDelta) — a toolbar button
+    // beside Export, not a Settings entry (see LogTab.showTimeDelta's doc comment for why). Default
+    // no-op keeps preview/test call sites that don't wire it unaffected, same as the other optional
+    // callbacks below.
+    onToggleTimeDelta: () -> Unit = {},
     onExportTxt: () -> Unit,
     onExportCsv: () -> Unit,
     scrollStateStore: LogViewerScrollStateStore? = null,
@@ -690,8 +764,13 @@ fun LogViewer(
     // Clear stale bounds from previous tab so drag-select uses correct positions
     LaunchedEffect(tab.id) { rowBoundsAbs.clear() }
 
+    // Order here MUST match the toolbar's actual left-to-right button order below — toolbarIndex
+    // (roving keyboard nav) indexes into this same list, and the per-button border highlight is
+    // literally `toolbarIndex == <that button's position in this list>`. Adding/reordering a
+    // toolbar button means updating BOTH this list and every `toolbarIndex == N` check below.
     fun toolbarActions(): List<Pair<Boolean, () -> Unit>> = listOf(
         true to { exportMenuOpen = true },
+        true to onToggleTimeDelta,
         canExpandAll to onExpandAll,
         canCollapseAll to onCollapseAll,
         true to onToggleUnfiltered,
@@ -722,26 +801,36 @@ fun LogViewer(
                 }
             }
             Spacer(Modifier.width(8.dp))
+            // Primary variant when on is this toolbar's only "active" state affordance (Unfiltered,
+            // the other stateful toggle here, signals its state via label text instead — "Δt on/off"
+            // has no comparably natural alternate label, so a filled/tinted button is the toggle cue).
+            AppButton(
+                "Δt",
+                onClick = onToggleTimeDelta,
+                variant = if (tab.showTimeDelta) ButtonVariant.Primary else ButtonVariant.Secondary,
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 1) tc.ac else Color.Transparent, CORNER_MD),
+            )
+            Spacer(Modifier.width(8.dp))
             val countLabel = if (tab.largeFileMode) "$visCnt / $totalCnt entries - large file mode" else "$visCnt / $totalCnt entries"
             AppText(countLabel, color = tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
             AppButton(
                 "Expand all",
                 onClick = onExpandAll,
                 enabled = canExpandAll,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 1) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 2) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(4.dp))
             AppButton(
                 "Collapse all",
                 onClick = onCollapseAll,
                 enabled = canCollapseAll,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 2) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 3) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(4.dp))
             AppButton(
                 if (tab.showUnfiltered) "Hide original" else "Unfiltered",
                 onClick = onToggleUnfiltered,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 3) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 4) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(8.dp))
         }
@@ -766,6 +855,10 @@ fun LogViewer(
             listState: LazyListState? = null,
             externalFr: FocusRequester? = null,
             onFocusChangedExternal: (Boolean) -> Unit = {},
+            // Δt column width in characters, precomputed once for this panel by the caller
+            // (rememberTimeDeltaChars) and passed straight through to every LogRow — see that
+            // function's doc for why this must NOT be recomputed per row.
+            timeDeltaChars: Int = 1,
         ) {
             if (listItems.isEmpty()) {
                 if (itemsLoading) {
@@ -784,7 +877,16 @@ fun LogViewer(
             val hScroll   = scrollStates.scrollState(panelKey)
             val scrollbarStyle = appScrollbarStyle(tc)
             val density = LocalDensity.current
-            val verticalScrollbarGutterPx = with(density) { 16.dp.toPx() }
+            // Must cover EVERYTHING drawn in the CenterEnd column beside the log rows — the
+            // Minimap strip AND VerticalScrollbar now render side by side there when
+            // settings.showMinimap is on (see the BoxWithConstraints wiring below), so this is
+            // additive, not a max. Getting this wrong was flagged repeatedly as the #1 trap for
+            // the minimap feature: a drag starting on either bar would fall inside the region this
+            // pointerInput treats as "on a row" and begin a row range-selection underneath it,
+            // instead of being ignored the way a scrollbar-area drag already is.
+            val verticalScrollbarGutterPx = with(density) {
+                (16.dp + if (settings.showMinimap) MINIMAP_WIDTH else 0.dp).toPx()
+            }
             val horizontalScrollbarGutterPx = with(density) { 18.dp.toPx() }
             val visibleIds = listSummary.allIds
             val currentOnSelRowRange by rememberUpdatedState(itemOnSelRowRange)
@@ -1006,10 +1108,10 @@ fun LogViewer(
                                 state = lazyState,
                                 modifier = Modifier.width(rowContentWidth).fillMaxHeight(),
                             ) {
-                                items(
+                                itemsIndexed(
                                     items = listItems,
-                                    key = { item -> logItemStableKey(effectiveTab.id, item) }
-                                ) { item ->
+                                    key = { _, item -> logItemStableKey(effectiveTab.id, item) }
+                                ) { index, item ->
                                     // O(log n) per row via the same ascending-id IntArray lookup
                                     // ItemsSummary.rowIds uses (indexOfId) — matchIds is built in
                                     // display order by computeSearchMatches, so it's sorted too.
@@ -1023,6 +1125,21 @@ fun LogViewer(
                                     }
                                     val isSearchMatch = matchIdx >= 0
                                     val isCurrentSearchMatch = isSearchMatch && matchIdx == search.currentIdx
+                                    // Δt baseline: a selection anchors every row's delta to the
+                                    // SIGNED offset from the selected line (deltaAnchorId picks the
+                                    // lowest selected id — see its own doc comment for why); with no
+                                    // selection this falls back to the plain gap-to-previous-VISIBLE-
+                                    // row behavior. Computed once per row here (not inside LogRow)
+                                    // because it needs listItems[index - 1], which only this lambda
+                                    // (via itemsIndexed) has.
+                                    val deltaAnchorEntryId = if (effectiveTab.showTimeDelta) deltaAnchorId(effectiveTab.selected) else null
+                                    val deltaMs = when {
+                                        !effectiveTab.showTimeDelta -> null
+                                        deltaAnchorEntryId != null ->
+                                            effectiveTab.rmap[deltaAnchorEntryId]?.ts?.let { anchorTs -> deltaMillis(anchorTs, item.entry.ts) }
+                                        index > 0 -> deltaMillis(listItems[index - 1].entry.ts, item.entry.ts)
+                                        else -> null
+                                    }
                                     when (item) {
                                         is LogItem.Row -> LogRow(
                                             item = item,
@@ -1038,6 +1155,10 @@ fun LogViewer(
                                             highlightEntireCrashGroup = settings.highlightEntireCrashGroup,
                                             autoWrap = settings.autoLogRowWrap,
                                             showRowNumbers = settings.showRowNumbers,
+                                            showTimeDelta = effectiveTab.showTimeDelta,
+                                            deltaMs = deltaMs,
+                                            deltaSelectionAnchored = deltaAnchorEntryId != null,
+                                            timeDeltaChars = timeDeltaChars,
                                             searchHighlight = if (isSearchMatch) {
                                                 SearchHighlight(
                                                     search.query, search.caseSensitive, isCurrentSearchMatch,
@@ -1069,11 +1190,27 @@ fun LogViewer(
                                 }
                             }
                         }
-                        VerticalScrollbar(
-                            adapter = rememberScrollbarAdapter(lazyState),
-                            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
-                            style = scrollbarStyle,
-                        )
+                        // Minimap sits beside VerticalScrollbar (outside it, i.e. further from the
+                        // log content), not instead of it — Sublime shows both, and so does this.
+                        // Both live in one right-aligned Row so they share the CenterEnd slot
+                        // cleanly; see verticalScrollbarGutterPx above for the matching (additive)
+                        // drag-select sizing this requires.
+                        Row(Modifier.align(Alignment.CenterEnd).fillMaxHeight()) {
+                            if (settings.showMinimap) {
+                                Minimap(
+                                    items = listItems,
+                                    analysis = effectiveTab.analysis,
+                                    highlighters = effectiveTab.filter.highlighters,
+                                    lazyState = lazyState,
+                                    tc = tc,
+                                )
+                            }
+                            VerticalScrollbar(
+                                adapter = rememberScrollbarAdapter(lazyState),
+                                modifier = Modifier.fillMaxHeight(),
+                                style = scrollbarStyle,
+                            )
+                        }
                     }
                     if (!settings.autoLogRowWrap) {
                         HorizontalScrollbar(
@@ -1256,7 +1393,16 @@ fun LogViewer(
                 // Fixed height for Panel1 → cursor drag adds directly to splitDp → 1:1 tracking.
                 Column(Modifier.fillMaxWidth().height(effectiveSplitDp.dp)) {
                     SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
-                    ColHeader(hasPidTid, showRowNumbers = settings.showRowNumbers, rowNumDigits = tab.logData.size.toString().length)
+                    // Original panel anchors its own Δt width off localAllSelected — its OWN
+                    // selection, independent of the Filtered panel's tab.selected below.
+                    val originalTimeDeltaChars = rememberTimeDeltaChars(tab, localAllSelected)
+                    ColHeader(
+                        hasPidTid,
+                        showRowNumbers = settings.showRowNumbers,
+                        rowNumDigits = tab.logData.size.toString().length,
+                        showTimeDelta = tab.showTimeDelta,
+                        timeDeltaChars = originalTimeDeltaChars,
+                    )
                     ItemList(
                         listItems = allItems,
                         listSummary = computedAllItems.summary,
@@ -1272,6 +1418,7 @@ fun LogViewer(
                         itemOnCtxMenu = { id, x, y, sel -> onCtxMenu(id, x, y, sel, localAllSelected) },
                         panelKey = "${tab.id}:original",
                         listState = allLazyState,
+                        timeDeltaChars = originalTimeDeltaChars,
                     )
                 }
                 VDivider { delta ->
@@ -1304,7 +1451,14 @@ fun LogViewer(
                             },
                         )
                     }
-                    ColHeader(hasPidTid, showRowNumbers = settings.showRowNumbers, rowNumDigits = tab.logData.size.toString().length)
+                    val filteredTimeDeltaChars = rememberTimeDeltaChars(tab, tab.selected)
+                    ColHeader(
+                        hasPidTid,
+                        showRowNumbers = settings.showRowNumbers,
+                        rowNumDigits = tab.logData.size.toString().length,
+                        showTimeDelta = tab.showTimeDelta,
+                        timeDeltaChars = filteredTimeDeltaChars,
+                    )
                     ItemList(
                         listItems = items,
                         listSummary = computedItems.summary,
@@ -1330,6 +1484,7 @@ fun LogViewer(
                         listState = filteredLazyState,
                         externalFr = focusRequester,
                         onFocusChangedExternal = onPanelFocusChanged,
+                        timeDeltaChars = filteredTimeDeltaChars,
                     )
                 }
             }
@@ -1381,11 +1536,19 @@ fun LogViewer(
                     },
                 )
             }
-            ColHeader(hasPidTid, showRowNumbers = settings.showRowNumbers, rowNumDigits = tab.logData.size.toString().length)
+            val mainTimeDeltaChars = rememberTimeDeltaChars(tab, tab.selected)
+            ColHeader(
+                hasPidTid,
+                showRowNumbers = settings.showRowNumbers,
+                rowNumDigits = tab.logData.size.toString().length,
+                showTimeDelta = tab.showTimeDelta,
+                timeDeltaChars = mainTimeDeltaChars,
+            )
             ItemList(
                 items, computedItems.summary, rowBoundsAbs, boxPosY,
                 panelKey = "${tab.id}:main", listState = mainLazyState,
                 externalFr = focusRequester, onFocusChangedExternal = onPanelFocusChanged,
+                timeDeltaChars = mainTimeDeltaChars,
             )
         }
     }
@@ -1616,6 +1779,28 @@ private fun LogRow(
     // real available width was used up, so the line wrapped one row earlier than necessary.
     autoWrap: Boolean = false,
     showRowNumbers: Boolean = false,
+    showTimeDelta: Boolean = false,
+    // Precomputed by the caller (LazyColumn's itemsIndexed row lambda), which is the one place
+    // that has both listItems[index - 1] AND the selected-line anchor logic (deltaAnchorId) —
+    // null when unavailable (showTimeDelta off, no baseline/anchor to compare against, or either
+    // side's ts didn't parse; see utils/LogTime.kt.deltaMillis). Deliberately NOT folded into
+    // buildFullLineAnnotation: that AnnotatedString is what gets copied to the clipboard, what Find
+    // matching/highlighters read via visibleLogLineText, and what flows into Markdown exports — Δt
+    // is derived UI-only data and must stay out of all three, so it's rendered as this separate
+    // gutter cell instead.
+    deltaMs: Long? = null,
+    // true when deltaMs is a SIGNED offset from the selected line (a row is selected in this tab)
+    // rather than the ordinary gap to the previous visible row. Changes both the formatting
+    // (formatSignedDelta, so the selected row itself reads as bare "0.000" rather than "+0.000")
+    // and suppresses the stall-warning tint below — a row simply being far from the selection
+    // isn't a "stall," so lighting up half the column in warning color would be noise, not signal.
+    deltaSelectionAnchored: Boolean = false,
+    // Δt column width in characters — precomputed ONCE per tab/mode by the caller
+    // (LogViewer.kt's rememberTimeDeltaChars) from the widest delta string this tab/mode will
+    // actually render, not recomputed per row. Mirrors rowNumDigits' role for the row-number
+    // gutter above: same shape, same "caller derives the digit/char count once, every row and the
+    // header both consume it" split.
+    timeDeltaChars: Int = 1,
     searchHighlight: SearchHighlight? = null,
 ) {
     val density  = LocalDensity.current.density
@@ -1759,6 +1944,29 @@ private fun LogRow(
                 AppText(
                     entry.id.toString(),
                     color = tc.td, fontSize = fontSize, fontFamily = mono, maxLines = 1,
+                    overflow = TextOverflow.Clip,
+                    modifier = Modifier.align(Alignment.CenterEnd),
+                )
+            }
+        }
+        // Optional left gutter (immediately after the row-number gutter, when both are on) showing
+        // either the signed offset from the selected line (deltaSelectionAnchored) or the gap to
+        // the previous VISIBLE row — see LogRow's deltaMs/deltaSelectionAnchored param docs. "—"
+        // marks no baseline (first visible row with no selection, or either side's ts unparseable
+        // — never invented as a zero). A gap over DELTA_WARN_THRESHOLD_MS is tinted the same
+        // warning color as a W-level row, but only in gap mode — see deltaSelectionAnchored's doc
+        // for why that tint is suppressed once the column means "distance from selection" instead.
+        if (showTimeDelta) {
+            val deltaColWidth = timeDeltaColumnWidth(fontSize.value, timeDeltaChars)
+            Box(Modifier.width(deltaColWidth + ROW_NUM_GAP).padding(end = ROW_NUM_GAP)) {
+                AppText(
+                    deltaMs?.let { if (deltaSelectionAnchored) formatSignedDelta(it) else formatDelta(it) } ?: "—",
+                    color = if (!deltaSelectionAnchored && deltaMs != null && deltaMs >= DELTA_WARN_THRESHOLD_MS) {
+                        LogLevel.W.defaultColor
+                    } else {
+                        tc.td
+                    },
+                    fontSize = fontSize, fontFamily = mono, maxLines = 1,
                     overflow = TextOverflow.Clip,
                     modifier = Modifier.align(Alignment.CenterEnd),
                 )
