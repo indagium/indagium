@@ -9,6 +9,7 @@ import com.openlog.ui.AppState
 import com.openlog.ui.EditorPreset
 import com.openlog.ui.detectedTemplate
 import com.openlog.ui.editorCommandArguments
+import com.openlog.ui.linuxDesktopEditorTemplates
 import com.openlog.ui.mkTab
 import com.openlog.ui.resolveExecutable
 import com.openlog.ui.splitEditorCommand
@@ -738,6 +739,31 @@ class SourceIndexAppStateTest {
         val result = detectInstalledEditorsForTest(listOf(installed, missing), listOf(dir))
 
         assertEquals(listOf(installed to "found-editor {file}:{line}"), result)
+    }
+
+    @Test
+    fun linuxDesktopEntryFindsJetbrainsExecutableOutsideThePath() {
+        val dir = createTempDirectory("openlog-linux-desktop-entry").toFile()
+        val appDir = File(dir, "applications").apply { mkdirs() }
+        val app = File(dir, "idea/bin/idea.sh").apply {
+            parentFile.mkdirs()
+            writeText("#!/bin/sh\n")
+            setExecutable(true)
+        }
+        File(appDir, "jetbrains-idea.desktop").writeText(
+            """
+            [Desktop Entry]
+            Name=IntelliJ IDEA
+            Exec=${app.absolutePath} %f
+            """.trimIndent(),
+        )
+
+        val templates = linuxDesktopEditorTemplates(listOf(appDir), emptyList())
+
+        assertEquals(
+            listOf("${app.absolutePath} --line {line} {file}"),
+            templates["intellij"],
+        )
     }
 
     // detectInstalledEditors() itself always scans the real EDITOR_CATALOG, which would make this

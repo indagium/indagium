@@ -349,11 +349,89 @@ internal fun splitEditorCommand(template: String, dirs: List<File> = executableS
 internal fun detectedTemplate(preset: EditorPreset, dirs: List<File> = executableSearchDirs()): String? =
     preset.candidates.firstOrNull { splitEditorCommand(it, dirs) != null }
 
+private fun EditorPreset.commandTemplateForExecutable(executable: File): String = when (id) {
+    "vscode", "cursor" -> "${executable.absolutePath} -g {file}:{line}"
+    "intellij", "studio" -> "${executable.absolutePath} --line {line} {file}"
+    "sublime", "zed" -> "${executable.absolutePath} {file}:{line}"
+    else -> "${executable.absolutePath} {file}"
+}
+
+private fun desktopEntryValue(lines: List<String>, key: String): String? =
+    lines.firstOrNull { it.startsWith("$key=") }?.substringAfter('=')?.trim()?.takeIf { it.isNotEmpty() }
+
+private fun desktopEntryExecutable(value: String, dirs: List<File>): File? {
+    val trimmed = value.trim()
+    val token = if (trimmed.startsWith('"')) {
+        trimmed.substringAfter('"').substringBefore('"')
+    } else {
+        trimmed.split(Regex("\\s+"), limit = 2).first()
+    }
+    return token.takeIf { it.isNotBlank() }?.let { resolveExecutable(it, dirs) }
+}
+
+private fun desktopEntryPresetId(file: File, name: String?): String? {
+    val identity = "${file.nameWithoutExtension} ${name.orEmpty()}".lowercase()
+    return when {
+        "android-studio" in identity || "android studio" in identity -> "studio"
+        "intellij" in identity || "jetbrains-idea" in identity || identity.contains(" idea") -> "intellij"
+        "visual studio code" in identity || "vscode" in identity || file.nameWithoutExtension == "code" -> "vscode"
+        "cursor" in identity -> "cursor"
+        "sublime" in identity -> "sublime"
+        "zed" in identity -> "zed"
+        else -> null
+    }
+}
+
+private fun linuxDesktopEntryDirs(): List<File> {
+    val home = System.getProperty("user.home").orEmpty()
+    val dataHome = System.getenv("XDG_DATA_HOME")?.takeIf { it.isNotBlank() } ?: "$home/.local/share"
+    val dataDirs = System.getenv("XDG_DATA_DIRS")?.split(':').orEmpty()
+        .ifEmpty { listOf("/usr/local/share", "/usr/share") }
+    return (listOf(dataHome) + dataDirs)
+        .map { File(it, "applications") }
+        .distinct()
+        .filter { it.isDirectory }
+}
+
+// Linux desktop packages and JetBrains Toolbox commonly register applications through a .desktop
+// file but do not add their CLI to a GUI app's inherited PATH. Read TryExec/Exec directly, validate
+// it with the same resolver as normal candidates, then generate the app's line-jump command.
+internal fun linuxDesktopEditorTemplates(
+    desktopEntryDirs: List<File> = linuxDesktopEntryDirs(),
+    executableDirs: List<File> = executableSearchDirs(),
+): Map<String, List<String>> {
+    val found = LinkedHashMap<String, MutableList<String>>()
+    desktopEntryDirs.flatMap { dir -> dir.listFiles { file -> file.isFile && file.extension == "desktop" }.orEmpty().toList() }
+        .sortedBy { it.name }
+        .forEach { entryFile ->
+            val lines = runCatching { entryFile.readLines() }.getOrNull() ?: return@forEach
+            val presetId = desktopEntryPresetId(entryFile, desktopEntryValue(lines, "Name")) ?: return@forEach
+            val executable = sequenceOf("TryExec", "Exec")
+                .mapNotNull { key -> desktopEntryValue(lines, key)?.let { desktopEntryExecutable(it, executableDirs) } }
+                .firstOrNull()
+                ?: return@forEach
+            val preset = EDITOR_CATALOG.firstOrNull { it.id == presetId } ?: return@forEach
+            found.getOrPut(presetId) { mutableListOf() }
+                .add(preset.commandTemplateForExecutable(executable))
+        }
+    return found.mapValues { (_, templates) -> templates.distinct() }
+}
+
 // EDITOR_CATALOG filtered down to installed editors, each paired with its resolved command
 // template (the first matching candidate) — the ordered list of choices the Settings dropdown
 // offers, and the read-only "resolved command" shown once one is selected.
-internal fun detectInstalledEditors(dirs: List<File> = executableSearchDirs()): List<Pair<EditorPreset, String>> =
-    EDITOR_CATALOG.mapNotNull { preset -> detectedTemplate(preset, dirs)?.let { preset to it } }
+internal fun detectInstalledEditors(dirs: List<File> = executableSearchDirs()): List<Pair<EditorPreset, String>> {
+    val desktopTemplates = if (System.getProperty("os.name").orEmpty().contains("linux", ignoreCase = true)) {
+        linuxDesktopEditorTemplates(executableDirs = dirs)
+    } else {
+        emptyMap()
+    }
+    return EDITOR_CATALOG.mapNotNull { preset ->
+        (preset.candidates + desktopTemplates[preset.id].orEmpty())
+            .firstOrNull { splitEditorCommand(it, dirs) != null }
+            ?.let { preset to it }
+    }
+}
 
 // Resolves an editor template and substitutes its location placeholders. Keeping this separate
 // from [launchEditor] makes the exact process arguments testable, especially for the Toolbox
