@@ -52,6 +52,7 @@ import com.openlog.utils.widestAdjacentGapMagnitudeMs
 import com.openlog.utils.widestAnchorDeltaMagnitudeMs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
@@ -60,6 +61,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
+import kotlin.coroutines.coroutineContext
 import java.awt.Cursor as AwtCursor
 
 private const val PAGE_JUMP_ROWS = 15
@@ -698,6 +700,9 @@ fun LogViewer(
     // no-op keeps preview/test call sites that don't wire it unaffected, same as the other optional
     // callbacks below.
     onToggleTimeDelta: () -> Unit = {},
+    onOpenSearch: () -> Unit = {},
+    onToggleRowNumbers: () -> Unit = {},
+    onToggleMinimap: () -> Unit = {},
     onExportTxt: () -> Unit,
     onExportCsv: () -> Unit,
     scrollStateStore: LogViewerScrollStateStore? = null,
@@ -758,6 +763,7 @@ fun LogViewer(
     val canCollapseAll = computedItems.summary.expandedGroupCount > 0
     var toolbarIndex by remember(tab.id) { mutableStateOf<Int?>(null) }
     var exportMenuOpen by remember(tab.id) { mutableStateOf(false) }
+    var toolbarContextMenuOpen by remember(tab.id) { mutableStateOf(false) }
 
     // Row bounds for global drag-select (plain HashMap avoids recomposition on scroll updates)
     val rowBoundsAbs = remember { HashMap<Int, Pair<Float, Float>>() }
@@ -773,6 +779,7 @@ fun LogViewer(
     fun toolbarActions(): List<Pair<Boolean, () -> Unit>> = listOf(
         true to { exportMenuOpen = true },
         true to onToggleTimeDelta,
+        true to onOpenSearch,
         canExpandAll to onExpandAll,
         canCollapseAll to onCollapseAll,
         true to onToggleUnfiltered,
@@ -783,7 +790,20 @@ fun LogViewer(
 
     Column(modifier.fillMaxSize().background(tc.bg)) {
         Row(
-            Modifier.fillMaxWidth().height(34.dp).background(tc.p).border(BorderStroke(1.dp, tc.br)),
+            Modifier.fillMaxWidth().height(34.dp)
+                .background(tc.p)
+                .border(BorderStroke(1.dp, tc.br))
+                .pointerInput("toolbar-context", tab.id) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
+                                event.changes.forEach { it.consume() }
+                                toolbarContextMenuOpen = true
+                            }
+                        }
+                    }
+                },
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Spacer(Modifier.width(12.dp))
@@ -813,28 +833,44 @@ fun LogViewer(
                 modifier = Modifier.border(1.dp, if (toolbarIndex == 1) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(8.dp))
+            AppButton(
+                "Search",
+                onClick = onOpenSearch,
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 2) tc.ac else Color.Transparent, CORNER_MD),
+            )
+            Spacer(Modifier.width(8.dp))
             val countLabel = if (tab.largeFileMode) "$visCnt / $totalCnt entries - large file mode" else "$visCnt / $totalCnt entries"
             AppText(countLabel, color = tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
             AppButton(
                 "Expand all",
                 onClick = onExpandAll,
                 enabled = canExpandAll,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 2) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 3) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(4.dp))
             AppButton(
                 "Collapse all",
                 onClick = onCollapseAll,
                 enabled = canCollapseAll,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 3) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 4) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(4.dp))
             AppButton(
                 if (tab.showUnfiltered) "Hide original" else "Unfiltered",
                 onClick = onToggleUnfiltered,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 4) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == 5) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(8.dp))
+            if (toolbarContextMenuOpen) {
+                ToolbarOptionsPopup(
+                    showRowNumbers = settings.showRowNumbers,
+                    showMinimap = settings.showMinimap,
+                    onToggleRowNumbers = { toolbarContextMenuOpen = false; onToggleRowNumbers() },
+                    onToggleMinimap = { toolbarContextMenuOpen = false; onToggleMinimap() },
+                    onDismiss = { toolbarContextMenuOpen = false },
+                    tc = tc,
+                )
+            }
         }
 
         @Composable
@@ -1074,19 +1110,27 @@ fun LogViewer(
                             )
                             (measured.size.width / sampleLen) / density
                         }
+                        // The minimap and vertical scrollbar are drawn in a right-aligned overlay
+                        // row. Keep the log viewport out from underneath that row so long lines and
+                        // the log's right border remain readable when the minimap is enabled.
+                        val logViewportWidth = (maxWidth - if (settings.showMinimap) {
+                            16.dp + MINIMAP_CONTENT_GAP + MINIMAP_WIDTH
+                        } else {
+                            0.dp
+                        }).coerceAtLeast(0.dp)
                         val effectiveWrapLimitChars = effectiveLogWrapLimitChars(
                             auto = settings.autoLogRowWrap,
                             configuredLimitChars = settings.logRowWrapLimitChars,
-                            visibleWidthDp = maxWidth.value,
+                            visibleWidthDp = logViewportWidth.value,
                             charWidthDp = charWidthDp,
                         )
                         val rowContentWidth = if (settings.autoLogRowWrap) {
-                            maxWidth
+                            logViewportWidth
                         } else {
                             logContentWidthDp(effectiveWrapLimitChars, charWidthDp)
                         }
                         val contentModifier = if (settings.autoLogRowWrap) {
-                            Modifier.fillMaxSize()
+                            Modifier.width(logViewportWidth).fillMaxHeight()
                         } else {
                             // horizontalScroll(hScroll) already reacts to PointerEventType.Scroll
                             // itself (that's how mouse-wheel scrolling works for any Compose
@@ -1100,7 +1144,7 @@ fun LogViewer(
                             // all (AWT has no horizontal wheel axis to deliver them on) — that
                             // path is bridged separately in ui/LinuxHorizontalScroll.kt via
                             // hoveredLogPanelKey below, not through Compose pointer events.
-                            Modifier.fillMaxSize()
+                            Modifier.width(logViewportWidth).fillMaxHeight()
                                 .horizontalScroll(hScroll)
                                 .onPointerEvent(PointerEventType.Enter) { onHoverPanelKey(panelKey) }
                                 .onPointerEvent(PointerEventType.Exit) { onHoverPanelKey(null) }
@@ -1833,6 +1877,8 @@ private fun LogRow(
     var hov      by remember { mutableStateOf(false) }
     var rowRoot  by remember { mutableStateOf(Offset.Zero) }
     var sel      by remember(tab.id, entry.id) { mutableStateOf(TextRange.Zero) }
+    val latestIsSelected by rememberUpdatedState(isSel)
+    val latestSelection by rememberUpdatedState(sel)
     val fontSize = baseSp()
     DisposableEffect(entry.id, rowBoundsAbs) {
         onDispose { rowBoundsAbs.remove(entry.id) }
@@ -1880,17 +1926,20 @@ private fun LogRow(
             }
             // Keys include tab.id so coroutines restart when the same entry ID appears in a different tab
             .pointerInput("rc", tab.id, entry.id) {
+                val clickScope = CoroutineScope(coroutineContext)
                 awaitPointerEventScope {
                     var pressPos: Offset? = null
                     var pressShift = false
                     var pressMulti = false
                     var pressDragged = false
+                    var pendingSelectedRowToggle: Job? = null
                     while (true) {
                         val ev = awaitPointerEvent(PointerEventPass.Initial)
                         when (ev.type) {
                             PointerEventType.Press -> {
                                 val mods = ev.keyboardModifiers
                                 if (ev.buttons.isSecondaryPressed) {
+                                    pendingSelectedRowToggle?.cancel()
                                     ev.changes.forEach { it.consume() }
                                     val selText = if (!sel.collapsed)
                                         runCatching {
@@ -1905,6 +1954,12 @@ private fun LogRow(
                                         selText,
                                     )
                                 } else if (ev.buttons.isPrimaryPressed) {
+                                    // A selected row's first click in a double-click sequence would
+                                    // otherwise deselect it before BasicTextField can select the
+                                    // word. Delay only that plain selected-row toggle; a second
+                                    // press cancels it, while an ordinary single click still
+                                    // deselects after the normal desktop double-click interval.
+                                    pendingSelectedRowToggle?.cancel()
                                     pressPos = ev.changes.firstOrNull()?.position
                                     pressShift = mods.isShiftPressed
                                     pressMulti = mods.isCtrlPressed || mods.isMetaPressed
@@ -1934,8 +1989,15 @@ private fun LogRow(
                                 // (the second half of the double-click) immediately deselected it
                                 // again, and the Δt column's anchor mode flipped on then off inside
                                 // one user gesture — visible as the flicker this guards against.
-                                if (!pressDragged && pressPos != null && sel.collapsed) {
-                                    onSelRow(entry.id, pressMulti, pressShift)
+                                if (!pressDragged && pressPos != null && latestSelection.collapsed) {
+                                    if (latestIsSelected && !pressMulti && !pressShift) {
+                                        pendingSelectedRowToggle = clickScope.launch {
+                                            kotlinx.coroutines.delay(350)
+                                            onSelRow(entry.id, false, false)
+                                        }
+                                    } else {
+                                        onSelRow(entry.id, pressMulti, pressShift)
+                                    }
                                 }
                                 pressPos = null
                                 pressShift = false
@@ -1984,7 +2046,7 @@ private fun LogRow(
                     entry.id.toString(),
                     color = tc.td, fontSize = fontSize, fontFamily = mono, maxLines = 1,
                     overflow = TextOverflow.Clip,
-                    modifier = Modifier.align(Alignment.CenterEnd),
+                    modifier = Modifier.align(Alignment.CenterStart),
                 )
             }
         }
@@ -2468,6 +2530,47 @@ private fun ExportMenuPopup(
                 AppText(
                     "Filtered log as .csv", color = tc.tx, fontSize = 11.sp,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolbarOptionsPopup(
+    showRowNumbers: Boolean,
+    showMinimap: Boolean,
+    onToggleRowNumbers: () -> Unit,
+    onToggleMinimap: () -> Unit,
+    onDismiss: () -> Unit,
+    tc: ThemeColors,
+) {
+    Popup(
+        alignment = Alignment.TopStart,
+        offset = IntOffset(0, (34 * LocalDensity.current.density).roundToInt()),
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        Column(
+            Modifier.width(190.dp)
+                .background(tc.p, RoundedCornerShape(7.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                .padding(vertical = 4.dp),
+        ) {
+            HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onToggleRowNumbers) {
+                AppText(
+                    if (showRowNumbers) "Hide row numbers" else "Show row numbers",
+                    color = tc.tx,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                )
+            }
+            HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onToggleMinimap) {
+                AppText(
+                    if (showMinimap) "Hide minimap" else "Show minimap",
+                    color = tc.tx,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                 )
             }
         }

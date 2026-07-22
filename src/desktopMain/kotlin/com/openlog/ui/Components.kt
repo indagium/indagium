@@ -282,7 +282,7 @@ fun ColHeader(
             Box(Modifier.width(numColWidth)) {
                 AppText(
                     "#", color = tc.td, fontSize = COL_HEADER_FONT_SP.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.align(Alignment.CenterEnd),
+                    modifier = Modifier.align(Alignment.CenterStart),
                 )
             }
         }
