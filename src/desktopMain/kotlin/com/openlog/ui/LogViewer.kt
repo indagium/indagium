@@ -326,14 +326,54 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
     return computed
 }
 
-// Keep the Δt gutter fixed while its meaning changes between "gap to previous row" and
-// "distance from selected row". The widest possible value is "+24h00m00s" (10 characters), so
-// a constant budget prevents a row selection from shifting every timestamp and breaking a
-// double-click midway through word selection.
-private const val TIME_DELTA_COLUMN_CHARS = 10
+// The first frame while the off-thread width calculation runs. This is the usual short
+// "+0.000"-shaped delta and avoids initially reserving the full-day worst case.
+private const val TIME_DELTA_SEED_CHARS = 6
 
-private fun timeDeltaChars(showTimeDelta: Boolean): Int =
-    if (showTimeDelta) TIME_DELTA_COLUMN_CHARS else 1
+// Keep the Δt gutter fixed while its meaning changes between "gap to previous row" and
+// "distance from selected row". The budget covers both the largest visible adjacent gap and the
+// visible range's endpoints (the largest possible selected-anchor distance), but never depends on
+// the current selection. That keeps timestamps still during double-click word selection without
+// leaving a full-day-sized blank gutter for short log files.
+@Composable
+private fun rememberTimeDeltaChars(tab: LogTab, visibleItems: List<LogItem>): Int {
+    if (!tab.showTimeDelta) return 1
+
+    var chars by remember(tab.id, tab.logData.size, visibleItems) {
+        mutableStateOf(TIME_DELTA_SEED_CHARS)
+    }
+    LaunchedEffect(tab.id, tab.logData.size, visibleItems) {
+        chars = withContext(Dispatchers.Default) {
+            formatDelta(widestVisibleTimeDeltaMagnitudeMs(visibleItems)).length
+        }
+    }
+    return chars
+}
+
+private fun widestVisibleTimeDeltaMagnitudeMs(items: List<LogItem>): Long {
+    var firstTs: String? = null
+    var previousTs: String? = null
+    var widest = 0L
+    items.forEach { item ->
+        val ts = when (item) {
+            is LogItem.Row -> item.entry.ts
+            is LogItem.SeqHeader -> item.entry.ts
+            is LogItem.ManualHeader -> item.entry.ts
+            is LogItem.StackTraceHeader -> item.entry.ts
+        }
+        if (firstTs == null) firstTs = ts
+        previousTs?.let { previous ->
+            deltaMillis(previous, ts)?.let { widest = maxOf(widest, kotlin.math.abs(it)) }
+        }
+        previousTs = ts
+    }
+    firstTs?.let { first ->
+        previousTs?.let { last ->
+            deltaMillis(first, last)?.let { widest = maxOf(widest, kotlin.math.abs(it)) }
+        }
+    }
+    return widest
+}
 
 internal data class AnnotationNavigationTarget(
     val filteredEntryId: Int?,
@@ -1434,7 +1474,7 @@ fun LogViewer(
                     SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
                     // Original panel's Δt values use its local selection, independent of the
                     // Filtered panel's tab.selected below; the gutter width itself stays fixed.
-                    val originalTimeDeltaChars = timeDeltaChars(tab.showTimeDelta)
+                    val originalTimeDeltaChars = rememberTimeDeltaChars(tab, allItems)
                     ColHeader(
                         hasPidTid,
                         showRowNumbers = settings.showRowNumbers,
@@ -1490,7 +1530,7 @@ fun LogViewer(
                             },
                         )
                     }
-                    val filteredTimeDeltaChars = timeDeltaChars(tab.showTimeDelta)
+                    val filteredTimeDeltaChars = rememberTimeDeltaChars(tab, items)
                     ColHeader(
                         hasPidTid,
                         showRowNumbers = settings.showRowNumbers,
@@ -1575,7 +1615,7 @@ fun LogViewer(
                     },
                 )
             }
-            val mainTimeDeltaChars = timeDeltaChars(tab.showTimeDelta)
+            val mainTimeDeltaChars = rememberTimeDeltaChars(tab, items)
             ColHeader(
                 hasPidTid,
                 showRowNumbers = settings.showRowNumbers,
