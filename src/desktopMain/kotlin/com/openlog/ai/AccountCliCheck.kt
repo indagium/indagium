@@ -10,6 +10,8 @@ import java.io.File
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
+private const val MACOS_BUNDLED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex"
+
 /** Result of a non-billed local account-agent prerequisite check. */
 internal data class AccountCliCheck(val isReady: Boolean, val message: String)
 
@@ -24,8 +26,6 @@ internal fun interface LocalCliCommandRunner {
  * applications often do not inherit the shell PATH that exposes that bundle as a bare command.
  */
 internal object LocalAccountCli {
-    private const val MACOS_BUNDLED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex"
-
     fun codexCommand(vararg arguments: String): List<String> = listOf(codexExecutable()) + arguments
 
     fun command(profile: AiProviderProfile, vararg arguments: String): List<String> =
@@ -68,26 +68,83 @@ internal object LocalAccountCli {
             AiProviderKind.CLAUDE_CODE_ACCOUNT -> listOf("claude", "claude.exe", "claude.cmd", "claude.bat")
             else -> return emptyList()
         }
-        val home = System.getProperty("user.home").orEmpty()
-        val pathEntries = System.getenv("PATH").orEmpty().split(File.pathSeparator).filter(String::isNotBlank)
-        val commonDirectories = buildList {
-            addAll(pathEntries)
-            add("/opt/homebrew/bin")
-            add("/usr/local/bin")
-            add("/usr/bin")
-            if (home.isNotBlank()) add(File(home, ".local/bin").path)
-            if (kind == AiProviderKind.CODEX_ACCOUNT) {
-                add(File(MACOS_BUNDLED_CODEX).parent.orEmpty())
-                if (home.isNotBlank()) add(File(home, "Applications/ChatGPT.app/Contents/Resources").path)
-            }
-            System.getenv("APPDATA")?.let { add(File(it, "npm").path) }
-            System.getenv("LOCALAPPDATA")?.let {
-                add(File(it, "Programs/Codex").path)
-                add(File(it, "Programs/Claude").path)
-            }
-        }
-        return commonDirectories.distinct().flatMap { directory -> commandNames.map { File(directory, it) } }
+        return accountCliSearchDirs(
+            kind = kind,
+            home = System.getProperty("user.home").orEmpty(),
+            pathEntries = System.getenv("PATH").orEmpty().split(File.pathSeparator).filter(String::isNotBlank),
+            appData = System.getenv("APPDATA"),
+            localAppData = System.getenv("LOCALAPPDATA"),
+            programFiles = System.getenv("ProgramFiles"),
+            programFilesX86 = System.getenv("ProgramFiles(x86)"),
+            pnpmHome = System.getenv("PNPM_HOME"),
+        ).flatMap { directory -> commandNames.map { File(directory, it) } }
     }
+}
+
+/**
+ * Places a GUI process may need to search for a Codex or Claude Code CLI. Interactive shells add
+ * these through nvm, Volta, asdf, mise, pnpm, npm, and Windows' per-user install folders, but a
+ * desktop-launched app commonly inherits none of them. Keep this path-only and deterministic so
+ * detection never starts a shell or evaluates a user's shell profile.
+ */
+internal fun accountCliSearchDirs(
+    kind: AiProviderKind,
+    home: String,
+    pathEntries: List<String>,
+    appData: String? = null,
+    localAppData: String? = null,
+    programFiles: String? = null,
+    programFilesX86: String? = null,
+    pnpmHome: String? = null,
+): List<File> {
+    val directories = buildList {
+        addAll(pathEntries.filter(String::isNotBlank))
+        addAll(listOf("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/snap/bin"))
+        if (home.isNotBlank()) {
+            addAll(
+                listOf(
+                    ".local/bin",
+                    "bin",
+                    ".npm-global/bin",
+                    ".npm/bin",
+                    ".yarn/bin",
+                    ".config/yarn/global/node_modules/.bin",
+                    ".volta/bin",
+                    ".asdf/shims",
+                    ".mise/shims",
+                    ".bun/bin",
+                    ".local/share/pnpm",
+                    "Library/pnpm",
+                    ".codex/bin",
+                ).map { relative -> File(home, relative).path },
+            )
+            // nvm puts each Node version in a distinct directory rather than one stable bin path.
+            File(home, ".nvm/versions/node").listFiles().orEmpty()
+                .filter(File::isDirectory)
+                .forEach { version -> add(File(version, "bin").path) }
+        }
+        pnpmHome?.takeIf(String::isNotBlank)?.let(::add)
+        if (kind == AiProviderKind.CODEX_ACCOUNT) {
+            add(File(MACOS_BUNDLED_CODEX).parent.orEmpty())
+            if (home.isNotBlank()) add(File(home, "Applications/ChatGPT.app/Contents/Resources").path)
+        }
+        appData?.takeIf(String::isNotBlank)?.let {
+            add(File(it, "npm").path)
+            add(File(it, "pnpm").path)
+        }
+        localAppData?.takeIf(String::isNotBlank)?.let {
+            add(File(it, "npm").path)
+            add(File(it, "Programs/Codex").path)
+            add(File(it, "Programs/Claude").path)
+            add(File(it, "Programs/AnthropicClaude").path)
+        }
+        listOfNotNull(programFiles, programFilesX86).filter(String::isNotBlank).forEach {
+            add(File(it, "nodejs").path)
+            add(File(it, "Codex").path)
+            add(File(it, "Claude").path)
+        }
+    }
+    return directories.filter(String::isNotBlank).distinct().map(::File)
 }
 
 /**

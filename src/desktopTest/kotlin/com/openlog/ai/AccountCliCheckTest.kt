@@ -3,6 +3,8 @@ package com.openlog.ai
 import com.openlog.model.AiProviderKind
 import com.openlog.model.defaultClaudeCodeAccountProfile
 import com.openlog.model.defaultCodexAccountProfile
+import java.io.File
+import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -51,6 +53,26 @@ class AccountCliCheckTest {
         assertEquals(listOf("claude", "--version"), command)
         assertTrue(result.isReady)
         assertTrue(result.message.contains("Account sign-in is checked when you send a request"))
+    }
+
+    @Test
+    fun searchDirsIncludeLinuxNodeManagersAndWindowsInstallLocations() {
+        val home = createTempDirectory("openlog-account-cli-home").toFile()
+        val nvmBin = File(home, ".nvm/versions/node/v22.0.0/bin").apply { mkdirs() }
+        val dirs = accountCliSearchDirs(
+            kind = AiProviderKind.CODEX_ACCOUNT,
+            home = home.absolutePath,
+            pathEntries = emptyList(),
+            appData = "C:/Users/test/AppData/Roaming",
+            localAppData = "C:/Users/test/AppData/Local",
+            programFiles = "C:/Program Files",
+        ).map { it.path }.toSet()
+
+        assertTrue(File(home, ".volta/bin").path in dirs)
+        assertTrue(nvmBin.path in dirs)
+        assertTrue("C:/Users/test/AppData/Roaming/npm" in dirs)
+        assertTrue("C:/Users/test/AppData/Local/Programs/Codex" in dirs)
+        assertTrue("C:/Program Files/nodejs" in dirs)
     }
 
     @Test
