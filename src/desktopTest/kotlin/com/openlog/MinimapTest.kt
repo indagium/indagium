@@ -12,9 +12,11 @@ import com.openlog.ui.MINIMAP_MAX_BUCKETS
 import com.openlog.ui.MinimapWord
 import com.openlog.ui.computeMinimapBars
 import com.openlog.ui.minimapBucketOf
+import com.openlog.ui.minimapFirstVisibleIndexForViewportDrag
 import com.openlog.ui.minimapItemIndexOf
 import com.openlog.ui.minimapScrollFraction
 import com.openlog.ui.minimapScrollOffsetPx
+import com.openlog.ui.minimapViewportBounds
 import com.openlog.ui.splitIntoWordBlocks
 import com.openlog.utils.visibleLogLineText
 import java.util.BitSet
@@ -323,6 +325,34 @@ class MinimapTest {
         val targetIndex = minimapItemIndexOf(row, itemCount, rowCount)
 
         assertEquals(0, targetIndex)
+    }
+
+    @Test
+    fun viewportDragPreservesThePointGrabbedInsideTheSelection() {
+        // 1,000 items, 10 visible: the 2,000px miniature has a 20px viewport in a 200px strip.
+        // A drag of 18px moves that viewport through 10% of its 180px travel, therefore 99 of the
+        // 990 available first-item positions. It must move from the original index, not jump to
+        // place the clicked point at the viewport's top edge.
+        val bounds = requireNotNull(minimapViewportBounds(
+            firstVisibleItemIndex = 450,
+            visibleItemCount = 10,
+            itemCount = 1_000,
+            miniatureHeightPx = 2_000f,
+            stripHeightPx = 200f,
+            minViewportHeightPx = 2f,
+        ))
+        assertTrue((bounds.first + bounds.second) / 2f in bounds.first..bounds.second)
+        assertEquals(
+            549,
+            minimapFirstVisibleIndexForViewportDrag(
+                dragStartIndex = 450,
+                dragDeltaPx = 18f,
+                visibleItemCount = 10,
+                itemCount = 1_000,
+                miniatureHeightPx = 2_000f,
+                stripHeightPx = 200f,
+            ),
+        )
     }
 
     // ── Bucket/index math (unchanged) ─────────────────────────────────

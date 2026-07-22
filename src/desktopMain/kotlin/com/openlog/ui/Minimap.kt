@@ -32,6 +32,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.BitSet
+import kotlin.math.roundToInt
 
 // ── Pure core (no @Composable / composition-dependent APIs — Color/ThemeColors/Highlighter are
 // plain data with no UI-thread coupling, so this stays unit-testable without a harness, same split
@@ -205,6 +206,49 @@ fun minimapScrollOffsetPx(scrollFraction: Float, miniatureHeightPx: Float, strip
     return scrollFraction.coerceIn(0f, 1f) * scrollableRangePx
 }
 
+/** On-screen bounds of the minimap's highlighted viewport. Keeping this mapping separate from the
+ * Canvas makes the press target and the drawn indicator use exactly the same geometry. */
+internal fun minimapViewportBounds(
+    firstVisibleItemIndex: Int,
+    visibleItemCount: Int,
+    itemCount: Int,
+    miniatureHeightPx: Float,
+    stripHeightPx: Float,
+    minViewportHeightPx: Float,
+): Pair<Float, Float>? {
+    if (itemCount <= 0 || visibleItemCount <= 0 || stripHeightPx <= 0f) return null
+    val scrollFraction = minimapScrollFraction(firstVisibleItemIndex, visibleItemCount, itemCount)
+    val offsetPx = minimapScrollOffsetPx(scrollFraction, miniatureHeightPx, stripHeightPx)
+    val viewportTopInMiniature = (firstVisibleItemIndex.toFloat() / itemCount) * miniatureHeightPx
+    val viewportHeightInMiniature = ((visibleItemCount.toFloat() / itemCount) * miniatureHeightPx)
+        .coerceAtLeast(minViewportHeightPx)
+    val top = (viewportTopInMiniature - offsetPx).coerceIn(0f, stripHeightPx)
+    val bottom = (viewportTopInMiniature + viewportHeightInMiniature - offsetPx)
+        .coerceIn(0f, stripHeightPx)
+    return top to bottom
+}
+
+/** Maps a drag distance that began inside the highlighted viewport to the corresponding first
+ * visible item. The original index is used for every move, so grabbing the viewport's middle does
+ * not make it jump to put that point at its top edge. */
+internal fun minimapFirstVisibleIndexForViewportDrag(
+    dragStartIndex: Int,
+    dragDeltaPx: Float,
+    visibleItemCount: Int,
+    itemCount: Int,
+    miniatureHeightPx: Float,
+    stripHeightPx: Float,
+): Int {
+    val maxFirst = (itemCount - visibleItemCount).coerceAtLeast(0)
+    if (maxFirst == 0 || miniatureHeightPx <= 0f || stripHeightPx <= 0f) return 0
+    val viewportHeightPx = (visibleItemCount.toFloat() / itemCount) * miniatureHeightPx
+    val viewportTravelPx = stripHeightPx - viewportHeightPx
+    if (viewportTravelPx <= 0f) return dragStartIndex.coerceIn(0, maxFirst)
+    return (dragStartIndex + dragDeltaPx * maxFirst / viewportTravelPx)
+        .roundToInt()
+        .coerceIn(0, maxFirst)
+}
+
 // ── Compose wrapper ──────────────────────────────────────────────────
 
 // Strip width. Rendered beside VerticalScrollbar (see LogViewer.kt's BoxWithConstraints wiring —
@@ -326,22 +370,53 @@ fun Minimap(
             .width(MINIMAP_WIDTH)
             .fillMaxHeight()
             .onSizeChanged { heightPx = it.height }
-            // Click-or-drag-to-jump: a bare Press already jumps (a "click"), and continuing to hold
-            // while moving keeps jumping to wherever the pointer now is (a "drag"). Deliberately a
-            // raw awaitPointerEventScope loop rather than detectDragGestures — detectDragGestures
-            // only fires after touch-slop movement, which would silently swallow a plain
-            // click-without-moving.
+            // Sublime-style viewport behavior: a press inside the highlighted viewport grabs it and
+            // only moves it as the pointer moves; a press outside it jumps immediately. A raw
+            // pointer loop is intentional here: detectDragGestures waits for touch slop and would
+            // make an outside click appear unresponsive.
             .pointerInput(items.size, rowCount) {
                 awaitPointerEventScope {
+                    var viewportDragStartY: Float? = null
+                    var viewportDragStartIndex = 0
                     while (true) {
                         val ev = awaitPointerEvent()
                         val ch = ev.changes.firstOrNull() ?: continue
-                        if (
-                            ev.buttons.isPrimaryPressed &&
-                            (ev.type == PointerEventType.Press || ev.type == PointerEventType.Move)
-                        ) {
+                        if (ev.type == PointerEventType.Press && ev.buttons.isPrimaryPressed) {
                             ch.consume()
-                            jumpTo(ch.position.y)
+                            val miniatureHeightPx = rowCount * rowHeightPx
+                            val bounds = minimapViewportBounds(
+                                firstVisibleItemIndex = lazyState.firstVisibleItemIndex,
+                                visibleItemCount = lazyState.layoutInfo.visibleItemsInfo.size,
+                                itemCount = items.size,
+                                miniatureHeightPx = miniatureHeightPx,
+                                stripHeightPx = heightPx.toFloat(),
+                                minViewportHeightPx = rowHeightPx,
+                            )
+                            if (bounds != null && ch.position.y in bounds.first..bounds.second) {
+                                viewportDragStartY = ch.position.y
+                                viewportDragStartIndex = lazyState.firstVisibleItemIndex
+                            } else {
+                                viewportDragStartY = null
+                                jumpTo(ch.position.y)
+                            }
+                        } else if (ev.type == PointerEventType.Move && ev.buttons.isPrimaryPressed) {
+                            ch.consume()
+                            val dragStartY = viewportDragStartY
+                            if (dragStartY == null) {
+                                jumpTo(ch.position.y)
+                            } else {
+                                val targetIndex = minimapFirstVisibleIndexForViewportDrag(
+                                    dragStartIndex = viewportDragStartIndex,
+                                    dragDeltaPx = ch.position.y - dragStartY,
+                                    visibleItemCount = lazyState.layoutInfo.visibleItemsInfo.size,
+                                    itemCount = items.size,
+                                    miniatureHeightPx = rowCount * rowHeightPx,
+                                    stripHeightPx = heightPx.toFloat(),
+                                )
+                                scope.launch { lazyState.scrollToItem(targetIndex) }
+                            }
+                        } else if (!ev.buttons.isPrimaryPressed) {
+                            viewportDragStartY = null
                         }
                     }
                 }
@@ -392,12 +467,16 @@ fun Minimap(
         val visibleCount = lazyState.layoutInfo.visibleItemsInfo.size
         if (items.isNotEmpty() && visibleCount > 0) {
             val first = lazyState.firstVisibleItemIndex.coerceIn(0, items.size - 1)
-            val viewportTopInMiniature = (first.toFloat() / items.size) * miniatureHeightPx
-            val viewportHeightInMiniature = ((visibleCount.toFloat() / items.size) * miniatureHeightPx)
-                .coerceAtLeast(rowHeightPx)
-            val viewportTop = (viewportTopInMiniature - offsetPx).coerceIn(0f, size.height)
-            val viewportBottom = (viewportTopInMiniature + viewportHeightInMiniature - offsetPx)
-                .coerceIn(0f, size.height)
+            val viewportBounds = minimapViewportBounds(
+                firstVisibleItemIndex = first,
+                visibleItemCount = visibleCount,
+                itemCount = items.size,
+                miniatureHeightPx = miniatureHeightPx,
+                stripHeightPx = size.height,
+                minViewportHeightPx = rowHeightPx,
+            )
+            val viewportTop = viewportBounds?.first ?: return@Canvas
+            val viewportBottom = viewportBounds.second
             val viewportHeightPx = (viewportBottom - viewportTop).coerceAtLeast(0f)
             if (viewportHeightPx > 0f) {
                 drawRect(
