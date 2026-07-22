@@ -32,7 +32,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.BitSet
-import kotlin.math.roundToInt
 
 // ── Pure core (no @Composable / composition-dependent APIs — Color/ThemeColors/Highlighter are
 // plain data with no UI-thread coupling, so this stays unit-testable without a harness, same split
@@ -238,15 +237,26 @@ internal fun minimapFirstVisibleIndexForViewportDrag(
     itemCount: Int,
     miniatureHeightPx: Float,
     stripHeightPx: Float,
+    minViewportHeightPx: Float,
 ): Int {
     val maxFirst = (itemCount - visibleItemCount).coerceAtLeast(0)
     if (maxFirst == 0 || miniatureHeightPx <= 0f || stripHeightPx <= 0f) return 0
-    val viewportHeightPx = (visibleItemCount.toFloat() / itemCount) * miniatureHeightPx
-    val viewportTravelPx = stripHeightPx - viewportHeightPx
-    if (viewportTravelPx <= 0f) return dragStartIndex.coerceIn(0, maxFirst)
-    return (dragStartIndex + dragDeltaPx * maxFirst / viewportTravelPx)
-        .roundToInt()
-        .coerceIn(0, maxFirst)
+    val startBounds = minimapViewportBounds(
+        firstVisibleItemIndex = dragStartIndex,
+        visibleItemCount = visibleItemCount,
+        itemCount = itemCount,
+        miniatureHeightPx = miniatureHeightPx,
+        stripHeightPx = stripHeightPx,
+        minViewportHeightPx = minViewportHeightPx,
+    ) ?: return dragStartIndex.coerceIn(0, maxFirst)
+    return minimapFirstVisibleIndexForViewportCenter(
+        pointerY = (startBounds.first + startBounds.second) / 2f + dragDeltaPx,
+        visibleItemCount = visibleItemCount,
+        itemCount = itemCount,
+        miniatureHeightPx = miniatureHeightPx,
+        stripHeightPx = stripHeightPx,
+        minViewportHeightPx = minViewportHeightPx,
+    )
 }
 
 /** Target first visible item for a press outside the viewport. Sublime centers the viewport on
@@ -262,13 +272,34 @@ internal fun minimapFirstVisibleIndexForViewportCenter(
 ): Int {
     val maxFirst = (itemCount - visibleItemCount).coerceAtLeast(0)
     if (maxFirst == 0 || miniatureHeightPx <= 0f || stripHeightPx <= 0f) return 0
-    val viewportHeightPx = ((visibleItemCount.toFloat() / itemCount) * miniatureHeightPx)
-        .coerceAtLeast(minViewportHeightPx)
-    val viewportTravelPx = stripHeightPx - viewportHeightPx
-    if (viewportTravelPx <= 0f) return 0
-    return ((pointerY - viewportHeightPx / 2f) * maxFirst / viewportTravelPx)
-        .roundToInt()
-        .coerceIn(0, maxFirst)
+    // This deliberately inverts minimapViewportBounds rather than relying on a simplified ratio.
+    // The miniature can scroll and the viewport can be height-clamped, so direct arithmetic drifts
+    // away from the rectangle the Canvas actually draws. A binary search is only O(log n) and makes
+    // both outside jumps and internal drags use the same exact on-screen coordinate system.
+    val targetY = pointerY.coerceIn(0f, stripHeightPx)
+    var low = 0
+    var high = maxFirst
+    var closest = 0
+    var closestDistance = Float.POSITIVE_INFINITY
+    while (low <= high) {
+        val candidate = (low + high) ushr 1
+        val bounds = minimapViewportBounds(
+            firstVisibleItemIndex = candidate,
+            visibleItemCount = visibleItemCount,
+            itemCount = itemCount,
+            miniatureHeightPx = miniatureHeightPx,
+            stripHeightPx = stripHeightPx,
+            minViewportHeightPx = minViewportHeightPx,
+        ) ?: break
+        val center = (bounds.first + bounds.second) / 2f
+        val distance = kotlin.math.abs(center - targetY)
+        if (distance < closestDistance) {
+            closest = candidate
+            closestDistance = distance
+        }
+        if (center < targetY) low = candidate + 1 else high = candidate - 1
+    }
+    return closest
 }
 
 // ── Compose wrapper ──────────────────────────────────────────────────
@@ -428,6 +459,7 @@ fun Minimap(
                                     itemCount = items.size,
                                     miniatureHeightPx = rowCount * rowHeightPx,
                                     stripHeightPx = heightPx.toFloat(),
+                                    minViewportHeightPx = rowHeightPx,
                                 )
                                 scope.launch { lazyState.scrollToItem(targetIndex) }
                             }

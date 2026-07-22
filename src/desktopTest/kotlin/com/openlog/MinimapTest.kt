@@ -352,6 +352,7 @@ class MinimapTest {
                 itemCount = 1_000,
                 miniatureHeightPx = 2_000f,
                 stripHeightPx = 200f,
+                minViewportHeightPx = 2f,
             ),
         )
     }
