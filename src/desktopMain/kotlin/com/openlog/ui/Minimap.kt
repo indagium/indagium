@@ -249,6 +249,28 @@ internal fun minimapFirstVisibleIndexForViewportDrag(
         .coerceIn(0, maxFirst)
 }
 
+/** Target first visible item for a press outside the viewport. Sublime centers the viewport on
+ * that press instead of putting the pointer on its top edge, which keeps click-to-jump predictable
+ * regardless of the viewport's height. */
+internal fun minimapFirstVisibleIndexForViewportCenter(
+    pointerY: Float,
+    visibleItemCount: Int,
+    itemCount: Int,
+    miniatureHeightPx: Float,
+    stripHeightPx: Float,
+    minViewportHeightPx: Float,
+): Int {
+    val maxFirst = (itemCount - visibleItemCount).coerceAtLeast(0)
+    if (maxFirst == 0 || miniatureHeightPx <= 0f || stripHeightPx <= 0f) return 0
+    val viewportHeightPx = ((visibleItemCount.toFloat() / itemCount) * miniatureHeightPx)
+        .coerceAtLeast(minViewportHeightPx)
+    val viewportTravelPx = stripHeightPx - viewportHeightPx
+    if (viewportTravelPx <= 0f) return 0
+    return ((pointerY - viewportHeightPx / 2f) * maxFirst / viewportTravelPx)
+        .roundToInt()
+        .coerceIn(0, maxFirst)
+}
+
 // ── Compose wrapper ──────────────────────────────────────────────────
 
 // Strip width. Rendered beside VerticalScrollbar (see LogViewer.kt's BoxWithConstraints wiring —
@@ -347,21 +369,15 @@ fun Minimap(
         val h = heightPx
         if (items.isEmpty() || h <= 0 || rowCount <= 0) return
         val miniatureHeightPx = rowCount * rowHeightPx
-        val scrollFraction = minimapScrollFraction(
-            lazyState.firstVisibleItemIndex,
-            lazyState.layoutInfo.visibleItemsInfo.size,
-            items.size,
+        val targetIndex = minimapFirstVisibleIndexForViewportCenter(
+            pointerY = y,
+            visibleItemCount = lazyState.layoutInfo.visibleItemsInfo.size,
+            itemCount = items.size,
+            miniatureHeightPx = miniatureHeightPx,
+            stripHeightPx = h.toFloat(),
+            minViewportHeightPx = rowHeightPx,
         )
-        val offsetPx = minimapScrollOffsetPx(scrollFraction, miniatureHeightPx, h.toFloat())
-        // The click lands in ON-SCREEN strip coordinates; adding back the scroll offset converts
-        // it into a position within the (possibly taller-than-the-strip) miniature before dividing
-        // into a row — see minimapScrollOffsetPx's doc and MinimapTest's dedicated coverage of this
-        // exact mapping (getting the sign/order wrong here sends jumps to the wrong place).
-        val row = ((y + offsetPx) / rowHeightPx).toInt().coerceIn(0, rowCount - 1)
-        val targetIndex = minimapItemIndexOf(row, items.size, rowCount)
-        // Immediate (non-animated) jump, same idiom as scrollForCursor/centerOnItem elsewhere in
-        // LogViewer.kt: animateScrollToItem takes several frames to settle, and a minimap click is
-        // a "land exactly here now" gesture, not something that benefits from an eased scroll.
+        // Immediate (non-animated) jump, so the centered viewport lands precisely under the press.
         scope.launch { lazyState.scrollToItem(targetIndex) }
     }
 

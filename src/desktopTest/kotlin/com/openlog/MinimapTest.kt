@@ -12,6 +12,7 @@ import com.openlog.ui.MINIMAP_MAX_BUCKETS
 import com.openlog.ui.MinimapWord
 import com.openlog.ui.computeMinimapBars
 import com.openlog.ui.minimapBucketOf
+import com.openlog.ui.minimapFirstVisibleIndexForViewportCenter
 import com.openlog.ui.minimapFirstVisibleIndexForViewportDrag
 import com.openlog.ui.minimapItemIndexOf
 import com.openlog.ui.minimapScrollFraction
@@ -351,6 +352,23 @@ class MinimapTest {
                 itemCount = 1_000,
                 miniatureHeightPx = 2_000f,
                 stripHeightPx = 200f,
+            ),
+        )
+    }
+
+    @Test
+    fun outsidePressCentersTheViewportOnThePointer() {
+        // The 20px viewport can travel 180px in a 200px strip. A press at y=100 is exactly the
+        // center, so its top should land at 90px — halfway through the travel and item range.
+        assertEquals(
+            495,
+            minimapFirstVisibleIndexForViewportCenter(
+                pointerY = 100f,
+                visibleItemCount = 10,
+                itemCount = 1_000,
+                miniatureHeightPx = 2_000f,
+                stripHeightPx = 200f,
+                minViewportHeightPx = 2f,
             ),
         )
     }
