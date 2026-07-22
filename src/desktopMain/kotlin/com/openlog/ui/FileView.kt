@@ -195,7 +195,7 @@ internal fun FileView(
             onCollapseAll = { state.collapseAll(tab.id) },
             onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
             onToggleTimeDelta = { state.toggleTimeDelta(tab.id) },
-            onOpenSearch = { state.openSearch(tab.id) },
+            onOpenSearch = { if (tab.search.active) state.closeSearch(tab.id) else state.openSearch(tab.id) },
             onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
             onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },
             onExportTxt = { state.exportFilteredTxt(tab.id) },

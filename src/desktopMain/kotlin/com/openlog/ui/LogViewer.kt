@@ -10,6 +10,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,6 +27,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.*
@@ -48,7 +51,6 @@ import com.openlog.utils.formatSignedDelta
 import com.openlog.utils.passesFilter
 import com.openlog.utils.regexRanges
 import com.openlog.utils.visibleLogLineText
-import com.openlog.utils.widestAdjacentGapMagnitudeMs
 import com.openlog.utils.widestAnchorDeltaMagnitudeMs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -68,6 +70,7 @@ private const val PAGE_JUMP_ROWS = 15
 private const val CTX_MENU_KEYBOARD_X_DP = 60f
 private const val LOADING_GRACE_MS = 250L
 private const val SPLICE_SUMMARY_GUARD_MIN_ITEMS = 4096
+private const val DOUBLE_CLICK_WINDOW_MS = 500L
 
 // Δt gutter cell (LogRow's deltaMs param) tints itself this color when the gap since the previous
 // visible row is at least this long — a fixed v1 threshold; a user-configurable one is out of scope
@@ -349,11 +352,11 @@ private const val GAP_MODE_SEED_CHARS = 6
 //     frame isn't visibly wrong while the scan is in flight.
 //
 // Both branches key on the tab id/size (so a tailed-in append or a tab switch recomputes) and the
-// anchor id (so selecting/deselecting a line recomputes) — deliberately NOT keyed on the filter or
-// scroll position, so the column stays the same width while scrolling or typing into a filter, per
-// the explicit "a column that resizes as you scroll is worse than the bug it fixes" requirement.
+// anchor id (so selecting/deselecting a line recomputes). Gap mode also keys on the actual visible
+// item list: sizing from the full unfiltered file left a large blank gutter when a hidden outlier
+// gap was the only long delta, which made otherwise identical files appear to have arbitrary spacing.
 @Composable
-private fun rememberTimeDeltaChars(tab: LogTab, selected: Set<Int>): Int {
+private fun rememberTimeDeltaChars(tab: LogTab, selected: Set<Int>, visibleItems: List<LogItem>): Int {
     if (!tab.showTimeDelta) return 1
     val anchorId = deltaAnchorId(selected)
     if (anchorId != null) {
@@ -369,15 +372,31 @@ private fun rememberTimeDeltaChars(tab: LogTab, selected: Set<Int>): Int {
         }
     }
 
-    var gapChars by remember(tab.id, tab.logData.size) { mutableStateOf(GAP_MODE_SEED_CHARS) }
-    LaunchedEffect(tab.id, tab.logData.size) {
+    var gapChars by remember(tab.id, tab.logData.size, visibleItems) { mutableStateOf(GAP_MODE_SEED_CHARS) }
+    LaunchedEffect(tab.id, tab.logData.size, visibleItems) {
         gapChars = withContext(Dispatchers.Default) {
-            // Passes tab.logData directly — widestAdjacentGapMagnitudeMs reads each entry's own
-            // ts, so this never materializes a second, equally huge List<String> just to call it.
-            formatDelta(widestAdjacentGapMagnitudeMs(tab.logData)).length
+            formatDelta(widestVisibleGapMagnitudeMs(visibleItems)).length
         }
     }
     return gapChars
+}
+
+private fun widestVisibleGapMagnitudeMs(items: List<LogItem>): Long {
+    var previousTs: String? = null
+    var widest = 0L
+    items.forEach { item ->
+        val ts = when (item) {
+            is LogItem.Row -> item.entry.ts
+            is LogItem.SeqHeader -> item.entry.ts
+            is LogItem.ManualHeader -> item.entry.ts
+            is LogItem.StackTraceHeader -> item.entry.ts
+        }
+        previousTs?.let { previous ->
+            deltaMillis(previous, ts)?.let { widest = maxOf(widest, kotlin.math.abs(it)) }
+        }
+        previousTs = ts
+    }
+    return widest
 }
 
 internal data class AnnotationNavigationTarget(
@@ -743,6 +762,7 @@ fun LogViewer(
 ) {
     val tc        = tc()
     val mono      = monoFont()
+    val toolbarDensity = LocalDensity.current
     val scrollStates = scrollStateStore ?: remember { LogViewerScrollStateStore() }
     val computedItems = rememberComputedLogItems(tab, true)
     val items = computedItems.items
@@ -764,6 +784,8 @@ fun LogViewer(
     var toolbarIndex by remember(tab.id) { mutableStateOf<Int?>(null) }
     var exportMenuOpen by remember(tab.id) { mutableStateOf(false) }
     var toolbarContextMenuOpen by remember(tab.id) { mutableStateOf(false) }
+    var toolbarContextMenuOffset by remember(tab.id) { mutableStateOf(IntOffset.Zero) }
+    var toolbarWidthPx by remember(tab.id) { mutableStateOf(0) }
 
     // Row bounds for global drag-select (plain HashMap avoids recomposition on scroll updates)
     val rowBoundsAbs = remember { HashMap<Int, Pair<Float, Float>>() }
@@ -793,12 +815,22 @@ fun LogViewer(
             Modifier.fillMaxWidth().height(34.dp)
                 .background(tc.p)
                 .border(BorderStroke(1.dp, tc.br))
+                .onSizeChanged { toolbarWidthPx = it.width }
                 .pointerInput("toolbar-context", tab.id) {
                     awaitPointerEventScope {
                         while (true) {
                             val event = awaitPointerEvent(PointerEventPass.Initial)
                             if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
                                 event.changes.forEach { it.consume() }
+                                val position = event.changes.firstOrNull()?.position ?: Offset.Zero
+                                val menuWidthPx = with(toolbarDensity) { 190.dp.toPx() }
+                                toolbarContextMenuOffset = IntOffset(
+                                    position.x.roundToInt().coerceIn(
+                                        0,
+                                        (toolbarWidthPx - menuWidthPx).roundToInt().coerceAtLeast(0),
+                                    ),
+                                    position.y.roundToInt().coerceAtLeast(0),
+                                )
                                 toolbarContextMenuOpen = true
                             }
                         }
@@ -834,8 +866,10 @@ fun LogViewer(
             )
             Spacer(Modifier.width(8.dp))
             AppButton(
-                "Search",
+                "",
                 onClick = onOpenSearch,
+                leadingIcon = Icons.Outlined.Search,
+                horizontalPadding = 8.dp,
                 modifier = Modifier.border(1.dp, if (toolbarIndex == 2) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(8.dp))
@@ -868,6 +902,7 @@ fun LogViewer(
                     onToggleRowNumbers = { toolbarContextMenuOpen = false; onToggleRowNumbers() },
                     onToggleMinimap = { toolbarContextMenuOpen = false; onToggleMinimap() },
                     onDismiss = { toolbarContextMenuOpen = false },
+                    offset = toolbarContextMenuOffset,
                     tc = tc,
                 )
             }
@@ -1463,7 +1498,7 @@ fun LogViewer(
                     SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
                     // Original panel anchors its own Δt width off localAllSelected — its OWN
                     // selection, independent of the Filtered panel's tab.selected below.
-                    val originalTimeDeltaChars = rememberTimeDeltaChars(tab, localAllSelected)
+                    val originalTimeDeltaChars = rememberTimeDeltaChars(tab, localAllSelected, allItems)
                     ColHeader(
                         hasPidTid,
                         showRowNumbers = settings.showRowNumbers,
@@ -1519,7 +1554,7 @@ fun LogViewer(
                             },
                         )
                     }
-                    val filteredTimeDeltaChars = rememberTimeDeltaChars(tab, tab.selected)
+                    val filteredTimeDeltaChars = rememberTimeDeltaChars(tab, tab.selected, items)
                     ColHeader(
                         hasPidTid,
                         showRowNumbers = settings.showRowNumbers,
@@ -1604,7 +1639,7 @@ fun LogViewer(
                     },
                 )
             }
-            val mainTimeDeltaChars = rememberTimeDeltaChars(tab, tab.selected)
+            val mainTimeDeltaChars = rememberTimeDeltaChars(tab, tab.selected, items)
             ColHeader(
                 hasPidTid,
                 showRowNumbers = settings.showRowNumbers,
@@ -1933,6 +1968,9 @@ private fun LogRow(
                     var pressMulti = false
                     var pressDragged = false
                     var pendingSelectedRowToggle: Job? = null
+                    var lastPrimaryPressMs = 0L
+                    var lastPrimaryPressPos = Offset.Unspecified
+                    var doubleClickInProgress = false
                     while (true) {
                         val ev = awaitPointerEvent(PointerEventPass.Initial)
                         when (ev.type) {
@@ -1960,7 +1998,15 @@ private fun LogRow(
                                     // press cancels it, while an ordinary single click still
                                     // deselects after the normal desktop double-click interval.
                                     pendingSelectedRowToggle?.cancel()
-                                    pressPos = ev.changes.firstOrNull()?.position
+                                    val position = ev.changes.firstOrNull()?.position
+                                    val now = System.currentTimeMillis()
+                                    doubleClickInProgress = position != null &&
+                                        lastPrimaryPressPos != Offset.Unspecified &&
+                                        now - lastPrimaryPressMs <= DOUBLE_CLICK_WINDOW_MS &&
+                                        (position - lastPrimaryPressPos).getDistance() <= 10f
+                                    lastPrimaryPressMs = now
+                                    if (position != null) lastPrimaryPressPos = position
+                                    pressPos = position
                                     pressShift = mods.isShiftPressed
                                     pressMulti = mods.isCtrlPressed || mods.isMetaPressed
                                     pressDragged = false
@@ -1989,10 +2035,10 @@ private fun LogRow(
                                 // (the second half of the double-click) immediately deselected it
                                 // again, and the Δt column's anchor mode flipped on then off inside
                                 // one user gesture — visible as the flicker this guards against.
-                                if (!pressDragged && pressPos != null && latestSelection.collapsed) {
+                                if (!doubleClickInProgress && !pressDragged && pressPos != null && latestSelection.collapsed) {
                                     if (latestIsSelected && !pressMulti && !pressShift) {
                                         pendingSelectedRowToggle = clickScope.launch {
-                                            kotlinx.coroutines.delay(350)
+                                            kotlinx.coroutines.delay(DOUBLE_CLICK_WINDOW_MS)
                                             onSelRow(entry.id, false, false)
                                         }
                                     } else {
@@ -2003,6 +2049,7 @@ private fun LogRow(
                                 pressShift = false
                                 pressMulti = false
                                 pressDragged = false
+                                doubleClickInProgress = false
                             }
                             else -> {}
                         }
@@ -2029,13 +2076,16 @@ private fun LogRow(
                     drawRect(groupColor.copy(alpha = 0.85f), topLeft = Offset(x, 0f), size = Size(2f, size.height))
                 }
             }
-            .padding(start = ROW_START_PAD + INDENT_STEP * item.indent, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
+            // Keep the optional gutters in a stable, file-wide column. Nesting indentation belongs
+            // to the log line itself, not to the row-number/Δt gutter; otherwise the same settings
+            // appear to create different gaps in different files depending on the visible group.
+            .padding(start = ROW_START_PAD, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // Optional left gutter showing the row's original (parse-order) row number — entry.id,
         // which is stable under filtering/folding so it always points at the same spot in the full
-        // file. Right-aligned in a fixed-width cell so numbers form a clean column; group/fold
-        // headers deliberately omit it and span the gutter (like an IDE's fold-region header).
+        // file. Left-aligned at the stable gutter origin; group/fold headers deliberately omit it
+        // and span the gutter (like an IDE's fold-region header).
         if (showRowNumbers) {
             // Size the number column to the widest row number in this tab (see ColHeader's "#" cell
             // for the matching header-side width), so a small-/mid-size log gets a tight gutter that
@@ -2082,6 +2132,9 @@ private fun LogRow(
                     modifier = Modifier.align(Alignment.CenterStart),
                 )
             }
+        }
+        if (item.indent > 0) {
+            Spacer(Modifier.width(INDENT_STEP * item.indent))
         }
         // Only merged tabs (utils/LogMerge.kt) ever set sourceTag — a small pinned (non-scrolling)
         // badge naming which original file a row came from, since a merged tab otherwise gives no
@@ -2543,11 +2596,12 @@ private fun ToolbarOptionsPopup(
     onToggleRowNumbers: () -> Unit,
     onToggleMinimap: () -> Unit,
     onDismiss: () -> Unit,
+    offset: IntOffset,
     tc: ThemeColors,
 ) {
     Popup(
         alignment = Alignment.TopStart,
-        offset = IntOffset(0, (34 * LocalDensity.current.density).roundToInt()),
+        offset = offset,
         onDismissRequest = onDismiss,
         properties = PopupProperties(focusable = true),
     ) {
