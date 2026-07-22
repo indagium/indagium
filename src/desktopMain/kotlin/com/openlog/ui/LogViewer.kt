@@ -61,8 +61,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.math.roundToInt
 import kotlin.coroutines.coroutineContext
+import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
 private const val PAGE_JUMP_ROWS = 15
@@ -905,8 +905,8 @@ fun LogViewer(
             listState: LazyListState? = null,
             externalFr: FocusRequester? = null,
             onFocusChangedExternal: (Boolean) -> Unit = {},
-    // Fixed Δt column width in characters, passed straight through to every LogRow so selecting
-    // an anchor never moves the rest of the log content.
+            // Fixed Δt column width in characters, passed straight through to every LogRow so selecting
+            // an anchor never moves the rest of the log content.
             timeDeltaChars: Int = 1,
         ) {
             if (listItems.isEmpty()) {
