@@ -167,8 +167,8 @@ class MinimapTest {
     }
 
     @Test
-    fun matchingEnabledHighlighterWinsOverGroupColorAndMutedDefault() {
-        val items = listOf(row(1, LogLevel.I, msg = "needle here", groupColor = Color.Blue))
+    fun matchingEnabledHighlighterWinsOverMutedDefault() {
+        val items = listOf(row(1, LogLevel.I, msg = "needle here"))
         val highlighters = listOf(hl("needle", Color.Yellow))
 
         val bars = computeMinimapBars(items, BitSet(), rowCount = 1, highlighters = highlighters, mutedColor = muted)
@@ -177,32 +177,38 @@ class MinimapTest {
     }
 
     @Test
-    fun disabledHighlighterIsSkippedFallingThroughToGroupColor() {
+    fun disabledHighlighterIsSkippedFallingThroughToMutedColor() {
+        // groupColor is set here too, deliberately — this also proves it's correctly ignored (see
+        // rowGroupColorIsIgnoredEvenWhenNothingElseMatches below for the dedicated case).
         val items = listOf(row(1, LogLevel.I, msg = "needle here", groupColor = Color.Blue))
         val highlighters = listOf(hl("needle", Color.Yellow, on = false))
 
         val bars = computeMinimapBars(items, BitSet(), rowCount = 1, highlighters = highlighters, mutedColor = muted)
 
-        assertEquals(Color.Blue, bars[0].color)
+        assertEquals(muted, bars[0].color)
     }
 
     @Test
-    fun nonMatchingHighlighterFallsThroughToGroupColor() {
+    fun nonMatchingHighlighterFallsThroughToMutedColor() {
         val items = listOf(row(1, LogLevel.I, msg = "nothing relevant here", groupColor = Color.Blue))
         val highlighters = listOf(hl("needle", Color.Yellow))
 
         val bars = computeMinimapBars(items, BitSet(), rowCount = 1, highlighters = highlighters, mutedColor = muted)
 
-        assertEquals(Color.Blue, bars[0].color)
+        assertEquals(muted, bars[0].color)
     }
 
     @Test
-    fun rowGroupColorIsUsedWhenPresentAndNothingElseMatches() {
+    fun rowGroupColorIsIgnoredEvenWhenNothingElseMatches() {
+        // LogItem.Row.groupColor is set on every MEMBER row of an expanded sequence/manual-collapse
+        // block, not just its header — consulting it here would paint the whole block one solid
+        // color. Only the block's own HEADER (SeqHeader.color / ManualHeader.color, see below) gets
+        // the group color; a member row falls through to the muted default like a plain line.
         val items = listOf(row(1, LogLevel.I, groupColor = Color.Blue))
 
         val bars = computeMinimapBars(items, BitSet(), rowCount = 1, highlighters = emptyList(), mutedColor = muted)
 
-        assertEquals(Color.Blue, bars[0].color)
+        assertEquals(muted, bars[0].color)
     }
 
     @Test
@@ -219,6 +225,22 @@ class MinimapTest {
         val bars = computeMinimapBars(listOf(header), BitSet(), rowCount = 1, highlighters = emptyList(), mutedColor = muted)
 
         assertEquals(Color.Magenta, bars[0].color)
+    }
+
+    @Test
+    fun manualHeaderOwnColorFieldIsUsedAsItsGroupColor() {
+        val header = LogItem.ManualHeader(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Tag", "msg"),
+            gid = "m_1",
+            direction = ManualCollapseDirection.RANGE,
+            expanded = false,
+            count = 1,
+            color = Color.Cyan,
+        )
+
+        val bars = computeMinimapBars(listOf(header), BitSet(), rowCount = 1, highlighters = emptyList(), mutedColor = muted)
+
+        assertEquals(Color.Cyan, bars[0].color)
     }
 
     @Test

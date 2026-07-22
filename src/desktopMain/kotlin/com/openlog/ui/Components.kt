@@ -289,9 +289,13 @@ fun ColHeader(
         if (showTimeDelta) {
             val deltaColWidth = timeDeltaColumnWidth(COL_HEADER_FONT_SP, timeDeltaChars)
             Box(Modifier.width(deltaColWidth)) {
+                // Left-aligned (CenterStart), matching the row's own Δt value below it (LogRow) —
+                // that cell is left-aligned too, so its left edge lands exactly where row content
+                // starts when the column is hidden. The "#" cell above stays right-aligned since
+                // row numbers themselves stay right-aligned.
                 AppText(
                     "Δt", color = tc.td, fontSize = COL_HEADER_FONT_SP.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.align(Alignment.CenterEnd),
+                    modifier = Modifier.align(Alignment.CenterStart),
                 )
             }
         }

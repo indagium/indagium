@@ -1,5 +1,6 @@
 package com.openlog.utils
 
+import com.openlog.model.LogEntry
 import java.util.Locale
 
 /** Returned by [parseMillisOfDay] for a `ts` that isn't a parseable `HH:MM:SS[.fraction]` string —
@@ -139,19 +140,34 @@ fun widestAnchorDeltaMagnitudeMs(firstTs: String, lastTs: String, anchorTs: Stri
     return maxOf(toFirst, toLast)
 }
 
-/** O(n) — the true widest magnitude among every CONSECUTIVE pair's delta in [ts] (parse order).
- *  This is the correct (and only correct) bound for the Δt gutter's GAP-mode column width, since
- *  gap mode renders exactly this quantity — ts[i] vs ts[i-1] — for every visible row. Unlike
- *  [widestAnchorDeltaMagnitudeMs], there is no O(1) shortcut: the largest adjacent gap can sit
- *  anywhere in the file, not just at the endpoints, so every pair must be checked. Callers on a
- *  multi-million-row tab MUST run this off the UI thread — see LogViewer.kt's
- *  rememberTimeDeltaChars, which mirrors ui/Minimap.kt's own off-thread pattern for exactly this
- *  reason. */
-fun widestAdjacentGapMagnitudeMs(ts: List<String>): Long {
+/** O(n) — the true widest magnitude among every CONSECUTIVE pair's delta across [entries]' own
+ *  `ts` fields (parse order). This is the correct (and only correct) bound for the Δt gutter's
+ *  GAP-mode column width, since gap mode renders exactly this quantity — entries[i].ts vs
+ *  entries[i-1].ts — for every visible row. Unlike [widestAnchorDeltaMagnitudeMs], there is no
+ *  O(1) shortcut: the largest adjacent gap can sit anywhere in the file, not just at the
+ *  endpoints, so every pair must be checked. Callers on a multi-million-row tab MUST run this off
+ *  the UI thread — see LogViewer.kt's rememberTimeDeltaChars, which mirrors ui/Minimap.kt's own
+ *  off-thread pattern for exactly this reason.
+ *
+ *  Takes [entries] directly (not a `List<String>` of timestamps) so a multi-million-row tab never
+ *  materializes a second, equally huge list just to call this. Each entry's `ts` is parsed exactly
+ *  ONCE — `prevMillis` carries the previous iteration's already-parsed value forward instead of
+ *  going through [deltaMillis] (which would parse BOTH its arguments on every call, meaning every
+ *  entry's ts got parsed twice over a full pass: once as "cur" for its own gap, again as "prev"
+ *  for the next one). */
+fun widestAdjacentGapMagnitudeMs(entries: List<LogEntry>): Long {
+    if (entries.isEmpty()) return 0L
     var widest = 0L
-    for (i in 1 until ts.size) {
-        val gap = deltaMillis(ts[i - 1], ts[i])?.let { kotlin.math.abs(it) } ?: 0L
-        if (gap > widest) widest = gap
+    var prevMillis = parseMillisOfDay(entries[0].ts)
+    for (i in 1 until entries.size) {
+        val curMillis = parseMillisOfDay(entries[i].ts)
+        if (prevMillis != TS_UNKNOWN && curMillis != TS_UNKNOWN) {
+            var delta = curMillis - prevMillis
+            if (delta < -ROLLOVER_THRESHOLD_MS) delta += HOURS_PER_DAY * MILLIS_PER_HOUR
+            val gap = kotlin.math.abs(delta)
+            if (gap > widest) widest = gap
+        }
+        prevMillis = curMillis
     }
     return widest
 }

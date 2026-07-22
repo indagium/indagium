@@ -1,5 +1,7 @@
 package com.openlog
 
+import com.openlog.model.LogEntry
+import com.openlog.model.LogLevel
 import com.openlog.utils.TS_UNKNOWN
 import com.openlog.utils.deltaAnchorId
 import com.openlog.utils.deltaMillis
@@ -13,6 +15,11 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 class LogTimeTest {
+    // widestAdjacentGapMagnitudeMs takes entries (not raw ts strings) — only ts matters for these
+    // fixtures, everything else is a filler value.
+    private fun entriesWithTs(vararg ts: String): List<LogEntry> =
+        ts.mapIndexed { i, t -> LogEntry(i + 1, t, LogLevel.I, "Tag", "msg") }
+
     @Test
     fun parsesAValidThreeDigitFractionTimestamp() {
         // 1h 2m 3s .456 = ((1*3600)+(2*60)+3)*1000 + 456
@@ -146,14 +153,14 @@ class LogTimeTest {
         // result must be exactly that 250ms, not the (much larger) first-to-last span, and not one
         // of the surrounding 5ms gaps either.
         // "10:00:00.255" is the +250ms adjacent gap; the pairs on either side of it are all 5ms.
-        val timestamps = listOf(
+        val entries = entriesWithTs(
             "10:00:00.000",
             "10:00:00.005",
             "10:00:00.255",
             "10:00:00.260",
             "10:00:00.265",
         )
-        assertEquals(250L, widestAdjacentGapMagnitudeMs(timestamps))
+        assertEquals(250L, widestAdjacentGapMagnitudeMs(entries))
     }
 
     @Test
@@ -165,7 +172,7 @@ class LogTimeTest {
         // Total span (first to last) is ~2h13m, but this function only ever looks at consecutive
         // PAIRS — there's exactly one huge pair here (the last two), which is legitimately the
         // widest adjacent gap.
-        val timestamps = listOf(
+        val entries = entriesWithTs(
             "10:00:00.000",
             "10:00:00.005",
             "10:00:00.010",
@@ -173,12 +180,12 @@ class LogTimeTest {
             "12:13:45.000",
         )
         // 12:13:45.000 - 10:00:00.015
-        assertEquals(8_024_985L, widestAdjacentGapMagnitudeMs(timestamps))
+        assertEquals(8_024_985L, widestAdjacentGapMagnitudeMs(entries))
 
         // Same total span shape, but with NO stall anywhere — every consecutive pair is 5ms. This
         // is the actual regression case: the widest adjacent gap must be tiny even though nothing
         // here bounds it away from the (nonexistent, in this fixture) total-span number.
-        val allNarrowGaps = listOf(
+        val allNarrowGaps = entriesWithTs(
             "10:00:00.000",
             "10:00:00.005",
             "10:00:00.010",
@@ -191,7 +198,7 @@ class LogTimeTest {
     @Test
     fun widestAdjacentGapMagnitudeIgnoresUnparseablePairs() {
         assertEquals(0L, widestAdjacentGapMagnitudeMs(emptyList()))
-        assertEquals(0L, widestAdjacentGapMagnitudeMs(listOf("10:00:00.000")))
-        assertEquals(0L, widestAdjacentGapMagnitudeMs(listOf("", "")))
+        assertEquals(0L, widestAdjacentGapMagnitudeMs(entriesWithTs("10:00:00.000")))
+        assertEquals(0L, widestAdjacentGapMagnitudeMs(entriesWithTs("", "")))
     }
 }

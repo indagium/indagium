@@ -102,8 +102,12 @@ private fun isCrashItem(item: LogItem, crashIds: BitSet): Boolean =
 //   3. The first enabled, matching highlighter from `highlighters` (tab.filter.highlighters) —
 //      reuses hlRanges (LogViewer.kt), the SAME matcher LogRow itself calls from
 //      buildFullLineAnnotation, rather than a second one that could drift from it.
-//   4. A group/collapse color — LogItem.Row.groupColor, or the header variants' own `color` field
-//      (StackTraceHeader has none, but it's already handled by crash precedence above).
+//   4. A group/collapse HEADER's own color — SeqHeader.color / ManualHeader.color (StackTraceHeader
+//      has none, but it's already handled by crash precedence above). Deliberately NOT
+//      LogItem.Row.groupColor: that field is set on every MEMBER row of an expanded sequence/
+//      manual-collapse block too, and painting every member the group color made the whole block
+//      read as one solid slab on the strip. Only the block's HEADER gets the color; a member row
+//      falls through to its own level color or the muted default like any other line.
 //   5. Otherwise, [mutedColor] — the same treatment V/D/plain-Info rows get, so the noise floor
 //      stays quiet and an actually-colored row means something.
 private fun resolveMinimapColor(
@@ -126,13 +130,13 @@ private fun resolveMinimapColor(
             if (hlRanges(lineText, hl, regexContext).isNotEmpty()) return hl.color
         }
     }
-    val groupColor = when (item) {
-        is LogItem.Row -> item.groupColor
+    val headerColor = when (item) {
+        is LogItem.Row -> null
         is LogItem.SeqHeader -> item.color
         is LogItem.ManualHeader -> item.color
         is LogItem.StackTraceHeader -> null
     }
-    return groupColor ?: mutedColor
+    return headerColor ?: mutedColor
 }
 
 /** Maps a display-order item index to the `[0, rowCount)` drawable row it falls in — the forward
@@ -205,9 +209,18 @@ fun minimapScrollOffsetPx(scrollFraction: Float, miniatureHeightPx: Float, strip
 
 // Strip width. Rendered beside VerticalScrollbar (see LogViewer.kt's BoxWithConstraints wiring —
 // both are shown together, Sublime-style; verticalScrollbarGutterPx there is sized against
-// 16.dp + MINIMAP_WIDTH, additive, not a max, since both bars are present at once). Wide enough
-// (64dp) that the per-line word-shape texture actually reads.
+// 16.dp + MINIMAP_WIDTH + MINIMAP_CONTENT_GAP, additive, not a max, since both bars are present at
+// once). Wide enough (64dp) that the per-line word-shape texture actually reads.
 val MINIMAP_WIDTH = 64.dp
+
+// Visual gap between the log content and the minimap+scrollbar cluster — in Sublime the minimap is
+// visually separated from the text it summarizes, not butted directly against it. Applied as
+// leading space on the Row that holds Minimap+VerticalScrollbar (see LogViewer.kt), only when the
+// minimap itself is shown (a bare VerticalScrollbar was never the thing users found cramped).
+// internal (not private) so LogViewer.kt can reuse the exact same value for
+// verticalScrollbarGutterPx — re-deriving that constant by hand a third time is exactly how it kept
+// going stale.
+internal val MINIMAP_CONTENT_GAP = 6.dp
 
 // Height of one drawn row. Small and fixed, like Sublime's own minimap rows — this is what lets
 // the strip show a full multi-million-line file's texture at a readable per-row scale.

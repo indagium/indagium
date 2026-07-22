@@ -370,7 +370,9 @@ private fun rememberTimeDeltaChars(tab: LogTab, selected: Set<Int>): Int {
     var gapChars by remember(tab.id, tab.logData.size) { mutableStateOf(GAP_MODE_SEED_CHARS) }
     LaunchedEffect(tab.id, tab.logData.size) {
         gapChars = withContext(Dispatchers.Default) {
-            formatDelta(widestAdjacentGapMagnitudeMs(tab.logData.map { it.ts })).length
+            // Passes tab.logData directly — widestAdjacentGapMagnitudeMs reads each entry's own
+            // ts, so this never materializes a second, equally huge List<String> just to call it.
+            formatDelta(widestAdjacentGapMagnitudeMs(tab.logData)).length
         }
     }
     return gapChars
@@ -880,12 +882,15 @@ fun LogViewer(
             // Must cover EVERYTHING drawn in the CenterEnd column beside the log rows — the
             // Minimap strip AND VerticalScrollbar now render side by side there when
             // settings.showMinimap is on (see the BoxWithConstraints wiring below), so this is
-            // additive, not a max. Getting this wrong was flagged repeatedly as the #1 trap for
-            // the minimap feature: a drag starting on either bar would fall inside the region this
+            // additive, not a max. Re-derived from MINIMAP_WIDTH/MINIMAP_CONTENT_GAP (Minimap.kt)
+            // rather than hand-copied, since this exact constant has gone stale twice already —
+            // once when the minimap's width changed and once when the content gap was added.
+            // Getting it wrong is the #1 trap for this feature: a drag starting on either bar (or
+            // now, on the gap between the content and the bars) would fall inside the region this
             // pointerInput treats as "on a row" and begin a row range-selection underneath it,
             // instead of being ignored the way a scrollbar-area drag already is.
             val verticalScrollbarGutterPx = with(density) {
-                (16.dp + if (settings.showMinimap) MINIMAP_WIDTH else 0.dp).toPx()
+                (16.dp + if (settings.showMinimap) MINIMAP_WIDTH + MINIMAP_CONTENT_GAP else 0.dp).toPx()
             }
             val horizontalScrollbarGutterPx = with(density) { 18.dp.toPx() }
             val visibleIds = listSummary.allIds
@@ -1172,16 +1177,28 @@ fun LogViewer(
                                             SeqHeaderRow(
                                                 item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
                                                 isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
+                                                showTimeDelta = effectiveTab.showTimeDelta,
+                                                deltaMs = deltaMs,
+                                                deltaSelectionAnchored = deltaAnchorEntryId != null,
+                                                timeDeltaChars = timeDeltaChars,
                                             )
                                         is LogItem.ManualHeader ->
                                             ManualHeaderRow(
                                                 item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
                                                 isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
+                                                showTimeDelta = effectiveTab.showTimeDelta,
+                                                deltaMs = deltaMs,
+                                                deltaSelectionAnchored = deltaAnchorEntryId != null,
+                                                timeDeltaChars = timeDeltaChars,
                                             )
                                         is LogItem.StackTraceHeader ->
                                             StackTraceHeaderRow(
                                                 item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
                                                 isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
+                                                showTimeDelta = effectiveTab.showTimeDelta,
+                                                deltaMs = deltaMs,
+                                                deltaSelectionAnchored = deltaAnchorEntryId != null,
+                                                timeDeltaChars = timeDeltaChars,
                                             )
                                     }
                                 }
@@ -1194,8 +1211,15 @@ fun LogViewer(
                         // log content), not instead of it — Sublime shows both, and so does this.
                         // Both live in one right-aligned Row so they share the CenterEnd slot
                         // cleanly; see verticalScrollbarGutterPx above for the matching (additive)
-                        // drag-select sizing this requires.
-                        Row(Modifier.align(Alignment.CenterEnd).fillMaxHeight()) {
+                        // drag-select sizing this requires. Leading start-padding (only when the
+                        // minimap itself is shown — see MINIMAP_CONTENT_GAP's own doc) is what
+                        // visually separates the strip from the log content behind it, the same way
+                        // Sublime's own minimap never butts directly against the text; nothing is
+                        // drawn in that padding, so the content's own background shows through it.
+                        Row(
+                            Modifier.align(Alignment.CenterEnd).fillMaxHeight()
+                                .then(if (settings.showMinimap) Modifier.padding(start = MINIMAP_CONTENT_GAP) else Modifier),
+                        ) {
                             if (settings.showMinimap) {
                                 Minimap(
                                     items = listItems,
@@ -1895,7 +1919,22 @@ private fun LogRow(
                                 }
                             }
                             PointerEventType.Release -> {
-                                if (!pressDragged && pressPos != null) {
+                                // sel reflects whatever BasicTextField's own gesture handling did
+                                // with THIS click by the time its Release arrives here — text
+                                // selection (double-click-to-select-word, in particular) happens on
+                                // the PRESS half of a click, not the release, so by Release time
+                                // `sel` already carries the new selection Press produced. A plain
+                                // click (cursor placement, no drag) always ends up COLLAPSED, so
+                                // this doesn't change ordinary click-to-select-row behavior at all.
+                                //
+                                // Without the sel.collapsed check: a double-click to select a word
+                                // is, from this handler's point of view, two ordinary clicks in
+                                // quick succession. AppState.selRow TOGGLES an already-selected row
+                                // off on a repeat plain click — so click 1 selected the row, click 2
+                                // (the second half of the double-click) immediately deselected it
+                                // again, and the Δt column's anchor mode flipped on then off inside
+                                // one user gesture — visible as the flicker this guards against.
+                                if (!pressDragged && pressPos != null && sel.collapsed) {
                                     onSelRow(entry.id, pressMulti, pressShift)
                                 }
                                 pressPos = null
@@ -1956,9 +1995,19 @@ private fun LogRow(
         // — never invented as a zero). A gap over DELTA_WARN_THRESHOLD_MS is tinted the same
         // warning color as a W-level row, but only in gap mode — see deltaSelectionAnchored's doc
         // for why that tint is suppressed once the column means "distance from selection" instead.
+        //
+        // LEFT-aligned, flush with this Box's own start (no leading padding) — deliberately, so the
+        // Δt VALUE's own left edge lands exactly where row content starts when the column is
+        // hidden (enabling Δt must not invent a new left margin). The box's own width still
+        // reserves deltaColWidth + ROW_NUM_GAP, same total footprint as the row-number gutter uses;
+        // since timeDeltaChars already sizes deltaColWidth to the widest string this tab/mode
+        // actually renders, that width is mostly filled by the text itself, and the small
+        // difference (ROW_NUM_GAP) becomes the trailing gap before whatever comes next — the same
+        // gap the row-number gutter gets, just achieved by leaving the end open instead of an
+        // explicit end-padding, because THIS text is left- not right-aligned.
         if (showTimeDelta) {
             val deltaColWidth = timeDeltaColumnWidth(fontSize.value, timeDeltaChars)
-            Box(Modifier.width(deltaColWidth + ROW_NUM_GAP).padding(end = ROW_NUM_GAP)) {
+            Box(Modifier.width(deltaColWidth + ROW_NUM_GAP)) {
                 AppText(
                     deltaMs?.let { if (deltaSelectionAnchored) formatSignedDelta(it) else formatDelta(it) } ?: "—",
                     color = if (!deltaSelectionAnchored && deltaMs != null && deltaMs >= DELTA_WARN_THRESHOLD_MS) {
@@ -1968,7 +2017,7 @@ private fun LogRow(
                     },
                     fontSize = fontSize, fontFamily = mono, maxLines = 1,
                     overflow = TextOverflow.Clip,
-                    modifier = Modifier.align(Alignment.CenterEnd),
+                    modifier = Modifier.align(Alignment.CenterStart),
                 )
             }
         }
@@ -2024,6 +2073,52 @@ private fun CollapseChevron(expanded: Boolean, color: Color, mono: FontFamily, o
     }
 }
 
+// Shared Δt gutter cell for the three group/collapse header row types below (SeqHeaderRow/
+// ManualHeaderRow/StackTraceHeaderRow) — rendered "exactly as a plain row does": same width
+// formula (timeDeltaColumnWidth), same left alignment and warn-tint rule, same "—" no-baseline
+// placeholder, using the header's OWN entry (its ts is what deltaMs was already computed against
+// upstream, same as any other item — see the itemsIndexed lambda's shared deltaMs block).
+//
+// Deliberately positioned as the FIRST element in each header's Row, before even the collapse
+// chevron — that's what makes its left edge land at the same x as LogRow's own Δt cell (which is
+// also the first thing after the row's own start-pad, when showRowNumbers is off).
+//
+// This is a real, if narrow, divergence from the row-number gutter's treatment of headers:
+// row-number gutter stays entirely OMITTED/spanned here (unchanged — headers never show row
+// numbers, regardless of settings.showRowNumbers), but the Δt cell is NOT spanned — it renders a
+// real value. One consequence: if a user has BOTH showRowNumbers AND showTimeDelta on, a plain
+// row's Δt cell sits to the right of its row-number gutter, while a header's Δt cell (having no
+// row-number gutter to sit after) stays flush left — the two Δt columns won't perfectly x-align in
+// that specific combined-settings case. Accepted rather than also reserving a phantom row-number-
+// width spacer here, which would have meant reintroducing the row-number gutter's own layout for
+// headers just to keep two settings that are usually used one-at-a-time in perfect lockstep.
+@Composable
+private fun HeaderTimeDeltaCell(
+    showTimeDelta: Boolean,
+    deltaMs: Long?,
+    deltaSelectionAnchored: Boolean,
+    timeDeltaChars: Int,
+    mono: FontFamily,
+    tc: ThemeColors,
+) {
+    if (!showTimeDelta) return
+    val fontSize = baseSp()
+    val deltaColWidth = timeDeltaColumnWidth(fontSize.value, timeDeltaChars)
+    Box(Modifier.width(deltaColWidth + ROW_NUM_GAP)) {
+        AppText(
+            deltaMs?.let { if (deltaSelectionAnchored) formatSignedDelta(it) else formatDelta(it) } ?: "—",
+            color = if (!deltaSelectionAnchored && deltaMs != null && deltaMs >= DELTA_WARN_THRESHOLD_MS) {
+                LogLevel.W.defaultColor
+            } else {
+                tc.td
+            },
+            fontSize = fontSize, fontFamily = mono, maxLines = 1,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier.align(Alignment.CenterStart),
+        )
+    }
+}
+
 @Composable
 private fun SeqHeaderRow(
     item: LogItem.SeqHeader,
@@ -2041,6 +2136,10 @@ private fun SeqHeaderRow(
     // utils/LogSearch.kt) without reworking every header composable onto AnnotatedString rendering.
     isSearchMatch: Boolean = false,
     isCurrentSearchMatch: Boolean = false,
+    showTimeDelta: Boolean = false,
+    deltaMs: Long? = null,
+    deltaSelectionAnchored: Boolean = false,
+    timeDeltaChars: Int = 1,
 ) {
     val density = LocalDensity.current.density
     val sc  = item.color
@@ -2111,6 +2210,7 @@ private fun SeqHeaderRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
         CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
@@ -2133,6 +2233,10 @@ private fun ManualHeaderRow(
     rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
     isSearchMatch: Boolean = false,
     isCurrentSearchMatch: Boolean = false,
+    showTimeDelta: Boolean = false,
+    deltaMs: Long? = null,
+    deltaSelectionAnchored: Boolean = false,
+    timeDeltaChars: Int = 1,
 ) {
     val density = LocalDensity.current.density
     val sc = item.color
@@ -2195,6 +2299,7 @@ private fun ManualHeaderRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
         CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
         val label = when (item.direction) {
             ManualCollapseDirection.TO_START -> "Collapsed to file start"
@@ -2225,6 +2330,10 @@ private fun StackTraceHeaderRow(
     rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
     isSearchMatch: Boolean = false,
     isCurrentSearchMatch: Boolean = false,
+    showTimeDelta: Boolean = false,
+    deltaMs: Long? = null,
+    deltaSelectionAnchored: Boolean = false,
+    timeDeltaChars: Int = 1,
 ) {
     val density = LocalDensity.current.density
     val sc = DANGER_RED
@@ -2295,6 +2404,7 @@ private fun StackTraceHeaderRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
         CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
