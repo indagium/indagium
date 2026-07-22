@@ -51,7 +51,6 @@ import com.openlog.utils.formatSignedDelta
 import com.openlog.utils.passesFilter
 import com.openlog.utils.regexRanges
 import com.openlog.utils.visibleLogLineText
-import com.openlog.utils.widestAnchorDeltaMagnitudeMs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -327,77 +326,14 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
     return computed
 }
 
-// Seed for the gap-mode branch of rememberTimeDeltaChars below, used for the first paint while its
-// off-thread scan is still running. A plain sub-minute gap ("+0.000"-shaped, 6 chars) is the
-// overwhelmingly common case — consecutive rows in a real logcat are almost always milliseconds
-// apart — so seeding with it means the very first frame already looks like the eventual answer
-// instead of flashing some other width and then resizing once the scan lands.
-private const val GAP_MODE_SEED_CHARS = 6
+// Keep the Δt gutter fixed while its meaning changes between "gap to previous row" and
+// "distance from selected row". The widest possible value is "+24h00m00s" (10 characters), so
+// a constant budget prevents a row selection from shifting every timestamp and breaking a
+// double-click midway through word selection.
+private const val TIME_DELTA_COLUMN_CHARS = 10
 
-// Character budget for the Δt gutter (Theme.kt's timeDeltaColumnWidth), sized from the widest
-// delta string actually rendered for this tab/mode instead of a fixed worst-case width.
-// `selected` is passed in separately from `tab` (rather than reading tab.selected directly)
-// because split view's Original panel anchors off its own local selection, not the tab's — see
-// this function's call sites below.
-//
-// The two modes are NOT computed the same way — see widestAnchorDeltaMagnitudeMs/
-// widestAdjacentGapMagnitudeMs's own docs for why collapsing them back into one shortcut is
-// exactly the bug this split fixes:
-//   - Anchor mode (a row selected): O(1), bounded by the two endpoints — cheap enough to compute
-//     synchronously inside `remember`.
-//   - Gap mode (no selection): the real bound is the single largest ADJACENT-row gap anywhere in
-//     tab.logData, which needs an O(n) scan — tab.logData can be millions of rows, so this runs
-//     off the UI thread via LaunchedEffect + Dispatchers.Default, the same pattern ui/Minimap.kt
-//     already uses for its own O(n) bucket pass, and is seeded (GAP_MODE_SEED_CHARS) so the first
-//     frame isn't visibly wrong while the scan is in flight.
-//
-// Both branches key on the tab id/size (so a tailed-in append or a tab switch recomputes) and the
-// anchor id (so selecting/deselecting a line recomputes). Gap mode also keys on the actual visible
-// item list: sizing from the full unfiltered file left a large blank gutter when a hidden outlier
-// gap was the only long delta, which made otherwise identical files appear to have arbitrary spacing.
-@Composable
-private fun rememberTimeDeltaChars(tab: LogTab, selected: Set<Int>, visibleItems: List<LogItem>): Int {
-    if (!tab.showTimeDelta) return 1
-    val anchorId = deltaAnchorId(selected)
-    if (anchorId != null) {
-        return remember(tab.id, tab.logData.size, anchorId) {
-            val firstTs = tab.logData.firstOrNull()?.ts
-            val lastTs = tab.logData.lastOrNull()?.ts
-            val anchorTs = tab.rmap[anchorId]?.ts
-            if (firstTs == null || lastTs == null || anchorTs == null) {
-                1
-            } else {
-                formatDelta(widestAnchorDeltaMagnitudeMs(firstTs, lastTs, anchorTs)).length
-            }
-        }
-    }
-
-    var gapChars by remember(tab.id, tab.logData.size, visibleItems) { mutableStateOf(GAP_MODE_SEED_CHARS) }
-    LaunchedEffect(tab.id, tab.logData.size, visibleItems) {
-        gapChars = withContext(Dispatchers.Default) {
-            formatDelta(widestVisibleGapMagnitudeMs(visibleItems)).length
-        }
-    }
-    return gapChars
-}
-
-private fun widestVisibleGapMagnitudeMs(items: List<LogItem>): Long {
-    var previousTs: String? = null
-    var widest = 0L
-    items.forEach { item ->
-        val ts = when (item) {
-            is LogItem.Row -> item.entry.ts
-            is LogItem.SeqHeader -> item.entry.ts
-            is LogItem.ManualHeader -> item.entry.ts
-            is LogItem.StackTraceHeader -> item.entry.ts
-        }
-        previousTs?.let { previous ->
-            deltaMillis(previous, ts)?.let { widest = maxOf(widest, kotlin.math.abs(it)) }
-        }
-        previousTs = ts
-    }
-    return widest
-}
+private fun timeDeltaChars(showTimeDelta: Boolean): Int =
+    if (showTimeDelta) TIME_DELTA_COLUMN_CHARS else 1
 
 internal data class AnnotationNavigationTarget(
     val filteredEntryId: Int?,
@@ -868,8 +804,9 @@ fun LogViewer(
             AppButton(
                 "",
                 onClick = onOpenSearch,
+                variant = if (tab.search.active) ButtonVariant.Primary else ButtonVariant.Secondary,
                 leadingIcon = Icons.Outlined.Search,
-                horizontalPadding = 8.dp,
+                horizontalPadding = 10.dp,
                 modifier = Modifier.border(1.dp, if (toolbarIndex == 2) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(8.dp))
@@ -928,9 +865,8 @@ fun LogViewer(
             listState: LazyListState? = null,
             externalFr: FocusRequester? = null,
             onFocusChangedExternal: (Boolean) -> Unit = {},
-            // Δt column width in characters, precomputed once for this panel by the caller
-            // (rememberTimeDeltaChars) and passed straight through to every LogRow — see that
-            // function's doc for why this must NOT be recomputed per row.
+    // Fixed Δt column width in characters, passed straight through to every LogRow so selecting
+    // an anchor never moves the rest of the log content.
             timeDeltaChars: Int = 1,
         ) {
             if (listItems.isEmpty()) {
@@ -1496,9 +1432,9 @@ fun LogViewer(
                 // Fixed height for Panel1 → cursor drag adds directly to splitDp → 1:1 tracking.
                 Column(Modifier.fillMaxWidth().height(effectiveSplitDp.dp)) {
                     SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
-                    // Original panel anchors its own Δt width off localAllSelected — its OWN
-                    // selection, independent of the Filtered panel's tab.selected below.
-                    val originalTimeDeltaChars = rememberTimeDeltaChars(tab, localAllSelected, allItems)
+                    // Original panel's Δt values use its local selection, independent of the
+                    // Filtered panel's tab.selected below; the gutter width itself stays fixed.
+                    val originalTimeDeltaChars = timeDeltaChars(tab.showTimeDelta)
                     ColHeader(
                         hasPidTid,
                         showRowNumbers = settings.showRowNumbers,
@@ -1554,7 +1490,7 @@ fun LogViewer(
                             },
                         )
                     }
-                    val filteredTimeDeltaChars = rememberTimeDeltaChars(tab, tab.selected, items)
+                    val filteredTimeDeltaChars = timeDeltaChars(tab.showTimeDelta)
                     ColHeader(
                         hasPidTid,
                         showRowNumbers = settings.showRowNumbers,
@@ -1639,7 +1575,7 @@ fun LogViewer(
                     },
                 )
             }
-            val mainTimeDeltaChars = rememberTimeDeltaChars(tab, tab.selected, items)
+            val mainTimeDeltaChars = timeDeltaChars(tab.showTimeDelta)
             ColHeader(
                 hasPidTid,
                 showRowNumbers = settings.showRowNumbers,
@@ -1898,11 +1834,8 @@ private fun LogRow(
     // and suppresses the stall-warning tint below — a row simply being far from the selection
     // isn't a "stall," so lighting up half the column in warning color would be noise, not signal.
     deltaSelectionAnchored: Boolean = false,
-    // Δt column width in characters — precomputed ONCE per tab/mode by the caller
-    // (LogViewer.kt's rememberTimeDeltaChars) from the widest delta string this tab/mode will
-    // actually render, not recomputed per row. Mirrors rowNumDigits' role for the row-number
-    // gutter above: same shape, same "caller derives the digit/char count once, every row and the
-    // header both consume it" split.
+    // Fixed Δt column width in characters. Its constant value mirrors rowNumDigits' role for the
+    // row-number gutter: every row and the header consume the same budget.
     timeDeltaChars: Int = 1,
     searchHighlight: SearchHighlight? = null,
 ) {
@@ -2112,9 +2045,8 @@ private fun LogRow(
         // Δt VALUE's own left edge lands exactly where row content starts when the column is
         // hidden (enabling Δt must not invent a new left margin). The box's own width still
         // reserves deltaColWidth + ROW_NUM_GAP, same total footprint as the row-number gutter uses;
-        // since timeDeltaChars already sizes deltaColWidth to the widest string this tab/mode
-        // actually renders, that width is mostly filled by the text itself, and the small
-        // difference (ROW_NUM_GAP) becomes the trailing gap before whatever comes next — the same
+        // since timeDeltaChars is fixed, that width remains stable while selecting a row, and the
+        // small difference (ROW_NUM_GAP) becomes the trailing gap before whatever comes next — the same
         // gap the row-number gutter gets, just achieved by leaving the end open instead of an
         // explicit end-padding, because THIS text is left- not right-aligned.
         if (showTimeDelta) {

@@ -263,11 +263,8 @@ fun ColHeader(
     showRowNumbers: Boolean = false,
     rowNumDigits: Int = 1,
     showTimeDelta: Boolean = false,
-    // Sized to the widest Δt string actually rendered for the row gutter below (see
-    // LogViewer.kt's rememberTimeDeltaChars) — the caller passes the SAME int this and the row
-    // gutter both got it from, exactly like rowNumDigits does for the "#" cell, so this cell's own
-    // (COL_HEADER_FONT_SP-sized) width formula tracks the row's (fontSize-sized) one instead of
-    // drifting from it.
+    // Fixed to the same Δt character budget as the row gutter below. This keeps the header and
+    // rows aligned while selecting an anchor.
     timeDeltaChars: Int = 1,
 ) {
     val tc = tc()
@@ -706,18 +703,24 @@ fun AppButton(
         // I-beam cursor on hover instead of looking clickable.
         DisableSelection {
             Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                horizontalArrangement = if (leadingIcon != null && label.isEmpty()) {
+                    Arrangement.Center
+                } else {
+                    Arrangement.spacedBy(4.dp)
+                },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 leadingIcon?.let {
                     Icon(it, contentDescription = null, modifier = Modifier.size(14.dp), tint = textColor)
                 }
-                AppText(
-                    label,
-                    color = textColor,
-                    fontSize = 12.sp,
-                    fontWeight = if (variant == ButtonVariant.Primary) FontWeight.Medium else FontWeight.Normal,
-                )
+                if (label.isNotEmpty()) {
+                    AppText(
+                        label,
+                        color = textColor,
+                        fontSize = 12.sp,
+                        fontWeight = if (variant == ButtonVariant.Primary) FontWeight.Medium else FontWeight.Normal,
+                    )
+                }
             }
         }
     }
