@@ -1232,6 +1232,7 @@ fun LogViewer(
                                             SeqHeaderRow(
                                                 item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
                                                 isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
+                                                showRowNumbers = settings.showRowNumbers,
                                                 showTimeDelta = effectiveTab.showTimeDelta,
                                                 deltaMs = deltaMs,
                                                 deltaSelectionAnchored = deltaAnchorEntryId != null,
@@ -1241,6 +1242,7 @@ fun LogViewer(
                                             ManualHeaderRow(
                                                 item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
                                                 isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
+                                                showRowNumbers = settings.showRowNumbers,
                                                 showTimeDelta = effectiveTab.showTimeDelta,
                                                 deltaMs = deltaMs,
                                                 deltaSelectionAnchored = deltaAnchorEntryId != null,
@@ -1250,6 +1252,7 @@ fun LogViewer(
                                             StackTraceHeaderRow(
                                                 item, effectiveTab, mono, tc, itemOnSelRow, itemOnCtxMenu, onToggleGroup, boundsMap,
                                                 isSearchMatch = isSearchMatch, isCurrentSearchMatch = isCurrentSearchMatch,
+                                                showRowNumbers = settings.showRowNumbers,
                                                 showTimeDelta = effectiveTab.showTimeDelta,
                                                 deltaMs = deltaMs,
                                                 deltaSelectionAnchored = deltaAnchorEntryId != null,
@@ -2160,25 +2163,37 @@ private fun CollapseChevron(expanded: Boolean, color: Color, mono: FontFamily, o
     }
 }
 
+// Shared row-number gutter for the three group/collapse header row types below. The header entry is
+// still a real log entry, so it uses its stable parse-order ID just like LogRow.
+@Composable
+private fun HeaderRowNumberCell(
+    showRowNumbers: Boolean,
+    entryId: Int,
+    tab: LogTab,
+    mono: FontFamily,
+    tc: ThemeColors,
+) {
+    if (!showRowNumbers) return
+    val fontSize = baseSp()
+    val numColWidth = rowNumberColumnWidth(fontSize.value, tab.logData.size.toString().length)
+    Box(Modifier.width(numColWidth + ROW_NUM_GAP).padding(end = ROW_NUM_GAP)) {
+        AppText(
+            entryId.toString(),
+            color = tc.td, fontSize = fontSize, fontFamily = mono, maxLines = 1,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier.align(Alignment.CenterStart),
+        )
+    }
+}
+
 // Shared Δt gutter cell for the three group/collapse header row types below (SeqHeaderRow/
-// ManualHeaderRow/StackTraceHeaderRow) — rendered "exactly as a plain row does": same width
+// ManualHeaderRow/StackTraceHeaderRow) — rendered exactly as a plain row does: same width
 // formula (timeDeltaColumnWidth), same left alignment and warn-tint rule, same "—" no-baseline
 // placeholder, using the header's OWN entry (its ts is what deltaMs was already computed against
 // upstream, same as any other item — see the itemsIndexed lambda's shared deltaMs block).
 //
-// Deliberately positioned as the FIRST element in each header's Row, before even the collapse
-// chevron — that's what makes its left edge land at the same x as LogRow's own Δt cell (which is
-// also the first thing after the row's own start-pad, when showRowNumbers is off).
-//
-// This is a real, if narrow, divergence from the row-number gutter's treatment of headers:
-// row-number gutter stays entirely OMITTED/spanned here (unchanged — headers never show row
-// numbers, regardless of settings.showRowNumbers), but the Δt cell is NOT spanned — it renders a
-// real value. One consequence: if a user has BOTH showRowNumbers AND showTimeDelta on, a plain
-// row's Δt cell sits to the right of its row-number gutter, while a header's Δt cell (having no
-// row-number gutter to sit after) stays flush left — the two Δt columns won't perfectly x-align in
-// that specific combined-settings case. Accepted rather than also reserving a phantom row-number-
-// width spacer here, which would have meant reintroducing the row-number gutter's own layout for
-// headers just to keep two settings that are usually used one-at-a-time in perfect lockstep.
+// Positioned immediately after HeaderRowNumberCell, so enabling both settings keeps the two
+// gutters in the same order as a normal log row.
 @Composable
 private fun HeaderTimeDeltaCell(
     showTimeDelta: Boolean,
@@ -2223,6 +2238,7 @@ private fun SeqHeaderRow(
     // utils/LogSearch.kt) without reworking every header composable onto AnnotatedString rendering.
     isSearchMatch: Boolean = false,
     isCurrentSearchMatch: Boolean = false,
+    showRowNumbers: Boolean = false,
     showTimeDelta: Boolean = false,
     deltaMs: Long? = null,
     deltaSelectionAnchored: Boolean = false,
@@ -2293,11 +2309,13 @@ private fun SeqHeaderRow(
                     }
                 }
             }
-            .padding(start = ROW_START_PAD + INDENT_STEP * item.indent, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
+            .padding(start = ROW_START_PAD, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        HeaderRowNumberCell(showRowNumbers, item.entry.id, tab, mono, tc)
         HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
+        if (item.indent > 0) Spacer(Modifier.width(INDENT_STEP * item.indent))
         CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
@@ -2320,6 +2338,7 @@ private fun ManualHeaderRow(
     rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
     isSearchMatch: Boolean = false,
     isCurrentSearchMatch: Boolean = false,
+    showRowNumbers: Boolean = false,
     showTimeDelta: Boolean = false,
     deltaMs: Long? = null,
     deltaSelectionAnchored: Boolean = false,
@@ -2386,6 +2405,7 @@ private fun ManualHeaderRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        HeaderRowNumberCell(showRowNumbers, item.entry.id, tab, mono, tc)
         HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
         CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
         val label = when (item.direction) {
@@ -2417,6 +2437,7 @@ private fun StackTraceHeaderRow(
     rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
     isSearchMatch: Boolean = false,
     isCurrentSearchMatch: Boolean = false,
+    showRowNumbers: Boolean = false,
     showTimeDelta: Boolean = false,
     deltaMs: Long? = null,
     deltaSelectionAnchored: Boolean = false,
@@ -2487,11 +2508,13 @@ private fun StackTraceHeaderRow(
                     }
                 }
             }
-            .padding(start = ROW_START_PAD + INDENT_STEP * item.indent, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
+            .padding(start = ROW_START_PAD, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        HeaderRowNumberCell(showRowNumbers, item.entry.id, tab, mono, tc)
         HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
+        if (item.indent > 0) Spacer(Modifier.width(INDENT_STEP * item.indent))
         CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
