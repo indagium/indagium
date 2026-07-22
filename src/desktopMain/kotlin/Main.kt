@@ -160,7 +160,11 @@ fun main(args: Array<String>) {
                 exitApplication()
             },
             title = "openLog",
-            icon = painterResource("icons/openlog.png"),
+            // On macOS, a JFrame's per-window icon becomes the miniaturized window's Dock
+            // image. Leaving it unset lets AppKit render the normal live window miniature;
+            // the packaged bundle's openLog.icns remains the application icon. Windows and
+            // Linux still need this image for their taskbar/window representation.
+            icon = if (isMacOs) null else painterResource("icons/openlog.png"),
             state = windowState,
         ) {
             // No-ops on a degraded handle (boundPort == null / macOS's null) — safe to call
