@@ -260,6 +260,38 @@ data class LogSearchState(
     }
 }
 
+// ── Tid map (ui/TidMap.kt, utils/TidMap.kt) ─────────────────────────
+// The row a "Show tid map" context-menu action was opened for. The map itself is scoped to [pid]
+// alone — matching/rendering never looks at [tid] (see utils/TidMap.kt's matchesTidMapTarget) — but
+// [tid] is kept so it's recoverable which specific row triggered the map, and so re-toggling from
+// that exact row still round-trips cleanly.
+data class TidMapTarget(val pid: Int, val tid: Int)
+
+// highlightedColorKey is the clicked-branch's own colorKey — this process's tid that branch
+// belongs to (utils/TidMap.kt's TidMapBranch) — click a branch to highlight every other branch from
+// that same thread, click the same one again to clear. Lives HERE (not as separate ad-hoc UI state)
+// so opening a new map — a fresh TidMapState — resets it for free, the same way replacing the whole
+// state object is what makes "only one map active at a time" trivial to enforce (AppState.
+// toggleTidMap just assigns a new instance).
+//
+// [colors] is the tid→Color palette assignment for THIS map (one entry per distinct thread of the
+// target's process — see utils/TidMap.kt's TidMapBranch.colorKey), computed ONCE (from the tab's
+// full, unfiltered logData — see utils/TidMap.kt's computeTidMapColors) at the moment the map
+// opens, and shared verbatim by both panels' TidMapOverlay instances (ui/TidMap.kt) rather than
+// each panel recomputing its own from its own — possibly differently filtered — visible item list.
+// That per-panel-recompute was a real bug: "first appearance order" differs between Original and
+// Filtered (they see different rows), so the SAME key could land on two different colors depending
+// on which panel you looked at, and a click-to-highlight comparing by key Int would then miss rows
+// whose displayed color didn't match despite sharing a key. Starts empty (AppState.toggleTidMap
+// launches the actual computation off-thread so opening a map is never a synchronous, file-size-
+// proportional UI-thread stall); TidMapOverlay falls back to a theme default for any key not yet
+// in this map, which only ever shows briefly right after opening a map on a very large file.
+data class TidMapState(
+    val target: TidMapTarget,
+    val highlightedColorKey: Int? = null,
+    val colors: Map<Int, Color> = emptyMap(),
+)
+
 // ── Tab ────────────────────────────────────────────────────────────
 data class LogTab(
     val id: String,
@@ -298,6 +330,13 @@ data class LogTab(
     // tab tokens still parse. Toggled via AppState.toggleTimeDelta from a toolbar button, not
     // Settings — see LogViewer.kt's toolbar.
     val showTimeDelta: Boolean = false,
+    // Session-only, like `tailing`/`search` above — NEVER persisted. Deliberately absent from
+    // AutosaveCodec's persistedSnapshot()/tabToken()/tabShellFromToken() (see those functions'
+    // comments) — a right-click investigation aid for the CURRENT session, not a standing
+    // preference, so it always resets to null on relaunch/tab-reopen. If you're adding a field to
+    // this token later and reflexively including every LogTab field, this one is the deliberate
+    // exception: do not add it there.
+    val tidMap: TidMapState? = null,
 )
 
 /**

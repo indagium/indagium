@@ -338,13 +338,21 @@ fun App(
                         // Keep the grouped action rows wide enough for three equal-width
                         // buttons, including the longest Highlight/Selected labels.
                         val menuWidth = 276.dp
+                        // Tid map — resolved once here (not inline in the buildList below) since
+                        // both the height estimate and the entries themselves need to agree on
+                        // exactly the same "is a map active, does it match this row" facts.
+                        val activeTidMap = ctxTab.tidMap
+                        val tidMapTargetHere = TidMapTarget(entry.pid, entry.tid)
                         // Estimate full menu height from items that will actually render:
                         //   header(37) + divider(9) + preview(63) + 1 item(32) + divider(9)
                         //   + 2 items(64) [sequence] + divider(9) + 2 items(64) [collapse-to-start/end]
                         //   + divider(9) + 2 items(64) [hide/show] + divider(9) + 1 row(32) [tags]
-                        //   + divider(9) + 2 items(64) = 538
-                        // Selection text adds a preview extension line(15) on top of that.
-                        val estimatedMenuHeight = (458 +
+                        //   + divider(9) + 1 row(64) + divider(9) [threads] = 531
+                        // Selection text adds a preview extension line(15) on top of that. The
+                        // Threads block is a single fixed-height row (like Collapse/Tag) regardless
+                        // of whether one or both of Show map/Hide map render, so — unlike the old
+                        // two-independent-Action-items layout — it no longer needs a conditional.
+                        val estimatedMenuHeight = (531 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (state.pendingSequenceStart != null) 32 else 0) +
                             (if (state.settings.sourceFolders.isNotEmpty()) 44 else 0)).dp
@@ -465,6 +473,33 @@ fun App(
                                 }
                                 if (hasCollapseAction) add(CtxMenuEntry.Divider)
                             }
+                            // Threads (tid map) — a single Collapse-shaped block ("Threads" header +
+                            // Show map/Hide map buttons), inserted here (after Collapse, before
+                            // Source) per the approved design. Hide is offered whenever a map is
+                            // active, from ANY row — not just the row it was originally opened for —
+                            // since requiring the user to find their way back to that exact row
+                            // before they could close it was a real dead end (the row can easily
+                            // have scrolled out of view). Show is offered whenever the right-clicked
+                            // row's pid differs from the currently active target's (including when
+                            // nothing is active), so switching to a new process's map never requires
+                            // closing the old one first — RAW-fallback rows carry no real pid at all
+                            // (LogParser.kt's RAW-fallback branch never populates one, defaulting to
+                            // 0), so a "map" of a fake shared pid=0 across unrelated lines would be
+                            // actively misleading, and Show is omitted rather than disabled (same
+                            // null-to-omit convention CollapseActions itself uses). Guarded like
+                            // Collapse's own hasCollapseAction check: the rare case of a pid-less row
+                            // with no map currently active leaves NEITHER button available, and an
+                            // empty "Threads" header with no buttons under it must not render.
+                            run {
+                                val onShowMap = (activeTidMap?.target?.pid != tidMapTargetHere.pid)
+                                    .takeIf { it && entry.pid > 0 }
+                                    ?.let { { state.toggleTidMap(ctx.tabId, entry.pid, entry.tid); state.ctx = null } }
+                                val onHideMap = activeTidMap?.let { { state.closeTidMap(ctx.tabId); state.ctx = null } }
+                                if (onShowMap != null || onHideMap != null) {
+                                    add(CtxMenuEntry.ThreadsActions(onShowMap = onShowMap, onHideMap = onHideMap))
+                                    add(CtxMenuEntry.Divider)
+                                }
+                            }
                             // Only offered once source folders are configured; if they are but this
                             // particular line has no resolved call site, the actions still render
                             // disabled rather than disappearing.
@@ -495,6 +530,7 @@ fun App(
                         val selectableEntries = menuEntries.filter {
                             it is CtxMenuEntry.ActionHeader || it is CtxMenuEntry.Action ||
                                 it is CtxMenuEntry.TagActions || it is CtxMenuEntry.CollapseActions ||
+                                it is CtxMenuEntry.ThreadsActions ||
                                 it is CtxMenuEntry.SelectionActions || it is CtxMenuEntry.SourceActions ||
                                 it is CtxMenuEntry.ActionWithSubmenu
                         }
@@ -533,6 +569,7 @@ fun App(
                                                     is CtxMenuEntry.Action -> it.onClick()
                                                     is CtxMenuEntry.TagActions -> it.onInclude()
                                                     is CtxMenuEntry.CollapseActions -> it.onToStart?.invoke()
+                                                    is CtxMenuEntry.ThreadsActions -> it.onShowMap?.invoke() ?: it.onHideMap?.invoke()
                                                     is CtxMenuEntry.SelectionActions -> it.onAskAi()
                                                     is CtxMenuEntry.SourceActions -> it.onShowCode()
                                                     is CtxMenuEntry.ActionWithSubmenu -> it.onClick()
@@ -579,6 +616,12 @@ fun App(
                                                 onToStart = e.onToStart,
                                                 onToEnd = e.onToEnd,
                                                 onSelected = e.onSelected,
+                                            )
+                                        is CtxMenuEntry.ThreadsActions ->
+                                            CtxThreadsActions(
+                                                highlighted = e === selectedEntry,
+                                                onShowMap = e.onShowMap,
+                                                onHideMap = e.onHideMap,
                                             )
                                         is CtxMenuEntry.SelectionActions ->
                                             CtxSelectionActions(

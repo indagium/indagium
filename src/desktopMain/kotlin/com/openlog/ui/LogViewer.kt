@@ -698,6 +698,11 @@ fun LogViewer(
     onOpenSearch: () -> Unit = {},
     onToggleRowNumbers: () -> Unit = {},
     onToggleMinimap: () -> Unit = {},
+    // Click-a-branch-to-highlight for the tid-map gutter overlay (ui/TidMap.kt,
+    // AppState.setTidMapHighlight) — bound to this tab's id by the caller already, same convention
+    // as onToggleTimeDelta/onToggleUnfiltered above. Default no-op keeps preview/test call sites
+    // that don't wire it unaffected.
+    onSetTidMapHighlight: (Int?) -> Unit = {},
     onExportTxt: () -> Unit,
     onExportCsv: () -> Unit,
     scrollStateStore: LogViewerScrollStateStore? = null,
@@ -1163,7 +1168,31 @@ fun LogViewer(
                         LaunchedEffect(settings.autoLogRowWrap, hScroll) {
                             if (settings.autoLogRowWrap && hScroll.value != 0) hScroll.scrollTo(0)
                         }
-                        Box(contentModifier) {
+                        // Absolute Y of this content Box's own top-left — the same
+                        // positionInRoot()-based bookkeeping rowBoundsAbs already uses for row hit-
+                        // testing (see the "drag" pointerInput above), captured here too so
+                        // TidMapOverlay can convert rowBoundsAbs's absolute row bounds into its own
+                        // LOCAL (canvas-relative) coordinates.
+                        var contentTopY by remember { mutableStateOf(0f) }
+                        // Positioned as its OWN leading gutter — BEFORE the timestamp, row-number,
+                        // and Δt gutters — exactly like those two gutters are: a real reserved-width
+                        // Box that pushes the row's own content right (see LogRow's/ColHeader's
+                        // leading TID_MAP_HIT_WIDTH spacer), not a measured offset into a gap that
+                        // already has other text in it.
+                        //
+                        // An earlier version tried to sit BETWEEN the timestamp and PID columns by
+                        // measuring the rendered width of the timestamp text and offsetting into the
+                        // 2-space gap buildFullLineAnnotation leaves there. That was fragile in two
+                        // ways at once: the 2-space gap is far narrower than the branch geometry
+                        // needs (near-zero margin for error even with a perfect measurement), and the
+                        // measurement itself could drift from the row's actual rendered position
+                        // (theme/font-scale-dependent) — the combination produced a spine that
+                        // visibly overlaid live timestamp digits. A fixed leading reservation has
+                        // neither problem: Compose's own layout system guarantees the row's real
+                        // content starts exactly TID_MAP_HIT_WIDTH later, the same guarantee the
+                        // row-number and Δt gutters already rely on.
+                        val tidMapSpineX = ROW_START_PAD
+                        Box(contentModifier.onGloballyPositioned { contentTopY = it.positionInRoot().y }) {
                             LazyColumn(
                                 state = lazyState,
                                 modifier = Modifier.width(rowContentWidth).fillMaxHeight(),
@@ -1219,6 +1248,7 @@ fun LogViewer(
                                             deltaMs = deltaMs,
                                             deltaSelectionAnchored = deltaAnchorEntryId != null,
                                             timeDeltaChars = timeDeltaChars,
+                                            hasTidMap = effectiveTab.tidMap != null,
                                             searchHighlight = if (isSearchMatch) {
                                                 SearchHighlight(
                                                     search.query, search.caseSensitive, isCurrentSearchMatch,
@@ -1237,6 +1267,7 @@ fun LogViewer(
                                                 deltaMs = deltaMs,
                                                 deltaSelectionAnchored = deltaAnchorEntryId != null,
                                                 timeDeltaChars = timeDeltaChars,
+                                                hasTidMap = effectiveTab.tidMap != null,
                                             )
                                         is LogItem.ManualHeader ->
                                             ManualHeaderRow(
@@ -1247,6 +1278,7 @@ fun LogViewer(
                                                 deltaMs = deltaMs,
                                                 deltaSelectionAnchored = deltaAnchorEntryId != null,
                                                 timeDeltaChars = timeDeltaChars,
+                                                hasTidMap = effectiveTab.tidMap != null,
                                             )
                                         is LogItem.StackTraceHeader ->
                                             StackTraceHeaderRow(
@@ -1257,12 +1289,31 @@ fun LogViewer(
                                                 deltaMs = deltaMs,
                                                 deltaSelectionAnchored = deltaAnchorEntryId != null,
                                                 timeDeltaChars = timeDeltaChars,
+                                                hasTidMap = effectiveTab.tidMap != null,
                                             )
                                     }
                                 }
                                 item(key = "tail-space") {
                                     Spacer(Modifier.height(tailSpaceHeight))
                                 }
+                            }
+                            // Drawn AFTER (on top of) the LazyColumn, as a second child of the same
+                            // Box — an overlay, not a participating layout row, same relationship
+                            // Minimap has to the log content below. Only renders when this tab has
+                            // an active map (effectiveTab.tidMap, not tab.tidMap — split view's
+                            // Original/Filtered panels share the one tab-level map, but each
+                            // instance here still only ever sees ITS OWN listItems/boundsMap, which
+                            // is what keeps the computed span independent per panel).
+                            effectiveTab.tidMap?.let { tidMap ->
+                                TidMapOverlay(
+                                    tidMap = tidMap,
+                                    items = listItems,
+                                    rowBoundsAbs = boundsMap,
+                                    contentTopY = contentTopY,
+                                    spineOffsetX = tidMapSpineX,
+                                    tc = tc,
+                                    onHighlightChange = onSetTidMapHighlight,
+                                )
                             }
                         }
                         // Minimap sits beside VerticalScrollbar (outside it, i.e. further from the
@@ -1484,6 +1535,7 @@ fun LogViewer(
                         rowNumDigits = tab.logData.size.toString().length,
                         showTimeDelta = tab.showTimeDelta,
                         timeDeltaChars = originalTimeDeltaChars,
+                        hasTidMap = tab.tidMap != null,
                     )
                     ItemList(
                         listItems = allItems,
@@ -1540,6 +1592,7 @@ fun LogViewer(
                         rowNumDigits = tab.logData.size.toString().length,
                         showTimeDelta = tab.showTimeDelta,
                         timeDeltaChars = filteredTimeDeltaChars,
+                        hasTidMap = tab.tidMap != null,
                     )
                     ItemList(
                         listItems = items,
@@ -1625,6 +1678,7 @@ fun LogViewer(
                 rowNumDigits = tab.logData.size.toString().length,
                 showTimeDelta = tab.showTimeDelta,
                 timeDeltaChars = mainTimeDeltaChars,
+                hasTidMap = tab.tidMap != null,
             )
             ItemList(
                 items, computedItems.summary, rowBoundsAbs, boxPosY,
@@ -1880,6 +1934,12 @@ private fun LogRow(
     // Fixed Δt column width in characters. Its constant value mirrors rowNumDigits' role for the
     // row-number gutter: every row and the header consume the same budget.
     timeDeltaChars: Int = 1,
+    // Whether this tab has an active tid map — reserves TID_MAP_HIT_WIDTH as a leading, EMPTY
+    // spacer (the actual spine/branch graphics are drawn by the separate TidMapOverlay Canvas that
+    // sits over the whole panel, not by this row itself) so the row's own content — and every other
+    // gutter after this one — starts exactly where the overlay expects it to. See LogViewer.kt's
+    // tidMapSpineX for the other half of this contract.
+    hasTidMap: Boolean = false,
     searchHighlight: SearchHighlight? = null,
 ) {
     val density  = LocalDensity.current.density
@@ -2058,6 +2118,11 @@ private fun LogRow(
             .padding(start = ROW_START_PAD, end = 8.dp, top = ROW_V_PAD, bottom = ROW_V_PAD),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Empty reserved space for the tid-map gutter (see hasTidMap's own doc above) — leading,
+        // before row-number/Δt/text, matching where TidMapOverlay's own Canvas is offset to.
+        if (hasTidMap) {
+            Spacer(Modifier.width(TID_MAP_HIT_WIDTH))
+        }
         // Optional left gutter showing the row's original (parse-order) row number — entry.id,
         // which is stable under filtering/folding so it always points at the same spot in the full
         // file. Left-aligned at the stable gutter origin; group/fold headers deliberately omit it
@@ -2163,6 +2228,15 @@ private fun CollapseChevron(expanded: Boolean, color: Color, mono: FontFamily, o
     }
 }
 
+// Shared, empty tid-map gutter reservation for the three group/collapse header row types below —
+// mirrors LogRow's own leading `hasTidMap` spacer (see its doc comment), first in the Row so the
+// header's row-number/Δt gutters and text line up with the body rows below it exactly the way they
+// already do for showRowNumbers/showTimeDelta.
+@Composable
+private fun HeaderTidMapGutterCell(hasTidMap: Boolean) {
+    if (hasTidMap) Spacer(Modifier.width(TID_MAP_HIT_WIDTH))
+}
+
 // Shared row-number gutter for the three group/collapse header row types below. The header entry is
 // still a real log entry, so it uses its stable parse-order ID just like LogRow.
 @Composable
@@ -2243,6 +2317,7 @@ private fun SeqHeaderRow(
     deltaMs: Long? = null,
     deltaSelectionAnchored: Boolean = false,
     timeDeltaChars: Int = 1,
+    hasTidMap: Boolean = false,
 ) {
     val density = LocalDensity.current.density
     val sc  = item.color
@@ -2313,6 +2388,7 @@ private fun SeqHeaderRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        HeaderTidMapGutterCell(hasTidMap)
         HeaderRowNumberCell(showRowNumbers, item.entry.id, tab, mono, tc)
         HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
         if (item.indent > 0) Spacer(Modifier.width(INDENT_STEP * item.indent))
@@ -2343,6 +2419,7 @@ private fun ManualHeaderRow(
     deltaMs: Long? = null,
     deltaSelectionAnchored: Boolean = false,
     timeDeltaChars: Int = 1,
+    hasTidMap: Boolean = false,
 ) {
     val density = LocalDensity.current.density
     val sc = item.color
@@ -2405,6 +2482,7 @@ private fun ManualHeaderRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        HeaderTidMapGutterCell(hasTidMap)
         HeaderRowNumberCell(showRowNumbers, item.entry.id, tab, mono, tc)
         HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
         CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
@@ -2442,6 +2520,7 @@ private fun StackTraceHeaderRow(
     deltaMs: Long? = null,
     deltaSelectionAnchored: Boolean = false,
     timeDeltaChars: Int = 1,
+    hasTidMap: Boolean = false,
 ) {
     val density = LocalDensity.current.density
     val sc = DANGER_RED
@@ -2512,6 +2591,7 @@ private fun StackTraceHeaderRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        HeaderTidMapGutterCell(hasTidMap)
         HeaderRowNumberCell(showRowNumbers, item.entry.id, tab, mono, tc)
         HeaderTimeDeltaCell(showTimeDelta, deltaMs, deltaSelectionAnchored, timeDeltaChars, mono, tc)
         if (item.indent > 0) Spacer(Modifier.width(INDENT_STEP * item.indent))

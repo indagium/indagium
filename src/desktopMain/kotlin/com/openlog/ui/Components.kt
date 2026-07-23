@@ -21,11 +21,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Label
 import androidx.compose.material.icons.automirrored.outlined.LabelOff
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.FindInPage
 import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.Icon
@@ -266,6 +268,10 @@ fun ColHeader(
     // Fixed to the same Δt character budget as the row gutter below. This keeps the header and
     // rows aligned while selecting an anchor.
     timeDeltaChars: Int = 1,
+    // Mirrors LogRow's own leading hasTidMap spacer (ui/LogViewer.kt) — same TID_MAP_HIT_WIDTH,
+    // same leading position, so the header's row-number/Δt column labels below line up with the
+    // body rows' actual gutters regardless of whether a tid map is active.
+    hasTidMap: Boolean = false,
 ) {
     val tc = tc()
     Row(
@@ -274,6 +280,9 @@ fun ColHeader(
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (hasTidMap) {
+            Spacer(Modifier.width(TID_MAP_HIT_WIDTH))
+        }
         if (showRowNumbers) {
             val numColWidth = rowNumberColumnWidth(COL_HEADER_FONT_SP, rowNumDigits)
             Box(Modifier.width(numColWidth)) {
@@ -943,6 +952,59 @@ internal fun CtxCollapseActions(
     }
 }
 
+// Mirrors CtxCollapseActions's own shape exactly (header + a row of up to N Ghost buttons) — the
+// tid map's "Hide tid map"/"Show tid map" pair used to render as two independent CtxMenuEntry.
+// Action rows (each a full-width 32dp item), which read as two unrelated menu entries rather than
+// one toggle; this groups them under a "Threads" header the same way Collapse groups its own
+// to-start/to-end/selected actions, so the menu reads consistently block-by-block.
+@Composable
+internal fun CtxThreadsActions(
+    highlighted: Boolean = false,
+    onShowMap: (() -> Unit)? = null,
+    onHideMap: (() -> Unit)? = null,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth(),
+        hoverBg = tc.hv,
+        forceHover = highlighted,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            AppText("Threads", color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                onShowMap?.let {
+                    CtxActionSlot(CTX_THREADS_BUTTON_WIDTH) {
+                        AppButton(
+                            "Show map", onClick = it, variant = ButtonVariant.Ghost,
+                            modifier = Modifier.fillMaxWidth().height(26.dp),
+                            leadingIcon = Icons.Outlined.AccountTree, horizontalPadding = 4.dp,
+                        )
+                    }
+                }
+                if (onShowMap != null && onHideMap != null) {
+                    CtxActionDivider(tc)
+                }
+                onHideMap?.let {
+                    CtxActionSlot(CTX_THREADS_BUTTON_WIDTH) {
+                        AppButton(
+                            "Hide map", onClick = it, variant = ButtonVariant.Ghost,
+                            modifier = Modifier.fillMaxWidth().height(26.dp),
+                            leadingIcon = Icons.Outlined.VisibilityOff, horizontalPadding = 4.dp,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 internal fun CtxSelectionActions(
     highlighted: Boolean = false,
@@ -1055,6 +1117,14 @@ private fun CtxActionSlot(
 // All grouped actions deliberately use one shared width so the three columns line up
 // across Selection, Tag, and Collapse rows, regardless of label length.
 private val CTX_ACTION_BUTTON_WIDTH = 78.dp
+
+// Threads (CtxThreadsActions) never has more than 2 slots (unlike the 3-slot rows above), so it
+// gets its own, wider width rather than reusing CTX_ACTION_BUTTON_WIDTH. At 78dp, "Show map"/"Hide
+// map" clipped their own trailing word invisibly (TextOverflow.Clip, no ellipsis) — despite being
+// the same CHARACTER count as "Selected"/"To start", both labels are two words built almost
+// entirely from wide glyphs ('w' and 'm' each appear twice between them), so they render measurably
+// wider than the single-word labels the 78dp width was originally sized for.
+private val CTX_THREADS_BUTTON_WIDTH = 100.dp
 
 // Extends into the row's existing right padding so the picker target can align with the
 // Show/Hide chevron without overlapping the Highlight label or leaving its hit area.
@@ -1305,6 +1375,11 @@ internal sealed class CtxMenuEntry {
         val onToStart: (() -> Unit)? = null,
         val onToEnd: (() -> Unit)? = null,
         val onSelected: (() -> Unit)? = null,
+    ) : CtxMenuEntry()
+
+    data class ThreadsActions(
+        val onShowMap: (() -> Unit)? = null,
+        val onHideMap: (() -> Unit)? = null,
     ) : CtxMenuEntry()
 
     data class SelectionActions(

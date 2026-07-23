@@ -246,3 +246,14 @@ fun rowNumberColumnWidth(fontSizeSp: Float, digitCount: Int): Dp =
 // the row gutter and its header cell in lockstep despite using different font sizes.
 fun timeDeltaColumnWidth(fontSizeSp: Float, charCount: Int): Dp =
     (charCount.coerceAtLeast(1) * fontSizeSp * MONO_DIGIT_EM).dp
+
+// NOTE: there is deliberately no width helper here for the tid-map gutter (unlike
+// rowNumberColumnWidth/timeDeltaColumnWidth above) — it doesn't need one. Two earlier versions
+// tried to fit it BETWEEN the timestamp and PID columns: first by assuming "HH:MM:SS.mmm" is
+// always 12 characters and multiplying by MONO_DIGIT_EM, then by measuring the row's own rendered
+// ts text via TextMeasurer. Both were fragile for the same underlying reason — trying to land
+// inside a 2-character gap that's part of one continuous monospace string, where even a correct
+// measurement leaves almost no margin for error. The gutter is now a fixed-width LEADING column
+// (ui/TidMap.kt's TID_MAP_HIT_WIDTH), positioned before the timestamp entirely, reserved by a real
+// layout Spacer in LogRow/ColHeader/the header-row variants — the same robust pattern
+// rowNumberColumnWidth/timeDeltaColumnWidth already use, needing no measurement at all.

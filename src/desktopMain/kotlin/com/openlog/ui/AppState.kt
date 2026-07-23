@@ -49,6 +49,7 @@ import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeSearchMatches
 import com.openlog.utils.computeStackTraceGroups
+import com.openlog.utils.computeTidMapColors
 import com.openlog.utils.exportFilteredToFile
 import com.openlog.utils.extractAppVersionHeuristic
 import com.openlog.utils.extractCandidate
@@ -1404,10 +1405,32 @@ class AppState(
     }
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
+        val prev = settings
         val next = transform(settings)
         if (settings == next) return
         settings = next
+        if (next.theme != prev.theme) recomputeTidMapColorsForThemeChange()
         autosaveNow()
+    }
+
+    // Theme swap invalidates every active tid map's color palette — toggleTidMap computes colors
+    // ONCE, off-thread, from whatever theme was active AT OPEN TIME ([ac, seq2, seq1]) and never
+    // revisits them afterward (TidMapState.colors's own doc). Without this, switching themes while
+    // a map is open left it showing the OLD theme's colors until the user closed and reopened it.
+    // Recomputes every tab's map independently (each tab may target a different pid), off-thread
+    // same as toggleTidMap, guarded on re-read after the async hop still having an active map for
+    // that exact target — a close/reopen racing this recompute must not resurrect a map the user
+    // just closed, or clobber a newer one opened for a different target in the meantime.
+    private fun recomputeTidMapColorsForThemeChange() {
+        val theme = themeColors(settings.theme)
+        val palette = listOf(theme.ac, theme.seq2, theme.seq1)
+        tabs.forEach { t ->
+            val target = t.tidMap?.target ?: return@forEach
+            ioScope.launch {
+                val colors = withContext(Dispatchers.Default) { computeTidMapColors(t.logData, target, palette) }
+                upTab(t.id) { cur -> if (cur.tidMap?.target == target) cur.copy(tidMap = cur.tidMap.copy(colors = colors)) else cur }
+            }
+        }
     }
 
     val needsLicenseAcceptance: Boolean
@@ -2538,6 +2561,63 @@ class AppState(
     // Per-tab Δt-column toggle (LogViewer.kt's toolbar button, beside Export) — see LogTab.showTimeDelta's
     // doc comment for why this lives on the tab rather than in AppSettings.
     fun toggleTimeDelta(tabId: String) = upTab(tabId) { it.copy(showTimeDelta = !it.showTimeDelta) }
+
+    // ── Tid map (ui/TidMap.kt, utils/TidMap.kt) ────────────────────────
+    // Only one map active at a time, per tab: opening a new one REPLACES tidMap wholesale rather
+    // than layering onto the old one, which is also what resets highlightedColorKey for free (a
+    // fresh TidMapState always starts with it null — see TidMapState's own doc). Toggles off when
+    // the right-clicked row's (pid, tid) is already the active map — kept for that one case (a menu
+    // click on the exact originating row), but ui/App.kt's "Hide tid map" entry now calls
+    // [closeTidMap] directly rather than relying on this equality trick, so a map is always
+    // closeable regardless of which row is right-clicked (previously it wasn't: right-clicking any
+    // OTHER row only ever offered "Show tid map", which replaces rather than closes — a real
+    // dead end once the originating row scrolled out of view).
+    //
+    // Opening a map (the `else` branch) also kicks off the pid→color palette computation — see
+    // TidMapState.colors's own doc for why this is computed once, off-thread, from the tab's full
+    // logData, rather than per-panel. Launched AFTER the state write (so `tab(tabId)` below already
+    // reflects the just-opened map) and guarded on re-read after the async hop still matching
+    // [target], so a second toggle fired before the first computation finishes can't have its
+    // result clobbered by the stale first one landing later.
+    //
+    // "Already active" is judged by PID ALONE, not the full (pid, tid) pair — the map itself is
+    // process-scoped (utils/TidMap.kt's matchesTidMapTarget), so right-clicking a DIFFERENT thread
+    // of the SAME already-mapped process would render an identical map; toggling it off (or
+    // needlessly recomputing colors for it) would be wrong. [target] itself still carries the
+    // specific tid that was right-clicked — it's just not what "same map" is judged by.
+    fun toggleTidMap(tabId: String, pid: Int, tid: Int) {
+        val target = TidMapTarget(pid, tid)
+        upTab(tabId) { t -> t.copy(tidMap = if (t.tidMap?.target?.pid == pid) null else TidMapState(target)) }
+        val opened = tab(tabId)?.takeIf { it.tidMap?.target == target } ?: return
+        // `ac` — the theme's own defining accent color — not the fixed global SEQ_COLORS, and not
+        // seq1/seq2: an earlier version used seq1/seq2, but 15 of this app's 20 themes keep seq1 in
+        // the same purple/violet family, so switching to it barely moved anything visible. `ac`
+        // spreads much wider across themes (blue in most, but teal/green/rose/cyan depending on the
+        // theme) — it's the field that actually makes a theme look like itself. seq1/seq2 stay as
+        // fallback entries only for the rare case more than one distinct color is ever needed here.
+        // Read from `settings` (not composed via tc()/LocalXxx) since this is a plain function, not
+        // a composable — themeColors() is the same non-composable ThemePreset->ThemeColors lookup
+        // tc() itself wraps.
+        val theme = themeColors(settings.theme)
+        val palette = listOf(theme.ac, theme.seq2, theme.seq1)
+        ioScope.launch {
+            val colors = withContext(Dispatchers.Default) { computeTidMapColors(opened.logData, target, palette) }
+            upTab(tabId) { t -> if (t.tidMap?.target == target) t.copy(tidMap = t.tidMap.copy(colors = colors)) else t }
+        }
+    }
+
+    // Unconditional close — the "Hide tid map" context-menu entry available from ANY row while a
+    // map is active (ui/App.kt), independent of [toggleTidMap]'s equality-based toggle so it never
+    // depends on which row happens to be right-clicked.
+    fun closeTidMap(tabId: String) = upTab(tabId) { it.copy(tidMap = null) }
+
+    // Click-a-branch-to-highlight (ui/TidMap.kt) — a plain field assignment, not a toggle, since
+    // the composable itself decides whether a click means "highlight this color" or "clear the
+    // highlight" (clicking the already-highlighted color again) and passes the resulting value
+    // straight through.
+    fun setTidMapHighlight(tabId: String, colorKey: Int?) = upTab(tabId) { t ->
+        t.tidMap?.let { t.copy(tidMap = it.copy(highlightedColorKey = colorKey)) } ?: t
+    }
 
     /** Reveals Original for the active tab without changing any already-visible panel. */
     fun ensureActiveTabUnfiltered() {
