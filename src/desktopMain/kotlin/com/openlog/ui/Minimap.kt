@@ -1,9 +1,16 @@
 package com.openlog.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -11,16 +18,22 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isPrimaryPressed
+import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.Highlighter
 import com.openlog.model.LogAnalysis
 import com.openlog.model.LogItem
@@ -32,6 +45,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.BitSet
+import kotlin.math.roundToInt
 
 // ── Pure core (no @Composable / composition-dependent APIs — Color/ThemeColors/Highlighter are
 // plain data with no UI-thread coupling, so this stays unit-testable without a harness, same split
@@ -355,6 +369,13 @@ private const val MAX_INDENT_WIDTH_FRACTION = 0.7f
 private const val VIEWPORT_FILL_ALPHA = 0.08f
 private val VIEWPORT_LINE_HEIGHT = 1.5.dp
 
+// Width of the right-click context menu. The strip itself (MINIMAP_WIDTH, 64dp) is far narrower
+// than this, so the menu is deliberately positioned opening LEFTWARD from the click (see the
+// pointerInput's contextMenuOffset below) rather than rightward off the strip's own edge — there's
+// no room to the right of the minimap (it already sits at the window's trailing edge), but plenty
+// of room to the left, over the log content.
+private val MINIMAP_CONTEXT_MENU_WIDTH = 170.dp
+
 /** Clickable Sublime-style text minimap, rendered BESIDE VerticalScrollbar (not instead of it —
  *  see LogViewer.kt's BoxWithConstraints wiring) when settings.showMinimap is on. [highlighters]
  *  should be the tab's own `filter.highlighters`, so the strip's colors track the same highlighter
@@ -366,10 +387,14 @@ fun Minimap(
     highlighters: List<Highlighter>,
     lazyState: LazyListState,
     tc: ThemeColors,
+    onHideMinimap: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var heightPx by remember { mutableStateOf(0) }
-    val rowHeightPx = with(LocalDensity.current) { BAR_ROW_HEIGHT.toPx() }.coerceAtLeast(1f)
+    val density = LocalDensity.current
+    val rowHeightPx = with(density) { BAR_ROW_HEIGHT.toPx() }.coerceAtLeast(1f)
+    var contextMenuOpen by remember { mutableStateOf(false) }
+    var contextMenuOffset by remember { mutableStateOf(IntOffset.Zero) }
     // Purely item-count-driven now (not heightPx-driven) — see MINIMAP_MAX_BUCKETS's own doc for
     // why: past this many items the row count stays capped and the miniature scrolls instead of
     // compressing further to fit whatever height happens to be available.
@@ -412,9 +437,13 @@ fun Minimap(
         scope.launch { lazyState.scrollToItem(targetIndex) }
     }
 
+    // Box wraps the Canvas (rather than the Canvas taking modifier directly) so the context-menu
+    // Popup below is anchored at exactly the same origin the pointerInput's own click coordinates
+    // are measured against — both are children of this same Box.
+    Box(modifier.width(MINIMAP_WIDTH).fillMaxHeight()) {
     Canvas(
-        modifier
-            .width(MINIMAP_WIDTH)
+        Modifier
+            .fillMaxWidth()
             .fillMaxHeight()
             .onSizeChanged { heightPx = it.height }
             // Sublime-style viewport behavior: a press inside the highlighted viewport grabs it and
@@ -428,7 +457,18 @@ fun Minimap(
                     while (true) {
                         val ev = awaitPointerEvent()
                         val ch = ev.changes.firstOrNull() ?: continue
-                        if (ev.type == PointerEventType.Press && ev.buttons.isPrimaryPressed) {
+                        if (ev.type == PointerEventType.Press && ev.buttons.isSecondaryPressed) {
+                            ch.consume()
+                            // Opens leftward from the click (see MINIMAP_CONTEXT_MENU_WIDTH's own
+                            // doc) — there's no room to the right of this strip, which already sits
+                            // at the window's trailing edge.
+                            val menuWidthPx = with(density) { MINIMAP_CONTEXT_MENU_WIDTH.toPx() }
+                            contextMenuOffset = IntOffset(
+                                (ch.position.x - menuWidthPx).roundToInt(),
+                                ch.position.y.roundToInt(),
+                            )
+                            contextMenuOpen = true
+                        } else if (ev.type == PointerEventType.Press && ev.buttons.isPrimaryPressed) {
                             ch.consume()
                             val miniatureHeightPx = rowCount * rowHeightPx
                             val bounds = minimapViewportBounds(
@@ -540,6 +580,50 @@ fun Minimap(
                     tc.ac,
                     topLeft = Offset(0f, (viewportBottom - lineHeightPx).coerceAtLeast(viewportTop)),
                     size = Size(size.width, lineHeightPx),
+                )
+            }
+        }
+    }
+    if (contextMenuOpen) {
+        MinimapContextMenuPopup(
+            onHideMinimap = { contextMenuOpen = false; onHideMinimap() },
+            onDismiss = { contextMenuOpen = false },
+            offset = contextMenuOffset,
+            tc = tc,
+        )
+    }
+    }
+}
+
+/** Right-click context menu for the minimap strip, opened at the cursor (see the Canvas's
+ *  pointerInput above for where [offset] comes from). Only ever shown while the minimap itself is
+ *  visible, so "Hide minimap" is the sole, unconditional action — unlike ToolbarOptionsPopup's
+ *  toggle (LogViewer.kt), there's no "Show minimap" state to also represent here. */
+@Composable
+private fun MinimapContextMenuPopup(
+    onHideMinimap: () -> Unit,
+    onDismiss: () -> Unit,
+    offset: IntOffset,
+    tc: ThemeColors,
+) {
+    Popup(
+        alignment = Alignment.TopStart,
+        offset = offset,
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        Column(
+            Modifier.width(MINIMAP_CONTEXT_MENU_WIDTH)
+                .background(tc.p, RoundedCornerShape(7.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                .padding(vertical = 4.dp),
+        ) {
+            HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onHideMinimap) {
+                AppText(
+                    "Hide minimap",
+                    color = tc.tx,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                 )
             }
         }

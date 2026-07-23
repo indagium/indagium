@@ -1336,6 +1336,7 @@ fun LogViewer(
                                     highlighters = effectiveTab.filter.highlighters,
                                     lazyState = lazyState,
                                     tc = tc,
+                                    onHideMinimap = onToggleMinimap,
                                 )
                             }
                             VerticalScrollbar(
