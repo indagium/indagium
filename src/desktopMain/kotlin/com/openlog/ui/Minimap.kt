@@ -3,8 +3,8 @@ package com.openlog.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -441,157 +441,157 @@ fun Minimap(
     // Popup below is anchored at exactly the same origin the pointerInput's own click coordinates
     // are measured against — both are children of this same Box.
     Box(modifier.width(MINIMAP_WIDTH).fillMaxHeight()) {
-    Canvas(
-        Modifier
-            .fillMaxWidth()
-            .fillMaxHeight()
-            .onSizeChanged { heightPx = it.height }
-            // Sublime-style viewport behavior: a press inside the highlighted viewport grabs it and
-            // only moves it as the pointer moves; a press outside it jumps immediately. A raw
-            // pointer loop is intentional here: detectDragGestures waits for touch slop and would
-            // make an outside click appear unresponsive.
-            .pointerInput(items.size, rowCount) {
-                awaitPointerEventScope {
-                    var viewportDragStartY: Float? = null
-                    var viewportDragStartIndex = 0
-                    while (true) {
-                        val ev = awaitPointerEvent()
-                        val ch = ev.changes.firstOrNull() ?: continue
-                        if (ev.type == PointerEventType.Press && ev.buttons.isSecondaryPressed) {
-                            ch.consume()
-                            // Opens leftward from the click (see MINIMAP_CONTEXT_MENU_WIDTH's own
-                            // doc) — there's no room to the right of this strip, which already sits
-                            // at the window's trailing edge.
-                            val menuWidthPx = with(density) { MINIMAP_CONTEXT_MENU_WIDTH.toPx() }
-                            contextMenuOffset = IntOffset(
-                                (ch.position.x - menuWidthPx).roundToInt(),
-                                ch.position.y.roundToInt(),
-                            )
-                            contextMenuOpen = true
-                        } else if (ev.type == PointerEventType.Press && ev.buttons.isPrimaryPressed) {
-                            ch.consume()
-                            val miniatureHeightPx = rowCount * rowHeightPx
-                            val bounds = minimapViewportBounds(
-                                firstVisibleItemIndex = lazyState.firstVisibleItemIndex,
-                                visibleItemCount = lazyState.layoutInfo.visibleItemsInfo.size,
-                                itemCount = items.size,
-                                miniatureHeightPx = miniatureHeightPx,
-                                stripHeightPx = heightPx.toFloat(),
-                                minViewportHeightPx = rowHeightPx,
-                            )
-                            if (bounds != null && ch.position.y in bounds.first..bounds.second) {
-                                viewportDragStartY = ch.position.y
-                                viewportDragStartIndex = lazyState.firstVisibleItemIndex
-                            } else {
-                                viewportDragStartY = null
-                                jumpTo(ch.position.y)
-                            }
-                        } else if (ev.type == PointerEventType.Move && ev.buttons.isPrimaryPressed) {
-                            ch.consume()
-                            val dragStartY = viewportDragStartY
-                            if (dragStartY == null) {
-                                jumpTo(ch.position.y)
-                            } else {
-                                val targetIndex = minimapFirstVisibleIndexForViewportDrag(
-                                    dragStartIndex = viewportDragStartIndex,
-                                    dragDeltaPx = ch.position.y - dragStartY,
+        Canvas(
+            Modifier
+                .fillMaxWidth()
+                .fillMaxHeight()
+                .onSizeChanged { heightPx = it.height }
+                // Sublime-style viewport behavior: a press inside the highlighted viewport grabs it and
+                // only moves it as the pointer moves; a press outside it jumps immediately. A raw
+                // pointer loop is intentional here: detectDragGestures waits for touch slop and would
+                // make an outside click appear unresponsive.
+                .pointerInput(items.size, rowCount) {
+                    awaitPointerEventScope {
+                        var viewportDragStartY: Float? = null
+                        var viewportDragStartIndex = 0
+                        while (true) {
+                            val ev = awaitPointerEvent()
+                            val ch = ev.changes.firstOrNull() ?: continue
+                            if (ev.type == PointerEventType.Press && ev.buttons.isSecondaryPressed) {
+                                ch.consume()
+                                // Opens leftward from the click (see MINIMAP_CONTEXT_MENU_WIDTH's own
+                                // doc) — there's no room to the right of this strip, which already sits
+                                // at the window's trailing edge.
+                                val menuWidthPx = with(density) { MINIMAP_CONTEXT_MENU_WIDTH.toPx() }
+                                contextMenuOffset = IntOffset(
+                                    (ch.position.x - menuWidthPx).roundToInt(),
+                                    ch.position.y.roundToInt(),
+                                )
+                                contextMenuOpen = true
+                            } else if (ev.type == PointerEventType.Press && ev.buttons.isPrimaryPressed) {
+                                ch.consume()
+                                val miniatureHeightPx = rowCount * rowHeightPx
+                                val bounds = minimapViewportBounds(
+                                    firstVisibleItemIndex = lazyState.firstVisibleItemIndex,
                                     visibleItemCount = lazyState.layoutInfo.visibleItemsInfo.size,
                                     itemCount = items.size,
-                                    miniatureHeightPx = rowCount * rowHeightPx,
+                                    miniatureHeightPx = miniatureHeightPx,
                                     stripHeightPx = heightPx.toFloat(),
                                     minViewportHeightPx = rowHeightPx,
                                 )
-                                scope.launch { lazyState.scrollToItem(targetIndex) }
+                                if (bounds != null && ch.position.y in bounds.first..bounds.second) {
+                                    viewportDragStartY = ch.position.y
+                                    viewportDragStartIndex = lazyState.firstVisibleItemIndex
+                                } else {
+                                    viewportDragStartY = null
+                                    jumpTo(ch.position.y)
+                                }
+                            } else if (ev.type == PointerEventType.Move && ev.buttons.isPrimaryPressed) {
+                                ch.consume()
+                                val dragStartY = viewportDragStartY
+                                if (dragStartY == null) {
+                                    jumpTo(ch.position.y)
+                                } else {
+                                    val targetIndex = minimapFirstVisibleIndexForViewportDrag(
+                                        dragStartIndex = viewportDragStartIndex,
+                                        dragDeltaPx = ch.position.y - dragStartY,
+                                        visibleItemCount = lazyState.layoutInfo.visibleItemsInfo.size,
+                                        itemCount = items.size,
+                                        miniatureHeightPx = rowCount * rowHeightPx,
+                                        stripHeightPx = heightPx.toFloat(),
+                                        minViewportHeightPx = rowHeightPx,
+                                    )
+                                    scope.launch { lazyState.scrollToItem(targetIndex) }
+                                }
+                            } else if (!ev.buttons.isPrimaryPressed) {
+                                viewportDragStartY = null
                             }
-                        } else if (!ev.buttons.isPrimaryPressed) {
-                            viewportDragStartY = null
                         }
                     }
-                }
-            },
-    ) {
-        if (bars.isEmpty()) return@Canvas
-        val miniatureHeightPx = bars.size * rowHeightPx
-        // Sublime-style scroll: 0 automatically whenever the miniature already fits (see
-        // minimapScrollOffsetPx) — no separate "fits" branch needed anywhere below.
-        val scrollFraction = minimapScrollFraction(
-            lazyState.firstVisibleItemIndex,
-            lazyState.layoutInfo.visibleItemsInfo.size,
-            items.size,
-        )
-        val offsetPx = minimapScrollOffsetPx(scrollFraction, miniatureHeightPx, size.height)
-
-        val indentStepPx = MINIMAP_INDENT_STEP.toPx()
-        val maxIndentPx = size.width * MAX_INDENT_WIDTH_FRACTION
-        val minWordWidthPx = MIN_WORD_WIDTH.toPx()
-        val charScalePx = (size.width * LINE_FILL_FRACTION) / CHAR_REFERENCE_COUNT
-
-        for (i in bars.indices) {
-            val bar = bars[i]
-            val top = i * rowHeightPx - offsetPx
-            // Cheap cull: with up to MINIMAP_MAX_BUCKETS (2000) rows this is a minor optimization
-            // rather than a necessity, but it's free and avoids issuing draw calls for rows that
-            // are entirely scrolled out of the strip's own visible bounds.
-            if (top + rowHeightPx < 0f || top > size.height) continue
-            val indentPx = (bar.indent * indentStepPx).coerceAtMost(maxIndentPx)
-            for (word in bar.words) {
-                val wordStartPx = indentPx + word.startChar * charScalePx
-                // Words are in ascending position order — once one starts past the strip's own
-                // right edge, every later word in this row would too, so stop early.
-                if (wordStartPx >= size.width) break
-                val wordWidthPx = (word.lengthChars * charScalePx)
-                    .coerceAtLeast(minWordWidthPx)
-                    .coerceAtMost(size.width - wordStartPx)
-                if (wordWidthPx <= 0f) continue
-                drawRect(bar.color, topLeft = Offset(wordStartPx, top), size = Size(wordWidthPx, rowHeightPx))
-            }
-        }
-
-        // Viewport indicator: outline (top/bottom edge lines + a barely-there fill) rather than a
-        // wash, so it marks the current scroll window without hiding the words underneath it. Its
-        // position is computed the same way the row offset above is — as a fraction of the
-        // MINIATURE's own height, then shifted by the same offsetPx — so the indicator and the
-        // content it's pointing at always move together.
-        val visibleCount = lazyState.layoutInfo.visibleItemsInfo.size
-        if (items.isNotEmpty() && visibleCount > 0) {
-            val first = lazyState.firstVisibleItemIndex.coerceIn(0, items.size - 1)
-            val viewportBounds = minimapViewportBounds(
-                firstVisibleItemIndex = first,
-                visibleItemCount = visibleCount,
-                itemCount = items.size,
-                miniatureHeightPx = miniatureHeightPx,
-                stripHeightPx = size.height,
-                minViewportHeightPx = rowHeightPx,
+                },
+        ) {
+            if (bars.isEmpty()) return@Canvas
+            val miniatureHeightPx = bars.size * rowHeightPx
+            // Sublime-style scroll: 0 automatically whenever the miniature already fits (see
+            // minimapScrollOffsetPx) — no separate "fits" branch needed anywhere below.
+            val scrollFraction = minimapScrollFraction(
+                lazyState.firstVisibleItemIndex,
+                lazyState.layoutInfo.visibleItemsInfo.size,
+                items.size,
             )
-            val viewportTop = viewportBounds?.first ?: return@Canvas
-            val viewportBottom = viewportBounds.second
-            val viewportHeightPx = (viewportBottom - viewportTop).coerceAtLeast(0f)
-            if (viewportHeightPx > 0f) {
-                drawRect(
-                    tc.ac.copy(alpha = VIEWPORT_FILL_ALPHA),
-                    topLeft = Offset(0f, viewportTop),
-                    size = Size(size.width, viewportHeightPx),
+            val offsetPx = minimapScrollOffsetPx(scrollFraction, miniatureHeightPx, size.height)
+
+            val indentStepPx = MINIMAP_INDENT_STEP.toPx()
+            val maxIndentPx = size.width * MAX_INDENT_WIDTH_FRACTION
+            val minWordWidthPx = MIN_WORD_WIDTH.toPx()
+            val charScalePx = (size.width * LINE_FILL_FRACTION) / CHAR_REFERENCE_COUNT
+
+            for (i in bars.indices) {
+                val bar = bars[i]
+                val top = i * rowHeightPx - offsetPx
+                // Cheap cull: with up to MINIMAP_MAX_BUCKETS (2000) rows this is a minor optimization
+                // rather than a necessity, but it's free and avoids issuing draw calls for rows that
+                // are entirely scrolled out of the strip's own visible bounds.
+                if (top + rowHeightPx < 0f || top > size.height) continue
+                val indentPx = (bar.indent * indentStepPx).coerceAtMost(maxIndentPx)
+                for (word in bar.words) {
+                    val wordStartPx = indentPx + word.startChar * charScalePx
+                    // Words are in ascending position order — once one starts past the strip's own
+                    // right edge, every later word in this row would too, so stop early.
+                    if (wordStartPx >= size.width) break
+                    val wordWidthPx = (word.lengthChars * charScalePx)
+                        .coerceAtLeast(minWordWidthPx)
+                        .coerceAtMost(size.width - wordStartPx)
+                    if (wordWidthPx <= 0f) continue
+                    drawRect(bar.color, topLeft = Offset(wordStartPx, top), size = Size(wordWidthPx, rowHeightPx))
+                }
+            }
+
+            // Viewport indicator: outline (top/bottom edge lines + a barely-there fill) rather than a
+            // wash, so it marks the current scroll window without hiding the words underneath it. Its
+            // position is computed the same way the row offset above is — as a fraction of the
+            // MINIATURE's own height, then shifted by the same offsetPx — so the indicator and the
+            // content it's pointing at always move together.
+            val visibleCount = lazyState.layoutInfo.visibleItemsInfo.size
+            if (items.isNotEmpty() && visibleCount > 0) {
+                val first = lazyState.firstVisibleItemIndex.coerceIn(0, items.size - 1)
+                val viewportBounds = minimapViewportBounds(
+                    firstVisibleItemIndex = first,
+                    visibleItemCount = visibleCount,
+                    itemCount = items.size,
+                    miniatureHeightPx = miniatureHeightPx,
+                    stripHeightPx = size.height,
+                    minViewportHeightPx = rowHeightPx,
                 )
-                // DrawScope itself implements Density, so Dp.toPx() resolves directly here — no
-                // separate LocalDensity needed inside the draw block.
-                val lineHeightPx = VIEWPORT_LINE_HEIGHT.toPx().coerceAtMost(viewportHeightPx)
-                drawRect(tc.ac, topLeft = Offset(0f, viewportTop), size = Size(size.width, lineHeightPx))
-                drawRect(
-                    tc.ac,
-                    topLeft = Offset(0f, (viewportBottom - lineHeightPx).coerceAtLeast(viewportTop)),
-                    size = Size(size.width, lineHeightPx),
-                )
+                val viewportTop = viewportBounds?.first ?: return@Canvas
+                val viewportBottom = viewportBounds.second
+                val viewportHeightPx = (viewportBottom - viewportTop).coerceAtLeast(0f)
+                if (viewportHeightPx > 0f) {
+                    drawRect(
+                        tc.ac.copy(alpha = VIEWPORT_FILL_ALPHA),
+                        topLeft = Offset(0f, viewportTop),
+                        size = Size(size.width, viewportHeightPx),
+                    )
+                    // DrawScope itself implements Density, so Dp.toPx() resolves directly here — no
+                    // separate LocalDensity needed inside the draw block.
+                    val lineHeightPx = VIEWPORT_LINE_HEIGHT.toPx().coerceAtMost(viewportHeightPx)
+                    drawRect(tc.ac, topLeft = Offset(0f, viewportTop), size = Size(size.width, lineHeightPx))
+                    drawRect(
+                        tc.ac,
+                        topLeft = Offset(0f, (viewportBottom - lineHeightPx).coerceAtLeast(viewportTop)),
+                        size = Size(size.width, lineHeightPx),
+                    )
+                }
             }
         }
-    }
-    if (contextMenuOpen) {
-        MinimapContextMenuPopup(
-            onHideMinimap = { contextMenuOpen = false; onHideMinimap() },
-            onDismiss = { contextMenuOpen = false },
-            offset = contextMenuOffset,
-            tc = tc,
-        )
-    }
+        if (contextMenuOpen) {
+            MinimapContextMenuPopup(
+                onHideMinimap = { contextMenuOpen = false; onHideMinimap() },
+                onDismiss = { contextMenuOpen = false },
+                offset = contextMenuOffset,
+                tc = tc,
+            )
+        }
     }
 }
 
