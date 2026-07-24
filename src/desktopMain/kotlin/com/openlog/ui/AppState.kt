@@ -260,12 +260,6 @@ internal val EDITOR_CATALOG = listOf(
     ),
 )
 
-// Auto-detect fallback chain for AppState.openInEditor's "auto"/blank editorChoice path: every
-// catalog candidate template, in catalog order — the first one whose CLI is actually on PATH (i.e.
-// ProcessBuilder.start() succeeds) wins. Each template supports jumping straight to a line, unlike
-// plain Desktop.open().
-private val AUTO_EDITOR_COMMANDS = EDITOR_CATALOG.flatMap { it.candidates }
-
 // Extra places to look for an editor CLI besides $PATH. A GUI app (and the Gradle daemon in dev)
 // doesn't inherit the user's interactive shell PATH, so `code`/`idea`/etc. are typically missing
 // from System.getenv("PATH") even though they're on the user's normal shell PATH or installed via
@@ -418,20 +412,30 @@ internal fun linuxDesktopEditorTemplates(
     return found.mapValues { (_, templates) -> templates.distinct() }
 }
 
+// Resolves [catalog] using both normal shell commands and Linux .desktop launchers. Keeping this
+// as the one source of truth is important: the Settings scan and the eventual Open action must use
+// the same template, otherwise an editor can be shown as found but still be impossible to launch.
+internal fun resolveInstalledEditors(
+    catalog: List<EditorPreset>,
+    dirs: List<File>,
+    desktopTemplates: Map<String, List<String>>,
+): List<Pair<EditorPreset, String>> =
+    catalog.mapNotNull { preset ->
+        (preset.candidates + desktopTemplates[preset.id].orEmpty())
+            .firstOrNull { splitEditorCommand(it, dirs) != null }
+            ?.let { preset to it }
+    }
+
 // EDITOR_CATALOG filtered down to installed editors, each paired with its resolved command
 // template (the first matching candidate) — the ordered list of choices the Settings dropdown
-// offers, and the read-only "resolved command" shown once one is selected.
+// offers, and the command the Open action launches.
 internal fun detectInstalledEditors(dirs: List<File> = executableSearchDirs()): List<Pair<EditorPreset, String>> {
     val desktopTemplates = if (System.getProperty("os.name").orEmpty().contains("linux", ignoreCase = true)) {
         linuxDesktopEditorTemplates(executableDirs = dirs)
     } else {
         emptyMap()
     }
-    return EDITOR_CATALOG.mapNotNull { preset ->
-        (preset.candidates + desktopTemplates[preset.id].orEmpty())
-            .firstOrNull { splitEditorCommand(it, dirs) != null }
-            ?.let { preset to it }
-    }
+    return resolveInstalledEditors(EDITOR_CATALOG, dirs, desktopTemplates)
 }
 
 // Resolves an editor template and substitutes its location placeholders. Keeping this separate
@@ -4226,21 +4230,24 @@ class AppState(
 
     // Opens filePath at line in an editor, dispatched on settings.editorChoice:
     //  - "auto" / "" (default, also the migration default for a never-configured install): tries
-    //    every AUTO_EDITOR_COMMANDS entry (every catalog candidate) in order.
+    //    every installed editor in detection order, including Linux .desktop launchers.
     //  - "custom": uses settings.editorCommand verbatim, exactly as the old single-field behavior.
-    //  - anything else is an EditorPreset.id: resolved fresh via detectedTemplate (not the cached
-    //    detectedEditors snapshot, so an editor installed/uninstalled since the last Settings scan
-    //    is still honoured correctly) rather than a stored command, so a Toolbox-relocated or
-    //    reinstalled editor keeps resolving without the user re-typing anything.
+    //  - anything else is an EditorPreset.id: resolved fresh (not from the cached detectedEditors
+    //    snapshot) so an editor installed, uninstalled, or relocated since the last Settings scan
+    //    is honoured correctly without the user re-typing anything.
     // There is deliberately no Desktop.open() fallback in any branch: that can open the correct file
     // but cannot honour the requested source line, which is worse than reporting a missing editor
     // launcher. Runs on ioScope so editor process startup never blocks the UI.
     fun openInEditor(filePath: String, line: Int) {
         val file = File(filePath)
         ioScope.launch {
+            // Resolve immediately before launch rather than use the Settings snapshot, so an
+            // editor installed, removed, or relocated after Rescan is handled correctly. This is
+            // also the Linux-aware path that produced the entries shown in Settings.
+            val installedEditors = detectInstalledEditors()
             when (val choice = settings.editorChoice) {
                 "auto", "" -> {
-                    if (AUTO_EDITOR_COMMANDS.any { launchEditor(it, file, line) }) return@launch
+                    if (installedEditors.any { (_, template) -> launchEditor(template, file, line) }) return@launch
                     showOpenError(
                         title = "Could not open code location",
                         path = filePath,
@@ -4260,7 +4267,7 @@ class AppState(
                 }
                 else -> {
                     val preset = EDITOR_CATALOG.find { it.id == choice }
-                    val template = preset?.let { detectedTemplate(it) }
+                    val template = installedEditors.firstOrNull { (detectedPreset, _) -> detectedPreset.id == choice }?.second
                     if (template != null && launchEditor(template, file, line)) return@launch
                     showOpenError(
                         title = "Could not open code location",
