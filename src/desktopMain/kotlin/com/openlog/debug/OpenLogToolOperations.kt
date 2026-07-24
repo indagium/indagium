@@ -28,6 +28,7 @@ import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.newId
 import java.io.File
+import java.util.Base64
 import kotlin.math.roundToInt
 
 // Hex-color parsing constants for set_highlighters (parseHexColor / colorToHex).
@@ -137,6 +138,9 @@ internal class OpenLogToolOperations(
             setCaseMetadataRoute(a.str("tabId") ?: "", a.str("appVersion"), a.strList("decisiveTags"))
         },
         "reindex_cases" to { reindexCasesRoute() },
+        "get_video_frame" to { a ->
+            getVideoFrameRoute(a.str("tabId") ?: "", a.anyInt("lineId"), a.anyInt("videoMs")?.toLong())
+        },
     )
 
     // Built lazily (not at construction) so tests/hosts that never touch case-search tools never
@@ -917,6 +921,32 @@ internal class OpenLogToolOperations(
         val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         if (tab.analysis.pending) return mapOf("tabId" to tabId, "sites" to emptyList<Map<String, Any?>>(), "pending" to true)
         return mapOf("tabId" to tabId, "sites" to tab.analysis.crashSites.map { crashSiteToMap(it) })
+    }
+
+    // Returns a real inline image (see ControlServer.toCallToolResult's imageBase64 special-case),
+    // for a log line (via the tab's single anchor) or an explicit video position. videoMs, when
+    // supplied, always wins over lineId — mirrors resolve_log_source's "explicit input wins" shape,
+    // here with one field rather than a two-mode switch since either alone is enough to resolve a
+    // target position.
+    private fun getVideoFrameRoute(tabId: String, lineId: Int?, videoMs: Long?): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        if (tab.attachedVideo == null) return mapOf("error" to "no video attached to tab: $tabId")
+        val targetMs = when {
+            videoMs != null -> videoMs
+            lineId != null -> appState.logIdToVideoMs(tab, lineId)
+                ?: return mapOf(
+                    "error" to "no anchor set (link a log row to a video position first), " +
+                        "or line has no parseable timestamp",
+                )
+            else -> return mapOf("error" to "provide lineId or videoMs")
+        }
+        val bytes = appState.videoController(tabId)?.grabFrameAt(targetMs)
+            ?: return mapOf("error" to "could not extract frame at ${targetMs}ms")
+        return mapOf(
+            "imageBase64" to Base64.getEncoder().encodeToString(bytes),
+            "mimeType" to "image/png",
+            "videoMs" to targetMs,
+        )
     }
 
     // ── DTO helpers ───────────────────────────────────────────────────

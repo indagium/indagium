@@ -274,6 +274,10 @@ internal fun CompareView(
                             runCatching { rightLogFr.requestFocus() }
                         },
                     )
+                    // Tied to leftTab, matching RightSidebarPanel's own AnnotationPanel below — the
+                    // top TabBar (not this view) owns which tab is "primary," and there's only one
+                    // video panel slot regardless of which side a video happens to be attached to.
+                    BoundVideoPanel(state, leftTab)
                     if (state.annotationVisible || state.aiPanelVisible) {
                         HDivider { d ->
                             state.updateAnnotationPanelWidth(state.annotationPanelWidth - d)
@@ -294,6 +298,8 @@ internal fun CompareView(
                                 recentNotesMenuOpen = state.recentNotesMenuOpen,
                                 onToggleMd = { state.toggleMd(leftTab.id) },
                                 onCopy = { state.copyAnn(leftTab.id) },
+                                onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
+                                onCopyRichPreview = { state.copyRichPreview(leftTab.id) },
                                 onSave = { state.saveAnalysis(leftTab.id) },
                                 onToggleRecentNotes = { state.toggleRecentNotesMenu() },
                                 onOpenNote = { state.openNoteFileAsync(leftTab.id, it) },

@@ -21,6 +21,35 @@ plugins {
 // it exposes the mcpStreamableHttp {} Ktor helper the older 0.8.x line lacked.
 val ktorVersion = "3.4.3"
 
+// bytedeco/javacv 1.5.13 (com.openlog.video.VideoPlayerController) — FFmpeg natives ship INSIDE
+// the jar (no user install), decode every phone recording format incl. HEVC/.mov/WebM, and stay
+// license-clean (Apache wrapper + LGPL FFmpeg build) — see the plan doc's "Decisions taken" for
+// why this beat VLCJ (GPLv3), JavaFX Media (no HEVC/.mov), and GStreamer/libVLC-direct (both need
+// a per-OS runtime install). javacppVersion tracks javacvVersion — bytedeco releases them in
+// lockstep — while ffmpegVersion is "<ffmpeg-release>-<javacv-release>", bytedeco's own scheme for
+// pinning which FFmpeg build a given javacv/javacpp pair was tested against.
+val javacvVersion = "1.5.13"
+val javacppVersion = "1.5.13"
+val ffmpegVersion = "8.0.1-1.5.13"
+
+// One native classifier per OS/arch, matching the packaging story already established for
+// compose.desktop.currentOs/skiko below (each installer bundles only ITS OWN OS's natives — see
+// "Artifact size = per-platform native classifiers" in the plan). Resolved from the machine
+// running Gradle, exactly like jpackage building for the host OS only.
+val bytedecoPlatform: String = run {
+    val os = org.gradle.internal.os.OperatingSystem.current()
+    val arch = System.getProperty("os.arch")
+    val isArm = arch == "aarch64" || arch == "arm64"
+    when {
+        os.isMacOsX && isArm -> "macosx-arm64"
+        os.isMacOsX -> "macosx-x86_64"
+        os.isWindows -> "windows-x86_64"
+        os.isLinux && isArm -> "linux-arm64"
+        os.isLinux -> "linux-x86_64"
+        else -> error("Unsupported OS/arch for bytedeco FFmpeg natives: ${os.name}/$arch")
+    }
+}
+
 val appVersion: String = providers.gradleProperty("app.version").get()
 val appAuthor = "Roman Arnaut"
 val licenseVersion = "2026-07-19"
@@ -110,6 +139,35 @@ kotlin {
                 // so a no-op binding (silently discard) is the right fit here, not a real backend
                 // like logback. Version pinned to match the resolved slf4j-api transitive version.
                 runtimeOnly("org.slf4j:slf4j-nop:2.0.17")
+                // video/VideoPlayerController.kt — see the bytedeco version block above for why
+                // this trio (javacpp + ffmpeg's platform-neutral jar + ffmpeg's native classifier
+                // jar) rather than javacv-platform/ffmpeg-platform, which would bundle every OS's
+                // natives into a single installer instead of just this build's own.
+                implementation("org.bytedeco:javacv:$javacvVersion") {
+                    // javacv's own POM lists EVERY wrapped native library (opencv, ffmpeg, leptonica/
+                    // tesseract, openblas, flycapture, librealsense(2), libdc1394, libfreenect(2),
+                    // videoinput, artoolkitplus) as plain (non-optional) dependencies — this app
+                    // only ever uses FFmpegFrameGrabber, so all of those are excluded; ffmpeg itself
+                    // is re-added below as an explicit classifier pair instead of javacv's
+                    // no-classifier (= "every OS's natives") transitive default.
+                    exclude(group = "org.bytedeco", module = "ffmpeg")
+                    exclude(group = "org.bytedeco", module = "opencv")
+                    exclude(group = "org.bytedeco", module = "openblas")
+                    exclude(group = "org.bytedeco", module = "leptonica")
+                    exclude(group = "org.bytedeco", module = "tesseract")
+                    exclude(group = "org.bytedeco", module = "flycapture")
+                    exclude(group = "org.bytedeco", module = "libdc1394")
+                    exclude(group = "org.bytedeco", module = "libfreenect")
+                    exclude(group = "org.bytedeco", module = "libfreenect2")
+                    exclude(group = "org.bytedeco", module = "librealsense")
+                    exclude(group = "org.bytedeco", module = "librealsense2")
+                    exclude(group = "org.bytedeco", module = "videoinput")
+                    exclude(group = "org.bytedeco", module = "artoolkitplus")
+                }
+                implementation("org.bytedeco:javacpp:$javacppVersion")
+                implementation("org.bytedeco:javacpp:$javacppVersion:$bytedecoPlatform")
+                implementation("org.bytedeco:ffmpeg:$ffmpegVersion")
+                implementation("org.bytedeco:ffmpeg:$ffmpegVersion:$bytedecoPlatform")
             }
         }
         val desktopTest by getting
@@ -274,6 +332,13 @@ tasks.withType<Test>().configureEach {
 dependencyLocking {
     ignoredDependencies.add("org.jetbrains.compose.desktop:desktop-jvm-*")
     ignoredDependencies.add("org.jetbrains.skiko:skiko-awt-runtime-*")
+    // NOTE: org.bytedeco:ffmpeg/javacpp are NOT added here despite also varying by OS/arch
+    // (bytedecoPlatform above) — unlike skiko-awt-runtime-* (a genuinely different MODULE NAME
+    // per OS: "skiko-awt-runtime-macos-arm64" vs "-linux-x64"), bytedeco publishes one module
+    // (group:artifact:version) with per-platform CLASSIFIERS of that same module. Gradle's
+    // dependency lock file is keyed at the module (group:artifact:version) level, not per
+    // classifier, so the same lock entry is satisfied on every OS regardless of which classifier
+    // gets pulled in — confirmed by `./gradlew build --write-locks` succeeding here unmodified.
 }
 
 configurations.matching {

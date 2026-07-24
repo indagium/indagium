@@ -13,6 +13,7 @@ import androidx.compose.material.icons.automirrored.outlined.StickyNote2
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -115,6 +116,21 @@ internal fun TabBar(state: AppState) {
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
         ) { state.updateAiPanelVisible(!state.aiPanelVisible) }
+        // Only offered when the active tab actually has a video attached — toggling
+        // AppState.videoPanelVisible would otherwise have no visible effect (BoundVideoPanel
+        // renders nothing without an attachment), matching Compare's own `enabled = canCompare`
+        // convention of gating on real applicability rather than hiding the whole button.
+        if (state.tab(state.activeTabId)?.attachedVideo != null) {
+            ToolbarBtn(
+                "Video",
+                icon = Icons.Outlined.Movie,
+                showLabel = showToolbarText,
+                tooltip = "Toggle video panel",
+                active = state.videoPanelVisible,
+                modifier = Modifier.fillMaxHeight(),
+                shape = middleShape,
+            ) { state.updateVideoPanelVisible(!state.videoPanelVisible) }
+        }
         ToolbarBtn(
             "Compare",
             icon = Icons.AutoMirrored.Outlined.CompareArrows,

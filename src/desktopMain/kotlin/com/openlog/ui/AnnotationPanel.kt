@@ -20,8 +20,10 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
@@ -33,6 +35,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
@@ -60,6 +63,11 @@ import java.awt.Cursor as AwtCursor
 private const val BLOCK_DRAG_SNAP_BIAS = 0.25f
 private const val AUTO_SCROLL_SPEED_FACTOR = 0.6f
 private const val STICK_TO_BOTTOM_THRESHOLD_DP = 24f
+
+// Fixed thumbnail height for an AnnBlock.Image — shared between estimateBlockHeightPx (drag-
+// reorder offset math) and the actual ImageBlockView render, so the estimate never drifts from
+// what's really on screen the way a content-dependent guess (like textFieldDp for text) would.
+private const val IMAGE_BLOCK_THUMBNAIL_DP = 140f
 
 internal fun annotationPreviewCopyShortcutHandled(actionPressed: Boolean, key: Key, textFieldFocused: Boolean): Boolean =
     actionPressed && key == Key.C && !textFieldFocused
@@ -110,6 +118,8 @@ fun AnnotationPanel(
     recentNotesMenuOpen: Boolean = false,
     onToggleMd: () -> Unit,
     onCopy: () -> Unit,
+    onCopyImage: (AnnBlock.Image) -> Unit,
+    onCopyRichPreview: () -> Unit,
     onSave: () -> Unit,
     onToggleRecentNotes: () -> Unit,
     onOpenNote: (File) -> Unit,
@@ -208,6 +218,11 @@ fun AnnotationPanel(
                 val rowsDp = rowCount * 15f + 12f
                 val filenameBadgeDp = if (block.sourceFilename != null) 21f else 0f
                 controlsDp + filenameBadgeDp + captionDp + 6f + rowsDp + outerChromeDp
+            }
+            is AnnBlock.Image -> {
+                val provenanceDp = 16f
+                val captionDp = textFieldDp(block.caption, 20.7f, 40f)
+                controlsDp + IMAGE_BLOCK_THUMBNAIL_DP + 5f + provenanceDp + 5f + captionDp + outerChromeDp
             }
         }
         return dp * blockDensity
@@ -349,6 +364,22 @@ fun AnnotationPanel(
             ) {
                 AppButton("Preview", onClick = onToggleMd, enabled = hasAnnotationBlocks, modifier = headerButtonModifier)
                 AppButton("Copy", onClick = onCopy, modifier = headerButtonModifier)
+                TooltipArea(
+                    tooltip = {
+                        ToolbarTooltip(
+                            "Copies text + inline images as rich HTML. Jira Cloud's comment editor generally " +
+                                "accepts pasted HTML; Server/Data Center may not — if the paste comes through as " +
+                                "plain text, use \"Copy image\" on each picture instead.",
+                        )
+                    },
+                ) {
+                    AppButton(
+                        "Copy rich preview",
+                        onClick = onCopyRichPreview,
+                        enabled = hasAnnotationBlocks,
+                        modifier = headerButtonModifier,
+                    )
+                }
                 AppButton("Save", onClick = onSave, modifier = headerButtonModifier)
                 AppButton("Open Note", onClick = { openNotePicker() }, modifier = headerButtonModifier)
                 Box {
@@ -371,7 +402,10 @@ fun AnnotationPanel(
         }
         // Inline preview popup
         if (tab.showAnnMd && hasAnnotationBlocks) {
-            MdPreviewDialog(tab = tab, settings = settings, mono = mono, onCopy = onCopy, onDismiss = onToggleMd)
+            MdPreviewDialog(
+                tab = tab, settings = settings, mono = mono,
+                onCopy = onCopy, onCopyRichPreview = onCopyRichPreview, onDismiss = onToggleMd,
+            )
         }
 
         // Un-keyed rememberScrollState() here would tie the scroll position to this composable's
@@ -498,6 +532,19 @@ fun AnnotationPanel(
                             onMoveDown = { onMoveBlock(block.id, 1) },
                             onAddBelow = { onAddNoteAfter(block.id) },
                             onNavigate = { onNavigateLogRef(block) },
+                            dragHandleModifier = dragHandleModifier,
+                        )
+                        is AnnBlock.Image -> ImageBlockView(
+                            block = block, tc = tc, isFirst = isFirst, isLast = isLast,
+                            focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}" || highlightedBlockId == block.id,
+                            fieldFocusRequester = blockFieldRequesters[block.id],
+                            onFieldFocusChanged = { blockFieldFocused = it },
+                            onUpdateCaption = { onUpdateBlock(block.id, it) },
+                            onRemove = { onRemoveBlock(block.id) },
+                            onMoveUp = { onMoveBlock(block.id, -1) },
+                            onMoveDown = { onMoveBlock(block.id, 1) },
+                            onAddBelow = { onAddNoteAfter(block.id) },
+                            onCopyImage = { onCopyImage(block) },
                             dragHandleModifier = dragHandleModifier,
                         )
                     }
@@ -767,9 +814,17 @@ private fun RecentNotesPopup(
 
 // ── Markdown preview dialog ────────────────────────────────────────────
 @Composable
-private fun MdPreviewDialog(tab: LogTab, settings: AppSettings, mono: FontFamily, onCopy: () -> Unit, onDismiss: () -> Unit) {
+private fun MdPreviewDialog(
+    tab: LogTab,
+    settings: AppSettings,
+    mono: FontFamily,
+    onCopy: () -> Unit,
+    onCopyRichPreview: () -> Unit,
+    onDismiss: () -> Unit,
+) {
     val tc = tc()
     var copied by remember { mutableStateOf(false) }
+    var richCopied by remember { mutableStateOf(false) }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
             Modifier.fillMaxWidth(0.75f).fillMaxHeight(0.8f)
@@ -791,6 +846,23 @@ private fun MdPreviewDialog(tab: LogTab, settings: AppSettings, mono: FontFamily
                     },
                     modifier = Modifier.height(28.dp),
                 )
+                TooltipArea(
+                    tooltip = {
+                        ToolbarTooltip(
+                            "Copies text + inline images as rich HTML. Jira Cloud's comment editor generally " +
+                                "accepts pasted HTML; Server/Data Center may not.",
+                        )
+                    },
+                ) {
+                    AppButton(
+                        if (richCopied) "Copied!" else "Copy rich preview",
+                        onClick = {
+                            onCopyRichPreview()
+                            richCopied = true
+                        },
+                        modifier = Modifier.height(28.dp),
+                    )
+                }
                 CloseButton(onClick = onDismiss)
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
@@ -870,6 +942,35 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                                 )
                             }
                         }
+                    }
+                }
+
+                is AnnBlock.Image -> {
+                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (block.caption.isNotBlank() || settings.numberAnnotationBlocks) {
+                            AppText(
+                                (if (settings.numberAnnotationBlocks) "${blockNumber++}. " else "") + block.caption,
+                                color = tc.tx,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = Int.MAX_VALUE,
+                                overflow = TextOverflow.Clip,
+                            )
+                        }
+                        val bitmap = decodeImageBlockBitmap(block.bytes)
+                        if (bitmap != null) {
+                            Image(
+                                bitmap = bitmap,
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxWidth().heightIn(max = (IMAGE_BLOCK_THUMBNAIL_DP * 2).dp),
+                                contentScale = ContentScale.Fit,
+                            )
+                        }
+                        // block.provenance already reads "from <source>" (set at capture time in
+                        // VideoPanel's "Add frame to notes" handler) — unlike LogRef's
+                        // sourceFilename above, it doesn't need the settings-configurable label
+                        // prefixed onto it.
+                        AppText(block.provenance, color = tc.td, fontSize = 11.sp, fontFamily = mono)
                     }
                 }
             }
@@ -1005,6 +1106,79 @@ private fun LogRefBlock(
     }
 }
 
+// ── Image block ──────────────────────────────────────────────────────
+@Composable
+private fun ImageBlockView(
+    block: AnnBlock.Image,
+    tc: ThemeColors,
+    isFirst: Boolean, isLast: Boolean,
+    focused: Boolean,
+    fieldFocusRequester: FocusRequester?,
+    onFieldFocusChanged: (Boolean) -> Unit,
+    onUpdateCaption: (String) -> Unit,
+    onRemove: () -> Unit,
+    onMoveUp: () -> Unit, onMoveDown: () -> Unit,
+    onAddBelow: () -> Unit,
+    onCopyImage: () -> Unit,
+    dragHandleModifier: Modifier = Modifier,
+) {
+    // Keyed on the byte array's own identity (stable across recompositions and across a caption
+    // edit — updateBlock's b.copy(caption = ...) reuses the same bytes reference), so decoding
+    // only happens once per distinct image, not on every recomposition.
+    val bitmap = remember(block.bytes) { decodeImageBlockBitmap(block.bytes) }
+    Column(
+        Modifier.fillMaxWidth()
+            .border(BorderStroke(2.dp, if (focused) tc.ac else tc.ac.copy(.35f)))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        BlockControls(
+            "image", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow,
+            onCopyImage = onCopyImage, dragHandleModifier = dragHandleModifier,
+        )
+        Spacer(Modifier.height(5.dp))
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap,
+                contentDescription = null,
+                modifier = Modifier.fillMaxWidth().heightIn(max = IMAGE_BLOCK_THUMBNAIL_DP.dp)
+                    .background(Color.Black, CORNER_SM),
+                contentScale = ContentScale.Fit,
+            )
+        } else {
+            Box(
+                Modifier.fillMaxWidth().height(IMAGE_BLOCK_THUMBNAIL_DP.dp)
+                    .background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM),
+                contentAlignment = Alignment.Center,
+            ) { AppText("Couldn't decode image", color = tc.td, fontSize = 11.sp) }
+        }
+        Spacer(Modifier.height(5.dp))
+        AppText(block.provenance, color = tc.td, fontSize = 9.sp, fontFamily = MONO)
+        Spacer(Modifier.height(5.dp))
+        BasicTextField(
+            value = block.caption,
+            onValueChange = onUpdateCaption,
+            textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
+            cursorBrush = SolidColor(tc.ac),
+            modifier = Modifier.fillMaxWidth()
+                .background(tc.bg, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM)
+                .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
+                .onFocusChanged { onFieldFocusChanged(it.isFocused) }
+                .padding(8.dp).defaultMinSize(minHeight = 40.dp),
+            decorationBox = { inner ->
+                if (block.caption.isEmpty()) AppText("Add a caption…", color = tc.td, fontSize = 12.sp)
+                inner()
+            },
+        )
+    }
+}
+
+// Pure decode of a stored image block's bytes into something Compose can draw. Returns null
+// (rendered as a placeholder above) rather than throwing on a corrupt/unsupported blob — an
+// image block should never crash the panel it's part of.
+private fun decodeImageBlockBitmap(bytes: ByteArray): ImageBitmap? =
+    runCatching { org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap() }.getOrNull()
+
 // ── Block controls (move / delete / add note) ──────────────────────────
 @Composable
 private fun BlockControls(
@@ -1014,6 +1188,7 @@ private fun BlockControls(
     onRemove: () -> Unit,
     onAddBelow: () -> Unit,
     onNavigate: (() -> Unit)? = null,
+    onCopyImage: (() -> Unit)? = null,
     dragHandleModifier: Modifier = Modifier,
 ) {
     val badgeShape = CORNER_SM
@@ -1071,6 +1246,7 @@ private fun BlockControls(
 
         if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp)
         if (!isLast)  SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown)
+        if (onCopyImage != null) LabelIconButton("copy image", fontSize = 10.sp, onClick = onCopyImage)
         LabelIconButton("+ note", fontSize = 10.sp, onClick = onAddBelow)
         SquareIconButton("×", fontSize = 14.sp, onClick = onRemove)
     }

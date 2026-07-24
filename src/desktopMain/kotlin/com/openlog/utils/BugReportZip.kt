@@ -1,6 +1,7 @@
 package com.openlog.utils
 
 import com.openlog.model.LogEntry
+import com.openlog.model.VIDEO_FILE_EXTENSIONS
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import java.io.File
 import java.io.FilterInputStream
@@ -54,7 +55,7 @@ private class BoundedInputStream(private val delegate: InputStream, private val 
     override fun close() = delegate.close()
 }
 
-enum class ZipLogCandidateKind { LOGCAT, ANR_TEXT }
+enum class ZipLogCandidateKind { LOGCAT, ANR_TEXT, VIDEO }
 
 data class ZipLogCandidate(
     val entryPath: String,
@@ -148,6 +149,58 @@ private fun candidateKind(entryPath: String, isText: () -> Boolean): ZipLogCandi
         null
     }
 }
+
+// Parallel lister to listArchiveLogCandidates above, reusing the same ZipFile/SevenZFile entry
+// iteration but for screen recordings instead of log text — extension-gated only (VIDEO_FILE_
+// EXTENSIONS), not content-sniffed, since isLikelyTextStream would (correctly) reject every video
+// as non-text. Kept as its own function rather than folded into candidateKind() because that
+// function's whole shape (looksLikeLog/looksLikeAnr + a text-content check) doesn't apply here.
+fun listArchiveVideoCandidates(archiveFile: File, maxEntries: Int = MAX_ARCHIVE_ENTRIES_SCANNED): List<ZipLogCandidate> = when {
+    isZipFile(archiveFile) -> listZipVideoCandidates(archiveFile, maxEntries)
+    isSevenZFile(archiveFile) -> listSevenZVideoCandidates(archiveFile, maxEntries)
+    else -> emptyList()
+}
+
+private fun isVideoEntryName(name: String): Boolean =
+    name.substringAfterLast('.', missingDelimiterValue = "").lowercase() in VIDEO_FILE_EXTENSIONS
+
+private fun listZipVideoCandidates(zipFile: File, maxEntries: Int): List<ZipLogCandidate> = runCatching {
+    ZipFile(zipFile).use { zf ->
+        zf.entries().asSequence()
+            .take(maxEntries)
+            .filter { entry -> !entry.isDirectory && isVideoEntryName(entry.name) }
+            .map { entry -> ZipLogCandidate(entry.name, entry.name.substringAfterLast('/'), entry.size, ZipLogCandidateKind.VIDEO) }
+            .toList()
+    }
+}.getOrDefault(emptyList())
+
+private fun listSevenZVideoCandidates(archiveFile: File, maxEntries: Int): List<ZipLogCandidate> = runCatching {
+    sevenZFile(archiveFile).use { sevenZ ->
+        sevenZ.entries
+            .asSequence()
+            .take(maxEntries)
+            .filter { entry -> !entry.isDirectory && isVideoEntryName(entry.name) }
+            .map { entry -> ZipLogCandidate(entry.name, entry.name.substringAfterLast('/'), entry.size, ZipLogCandidateKind.VIDEO) }
+            .toList()
+    }
+}.getOrDefault(emptyList())
+
+// Extracts one archive entry to a fresh temp file instead of materializing it in memory —
+// extractZipCandidate/extractSevenZCandidate below parse text straight from the entry's stream,
+// which is fine for logs but wrong for a multi-hundred-MB video: this streams through
+// BoundedInputStream (same MAX_ARCHIVE_ENTRY_BYTES budget as the text path) straight to disk.
+// The returned file is a real temp file the caller owns (VideoAttachment.path points at it) —
+// deleteOnExit is set as a best-effort cleanup net, not the primary lifecycle.
+fun extractEntryToTempFile(archiveFile: File, candidate: ZipLogCandidate, maxEntryBytes: Long = MAX_ARCHIVE_ENTRY_BYTES): File? = runCatching {
+    val stream = openArchiveCandidateStream(archiveFile, candidate) ?: return@runCatching null
+    val suffix = candidate.displayName.substringAfterLast('.', missingDelimiterValue = "").ifBlank { "bin" }
+    val tempFile = File.createTempFile("openlog-video-", ".$suffix")
+    tempFile.deleteOnExit()
+    BoundedInputStream(stream, maxEntryBytes).use { input ->
+        tempFile.outputStream().use { output -> input.copyTo(output) }
+    }
+    tempFile
+}.getOrNull()
 
 // Parses in-memory, straight from the zip entry's stream — never extracts to a temp dir.
 // [maxEntryBytes] bounds actual decompressed bytes read (see BoundedInputStream); a candidate that

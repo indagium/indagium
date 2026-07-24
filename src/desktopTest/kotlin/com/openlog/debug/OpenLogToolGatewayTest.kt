@@ -3,6 +3,7 @@ package com.openlog.debug
 import com.openlog.model.FilterMode
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
+import com.openlog.model.VideoAttachment
 import com.openlog.ui.AppState
 import com.openlog.ui.mkTab
 import kotlinx.serialization.json.Json
@@ -47,6 +48,7 @@ class OpenLogToolGatewayTest {
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing", "resolve_log_source",
             "get_project_info", "set_highlighters", "reindex_sources", "add_manual_collapse", "add_sequence",
             "save_filter_preset", "search_similar_cases", "get_case", "set_case_metadata", "reindex_cases",
+            "get_video_frame",
         )
         assertEquals(expected, operations.toolGateway.tools.map { it.name }.toSet())
         assertEquals(expected.size, operations.toolGateway.tools.size)
@@ -246,5 +248,45 @@ class OpenLogToolGatewayTest {
 
         assertNotNull(folder["readmeError"])
         assertTrue(!folder.containsKey("readmeContent"))
+    }
+
+    // get_video_frame's happy path needs a real decoded frame (real FFmpeg natives on a real video
+    // file) so it's integration-only and out of scope here — these cover the error contract, which
+    // is reachable with only plain AppState/LogTab state (see plan doc Task E's test note).
+    @Test
+    fun getVideoFrameRejectsUnknownTab() {
+        val result = operations.toolGateway.execute("get_video_frame", mapOf("tabId" to "missing", "videoMs" to 1_000)) as Map<*, *>
+        assertTrue((result["error"] as String).contains("no such tab: missing"))
+    }
+
+    @Test
+    fun getVideoFrameRequiresAnAttachedVideo() {
+        val result = operations.toolGateway.execute("get_video_frame", mapOf("tabId" to "t1", "videoMs" to 1_000)) as Map<*, *>
+        assertTrue((result["error"] as String).contains("no video attached to tab: t1"))
+    }
+
+    @Test
+    fun getVideoFrameRequiresLineIdOrVideoMs() {
+        attachVideoToT1()
+        val result = operations.toolGateway.execute("get_video_frame", mapOf("tabId" to "t1")) as Map<*, *>
+        assertTrue((result["error"] as String).contains("provide lineId or videoMs"))
+    }
+
+    @Test
+    fun getVideoFrameErrorsWhenLineIdHasNoAnchorSet() {
+        attachVideoToT1()
+        val result = operations.toolGateway.execute("get_video_frame", mapOf("tabId" to "t1", "lineId" to 1)) as Map<*, *>
+        assertTrue((result["error"] as String).contains("no anchor set"))
+    }
+
+    @Test
+    fun getVideoFrameIsClassifiedAutomatic() {
+        assertEquals(OpenLogToolActionPolicy.AUTOMATIC, operations.toolGateway.actionPolicy("get_video_frame"))
+    }
+
+    private fun attachVideoToT1() {
+        state.tabs = state.tabs.map { t ->
+            if (t.id == "t1") t.copy(attachedVideo = VideoAttachment(path = "/tmp/repro.mp4", sourceLabel = "/tmp/repro.mp4")) else t
+        }
     }
 }

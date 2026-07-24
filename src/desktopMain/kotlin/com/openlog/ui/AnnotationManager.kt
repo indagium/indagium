@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.openlog.model.AddAnnRequest
 import com.openlog.model.AnnBlock
+import com.openlog.utils.downscaleAndEncodeJpeg
 
 // Extracted from AppState (Task 12 slice 5, mechanical — no behavior change): the annotation
 // block-model mutations (add/update/remove/move/reorder a note or log-ref block, prefix/suffix/
@@ -100,11 +101,31 @@ internal class AnnotationManager(private val appState: AppState) {
                         b.id != blockId -> b
                         b is AnnBlock.Note -> b.copy(text = newText)
                         b is AnnBlock.LogRef -> b.copy(caption = newText)
+                        b is AnnBlock.Image -> b.copy(caption = newText)
                         else -> b
                     }
                 },
             ),
         )
+    }
+
+    // Downscale+re-encode happens here (not at the call site) so every entry point — video panel
+    // "Add frame to notes" today, MCP/other producers later — gets the same storage guard: a raw
+    // capture would bloat autosave, which re-serializes the whole Annotations tree on every
+    // debounced edit (see AutosaveCodec.kt persistedSnapshot()). Returns null (adding nothing) if
+    // sourceBytes doesn't decode as an image at all.
+    fun addImageBlock(tabId: String, sourceBytes: ByteArray, provenance: String, afterId: String? = null): String? {
+        val encoded = downscaleAndEncodeJpeg(sourceBytes) ?: return null
+        val id = "i${System.nanoTime()}"
+        appState.upAnn(tabId) { t ->
+            val block = AnnBlock.Image(id = id, caption = "", provenance = provenance, format = "jpeg", bytes = encoded)
+            val blocks = t.annotations.blocks.toMutableList()
+            val idx =
+                if (afterId != null) (blocks.indexOfFirst { it.id == afterId } + 1).coerceAtLeast(0) else blocks.size
+            blocks.add(idx, block)
+            t.copy(annotations = t.annotations.copy(blocks = blocks))
+        }
+        return id
     }
 
     fun removeBlock(tabId: String, blockId: String) = appState.upAnn(tabId) { t ->
