@@ -2,6 +2,8 @@ package com.openlog
 
 import com.openlog.model.AnnBlock
 import com.openlog.model.Annotations
+import com.openlog.model.VideoFrameReference
+import com.openlog.model.VideoSource
 import com.openlog.ui.annotationsFromToken
 import com.openlog.ui.annotationsToken
 import com.openlog.ui.tokenFields
@@ -84,6 +86,37 @@ class AnnotationsTokenTest {
         // comment on why the default array-field equals would fail this even though decode is
         // byte-for-byte correct.
         assertEquals(original, restored)
+    }
+
+    @Test
+    fun roundTripsVideoFrameIdentityLabelAndExactPosition() {
+        val original = Annotations(
+            blocks = listOf(
+                AnnBlock.Image(
+                    id = "frame-1",
+                    caption = "Crash dialog appears",
+                    provenance = "From bugreport.zip/screen.mp4",
+                    format = "jpeg",
+                    bytes = byteArrayOf(0x01, 0x7F, 0x00),
+                    videoFrame = VideoFrameReference(
+                        source = VideoSource.ArchiveEntry(
+                            archivePath = "/reports/bugreport.zip",
+                            entryPath = "FS/data/screen.mp4",
+                            displayName = "screen.mp4",
+                        ),
+                        sourceLabel = "bugreport.zip/screen.mp4",
+                        positionMs = 12_345L,
+                    ),
+                ),
+            ),
+        )
+
+        val restored = requireNotNull(original.annotationsToken().annotationsFromToken())
+        val image = restored.blocks.single() as AnnBlock.Image
+
+        assertEquals(original, restored)
+        assertEquals("From bugreport.zip/screen.mp4", image.videoFrame?.provenanceLabel)
+        assertEquals(12_345L, image.videoFrame?.positionMs)
     }
 
     @Test

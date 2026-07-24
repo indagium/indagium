@@ -1414,6 +1414,20 @@ fun LogViewer(
 
             LaunchedEffect(annotationNavigationRequest?.id, itemsVersion, allItemsVersion, tab.expanded) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
+                if (request.scrollMode == NavigationScrollMode.FOLLOW) {
+                    // Follow targets come from AppState's currently displayed `rowIds`, so they
+                    // are already visible rather than hidden in a collapsed group. Keeping this
+                    // branch expansion-free also prevents its own tab.expanded state changes from
+                    // restarting this effect and producing a second, conflicting jump.
+                    request.logIds.firstNotNullOfOrNull { entryId ->
+                        items.indexOfEntry(entryId).takeIf { it >= 0 }
+                    }?.let { filteredLazyState.followItem(it) }
+                    request.logIds.firstNotNullOfOrNull { entryId ->
+                        allItems.indexOfEntry(entryId).takeIf { it >= 0 }
+                    }?.let { allLazyState.followItem(it) }
+                    onConsumeAnnotationNavigation(request.id)
+                    return@LaunchedEffect
+                }
                 val filteredTarget = request.logIds.firstNotNullOfOrNull { entryId ->
                     expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
                 }
@@ -1631,6 +1645,16 @@ fun LogViewer(
             val searchNavScope = rememberCoroutineScope()
             LaunchedEffect(annotationNavigationRequest?.id, itemsVersion) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
+                if (request.scrollMode == NavigationScrollMode.FOLLOW) {
+                    // Follow never expands collapsed content. Its target is selected from the
+                    // visible filtered rows, and a direct, hysteretic move avoids the ordinary
+                    // annotation path's scroll-to-top-then-recenter flash.
+                    request.logIds.firstNotNullOfOrNull { entryId ->
+                        items.indexOfEntry(entryId).takeIf { it >= 0 }
+                    }?.let { mainLazyState.followItem(it) }
+                    onConsumeAnnotationNavigation(request.id)
+                    return@LaunchedEffect
+                }
                 val target = request.logIds.firstNotNullOfOrNull { entryId ->
                     expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
                 }
@@ -1724,6 +1748,27 @@ private suspend fun LazyListState.centerOnItem(index: Int) {
     val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
     val anchorIndex = centerAnchorIndex(index, viewportHeight, visible.map { it.size })
     if (anchorIndex != index) scrollToItem(anchorIndex)
+}
+
+// A wide center band supplies the hysteresis needed for a continuously-moving playhead: adjacent
+// rows can update selection without issuing another scroll, while a target that leaves the middle
+// third is brought back near centre in one operation. Unlike centerOnItem this never first jumps
+// to the target at the viewport edge, so there is no visible bounce.
+private suspend fun LazyListState.followItem(index: Int) {
+    val info = layoutInfo
+    val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
+    if (viewportHeight <= 0) return
+    val visibleTarget = info.visibleItemsInfo.firstOrNull { it.index == index }
+    if (visibleTarget != null) {
+        val targetCenter = visibleTarget.offset + visibleTarget.size / 2
+        val viewportCenter = (info.viewportStartOffset + info.viewportEndOffset) / 2
+        // Stay put while the target occupies the middle third. This avoids needless tiny
+        // corrections as the playhead progresses row-by-row.
+        if (kotlin.math.abs(targetCenter - viewportCenter) <= viewportHeight / 3) return
+    }
+    // LazyListState's offset is relative to the viewport start. A negative half-viewport offset
+    // places the item near the middle in one scroll, including when it was previously offscreen.
+    scrollToItem(index, scrollOffset = -(viewportHeight / 2))
 }
 
 // Ranks collapsed-header candidates (gid to the header's own log entry id) by how likely each is

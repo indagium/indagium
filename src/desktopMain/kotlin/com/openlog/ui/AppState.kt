@@ -45,6 +45,7 @@ import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.SearchComputeResult
 import com.openlog.utils.TS_UNKNOWN
 import com.openlog.utils.ZipLogCandidate
+import com.openlog.utils.ZipLogCandidateKind
 import com.openlog.utils.buildAnnotationsHtml
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeCrashSites
@@ -52,11 +53,10 @@ import com.openlog.utils.computeItems
 import com.openlog.utils.computeSearchMatches
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.computeTidMapColors
-import com.openlog.utils.deltaMillis
 import com.openlog.utils.exportFilteredToFile
 import com.openlog.utils.extractAppVersionHeuristic
 import com.openlog.utils.extractCandidate
-import com.openlog.utils.extractEntryToTempFile
+import com.openlog.utils.extractArchiveVideoToCache
 import com.openlog.utils.indexOfEntryId
 import com.openlog.utils.invalidateComputeCache
 import com.openlog.utils.isLikelyTextFile
@@ -567,7 +567,21 @@ data class PendingImportReview(
 
 data class OpenFileError(val title: String, val path: String?, val message: String)
 
-data class AnnotationNavigationRequest(val id: Long, val tabId: String, val logIds: List<Int>)
+/**
+ * How a log-navigation request should move the viewport.
+ *
+ * Annotation-style jumps are explicit, one-off actions and should fully re-center. Follow-mode
+ * updates arrive continuously while a recording plays, so they use a center band instead: the
+ * row is kept near the middle without restarting a two-phase jump for every adjacent log row.
+ */
+enum class NavigationScrollMode { CENTER, FOLLOW }
+
+data class AnnotationNavigationRequest(
+    val id: Long,
+    val tabId: String,
+    val logIds: List<Int>,
+    val scrollMode: NavigationScrollMode = NavigationScrollMode.CENTER,
+)
 
 // Search next/prev's own navigation request — deliberately separate from
 // AnnotationNavigationRequest above rather than reusing it. Annotation/crash/ctx-anchor jumps are
@@ -581,7 +595,14 @@ data class AnnotationNavigationRequest(val id: Long, val tabId: String, val logI
 // to it deserves recentering the same way expand-all or annotation navigation does.
 data class SearchNavigationRequest(val id: Long, val tabId: String, val entryId: Int)
 
-data class PendingZipPicker(val zipFile: File, val candidates: List<ZipLogCandidate>)
+// Video candidates deliberately stay out of the picker rows: it is a log-selection UI. Keeping
+// them alongside the log candidates lets the picker offer an explicit, optional attachment
+// without presenting recordings as fake log choices.
+data class PendingZipPicker(
+    val zipFile: File,
+    val candidates: List<ZipLogCandidate>,
+    val videoCandidates: List<ZipLogCandidate> = emptyList(),
+)
 
 enum class SplitMode { SPLIT, OPEN_AS_IS }
 
@@ -986,6 +1007,10 @@ class AppState(
     // visible effect on a tab with no video attached.
     var videoPanelVisible by mutableStateOf(true)
     var videoPanelWidth by mutableStateOf(VIDEO_PANEL_DEFAULT_WIDTH)
+    // Rotation is deliberately session-only UI state. It belongs here rather than in a player
+    // composable so the embedded and detached views of a tab's one controller show the same
+    // orientation, and so switching between those views does not reset it.
+    private val videoRotationDegrees = mutableStateMapOf<String, Int>()
     var compareSplit by mutableStateOf(0.5f)
     var compareFilterRight by mutableStateOf(true)
     var isLoading by mutableStateOf(false)
@@ -1211,6 +1236,10 @@ class AppState(
         controlServerManager.stopControlServer()
         ioJob.cancel() // also cancels every active FileTailer's Job — each is started on ioScope
         tailCoordinator.clear()
+        // A tab may never have gone through closeTabsById before an app-wide shutdown. Release
+        // every decoder/audio line explicitly rather than relying on daemon-thread teardown.
+        videoControllers.values.forEach { controller -> controller.close() }
+        videoControllers.clear()
         activeLoads.clear()
         synchronized(stateLock) {
             pendingRestoredLoads.clear()
@@ -2472,7 +2501,9 @@ class AppState(
 
             else -> if (t.selected == setOf(id)) emptySet() else setOf(id)
         }
-        t.copy(selected = n)
+        // A direct selection is an explicit user navigation decision, so it must take control
+        // back from the video playhead rather than immediately being overwritten by Follow logs.
+        t.copy(selected = n, videoFollowLog = false)
     }
 
     fun selRowRange(tabId: String, fromId: Int, toId: Int) = upTab(tabId) { t ->
@@ -2487,14 +2518,14 @@ class AppState(
         val a = ids.indexOfId(fromId)
         val b = ids.indexOfId(toId)
         if (a < 0 || b < 0) return@upTab t
-        t.copy(selected = (minOf(a, b)..maxOf(a, b)).map { ids[it] }.toSet())
+        t.copy(selected = (minOf(a, b)..maxOf(a, b)).map { ids[it] }.toSet(), videoFollowLog = false)
     }
 
     fun setSelectedRows(tabId: String, ids: List<Int>) = upTab(tabId) { t ->
-        t.copy(selected = ids.toSet())
+        t.copy(selected = ids.toSet(), videoFollowLog = false)
     }
 
-    fun clearSelection(tabId: String) = upTab(tabId) { it.copy(selected = emptySet()) }
+    fun clearSelection(tabId: String) = upTab(tabId) { it.copy(selected = emptySet(), videoFollowLog = false) }
 
     fun selectAll(tabId: String) {
         val t = tab(tabId) ?: return
@@ -2539,10 +2570,14 @@ class AppState(
         pendingAnnotationNavigation = AnnotationNavigationRequest(annotationNavigationCounter, tabId, listOf(logId))
     }
 
-    /** Video panel's "Show in logs" button (ui/VideoPanel.kt, plan doc's Task B) — selects and
-     *  scrolls to [logId], reusing the exact same jump-to-log-lines mechanism as crash/annotation
-     *  navigation above (including auto-expanding whatever collapsed header owns it). */
-    fun requestVideoLogNavigation(tabId: String, logId: Int) = requestCrashNavigation(tabId, logId)
+    /**
+     * Legacy entry point for the video panel's "Show in logs" action. Keep it as an alias for
+     * [navigateToVideoLog], rather than [requestCrashNavigation]: video-originated navigation is
+     * allowed while Follow logs is enabled and must not silently disable that mode. Both routes
+     * use the same follow request, so a mapped playhead row and an explicit Show action retain
+     * the same filtered-row mapping and hysteretic viewport behavior.
+     */
+    fun requestVideoLogNavigation(tabId: String, logId: Int) = navigateToVideoLog(tabId, logId)
 
     /** Evidence cards use the established selection/scroll pathway so collapsed groups expand. */
     private fun requestAiLogNavigation(tabId: String, lineIds: List<Int>) {
@@ -2679,46 +2714,136 @@ class AppState(
     }
 
     // ── Video (video/VideoPlayerController.kt, model/Model.kt's VideoAttachment/VideoAnchor) ────
-    // Substrate only (plan doc's Task A) — no panel UI reads any of this yet; that's Task B.
 
-    /** Attaches [file] (a real file on disk — see [attachVideoFromZip] for zip-sourced videos) to
+    /** Attaches [file] (a real file on disk — see [attachVideoFromZip] for archive videos) to
      *  the active tab, keyed by absolute path as its own provenance label. Overwrites any video
      *  already attached to that tab (one video per tab, matching one anchor per tab). Returns the
      *  tab id it was attached to, or null if there's no active tab. */
     fun attachVideoToActiveTab(file: File): String? {
         val tabId = activeTabId.takeIf { it.isNotBlank() } ?: return null
-        return attachVideo(tabId, file, file.absolutePath)
+        return attachVideoToTab(file, tabId)
     }
 
-    /** Extracts [candidate] (kind VIDEO — see BugReportZip.kt's listArchiveVideoCandidates) from
-     *  [zipFile] to a temp file and attaches it to [targetTabId], falling back to the active tab
-     *  when none is given. Returns the tab id it was attached to, or null on extraction failure or
-     *  no target tab. */
+    /** Attaches a local video to the specified tab rather than whichever tab happens to be active.
+     *  Drop handling uses this after the paired log has finished its asynchronous load. */
+    fun attachVideoToTab(file: File, targetTabId: String): String? =
+        attachVideo(targetTabId, VideoSource.LocalFile(file.absolutePath), file.absolutePath)
+
+    /** Attaches a durable archive reference. Extraction is deferred until playback and uses the
+     *  app-managed archive cache, so autosave never records an ephemeral temp-file path. */
     fun attachVideoFromZip(zipFile: File, candidate: ZipLogCandidate, targetTabId: String? = null): String? {
         val tabId = targetTabId ?: activeTabId.takeIf { it.isNotBlank() } ?: return null
-        val tempFile = extractEntryToTempFile(zipFile, candidate) ?: run {
-            AppLogger.error("video", "Failed to extract video entry ${candidate.entryPath} from ${zipFile.name}")
-            return null
-        }
-        return attachVideo(tabId, tempFile, "${zipFile.name}/${candidate.displayName}")
+        if (candidate.kind != ZipLogCandidateKind.VIDEO) return null
+        return attachVideo(
+            tabId,
+            VideoSource.ArchiveEntry(zipFile.absolutePath, candidate.entryPath, candidate.displayName),
+            "${zipFile.name}/${candidate.displayName}",
+        )
     }
 
-    private fun attachVideo(tabId: String, videoFile: File, sourceLabel: String): String? {
+    private fun attachVideo(tabId: String, source: VideoSource, sourceLabel: String): String? {
         if (tab(tabId) == null) return null
-        upTab(tabId) { it.copy(attachedVideo = VideoAttachment(path = videoFile.absolutePath, sourceLabel = sourceLabel)) }
+        // A controller owns a grabber/audio line for precisely one source. Dispose it BEFORE
+        // publishing replacement metadata so a recomposition cannot keep using the old decoder.
+        videoControllers.remove(tabId)?.close()
+        videoRotationDegrees.remove(tabId)
+        upTab(tabId) { it.copy(attachedVideo = VideoAttachment(source = source, sourceLabel = sourceLabel)) }
+        // A successful attachment should be immediately discoverable; otherwise a user who had
+        // collapsed the video panel sees no sign that a standalone dropped recording was accepted.
+        videoPanelVisible = true
         return tabId
     }
+
+    /**
+     * Detaches an accidentally associated recording and immediately releases its decoder/audio
+     * resources. The log tab and all of its annotations stay intact.
+     */
+    fun removeVideo(tabId: String) {
+        videoControllers.remove(tabId)?.close()
+        videoRotationDegrees.remove(tabId)
+        upTab(tabId) { tab ->
+            if (tab.attachedVideo == null) tab else tab.copy(attachedVideo = null, videoFollowLog = false)
+        }
+        // There can be no embedded player after removing the active tab's only attachment.
+        if (tabId == activeTabId) videoPanelVisible = false
+    }
+
+    /** Clockwise orientation, kept independently for each tab's current video attachment. */
+    fun rotateVideoClockwise(tabId: String) {
+        videoRotationDegrees[tabId] = ((videoRotationDegrees[tabId] ?: 0) + 90) % 360
+    }
+
+    fun videoRotationDegrees(tabId: String): Int = videoRotationDegrees[tabId] ?: 0
 
     /** Lazily creates (and caches) the [VideoPlayerController] for [tabId]'s attached video. Null
      *  when the tab doesn't exist or has no video attached — a tab that later gets a video needs a
      *  fresh call after [attachVideoToActiveTab]/[attachVideoFromZip], since the controller is
      *  bound to one file path for its whole lifetime (see [close][VideoPlayerController.close]). */
     fun videoController(tabId: String): VideoPlayerController? {
-        val path = tab(tabId)?.attachedVideo?.path ?: return null
+        val attachment = tab(tabId)?.attachedVideo ?: return null
+        val path = resolveVideoPlaybackPath(attachment.source) ?: return null
         return videoControllers.getOrPut(tabId) { videoControllerFactory(path) }
     }
 
+    private fun resolveVideoPlaybackPath(source: VideoSource): String? = when (source) {
+        is VideoSource.LocalFile -> source.path.takeIf { it.isNotBlank() }
+        is VideoSource.ArchiveEntry -> extractArchiveVideoToCache(
+            archiveFile = File(source.archivePath),
+            candidate = ZipLogCandidate(
+                entryPath = source.entryPath,
+                displayName = source.displayName,
+                sizeBytes = -1L,
+                kind = ZipLogCandidateKind.VIDEO,
+            ),
+            cacheDir = archiveCacheDir,
+            maxEntryBytes = archiveEntryByteBudget,
+        )?.absolutePath
+    }
+
+    /** Session-only per-tab transport preference, deliberately false for every new/restored tab. */
+    fun setVideoFollowLog(tabId: String, enabled: Boolean) = upTab(tabId) { it.copy(videoFollowLog = enabled) }
+
+    fun isVideoFollowLogEnabled(tabId: String): Boolean = tab(tabId)?.videoFollowLog == true
+
+    /**
+     * Seeks the currently attached recording to a Notes frame. The durable [frame.source] check
+     * prevents a saved frame from seeking a different video that happened to replace the tab's
+     * original attachment after the note was created.
+     */
+    fun navigateToVideoFrame(tabId: String, frame: VideoFrameReference): Boolean {
+        val attachment = tab(tabId)?.attachedVideo ?: return false
+        if (attachment.source != frame.source || frame.positionMs < 0L) return false
+        val controller = videoController(tabId) ?: return false
+        videoPanelVisible = true
+        controller.seek(frame.positionMs)
+        return true
+    }
+
+    /**
+     * Returns the best known duration. A persisted value makes restores cheap; once a controller
+     * exists its live value wins, so range checks become effective as soon as FFmpeg opens it.
+     */
+    fun videoDurationMs(tab: LogTab): Long = maxOf(
+        tab.attachedVideo?.durationMs?.coerceAtLeast(0L) ?: 0L,
+        videoControllers[tab.id]?.durationMs?.coerceAtLeast(0L) ?: 0L,
+    )
+
+    fun videoDurationMs(tabId: String): Long = tab(tabId)?.let(::videoDurationMs) ?: 0L
+
+    /** A non-negative position is valid while duration is unknown; once known, it is inclusive. */
+    fun isVideoPositionValid(tab: LogTab, videoMs: Long): Boolean {
+        val duration = videoDurationMs(tab)
+        return videoMs >= 0 && (duration == 0L || videoMs <= duration)
+    }
+
+    /** Validates and normalizes an inclusive seek/export range against the known duration. */
+    fun validatedVideoRange(tab: LogTab, startMs: Long, endMs: Long): LongRange? {
+        if (startMs < 0 || endMs < startMs || !isVideoPositionValid(tab, endMs)) return null
+        return startMs..endMs
+    }
+
     fun setVideoAnchor(tabId: String, videoMs: Long, logId: Int) = upTab(tabId) { t ->
+        if (!isVideoPositionValid(t, videoMs) || logId !in t.rmap) return@upTab t
         t.attachedVideo?.let { t.copy(attachedVideo = it.copy(anchor = VideoAnchor(videoMs, logId))) } ?: t
     }
 
@@ -2732,10 +2857,10 @@ class AppState(
      *  access — so it's directly unit-testable against a bare LogTab. */
     fun logIdToVideoMs(tab: LogTab, logId: Int): Long? {
         val anchor = tab.attachedVideo?.anchor ?: return null
-        val anchorEntry = tab.rmap[anchor.logId] ?: return null
-        val targetEntry = tab.rmap[logId] ?: return null
-        val delta = deltaMillis(anchorEntry.ts, targetEntry.ts) ?: return null
-        return anchor.videoMs + delta
+        val elapsed = monotonicLogElapsedById(tab)
+        val anchorElapsed = elapsed[anchor.logId] ?: return null
+        val targetElapsed = elapsed[logId] ?: return null
+        return anchor.videoMs + (targetElapsed - anchorElapsed)
     }
 
     /** Inverse of [logIdToVideoMs]: the entry id whose mapped video-time is closest to [videoMs].
@@ -2745,20 +2870,113 @@ class AppState(
      *  same conditions as [logIdToVideoMs], or if no entry in the tab has a parseable `ts`. */
     fun videoMsToNearestLogId(tab: LogTab, videoMs: Long): Int? {
         val anchor = tab.attachedVideo?.anchor ?: return null
-        val anchorEntry = tab.rmap[anchor.logId] ?: return null
-        if (parseMillisOfDay(anchorEntry.ts) == TS_UNKNOWN) return null
+        val elapsed = monotonicLogElapsedById(tab)
+        val anchorElapsed = elapsed[anchor.logId] ?: return null
         val targetDeltaMs = videoMs - anchor.videoMs
         var bestId: Int? = null
         var bestDiff = Long.MAX_VALUE
-        for (entry in tab.logData) {
-            val delta = deltaMillis(anchorEntry.ts, entry.ts) ?: continue
-            val diff = kotlin.math.abs(delta - targetDeltaMs)
+        for ((id, entryElapsed) in elapsed) {
+            val diff = kotlin.math.abs((entryElapsed - anchorElapsed) - targetDeltaMs)
             if (diff < bestDiff) {
                 bestDiff = diff
-                bestId = entry.id
+                bestId = id
             }
         }
         return bestId
+    }
+
+    /**
+     * Unfolds time-of-day timestamps in log order into an elapsed timeline. Unlike a one-off
+     * `deltaMillis(anchor, row)`, this works in both directions around midnight and across
+     * multiple rollovers while preserving small real backwards jumps. Rows without a timestamp
+     * remain unmappable.
+     */
+    private fun monotonicLogElapsedById(tab: LogTab): Map<Int, Long> {
+        val result = LinkedHashMap<Int, Long>()
+        var previousMillis: Long? = null
+        var dayOffset = 0L
+        val dayMs = 24L * 60L * 60L * 1_000L
+        for (entry in tab.logData) {
+            val millis = parseMillisOfDay(entry.ts)
+            if (millis == TS_UNKNOWN) continue
+            // Preserve LogTime.deltaMillis's established interpretation: only a backwards jump
+            // larger than half a day is midnight. Small backwards jumps are real out-of-order
+            // rows/clock corrections, not a fabricated next-day recording.
+            if (previousMillis != null && millis - previousMillis < -(dayMs / 2)) dayOffset += dayMs
+            result[entry.id] = dayOffset + millis
+            previousMillis = millis
+        }
+        return result
+    }
+
+    /** Current log row for a transport position, suitable for a follow-playhead UI. */
+    fun mappedVideoLogId(tabId: String, videoMs: Long): Int? =
+        tab(tabId)?.let { videoMsToNearestLogId(it, videoMs) }
+
+    /**
+     * Chooses the displayed row nearest [mappedLogId] in the log's actual timeline. The viewer
+     * reports its derived rows after filtering and folding, so this deliberately uses `rowIds`
+     * rather than `allIds`: headers are navigable anchors, but they are not a meaningful playhead
+     * selection. Returning null when the filtered view has no timestamped rows leaves the existing
+     * selection alone instead of replacing it with an id the user cannot see.
+     *
+     * Crucially, row ids are identities, not elapsed time. A filtered log can hide thousands of
+     * repeated/nearby records between two visible rows, so choosing by id distance would make a
+     * line a minute ahead appear closer than the anchor after only a second of playback. Build the
+     * timeline from the complete source order first, then choose among the visible candidates by
+     * that timeline. On an exact tie, the earlier displayed row wins because `rowIds` are source
+     * ordered and `minWithOrNull` retains the first equal candidate.
+     */
+    private fun closestVisibleFollowLogId(tab: LogTab, mappedLogId: Int): Int? {
+        val visibleRows = visibleItemsByTab[tab.id]?.rowIds
+            ?: computeItems(tab, applyFilter = true).filterIsInstance<LogItem.Row>().map { it.entry.id }.toIntArray()
+        if (visibleRows.isEmpty()) return null
+
+        val elapsed = monotonicLogElapsedById(tab)
+        val mappedElapsed = elapsed[mappedLogId] ?: return null
+        var closestId: Int? = null
+        var closestDelta = Long.MAX_VALUE
+        for (visibleId in visibleRows) {
+            val visibleElapsed = elapsed[visibleId] ?: continue
+            val delta = kotlin.math.abs(visibleElapsed - mappedElapsed)
+            if (delta < closestDelta) {
+                closestDelta = delta
+                closestId = visibleId
+            }
+        }
+        return closestId
+    }
+
+    /**
+     * Selects and centers the visible row represented by a mapped playhead position.
+     *
+     * A video timestamp may map to a row excluded by the current filter. Resolve that to the
+     * closest displayed log row before changing selection, then avoid publishing another
+     * navigation request when several mapped rows resolve to that same visible row. Follow uses
+     * a distinct viewport mode so rapid playhead updates do not fight the annotation jump path's
+     * deliberate two-phase re-centering.
+     */
+    fun navigateToVideoLog(tabId: String, logId: Int) {
+        val currentTab = tab(tabId) ?: return
+        if (logId !in currentTab.rmap) return
+        val visibleLogId = closestVisibleFollowLogId(currentTab, logId) ?: return
+        if (currentTab.selected == setOf(visibleLogId)) return
+        // Follow navigation is the one selection source that deliberately does not turn Follow
+        // logs back off. Do not activate the already-active tab: the redundant state write can
+        // restart composable effects while a follow scroll is in flight.
+        if (compareMode && tabId != activeTabId) {
+            compareTabId = tabId
+        } else if (tabId != activeTabId) {
+            activateTab(tabId)
+        }
+        upTab(tabId) { it.copy(selected = setOf(visibleLogId)) }
+        annotationNavigationCounter += 1
+        pendingAnnotationNavigation = AnnotationNavigationRequest(
+            id = annotationNavigationCounter,
+            tabId = tabId,
+            logIds = listOf(visibleLogId),
+            scrollMode = NavigationScrollMode.FOLLOW,
+        )
     }
 
     // ── Annotations (block model) ────────────────────────────────────
@@ -2800,8 +3018,23 @@ class AppState(
     fun addLogRefBlock(tabId: String, logIds: List<Int>, caption: String = ""): String? =
         annotationManager.addLogRefBlock(tabId, logIds, caption)
 
-    fun addImageBlock(tabId: String, sourceBytes: ByteArray, provenance: String, afterId: String? = null): String? =
-        annotationManager.addImageBlock(tabId, sourceBytes, provenance, afterId)
+    fun addImageBlock(
+        tabId: String,
+        sourceBytes: ByteArray,
+        provenance: String,
+        afterId: String? = null,
+        videoFrame: VideoFrameReference? = null,
+    ): String? = annotationManager.addImageBlock(tabId, sourceBytes, provenance, afterId, videoFrame)
+
+    /** Captures a video frame as Notes evidence with durable identity and exact seek metadata. */
+    fun addVideoFrameNote(
+        tabId: String,
+        sourceBytes: ByteArray,
+        source: VideoSource,
+        sourceLabel: String,
+        positionMs: Long,
+        afterId: String? = null,
+    ): String? = annotationManager.addVideoFrameNote(tabId, sourceBytes, source, sourceLabel, positionMs, afterId)
 
     fun updateBlock(tabId: String, blockId: String, newText: String) = annotationManager.updateBlock(tabId, blockId, newText)
 
@@ -3346,6 +3579,47 @@ class AppState(
         openable.forEach { openPath(it) }
     }
 
+    /**
+     * Handles file drops without guessing an association. A lone video goes to the current tab;
+     * exactly one plain log plus one video forms an explicit pair and is attached only after that
+     * log tab publishes. Every other batch opens its log files but leaves videos unattached with a
+     * visible explanation rather than overwriting an arbitrary tab's recording.
+     */
+    fun openDroppedFiles(files: List<File>) {
+        val (videos, nonVideos) = files.partition { it.extension.lowercase() in VIDEO_FILE_EXTENSIONS }
+        when {
+            videos.size == 1 && nonVideos.isEmpty() -> {
+                if (attachVideoToActiveTab(videos.single()) == null) {
+                    showOpenError(
+                        title = "Could not attach video",
+                        path = videos.single().absolutePath,
+                        message = "Open a log tab before dropping a video.",
+                    )
+                }
+            }
+
+            videos.size == 1 && nonVideos.size == 1 &&
+                !isSupportedArchiveFile(nonVideos.single()) && isOpenableAsLog(nonVideos.single()) -> {
+                // openFile returns a stable id immediately, but its tab is published on ioScope.
+                // Target that id, never activeTabId, because another load or tab click may change
+                // the active tab while parsing is in progress.
+                val tabId = openFile(nonVideos.single())
+                if (tabId != null) attachVideoToTabWhenAvailable(videos.single(), tabId)
+            }
+
+            else -> {
+                openPaths(nonVideos)
+                if (videos.isNotEmpty()) {
+                    showOpenError(
+                        title = "Videos were not attached",
+                        path = videos.joinToString(", ") { it.absolutePath },
+                        message = "Drop one video by itself, or exactly one video together with one non-archive log.",
+                    )
+                }
+            }
+        }
+    }
+
     private fun isLikelyLogPath(file: File): Boolean =
         file.isFile && file.extension.lowercase() in setOf("log", "txt")
 
@@ -3487,10 +3761,11 @@ class AppState(
         openError = OpenFileError(title = title, path = path, message = message)
     }
 
-    // A single candidate auto-opens (the common case — most bug reports bundle one logcat
-    // buffer). 2+ candidates show a picker rather than guessing: Android 11+ bug reports often
-    // bundle multiple buffers (main/system/crash/events), and silently picking one wrong is worse
-    // than one extra click. 0 candidates reports that no log-like entries were found.
+    // A single log candidate normally auto-opens (the common case — most bug reports bundle one
+    // logcat buffer). An archive with recordings always shows the picker, even for one log: the
+    // user must be able to see and confirm the optional log/video association. 2+ log candidates
+    // also show a picker rather than guessing. 0 candidates reports that no log-like entries were
+    // found.
     fun openZipFile(file: File) {
         val path = file.absolutePath
         if (!file.exists() || !file.isFile) {
@@ -3509,24 +3784,20 @@ class AppState(
             return
         }
         // Scanned separately from the log/ANR candidates above (own extension-gated lister, see
-        // BugReportZip.kt) — screen recordings never show up in a picker meant for log text, they
-        // silently ride along with whichever log tab this call resolves to. Only the single-
-        // log-candidate auto-open case attaches one (below): with 2+ log candidates it's not yet
-        // known which of the resulting tabs should own the recording, and 0 log candidates means
-        // there's no tab to attach it to — both left for Task B's picker UI to resolve properly.
+        // BugReportZip.kt). Recordings never become log rows; the picker presents them separately
+        // as an explicit optional attachment choice.
         val videoCandidates = runCatching { listArchiveVideoCandidates(file) }.getOrDefault(emptyList())
         AppLogger.info("archive", "Archive scan found ${candidates.size} candidates")
         when {
-            candidates.size == 1 -> {
+            candidates.size == 1 && videoCandidates.isEmpty() -> {
                 rememberRecentFile(file)
                 recentMenuOpen = false
-                val tabId = openZipEntries(file, listOf(candidates.first())).firstOrNull()
-                attachFirstVideoCandidateAsync(file, videoCandidates, tabId)
+                openZipEntries(file, listOf(candidates.first()))
             }
-            candidates.size > 1 -> {
+            candidates.isNotEmpty() -> {
                 rememberRecentFile(file)
                 recentMenuOpen = false
-                pendingZipPicker = PendingZipPicker(file, candidates)
+                pendingZipPicker = PendingZipPicker(file, candidates, videoCandidates)
             }
             else -> {
                 removeRecentFile(file)
@@ -3540,20 +3811,30 @@ class AppState(
         }
     }
 
-    // Extraction (extractEntryToTempFile) streams a potentially multi-hundred-MB file to disk —
-    // dispatched onto ioScope rather than inline in openZipFile so it never blocks the caller
-    // (typically the UI thread), same reasoning as every other archive-entry extraction path.
-    // openZipEntries allocates [tabId] synchronously but the tab itself only PUBLISHES once its
-    // own ioScope job finishes parsing (openZipEntry, above) — awaiting isLoadInFlight first (same
-    // bounded-poll pattern as OpenLogToolOperations.awaitLoad) avoids the race where this job's
-    // attachVideo would otherwise silently no-op against a tab that doesn't exist yet.
-    private fun attachFirstVideoCandidateAsync(zipFile: File, videoCandidates: List<ZipLogCandidate>, tabId: String?) {
-        val candidate = videoCandidates.firstOrNull() ?: return
-        if (tabId == null) return
+    // Archive tabs publish asynchronously after parsing. Wait for each selected target before
+    // attaching the explicitly selected archive entry, otherwise a still-loading tab would make
+    // the association silently disappear. A deliberately selected recording is attached to every
+    // selected log, which is explicit in the picker and avoids inventing a one-to-one pairing.
+    private fun attachArchiveVideoToTabsWhenAvailable(
+        zipFile: File,
+        videoCandidate: ZipLogCandidate?,
+        tabIds: List<String>,
+    ) {
+        if (videoCandidate?.kind != ZipLogCandidateKind.VIDEO) return
+        tabIds.forEach { tabId ->
+            ioScope.launch {
+                val deadline = System.currentTimeMillis() + VIDEO_ATTACH_AWAIT_TIMEOUT_MS
+                while (isLoadInFlight(tabId) && System.currentTimeMillis() < deadline) delay(VIDEO_ATTACH_AWAIT_POLL_MS)
+                attachVideoFromZip(zipFile, videoCandidate, tabId)
+            }
+        }
+    }
+
+    private fun attachVideoToTabWhenAvailable(file: File, tabId: String) {
         ioScope.launch {
             val deadline = System.currentTimeMillis() + VIDEO_ATTACH_AWAIT_TIMEOUT_MS
             while (isLoadInFlight(tabId) && System.currentTimeMillis() < deadline) delay(VIDEO_ATTACH_AWAIT_POLL_MS)
-            attachVideoFromZip(zipFile, candidate, tabId)
+            attachVideoToTab(file, tabId)
         }
     }
 
@@ -3561,7 +3842,11 @@ class AppState(
     // same order as `selected`), so a caller with a concrete tabId to scope awaitLoad-style
     // polling to (ARCH-3: OpenLogToolOperations) doesn't have to re-derive it from sourcePath
     // matching afterward. Empty when every candidate got deferred into a split prompt instead.
-    fun openZipEntries(zipFile: File, selected: List<ZipLogCandidate>): List<String> {
+    fun openZipEntries(
+        zipFile: File,
+        selected: List<ZipLogCandidate>,
+        videoToAttach: ZipLogCandidate? = null,
+    ): List<String> {
         val (oversized, normal) = selected.partition { requiresSplitPrompt(it.sizeBytes) }
         if (oversized.isNotEmpty()) {
             pendingSplitPrompt = PendingSplitPrompt(
@@ -3573,6 +3858,7 @@ class AppState(
         }
         val tabIds = selected.mapNotNull { openZipEntry(zipFile, it, bypassSplitPrompt = false) }
         pendingZipPicker = null
+        attachArchiveVideoToTabsWhenAvailable(zipFile, videoToAttach, tabIds)
         return tabIds
     }
 

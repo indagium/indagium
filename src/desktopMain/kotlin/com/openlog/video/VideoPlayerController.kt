@@ -13,14 +13,15 @@ import org.bytedeco.javacv.Java2DFrameConverter
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.nio.ShortBuffer
+import java.util.concurrent.atomic.AtomicLong
 import javax.imageio.ImageIO
 import javax.sound.sampled.AudioFormat
 import javax.sound.sampled.AudioSystem
 import javax.sound.sampled.DataLine
 import javax.sound.sampled.SourceDataLine
 
-// Presentation tolerance for the audio-master-clock wait below: a video frame within this many
-// microseconds of the current clock is shown immediately rather than sleeping for a
+// Presentation tolerance for the timestamped wall-clock wait below: a video frame within this
+// many microseconds of the current clock is shown immediately rather than sleeping for a
 // sub-millisecond gap that would just burn CPU on wakeups.
 private const val PRESENT_TOLERANCE_US = 1_000L
 
@@ -51,12 +52,29 @@ private const val BITS_PER_BYTE = 8
 private const val BYTE_MASK = 0xFF
 
 /**
+ * The transport timeline is authoritative for both the slider and video-to-log mapping. A normal
+ * decode must never move it backwards: that would make a late frame look like a seek. A deliberate
+ * seek is the one exception and starts a new timeline epoch.
+ *
+ * This small type is deliberately independent of FFmpeg so its ordering contract can be tested
+ * without native video libraries.
+ */
+internal class PlaybackTimeline(initialUs: Long = 0L) {
+    var positionUs: Long = initialUs.coerceAtLeast(0L)
+        private set
+
+    fun seek(targetUs: Long): Long = targetUs.coerceAtLeast(0L).also { positionUs = it }
+
+    fun advance(candidateUs: Long): Long = maxOf(positionUs, candidateUs.coerceAtLeast(0L)).also { positionUs = it }
+}
+
+/**
  * Behind-an-interface video playback engine (plan doc's Task A "player core"). The concrete
  * implementation ([FfmpegVideoPlayerController]) wraps `FFmpegFrameGrabber` (bytedeco/javacv) on a
- * background thread: video [Frame]s become Compose [ImageBitmap]s, audio `Frame`s feed a JavaSound
- * `SourceDataLine`, and the audio line's own playback pace is the clock video frames wait on
- * before being presented — the standard "audio-master-clock" A/V sync pattern (see the plan doc's
- * "Decisions taken").
+ * background thread: video [Frame]s become Compose [ImageBitmap]s and audio `Frame`s feed a
+ * JavaSound `SourceDataLine`. Presentation uses a timestamped wall clock. This is deliberately
+ * correctness-first: a single FFmpeg grabber cannot wait for an audio frame that is still behind a
+ * video frame in that same decode stream, which was an audio-clock deadlock in the old design.
  *
  * Kept as an interface (not exposed as a concrete class from AppState) so ui/AppState.kt's pure
  * mapping helpers and the autosave round-trip tests never need real FFmpeg natives on the test
@@ -79,11 +97,9 @@ interface VideoPlayerController {
 
     fun seek(ms: Long)
 
-    /** Playback speed multiplier. MVP limitation (documented, not silently wrong): this only
-     *  re-paces the WALL-CLOCK fallback used while no audio frame has been decoded yet (e.g.
-     *  video-only content); once a real audio Frame lands, the audio hardware — which always
-     *  plays at 1x — becomes the clock again. Real variable-speed audio needs resampling, out of
-     *  scope for this substrate. */
+    /** Playback speed multiplier. MVP limitation (documented, not silently wrong): it re-paces
+     *  video presentation but JavaSound audio remains at 1x. Real variable-speed audio needs
+     *  resampling, out of scope for this substrate. */
     fun setRate(rate: Float)
 
     /** PNG bytes of whatever [currentFrame] currently shows. Null before the first frame decodes. */
@@ -130,48 +146,79 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     // safe for concurrent grab+seek.
     @Volatile private var playRequested = false
 
-    @Volatile private var pendingSeekUs: Long? = null
+    private data class SeekCommand(val epoch: Long, val targetUs: Long)
+
+    // A request's epoch makes it impossible for an already-decoded frame to overwrite a newer
+    // seek. The lock also keeps the UI thread's immediate position update and the decoder's frame
+    // publication in one ordering domain.
+    private val presentationLock = Any()
+    private val seekEpoch = AtomicLong(0L)
+    private var pendingSeek: SeekCommand? = null
+    private val timeline = PlaybackTimeline()
+
+    @Volatile private var resetPlaybackClockRequested = false
+
+    @Volatile private var pendingRate: Float? = null
+
+    // A newly-opened grabber has no decoded image yet. Keep this flag on the decode thread so it
+    // can acquire and publish the first video frame even while playback is paused. Seeking is
+    // handled directly in applyPendingSeek() for the same reason.
+    private var needsInitialFrame = true
 
     @Volatile private var rate = 1f
 
     @Volatile private var closed = false
 
-    // Audio-master clock: -1 means "no audio frame decoded since the last seek/resume", which
-    // routes currentClockUs() through the wall-clock fallback until a real audio Frame lands.
-    @Volatile private var audioClockUs = -1L
     private var playbackStartNanos = 0L
     private var playbackStartTimestampUs = 0L
     private var hasAudioStream = false
 
+    private val decodeThread = Thread({ runLoop() }, "openlog-video-decode").apply {
+        isDaemon = true
+    }
+
     init {
-        // Not kept as a property (detekt's UnusedPrivateProperty would flag it — nothing ever
-        // needs to join/interrupt it, it's a daemon thread that self-stops via `closed`): starting
-        // it here, as the last statement in the constructor, is enough.
-        Thread({ runLoop() }, "openlog-video-decode").apply { isDaemon = true }.start()
+        decodeThread.start()
     }
 
     override fun play() {
         if (playRequested || closed) return
-        playbackStartNanos = System.nanoTime()
-        playbackStartTimestampUs = _positionMs * MICROS_PER_MS
-        audioClockUs = -1L
         playRequested = true
+        // The decoder owns the clock fields. Rebase on its next step so a Play immediately after
+        // a seek cannot use a stale frame timestamp as its origin.
+        resetPlaybackClockRequested = true
         _isPlaying = true
         runCatching { audioLine?.start() }
+        wakeDecoder()
     }
 
     override fun pause() {
         playRequested = false
         _isPlaying = false
         runCatching { audioLine?.stop() }
+        runCatching { audioLine?.flush() }
+        wakeDecoder()
     }
 
     override fun seek(ms: Long) {
-        pendingSeekUs = (ms * MICROS_PER_MS).coerceAtLeast(0)
+        val targetUs = ms.coerceAtLeast(0L).coerceAtMost(Long.MAX_VALUE / MICROS_PER_MS) * MICROS_PER_MS
+        val command = SeekCommand(seekEpoch.incrementAndGet(), targetUs)
+        synchronized(presentationLock) {
+            // Calls can arrive from more than one caller. An older caller which was delayed until
+            // after a newer one must not replace that newer command.
+            if (command.epoch >= seekEpoch.get()) {
+                pendingSeek = command
+                publishSeekPositionLocked(command)
+            }
+        }
+        // The decoder normally idles while paused. Interrupting that short idle sleep makes a
+        // paused scrub publish its frame promptly instead of waiting for a later Play action.
+        wakeDecoder()
     }
 
     override fun setRate(rate: Float) {
-        this.rate = rate.coerceIn(MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE)
+        pendingRate = rate.coerceIn(MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE)
+        wakeDecoder()
     }
 
     override fun grabCurrentFrame(): ByteArray? = lastImage?.let(::encodePng)
@@ -188,13 +235,22 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     override fun close() {
         closed = true
         playRequested = false
+        _isPlaying = false
+        // Closing the audio line wakes a blocking SourceDataLine.write; interrupt wakes an idle
+        // poll/sleep. The decode thread owns grabber.release() so FFmpeg is never released while
+        // another thread is grabbing from it.
+        runCatching { audioLine?.close() }
+        decodeThread.interrupt()
     }
 
     // ── Decode loop (background thread) ─────────────────────────────
     private fun runLoop() {
-        if (!openGrabber()) return
-        while (!closed) decodeStep()
-        releaseAll()
+        try {
+            if (!openGrabber()) return
+            while (!closed) decodeStep()
+        } finally {
+            releaseAll()
+        }
     }
 
     // One step of the decode loop, pulled out of runLoop's while so every early-exit is a plain
@@ -202,12 +258,23 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     // LoopWithTooManyJumpStatements — a loop body that's just one function call has none).
     private fun decodeStep() {
         if (applyPendingSeek()) return
+        if (needsInitialFrame) {
+            needsInitialFrame = false
+            presentImageImmediately(isInitialFrame = true)
+            return
+        }
         if (!playRequested) {
+            applyPendingRateWhilePaused()
             sleepQuietly(IDLE_POLL_MS)
             return
         }
+        applyPendingPlaybackClockChanges()
+        // Capture before the blocking grab. If a seek is requested while FFmpeg is decoding this
+        // packet, the returned frame belongs to the old epoch and must be discarded rather than
+        // being presented under the newly requested timeline position.
+        val epoch = seekEpoch.get()
         val frame = grabNextFrame() ?: return
-        presentFrame(frame)
+        presentFrame(frame, epoch)
     }
 
     private fun openGrabber(): Boolean = runCatching {
@@ -225,16 +292,49 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
 
     /** Returns true (and restarts the loop) if a seek was applied this iteration. */
     private fun applyPendingSeek(): Boolean {
-        val target = pendingSeekUs ?: return false
-        pendingSeekUs = null
-        runCatching { grabber.setTimestamp(target) }
+        val command = synchronized(presentationLock) {
+            pendingSeek?.also { pendingSeek = null }
+        } ?: return false
+        if (!isCurrentEpoch(command.epoch)) return true
+        runCatching { grabber.setTimestamp(command.targetUs) }
             .onFailure { AppLogger.warn("video", "seek failed for $path", it) }
         runCatching { audioLine?.flush() }
-        audioClockUs = -1L
+        if (!isCurrentEpoch(command.epoch)) return true
         playbackStartNanos = System.nanoTime()
-        playbackStartTimestampUs = target
-        _positionMs = target / MICROS_PER_MS
+        playbackStartTimestampUs = command.targetUs
+        // Use grabImage rather than the normal interleaved grab loop: when paused we need a
+        // video frame now, and waiting to encounter/drain audio packets would leave the preview
+        // stale (or block on an audio line). The grabber remains exclusively owned by this thread.
+        presentImageImmediately(isInitialFrame = false, epoch = command.epoch, minimumTimestampUs = command.targetUs)
         return true
+    }
+
+    /**
+     * Decodes and publishes the next image without playback-clock pacing. Used for readiness and
+     * paused seeks, so opening a video and moving the slider both show a picture before Play.
+     */
+    private fun presentImageImmediately(
+        isInitialFrame: Boolean,
+        epoch: Long = seekEpoch.get(),
+        minimumTimestampUs: Long? = null,
+    ) {
+        val frame = runCatching { grabImageAtOrAfter(minimumTimestampUs, epoch) }
+            .onFailure {
+                AppLogger.error("video", "image grab failed for $path", it)
+                _error = it.message ?: "Playback error"
+            }
+            .getOrNull()
+
+        if (frame == null) {
+            if (isInitialFrame && !closed) {
+                _error = "Video contains no decodable image frames"
+            }
+            return
+        }
+        if (closed || !isCurrentEpoch(epoch)) return
+
+        val image = runCatching { converter.convert(frame) }.getOrNull() ?: return
+        publishFrame(image, frame.timestamp, epoch)
     }
 
     private fun grabNextFrame(): Frame? = runCatching { grabber.grab() }
@@ -251,33 +351,33 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
             null
         }
 
-    private fun presentFrame(frame: Frame) {
+    private fun presentFrame(frame: Frame, epoch: Long) {
         when {
-            !frame.image.isNullOrEmpty() -> presentVideoFrame(frame)
+            !frame.image.isNullOrEmpty() -> presentVideoFrame(frame, epoch)
             !frame.samples.isNullOrEmpty() -> presentAudioFrame(frame)
             else -> Unit // data/subtitle frames — nothing to do with them here
         }
     }
 
-    private fun presentVideoFrame(frame: Frame) {
-        waitUntilPresentationTime(frame.timestamp)
-        if (closed || pendingSeekUs != null) return // superseded by a seek while we were waiting
+    private fun presentVideoFrame(frame: Frame, epoch: Long) {
+        waitUntilPresentationTime(frame.timestamp, epoch)
+        if (closed || !playRequested || !isCurrentEpoch(epoch)) return // superseded while waiting
         val image = runCatching { converter.convert(frame) }.getOrNull() ?: return
-        lastImage = image
-        runCatching { _currentFrame = image.toComposeImageBitmap() }
-        _positionMs = frame.timestamp / MICROS_PER_MS
+        publishFrame(image, frame.timestamp, epoch)
     }
 
     private fun presentAudioFrame(frame: Frame) {
         writeAudio(frame)
-        audioClockUs = frame.timestamp
     }
 
-    // Busy-waits (in short bounded sleeps, not a tight spin) until the audio-master clock reaches
-    // [targetUs], or until closed/paused/re-seeked interrupts the wait — those three cases all
-    // need to abandon a stale wait rather than block the whole controller.
-    private fun waitUntilPresentationTime(targetUs: Long) {
-        while (!closed && playRequested && pendingSeekUs == null) {
+    // Waits in short bounded sleeps (not a tight spin) until [targetUs] reaches the playback
+    // clock, or until closed/paused/re-seeked. Crucially this clock never depends on a future
+    // decoded audio frame, so interleaved video/audio streams continue making forward progress.
+    private fun waitUntilPresentationTime(targetUs: Long, epoch: Long) {
+        while (!closed && playRequested && isCurrentEpoch(epoch)) {
+            // The frame is already decoded, so the wall clock may advance smoothly toward its
+            // timestamp without the slider getting ahead of the picture it is waiting to show.
+            publishClockPosition(targetUs, epoch)
             val remaining = targetUs - currentClockUs()
             if (remaining <= PRESENT_TOLERANCE_US) return
             sleepQuietly((remaining / MICROS_PER_MS).coerceIn(1, MAX_WAIT_SLEEP_MS))
@@ -285,10 +385,75 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     }
 
     private fun currentClockUs(): Long {
-        val audio = audioClockUs
-        if (hasAudioStream && audio >= 0) return audio
         val elapsedUs = (System.nanoTime() - playbackStartNanos) / NANOS_PER_MICRO
         return playbackStartTimestampUs + (elapsedUs * rate).toLong()
+    }
+
+    private fun applyPendingRateWhilePaused() {
+        pendingRate?.let {
+            rate = it
+            pendingRate = null
+        }
+    }
+
+    private fun applyPendingPlaybackClockChanges() {
+        pendingRate?.let { newRate ->
+            val position = currentClockUs()
+            rate = newRate
+            pendingRate = null
+            playbackStartNanos = System.nanoTime()
+            playbackStartTimestampUs = position
+        }
+        if (resetPlaybackClockRequested) {
+            resetPlaybackClockRequested = false
+            synchronized(presentationLock) {
+                playbackStartNanos = System.nanoTime()
+                playbackStartTimestampUs = timeline.positionUs
+            }
+        }
+    }
+
+    /** Grabs past a keyframe before the requested timestamp, so a seek cannot publish backwards. */
+    private fun grabImageAtOrAfter(minimumTimestampUs: Long?, epoch: Long): Frame? {
+        var frame = grabber.grabImage()
+        while (frame != null && minimumTimestampUs != null && frame.timestamp < minimumTimestampUs && isCurrentEpoch(epoch)) {
+            frame = grabber.grabImage()
+        }
+        return frame
+    }
+
+    private fun isCurrentEpoch(epoch: Long): Boolean = seekEpoch.get() == epoch
+
+    private fun publishSeekPositionLocked(command: SeekCommand) {
+        if (!isCurrentEpoch(command.epoch)) return
+        _positionMs = timeline.seek(command.targetUs) / MICROS_PER_MS
+    }
+
+    private fun publishClockPosition(frameTimestampUs: Long, epoch: Long) {
+        publishPosition(frameTimestampUs.coerceAtMost(currentClockUs()), epoch)
+    }
+
+    private fun publishFrame(image: BufferedImage, timestampUs: Long, epoch: Long) {
+        synchronized(presentationLock) {
+            if (closed || !isCurrentEpoch(epoch)) return
+            // Keep one timestamp for the bitmap and controller position. Do not merely retain the
+            // newer position for an old bitmap: that would leave logs following one moment while
+            // the video visibly shows another. A backward frame is stale and is discarded.
+            if (timestampUs.coerceAtLeast(0L) < timeline.positionUs) return
+            val positionUs = timeline.advance(timestampUs)
+            lastImage = image
+            runCatching { _currentFrame = image.toComposeImageBitmap() }
+            _positionMs = positionUs / MICROS_PER_MS
+            playbackStartNanos = System.nanoTime()
+            playbackStartTimestampUs = positionUs
+        }
+    }
+
+    private fun publishPosition(candidateUs: Long, epoch: Long) {
+        synchronized(presentationLock) {
+            if (closed || !isCurrentEpoch(epoch)) return
+            _positionMs = timeline.advance(candidateUs) / MICROS_PER_MS
+        }
     }
 
     private fun openAudioLine() {
@@ -318,9 +483,12 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
             bytes[i + 1] = ((s shr BITS_PER_BYTE) and BYTE_MASK).toByte()
             i += BYTES_PER_SAMPLE
         }
-        // Blocking write — SourceDataLine.write() only returns once there's buffer room, which is
-        // exactly what makes the audio hardware the natural pace-setter for the whole loop.
-        runCatching { line.write(bytes, 0, bytes.size) }
+        // Do not let JavaSound hold the sole grabber-owning thread in a blocking write. That would
+        // make pause/seek unable to reach applyPendingSeek(), especially when pausing prevents the
+        // audio device from draining. Dropping the portion that will not fit is preferable to a
+        // stale video preview; video has its own timestamp clock and software decode continues.
+        val writableBytes = bytes.size.coerceAtMost(line.available().coerceAtLeast(0))
+        if (writableBytes > 0) runCatching { line.write(bytes, 0, writableBytes) }
     }
 
     private fun encodePng(image: BufferedImage): ByteArray? = runCatching {
@@ -335,5 +503,9 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
 
     private fun sleepQuietly(ms: Long) {
         runCatching { Thread.sleep(ms.coerceAtLeast(1)) }
+    }
+
+    private fun wakeDecoder() {
+        decodeThread.interrupt()
     }
 }

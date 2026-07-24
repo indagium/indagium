@@ -706,12 +706,13 @@ fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildS
             is AnnBlock.LogRef -> blockNumber = appendLogRefBlock(tab, settings, block, blockNumber)
 
             is AnnBlock.Image -> {
-                if (settings.numberAnnotationBlocks) append("${blockNumber++}. ")
-                if (block.caption.isNotBlank()) appendLine(block.caption)
                 // No Markdown/data-URI image here — it won't render in Jira plain text. The real
                 // image bytes are meant to travel via clipboard (per-image "Copy image" — Task D,
                 // not yet implemented), so this exported text only carries the provenance marker.
-                appendLine("[screenshot: ${block.provenance}]")
+                if (settings.numberAnnotationBlocks) append("${blockNumber++}. ")
+                if (block.caption.isNotBlank()) appendLine(block.caption)
+                appendLine(block.videoFrame?.provenanceLabel ?: block.provenance)
+                appendLine(if (block.videoFrame != null) "[screenshot]" else "[screenshot: ${block.provenance}]")
                 appendLine()
             }
         }

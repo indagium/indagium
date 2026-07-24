@@ -275,10 +275,9 @@ internal fun CompareView(
                         },
                     )
                     // Tied to leftTab, matching RightSidebarPanel's own AnnotationPanel below — the
-                    // top TabBar (not this view) owns which tab is "primary," and there's only one
-                    // video panel slot regardless of which side a video happens to be attached to.
-                    BoundVideoPanel(state, leftTab)
-                    if (state.annotationVisible || state.aiPanelVisible) {
+                    // top TabBar (not this view) owns which tab is "primary," and there is one
+                    // sidebar/player slot regardless of which side has the attachment.
+                    if (state.annotationVisible || state.aiPanelVisible || (state.videoPanelVisible && leftTab.attachedVideo != null)) {
                         HDivider { d ->
                             state.updateAnnotationPanelWidth(state.annotationPanelWidth - d)
                         }
@@ -290,7 +289,7 @@ internal fun CompareView(
                             onAiPanelFocusChanged = { focused ->
                                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == aiFr }
                             },
-                        ) {
+                            notesContent = {
                             AnnotationPanel(
                                 tab = leftTab,
                                 settings = state.settings,
@@ -311,7 +310,9 @@ internal fun CompareView(
                                 onMoveBlock = { bid, d -> state.moveBlock(leftTab.id, bid, d) },
                                 onReorderBlock = { bid, idx -> state.reorderBlock(leftTab.id, bid, idx) },
                                 onAddNoteAfter = { state.addNoteBlock(leftTab.id, it) },
+                                onAddImage = { bytes, provenance, after -> state.addImageBlock(leftTab.id, bytes, provenance, after) },
                                 onNavigateLogRef = { state.requestAnnotationNavigation(leftTab.id, it) },
+                                onNavigateVideoFrame = { state.navigateToVideoFrame(leftTab.id, it) },
                                 width = state.annotationPanelWidth,
                                 focusRequester = annotationFr,
                                 onPanelFocusChanged = { focused ->
@@ -322,7 +323,13 @@ internal fun CompareView(
                                 highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == leftTab.id }?.blockId,
                                 modifier = Modifier.fillMaxSize(),
                             )
-                        }
+                            },
+                            videoContent = if (state.videoPanelVisible && leftTab.attachedVideo != null) {
+                                { BoundVideoPanel(state = state, tab = leftTab, modifier = Modifier.fillMaxSize()) }
+                            } else {
+                                null
+                            },
+                        )
                     }
                 }
             }

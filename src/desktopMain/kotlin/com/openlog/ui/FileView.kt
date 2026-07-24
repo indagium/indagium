@@ -227,8 +227,7 @@ internal fun FileView(
             onSearchPrev = { state.searchPrev(tab.id) },
             onSearchClose = { state.closeSearch(tab.id) },
         )
-        BoundVideoPanel(state, tab)
-        if (state.annotationVisible || state.aiPanelVisible) {
+        if (state.annotationVisible || state.aiPanelVisible || (state.videoPanelVisible && tab.attachedVideo != null)) {
             HDivider { delta ->
                 state.updateAnnotationPanelWidth(state.annotationPanelWidth - delta)
             }
@@ -240,7 +239,7 @@ internal fun FileView(
                 onAiPanelFocusChanged = { focused ->
                     if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == aiFr }
                 },
-            ) {
+                notesContent = {
                 AnnotationPanel(
                     tab = tab,
                     settings = state.settings,
@@ -261,7 +260,9 @@ internal fun FileView(
                     onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
                     onReorderBlock = { blockId, idx -> state.reorderBlock(tab.id, blockId, idx) },
                     onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
+                    onAddImage = { bytes, provenance, after -> state.addImageBlock(tab.id, bytes, provenance, after) },
                     onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
+                    onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it) },
                     width = state.annotationPanelWidth,
                     focusRequester = annotationFr,
                     onPanelFocusChanged = { focused ->
@@ -272,7 +273,13 @@ internal fun FileView(
                     highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == tab.id }?.blockId,
                     modifier = Modifier.fillMaxSize(),
                 )
-            }
+            },
+            videoContent = if (state.videoPanelVisible && tab.attachedVideo != null) {
+                { BoundVideoPanel(state = state, tab = tab, modifier = Modifier.fillMaxSize()) }
+            } else {
+                null
+            },
+        )
         }
     }
 }

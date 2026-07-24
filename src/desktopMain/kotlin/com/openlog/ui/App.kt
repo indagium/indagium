@@ -24,6 +24,8 @@ import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -129,12 +131,10 @@ fun App(
                         (event.dragData() as DragData.FilesList).readFiles()
                     }.getOrElse { return false }
                     val dropped = files.mapNotNull { uri -> runCatching { File(URI.create(uri)) }.getOrNull() }
-                    // Videos fall through isOpenableAsLog and are silently dropped otherwise — split
-                    // them out BEFORE openPaths so they route to the active tab's video attachment
-                    // instead of a (failed) attempt to open them as a log/text file.
-                    val (videos, logs) = dropped.partition { it.extension.lowercase() in VIDEO_FILE_EXTENSIONS }
-                    videos.forEach { state.attachVideoToActiveTab(it) }
-                    state.openPaths(logs)
+                    // Keep the pairing decision in AppState: opening a log publishes its tab
+                    // asynchronously, so attaching here would race it and bind the video to the
+                    // previously active tab instead.
+                    state.openDroppedFiles(dropped)
                     return true
                 }
             }
@@ -522,6 +522,7 @@ fun App(
                                 if (attachedVideo != null) {
                                     val videoController = state.videoController(ctxTab.id)
                                     val mappedMs = state.logIdToVideoMs(ctxTab, entry.id)
+                                    val hasValidMappedPosition = mappedMs?.let { state.isVideoPositionValid(ctxTab, it) } == true
                                     add(
                                         CtxMenuEntry.Action(Icons.Outlined.Link, "Link to current video position") {
                                             videoController?.let { vc -> state.setVideoAnchor(ctxTab.id, vc.positionMs, entry.id) }
@@ -531,9 +532,9 @@ fun App(
                                     add(
                                         CtxMenuEntry.Action(
                                             Icons.Outlined.Movie, "Show in video",
-                                            enabled = attachedVideo.anchor != null && mappedMs != null,
+                                            enabled = attachedVideo.anchor != null && hasValidMappedPosition,
                                         ) {
-                                            mappedMs?.let { ms -> videoController?.seek(ms) }
+                                            mappedMs?.takeIf { state.isVideoPositionValid(ctxTab, it) }?.let { ms -> videoController?.seek(ms) }
                                             state.ctx = null
                                         },
                                     )
@@ -1483,7 +1484,14 @@ fun App(
             }
 
             state.pendingZipPicker?.let { pending ->
-                var selected by remember(pending.zipFile) { mutableStateOf(emptySet<String>()) }
+                var selected by remember(pending.zipFile, pending.candidates) {
+                    mutableStateOf(if (pending.candidates.size == 1) setOf(pending.candidates.single().entryPath) else emptySet())
+                }
+                // A lone recording is preselected only in this visible dialog. It is never
+                // attached by archive scanning or by openZipEntries' implicit state.
+                var selectedVideoPath by remember(pending.zipFile, pending.videoCandidates) {
+                    mutableStateOf(pending.videoCandidates.singleOrNull()?.entryPath)
+                }
                 Dialog(
                     onDismissRequest = { state.cancelZipPicker() },
                     properties = DialogProperties(dismissOnClickOutside = false),
@@ -1493,11 +1501,16 @@ fun App(
                         Modifier.width(420.dp).background(tc2.p, RoundedCornerShape(8.dp))
                             .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
                     ) {
-                        AppText("Multiple log files found", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        AppText(
+                            if (pending.candidates.size == 1) "Log file found" else "Multiple log files found",
+                            color = tc2.tx,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
                         Spacer(Modifier.height(6.dp))
                         AppText(
-                            "\"${pending.zipFile.name}\" contains ${pending.candidates.size} candidate log files. " +
-                                "Choose which to open — each opens as its own tab.",
+                            "\"${pending.zipFile.name}\" contains ${pending.candidates.size} candidate log file" +
+                                if (pending.candidates.size == 1) ". Choose whether to open it." else "s. Choose which to open — each opens as its own tab.",
                             color = tc2.td,
                             fontSize = 11.sp,
                             maxLines = 3,
@@ -1541,6 +1554,33 @@ fun App(
                                 }
                             }
                         }
+                        if (pending.videoCandidates.isNotEmpty()) {
+                            Spacer(Modifier.height(12.dp))
+                            AppText("Attach a video (optional)", color = tc2.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.height(3.dp))
+                            AppText(
+                                "Choose one recording to attach to every selected log. Leave this unset to open logs without a video.",
+                                color = tc2.td,
+                                fontSize = 11.sp,
+                                maxLines = 2,
+                            )
+                            Spacer(Modifier.height(5.dp))
+                            Column(Modifier.heightIn(max = 130.dp).verticalScroll(rememberScrollState())) {
+                                ArchiveVideoChoiceRow(
+                                    label = "No video",
+                                    selected = selectedVideoPath == null,
+                                    onClick = { selectedVideoPath = null },
+                                )
+                                pending.videoCandidates.forEach { candidate ->
+                                    ArchiveVideoChoiceRow(
+                                        label = zipEntryPathForDisplay(candidate.entryPath),
+                                        tooltip = candidate.entryPath,
+                                        selected = candidate.entryPath == selectedVideoPath,
+                                        onClick = { selectedVideoPath = candidate.entryPath },
+                                    )
+                                }
+                            }
+                        }
                         Spacer(Modifier.height(14.dp))
                         Row(
                             Modifier.fillMaxWidth(),
@@ -1552,7 +1592,11 @@ fun App(
                                 active = selected.isNotEmpty(),
                                 enabled = selected.isNotEmpty(),
                             ) {
-                                state.openZipEntries(pending.zipFile, pending.candidates.filter { it.entryPath in selected })
+                                state.openZipEntries(
+                                    pending.zipFile,
+                                    pending.candidates.filter { it.entryPath in selected },
+                                    pending.videoCandidates.firstOrNull { it.entryPath == selectedVideoPath },
+                                )
                             }
                             DialogActionButton("Cancel", active = false) { state.cancelZipPicker() }
                         }
@@ -1918,6 +1962,38 @@ fun App(
                     SourceFolderInfoDialog(state = state, path = path) { state.sourceFolderInfoEditorTarget = null }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ArchiveVideoChoiceRow(label: String, selected: Boolean, onClick: () -> Unit, tooltip: String? = null) {
+    val tc = tc()
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = onClick,
+            colors = RadioButtonDefaults.colors(selectedColor = tc.ac, unselectedColor = tc.td),
+            modifier = Modifier.size(16.dp),
+        )
+        TooltipArea(
+            tooltip = {
+                if (tooltip != null) {
+                    Box(
+                        Modifier.widthIn(max = 560.dp).background(tc.p2, RoundedCornerShape(4.dp))
+                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        AppText(tooltip, color = tc.tx, fontSize = 11.sp, fontFamily = MONO, maxLines = 4)
+                    }
+                }
+            },
+            modifier = Modifier.weight(1f),
+        ) {
+            AppText(label, color = tc.tx, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
         }
     }
 }

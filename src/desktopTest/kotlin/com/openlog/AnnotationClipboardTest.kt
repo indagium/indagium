@@ -6,11 +6,15 @@ import com.openlog.model.AppSettings
 import com.openlog.model.CopyMaskRule
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
+import com.openlog.model.VideoFrameReference
+import com.openlog.model.VideoSource
 import com.openlog.ui.HtmlTransferable
 import com.openlog.ui.ImageTransferable
+import com.openlog.ui.imageBytesFromTransferable
 import com.openlog.ui.maskWordForCopy
 import com.openlog.ui.mkTab
 import com.openlog.utils.buildAnnotationsHtml
+import com.openlog.utils.buildMd
 import java.awt.Image
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.UnsupportedFlavorException
@@ -58,6 +62,45 @@ class AnnotationClipboardTest {
         assertTrue(html.contains("data:image/jpeg;base64,"))
         assertTrue(html.contains("Crash dialog"))
         assertTrue(html.contains("from bugreport.zip/screen.mp4"))
+    }
+
+    @Test
+    fun imageEvidenceMarkdownAndRichPreviewKeepCaptionSourceThenImageOrder() {
+        val tab = mkTab("log", "LOGCAT_example.log", emptyList()).copy(
+            annotations = Annotations(
+                blocks = listOf(
+                    AnnBlock.Image(
+                        id = "i1",
+                        caption = "Crash dialog",
+                        provenance = "From bugreport.zip/screen.mp4",
+                        format = "jpeg",
+                        bytes = byteArrayOf(1, 2, 3),
+                        videoFrame = VideoFrameReference(
+                            source = VideoSource.LocalFile("/videos/screen.mp4"),
+                            sourceLabel = "bugreport.zip/screen.mp4",
+                            positionMs = 1_234L,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val markdown = buildMd(tab)
+        val html = buildAnnotationsHtml(tab)
+
+        val markdownCaption = markdown.indexOf("Crash dialog")
+        val markdownSource = markdown.indexOf("From bugreport.zip/screen.mp4")
+        val markdownImage = markdown.indexOf("[screenshot]")
+        assertTrue(markdownCaption >= 0 && markdownSource >= 0 && markdownImage >= 0)
+        assertTrue(markdownCaption < markdownSource)
+        assertTrue(markdownSource < markdownImage)
+
+        val htmlCaption = html.indexOf("Crash dialog")
+        val htmlSource = html.indexOf("From bugreport.zip/screen.mp4")
+        val htmlImage = html.indexOf("<img ")
+        assertTrue(htmlCaption >= 0 && htmlSource >= 0 && htmlImage >= 0)
+        assertTrue(htmlCaption < htmlSource)
+        assertTrue(htmlSource < htmlImage)
     }
 
     @Test
@@ -135,6 +178,14 @@ class AnnotationClipboardTest {
         assertTrue(t.isDataFlavorSupported(DataFlavor.stringFlavor))
         assertEquals("from bugreport.zip/screen.mp4", t.getTransferData(DataFlavor.stringFlavor))
         assertFailsWith<UnsupportedFlavorException> { t.getTransferData(DataFlavor.imageFlavor) }
+    }
+
+    @Test
+    fun clipboardImageFlavorCanBeConvertedIntoPortableImageBytes() {
+        val encoded = imageBytesFromTransferable(ImageTransferable(jpegBytes(), "clipboard image"))
+
+        requireNotNull(encoded)
+        assertTrue(ImageIO.read(encoded.inputStream()) != null)
     }
 
     // ── HtmlTransferable ─────────────────────────────────────────────────

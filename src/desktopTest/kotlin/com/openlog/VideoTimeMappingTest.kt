@@ -1,14 +1,20 @@
 package com.openlog
 
 import com.openlog.model.LogEntry
+import com.openlog.model.Filter
 import com.openlog.model.LogLevel
 import com.openlog.model.LogTab
 import com.openlog.model.VideoAnchor
 import com.openlog.model.VideoAttachment
 import com.openlog.ui.AppState
+import com.openlog.ui.NavigationScrollMode
+import com.openlog.ui.summarizeItems
+import com.openlog.utils.computeItems
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 /**
  * AppState.logIdToVideoMs / videoMsToNearestLogId (plan doc's Task A "pure mapping helpers") —
@@ -124,5 +130,186 @@ class VideoTimeMappingTest {
         val unparseableAnchor = listOf(entry(1, "")).let { it }
         val tabBadAnchor = tabWith(unparseableAnchor, anchor = VideoAnchor(videoMs = 0, logId = 1))
         assertNull(state.videoMsToNearestLogId(tabBadAnchor, 1_000))
+    }
+
+    @Test
+    fun mappingUsesOneMonotonicTimelineAcrossMidnightInBothDirections() {
+        val entries = listOf(
+            entry(1, "23:59:59.000"),
+            entry(2, "00:00:01.000"),
+            entry(3, "00:00:03.000"),
+        )
+        val tab = tabWith(entries, anchor = VideoAnchor(videoMs = 10_000, logId = 2))
+
+        assertEquals(8_000L, state.logIdToVideoMs(tab, 1))
+        assertEquals(12_000L, state.logIdToVideoMs(tab, 3))
+        assertEquals(1, state.videoMsToNearestLogId(tab, 8_000))
+        assertEquals(3, state.videoMsToNearestLogId(tab, 12_000))
+    }
+
+    @Test
+    fun rangeValidationRejectsNegativeAndPastKnownDuration() {
+        val entries = listOf(entry(1, "10:00:00.000"))
+        val tab = tabWith(entries, anchor = VideoAnchor(videoMs = 0, logId = 1))
+
+        assertEquals(1_000L..2_000L, state.validatedVideoRange(tab, 1_000, 2_000))
+        assertNull(state.validatedVideoRange(tab, -1, 2_000))
+        assertNull(state.validatedVideoRange(tab, 2_000, 1_000))
+        assertNull(state.validatedVideoRange(tab, 1_000, 60_001))
+    }
+
+    @Test
+    fun smallBackwardsTimestampIsNotTreatedAsAnotherMidnight() {
+        val entries = listOf(
+            entry(1, "10:00:01.000"),
+            entry(2, "10:00:00.900"),
+        )
+        val tab = tabWith(entries, anchor = VideoAnchor(videoMs = 5_000, logId = 1))
+
+        assertEquals(4_900L, state.logIdToVideoMs(tab, 2))
+        assertEquals(2, state.videoMsToNearestLogId(tab, 4_900))
+    }
+
+    @Test
+    fun followNavigationSelectsMappedRowWithFollowViewportModeWithoutDisablingFollowMode() {
+        val tab = tabWith(
+            entries = listOf(entry(1, "10:00:00.000"), entry(2, "10:00:01.000")),
+            anchor = VideoAnchor(videoMs = 0, logId = 1),
+        )
+        state.tabs = listOf(tab)
+        state.activeTabId = tab.id
+        state.setVideoFollowLog(tab.id, enabled = true)
+
+        state.navigateToVideoLog(tab.id, logId = 2)
+
+        assertEquals(setOf(2), state.tab(tab.id)?.selected)
+        assertTrue(state.isVideoFollowLogEnabled(tab.id))
+        assertEquals(listOf(2), assertNotNull(state.pendingAnnotationNavigation).logIds)
+        assertEquals(tab.id, state.pendingAnnotationNavigation?.tabId)
+        assertEquals(NavigationScrollMode.FOLLOW, state.pendingAnnotationNavigation?.scrollMode)
+    }
+
+    @Test
+    fun followNavigationUsesClosestDisplayedRowWhenMappedRowIsFilteredOut() {
+        val entries = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "shown", "first"),
+            LogEntry(2, "10:00:01.000", LogLevel.I, "shown", "before"),
+            LogEntry(3, "10:00:02.000", LogLevel.I, "hidden", "mapped"),
+            LogEntry(4, "10:00:03.000", LogLevel.I, "shown", "after"),
+        )
+        val tab = tabWith(entries, anchor = VideoAnchor(videoMs = 0, logId = 1)).copy(
+            filter = Filter(excludeTags = setOf("hidden")),
+        )
+        state.tabs = listOf(tab)
+        state.activeTabId = tab.id
+        state.setVideoFollowLog(tab.id, enabled = true)
+        state.noteVisibleItems(tab.id, summarizeItems(computeItems(tab, applyFilter = true)))
+
+        state.navigateToVideoLog(tab.id, logId = 3)
+
+        // 2 and 4 are equally close in source order; the preceding displayed row wins the tie.
+        assertEquals(setOf(2), state.tab(tab.id)?.selected)
+        assertEquals(listOf(2), assertNotNull(state.pendingAnnotationNavigation).logIds)
+        assertEquals(NavigationScrollMode.FOLLOW, state.pendingAnnotationNavigation?.scrollMode)
+        assertTrue(state.isVideoFollowLogEnabled(tab.id))
+    }
+
+    @Test
+    fun followNavigationUsesMappedTimeInsteadOfRowIdDistanceForFilteredRepeatedLines() {
+        // The hidden rows are intentionally assigned source-order ids far from the anchor. This
+        // mirrors a dense filtered span: at one second, id-distance says that the visible +1min
+        // line is closer, while the actual timestamp says to stay on the visible anchor.
+        val entries = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "shown", "anchor"),
+            LogEntry(999, "10:00:00.000", LogLevel.I, "hidden", "same timestamp"),
+            LogEntry(1_000, "10:00:01.000", LogLevel.I, "hidden", "one second later"),
+            LogEntry(1_001, "10:01:00.000", LogLevel.I, "shown", "one minute later"),
+        )
+        val tab = tabWith(entries, anchor = VideoAnchor(videoMs = 0, logId = 1)).copy(
+            filter = Filter(excludeTags = setOf("hidden")),
+        )
+        state.tabs = listOf(tab)
+        state.activeTabId = tab.id
+        state.setVideoFollowLog(tab.id, enabled = true)
+        state.noteVisibleItems(tab.id, summarizeItems(computeItems(tab, applyFilter = true)))
+
+        // The real mapped row is hidden at +1s. The nearest visible timestamp is the anchor,
+        // not the next visible record one minute later.
+        state.navigateToVideoLog(tab.id, assertNotNull(state.mappedVideoLogId(tab.id, 1_000)))
+        assertEquals(setOf(1), state.tab(tab.id)?.selected)
+
+        // Once playback actually reaches the visible +1min row, follow advances normally.
+        state.navigateToVideoLog(tab.id, assertNotNull(state.mappedVideoLogId(tab.id, 60_000)))
+        assertEquals(setOf(1_001), state.tab(tab.id)?.selected)
+        assertTrue(state.isVideoFollowLogEnabled(tab.id))
+    }
+
+    @Test
+    fun relinkingAnchorStillFollowsTheFullSourceTimelineToTheNextVisibleRow() {
+        val entries = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "shown", "first"),
+            LogEntry(999, "10:00:00.000", LogLevel.I, "hidden", "repeated"),
+            LogEntry(1_000, "10:00:01.000", LogLevel.I, "hidden", "hidden second"),
+            LogEntry(1_001, "10:01:00.000", LogLevel.I, "shown", "new anchor"),
+            LogEntry(2_001, "10:02:00.000", LogLevel.I, "shown", "next visible"),
+        )
+        val tab = tabWith(entries, anchor = VideoAnchor(videoMs = 0, logId = 1)).copy(
+            filter = Filter(excludeTags = setOf("hidden")),
+        )
+        state.tabs = listOf(tab)
+        state.activeTabId = tab.id
+        state.setVideoFollowLog(tab.id, enabled = true)
+        state.noteVisibleItems(tab.id, summarizeItems(computeItems(tab, applyFilter = true)))
+
+        // Set a fresh link at the one-minute row. A minute of video later maps to the two-minute
+        // row in the full timeline and must move the filtered selection there.
+        state.setVideoAnchor(tab.id, videoMs = 0, logId = 1_001)
+        state.navigateToVideoLog(tab.id, assertNotNull(state.mappedVideoLogId(tab.id, 60_000)))
+
+        assertEquals(setOf(2_001), state.tab(tab.id)?.selected)
+        assertTrue(state.isVideoFollowLogEnabled(tab.id))
+    }
+
+    @Test
+    fun followNavigationDoesNotRepublishWhenMappedRowsResolveToTheSameDisplayedRow() {
+        val entries = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "hidden", "first"),
+            LogEntry(2, "10:00:01.000", LogLevel.I, "shown", "before"),
+            LogEntry(3, "10:00:02.000", LogLevel.I, "hidden", "mapped one"),
+            LogEntry(4, "10:00:03.000", LogLevel.I, "hidden", "mapped two"),
+            LogEntry(5, "10:00:04.000", LogLevel.I, "hidden", "after"),
+        )
+        val tab = tabWith(entries, anchor = VideoAnchor(videoMs = 0, logId = 1)).copy(
+            filter = Filter(excludeTags = setOf("hidden")),
+        )
+        state.tabs = listOf(tab)
+        state.activeTabId = tab.id
+        state.noteVisibleItems(tab.id, summarizeItems(computeItems(tab, applyFilter = true)))
+
+        state.navigateToVideoLog(tab.id, logId = 3)
+        val firstRequest = assertNotNull(state.pendingAnnotationNavigation)
+        state.navigateToVideoLog(tab.id, logId = 4)
+
+        assertEquals(setOf(2), state.tab(tab.id)?.selected)
+        assertEquals(firstRequest, state.pendingAnnotationNavigation)
+    }
+
+    @Test
+    fun showInLogsUsesTheSameFollowSafeNavigationMode() {
+        val tab = tabWith(
+            entries = listOf(entry(1, "10:00:00.000"), entry(2, "10:00:01.000")),
+            anchor = VideoAnchor(videoMs = 0, logId = 1),
+        )
+        state.tabs = listOf(tab)
+        state.activeTabId = tab.id
+        state.setVideoFollowLog(tab.id, enabled = true)
+
+        state.requestVideoLogNavigation(tab.id, logId = 2)
+
+        assertEquals(setOf(2), state.tab(tab.id)?.selected)
+        assertTrue(state.isVideoFollowLogEnabled(tab.id))
+        assertEquals(listOf(2), assertNotNull(state.pendingAnnotationNavigation).logIds)
+        assertEquals(tab.id, state.pendingAnnotationNavigation?.tabId)
+        assertEquals(NavigationScrollMode.FOLLOW, state.pendingAnnotationNavigation?.scrollMode)
     }
 }

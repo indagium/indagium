@@ -5,6 +5,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.openlog.model.AddAnnRequest
 import com.openlog.model.AnnBlock
+import com.openlog.model.VideoFrameReference
+import com.openlog.model.VideoSource
 import com.openlog.utils.downscaleAndEncodeJpeg
 
 // Extracted from AppState (Task 12 slice 5, mechanical — no behavior change): the annotation
@@ -114,19 +116,56 @@ internal class AnnotationManager(private val appState: AppState) {
     // capture would bloat autosave, which re-serializes the whole Annotations tree on every
     // debounced edit (see AutosaveCodec.kt persistedSnapshot()). Returns null (adding nothing) if
     // sourceBytes doesn't decode as an image at all.
-    fun addImageBlock(tabId: String, sourceBytes: ByteArray, provenance: String, afterId: String? = null): String? {
+    fun addImageBlock(
+        tabId: String,
+        sourceBytes: ByteArray,
+        provenance: String,
+        afterId: String? = null,
+        videoFrame: VideoFrameReference? = null,
+    ): String? {
         val encoded = downscaleAndEncodeJpeg(sourceBytes) ?: return null
         val id = "i${System.nanoTime()}"
         appState.upAnn(tabId) { t ->
-            val block = AnnBlock.Image(id = id, caption = "", provenance = provenance, format = "jpeg", bytes = encoded)
+            val block = AnnBlock.Image(
+                id = id,
+                caption = "",
+                provenance = provenance,
+                format = "jpeg",
+                bytes = encoded,
+                videoFrame = videoFrame,
+            )
             val blocks = t.annotations.blocks.toMutableList()
-            val idx =
-                if (afterId != null) (blocks.indexOfFirst { it.id == afterId } + 1).coerceAtLeast(0) else blocks.size
+            // A stale focus id (for example, the user removed that block while a drag was in
+            // flight) is equivalent to no focused block: append rather than unexpectedly putting
+            // newly pasted evidence at the top of Notes.
+            val idx = afterId?.let { anchorId ->
+                blocks.indexOfFirst { it.id == anchorId }.takeIf { it >= 0 }?.plus(1)
+            } ?: blocks.size
             blocks.add(idx, block)
             t.copy(annotations = t.annotations.copy(blocks = blocks))
         }
         return id
     }
+
+    /** Adds clickable video evidence with identity and time kept as structured metadata. */
+    fun addVideoFrameNote(
+        tabId: String,
+        sourceBytes: ByteArray,
+        source: VideoSource,
+        sourceLabel: String,
+        positionMs: Long,
+        afterId: String? = null,
+    ): String? = addImageBlock(
+        tabId = tabId,
+        sourceBytes = sourceBytes,
+        provenance = "From $sourceLabel",
+        afterId = afterId,
+        videoFrame = VideoFrameReference(
+            source = source,
+            sourceLabel = sourceLabel,
+            positionMs = positionMs.coerceAtLeast(0L),
+        ),
+    )
 
     fun removeBlock(tabId: String, blockId: String) = appState.upAnn(tabId) { t ->
         t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks.filter { it.id != blockId }))
