@@ -116,7 +116,21 @@ jobs:
         run: chmod +x gradlew
 
       - name: Package distribution
-        run: ./gradlew ${{ matrix.task }}
+        # Maven Central occasionally times out on a fresh macOS ARM runner while resolving the
+        # platform-specific Compose runtime. Retry the whole package task twice; Gradle reuses any
+        # artifacts downloaded before a failed attempt, so this is both bounded and inexpensive
+        # when the repository has a transient network failure.
+        run: |
+          for attempt in 1 2 3; do
+            if ./gradlew ${{ matrix.task }}; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Packaging attempt $attempt failed; retrying in 30 seconds..."
+              sleep 30
+            fi
+          done
+          exit 1
 
       # jpackage doesn't emit StartupWMClass in the .desktop file it generates (no Gradle DSL
       # hook for it either), so docks/taskbars can't match the running window (WM_CLASS set to
