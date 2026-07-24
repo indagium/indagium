@@ -7,6 +7,7 @@ import java.io.File
 import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
+import java.security.MessageDigest
 import java.util.zip.ZipFile
 
 // Applies to extractZipCandidate/extractSevenZCandidate, which fully materialize a candidate's
@@ -185,12 +186,8 @@ private fun listSevenZVideoCandidates(archiveFile: File, maxEntries: Int): List<
     }
 }.getOrDefault(emptyList())
 
-// Extracts one archive entry to a fresh temp file instead of materializing it in memory —
-// extractZipCandidate/extractSevenZCandidate below parse text straight from the entry's stream,
-// which is fine for logs but wrong for a multi-hundred-MB video: this streams through
-// BoundedInputStream (same MAX_ARCHIVE_ENTRY_BYTES budget as the text path) straight to disk.
-// The returned file is a real temp file the caller owns (VideoAttachment.path points at it) —
-// deleteOnExit is set as a best-effort cleanup net, not the primary lifecycle.
+// Legacy one-shot extraction API. New video attachments use [extractArchiveVideoToCache] so their
+// persisted source remains the archive entry, not this process-local temp path.
 fun extractEntryToTempFile(archiveFile: File, candidate: ZipLogCandidate, maxEntryBytes: Long = MAX_ARCHIVE_ENTRY_BYTES): File? = runCatching {
     val stream = openArchiveCandidateStream(archiveFile, candidate) ?: return@runCatching null
     val suffix = candidate.displayName.substringAfterLast('.', missingDelimiterValue = "").ifBlank { "bin" }
@@ -200,6 +197,55 @@ fun extractEntryToTempFile(archiveFile: File, candidate: ZipLogCandidate, maxEnt
         tempFile.outputStream().use { output -> input.copyTo(output) }
     }
     tempFile
+}.getOrNull()
+
+private val archiveVideoCacheLock = Any()
+
+/**
+ * Materializes a video archive entry into app-managed cache storage. The returned path is only a
+ * playback implementation detail: callers must persist [ZipLogCandidate.entryPath] plus the
+ * archive path instead. The cache key includes archive identity/version metadata, so replacing an
+ * archive at the same location cannot replay an old recording.
+ */
+fun extractArchiveVideoToCache(
+    archiveFile: File,
+    candidate: ZipLogCandidate,
+    cacheDir: File,
+    maxEntryBytes: Long = MAX_ARCHIVE_ENTRY_BYTES,
+): File? = runCatching {
+    if (candidate.kind != ZipLogCandidateKind.VIDEO || !archiveFile.isFile) return@runCatching null
+    val fingerprint = listOf(
+        archiveFile.canonicalPath,
+        archiveFile.length().toString(),
+        archiveFile.lastModified().toString(),
+        candidate.entryPath,
+        candidate.sizeBytes.toString(),
+    ).joinToString("\u0000")
+    val key = MessageDigest.getInstance("SHA-256").digest(fingerprint.toByteArray())
+        .joinToString("") { byte -> "%02x".format(byte) }
+    val suffix = candidate.displayName.substringAfterLast('.', missingDelimiterValue = "bin")
+        .lowercase().replace(Regex("[^a-z0-9]"), "").ifBlank { "bin" }
+    val destination = File(File(cacheDir, "videos"), "$key.$suffix")
+    synchronized(archiveVideoCacheLock) {
+        if (destination.isFile && destination.length() > 0) return@synchronized destination
+        destination.parentFile?.mkdirs()
+        val partial = File(destination.parentFile, ".${destination.name}.partial")
+        runCatching { partial.delete() }
+        val stream = openArchiveCandidateStream(archiveFile, candidate) ?: return@synchronized null
+        try {
+            BoundedInputStream(stream, maxEntryBytes).use { input ->
+                partial.outputStream().use { output -> input.copyTo(output) }
+            }
+            if (!partial.renameTo(destination)) {
+                partial.copyTo(destination, overwrite = true)
+                partial.delete()
+            }
+            destination
+        } catch (t: Throwable) {
+            partial.delete()
+            throw t
+        }
+    }
 }.getOrNull()
 
 // Parses in-memory, straight from the zip entry's stream — never extracts to a temp dir.

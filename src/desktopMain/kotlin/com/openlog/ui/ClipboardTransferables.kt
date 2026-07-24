@@ -3,8 +3,48 @@ package com.openlog.ui
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.Transferable
 import java.awt.datatransfer.UnsupportedFlavorException
+import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.File
 import javax.imageio.ImageIO
+
+private const val MAX_IMAGE_IMPORT_SOURCE_BYTES = 64 * 1024 * 1024
+
+/**
+ * Converts the platform's [DataFlavor.imageFlavor] payload to portable encoded bytes. Clipboard
+ * images are commonly backed by native AWT image implementations, so draw into a BufferedImage
+ * before encoding rather than assuming the object can be cast or serialized directly.
+ */
+internal fun imageBytesFromTransferable(transferable: Transferable): ByteArray? = runCatching {
+    if (!transferable.isDataFlavorSupported(DataFlavor.imageFlavor)) return null
+    val image = transferable.getTransferData(DataFlavor.imageFlavor) as? java.awt.Image ?: return null
+    val width = image.getWidth(null)
+    val height = image.getHeight(null)
+    if (width <= 0 || height <= 0) return null
+    val buffered = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+    val graphics = buffered.createGraphics()
+    try {
+        graphics.drawImage(image, 0, 0, null)
+    } finally {
+        graphics.dispose()
+    }
+    ByteArrayOutputStream().use { out ->
+        if (!ImageIO.write(buffered, "png", out)) return null
+        out.toByteArray()
+    }
+}.getOrNull()
+
+/**
+ * Reads an image file dropped on Notes. The source is bounded before it reaches ImageIO so a
+ * mistaken archive or raw capture cannot monopolize the UI heap; the persisted representation is
+ * still normalized and hard-capped by AnnotationManager/ImageDownscale afterwards.
+ */
+internal fun imageBytesFromFile(file: File): ByteArray? = runCatching {
+    if (!file.isFile || file.length() !in 1..MAX_IMAGE_IMPORT_SOURCE_BYTES) return null
+    val bytes = file.readBytes()
+    ImageIO.read(ByteArrayInputStream(bytes))?.let { bytes }
+}.getOrNull()
 
 // Two custom Transferables for the "get pictures into Jira" clipboard paths (see AppState.
 // copyImageToClipboard / copyRichPreview). Kept as standalone classes — rather than building the

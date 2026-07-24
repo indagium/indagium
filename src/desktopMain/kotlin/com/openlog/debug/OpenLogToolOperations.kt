@@ -940,6 +940,9 @@ internal class OpenLogToolOperations(
                 )
             else -> return mapOf("error" to "provide lineId or videoMs")
         }
+        if (!appState.isVideoPositionValid(tab, targetMs)) {
+            return mapOf("error" to "video position is outside the attached video's known range")
+        }
         val bytes = appState.videoController(tabId)?.grabFrameAt(targetMs)
             ?: return mapOf("error" to "could not extract frame at ${targetMs}ms")
         return mapOf(

@@ -16,17 +16,19 @@ import javax.imageio.ImageWriteParam
 const val MAX_IMAGE_DIMENSION = 1280
 const val MAX_IMAGE_BYTES = 400 * 1024 // 400 KB cap on the re-encoded JPEG
 
-// Quality steps tried in order, highest first — stops at the first step that fits maxBytes; the
-// lowest step's output is returned even if it still doesn't fit, rather than failing the whole
-// capture over a soft size target.
+// Quality steps tried in order, highest first. If none of these fits, the image is reduced again
+// and retried; an image that still cannot meet the cap is rejected rather than entering the
+// autosave tree oversized.
 private val JPEG_QUALITY_STEPS = listOf(0.75f, 0.6f, 0.45f, 0.3f)
 
 /**
  * Decodes [sourceBytes] as an image (any ImageIO-readable format — PNG from grabCurrentFrame),
  * downscales so neither dimension exceeds [maxDimension], and re-encodes as JPEG, stepping
- * quality down through [JPEG_QUALITY_STEPS] until the result fits [maxBytes]. Returns null only
- * if [sourceBytes] doesn't decode as an image at all. Pure (no file/network I/O) — safe to unit
- * test with a synthetic BufferedImage encoded to bytes.
+ * quality down through [JPEG_QUALITY_STEPS] until the result fits [maxBytes]. If quality alone
+ * cannot meet the cap, repeatedly reduces the dimensions and tries again. Returns null when the
+ * source is not an image or when even a 1×1 JPEG cannot meet [maxBytes]. This is deliberately a
+ * hard storage limit: persisted annotation images must never exceed [maxBytes]. Pure (no
+ * file/network I/O) — safe to unit test with a synthetic BufferedImage encoded to bytes.
  */
 fun downscaleAndEncodeJpeg(
     sourceBytes: ByteArray,
@@ -34,14 +36,16 @@ fun downscaleAndEncodeJpeg(
     maxBytes: Int = MAX_IMAGE_BYTES,
 ): ByteArray? {
     val source = runCatching { ImageIO.read(ByteArrayInputStream(sourceBytes)) }.getOrNull() ?: return null
-    val scaled = scaleToFit(source, maxDimension)
-    var best: ByteArray? = null
-    for (quality in JPEG_QUALITY_STEPS) {
-        val encoded = encodeJpeg(scaled, quality) ?: continue
-        best = encoded
-        if (encoded.size <= maxBytes) return encoded
+    if (maxDimension <= 0 || maxBytes <= 0) return null
+    var scaled = scaleToFit(source, maxDimension)
+    while (true) {
+        for (quality in JPEG_QUALITY_STEPS) {
+            val encoded = encodeJpeg(scaled, quality) ?: continue
+            if (encoded.size <= maxBytes) return encoded
+        }
+        if (scaled.width == 1 && scaled.height == 1) return null
+        scaled = scaleBy(scaled, 0.75f)
     }
-    return best
 }
 
 private fun scaleToFit(source: BufferedImage, maxDimension: Int): BufferedImage {
@@ -50,6 +54,19 @@ private fun scaleToFit(source: BufferedImage, maxDimension: Int): BufferedImage 
     if (scale >= 1f) return toOpaqueRgb(source)
     val targetW = (source.width * scale).toInt().coerceAtLeast(1)
     val targetH = (source.height * scale).toInt().coerceAtLeast(1)
+    val smoothScaled = source.getScaledInstance(targetW, targetH, Image.SCALE_SMOOTH)
+    val out = BufferedImage(targetW, targetH, BufferedImage.TYPE_INT_RGB)
+    val g = out.createGraphics()
+    g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+    g.drawImage(smoothScaled, 0, 0, null)
+    g.dispose()
+    return out
+}
+
+private fun scaleBy(source: BufferedImage, factor: Float): BufferedImage {
+    val targetW = (source.width * factor).toInt().coerceAtLeast(1)
+    val targetH = (source.height * factor).toInt().coerceAtLeast(1)
+    if (targetW == source.width && targetH == source.height) return source
     val smoothScaled = source.getScaledInstance(targetW, targetH, Image.SCALE_SMOOTH)
     val out = BufferedImage(targetW, targetH, BufferedImage.TYPE_INT_RGB)
     val g = out.createGraphics()

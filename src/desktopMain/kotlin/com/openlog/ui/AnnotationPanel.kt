@@ -8,6 +8,7 @@ package com.openlog.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.*
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -16,6 +17,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.DragData
+import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -54,9 +59,12 @@ import androidx.compose.ui.zIndex
 import com.openlog.model.AnnBlock
 import com.openlog.model.AppSettings
 import com.openlog.model.LogTab
+import com.openlog.model.VideoFrameReference
 import java.awt.FileDialog
 import java.awt.Frame
+import java.awt.Toolkit
 import java.io.File
+import java.net.URI
 import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
@@ -131,7 +139,9 @@ fun AnnotationPanel(
     onMoveBlock: (String, Int) -> Unit,
     onReorderBlock: (String, Int) -> Unit,
     onAddNoteAfter: (String?) -> Unit,
+    onAddImage: (sourceBytes: ByteArray, provenance: String, afterId: String?) -> String?,
     onNavigateLogRef: (AnnBlock.LogRef) -> Unit,
+    onNavigateVideoFrame: (VideoFrameReference) -> Unit,
     width: Float,
     focusRequester: FocusRequester? = null,
     onPanelFocusChanged: (Boolean) -> Unit = {},
@@ -154,6 +164,7 @@ fun AnnotationPanel(
     // Session-only, not persisted — only the text itself needs to survive a restart.
     var issueDescExpanded by remember(tab.id) { mutableStateOf(false) }
     var blockFieldFocused by remember { mutableStateOf(false) }
+    var activeBlockFieldId by remember(tab.id) { mutableStateOf<String?>(null) }
     var navIndex by remember(tab.id) { mutableStateOf(0) }
     val prefixFr = remember { FocusRequester() }
     val suffixFr = remember { FocusRequester() }
@@ -275,6 +286,37 @@ fun AnnotationPanel(
         ?.id
         ?.removePrefix("block:")
 
+    // Images follow the same insertion rule as a new text block: the block currently being
+    // edited/roved is the anchor, otherwise evidence goes at the end. This makes a screenshot
+    // pasted while writing an observation stay beside that observation rather than jumping to the
+    // bottom of a long notes list.
+    fun imageInsertionAfterId(): String? = activeBlockFieldId ?: focusedBlockId()
+
+    fun addDroppedImageFiles(files: List<File>): Boolean {
+        var afterId = imageInsertionAfterId()
+        var addedAny = false
+        files.forEach { file ->
+            val bytes = imageBytesFromFile(file) ?: return@forEach
+            val insertedId = onAddImage(bytes, "dropped ${file.name}", afterId)
+            if (insertedId != null) {
+                afterId = insertedId
+                addedAny = true
+            }
+        }
+        return addedAny
+    }
+
+    val imageDropTarget = remember(tab.id, activeBlockFieldId, navIndex, ann.blocks, onAddImage) {
+        object : DragAndDropTarget {
+            override fun onDrop(event: DragAndDropEvent): Boolean {
+                val files = runCatching { (event.dragData() as DragData.FilesList).readFiles() }
+                    .getOrElse { return false }
+                    .mapNotNull { uri -> runCatching { File(URI.create(uri)) }.getOrNull() }
+                return addDroppedImageFiles(files)
+            }
+        }
+    }
+
     fun activateNoteTarget() {
         val target = noteTargets.getOrNull(navIndex) ?: return
         when (target.kind) {
@@ -292,8 +334,12 @@ fun AnnotationPanel(
             KeyboardTargetKind.NoteBlock -> {
                 val blockId = target.id.removePrefix("block:")
                 val block = ann.blocks.firstOrNull { it.id == blockId }
-                if (block is AnnBlock.LogRef) onNavigateLogRef(block)
-                else runCatching { blockFieldRequesters[blockId]?.requestFocus() }
+                when (block) {
+                    is AnnBlock.LogRef -> onNavigateLogRef(block)
+                    is AnnBlock.Image -> block.videoFrame?.let(onNavigateVideoFrame)
+                        ?: runCatching { blockFieldRequesters[blockId]?.requestFocus() }
+                    else -> runCatching { blockFieldRequesters[blockId]?.requestFocus() }
+                }
             }
             else -> {}
         }
@@ -316,6 +362,12 @@ fun AnnotationPanel(
     Column(
         modifier.width(width.dp).background(tc.p)
             .border(BorderStroke(1.dp, if (panelFocused && keyboardFocusVisible) tc.ac else tc.br))
+            .dragAndDropTarget(
+                shouldStartDragAndDrop = { event ->
+                    runCatching { event.dragData() is DragData.FilesList }.getOrElse { false }
+                },
+                target = imageDropTarget,
+            )
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .focusGroup()
             .focusable()
@@ -326,6 +378,17 @@ fun AnnotationPanel(
                 val textFieldFocused = prefixFocused || suffixFocused || blockFieldFocused || issueDescFocused
                 when {
                     actionPressed && ev.key == Key.S -> { onSave(); true }
+                    actionPressed && ev.key == Key.V -> {
+                        val bytes = runCatching { Toolkit.getDefaultToolkit().systemClipboard.getContents(null) }
+                            .getOrNull()
+                            ?.let(::imageBytesFromTransferable)
+                        if (bytes != null) {
+                            onAddImage(bytes, "pasted from clipboard", imageInsertionAfterId())
+                            true
+                        } else {
+                            false
+                        }
+                    }
                     annotationPreviewCopyShortcutHandled(actionPressed, ev.key, textFieldFocused) -> { onCopy(); true }
                     actionPressed && ev.key == Key.O -> { openNotePicker(); true }
                     textFieldFocused -> {
@@ -352,7 +415,9 @@ fun AnnotationPanel(
                 }
             },
     ) {
-        // Header row 1: title + action buttons
+        // These five controls fit within the panel's minimum width, so keep the established
+        // workflow visible rather than making note opening/history discoverable only through a
+        // responsive overflow menu. Rich HTML copying belongs with the rendered Preview below.
         Box(
             Modifier.fillMaxWidth().height(36.dp).background(tc.p2)
                 .border(BorderStroke(1.dp, tc.br)).padding(horizontal = 12.dp),
@@ -364,22 +429,6 @@ fun AnnotationPanel(
             ) {
                 AppButton("Preview", onClick = onToggleMd, enabled = hasAnnotationBlocks, modifier = headerButtonModifier)
                 AppButton("Copy", onClick = onCopy, modifier = headerButtonModifier)
-                TooltipArea(
-                    tooltip = {
-                        ToolbarTooltip(
-                            "Copies text + inline images as rich HTML. Jira Cloud's comment editor generally " +
-                                "accepts pasted HTML; Server/Data Center may not — if the paste comes through as " +
-                                "plain text, use \"Copy image\" on each picture instead.",
-                        )
-                    },
-                ) {
-                    AppButton(
-                        "Copy rich preview",
-                        onClick = onCopyRichPreview,
-                        enabled = hasAnnotationBlocks,
-                        modifier = headerButtonModifier,
-                    )
-                }
                 AppButton("Save", onClick = onSave, modifier = headerButtonModifier)
                 AppButton("Open Note", onClick = { openNotePicker() }, modifier = headerButtonModifier)
                 Box {
@@ -512,7 +561,11 @@ fun AnnotationPanel(
                             block = block, tc = tc, isFirst = isFirst, isLast = isLast,
                             focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}" || highlightedBlockId == block.id,
                             fieldFocusRequester = blockFieldRequesters[block.id],
-                            onFieldFocusChanged = { blockFieldFocused = it },
+                            onFieldFocusChanged = { focused ->
+                                blockFieldFocused = focused
+                                if (focused) activeBlockFieldId = block.id
+                                else if (activeBlockFieldId == block.id) activeBlockFieldId = null
+                            },
                             onUpdate = { onUpdateBlock(block.id, it) },
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
@@ -525,7 +578,11 @@ fun AnnotationPanel(
                             isFirst = isFirst, isLast = isLast,
                             focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}" || highlightedBlockId == block.id,
                             fieldFocusRequester = blockFieldRequesters[block.id],
-                            onFieldFocusChanged = { blockFieldFocused = it },
+                            onFieldFocusChanged = { focused ->
+                                blockFieldFocused = focused
+                                if (focused) activeBlockFieldId = block.id
+                                else if (activeBlockFieldId == block.id) activeBlockFieldId = null
+                            },
                             onUpdateCaption = { onUpdateBlock(block.id, it) },
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
@@ -538,13 +595,18 @@ fun AnnotationPanel(
                             block = block, tc = tc, isFirst = isFirst, isLast = isLast,
                             focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}" || highlightedBlockId == block.id,
                             fieldFocusRequester = blockFieldRequesters[block.id],
-                            onFieldFocusChanged = { blockFieldFocused = it },
+                            onFieldFocusChanged = { focused ->
+                                blockFieldFocused = focused
+                                if (focused) activeBlockFieldId = block.id
+                                else if (activeBlockFieldId == block.id) activeBlockFieldId = null
+                            },
                             onUpdateCaption = { onUpdateBlock(block.id, it) },
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
                             onAddBelow = { onAddNoteAfter(block.id) },
                             onCopyImage = { onCopyImage(block) },
+                            onNavigateVideoFrame = block.videoFrame?.let { frame -> { onNavigateVideoFrame(frame) } },
                             dragHandleModifier = dragHandleModifier,
                         )
                     }
@@ -855,7 +917,7 @@ private fun MdPreviewDialog(
                     },
                 ) {
                     AppButton(
-                        if (richCopied) "Copied!" else "Copy rich preview",
+                        if (richCopied) "Copied!" else "Copy as HTML",
                         onClick = {
                             onCopyRichPreview()
                             richCopied = true
@@ -957,6 +1019,7 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                                 overflow = TextOverflow.Clip,
                             )
                         }
+                        AppText(imageProvenanceLabel(block), color = tc.td, fontSize = 11.sp, fontFamily = mono)
                         val bitmap = decodeImageBlockBitmap(block.bytes)
                         if (bitmap != null) {
                             Image(
@@ -966,11 +1029,6 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                                 contentScale = ContentScale.Fit,
                             )
                         }
-                        // block.provenance already reads "from <source>" (set at capture time in
-                        // VideoPanel's "Add frame to notes" handler) — unlike LogRef's
-                        // sourceFilename above, it doesn't need the settings-configurable label
-                        // prefixed onto it.
-                        AppText(block.provenance, color = tc.td, fontSize = 11.sp, fontFamily = mono)
                     }
                 }
             }
@@ -1120,6 +1178,7 @@ private fun ImageBlockView(
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onAddBelow: () -> Unit,
     onCopyImage: () -> Unit,
+    onNavigateVideoFrame: (() -> Unit)? = null,
     dragHandleModifier: Modifier = Modifier,
 ) {
     // Keyed on the byte array's own identity (stable across recompositions and across a caption
@@ -1133,26 +1192,10 @@ private fun ImageBlockView(
     ) {
         BlockControls(
             "image", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow,
-            onCopyImage = onCopyImage, dragHandleModifier = dragHandleModifier,
+            onNavigate = onNavigateVideoFrame,
+            onCopyImage = onCopyImage,
+            dragHandleModifier = dragHandleModifier,
         )
-        Spacer(Modifier.height(5.dp))
-        if (bitmap != null) {
-            Image(
-                bitmap = bitmap,
-                contentDescription = null,
-                modifier = Modifier.fillMaxWidth().heightIn(max = IMAGE_BLOCK_THUMBNAIL_DP.dp)
-                    .background(Color.Black, CORNER_SM),
-                contentScale = ContentScale.Fit,
-            )
-        } else {
-            Box(
-                Modifier.fillMaxWidth().height(IMAGE_BLOCK_THUMBNAIL_DP.dp)
-                    .background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM),
-                contentAlignment = Alignment.Center,
-            ) { AppText("Couldn't decode image", color = tc.td, fontSize = 11.sp) }
-        }
-        Spacer(Modifier.height(5.dp))
-        AppText(block.provenance, color = tc.td, fontSize = 9.sp, fontFamily = MONO)
         Spacer(Modifier.height(5.dp))
         BasicTextField(
             value = block.caption,
@@ -1170,8 +1213,42 @@ private fun ImageBlockView(
                 inner()
             },
         )
+        Spacer(Modifier.height(5.dp))
+        val provenanceModifier = if (onNavigateVideoFrame != null) {
+            Modifier
+                .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)))
+                .clickable(onClick = onNavigateVideoFrame)
+        } else {
+            Modifier
+        }
+        AppText(
+            imageProvenanceLabel(block),
+            color = tc.td,
+            fontSize = 9.sp,
+            fontFamily = MONO,
+            modifier = provenanceModifier,
+        )
+        Spacer(Modifier.height(5.dp))
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap,
+                contentDescription = null,
+                modifier = Modifier.fillMaxWidth().heightIn(max = IMAGE_BLOCK_THUMBNAIL_DP.dp)
+                    .background(Color.Black, CORNER_SM),
+                contentScale = ContentScale.Fit,
+            )
+        } else {
+            Box(
+                Modifier.fillMaxWidth().height(IMAGE_BLOCK_THUMBNAIL_DP.dp)
+                    .background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM),
+                contentAlignment = Alignment.Center,
+            ) { AppText("Couldn't decode image", color = tc.td, fontSize = 11.sp) }
+        }
     }
 }
+
+/** Structured video frames render their canonical source label; free-form image provenance stays intact. */
+private fun imageProvenanceLabel(block: AnnBlock.Image): String = block.videoFrame?.provenanceLabel ?: block.provenance
 
 // Pure decode of a stored image block's bytes into something Compose can draw. Returns null
 // (rendered as a placeholder above) rather than throwing on a corrupt/unsupported blob — an

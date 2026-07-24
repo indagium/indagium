@@ -125,7 +125,7 @@ internal fun TabBar(state: AppState) {
                 "Video",
                 icon = Icons.Outlined.Movie,
                 showLabel = showToolbarText,
-                tooltip = "Toggle video panel",
+                tooltip = "Toggle video in sidebar",
                 active = state.videoPanelVisible,
                 modifier = Modifier.fillMaxHeight(),
                 shape = middleShape,

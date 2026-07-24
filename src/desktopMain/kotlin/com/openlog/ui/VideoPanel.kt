@@ -1,64 +1,252 @@
 package com.openlog.ui
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.KeyboardReturn
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.automirrored.outlined.RotateRight
 import androidx.compose.material.icons.outlined.AddAPhoto
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.rememberWindowState
 import com.openlog.model.LogTab
 import com.openlog.model.VideoAttachment
+import com.openlog.model.VideoSource
 import com.openlog.video.VideoPlayerController
 import com.openlog.video.formatVideoTime
+import java.awt.image.BufferedImage
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import javax.imageio.ImageIO
 
 // Preset playback-rate choices. VideoPlayerController.setRate accepts any Float in
 // [0.1, 8] but the transport bar only ever offers a fixed, familiar set — matching ListStepper's
 // own "small fixed choice set, not a free-form input" convention elsewhere in this codebase.
 private val VIDEO_RATE_PRESETS = listOf(0.5f, 1f, 1.5f, 2f)
 
+private fun pathFileName(path: String): String = path.substringAfterLast('/').substringAfterLast('\\')
+
+private fun videoDisplayName(attachment: VideoAttachment): String = when (val source = attachment.source) {
+    is VideoSource.LocalFile -> pathFileName(source.path)
+    is VideoSource.ArchiveEntry -> pathFileName(source.displayName)
+}
+
+private fun videoFullPath(attachment: VideoAttachment): String = when (val source = attachment.source) {
+    is VideoSource.LocalFile -> source.path
+    is VideoSource.ArchiveEntry -> "${source.archivePath}/${source.entryPath}"
+}
+
 /**
- * Wires the video panel into [tab]'s Row of panels (ui/FileView.kt, ui/CompareView.kt — plan doc's
- * Task B) — a leading [HDivider] plus the panel itself, following [BoundFilterPanel]'s own
- * bound-composable pattern. Renders nothing when [tab] has no attached video, or when the panel is
- * toggled off (AppState.videoPanelVisible, mirroring filterVisible/annotationVisible).
+ * Persists the same orientation that the user sees in the player. The player produces PNG bytes,
+ * so applying the transform here keeps the decoder API independent of presentation preferences.
+ */
+private fun rotatedFramePng(sourceBytes: ByteArray, rotationDegrees: Int): ByteArray? {
+    val rotation = ((rotationDegrees % 360) + 360) % 360
+    if (rotation == 0) return sourceBytes
+    val source = runCatching { ImageIO.read(ByteArrayInputStream(sourceBytes)) }.getOrNull() ?: return null
+    val swapsDimensions = rotation == 90 || rotation == 270
+    val output = BufferedImage(
+        if (swapsDimensions) source.height else source.width,
+        if (swapsDimensions) source.width else source.height,
+        BufferedImage.TYPE_INT_ARGB,
+    )
+    val graphics = output.createGraphics()
+    try {
+        graphics.rotate(Math.toRadians(rotation.toDouble()))
+        when (rotation) {
+            90 -> graphics.translate(0, -source.height)
+            180 -> graphics.translate(-source.width, -source.height)
+            270 -> graphics.translate(-source.width, 0)
+        }
+        graphics.drawImage(source, 0, 0, null)
+    } finally {
+        graphics.dispose()
+    }
+    return runCatching {
+        ByteArrayOutputStream().use { outputStream ->
+            if (ImageIO.write(output, "png", outputStream)) outputStream.toByteArray() else null
+        }
+    }.getOrNull()
+}
+
+@Composable
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+private fun VideoHeader(
+    attachment: VideoAttachment,
+    trailing: @Composable RowScope.() -> Unit,
+) {
+    val colors = tc()
+    val fullPath = videoFullPath(attachment)
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.weight(1f)) {
+            TooltipArea(
+                tooltip = {
+                    Box(
+                        Modifier.background(colors.p2, CORNER_SM)
+                            .border(0.5.dp, colors.br, CORNER_SM)
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        AppText(fullPath, color = colors.tx, fontSize = 11.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                    }
+                },
+            ) {
+                AppText(
+                    "Video: ${videoDisplayName(attachment)}",
+                    color = colors.td,
+                    fontSize = 10.sp,
+                    fontFamily = UI,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            trailing()
+        }
+    }
+}
+
+@Composable
+private fun VideoRemoveAction(state: AppState, tab: LogTab) {
+    var confirmationOpen by remember(tab.id) { mutableStateOf(false) }
+    ToolbarBtn(
+        label = "Remove video",
+        icon = Icons.Outlined.DeleteOutline,
+        showLabel = false,
+        tooltip = "Remove video",
+        onClick = { confirmationOpen = true },
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
+    )
+    if (confirmationOpen) {
+        Dialog(onDismissRequest = { confirmationOpen = false }) {
+            val colors = tc()
+            Column(
+                Modifier.width(400.dp).background(colors.p, CORNER_MD)
+                    .border(1.dp, colors.br, CORNER_MD)
+                    .padding(20.dp),
+            ) {
+                AppText("Remove video?", color = colors.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(6.dp))
+                AppText(
+                    "This detaches the video from this log and stops playback. Your log and notes remain unchanged.",
+                    color = colors.td,
+                    fontSize = 11.sp,
+                    maxLines = 3,
+                )
+                Spacer(Modifier.height(14.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    DialogActionButton("Remove video", active = true, danger = true) {
+                        confirmationOpen = false
+                        state.removeVideo(tab.id)
+                    }
+                    DialogActionButton("Cancel", active = false) { confirmationOpen = false }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Wires the video player into the right sidebar. The controller lives in [AppState], so the
+ * sidebar and detached window are two views of the very same playback session rather than two
+ * competing decoders.
  */
 @Composable
-internal fun BoundVideoPanel(state: AppState, tab: LogTab) {
+internal fun BoundVideoPanel(
+    state: AppState,
+    tab: LogTab,
+    modifier: Modifier = Modifier,
+) {
     val attachment = tab.attachedVideo ?: return
     if (!state.videoPanelVisible) return
-    // Guaranteed non-null here: videoController(tabId) only returns null when the tab has no
-    // attachedVideo, which was just checked above.
     val controller = state.videoController(tab.id) ?: return
-    HDivider { delta -> state.updateVideoPanelWidth(state.videoPanelWidth - delta) }
-    VideoPanel(state = state, tab = tab, attachment = attachment, controller = controller, width = state.videoPanelWidth)
+    var detached by remember(tab.id) { mutableStateOf(false) }
+    val onSidebarVisibleChange = LocalVideoSidebarExpandedChange.current
+
+    // A detached player deliberately does not retain a blank sidebar slot. Returning from it
+    // restores the embedded player without recreating its controller.
+    LaunchedEffect(detached) { onSidebarVisibleChange(!detached) }
+
+    if (!detached) {
+        VideoPanel(
+            state = state,
+            tab = tab,
+            attachment = attachment,
+            controller = controller,
+            onDetach = { detached = true },
+            modifier = modifier,
+        )
+    }
+    if (detached) {
+        VideoPlayerWindow(
+            state = state,
+            tab = tab,
+            attachment = attachment,
+            controller = controller,
+            onReturnToSidebar = { detached = false },
+        )
+    }
 }
 
 @Composable
@@ -67,7 +255,8 @@ internal fun VideoPanel(
     tab: LogTab,
     attachment: VideoAttachment,
     controller: VideoPlayerController,
-    width: Float,
+    onDetach: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val tc = tc()
     // Session-only, per-tab: VideoPlayerController exposes no rate GETTER (setRate is fire-and-
@@ -77,16 +266,22 @@ internal fun VideoPanel(
     // cosmetic gap, not a functional one (the controller keeps playing at its real rate regardless).
     var selectedRate by remember(tab.id) { mutableStateOf(1f) }
 
-    Column(Modifier.width(width.dp).fillMaxHeight().background(tc.p)) {
-        SectionHeader(title = "Video")
-        Box(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp)) {
-            AppText(
-                attachment.sourceLabel, color = tc.td, fontSize = 10.sp, fontFamily = MONO,
-                overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth(),
-            )
-        }
-        VideoFrameArea(controller = controller, modifier = Modifier.fillMaxWidth().weight(1f))
-        VideoTransportBar(
+    Column(modifier.fillMaxSize().background(tc.p)) {
+        VideoHeader(
+            attachment = attachment,
+            trailing = {
+                VideoRemoveAction(state = state, tab = tab)
+                ToolbarBtn(
+                    label = "Maximize video",
+                    icon = Icons.AutoMirrored.Outlined.OpenInNew,
+                    showLabel = false,
+                    tooltip = "Maximize video",
+                    onClick = onDetach,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
+                )
+            },
+        )
+        VideoPlayerContents(
             state = state,
             tab = tab,
             attachment = attachment,
@@ -98,7 +293,99 @@ internal fun VideoPanel(
 }
 
 @Composable
-private fun VideoFrameArea(controller: VideoPlayerController, modifier: Modifier = Modifier) {
+private fun VideoPlayerWindow(
+    state: AppState,
+    tab: LogTab,
+    attachment: VideoAttachment,
+    controller: VideoPlayerController,
+    onReturnToSidebar: () -> Unit,
+) {
+    val tc = tc()
+    var selectedRate by remember(tab.id) { mutableStateOf(1f) }
+    Window(
+        onCloseRequest = onReturnToSidebar,
+        title = "Video — ${tab.filename}",
+        state = rememberWindowState(size = DpSize(820.dp, 600.dp)),
+        resizable = true,
+    ) {
+        Column(Modifier.fillMaxSize().background(tc.p)) {
+            VideoHeader(
+                attachment = attachment,
+                trailing = {
+                    VideoRemoveAction(state = state, tab = tab)
+                    ToolbarBtn(
+                        label = "Return video to sidebar",
+                        icon = Icons.AutoMirrored.Outlined.KeyboardReturn,
+                        showLabel = false,
+                        tooltip = "Return video to sidebar",
+                        onClick = onReturnToSidebar,
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
+                    )
+                },
+            )
+            VideoPlayerContents(
+                state = state,
+                tab = tab,
+                attachment = attachment,
+                controller = controller,
+                selectedRate = selectedRate,
+                onRateSelected = { rate -> selectedRate = rate; controller.setRate(rate) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ColumnScope.VideoPlayerContents(
+    state: AppState,
+    tab: LogTab,
+    attachment: VideoAttachment,
+    controller: VideoPlayerController,
+    selectedRate: Float,
+    onRateSelected: (Float) -> Unit,
+) {
+    val followLogs = state.isVideoFollowLogEnabled(tab.id)
+    var lastFollowedLogId by remember(tab.id) { mutableStateOf<Int?>(null) }
+
+    // A decoded frame can arrive many times while the closest log row remains the same. Navigating
+    // only on an actual mapped-row change keeps the log view stable and makes a user's manual
+    // scroll/selection meaningful until playback crosses into a new row.
+    LaunchedEffect(followLogs, tab.attachedVideo?.anchor, controller.positionMs) {
+        if (!followLogs) {
+            lastFollowedLogId = null
+            return@LaunchedEffect
+        }
+        val mappedId = state.mappedVideoLogId(tab.id, controller.positionMs)
+        if (mappedId != null && mappedId != lastFollowedLogId) {
+            state.navigateToVideoLog(tab.id, mappedId)
+            lastFollowedLogId = mappedId
+        }
+    }
+
+    VideoFrameArea(
+        controller = controller,
+        rotationDegrees = state.videoRotationDegrees(tab.id),
+        modifier = Modifier.fillMaxWidth().weight(1f),
+    )
+    VideoTransportBar(
+        state = state,
+        tab = tab,
+        attachment = attachment,
+        controller = controller,
+        selectedRate = selectedRate,
+        onRateSelected = onRateSelected,
+        followLogs = followLogs,
+        onFollowLogsChange = { state.setVideoFollowLog(tab.id, it) },
+        onRotateClockwise = { state.rotateVideoClockwise(tab.id) },
+    )
+}
+
+@Composable
+private fun VideoFrameArea(
+    controller: VideoPlayerController,
+    rotationDegrees: Int,
+    modifier: Modifier = Modifier,
+) {
     Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
         val err = controller.error
         val frame = controller.currentFrame
@@ -111,16 +398,30 @@ private fun VideoFrameArea(controller: VideoPlayerController, modifier: Modifier
                     modifier = Modifier.padding(top = 4.dp, start = 10.dp, end = 10.dp),
                 )
             }
-            frame != null -> Image(
-                bitmap = frame, contentDescription = null,
-                modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit,
+            frame != null && rotationDegrees % 180 == 0 -> Image(
+                bitmap = frame,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize().rotate(rotationDegrees.toFloat()),
+                contentScale = ContentScale.Fit,
             )
+            frame != null -> BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                // A 90° rotation swaps the frame's measured width and height. Measuring the
+                // image with the parent's constraints would crop it after rotation; swapping
+                // them first makes the rotated bounds fit the available frame area.
+                Image(
+                    bitmap = frame,
+                    contentDescription = null,
+                    modifier = Modifier.width(maxHeight).height(maxWidth).rotate(rotationDegrees.toFloat()),
+                    contentScale = ContentScale.Fit,
+                )
+            }
             else -> AppText("Opening video…", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
         }
     }
 }
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 private fun VideoTransportBar(
     state: AppState,
     tab: LogTab,
@@ -128,6 +429,9 @@ private fun VideoTransportBar(
     controller: VideoPlayerController,
     selectedRate: Float,
     onRateSelected: (Float) -> Unit,
+    followLogs: Boolean,
+    onFollowLogsChange: (Boolean) -> Unit,
+    onRotateClockwise: () -> Unit,
 ) {
     val tc = tc()
     val playable = controller.error == null
@@ -139,22 +443,54 @@ private fun VideoTransportBar(
     var dragPositionMs by remember(tab.id) { mutableStateOf<Long?>(null) }
     val durationF = controller.durationMs.coerceAtLeast(1L).toFloat()
     val sliderValueMs = dragPositionMs ?: controller.positionMs
-    Column(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Slider(
-            value = sliderValueMs.toFloat().coerceIn(0f, durationF),
-            onValueChange = { dragPositionMs = it.toLong() },
-            onValueChangeFinished = {
-                dragPositionMs?.let { controller.seek(it) }
-                dragPositionMs = null
-            },
-            valueRange = 0f..durationF,
-            enabled = playable,
-            colors = SliderDefaults.colors(thumbColor = tc.ac, activeTrackColor = tc.ac, inactiveTrackColor = tc.br),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            AppText(formatVideoTime(sliderValueMs), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
-            AppText(formatVideoTime(controller.durationMs), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+    val sliderColors = SliderDefaults.colors(thumbColor = tc.ac, activeTrackColor = tc.ac, inactiveTrackColor = tc.br)
+    val sliderInteractionSource = remember { MutableInteractionSource() }
+    Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        // This narrow strip separates the picture from the timeline while retaining drag-time
+        // feedback (sliderValueMs includes the uncommitted thumb position).
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 2.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            AppText(formatVideoTime(sliderValueMs), color = tc.td, fontSize = 9.sp, fontFamily = MONO)
+            AppText(formatVideoTime(controller.durationMs), color = tc.td, fontSize = 9.sp, fontFamily = MONO)
+        }
+        // Material's normal slider reserves a 48dp touch target. This desktop transport uses the
+        // same 28dp control height as the adjacent play and rate controls while retaining a
+        // high-contrast 14dp thumb and a 4dp track for accurate mouse seeking.
+        CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 28.dp) {
+            Slider(
+                value = sliderValueMs.toFloat().coerceIn(0f, durationF),
+                onValueChange = { dragPositionMs = it.toLong() },
+                onValueChangeFinished = {
+                    dragPositionMs?.let { controller.seek(it) }
+                    dragPositionMs = null
+                },
+                valueRange = 0f..durationF,
+                enabled = playable,
+                colors = sliderColors,
+                interactionSource = sliderInteractionSource,
+                thumb = {
+                    SliderDefaults.Thumb(
+                        interactionSource = sliderInteractionSource,
+                        colors = sliderColors,
+                        enabled = playable,
+                        thumbSize = DpSize(14.dp, 14.dp),
+                    )
+                },
+                track = { sliderState ->
+                    SliderDefaults.Track(
+                        sliderState = sliderState,
+                        modifier = Modifier.height(4.dp),
+                        enabled = playable,
+                        colors = sliderColors,
+                        drawStopIndicator = null,
+                        thumbTrackGapSize = 0.dp,
+                        trackInsideCornerSize = 2.dp,
+                    )
+                },
+                modifier = Modifier.fillMaxWidth().height(28.dp).padding(horizontal = 2.dp),
+            )
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             ToolbarBtn(
@@ -165,11 +501,43 @@ private fun VideoTransportBar(
                 enabled = playable,
                 onClick = { if (controller.isPlaying) controller.pause() else controller.play() },
             )
-            VIDEO_RATE_PRESETS.forEach { rate ->
-                PillBtn(rateLabel(rate), active = rate == selectedRate) { onRateSelected(rate) }
-            }
+            PlaybackRateStepper(selectedRate = selectedRate, onRateSelected = onRateSelected)
+            ToolbarBtn(
+                label = "Rotate clockwise",
+                icon = Icons.AutoMirrored.Outlined.RotateRight,
+                showLabel = false,
+                tooltip = "Rotate clockwise",
+                onClick = onRotateClockwise,
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
+            )
         }
-        VideoAnchorRow(state = state, tab = tab, attachment = attachment, controller = controller)
+        VideoAnchorRow(
+            state = state,
+            tab = tab,
+            attachment = attachment,
+            controller = controller,
+            followLogs = followLogs,
+            onFollowLogsChange = onFollowLogsChange,
+        )
+    }
+}
+
+/** A compact, single segmented control for the fixed playback-speed choices. */
+@Composable
+private fun PlaybackRateStepper(selectedRate: Float, onRateSelected: (Float) -> Unit) {
+    val tc = tc()
+    val index = VIDEO_RATE_PRESETS.indexOf(selectedRate).coerceAtLeast(0)
+    Row(
+        Modifier.border(0.5.dp, tc.br, CORNER_MD).clip(CORNER_MD),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        StepperButton("−", enabled = index > 0) { onRateSelected(VIDEO_RATE_PRESETS[index - 1]) }
+        Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
+        Box(Modifier.width(38.dp).height(28.dp), contentAlignment = Alignment.Center) {
+            AppText(rateLabel(selectedRate), color = tc.tx, fontSize = 10.sp, fontFamily = MONO, fontWeight = FontWeight.Medium)
+        }
+        Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
+        StepperButton("+", enabled = index < VIDEO_RATE_PRESETS.lastIndex) { onRateSelected(VIDEO_RATE_PRESETS[index + 1]) }
     }
 }
 
@@ -179,55 +547,95 @@ private fun rateLabel(rate: Float): String {
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 private fun VideoAnchorRow(
     state: AppState,
     tab: LogTab,
     attachment: VideoAttachment,
     controller: VideoPlayerController,
+    followLogs: Boolean,
+    onFollowLogsChange: (Boolean) -> Unit,
 ) {
     val tc = tc()
     val anchor = attachment.anchor
+    val rotationDegrees = state.videoRotationDegrees(tab.id)
     // "Show in logs" jumps to whatever log row currently maps closest to the playhead — null (and
     // the button disabled) when there's no anchor yet, or the anchor/target rows' `ts` doesn't
     // parse (LogTime.parseMillisOfDay's TS_UNKNOWN case — brief/RAW-format rows).
-    val targetLogId = if (anchor != null) state.videoMsToNearestLogId(tab, controller.positionMs) else null
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        AppText(
-            if (anchor != null) {
-                "Anchored to line #${anchor.logId} @ ${formatVideoTime(anchor.videoMs)}"
-            } else {
-                "No anchor — right-click a log row to link it here"
-            },
-            color = tc.td, fontSize = 10.sp, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth(),
+    val targetLogId = if (anchor != null && state.isVideoPositionValid(tab, controller.positionMs)) {
+        state.mappedVideoLogId(tab.id, controller.positionMs)
+    } else {
+        null
+    }
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        AppButton(
+            "Logs",
+            onClick = { targetLogId?.let { state.navigateToVideoLog(tab.id, it) } },
+            variant = ButtonVariant.Secondary,
+            enabled = targetLogId != null,
+            leadingIcon = Icons.Outlined.MyLocation,
+            horizontalPadding = 6.dp,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            AppButton(
-                "Show in logs",
-                onClick = { targetLogId?.let { state.requestVideoLogNavigation(tab.id, it) } },
-                variant = ButtonVariant.Secondary,
-                enabled = targetLogId != null,
-                leadingIcon = Icons.Outlined.MyLocation,
-            )
-            if (anchor != null) {
+        if (anchor != null) {
+            TooltipArea(
+                tooltip = {
+                    Box(
+                        Modifier.background(tc.p2, CORNER_SM)
+                            .border(0.5.dp, tc.br, CORNER_SM)
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        AppText(
+                            "Anchored to line #${anchor.logId} at ${formatVideoTime(anchor.videoMs)}",
+                            color = tc.tx,
+                            fontSize = 11.sp,
+                        )
+                    }
+                },
+            ) {
                 AppButton(
-                    "Clear anchor",
+                    "Clear",
                     onClick = { state.clearVideoAnchor(tab.id) },
                     variant = ButtonVariant.Secondary,
                     leadingIcon = Icons.Outlined.LinkOff,
+                    horizontalPadding = 6.dp,
                 )
             }
         }
         AppButton(
-            "Add frame to notes",
+            if (followLogs) "Following" else "Follow",
+            onClick = { onFollowLogsChange(!followLogs) },
+            variant = if (followLogs) ButtonVariant.Primary else ButtonVariant.Secondary,
+            enabled = targetLogId != null,
+            leadingIcon = Icons.Outlined.MyLocation,
+            horizontalPadding = 6.dp,
+        )
+        ToolbarBtn(
+            label = "Add frame to notes",
+            icon = Icons.Outlined.AddAPhoto,
+            showLabel = false,
+            tooltip = "Add frame to notes",
+            enabled = controller.currentFrame != null,
+            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
             onClick = {
+                // Capture all context before encoding; playback can advance while ImageIO works.
+                val capturedPositionMs = controller.positionMs
                 controller.grabCurrentFrame()?.let { bytes ->
-                    state.addImageBlock(tab.id, bytes, provenance = "from ${attachment.sourceLabel}")
+                    rotatedFramePng(bytes, rotationDegrees)?.let { orientedBytes ->
+                        state.addVideoFrameNote(
+                            tabId = tab.id,
+                            sourceBytes = orientedBytes,
+                            source = attachment.source,
+                            sourceLabel = attachment.sourceLabel,
+                            positionMs = capturedPositionMs,
+                        )
+                    }
                     if (!state.annotationVisible) state.updateAnnotationVisible(true)
                 }
             },
-            variant = ButtonVariant.Secondary,
-            enabled = controller.currentFrame != null,
-            leadingIcon = Icons.Outlined.AddAPhoto,
         )
     }
 }

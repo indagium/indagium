@@ -37,6 +37,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -45,6 +46,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -104,14 +106,19 @@ import java.awt.Cursor as AwtCursor
 /** Provider and Actions share one row as an accordion: opening one closes the other. */
 internal enum class AiSidebarSection { PROVIDER, ACTIONS }
 
+/**
+ * Lets the embedded player release its sidebar height while shown in its detached window.
+ * The player itself has no collapse state: removing the video removes its sidebar section.
+ */
+internal val LocalVideoSidebarExpandedChange = staticCompositionLocalOf<(Boolean) -> Unit> { {} }
+
 private fun AiSidebarSection?.toggled(section: AiSidebarSection): AiSidebarSection? =
     if (this == section) null else section
 
 /**
- * Notes and the AI panel are independent visibility toggles (AppState.annotationVisible /
- * aiPanelVisible, both driven from the main toolbar) sharing this one resizable sidebar slot.
- * With both on, it splits vertically - Notes above AI - at a user-draggable ratio
- * (rightSidebarSplit); with only one on, that one fills the whole slot.
+ * Video, Notes and AI share one resizable right-sidebar column. Video is the top section while
+ * Notes and AI retain their existing independently-toggled lower split. The active video
+ * controller continues to belong to AppState when the player is detached.
  */
 @Composable
 internal fun RightSidebarPanel(
@@ -121,11 +128,16 @@ internal fun RightSidebarPanel(
     aiFocusRequester: FocusRequester,
     onAiPanelFocusChanged: (Boolean) -> Unit,
     notesContent: @Composable () -> Unit,
+    videoContent: (@Composable () -> Unit)? = null,
 ) {
     val notesOn = state.annotationVisible
     val aiOn = state.aiPanelVisible
+    val videoOn = videoContent != null
     val density = LocalDensity.current
     var totalHeightPx by remember { mutableStateOf(0) }
+    var videoSplit by remember(tab.id) { mutableStateOf(0.42f) }
+    var videoSidebarVisible by remember(tab.id) { mutableStateOf(true) }
+    CompositionLocalProvider(LocalVideoSidebarExpandedChange provides { videoSidebarVisible = it }) {
     Column(Modifier.width(width.dp).fillMaxHeight().background(tc().p)) {
         // notesContent() and AiSidebarPanel() each appear at exactly one call site below,
         // regardless of notesOn/aiOn - only their weight changes. Branching into separate `when`
@@ -142,26 +154,55 @@ internal fun RightSidebarPanel(
         // subcomposition boundary entirely.
         Column(Modifier.weight(1f).fillMaxWidth().onSizeChanged { totalHeightPx = it.height }) {
             val totalHeightDp = with(density) { totalHeightPx.toDp().value }
-            if (notesOn) {
-                Box(Modifier.weight(if (aiOn) state.rightSidebarSplit else 1f).fillMaxWidth()) { notesContent() }
-            }
-            if (notesOn && aiOn) {
-                VDivider { delta ->
-                    val newFrac = (state.rightSidebarSplit * totalHeightDp + delta) / totalHeightDp
-                    state.updateRightSidebarSplit(newFrac)
+            // Keep videoContent composed after detaching it. The detached Window is owned by
+            // BoundVideoPanel, so removing this slot would also discard its remembered detached
+            // state and immediately close the Window. A zero-height parking slot preserves that
+            // ownership without reserving sidebar space.
+            if (videoOn) {
+                Box(
+                    Modifier.fillMaxWidth().then(
+                        if (videoSidebarVisible) {
+                            Modifier.weight(if (notesOn || aiOn) videoSplit else 1f)
+                        } else {
+                            Modifier.height(0.dp)
+                        },
+                    ),
+                ) {
+                    videoContent.invoke()
                 }
             }
-            if (aiOn) {
-                Box(Modifier.weight(if (notesOn) 1f - state.rightSidebarSplit else 1f).fillMaxWidth()) {
-                    AiSidebarPanel(
-                        state = state,
-                        tab = tab,
-                        focusRequester = aiFocusRequester,
-                        onPanelFocusChanged = onAiPanelFocusChanged,
-                    )
+            if (videoOn && videoSidebarVisible && (notesOn || aiOn)) {
+                VDivider { delta ->
+                    val next = (videoSplit * totalHeightDp + delta) / totalHeightDp
+                    videoSplit = next.coerceIn(0.18f, 0.82f)
+                }
+            }
+            if (notesOn || aiOn) {
+                Column(Modifier.weight(if (videoOn && videoSidebarVisible) 1f - videoSplit else 1f).fillMaxWidth()) {
+                    if (notesOn) {
+                        Box(Modifier.weight(if (aiOn) state.rightSidebarSplit else 1f).fillMaxWidth()) { notesContent() }
+                    }
+                    if (notesOn && aiOn) {
+                        VDivider { delta ->
+                            val lowerHeightDp = totalHeightDp * (if (videoOn && videoSidebarVisible) 1f - videoSplit else 1f)
+                            val newFrac = (state.rightSidebarSplit * lowerHeightDp + delta) / lowerHeightDp
+                            state.updateRightSidebarSplit(newFrac)
+                        }
+                    }
+                    if (aiOn) {
+                        Box(Modifier.weight(if (notesOn) 1f - state.rightSidebarSplit else 1f).fillMaxWidth()) {
+                            AiSidebarPanel(
+                                state = state,
+                                tab = tab,
+                                focusRequester = aiFocusRequester,
+                                onPanelFocusChanged = onAiPanelFocusChanged,
+                            )
+                        }
+                    }
                 }
             }
         }
+    }
     }
 }
 

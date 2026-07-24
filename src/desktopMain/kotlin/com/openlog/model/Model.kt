@@ -187,6 +187,10 @@ sealed class AnnBlock {
      *  through autosave on every debounced edit (ui/AutosaveCodec.kt persistedSnapshot()).
      *  [provenance] is the human-readable source string, e.g. "from <zip>/<video-filename>".
      *  [format] is the encoded image format ("jpeg").
+     *  [videoFrame] is present only for a frame taken from an attached video. It keeps the
+     *  durable video identity and exact player position separate from the display-only
+     *  [provenance], so a Notes click cannot accidentally seek a replacement video with the same
+     *  label.
      *
      *  equals/hashCode are overridden to compare [bytes] by CONTENT (contentEquals/
      *  contentHashCode) rather than the default data-class array-field behavior, which compares
@@ -200,12 +204,13 @@ sealed class AnnBlock {
         val provenance: String,
         val format: String,
         val bytes: ByteArray,
+        val videoFrame: VideoFrameReference? = null,
     ) : AnnBlock() {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is Image) return false
             return id == other.id && caption == other.caption && provenance == other.provenance &&
-                format == other.format && bytes.contentEquals(other.bytes)
+                format == other.format && bytes.contentEquals(other.bytes) && videoFrame == other.videoFrame
         }
 
         override fun hashCode(): Int {
@@ -214,6 +219,7 @@ sealed class AnnBlock {
             result = 31 * result + provenance.hashCode()
             result = 31 * result + format.hashCode()
             result = 31 * result + bytes.contentHashCode()
+            result = 31 * result + (videoFrame?.hashCode() ?: 0)
             return result
         }
     }
@@ -338,18 +344,54 @@ data class TidMapState(
 // the plan doc) may add a second anchor for clock-drift correction; MVP intentionally has one.
 data class VideoAnchor(val videoMs: Long, val logId: Int)
 
-// [path] is the video file on disk — for a zip-sourced attachment this is a temp-extracted copy
-// (utils/BugReportZip.kt's extractEntryToTempFile), not a path inside the archive itself.
+/**
+ * A durable description of a video attachment.  In particular, an archive entry is persisted as
+ * the archive and entry names, never as the path of a process-local extracted file.  The latter
+ * disappeared on restart and made an otherwise-restored attachment unusable.
+ */
+sealed interface VideoSource {
+    data class LocalFile(val path: String) : VideoSource
+    data class ArchiveEntry(
+        val archivePath: String,
+        val entryPath: String,
+        val displayName: String,
+    ) : VideoSource
+}
+
 // [sourceLabel] is the provenance string shown on any frame grabbed from this video
-// ("from <sourceLabel>" — see the plan's Task C): "<zip-filename>/<video-filename>" for
-// zip-sourced attachments, otherwise the plain file path. [durationMs] defaults to 0 until the
-// player core (video/VideoPlayerController.kt) opens the file and reports the real value.
+// ("from <sourceLabel>"). [durationMs] defaults to 0 until the player opens the file and reports
+// the real value. The secondary constructor deliberately preserves source compatibility with
+// callers and saved-data tests written before VideoSource was introduced.
 data class VideoAttachment(
-    val path: String,
+    val source: VideoSource,
     val sourceLabel: String,
     val durationMs: Long = 0,
     val anchor: VideoAnchor? = null,
-)
+) {
+    constructor(
+        path: String,
+        sourceLabel: String,
+        durationMs: Long = 0,
+        anchor: VideoAnchor? = null,
+    ) : this(VideoSource.LocalFile(path), sourceLabel, durationMs, anchor)
+
+    /** Compatibility/readability accessor. Archive sources intentionally have no durable local path. */
+    val path: String? get() = (source as? VideoSource.LocalFile)?.path
+}
+
+/**
+ * Structured provenance for an annotation image captured from a video. [source] is the durable
+ * identity used to verify that a currently attached video is the same recording; [sourceLabel]
+ * is the user-facing label displayed below the image; and [positionMs] is the exact playhead
+ * timestamp to seek when the evidence is activated.
+ */
+data class VideoFrameReference(
+    val source: VideoSource,
+    val sourceLabel: String,
+    val positionMs: Long,
+) {
+    val provenanceLabel: String get() = "From $sourceLabel"
+}
 
 // Recognized by both the drag-drop attach path (ui/App.kt's onDrop) and the zip-archive
 // video-candidate scan (utils/BugReportZip.kt's listArchiveVideoCandidates) — kept as one shared
@@ -408,6 +450,9 @@ data class LogTab(
     // restart — re-attaching a multi-hundred-MB recording by hand every launch would defeat the
     // point of it being attached at all.
     val attachedVideo: VideoAttachment? = null,
+    // A transport/UI preference for this process only. Keeping it out of AutosaveCodec means a
+    // restored session never unexpectedly scrolls the log while a recording starts playing.
+    val videoFollowLog: Boolean = false,
 )
 
 /**

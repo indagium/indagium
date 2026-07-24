@@ -1022,7 +1022,12 @@ private fun AnnBlock.annBlockToken(): String = when (this) {
     // which round-trips a String through UTF-8 and would corrupt raw JPEG bytes) — the result is
     // an ASCII string, so it's safe to pass through tokenFields' own b64()-per-field encoding on
     // top, same as every other field here.
-    is AnnBlock.Image -> tokenFields("I", id, caption, provenance, format, Base64.getEncoder().encodeToString(bytes))
+    // [videoFrame] is appended after the original six fields. Existing sidecars/autosaves have
+    // no seventh field and therefore keep restoring as ordinary, non-navigable images.
+    is AnnBlock.Image -> tokenFields(
+        "I", id, caption, provenance, format, Base64.getEncoder().encodeToString(bytes),
+        videoFrame?.videoFrameToken().orEmpty(),
+    )
 }
 
 private fun String.annBlockFromToken(): AnnBlock? = runCatching {
@@ -1046,10 +1051,48 @@ private fun String.annBlockFromToken(): AnnBlock? = runCatching {
             format = p.getOrElse(4) { "jpeg" },
             bytes = p.getOrElse(5) { "" }.takeIf { it.isNotBlank() }
                 ?.let { Base64.getDecoder().decode(it) } ?: ByteArray(0),
+            videoFrame = p.getOrElse(6) { "" }.takeIf { it.isNotBlank() }?.videoFrameFromToken(),
         )
 
         else -> null
     }
+}.getOrNull()
+
+// Nested in an image block token so it must be self-contained: the first two fields are the
+// user-facing source label and exact millisecond timestamp; the remaining appended fields encode
+// the durable VideoSource identity. This deliberately mirrors attachedVideoToken's local/archive
+// shape while keeping image persistence independently backwards compatible.
+private fun VideoFrameReference.videoFrameToken(): String {
+    val (kind, primaryPath, archiveEntry, displayName) = when (val videoSource = source) {
+        is VideoSource.LocalFile -> listOf("LOCAL", videoSource.path, "", "")
+        is VideoSource.ArchiveEntry -> listOf(
+            "ARCHIVE",
+            videoSource.archivePath,
+            videoSource.entryPath,
+            videoSource.displayName,
+        )
+    }
+    return tokenFields(sourceLabel, positionMs.toString(), kind, primaryPath, archiveEntry, displayName)
+}
+
+private fun String.videoFrameFromToken(): VideoFrameReference? = runCatching {
+    val p = tokenFields()
+    val label = p.getOrNull(0)?.takeIf { it.isNotBlank() } ?: return@runCatching null
+    val positionMs = p.getOrNull(1)?.toLongOrNull()?.takeIf { it >= 0L } ?: return@runCatching null
+    val source = when (p.getOrNull(2)) {
+        "LOCAL" -> p.getOrNull(3)?.takeIf { it.isNotBlank() }?.let(VideoSource::LocalFile)
+        "ARCHIVE" -> {
+            val archivePath = p.getOrNull(3)?.takeIf { it.isNotBlank() } ?: return@runCatching null
+            val entryPath = p.getOrNull(4)?.takeIf { it.isNotBlank() } ?: return@runCatching null
+            VideoSource.ArchiveEntry(
+                archivePath = archivePath,
+                entryPath = entryPath,
+                displayName = p.getOrNull(5)?.takeIf { it.isNotBlank() } ?: entryPath.substringAfterLast('/'),
+            )
+        }
+        else -> null
+    } ?: return@runCatching null
+    VideoFrameReference(source = source, sourceLabel = label, positionMs = positionMs)
 }.getOrNull()
 
 internal fun Annotations.annotationsToken(sourcePath: String? = null): String = tokenFields(
@@ -1129,25 +1172,48 @@ private fun String.archiveCandidateFromToken(): ZipLogCandidate? = runCatching {
     )
 }.getOrNull()
 
-// Mirrors archiveCandidateToken/archiveCandidateFromToken above. anchor's two fields (videoMs/
-// logId) are appended after the always-present ones (path/sourceLabel/durationMs) rather than
-// nested as a sub-token — VideoAnchor is small and flat enough that a fifth/sixth field reads just
-// as clearly, and it keeps this codec's shape consistent with every other token in this file.
-private fun VideoAttachment.attachedVideoToken(): String = tokenFields(
-    path,
-    sourceLabel,
-    durationMs.toString(),
-    anchor?.videoMs?.toString().orEmpty(),
-    anchor?.logId?.toString().orEmpty(),
-)
+// Mirrors archiveCandidateToken/archiveCandidateFromToken above. The first five fields retain
+// the old local-file layout. Source kind/details were appended, so old autosaves still parse as a
+// LocalFile while new archive videos persist their durable archive reference, never a temp path.
+private fun VideoAttachment.attachedVideoToken(): String {
+    val (legacyPath, kind, archiveEntry, displayName) = when (val videoSource = source) {
+        is VideoSource.LocalFile -> listOf(videoSource.path, "LOCAL", "", "")
+        is VideoSource.ArchiveEntry -> listOf(
+            videoSource.archivePath,
+            "ARCHIVE",
+            videoSource.entryPath,
+            videoSource.displayName,
+        )
+    }
+    return tokenFields(
+        legacyPath,
+        sourceLabel,
+        durationMs.toString(),
+        anchor?.videoMs?.toString().orEmpty(),
+        anchor?.logId?.toString().orEmpty(),
+        kind,
+        archiveEntry,
+        displayName,
+    )
+}
 
 private fun String.attachedVideoFromToken(): VideoAttachment? = runCatching {
     val p = tokenFields()
     if (p.size < 2) return@runCatching null
     val anchorVideoMs = p.getOrNull(3)?.toLongOrNull()
     val anchorLogId = p.getOrNull(4)?.toIntOrNull()
+    val source = if (p.getOrNull(5) == "ARCHIVE") {
+        val entryPath = p.getOrNull(6)?.takeIf { it.isNotBlank() } ?: return@runCatching null
+        VideoSource.ArchiveEntry(
+            archivePath = p[0],
+            entryPath = entryPath,
+            displayName = p.getOrNull(7)?.takeIf { it.isNotBlank() } ?: entryPath.substringAfterLast('/'),
+        )
+    } else {
+        VideoSource.LocalFile(p[0])
+    }
     VideoAttachment(
-        path = p[0],
+        source = source,
         sourceLabel = p[1],
         durationMs = p.getOrNull(2)?.toLongOrNull() ?: 0L,
         // Both anchor fields must be present and parse — a partially-written/corrupt pair falls

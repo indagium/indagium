@@ -4,9 +4,11 @@ import com.openlog.model.LogLevel
 import com.openlog.utils.ArchiveBudgetExceededException
 import com.openlog.utils.ZipLogCandidateKind
 import com.openlog.utils.extractCandidate
+import com.openlog.utils.extractArchiveVideoToCache
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.isZipFile
 import com.openlog.utils.listArchiveLogCandidates
+import com.openlog.utils.listArchiveVideoCandidates
 import com.openlog.utils.listLogcatCandidates
 import com.openlog.utils.openArchiveCandidateStream
 import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry
@@ -175,6 +177,22 @@ class BugReportZipTest {
         val notAZip = File(dir, "notes.txt").apply { writeText("hello") }
 
         assertTrue(listLogcatCandidates(notAZip).isEmpty())
+    }
+
+    @Test
+    fun archiveVideoExtractionUsesReusableManagedCacheFile() {
+        val dir = createTempDirectory("openlog-video-cache").toFile()
+        val archive = buildZip(dir, "bugreport.zip", mapOf("recordings/repro.mp4" to byteArrayOf(1, 2, 3, 4)))
+        val candidate = listArchiveVideoCandidates(archive).single()
+        val cacheDir = File(dir, "managed-cache")
+
+        val first = extractArchiveVideoToCache(archive, candidate, cacheDir, maxEntryBytes = 10)
+        val second = extractArchiveVideoToCache(archive, candidate, cacheDir, maxEntryBytes = 10)
+
+        assertTrue(first?.isFile == true)
+        assertEquals(first, second)
+        assertTrue(first!!.toPath().startsWith(cacheDir.toPath()))
+        assertTrue(first.readBytes().contentEquals(byteArrayOf(1, 2, 3, 4)))
     }
 
     // ── Bounded archive extraction (S-03) ───────────────────────────────

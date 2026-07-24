@@ -3,6 +3,7 @@ package com.openlog
 import com.openlog.model.LogTab
 import com.openlog.model.VideoAnchor
 import com.openlog.model.VideoAttachment
+import com.openlog.model.VideoSource
 import com.openlog.ui.tabShellFromToken
 import com.openlog.ui.tabToken
 import com.openlog.ui.tokenFields
@@ -65,6 +66,29 @@ class VideoAttachmentTokenTest {
         val restored = original.tabToken().tabShellFromToken()
         assertEquals(original.attachedVideo, restored?.tab?.attachedVideo)
         assertNull(restored?.tab?.attachedVideo?.anchor)
+    }
+
+    @Test
+    fun roundTripsArchiveVideoAsDurableArchiveReference() {
+        val original = tabFixture(
+            VideoAttachment(
+                source = VideoSource.ArchiveEntry(
+                    archivePath = "/reports/bugreport.zip",
+                    entryPath = "FS/data/repro/screen.mp4",
+                    displayName = "screen.mp4",
+                ),
+                sourceLabel = "bugreport.zip/screen.mp4",
+                durationMs = 90_000,
+            ),
+        )
+
+        val restored = original.tabToken().tabShellFromToken()
+
+        assertEquals(original.attachedVideo, restored?.tab?.attachedVideo)
+        assertEquals(
+            VideoSource.ArchiveEntry("/reports/bugreport.zip", "FS/data/repro/screen.mp4", "screen.mp4"),
+            restored?.tab?.attachedVideo?.source,
+        )
     }
 
     @Test

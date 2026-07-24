@@ -70,4 +70,15 @@ class ImageDownscaleTest {
         val garbage = byteArrayOf(1, 2, 3, 4, 5)
         assertNull(downscaleAndEncodeJpeg(garbage))
     }
+
+    @Test
+    fun enforcesCustomByteCapByReducingDimensionsFurther() {
+        // The initial 1280px re-encode is deliberately too large for this small cap. A storage
+        // guard must keep reducing it rather than returning the old implementation's best effort.
+        val cap = 5 * 1024
+        val encoded = downscaleAndEncodeJpeg(syntheticPngBytes(1920, 1080), maxBytes = cap)
+
+        requireNotNull(encoded)
+        assertTrue(encoded.size <= cap, "stored image ${encoded.size} must never exceed cap $cap")
+    }
 }
