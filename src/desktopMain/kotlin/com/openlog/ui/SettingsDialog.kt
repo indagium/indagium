@@ -1392,7 +1392,7 @@ private fun SourceLoggingConfigurationEditor(
                     InlineField(
                         rule.ownerType,
                         { value -> draft = draft.replaceWrapperRule(index, rule.copy(ownerType = value)) },
-                        "Owner/type, e.g. com.example.Telemetry",
+                        "Owner/type, e.g. com.example.Telemetry or Telemetry",
                         Modifier.weight(1f),
                         fontSize = 11.sp,
                     )

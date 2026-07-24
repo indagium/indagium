@@ -7,7 +7,7 @@ import java.security.MessageDigest
  *  changes in a way that makes a previously-persisted index stale. Task 1 doesn't persist
  *  anything yet, but later tasks compare this against a saved value to decide whether a cached
  *  index must be rebuilt rather than merely refreshed. */
-const val SOURCE_INDEX_VERSION = 8
+const val SOURCE_INDEX_VERSION = 9
 
 /** One Android logging call site discovered by [SourceIndexer.build].
  *
