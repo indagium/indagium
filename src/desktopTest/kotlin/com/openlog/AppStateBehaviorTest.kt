@@ -534,6 +534,34 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun markdownEmitsScreenshotMarkerForImageBlockNotRawBytes() {
+        val tab = mkTab(
+            "log",
+            "LOGCAT_example.log",
+            listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "line 1")),
+        ).copy(
+            annotations = com.openlog.model.Annotations(
+                blocks = listOf(
+                    AnnBlock.Image(
+                        id = "i1",
+                        caption = "Crash dialog",
+                        provenance = "from bugreport.zip/screen.mp4",
+                        format = "jpeg",
+                        bytes = byteArrayOf(1, 2, 3),
+                    ),
+                ),
+            ),
+        )
+
+        val md = buildMd(tab, AppSettings())
+
+        assertTrue(md.contains("Crash dialog"))
+        assertTrue(md.contains("[screenshot: from bugreport.zip/screen.mp4]"))
+        // No data-URI / raw bytes leak into the exported text — Jira plain text won't render it.
+        assertTrue(!md.contains("data:image"))
+    }
+
+    @Test
     fun savedFiltersRoundTripAllFilterFields() {
         val state = AppState()
         state.addTab()
@@ -1949,14 +1977,19 @@ class AppStateBehaviorTest {
 
         // Simulate a pre-PERF-3b cache: strip the trailing candidate field from every tab line by
         // dropping the last '|'-separated token. Tab lines are the ones after the "tabs" marker.
-        // Two drops, not one: showTimeDelta was appended AFTER archiveCandidate (position 10), so
-        // a single strip would now remove showTimeDelta and leave archiveCandidate in place —
-        // dropping both trailing fields is what actually reproduces a token from before either one
-        // existed, which is the scenario this test means to exercise.
+        // Three drops, not one: showTimeDelta and attachedVideo were appended AFTER archiveCandidate
+        // (positions 10/11), so a single strip would now remove only attachedVideo and leave both
+        // showTimeDelta and archiveCandidate in place — dropping all three trailing fields is what
+        // actually reproduces a token from before any of them existed, which is the scenario this
+        // test means to exercise.
         val lines = cacheFile.readLines()
         val tabsIdx = lines.indexOf("tabs")
         val rewritten = lines.mapIndexed { i, line ->
-            if (i > tabsIdx && line.startsWith("tab\t")) line.substringBeforeLast('|').substringBeforeLast('|') else line
+            if (i > tabsIdx && line.startsWith("tab\t")) {
+                line.substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
+            } else {
+                line
+            }
         }
         cacheFile.writeText(rewritten.joinToString("\n"))
 

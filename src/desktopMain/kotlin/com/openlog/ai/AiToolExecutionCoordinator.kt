@@ -133,16 +133,22 @@ internal data class AiToolExecutionResult(
     val preview: String,
     val truncated: Boolean,
     val evidence: List<AiEvidence> = emptyList(),
+    // The un-stringified tool result (a Map, for every existing tool), kept alongside `content`
+    // so a caller that needs the original shape — e.g. ControlServer.managedMcpServer's
+    // get_video_frame special-case, which needs the real imageBase64/mimeType values rather than
+    // their Map.toString() rendering — doesn't have to re-parse `content`. Null for `error()`
+    // results, where there is no underlying tool value.
+    val raw: Any? = null,
 ) {
     companion object {
         fun from(value: Any?, maxChars: Int, evidence: List<AiEvidence>): AiToolExecutionResult {
             val rendered = value?.toString() ?: "null"
             return if (rendered.length <= maxChars) {
-                AiToolExecutionResult(rendered, rendered, truncated = false, evidence = evidence)
+                AiToolExecutionResult(rendered, rendered, truncated = false, evidence = evidence, raw = value)
             } else {
                 val notice = "\n\n[Tool result truncated to $maxChars characters by openLog.]"
                 val bounded = rendered.take((maxChars - notice.length).coerceAtLeast(0)) + notice
-                AiToolExecutionResult(bounded, bounded, truncated = true, evidence = evidence)
+                AiToolExecutionResult(bounded, bounded, truncated = true, evidence = evidence, raw = value)
             }
         }
 

@@ -95,6 +95,11 @@ fun reconstructAnnotationsText(annotations: Annotations): String = buildString {
                 block.sourceEntries?.forEach { e -> appendLine("${e.ts} ${e.level.key}/${e.tag}: ${e.msg}") }
                 appendLine()
             }
+            is AnnBlock.Image -> {
+                if (block.caption.isNotBlank()) appendLine(block.caption)
+                appendLine("[screenshot: ${block.provenance}]")
+                appendLine()
+            }
         }
     }
     if (annotations.suffix.isNotBlank()) appendLine(annotations.suffix)

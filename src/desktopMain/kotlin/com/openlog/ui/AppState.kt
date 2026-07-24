@@ -43,31 +43,39 @@ import com.openlog.utils.MergeSourceFile
 import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.SPLIT_PROMPT_BYTES
 import com.openlog.utils.SearchComputeResult
+import com.openlog.utils.TS_UNKNOWN
 import com.openlog.utils.ZipLogCandidate
+import com.openlog.utils.buildAnnotationsHtml
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeSearchMatches
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.computeTidMapColors
+import com.openlog.utils.deltaMillis
 import com.openlog.utils.exportFilteredToFile
 import com.openlog.utils.extractAppVersionHeuristic
 import com.openlog.utils.extractCandidate
+import com.openlog.utils.extractEntryToTempFile
 import com.openlog.utils.indexOfEntryId
 import com.openlog.utils.invalidateComputeCache
 import com.openlog.utils.isLikelyTextFile
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
+import com.openlog.utils.listArchiveVideoCandidates
 import com.openlog.utils.mergeLogs
 import com.openlog.utils.newId
 import com.openlog.utils.openArchiveCandidateStream
 import com.openlog.utils.parseLogcat
+import com.openlog.utils.parseMillisOfDay
 import com.openlog.utils.passesFilter
 import com.openlog.utils.planSplitOutputs
 import com.openlog.utils.requiresSplitPrompt
 import com.openlog.utils.splitFileToFiles
 import com.openlog.utils.splitStreamToFiles
 import com.openlog.utils.suggestedSplitPartCount
+import com.openlog.video.VideoPlayerController
+import com.openlog.video.defaultVideoPlayerController
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.add
 import java.awt.FileDialog
@@ -186,6 +194,9 @@ internal const val COMPARE_SPLIT_MIN = 0.2f
 internal const val COMPARE_SPLIT_MAX = 0.8f
 internal const val RIGHT_SIDEBAR_SPLIT_MIN = 0.2f
 internal const val RIGHT_SIDEBAR_SPLIT_MAX = 0.8f
+internal const val VIDEO_PANEL_MIN_WIDTH = 280f
+internal const val VIDEO_PANEL_MAX_WIDTH = 640f
+internal const val VIDEO_PANEL_DEFAULT_WIDTH = 380f
 internal const val MIN_PORT = 1
 internal const val MAX_PORT = 65535
 internal const val DEFAULT_MCP_PORT = 8991
@@ -474,6 +485,12 @@ internal const val LARGE_FILE_MODE_BYTES = 64L * 1024L * 1024L
 // feels the same as typing into the filter's keyword field.
 internal const val SEARCH_RECOMPUTE_DEBOUNCE_MS = 150L
 
+// Bounds for attachFirstVideoCandidateAsync's wait on a just-triggered zip-entry tab load — same
+// bounded-poll shape as OpenLogToolOperations.awaitLoad, duplicated here (not shared) since that
+// class's constants are private and scoped to MCP/REST request handling, a different concern.
+internal const val VIDEO_ATTACH_AWAIT_TIMEOUT_MS = 30_000L
+internal const val VIDEO_ATTACH_AWAIT_POLL_MS = 100L
+
 data class PendingSequenceStart(val text: String, val tag: String)
 
 data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val currentFilterId: String?)
@@ -676,6 +693,10 @@ class AppState(
         PlatformDirectoryPicker.pick(title, initialDirectory)
     },
     private val updateChecker: UpdateChecker = UpdateChecker(),
+    // Test seam for video/VideoPlayerController.kt: production wraps a real FFmpegFrameGrabber
+    // (needs the bytedeco natives on the classpath); tests substitute a fake VideoPlayerController
+    // so the mapping/persistence tests in this file's video section never touch real FFmpeg.
+    private val videoControllerFactory: (String) -> VideoPlayerController = ::defaultVideoPlayerController,
 ) {
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
@@ -958,6 +979,13 @@ class AppState(
     var rightSidebarSplit by mutableStateOf(0.5f)
     var filterPanelWidth by mutableStateOf(220f)
     var annotationPanelWidth by mutableStateOf(ANNOTATION_PANEL_MIN_WIDTH)
+
+    // Video panel (ui/VideoPanel.kt, Task B) — a single global visibility toggle mirroring
+    // filterVisible/annotationVisible above; the panel itself only ever renders when the ACTIVE
+    // tab also has attachedVideo != null (see BoundVideoPanel), so toggling this off/on has no
+    // visible effect on a tab with no video attached.
+    var videoPanelVisible by mutableStateOf(true)
+    var videoPanelWidth by mutableStateOf(VIDEO_PANEL_DEFAULT_WIDTH)
     var compareSplit by mutableStateOf(0.5f)
     var compareFilterRight by mutableStateOf(true)
     var isLoading by mutableStateOf(false)
@@ -1038,6 +1066,12 @@ class AppState(
     fun noteVisibleItems(tabId: String, summary: ItemsSummary) {
         visibleItemsByTab[tabId] = summary
     }
+
+    // Lazily-created, cached off this map — same pattern as TailCoordinator's activeTails — rather
+    // than living on the LogTab data class itself, since a live decode thread/FFmpegFrameGrabber
+    // isn't copy()/equals()-friendly. One controller per tab that has ever had its player opened;
+    // closeTabsById releases and removes the entry when the owning tab closes.
+    private val videoControllers = ConcurrentHashMap<String, VideoPlayerController>()
 
     // ── Sequences (per-tab, stored in Filter) ────────────────────────
     var sequences: List<SequenceDef>
@@ -1358,6 +1392,12 @@ class AppState(
         autosaveNow()
     }
 
+    fun updateVideoPanelVisible(visible: Boolean) {
+        if (videoPanelVisible == visible) return
+        videoPanelVisible = visible
+        autosaveNow()
+    }
+
     fun updateRightSidebarSplit(split: Float) {
         val next = split.coerceIn(RIGHT_SIDEBAR_SPLIT_MIN, RIGHT_SIDEBAR_SPLIT_MAX)
         if (rightSidebarSplit == next) return
@@ -1394,6 +1434,13 @@ class AppState(
         val next = width.coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
         if (annotationPanelWidth == next) return
         annotationPanelWidth = next
+        autosaveInBackground()
+    }
+
+    fun updateVideoPanelWidth(width: Float) {
+        val next = width.coerceIn(VIDEO_PANEL_MIN_WIDTH, VIDEO_PANEL_MAX_WIDTH)
+        if (videoPanelWidth == next) return
+        videoPanelWidth = next
         autosaveInBackground()
     }
 
@@ -2492,6 +2539,11 @@ class AppState(
         pendingAnnotationNavigation = AnnotationNavigationRequest(annotationNavigationCounter, tabId, listOf(logId))
     }
 
+    /** Video panel's "Show in logs" button (ui/VideoPanel.kt, plan doc's Task B) — selects and
+     *  scrolls to [logId], reusing the exact same jump-to-log-lines mechanism as crash/annotation
+     *  navigation above (including auto-expanding whatever collapsed header owns it). */
+    fun requestVideoLogNavigation(tabId: String, logId: Int) = requestCrashNavigation(tabId, logId)
+
     /** Evidence cards use the established selection/scroll pathway so collapsed groups expand. */
     private fun requestAiLogNavigation(tabId: String, lineIds: List<Int>) {
         val tab = tab(tabId) ?: return
@@ -2626,6 +2678,89 @@ class AppState(
         upTab(tabId) { tab -> if (tab.showUnfiltered) tab else tab.copy(showUnfiltered = true) }
     }
 
+    // ── Video (video/VideoPlayerController.kt, model/Model.kt's VideoAttachment/VideoAnchor) ────
+    // Substrate only (plan doc's Task A) — no panel UI reads any of this yet; that's Task B.
+
+    /** Attaches [file] (a real file on disk — see [attachVideoFromZip] for zip-sourced videos) to
+     *  the active tab, keyed by absolute path as its own provenance label. Overwrites any video
+     *  already attached to that tab (one video per tab, matching one anchor per tab). Returns the
+     *  tab id it was attached to, or null if there's no active tab. */
+    fun attachVideoToActiveTab(file: File): String? {
+        val tabId = activeTabId.takeIf { it.isNotBlank() } ?: return null
+        return attachVideo(tabId, file, file.absolutePath)
+    }
+
+    /** Extracts [candidate] (kind VIDEO — see BugReportZip.kt's listArchiveVideoCandidates) from
+     *  [zipFile] to a temp file and attaches it to [targetTabId], falling back to the active tab
+     *  when none is given. Returns the tab id it was attached to, or null on extraction failure or
+     *  no target tab. */
+    fun attachVideoFromZip(zipFile: File, candidate: ZipLogCandidate, targetTabId: String? = null): String? {
+        val tabId = targetTabId ?: activeTabId.takeIf { it.isNotBlank() } ?: return null
+        val tempFile = extractEntryToTempFile(zipFile, candidate) ?: run {
+            AppLogger.error("video", "Failed to extract video entry ${candidate.entryPath} from ${zipFile.name}")
+            return null
+        }
+        return attachVideo(tabId, tempFile, "${zipFile.name}/${candidate.displayName}")
+    }
+
+    private fun attachVideo(tabId: String, videoFile: File, sourceLabel: String): String? {
+        if (tab(tabId) == null) return null
+        upTab(tabId) { it.copy(attachedVideo = VideoAttachment(path = videoFile.absolutePath, sourceLabel = sourceLabel)) }
+        return tabId
+    }
+
+    /** Lazily creates (and caches) the [VideoPlayerController] for [tabId]'s attached video. Null
+     *  when the tab doesn't exist or has no video attached — a tab that later gets a video needs a
+     *  fresh call after [attachVideoToActiveTab]/[attachVideoFromZip], since the controller is
+     *  bound to one file path for its whole lifetime (see [close][VideoPlayerController.close]). */
+    fun videoController(tabId: String): VideoPlayerController? {
+        val path = tab(tabId)?.attachedVideo?.path ?: return null
+        return videoControllers.getOrPut(tabId) { videoControllerFactory(path) }
+    }
+
+    fun setVideoAnchor(tabId: String, videoMs: Long, logId: Int) = upTab(tabId) { t ->
+        t.attachedVideo?.let { t.copy(attachedVideo = it.copy(anchor = VideoAnchor(videoMs, logId))) } ?: t
+    }
+
+    fun clearVideoAnchor(tabId: String) = upTab(tabId) { t ->
+        t.attachedVideo?.let { t.copy(attachedVideo = it.copy(anchor = null)) } ?: t
+    }
+
+    /** Video-time (ms) for [logId], relative to [tab]'s single anchor — null when there's no
+     *  video/anchor, [logId] isn't in this tab, or either row's `ts` doesn't parse (see
+     *  LogTime.parseMillisOfDay: blank on brief/RAW-format rows). Pure — no AppState/controller
+     *  access — so it's directly unit-testable against a bare LogTab. */
+    fun logIdToVideoMs(tab: LogTab, logId: Int): Long? {
+        val anchor = tab.attachedVideo?.anchor ?: return null
+        val anchorEntry = tab.rmap[anchor.logId] ?: return null
+        val targetEntry = tab.rmap[logId] ?: return null
+        val delta = deltaMillis(anchorEntry.ts, targetEntry.ts) ?: return null
+        return anchor.videoMs + delta
+    }
+
+    /** Inverse of [logIdToVideoMs]: the entry id whose mapped video-time is closest to [videoMs].
+     *  Linear over [tab]'s own logData (parse order tracks ascending id — see LogTime.kt's own
+     *  doc) since Task A's substrate only needs correctness; Task B's UI-driven "Show in logs" nav
+     *  can index/binary-search this if it turns out to matter on a very large tab. Null under the
+     *  same conditions as [logIdToVideoMs], or if no entry in the tab has a parseable `ts`. */
+    fun videoMsToNearestLogId(tab: LogTab, videoMs: Long): Int? {
+        val anchor = tab.attachedVideo?.anchor ?: return null
+        val anchorEntry = tab.rmap[anchor.logId] ?: return null
+        if (parseMillisOfDay(anchorEntry.ts) == TS_UNKNOWN) return null
+        val targetDeltaMs = videoMs - anchor.videoMs
+        var bestId: Int? = null
+        var bestDiff = Long.MAX_VALUE
+        for (entry in tab.logData) {
+            val delta = deltaMillis(anchorEntry.ts, entry.ts) ?: continue
+            val diff = kotlin.math.abs(delta - targetDeltaMs)
+            if (diff < bestDiff) {
+                bestDiff = diff
+                bestId = entry.id
+            }
+        }
+        return bestId
+    }
+
     // ── Annotations (block model) ────────────────────────────────────
     // Zip-backed tabs encode sourcePath as "<absZipPath>!<entryPath>" (see openZipEntry) — the
     // bare entry filename alone doesn't say which archive it came from, so this is qualified
@@ -2664,6 +2799,9 @@ class AppState(
 
     fun addLogRefBlock(tabId: String, logIds: List<Int>, caption: String = ""): String? =
         annotationManager.addLogRefBlock(tabId, logIds, caption)
+
+    fun addImageBlock(tabId: String, sourceBytes: ByteArray, provenance: String, afterId: String? = null): String? =
+        annotationManager.addImageBlock(tabId, sourceBytes, provenance, afterId)
 
     fun updateBlock(tabId: String, blockId: String, newText: String) = annotationManager.updateBlock(tabId, blockId, newText)
 
@@ -3130,6 +3268,7 @@ class AppState(
                 aiSessions.remove(tabId)
                 cancelActiveLoad(tabId)
                 tailCoordinator.cancelTailingFor(tabId)
+                videoControllers.remove(tabId)?.close()
                 visibleItemsByTab.remove(tabId)
                 invalidateComputeCache(tabId)
                 logViewerScrollStateStore.removeTab(tabId)
@@ -3369,12 +3508,20 @@ class AppState(
             showOpenError("Could not open archive", path, "The archive could not be scanned.")
             return
         }
+        // Scanned separately from the log/ANR candidates above (own extension-gated lister, see
+        // BugReportZip.kt) — screen recordings never show up in a picker meant for log text, they
+        // silently ride along with whichever log tab this call resolves to. Only the single-
+        // log-candidate auto-open case attaches one (below): with 2+ log candidates it's not yet
+        // known which of the resulting tabs should own the recording, and 0 log candidates means
+        // there's no tab to attach it to — both left for Task B's picker UI to resolve properly.
+        val videoCandidates = runCatching { listArchiveVideoCandidates(file) }.getOrDefault(emptyList())
         AppLogger.info("archive", "Archive scan found ${candidates.size} candidates")
         when {
             candidates.size == 1 -> {
                 rememberRecentFile(file)
                 recentMenuOpen = false
-                openZipEntries(file, listOf(candidates.first()))
+                val tabId = openZipEntries(file, listOf(candidates.first())).firstOrNull()
+                attachFirstVideoCandidateAsync(file, videoCandidates, tabId)
             }
             candidates.size > 1 -> {
                 rememberRecentFile(file)
@@ -3390,6 +3537,23 @@ class AppState(
                     message = "This archive does not contain readable .log, .txt, or ANR trace entries.",
                 )
             }
+        }
+    }
+
+    // Extraction (extractEntryToTempFile) streams a potentially multi-hundred-MB file to disk —
+    // dispatched onto ioScope rather than inline in openZipFile so it never blocks the caller
+    // (typically the UI thread), same reasoning as every other archive-entry extraction path.
+    // openZipEntries allocates [tabId] synchronously but the tab itself only PUBLISHES once its
+    // own ioScope job finishes parsing (openZipEntry, above) — awaiting isLoadInFlight first (same
+    // bounded-poll pattern as OpenLogToolOperations.awaitLoad) avoids the race where this job's
+    // attachVideo would otherwise silently no-op against a tab that doesn't exist yet.
+    private fun attachFirstVideoCandidateAsync(zipFile: File, videoCandidates: List<ZipLogCandidate>, tabId: String?) {
+        val candidate = videoCandidates.firstOrNull() ?: return
+        if (tabId == null) return
+        ioScope.launch {
+            val deadline = System.currentTimeMillis() + VIDEO_ATTACH_AWAIT_TIMEOUT_MS
+            while (isLoadInFlight(tabId) && System.currentTimeMillis() < deadline) delay(VIDEO_ATTACH_AWAIT_POLL_MS)
+            attachVideoFromZip(zipFile, candidate, tabId)
         }
     }
 
@@ -3628,6 +3792,25 @@ class AppState(
 
     fun copyAnn(tabId: String) {
         tab(tabId)?.let { copyToClipboard(maskWordForCopy(buildMd(it, settings), settings)) }
+    }
+
+    // Per-image "Copy image" (AnnotationPanel's ImageBlockView) — puts real image bytes on the
+    // clipboard as DataFlavor.imageFlavor so pasting into a rich editor (Jira comment, Slack,
+    // email) uploads it as an inline attachment, not a broken Markdown link. [fallbackText] is
+    // what a plain-text-only paste target receives instead (the block's provenance string).
+    fun copyImageToClipboard(bytes: ByteArray, fallbackText: String) {
+        Toolkit.getDefaultToolkit().systemClipboard.setContents(ImageTransferable(bytes, fallbackText), null)
+    }
+
+    // "Copy rich preview" (AnnotationPanel header / MdPreviewDialog) — the whole annotation, as
+    // buildAnnotationsHtml() renders it, on the clipboard as text/html with inline <img> data
+    // URIs, so a single paste reproduces text *and* pictures. Falls back to the same masked
+    // buildMd() text copyAnn() writes for editors that don't accept the HTML flavor.
+    fun copyRichPreview(tabId: String) {
+        val t = tab(tabId) ?: return
+        val html = buildAnnotationsHtml(t, settings)
+        val plainText = maskWordForCopy(buildMd(t, settings), settings)
+        Toolkit.getDefaultToolkit().systemClipboard.setContents(HtmlTransferable(html, plainText), null)
     }
 
     fun exportAnalysisTo(tabId: String, file: File): Boolean {

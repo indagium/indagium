@@ -11,7 +11,9 @@ import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -2176,6 +2178,17 @@ private fun LogRow(
         }
         if (item.indent > 0) {
             Spacer(Modifier.width(INDENT_STEP * item.indent))
+        }
+        // Video anchor badge (plan doc's Task B) — this row is the one and only VideoAnchor.logId
+        // for tab.attachedVideo, if any. A plain icon (no tooltip): rows are the hottest path in
+        // this composable (every visible row, every recomposition), and the match is rare enough
+        // (at most one row per tab) that the extra affordance isn't worth the per-row cost of
+        // wiring up TooltipArea's own pointer-event tracking on every row just to support it.
+        if (tab.attachedVideo?.anchor?.logId == entry.id) {
+            Icon(
+                Icons.Outlined.Movie, contentDescription = "Linked to the attached video",
+                tint = tc.ac, modifier = Modifier.size(12.dp).padding(end = 4.dp),
+            )
         }
         // Only merged tabs (utils/LogMerge.kt) ever set sourceTag — a small pinned (non-scrolling)
         // badge naming which original file a row came from, since a merged tab otherwise gives no

@@ -227,6 +227,7 @@ internal fun FileView(
             onSearchPrev = { state.searchPrev(tab.id) },
             onSearchClose = { state.closeSearch(tab.id) },
         )
+        BoundVideoPanel(state, tab)
         if (state.annotationVisible || state.aiPanelVisible) {
             HDivider { delta ->
                 state.updateAnnotationPanelWidth(state.annotationPanelWidth - delta)
@@ -247,6 +248,8 @@ internal fun FileView(
                     recentNotesMenuOpen = state.recentNotesMenuOpen,
                     onToggleMd = { state.toggleMd(tab.id) },
                     onCopy = { state.copyAnn(tab.id) },
+                    onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
+                    onCopyRichPreview = { state.copyRichPreview(tab.id) },
                     onSave = { state.saveAnalysis(tab.id) },
                     onToggleRecentNotes = { state.toggleRecentNotesMenu() },
                     onOpenNote = { state.openNoteFileAsync(tab.id, it) },

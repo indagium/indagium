@@ -55,6 +55,38 @@ class AnnotationsTokenTest {
     }
 
     @Test
+    fun roundTripsImageBlockBytesExactlyThroughBase64() {
+        // Deliberately includes 0x00 and 0xFF bytes (not valid UTF-8 on their own) — this is the
+        // scenario .b64()/.unb64() (String<->UTF-8) would corrupt; annBlockToken/FromToken must
+        // route raw bytes through java.util.Base64 directly instead.
+        val rawBytes = byteArrayOf(0x00, 0x01, 0x7F.toByte(), 0x80.toByte(), 0xFF.toByte(), 0x42, 0x00)
+        val original = Annotations(
+            blocks = listOf(
+                AnnBlock.Image(
+                    id = "i1",
+                    caption = "Crash moment",
+                    provenance = "from bugreport.zip/screen.mp4",
+                    format = "jpeg",
+                    bytes = rawBytes,
+                ),
+            ),
+        )
+        val token = original.annotationsToken()
+        val restored = token.annotationsFromToken()
+
+        requireNotNull(restored)
+        val restoredImage = restored.blocks.single() as AnnBlock.Image
+        assertTrue(rawBytes.contentEquals(restoredImage.bytes), "image bytes must survive the round trip exactly")
+        assertEquals("Crash moment", restoredImage.caption)
+        assertEquals("from bugreport.zip/screen.mp4", restoredImage.provenance)
+        assertEquals("jpeg", restoredImage.format)
+        // Also exercises AnnBlock.Image's overridden (content-based) equals — see Model.kt's doc
+        // comment on why the default array-field equals would fail this even though decode is
+        // byte-for-byte correct.
+        assertEquals(original, restored)
+    }
+
+    @Test
     fun parsesLegacyFiveFieldTokenWithEmptyNewFieldsAndNoCrash() {
         val current = Annotations(
             blocks = listOf(AnnBlock.Note("n1", "legacy note")),

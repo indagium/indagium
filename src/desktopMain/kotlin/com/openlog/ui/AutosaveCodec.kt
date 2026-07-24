@@ -301,9 +301,13 @@ internal fun maskWordForCopy(text: String, settings: AppSettings): String {
     if (rules.isEmpty()) return text
     return text.lines().joinToString("\n") { line ->
         val trimmed = line.trim()
-        if (trimmed == "{code:java}" || trimmed == "{code}") line
-        else rules.fold(line) { masked, rule ->
-            Regex("\\b${Regex.escape(rule.target)}\\b").replace(masked, rule.replacement)
+        val isScreenshotMarker = trimmed.startsWith("[screenshot: ") && trimmed.endsWith("]")
+        if (trimmed == "{code:java}" || trimmed == "{code}" || isScreenshotMarker) {
+            line
+        } else {
+            rules.fold(line) { masked, rule ->
+                Regex("\\b${Regex.escape(rule.target)}\\b").replace(masked, rule.replacement)
+            }
         }
     }
 }
@@ -813,6 +817,8 @@ internal fun AppState.compareStateToken(): String = tokenFields(
     compareSplit.toString(),
     aiPanelVisible.toString(),
     rightSidebarSplit.toString(),
+    videoPanelVisible.toString(),
+    videoPanelWidth.toString(),
 )
 
 internal fun AppState.restoreCompareState(token: String) {
@@ -830,6 +836,10 @@ internal fun AppState.restoreCompareState(token: String) {
     aiPanelVisible = p.getOrNull(8)?.toBooleanStrictOrNull() ?: false
     rightSidebarSplit = (p.getOrNull(9)?.toFloatOrNull() ?: rightSidebarSplit)
         .coerceIn(RIGHT_SIDEBAR_SPLIT_MIN, RIGHT_SIDEBAR_SPLIT_MAX)
+    // Trailing fields: absent on tokens from before the video panel (plan doc's Task B) existed.
+    videoPanelVisible = p.getOrNull(10)?.toBooleanStrictOrNull() ?: true
+    videoPanelWidth = (p.getOrNull(11)?.toFloatOrNull() ?: videoPanelWidth)
+        .coerceIn(VIDEO_PANEL_MIN_WIDTH, VIDEO_PANEL_MAX_WIDTH)
 }
 
 internal fun FilterPanelUiState.filterPanelToken(): String = tokenFields(
@@ -1008,6 +1018,11 @@ private fun AnnBlock.annBlockToken(): String = when (this) {
         sourceFilename.orEmpty(),
         sourceEntries?.joinToString(";") { it.toAnnToken() }.orEmpty(),
     )
+    // bytes is base64'd with a plain java.util.Base64 call (NOT the .b64() field helper below,
+    // which round-trips a String through UTF-8 and would corrupt raw JPEG bytes) — the result is
+    // an ASCII string, so it's safe to pass through tokenFields' own b64()-per-field encoding on
+    // top, same as every other field here.
+    is AnnBlock.Image -> tokenFields("I", id, caption, provenance, format, Base64.getEncoder().encodeToString(bytes))
 }
 
 private fun String.annBlockFromToken(): AnnBlock? = runCatching {
@@ -1023,6 +1038,14 @@ private fun String.annBlockFromToken(): AnnBlock? = runCatching {
             sourceFilename = p.getOrElse(5) { "" }.takeIf { it.isNotBlank() },
             sourceEntries = p.getOrElse(6) { "" }.takeIf { it.isNotBlank() }
                 ?.split(";")?.mapNotNull { it.toLogEntryFromAnnToken() },
+        )
+        "I" -> AnnBlock.Image(
+            id = p[1],
+            caption = p.getOrElse(2) { "" },
+            provenance = p.getOrElse(3) { "" },
+            format = p.getOrElse(4) { "jpeg" },
+            bytes = p.getOrElse(5) { "" }.takeIf { it.isNotBlank() }
+                ?.let { Base64.getDecoder().decode(it) } ?: ByteArray(0),
         )
 
         else -> null
@@ -1085,7 +1108,7 @@ private fun String.manualBlockFromToken(): ManualCollapseBlock? = runCatching {
 // a serialize+write. Keep this in sync if tabToken()'s field list changes.
 internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
-    showTimeDelta,
+    showTimeDelta, attachedVideo,
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1103,6 +1126,33 @@ private fun String.archiveCandidateFromToken(): ZipLogCandidate? = runCatching {
         displayName = p[1],
         sizeBytes = p[2].toLongOrNull() ?: return@runCatching null,
         kind = runCatching { ZipLogCandidateKind.valueOf(p[3]) }.getOrElse { ZipLogCandidateKind.LOGCAT },
+    )
+}.getOrNull()
+
+// Mirrors archiveCandidateToken/archiveCandidateFromToken above. anchor's two fields (videoMs/
+// logId) are appended after the always-present ones (path/sourceLabel/durationMs) rather than
+// nested as a sub-token — VideoAnchor is small and flat enough that a fifth/sixth field reads just
+// as clearly, and it keeps this codec's shape consistent with every other token in this file.
+private fun VideoAttachment.attachedVideoToken(): String = tokenFields(
+    path,
+    sourceLabel,
+    durationMs.toString(),
+    anchor?.videoMs?.toString().orEmpty(),
+    anchor?.logId?.toString().orEmpty(),
+)
+
+private fun String.attachedVideoFromToken(): VideoAttachment? = runCatching {
+    val p = tokenFields()
+    if (p.size < 2) return@runCatching null
+    val anchorVideoMs = p.getOrNull(3)?.toLongOrNull()
+    val anchorLogId = p.getOrNull(4)?.toIntOrNull()
+    VideoAttachment(
+        path = p[0],
+        sourceLabel = p[1],
+        durationMs = p.getOrNull(2)?.toLongOrNull() ?: 0L,
+        // Both anchor fields must be present and parse — a partially-written/corrupt pair falls
+        // back to "no anchor" rather than a half-populated VideoAnchor.
+        anchor = if (anchorVideoMs != null && anchorLogId != null) VideoAnchor(anchorVideoMs, anchorLogId) else null,
     )
 }.getOrNull()
 
@@ -1134,6 +1184,10 @@ internal fun LogTab.tabToken(): String {
         // other trailing field in this token, so tab tokens written before this field existed keep
         // parsing (tabShellFromToken reads it via getOrNull and defaults to false).
         showTimeDelta.toString(),
+        // Trailing field (position 11): the video attached to this tab (ui/AppState.kt's
+        // attachVideoToActiveTab/attachVideoFromZip), same append-last discipline — tab tokens
+        // written before this field existed keep parsing (tabShellFromToken defaults to null).
+        attachedVideo?.attachedVideoToken().orEmpty(),
     )
 }
 
@@ -1190,6 +1244,7 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             largeFileMode = source.largeFileMode,
             archiveCandidate = (source as? RestoredTabSource.ArchiveSource)?.persistedCandidate,
             showTimeDelta = p.getOrNull(10)?.toBoolean() ?: false,
+            attachedVideo = p.getOrNull(11)?.takeIf { it.isNotBlank() }?.attachedVideoFromToken(),
         ),
         source,
     )

@@ -17,6 +17,8 @@ import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
@@ -126,7 +128,13 @@ fun App(
                     val files = runCatching {
                         (event.dragData() as DragData.FilesList).readFiles()
                     }.getOrElse { return false }
-                    state.openPaths(files.mapNotNull { uri -> runCatching { File(URI.create(uri)) }.getOrNull() })
+                    val dropped = files.mapNotNull { uri -> runCatching { File(URI.create(uri)) }.getOrNull() }
+                    // Videos fall through isOpenableAsLog and are silently dropped otherwise — split
+                    // them out BEFORE openPaths so they route to the active tab's video attachment
+                    // instead of a (failed) attempt to open them as a log/text file.
+                    val (videos, logs) = dropped.partition { it.extension.lowercase() in VIDEO_FILE_EXTENSIONS }
+                    videos.forEach { state.attachVideoToActiveTab(it) }
+                    state.openPaths(logs)
                     return true
                 }
             }
@@ -355,6 +363,8 @@ fun App(
                         val estimatedMenuHeight = (531 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (state.pendingSequenceStart != null) 32 else 0) +
+                            // Video block: 2 Action rows (32 each) + a trailing divider (9).
+                            (if (ctxTab.attachedVideo != null) 73 else 0) +
                             (if (state.settings.sourceFolders.isNotEmpty()) 44 else 0)).dp
                         val menuScroll = rememberScrollState()
                         val x = ctx.x.dp.coerceIn(8.dp, (maxWidth - menuWidth - 8.dp).coerceAtLeast(8.dp))
@@ -497,6 +507,36 @@ fun App(
                                 val onHideMap = activeTidMap?.let { { state.closeTidMap(ctx.tabId); state.ctx = null } }
                                 if (onShowMap != null || onHideMap != null) {
                                     add(CtxMenuEntry.ThreadsActions(onShowMap = onShowMap, onHideMap = onHideMap))
+                                    add(CtxMenuEntry.Divider)
+                                }
+                            }
+                            // Video anchoring/nav (plan doc's Task B) — only offered when this tab
+                            // has a video attached at all. "Link" always overwrites whatever anchor
+                            // already existed (one anchor per tab — see VideoAttachment.anchor's own
+                            // doc); "Show in video" stays visible but disabled (matching Source's own
+                            // enabled-not-hidden convention below) until BOTH an anchor exists AND
+                            // this row's `ts` actually maps to a video-time (logIdToVideoMs is null
+                            // for TS_UNKNOWN rows — brief/RAW-format lines with no timestamp).
+                            run {
+                                val attachedVideo = ctxTab.attachedVideo
+                                if (attachedVideo != null) {
+                                    val videoController = state.videoController(ctxTab.id)
+                                    val mappedMs = state.logIdToVideoMs(ctxTab, entry.id)
+                                    add(
+                                        CtxMenuEntry.Action(Icons.Outlined.Link, "Link to current video position") {
+                                            videoController?.let { vc -> state.setVideoAnchor(ctxTab.id, vc.positionMs, entry.id) }
+                                            state.ctx = null
+                                        },
+                                    )
+                                    add(
+                                        CtxMenuEntry.Action(
+                                            Icons.Outlined.Movie, "Show in video",
+                                            enabled = attachedVideo.anchor != null && mappedMs != null,
+                                        ) {
+                                            mappedMs?.let { ms -> videoController?.seek(ms) }
+                                            state.ctx = null
+                                        },
+                                    )
                                     add(CtxMenuEntry.Divider)
                                 }
                             }

@@ -180,6 +180,43 @@ sealed class AnnBlock {
         val sourceFilename: String? = null,
         val sourceEntries: List<LogEntry>? = null,
     ) : AnnBlock()
+
+    /** A video frame or screenshot, captured via the video panel's "Add frame to notes" button
+     *  (video/VideoPlayerController.grabCurrentFrame()) and downscaled/re-encoded (see
+     *  utils/ImageDownscale.kt) before landing here — kept small since Annotations round-trips
+     *  through autosave on every debounced edit (ui/AutosaveCodec.kt persistedSnapshot()).
+     *  [provenance] is the human-readable source string, e.g. "from <zip>/<video-filename>".
+     *  [format] is the encoded image format ("jpeg").
+     *
+     *  equals/hashCode are overridden to compare [bytes] by CONTENT (contentEquals/
+     *  contentHashCode) rather than the default data-class array-field behavior, which compares
+     *  by REFERENCE and would make two structurally-identical images (e.g. this block before and
+     *  after an autosave round-trip) compare unequal. persistedSnapshot() keys the debounced
+     *  autosave-write LaunchedEffect on the whole Annotations tree, so a block that never compares
+     *  equal to its own restored copy would silently keep re-arming that debounce forever. */
+    data class Image(
+        override val id: String,
+        val caption: String,
+        val provenance: String,
+        val format: String,
+        val bytes: ByteArray,
+    ) : AnnBlock() {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is Image) return false
+            return id == other.id && caption == other.caption && provenance == other.provenance &&
+                format == other.format && bytes.contentEquals(other.bytes)
+        }
+
+        override fun hashCode(): Int {
+            var result = id.hashCode()
+            result = 31 * result + caption.hashCode()
+            result = 31 * result + provenance.hashCode()
+            result = 31 * result + format.hashCode()
+            result = 31 * result + bytes.contentHashCode()
+            return result
+        }
+    }
 }
 
 // issueDescription is persisted (.ann sidecar + autosave) but deliberately excluded from
@@ -292,6 +329,33 @@ data class TidMapState(
     val colors: Map<Int, Color> = emptyMap(),
 )
 
+// ── Video (video/VideoPlayerController.kt) ──────────────────────────
+// One manual anchor links a moment in the attached video to a log row: [videoMs] is the video's
+// own playback position (milliseconds from the start of the file), [logId] is the LogEntry.id it
+// was linked to. Every other log-line <-> video-time lookup (AppState.logIdToVideoMs/
+// videoMsToNearestLogId) is a relative offset from this single point (slope 1 — see LogTime.kt's
+// deltaMillis) rather than an absolute-clock join, since LogEntry.ts carries no date. Phase 2 (see
+// the plan doc) may add a second anchor for clock-drift correction; MVP intentionally has one.
+data class VideoAnchor(val videoMs: Long, val logId: Int)
+
+// [path] is the video file on disk — for a zip-sourced attachment this is a temp-extracted copy
+// (utils/BugReportZip.kt's extractEntryToTempFile), not a path inside the archive itself.
+// [sourceLabel] is the provenance string shown on any frame grabbed from this video
+// ("from <sourceLabel>" — see the plan's Task C): "<zip-filename>/<video-filename>" for
+// zip-sourced attachments, otherwise the plain file path. [durationMs] defaults to 0 until the
+// player core (video/VideoPlayerController.kt) opens the file and reports the real value.
+data class VideoAttachment(
+    val path: String,
+    val sourceLabel: String,
+    val durationMs: Long = 0,
+    val anchor: VideoAnchor? = null,
+)
+
+// Recognized by both the drag-drop attach path (ui/App.kt's onDrop) and the zip-archive
+// video-candidate scan (utils/BugReportZip.kt's listArchiveVideoCandidates) — kept as one shared
+// set so "is this a video" means the same thing at every attach site instead of drifting.
+val VIDEO_FILE_EXTENSIONS: Set<String> = setOf("mp4", "mkv", "webm", "mov", "m4v", "avi")
+
 // ── Tab ────────────────────────────────────────────────────────────
 data class LogTab(
     val id: String,
@@ -337,6 +401,13 @@ data class LogTab(
     // this token later and reflexively including every LogTab field, this one is the deliberate
     // exception: do not add it there.
     val tidMap: TidMapState? = null,
+    // The video (if any) attached to this tab (ui/AppState.kt's attachVideoToActiveTab/
+    // attachVideoFromZip) — a screen recording bundled alongside this tab's log, linked to it via
+    // at most one VideoAnchor. Persisted (AutosaveCodec.tabToken/tabShellFromToken), appended last
+    // so old tab tokens still parse. Unlike tidMap/search/tailing above, this DOES survive a
+    // restart — re-attaching a multi-hundred-MB recording by hand every launch would defeat the
+    // point of it being attached at all.
+    val attachedVideo: VideoAttachment? = null,
 )
 
 /**

@@ -661,6 +661,33 @@ internal fun computeItems(
 private fun sourcePrefixLabel(settings: AppSettings): String =
     settings.annotationPrefixLabel.trim().ifBlank { "From" }
 
+// Extracted out of buildMd() purely to keep that function's cyclomatic complexity under the
+// detekt gate — same behavior as when it was inlined in the AnnBlock.LogRef branch. Returns the
+// next block number (only advanced when numbering is on, mirroring the original inline
+// `blockNumber++` which was itself gated on settings.numberAnnotationBlocks).
+private fun StringBuilder.appendLogRefBlock(tab: LogTab, settings: AppSettings, block: AnnBlock.LogRef, blockNumber: Int): Int {
+    if (settings.numberAnnotationBlocks) append("$blockNumber. ")
+    if (block.caption.isNotBlank()) {
+        appendLine(block.caption); appendLine()
+    } else if (settings.numberAnnotationBlocks) {
+        appendLine()
+    }
+    if (block.sourceFilename != null) appendLine("${sourcePrefixLabel(settings)} ${block.sourceFilename}")
+    val rows = block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }
+    when (settings.annotationLogBlockStyle) {
+        AnnotationLogBlockStyle.INDENTED ->
+            rows.forEach { r -> appendLine("    ${r.ts}  ${r.level.key}/${r.tag}  ${r.msg}") }
+
+        AnnotationLogBlockStyle.JIRA_JAVA -> {
+            appendLine("{code:java}")
+            rows.forEach { r -> appendLine("${r.ts}  ${r.level.key}/${r.tag}  ${r.msg}") }
+            appendLine("{code}")
+        }
+    }
+    appendLine()
+    return if (settings.numberAnnotationBlocks) blockNumber + 1 else blockNumber
+}
+
 fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildString {
     if (tab.annotations.prefix.isNotBlank()) {
         appendLine(tab.annotations.prefix); appendLine()
@@ -676,25 +703,15 @@ fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildS
                 }
             }
 
-            is AnnBlock.LogRef -> {
-                if (settings.numberAnnotationBlocks) append("${blockNumber++}. ")
-                if (block.caption.isNotBlank()) {
-                    appendLine(block.caption); appendLine()
-                } else if (settings.numberAnnotationBlocks) {
-                    appendLine()
-                }
-                if (block.sourceFilename != null) appendLine("${sourcePrefixLabel(settings)} ${block.sourceFilename}")
-                val rows = block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }
-                when (settings.annotationLogBlockStyle) {
-                    AnnotationLogBlockStyle.INDENTED ->
-                        rows.forEach { r -> appendLine("    ${r.ts}  ${r.level.key}/${r.tag}  ${r.msg}") }
+            is AnnBlock.LogRef -> blockNumber = appendLogRefBlock(tab, settings, block, blockNumber)
 
-                    AnnotationLogBlockStyle.JIRA_JAVA -> {
-                        appendLine("{code:java}")
-                        rows.forEach { r -> appendLine("${r.ts}  ${r.level.key}/${r.tag}  ${r.msg}") }
-                        appendLine("{code}")
-                    }
-                }
+            is AnnBlock.Image -> {
+                if (settings.numberAnnotationBlocks) append("${blockNumber++}. ")
+                if (block.caption.isNotBlank()) appendLine(block.caption)
+                // No Markdown/data-URI image here — it won't render in Jira plain text. The real
+                // image bytes are meant to travel via clipboard (per-image "Copy image" — Task D,
+                // not yet implemented), so this exported text only carries the provenance marker.
+                appendLine("[screenshot: ${block.provenance}]")
                 appendLine()
             }
         }

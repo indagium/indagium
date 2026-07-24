@@ -30,6 +30,7 @@ import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.server.mcpStreamableHttp
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
+import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
@@ -458,7 +459,7 @@ class ControlServer(
             server.addTool(name = tool.name, description = tool.description, inputSchema = tool.schema) { request ->
                 val result = runCatching { toolGateway.execute(tool.name, request.arguments?.toArgMap() ?: emptyMap()) }
                     .getOrElse { e -> mapOf("error" to (e.message ?: e.toString())) }
-                CallToolResult(content = listOf(TextContent(Json.encode(result))))
+                toCallToolResult(tool.name, result, Json.encode(result))
             }
         }
         return server
@@ -472,18 +473,31 @@ class ControlServer(
             ).also { server ->
                 toolGateway.tools.forEach { tool ->
                     server.addTool(name = tool.name, description = tool.description, inputSchema = tool.schema) { request ->
-                        val result = try {
-                            managed.toolExecutor.executeManaged(managed.run, tool.name, request.arguments?.toArgMap() ?: emptyMap()).content
+                        val (raw, content) = try {
+                            val executed = managed.toolExecutor.executeManaged(managed.run, tool.name, request.arguments?.toArgMap() ?: emptyMap())
+                            executed.raw to executed.content
                         } catch (error: Exception) {
-                            "{\"error\":${Json.encode(error.message ?: "managed MCP tool failed")}}"
+                            null to "{\"error\":${Json.encode(error.message ?: "managed MCP tool failed")}}"
                         }
-                        CallToolResult(content = listOf(TextContent(result)))
+                        toCallToolResult(tool.name, raw, content)
                     }
                 }
             }
         }
 
     internal fun openAiFunctionDefinitions() = operations.openAiFunctionDefinitions()
+}
+
+// get_video_frame is the one tool whose result is a real image rather than data to describe in
+// text: when `rawResult` is the Map get_video_frame's handler returns on success (carrying a
+// non-null imageBase64), reply with a real MCP ImageContent block instead of the default
+// TextContent(JSON) wrap every other tool gets. An error map (no imageBase64) — or any other
+// tool — falls straight through to the usual text path, `textFallback` unchanged.
+private fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: String): CallToolResult {
+    val imageBase64 = (rawResult as? Map<*, *>)?.get("imageBase64") as? String
+    if (toolName != "get_video_frame" || imageBase64 == null) return CallToolResult(content = listOf(TextContent(textFallback)))
+    val mimeType = (rawResult["mimeType"] as? String) ?: "image/png"
+    return CallToolResult(content = listOf(ImageContent(data = imageBase64, mimeType = mimeType)))
 }
 
 private fun bearerToken(rawHeader: String?): String? = rawHeader
@@ -1061,6 +1075,24 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
             "picked up automatically. Use this only as an escape hatch if results look stale despite that.",
         schema(),
     ),
+    McpTool(
+        "get_video_frame",
+        "Return the video frame for a tab's attached video, as a real inline image. Position is " +
+            "given either as a log line (mapped to a video position via the tab's single anchor — " +
+            "see \"Link to current video position\" in the UI) or as an explicit video-time offset; " +
+            "provide exactly one of lineId or videoMs. Requires a video to already be attached to " +
+            "the tab (drag-and-drop or a zip candidate) — returns an error otherwise, and another " +
+            "error naming the missing step when lineId is given but no anchor is set.",
+        schema(
+            "tabId" to "string", "lineId" to "integer", "videoMs" to "integer",
+            required = listOf("tabId"),
+            descriptions = mapOf(
+                "tabId" to "Id of a tab with a video attached.",
+                "lineId" to "Log line id to resolve to a video position via the tab's anchor (alternative to videoMs).",
+                "videoMs" to "Explicit video position in milliseconds (alternative to lineId).",
+            ),
+        ),
+    ),
 )
 
 // REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl
@@ -1106,4 +1138,5 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/manual-collapse", "add_manual_collapse"),
     Triple(HttpMethod.Post, "/sequence", "add_sequence"),
     Triple(HttpMethod.Post, "/filter/save-preset", "save_filter_preset"),
+    Triple(HttpMethod.Get, "/video/frame", "get_video_frame"),
 )

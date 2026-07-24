@@ -3,6 +3,7 @@ package com.openlog
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.ManualCollapseBlock
 import com.openlog.model.ManualCollapseDirection
+import com.openlog.model.VideoAttachment
 import com.openlog.ui.AppState
 import com.openlog.ui.AutosaveScheduler
 import com.openlog.ui.mkTab
@@ -298,9 +299,10 @@ class AutosaveSchedulerTest {
             ),
             base.copy(archiveCandidate = ZipLogCandidate("logs/main.txt", "main.txt", 42)),
             base.copy(showTimeDelta = true),
+            base.copy(attachedVideo = VideoAttachment(path = "/tmp/repro.mp4", sourceLabel = "/tmp/repro.mp4")),
         )
 
-        assertEquals(11, base.persistedSnapshot().size)
+        assertEquals(12, base.persistedSnapshot().size)
         variants.forEach { variant ->
             assertNotEquals(base.persistedSnapshot(), variant.persistedSnapshot())
             assertNotEquals(base.tabToken(), variant.tabToken())
