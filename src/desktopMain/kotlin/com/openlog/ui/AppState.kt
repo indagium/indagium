@@ -523,6 +523,14 @@ data class PendingDuplicateFilterSave(val tabId: String, val existingId: String,
 
 data class PendingFilterRename(val id: String, val currentName: String, val isDraft: Boolean, val tabId: String?)
 
+// autoExportAnnotations' synchronous overwrite gate publishes this instead of writing when the
+// resolved auto-export target already exists on disk AND the tab has no recorded noteTargetName
+// decision yet (see LogTab.noteTargetName's doc comment). targetPath/targetName are both the
+// resolved file — targetName (bare, no directory) is what a "keep this name" decision pins on the
+// tab, targetPath (absolute) is what the dialog copy shows the user and what "Open existing notes"
+// loads.
+data class PendingNoteOverwrite(val tabId: String, val targetPath: String, val targetName: String)
+
 enum class ImportFilterAction { RENAME, REPLACE, SKIP, ADD }
 
 private fun isTransientRegexOnlyChange(before: Filter, after: Filter): Boolean {
@@ -605,6 +613,14 @@ data class AnnotationNavigationRequest(
     val tabId: String,
     val logIds: List<Int>,
     val scrollMode: NavigationScrollMode = NavigationScrollMode.CENTER,
+    // Opt-in permission for the viewer to open collapsed groups to reach this request's target,
+    // set only by Follow navigation that resolved to a row a collapsed group is folding away (see
+    // AppState.followRevealTarget). A plain FOLLOW request still refuses to expand anything: the
+    // playhead ticking past a filtered-out row must not disturb the view. Deliberately a flag
+    // rather than a third NavigationScrollMode — every existing `== FOLLOW` check would otherwise
+    // have to learn about a mode that scrolls identically — and deliberately not a second entry in
+    // logIds, since the viewer picks the first id it can already see and would skip the expansion.
+    val expandCollapsedGroups: Boolean = false,
 )
 
 /**
@@ -650,6 +666,12 @@ data class VideoFollowMapping(
     // readout show the computed target time alongside whatever row Follow actually holds on,
     // instead of leaving the reader to guess whether "holding" means "close" or "very far behind."
     val mappedElapsedMs: Long? = null,
+    // The row the FULL log was on at this moment, before visible-floor resolution — i.e. the line
+    // the video actually corresponds to, even when a filter or a collapsed group keeps it out of
+    // the displayed list. Equals mappedNearestLogId whenever status is ON_VISIBLE_ROW. Follow
+    // navigation reads it to decide whether there is a folded row worth revealing; see
+    // AppState.followRevealTarget.
+    val mappedFullFloorLogId: Int? = null,
 )
 
 /** One row-shaped fact inside a [FollowDiagnostics] dump: id/ts/elapsed ONLY, deliberately never
@@ -1203,10 +1225,6 @@ class AppState(
     // visible effect on a tab with no video attached.
     var videoPanelVisible by mutableStateOf(true)
     var videoPanelWidth by mutableStateOf(VIDEO_PANEL_DEFAULT_WIDTH)
-    // Rotation is deliberately session-only UI state. It belongs here rather than in a player
-    // composable so the embedded and detached views of a tab's one controller show the same
-    // orientation, and so switching between those views does not reset it.
-    private val videoRotationDegrees = mutableStateMapOf<String, Int>()
     var compareSplit by mutableStateOf(0.5f)
     var compareFilterRight by mutableStateOf(true)
     var isLoading by mutableStateOf(false)
@@ -1362,6 +1380,11 @@ class AppState(
     /** Compatibility alias for callers that still use the previous cache-only name. */
     val archiveCacheSizeBytes: Long get() = temporaryDataSizeBytes
     var pendingSequenceStart by mutableStateOf<PendingSequenceStart?>(null)
+    // See PendingNoteOverwrite's doc comment / autoExportAnnotations. Dismissing (Dialog's
+    // onDismissRequest, or the explicit "Cancel" button) must only set this back to null — never a
+    // permanent silent no-save decision — so the very next annotation edit re-prompts instead of
+    // resuming an unconfirmed overwrite.
+    var pendingNoteOverwrite by mutableStateOf<PendingNoteOverwrite?>(null)
     var pendingFilterLoad by mutableStateOf<PendingFilterLoad?>(null)
     var updateExistingPickerOpen by mutableStateOf(false)
     var pendingDuplicateFilterSave by mutableStateOf<PendingDuplicateFilterSave?>(null)
@@ -2783,8 +2806,13 @@ class AppState(
      * allowed while Follow logs is enabled and must not silently disable that mode. Both routes
      * use the same follow request, so a mapped playhead row and an explicit Show action retain
      * the same filtered-row mapping and hysteretic viewport behavior.
+     *
+     * forceRecenter: an explicit "show me this" action, not a playhead tick — it must re-center a
+     * row that is already selected but scrolled off screen, and must not be swallowed by the
+     * one-reveal-per-folded-run memo the continuous follow effect relies on.
      */
-    fun requestVideoLogNavigation(tabId: String, logId: Int) = navigateToVideoLog(tabId, logId)
+    fun requestVideoLogNavigation(tabId: String, logId: Int) =
+        navigateToVideoLog(tabId, logId, forceRecenter = true)
 
     /** Evidence cards use the established selection/scroll pathway so collapsed groups expand. */
     private fun requestAiLogNavigation(tabId: String, lineIds: List<Int>) {
@@ -2953,7 +2981,8 @@ class AppState(
         // A controller owns a grabber/audio line for precisely one source. Dispose it BEFORE
         // publishing replacement metadata so a recomposition cannot keep using the old decoder.
         videoControllers.remove(tabId)?.close()
-        videoRotationDegrees.remove(tabId)
+        // A fresh VideoAttachment defaults rotationDegrees to 0, so replacing the attachment
+        // resets rotation implicitly — no separate clear needed now that rotation lives on it.
         upTab(tabId) { it.copy(attachedVideo = VideoAttachment(source = source, sourceLabel = sourceLabel)) }
         // A successful attachment should be immediately discoverable; otherwise a user who had
         // collapsed the video panel sees no sign that a standalone dropped recording was accepted.
@@ -2967,7 +2996,6 @@ class AppState(
      */
     fun removeVideo(tabId: String) {
         videoControllers.remove(tabId)?.close()
-        videoRotationDegrees.remove(tabId)
         upTab(tabId) { tab ->
             if (tab.attachedVideo == null) tab else tab.copy(attachedVideo = null, videoFollowLog = false)
         }
@@ -2977,12 +3005,16 @@ class AppState(
         pruneArchiveVideoCache()
     }
 
-    /** Clockwise orientation, kept independently for each tab's current video attachment. */
+    /** Clockwise orientation, kept independently for each tab's current video attachment and
+     *  persisted with it (see [VideoAttachment.rotationDegrees]) so it survives a restart. */
     fun rotateVideoClockwise(tabId: String) {
-        videoRotationDegrees[tabId] = ((videoRotationDegrees[tabId] ?: 0) + 90) % 360
+        upTab(tabId) { tab ->
+            val video = tab.attachedVideo ?: return@upTab tab
+            tab.copy(attachedVideo = video.copy(rotationDegrees = (video.rotationDegrees + 90) % 360))
+        }
     }
 
-    fun videoRotationDegrees(tabId: String): Int = videoRotationDegrees[tabId] ?: 0
+    fun videoRotationDegrees(tabId: String): Int = tab(tabId)?.attachedVideo?.rotationDegrees ?: 0
 
     /** Lazily creates (and caches) the [VideoPlayerController] for [tabId]'s attached video. Null
      *  when the tab doesn't exist or has no video attached — a tab that later gets a video needs a
@@ -3448,6 +3480,15 @@ class AppState(
 
     private val followFloorIndexByTab = ConcurrentHashMap<String, FollowFloorIndex>()
 
+    // tabId -> the visible floor id an auto-expanding Follow request was already published for.
+    // Bounds auto-expansion to ONE attempt per folded run: the clamped floor is the collapsed
+    // header and stays constant for as long as the playhead is inside that group, so crossing a
+    // 10k-row folded block issues one reveal request instead of one per playhead tick. Without it
+    // the usual "already selected" dedupe cannot help — that compares against the un-clamped id,
+    // which advances on every row of the full log. It doubles as the user-respect guard: manually
+    // re-collapsing the group mid-playback does not get silently undone.
+    private val followExpandAttemptByTab = ConcurrentHashMap<String, Int>()
+
     private fun followFloorIndex(tab: LogTab): FollowFloorIndex {
         val elapsedIndex = logElapsedIndex(tab)
         // Part of the cache key AND the reason a Compose caller re-derives once a newly computed
@@ -3583,7 +3624,26 @@ class AppState(
             mappedNearestLogTs = visibleFloorId?.let { tab.rmap[it]?.ts },
             status = status,
             mappedElapsedMs = mappedElapsed,
+            mappedFullFloorLogId = fullFloorId,
         )
+    }
+
+    /**
+     * The un-clamped row a Follow navigation should reveal by expanding, or null when clamping to
+     * the visible floor is the only correct answer.
+     *
+     * [FollowMappingStatus.HIDDEN_BY_COLLAPSE] is exactly "passes the filter, but a collapsed
+     * sequence/manual/stack-trace group folds it away" — the one case expanding can fix.
+     * HIDDEN_BY_FILTER can never be revealed by opening a group (LogViewer's own
+     * expansionAndIndexForEntry bails on a filtered-out entry for the same reason), so it keeps the
+     * existing clamp-to-visible behavior untouched. largeFileMode disables the viewer's group
+     * search outright, so a reveal request there could only ever be dropped — never publish one.
+     */
+    private fun followRevealTarget(tab: LogTab, fullFloorLogId: Int, visibleFloorLogId: Int): Int? {
+        if (fullFloorLogId == visibleFloorLogId) return null
+        if (tab.largeFileMode) return null
+        if (fullFloorHiddenReason(tab, fullFloorLogId) != FollowMappingStatus.HIDDEN_BY_COLLAPSE) return null
+        return fullFloorLogId
     }
 
     // Approximate "is any filtering criterion configured at all" check backing
@@ -3719,7 +3779,18 @@ class AppState(
         val currentTab = tab(tabId) ?: return
         if (logId !in currentTab.rmap) return
         val visibleLogId = closestVisibleFollowLogId(currentTab, logId) ?: return
-        if (!forceRecenter && currentTab.selected == setOf(visibleLogId)) return
+        // When a collapsed group is the only thing hiding the mapped row, target the row itself and
+        // ask the viewer to open the group; a filter-hidden row still clamps (see followRevealTarget).
+        val revealLogId = followRevealTarget(currentTab, logId, visibleLogId)
+        // Must return outright, never fall through to the clamp path: VideoPanel's follow effect is
+        // keyed on tab.selected, so re-selecting the header here would re-fire it and oscillate
+        // real -> header -> real, superseding the pending reveal request before the viewer reads it.
+        if (revealLogId != null && !forceRecenter && followExpandAttemptByTab[tabId] == visibleLogId) return
+        val selectionId = revealLogId ?: visibleLogId
+        // The "already selected" dedupe only applies on the clamp path. The un-clamped id advances
+        // on every row of the full log, so it would never match — followExpandAttemptByTab above is
+        // what bounds the reveal path instead.
+        if (!forceRecenter && revealLogId == null && currentTab.selected == setOf(selectionId)) return
         // Follow navigation is the one selection source that deliberately does not turn Follow
         // logs back off. Do not activate the already-active tab: the redundant state write can
         // restart composable effects while a follow scroll is in flight.
@@ -3728,13 +3799,15 @@ class AppState(
         } else if (tabId != activeTabId) {
             activateTab(tabId)
         }
-        upTab(tabId) { it.copy(selected = setOf(visibleLogId)) }
+        upTab(tabId) { it.copy(selected = setOf(selectionId)) }
+        if (revealLogId != null) followExpandAttemptByTab[tabId] = visibleLogId else followExpandAttemptByTab.remove(tabId)
         annotationNavigationCounter += 1
         pendingAnnotationNavigation = AnnotationNavigationRequest(
             id = annotationNavigationCounter,
             tabId = tabId,
-            logIds = listOf(visibleLogId),
+            logIds = listOf(selectionId),
             scrollMode = NavigationScrollMode.FOLLOW,
+            expandCollapsedGroups = revealLogId != null,
         )
     }
 
@@ -3783,7 +3856,8 @@ class AppState(
         provenance: String,
         afterId: String? = null,
         videoFrame: VideoFrameReference? = null,
-    ): String? = annotationManager.addImageBlock(tabId, sourceBytes, provenance, afterId, videoFrame)
+        caption: String = "",
+    ): String? = annotationManager.addImageBlock(tabId, sourceBytes, provenance, afterId, videoFrame, caption)
 
     /** Captures a video frame as Notes evidence with durable identity and exact seek metadata. */
     fun addVideoFrameNote(
@@ -3793,7 +3867,8 @@ class AppState(
         sourceLabel: String,
         positionMs: Long,
         afterId: String? = null,
-    ): String? = annotationManager.addVideoFrameNote(tabId, sourceBytes, source, sourceLabel, positionMs, afterId)
+        caption: String = "",
+    ): String? = annotationManager.addVideoFrameNote(tabId, sourceBytes, source, sourceLabel, positionMs, afterId, caption)
 
     fun updateBlock(tabId: String, blockId: String, newText: String) = annotationManager.updateBlock(tabId, blockId, newText)
 
@@ -4264,6 +4339,7 @@ class AppState(
                 visibleItemsByTab.remove(tabId)
                 elapsedIndexByTab.remove(tabId)
                 followFloorIndexByTab.remove(tabId)
+                followExpandAttemptByTab.remove(tabId)
                 invalidateComputeCache(tabId)
                 logViewerScrollStateStore.removeTab(tabId)
             }
@@ -4908,7 +4984,10 @@ class AppState(
 
     fun loadAnnotationsFrom(tabId: String, file: File): Boolean {
         val annotations = runCatching { file.readText().annotationsFromToken() }.getOrNull() ?: return false
-        upAnn(tabId) { t -> t.copy(annotations = annotations) }
+        // The pin MUST be set inside this same upAnn lambda, not after: upAnn re-reads the tab and
+        // auto-exports immediately, so setting noteTargetName afterwards would let one unpinned
+        // export fire first — the exact overwrite this whole mechanism exists to prevent.
+        upAnn(tabId) { t -> t.copy(annotations = annotations, noteTargetName = file.name) }
         return tab(tabId)?.annotations == annotations
     }
 
@@ -4923,6 +5002,15 @@ class AppState(
         val dir = dlg.directory ?: return
         settings = settings.copy(defaultSaveDir = dir)
         val saved = File(dir, path)
+        // Pin only when this manual save actually landed where auto-export writes too (which,
+        // right after the defaultSaveDir update above, is virtually always the case) — otherwise a
+        // manual save to a differently-named file in that same directory (e.g. "foo_analysis_2.md")
+        // would be shadowed by the very next keystroke's auto-export writing the plain
+        // "foo_analysis.md" right back over it. Uses upTab, not upAnn: this manual save is already
+        // in flight, so pinning here must not itself trigger a second, redundant auto-export.
+        if (File(dir).absolutePath == activeNotesDir().absolutePath) {
+            upTab(tabId) { it.copy(noteTargetName = saved.name) }
+        }
         ioScope.launch {
             runCatching {
                 saved.writeText(buildMd(t, settings))
@@ -5017,7 +5105,12 @@ class AppState(
         if (sidecar.exists()) {
             val annotations = runCatching { sidecar.readText().annotationsFromToken() }.getOrNull()
             if (annotations != null) {
-                upTab(tabId) { t -> t.copy(annotations = annotations) }
+                // Pins noteTargetName so this exact file (not the default "<base>_analysis.md")
+                // keeps receiving future auto-exports — fixes the adjacent latent bug where opening
+                // "foo_analysis_2.md" and editing it re-exported to the plain "foo_analysis.md".
+                // Uses upTab, not upAnn: opening a file is not itself an annotation edit, so this
+                // must not trigger an immediate (and here, redundant) re-export.
+                upTab(tabId) { t -> t.copy(annotations = annotations, noteTargetName = file.name) }
                 return
             }
         }
@@ -5025,7 +5118,7 @@ class AppState(
         val text = runCatching { file.readText() }.getOrElse { return }
         upTab(tabId) { t ->
             val block = AnnBlock.Note(newId("n"), text)
-            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block))
+            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block), noteTargetName = file.name)
         }
     }
 
@@ -5113,13 +5206,46 @@ class AppState(
         recentNotesMenuOpen = !recentNotesMenuOpen
     }
 
+    // The overwrite gate below MUST run synchronously, before the ioScope.launch that does the
+    // actual write — not inside it. upAnn fires on every keystroke (updateBlock et al.), and
+    // ioScope is Dispatchers.IO (multi-threaded): a gate placed inside the launch would let
+    // overlapping coroutines race to prompt/write, and a lock would only mask that instead of
+    // removing it. Gating here, on the caller's already-serialized thread, means at most one
+    // decision is ever in flight per tab with no coordination needed.
     private fun autoExportAnnotations(tab: LogTab) {
         if (!autoExportNotes || !settings.autoExportNotes || tab.annotations.blocks.isEmpty()) return
+        // A prompt is already up (for this tab or another) — write nothing until it's resolved,
+        // rather than silently proceeding or silently dropping the edit.
+        if (pendingNoteOverwrite != null) return
+        val targetDir = activeNotesDir()
+        val mdFile = resolveNoteTarget(targetDir, tab)
+        // The in-memory check comes FIRST, before the exists() syscall: once a tab has a pinned
+        // noteTargetName, every later keystroke short-circuits on this and never re-stats the
+        // file. Only a still-undecided tab (fresh session, or a legacy autosave restored with
+        // blocks but no pin — see LogTab.noteTargetName) pays for the filesystem check at all.
+        //
+        // Deliberately ignores WHY resolveNoteTarget picked mdFile — a matching sourcePath
+        // fingerprint is not treated as proof of ownership here (that's the reported bug: a fresh
+        // tab/session on the SAME log file, whose fingerprint of course matches, still must not
+        // silently overwrite an earlier session's saved analysis it never loaded). The only
+        // decision that skips this check is an explicit one recorded on the tab itself.
+        if (tab.noteTargetName == null) {
+            if (mdFile.exists()) {
+                pendingNoteOverwrite = PendingNoteOverwrite(tab.id, mdFile.absolutePath, mdFile.name)
+                return
+            }
+            // No conflict — mdFile is guaranteed not to exist here (the branch above already
+            // returned otherwise). This is either a brand-new export or a fingerprint-disambiguated
+            // "_2"/"_3" slot; either way, THIS session now owns it. Pinning immediately means every
+            // later edit this session skips straight past the fingerprint walk above too, not just
+            // this exists() check — without it, "reuse the plain name on repeated saves" would
+            // re-run readSourceFingerprint on every keystroke and, worse, would see the file this
+            // very write is about to create and prompt on the very next edit.
+            upTab(tab.id) { it.copy(noteTargetName = mdFile.name) }
+        }
         ioScope.launch {
             runCatching {
-                val targetDir = activeNotesDir()
                 targetDir.mkdirs()
-                val mdFile = resolveNoteTarget(targetDir, tab.filename, tab.sourcePath)
                 mdFile.writeText(buildMd(tab, settings))
                 // Sidecar stores full block state for restoration, plus the sourcePath
                 // fingerprint (5th token field) used to disambiguate same-named notes.
@@ -5159,14 +5285,21 @@ class AppState(
             ?.takeIf { it.isNotBlank() }
     }
 
-    // Picks the .md target for this tab's auto-exported note in targetDir. Reuses the plain
-    // "<name>_analysis.md" whenever there's no evidence of a different owner (no fingerprint
-    // recorded yet — a legacy or first-time save — or it already matches this tab's sourcePath,
-    // or this tab has no sourcePath to compare); otherwise walks "_2", "_3", ... until it finds a
-    // slot with no conflicting fingerprint, so a genuine collision no longer silently overwrites
-    // an unrelated file's saved notes.
-    private fun resolveNoteTarget(targetDir: File, filename: String, sourcePath: String?): File {
-        val baseName = analysisNoteMarkdownName(filename, sourcePath)
+    // Picks the .md target for this tab's auto-exported note in targetDir. A recorded
+    // noteTargetName decision (LogTab's pin — set by openNoteFile/loadAnnotationsFrom/saveAnalysis,
+    // or by confirming the overwrite-prompt dialog) wins unconditionally, before any of the
+    // fingerprint logic below runs: that's the whole point of the pin, and it also fixes an
+    // adjacent latent bug where opening "foo_analysis_2.md" and editing it re-exported to the
+    // plain "foo_analysis.md" instead. Otherwise, reuses the plain "<name>_analysis.md" whenever
+    // there's no evidence of a different owner (no fingerprint recorded yet — a legacy or
+    // first-time save — or it already matches this tab's sourcePath, or this tab has no sourcePath
+    // to compare); otherwise walks "_2", "_3", ... until it finds a slot with no conflicting
+    // fingerprint, so a genuine collision no longer silently overwrites an unrelated file's saved
+    // notes.
+    private fun resolveNoteTarget(targetDir: File, tab: LogTab): File {
+        tab.noteTargetName?.let { return File(targetDir, it) }
+        val baseName = analysisNoteMarkdownName(tab.filename, tab.sourcePath)
+        val sourcePath = tab.sourcePath
         if (sourcePath == null) return File(targetDir, baseName)
         var candidateName = baseName
         var suffix = 2
@@ -5178,6 +5311,60 @@ class AppState(
             suffix++
         }
         return File(targetDir, candidateName)
+    }
+
+    // The three choices on the "note file already exists" prompt (see PendingNoteOverwrite /
+    // autoExportAnnotations). Dismissing the dialog without picking one of these three must leave
+    // pendingNoteOverwrite unset instead — App.kt's Dialog(onDismissRequest = ::cancelNoteOverwrite).
+
+    /** "Overwrite": pin to the name that was about to be overwritten, then let the write proceed. */
+    fun confirmNoteOverwrite() {
+        val pending = pendingNoteOverwrite ?: return
+        pendingNoteOverwrite = null
+        // Setting the pin inside the SAME upAnn call (not after) matters exactly like it does for
+        // loadAnnotationsFrom: upAnn re-resolves and auto-exports immediately, and resolveNoteTarget
+        // checks the pin first, so this one call both records the decision and performs the write
+        // the gate had held back — no separate unpinned export sneaks out first.
+        upAnn(pending.tabId) { it.copy(noteTargetName = pending.targetName) }
+    }
+
+    /** "Open existing notes": load the file the tab was about to overwrite instead, discarding the unsaved edit that triggered the prompt. */
+    fun openExistingNoteInsteadOfOverwrite() {
+        val pending = pendingNoteOverwrite ?: return
+        pendingNoteOverwrite = null
+        // The edit that TRIGGERED this prompt is still only in memory, and openNoteFile replaces
+        // the whole block list. Capture it first and re-append after loading, so choosing "open
+        // existing" merges (earlier analysis, then the note just written) instead of silently
+        // throwing away the very thing the user was in the middle of adding — losing typed work to
+        // a dialog that never warned about it is not a choice this prompt is offering.
+        val unsavedBlocks = tab(pending.tabId)?.annotations?.blocks.orEmpty()
+        openNoteFile(pending.tabId, File(pending.targetPath))
+        if (unsavedBlocks.isEmpty()) return
+        upAnn(pending.tabId) { t ->
+            // Id-based skip: a block already restored from the file (same id) must not be duplicated
+            // by its in-memory twin.
+            val restoredIds = t.annotations.blocks.map { it.id }.toSet()
+            val merged = t.annotations.blocks + unsavedBlocks.filterNot { it.id in restoredIds }
+            t.copy(annotations = t.annotations.copy(blocks = merged))
+        }
+    }
+
+    /** "Save to a new file": pick the next free "_2"/"_3"/... name and pin to that instead. */
+    fun saveNotesToNewNoteFile() {
+        val pending = pendingNoteOverwrite ?: return
+        pendingNoteOverwrite = null
+        val targetDir = activeNotesDir()
+        // Check the .ann sidecar too, not just the .md — a hand-deleted .md with an orphaned
+        // sidecar would otherwise let this pick a slot whose sidecar it then clobbers.
+        val newName = nextFreeNoteTargetName(pending.targetName, MAX_NOTE_TARGET_SUFFIX) { name ->
+            File(targetDir, name).exists() || File(targetDir, "${name.removeSuffix(".md")}.ann").exists()
+        }
+        upAnn(pending.tabId) { it.copy(noteTargetName = newName) }
+    }
+
+    /** Dialog dismissed/cancelled: leave the decision unset so the very next edit re-prompts. */
+    fun cancelNoteOverwrite() {
+        pendingNoteOverwrite = null
     }
 
     // Annotation-aware tab updater — auto-exports after any annotation change. internal, not

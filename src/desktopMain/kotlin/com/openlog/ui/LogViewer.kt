@@ -1415,12 +1415,43 @@ fun LogViewer(
             LaunchedEffect(annotationNavigationRequest?.id, itemsVersion, allItemsVersion, tab.expanded) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
                 if (request.scrollMode == NavigationScrollMode.FOLLOW) {
-                    request.logIds.firstNotNullOfOrNull { entryId ->
+                    var filteredIdx = request.logIds.firstNotNullOfOrNull { entryId ->
                         items.indexOfEntry(entryId).takeIf { it >= 0 }
-                    }?.let { filteredLazyState.followItem(it) }
-                    request.logIds.firstNotNullOfOrNull { entryId ->
+                    }
+                    var allIdx = request.logIds.firstNotNullOfOrNull { entryId ->
                         allItems.indexOfEntry(entryId).takeIf { it >= 0 }
-                    }?.let { allLazyState.followItem(it) }
+                    }
+                    // A direct miss only gets the expand treatment when AppState explicitly asked
+                    // for it (a collapsed group is genuinely hiding the row) — a plain FOLLOW with
+                    // no un-clamped target never opens anything, matching the historical clamp
+                    // behavior for filter-hidden rows (see AppState.followRevealTarget).
+                    if ((filteredIdx == null || allIdx == null) && request.expandCollapsedGroups) {
+                        var opened = tab.expanded
+                        if (filteredIdx == null) {
+                            val target = request.logIds.firstNotNullOfOrNull { entryId ->
+                                expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
+                            }
+                            if (target != null) {
+                                (target.expanded - opened).forEach { gid -> onToggleGroup(gid) }
+                                if (target.expanded != opened) kotlinx.coroutines.delay(80)
+                                opened = opened + target.expanded
+                                filteredIdx = target.index
+                            }
+                        }
+                        if (allIdx == null) {
+                            val target = request.logIds.firstNotNullOfOrNull { entryId ->
+                                expansionAndIndexForEntry(tab, applyFilter = false, entryId = entryId, currentItems = allItems)
+                            }
+                            if (target != null) {
+                                (target.expanded - opened).forEach { gid -> onToggleGroup(gid) }
+                                if (target.expanded != opened) kotlinx.coroutines.delay(80)
+                                opened = opened + target.expanded
+                                allIdx = target.index
+                            }
+                        }
+                    }
+                    filteredIdx?.let { filteredLazyState.followItem(it) }
+                    allIdx?.let { allLazyState.followItem(it) }
                     onConsumeAnnotationNavigation(request.id)
                     return@LaunchedEffect
                 }
@@ -1639,12 +1670,26 @@ fun LogViewer(
         } else {
             val mainLazyState = scrollStates.lazyState("${tab.id}:main")
             val searchNavScope = rememberCoroutineScope()
-            LaunchedEffect(annotationNavigationRequest?.id, itemsVersion) {
+            LaunchedEffect(annotationNavigationRequest?.id, itemsVersion, tab.expanded) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
                 if (request.scrollMode == NavigationScrollMode.FOLLOW) {
-                    request.logIds.firstNotNullOfOrNull { entryId ->
+                    val directIdx = request.logIds.firstNotNullOfOrNull { entryId ->
                         items.indexOfEntry(entryId).takeIf { it >= 0 }
-                    }?.let { mainLazyState.followItem(it) }
+                    }
+                    // A direct miss only gets the expand treatment when AppState explicitly asked
+                    // for it — see the split-view FOLLOW branch above for the full rationale.
+                    if (directIdx == null && request.expandCollapsedGroups) {
+                        val target = request.logIds.firstNotNullOfOrNull { entryId ->
+                            expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
+                        }
+                        if (target != null) {
+                            (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
+                            if (target.expanded != tab.expanded) kotlinx.coroutines.delay(80)
+                            mainLazyState.followItem(target.index)
+                        }
+                    } else {
+                        directIdx?.let { mainLazyState.followItem(it) }
+                    }
                     onConsumeAnnotationNavigation(request.id)
                     return@LaunchedEffect
                 }

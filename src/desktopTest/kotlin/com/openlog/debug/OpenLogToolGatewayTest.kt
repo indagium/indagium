@@ -1,5 +1,6 @@
 package com.openlog.debug
 
+import com.openlog.model.AnnBlock
 import com.openlog.model.FilterMode
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
@@ -8,13 +9,18 @@ import com.openlog.ui.AppState
 import com.openlog.ui.mkTab
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
+import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.Base64
+import javax.imageio.ImageIO
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class OpenLogToolGatewayTest {
@@ -43,7 +49,7 @@ class OpenLogToolGatewayTest {
             "get_filter", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
             "toggle_group", "expand_all", "collapse_all", "get_tags", "get_packages", "get_crash_sites",
             "get_issue_description", "get_annotation_sections", "append_annotation_section",
-            "add_text_note", "add_log_note", "update_note_block", "move_note_block",
+            "add_text_note", "add_log_note", "add_image_note", "update_note_block", "move_note_block",
             "delete_note_block", "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing", "resolve_log_source",
             "get_project_info", "set_highlighters", "reindex_sources", "add_manual_collapse", "add_sequence",
@@ -282,6 +288,80 @@ class OpenLogToolGatewayTest {
     @Test
     fun getVideoFrameIsClassifiedAutomatic() {
         assertEquals(OpenLogToolActionPolicy.AUTOMATIC, operations.toolGateway.actionPolicy("get_video_frame"))
+    }
+
+    // ── add_image_note ───────────────────────────────────────────────────
+
+    @Test
+    fun addImageNoteFromBase64AppendsAnImageBlockWithNoSourceLine() {
+        val result = operations.toolGateway.execute(
+            "add_image_note",
+            mapOf("tabId" to "t1", "imageBase64" to Base64.getEncoder().encodeToString(pngBytes()), "caption" to "Crash dialog"),
+        ) as Map<*, *>
+
+        assertEquals(true, result["ok"])
+        val block = state.tab("t1")!!.annotations.blocks.single() as AnnBlock.Image
+        assertEquals(result["blockId"], block.id)
+        assertEquals("Crash dialog", block.caption)
+        // Not a video frame ⇒ nothing to seek to ⇒ no "From …" line anywhere it is rendered.
+        assertNull(block.videoFrame)
+        assertNull(block.displayProvenance)
+    }
+
+    @Test
+    fun addImageNoteFromImagePathReadsTheFileFromDisk() {
+        val file = File.createTempFile("openlog-image-note", ".png").apply { writeBytes(pngBytes()) }
+
+        val result = operations.toolGateway.execute(
+            "add_image_note",
+            mapOf("tabId" to "t1", "imagePath" to file.absolutePath),
+        ) as Map<*, *>
+
+        assertEquals(true, result["ok"])
+        assertTrue(state.tab("t1")!!.annotations.blocks.single() is AnnBlock.Image)
+    }
+
+    @Test
+    fun addImageNoteRequiresExactlyOneSource() {
+        val none = operations.toolGateway.execute("add_image_note", mapOf("tabId" to "t1")) as Map<*, *>
+        val both = operations.toolGateway.execute(
+            "add_image_note",
+            mapOf("tabId" to "t1", "imageBase64" to Base64.getEncoder().encodeToString(pngBytes()), "videoMs" to 1_000),
+        ) as Map<*, *>
+
+        // Silently preferring one source over another would leave a caller that passed two
+        // believing the wrong image had been used.
+        assertTrue((none["error"] as String).contains("exactly one"))
+        assertTrue((both["error"] as String).contains("exactly one"))
+        assertTrue(state.tab("t1")!!.annotations.blocks.isEmpty())
+    }
+
+    @Test
+    fun addImageNoteRejectsBytesThatAreNotAnImage() {
+        val result = operations.toolGateway.execute(
+            "add_image_note",
+            mapOf("tabId" to "t1", "imageBase64" to Base64.getEncoder().encodeToString(byteArrayOf(1, 2, 3))),
+        ) as Map<*, *>
+
+        assertNotNull(result["error"])
+        assertTrue(state.tab("t1")!!.annotations.blocks.isEmpty())
+    }
+
+    @Test
+    fun addImageNoteWithVideoMsNeedsAnAttachedVideo() {
+        val result = operations.toolGateway.execute(
+            "add_image_note",
+            mapOf("tabId" to "t1", "videoMs" to 1_000),
+        ) as Map<*, *>
+
+        assertTrue((result["error"] as String).contains("no video attached"))
+    }
+
+    // Smallest thing ImageIO will both write and read back, so AnnotationManager's
+    // downscaleAndEncodeJpeg accepts it rather than rejecting the block as undecodable.
+    private fun pngBytes(): ByteArray = ByteArrayOutputStream().use { out ->
+        ImageIO.write(BufferedImage(4, 4, BufferedImage.TYPE_INT_RGB), "png", out)
+        out.toByteArray()
     }
 
     private fun attachVideoToT1() {

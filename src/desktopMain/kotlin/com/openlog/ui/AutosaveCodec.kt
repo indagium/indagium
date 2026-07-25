@@ -326,6 +326,25 @@ internal fun analysisNoteMarkdownName(filename: String, sourcePath: String? = nu
     return "${safeBase}_analysis.md"
 }
 
+// Picks the first name, starting from [baseName], for which [taken] reports false — "<base>.md",
+// then "<base>_2.md", "<base>_3.md", ... up to (exclusive) [maxSuffix]. Pure and filesystem-free
+// (the caller supplies [taken]) so it's directly unit-testable with a fake set of names, unlike
+// AppState.resolveNoteTarget's own fingerprint-aware collision walk this deliberately does NOT
+// replace — this one backs a single call site: AppState.saveNotesToNewNoteFile, the "Save to a new
+// file" choice on the note-overwrite prompt (see PendingNoteOverwrite), where the user has already
+// confirmed they want a fresh name rather than the fingerprint logic silently reusing an old one.
+internal fun nextFreeNoteTargetName(baseName: String, maxSuffix: Int, taken: (String) -> Boolean): String {
+    if (!taken(baseName)) return baseName
+    var candidateName = baseName
+    var suffix = 2
+    while (suffix < maxSuffix) {
+        candidateName = "${baseName.removeSuffix(".md")}_$suffix.md"
+        if (!taken(candidateName)) return candidateName
+        suffix++
+    }
+    return candidateName
+}
+
 // For archive-sourced tabs (sourcePath "<absZipPath>!<entryPath>"), fold the archive filename
 // into the note's base name so two different archives' identically-named entries — every bug
 // report's "logcat.log" — don't all collapse to one "logcat_analysis.md" and then get pushed
@@ -1153,7 +1172,7 @@ private fun String.manualBlockFromToken(): ManualCollapseBlock? = runCatching {
 // a serialize+write. Keep this in sync if tabToken()'s field list changes.
 internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
-    showTimeDelta, attachedVideo,
+    showTimeDelta, attachedVideo, noteTargetName,
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1196,6 +1215,11 @@ private fun VideoAttachment.attachedVideoToken(): String {
         kind,
         archiveEntry,
         displayName,
+        // Field index 8, appended after displayName: rotation degrees (model/Model.kt's
+        // VideoAttachment.rotationDegrees), same append-last discipline as the rest of this
+        // token — an attachment token written before rotation was persisted (only 8 fields)
+        // still parses, defaulting to 0.
+        rotationDegrees.toString(),
     )
 }
 
@@ -1221,6 +1245,9 @@ private fun String.attachedVideoFromToken(): VideoAttachment? = runCatching {
         // Both anchor fields must be present and parse — a partially-written/corrupt pair falls
         // back to "no anchor" rather than a half-populated VideoAnchor.
         anchor = if (anchorVideoMs != null && anchorLogId != null) VideoAnchor(anchorVideoMs, anchorLogId) else null,
+        // Field index 8 (see attachedVideoToken above); absent on legacy tokens or an invalid/
+        // corrupt value both fall back to 0 rather than propagating a bogus orientation.
+        rotationDegrees = p.getOrNull(8)?.toIntOrNull()?.takeIf { it in setOf(0, 90, 180, 270) } ?: 0,
     )
 }.getOrNull()
 
@@ -1256,6 +1283,11 @@ internal fun LogTab.tabToken(): String {
         // attachVideoToActiveTab/attachVideoFromZip), same append-last discipline — tab tokens
         // written before this field existed keep parsing (tabShellFromToken defaults to null).
         attachedVideo?.attachedVideoToken().orEmpty(),
+        // Trailing field (position 12): the pinned auto-export note filename (model/Model.kt's
+        // LogTab.noteTargetName), same append-last discipline. Without this, a restart forgets a
+        // user's "keep existing note" / "save to a new file" decision and the next keystroke's
+        // auto-export silently re-resolves to (and overwrites) the default `<base>_analysis.md`.
+        noteTargetName.orEmpty(),
     )
 }
 
@@ -1313,6 +1345,9 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             archiveCandidate = (source as? RestoredTabSource.ArchiveSource)?.persistedCandidate,
             showTimeDelta = p.getOrNull(10)?.toBoolean() ?: false,
             attachedVideo = p.getOrNull(11)?.takeIf { it.isNotBlank() }?.attachedVideoFromToken(),
+            // Field index 12 (see tabToken above); absent on legacy tokens means "not yet decided",
+            // same as a brand-new tab — resolveNoteTarget falls through to its fingerprint search.
+            noteTargetName = p.getOrNull(12)?.takeIf { it.isNotBlank() },
         ),
         source,
     )

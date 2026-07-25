@@ -207,6 +207,16 @@ sealed class AnnBlock {
         val bytes: ByteArray,
         val videoFrame: VideoFrameReference? = null,
     ) : AnnBlock() {
+        /** The "From …" line to show under this image in Notes and in every export, or null for
+         *  no line at all. Only a video frame earns one: its label names a recording and a
+         *  timestamp the reader can actually seek to. For a pasted or dropped image, [provenance]
+         *  merely restates how the bytes reached the app ("pasted from clipboard", "dropped
+         *  shot.png") — noise in an analysis document. It stays on the model regardless, because
+         *  it is still the plain-text fallback a paste target receives (AppState.
+         *  copyImageToClipboard). Single source of this rule: the panel and all three exporters
+         *  (utils/Filter.kt buildMd, utils/AnnotationHtml.kt, cases/CaseModel.kt) read it here. */
+        val displayProvenance: String? get() = videoFrame?.provenanceLabel
+
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is Image) return false
@@ -368,6 +378,10 @@ data class VideoAttachment(
     val sourceLabel: String,
     val durationMs: Long = 0,
     val anchor: VideoAnchor? = null,
+    // Clockwise rotation applied to playback/frame grabs, one of 0/90/180/270. Lives on the
+    // attachment (a property of the recording) rather than session-only UI state, so it survives
+    // restart and resets implicitly whenever the attachment itself is replaced or removed.
+    val rotationDegrees: Int = 0,
 ) {
     constructor(
         path: String,
@@ -454,6 +468,19 @@ data class LogTab(
     // A transport/UI preference for this process only. Keeping it out of AutosaveCodec means a
     // restored session never unexpectedly scrolls the log while a recording starts playing.
     val videoFollowLog: Boolean = false,
+    // The auto-export note-file decision for this tab, once made: a bare filename (no directory)
+    // inside activeNotesDir(). null means "not yet decided" — AppState.resolveNoteTarget falls
+    // through to its fingerprint-based name search, and the first annotation edit prompts before
+    // ever writing, in case a same-named `<base>_analysis.md` already exists from an unrelated
+    // session. Every path that establishes ownership of a note file (openNoteFile, loadAnnotationsFrom,
+    // saveAnalysis when it lands in activeNotesDir()) sets this so later edits keep exporting to the
+    // same file instead of drifting back to the default name. Persisted (AutosaveCodec.tabToken/
+    // tabShellFromToken/persistedSnapshot), appended last so old tab tokens still parse — without
+    // persistence, a restart would forget the decision and silently overwrite the protected file
+    // again. Name-only (not an absolute path) so the pin survives a pickSaveFolder directory change;
+    // the accepted residual risk is that a pre-existing same-named file in the NEW directory is then
+    // overwritten without a prompt.
+    val noteTargetName: String? = null,
 )
 
 /**

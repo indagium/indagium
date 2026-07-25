@@ -8,6 +8,7 @@ import com.openlog.ui.AppState
 import com.openlog.ui.AutosaveScheduler
 import com.openlog.ui.mkTab
 import com.openlog.ui.persistedSnapshot
+import com.openlog.ui.tabShellFromToken
 import com.openlog.ui.tabToken
 import com.openlog.utils.ZipLogCandidate
 import kotlinx.coroutines.CoroutineScope
@@ -300,9 +301,10 @@ class AutosaveSchedulerTest {
             base.copy(archiveCandidate = ZipLogCandidate("logs/main.txt", "main.txt", 42)),
             base.copy(showTimeDelta = true),
             base.copy(attachedVideo = VideoAttachment(path = "/tmp/repro.mp4", sourceLabel = "/tmp/repro.mp4")),
+            base.copy(noteTargetName = "custom_name.md"),
         )
 
-        assertEquals(12, base.persistedSnapshot().size)
+        assertEquals(13, base.persistedSnapshot().size)
         variants.forEach { variant ->
             assertNotEquals(base.persistedSnapshot(), variant.persistedSnapshot())
             assertNotEquals(base.tabToken(), variant.tabToken())
@@ -311,6 +313,35 @@ class AutosaveSchedulerTest {
         val sessionOnlyChange = base.copy(selected = setOf(1))
         assertEquals(base.persistedSnapshot(), sessionOnlyChange.persistedSnapshot())
         assertEquals(base.tabToken(), sessionOnlyChange.tabToken())
+    }
+
+    // Without this round trip, a restart would forget a user's "keep existing note"/"save to a new
+    // file" decision (LogTab.noteTargetName) and the next keystroke's auto-export would silently
+    // re-resolve to (and overwrite) the default "<base>_analysis.md" — the whole bug section 6 fixes.
+    // tabShellFromToken() requires a real backing file to resolve a FileSource, hence the temp file.
+    @Test
+    fun noteTargetNamePinSurvivesATabTokenRoundTrip() {
+        val dir = createTempDirectory("openlog-note-pin-roundtrip").toFile()
+        val logFile = File(dir, "sample.log").apply { writeText("hello\n") }
+        val tab = mkTab("tab", "sample.log", emptyList())
+            .copy(sourcePath = logFile.absolutePath, noteTargetName = "sample_analysis_2.md")
+
+        val restored = tab.tabToken().tabShellFromToken()
+
+        assertEquals("sample_analysis_2.md", restored?.tab?.noteTargetName)
+    }
+
+    @Test
+    fun legacyTabTokenWithoutNoteTargetNameFieldParsesAsUndecided() {
+        val dir = createTempDirectory("openlog-note-pin-legacy").toFile()
+        val logFile = File(dir, "sample.log").apply { writeText("hello\n") }
+        val tab = mkTab("tab", "sample.log", emptyList()).copy(sourcePath = logFile.absolutePath)
+        // Simulate a token written before noteTargetName existed: drop the trailing field.
+        val legacyToken = tab.tabToken().substringBeforeLast('|')
+
+        val restored = legacyToken.tabShellFromToken()
+
+        assertEquals(null, restored?.tab?.noteTargetName)
     }
 
     private fun testScope(): CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

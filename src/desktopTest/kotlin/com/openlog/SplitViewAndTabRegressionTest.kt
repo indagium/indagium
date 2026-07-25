@@ -7,6 +7,7 @@ import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
 import com.openlog.model.ManualCollapseBlock
 import com.openlog.model.ManualCollapseDirection
+import com.openlog.model.SequenceDef
 import com.openlog.ui.AnnotationNavigationTarget
 import com.openlog.ui.AppState
 import com.openlog.ui.DANGER_RED
@@ -33,6 +34,7 @@ import com.openlog.utils.computeItems
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNotSame
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -223,6 +225,37 @@ class SplitViewAndTabRegressionTest {
 
         assertEquals(setOf("m1"), target?.expanded)
         val expandedItems = computeItems(tab.copy(expanded = target!!.expanded), applyFilter = true)
+        assertEquals(2, expandedItems[target.index].let { (it as LogItem.Row).entry.id })
+    }
+
+    // The manual-block case above and the filter-exclusion case below are the existing pair; this
+    // proves expansionAndIndexForEntry resolves the third kind of fold — a collapsed SEQUENCE group
+    // (SeqComputer.kt, not a manual block) — the same way, since it's what backs Follow's reveal
+    // path (AppState.followRevealTarget) for a sequence-folded row.
+    @Test
+    fun annotationNavigationCanRevealLineInsideCollapsedSequenceGroup() {
+        val tab = mkTab(
+            "log",
+            "test.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Auth", "request started"),
+                LogEntry(2, "10:00:00.100", LogLevel.I, "com.app.Auth", "referenced"),
+                LogEntry(3, "10:00:00.200", LogLevel.I, "com.app.Auth", "third"),
+            ),
+        ).copy(
+            filter = Filter(
+                sequences = listOf(
+                    SequenceDef("auth-start", "request started", priority = 1, color = Color.Red, tag = "com.app.Auth"),
+                ),
+            ),
+            // expanded stays empty (default) -> the sequence group renders collapsed, folding 2 and 3
+            // under row 1's header exactly like SequenceGroupingTest's own no-end-pattern fixture.
+        )
+
+        val target = expansionAndIndexForEntry(tab, applyFilter = true, entryId = 2)
+
+        assertEquals(1, assertNotNull(target).expanded.size)
+        val expandedItems = computeItems(tab.copy(expanded = target.expanded), applyFilter = true)
         assertEquals(2, expandedItems[target.index].let { (it as LogItem.Row).entry.id })
     }
 

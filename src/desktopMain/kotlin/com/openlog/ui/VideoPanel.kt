@@ -113,8 +113,12 @@ private fun videoFullPath(attachment: VideoAttachment): String = when (val sourc
 /**
  * Persists the same orientation that the user sees in the player. The player produces PNG bytes,
  * so applying the transform here keeps the decoder API independent of presentation preferences.
+ *
+ * internal, not private: the MCP `add_image_note` tool grabs frames on the same terms as this
+ * panel's own "Add frame to notes" button, and a frame captured through the API must land in Notes
+ * the same way up as one captured by clicking.
  */
-private fun rotatedFramePng(sourceBytes: ByteArray, rotationDegrees: Int): ByteArray? {
+internal fun rotatedFramePng(sourceBytes: ByteArray, rotationDegrees: Int): ByteArray? {
     val rotation = ((rotationDegrees % 360) + 360) % 360
     if (rotation == 0) return sourceBytes
     val source = runCatching { ImageIO.read(ByteArrayInputStream(sourceBytes)) }.getOrNull() ?: return null
@@ -346,6 +350,12 @@ private data class VideoFollowState(
     val followLogs: Boolean,
     val mapping: VideoFollowMapping,
     val targetLogId: Int?,
+    // Where a Follow/Logs click actually navigates. Differs from [targetLogId] only when a
+    // collapsed group is folding the mapped row away: then this is the folded row itself, so
+    // AppState.navigateToVideoLog can ask the viewer to open the group. Kept separate because
+    // [targetLogId] also answers "is there any visible row to follow at all", which drives the
+    // Follow/Logs buttons' enabled state — the un-clamped id would be the wrong answer there.
+    val navigateLogId: Int?,
 )
 
 /**
@@ -377,8 +387,15 @@ private fun videoFollowState(state: AppState, tab: LogTab, controller: VideoPlay
     // and the automatic follow effect use keeps "enabled", "what the readout says" and "where the
     // click lands" in sync — resolving it separately per button is how a filtered view could show
     // an enabled button whose click target isn't actually visible.
-    val targetLogId = mapping.mappedNearestLogId?.takeIf { state.isVideoPositionValid(tab, controller.positionMs) }
-    return VideoFollowState(followLogs, mapping, targetLogId)
+    val positionValid = state.isVideoPositionValid(tab, controller.positionMs)
+    val targetLogId = mapping.mappedNearestLogId?.takeIf { positionValid }
+    // A row folded inside a collapsed group is reachable — the viewer opens the group on the way —
+    // so navigation aims at the real row rather than the header the visible floor clamped to.
+    val navigateLogId = (
+        mapping.mappedFullFloorLogId?.takeIf { mapping.status == FollowMappingStatus.HIDDEN_BY_COLLAPSE }
+            ?: mapping.mappedNearestLogId
+        )?.takeIf { positionValid }
+    return VideoFollowState(followLogs, mapping, targetLogId, navigateLogId)
 }
 
 @Composable
@@ -500,7 +517,7 @@ private fun ColumnScope.VideoPlayerContents(
     onRateSelected: (Float) -> Unit,
 ) {
     val (followLogs, mapping, targetLogId) = followState
-    val followTarget = mapping.mappedNearestLogId.takeIf { followLogs }
+    val followTarget = followState.navigateLogId.takeIf { followLogs }
 
     // `selectionKey` is what lets Follow re-assert itself. Keyed on followTarget alone, Follow went
     // permanently silent after any manual click: with filters active the target holds for as long as
@@ -527,6 +544,7 @@ private fun ColumnScope.VideoPlayerContents(
         controller = controller,
         mapping = mapping,
         targetLogId = targetLogId,
+        navigateLogId = followState.navigateLogId,
         rotationDegrees = rotationDegrees,
         selectedRate = selectedRate,
         onRateSelected = onRateSelected,
@@ -583,6 +601,10 @@ private fun VideoTransportBar(
     controller: VideoPlayerController,
     mapping: VideoFollowMapping,
     targetLogId: Int?,
+    // See VideoFollowState.navigateLogId: what the Logs button navigates to, which is the folded
+    // row itself when a collapsed group is hiding it, while targetLogId still answers "is there
+    // anything to jump to" for the button's enabled state.
+    navigateLogId: Int?,
     rotationDegrees: Int,
     selectedRate: Float,
     onRateSelected: (Float) -> Unit,
@@ -656,7 +678,7 @@ private fun VideoTransportBar(
                     tooltip = "Jumps to the log line matching the current video position. Needs a log line " +
                         "linked to a video moment — right-click a log row and choose \"Link to current video position\".",
                     enabled = targetLogId != null,
-                    onClick = { targetLogId?.let { state.navigateToVideoLog(tab.id, it, forceRecenter = true) } },
+                    onClick = { navigateLogId?.let { state.navigateToVideoLog(tab.id, it, forceRecenter = true) } },
                 )
                 VideoOverflowMenu(
                     selectedRate = selectedRate,

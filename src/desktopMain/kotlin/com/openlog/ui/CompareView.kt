@@ -312,6 +312,7 @@ internal fun CompareView(
                                 onReorderBlock = { bid, idx -> state.reorderBlock(leftTab.id, bid, idx) },
                                 onAddNoteAfter = { state.addNoteBlock(leftTab.id, it) },
                                 onAddImage = { bytes, provenance, after -> state.addImageBlock(leftTab.id, bytes, provenance, after) },
+                                onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
                                 onNavigateLogRef = { state.requestAnnotationNavigation(leftTab.id, it) },
                                 onNavigateVideoFrame = { state.navigateToVideoFrame(leftTab.id, it) },
                                 width = state.annotationPanelWidth,

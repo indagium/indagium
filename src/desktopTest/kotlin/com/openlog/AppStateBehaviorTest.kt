@@ -85,6 +85,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -565,7 +566,10 @@ class AppStateBehaviorTest {
         val md = buildMd(tab, AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED))
 
         assertTrue(md.contains("Crash dialog"))
-        assertTrue(md.contains("[screenshot: from bugreport.zip/screen.mp4]"))
+        // Bare marker with no source named: this block has no videoFrame, and only a video frame
+        // earns a "From …" line in an export (AnnBlock.Image.displayProvenance).
+        assertTrue(md.contains("[screenshot]"))
+        assertTrue(!md.contains("bugreport.zip/screen.mp4"))
         // No data-URI / raw bytes leak into the exported text — Jira plain text won't render it.
         assertTrue(!md.contains("data:image"))
     }
@@ -1986,16 +1990,16 @@ class AppStateBehaviorTest {
 
         // Simulate a pre-PERF-3b cache: strip the trailing candidate field from every tab line by
         // dropping the last '|'-separated token. Tab lines are the ones after the "tabs" marker.
-        // Three drops, not one: showTimeDelta and attachedVideo were appended AFTER archiveCandidate
-        // (positions 10/11), so a single strip would now remove only attachedVideo and leave both
-        // showTimeDelta and archiveCandidate in place — dropping all three trailing fields is what
-        // actually reproduces a token from before any of them existed, which is the scenario this
-        // test means to exercise.
+        // Four drops, not one: showTimeDelta, attachedVideo, and noteTargetName were all appended
+        // AFTER archiveCandidate (positions 10/11/12), so a single strip would now remove only
+        // noteTargetName and leave showTimeDelta/attachedVideo/archiveCandidate in place — dropping
+        // all four trailing fields is what actually reproduces a token from before any of them
+        // existed, which is the scenario this test means to exercise.
         val lines = cacheFile.readLines()
         val tabsIdx = lines.indexOf("tabs")
         val rewritten = lines.mapIndexed { i, line ->
             if (i > tabsIdx && line.startsWith("tab\t")) {
-                line.substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
+                line.substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
             } else {
                 line
             }
@@ -2720,6 +2724,206 @@ class AppStateBehaviorTest {
 
         // Same sourcePath re-saving must keep reusing the plain name, never disambiguate itself.
         assertTrue(!File(notesDir, "sample_analysis_2.md").exists())
+    }
+
+    // The reported bug this whole mechanism exists for: a fresh tab/session opens the SAME log
+    // file an earlier session already analyzed and saved notes for. The sourcePath fingerprint
+    // recorded in the earlier .ann sidecar matches, so the OLD collision-avoidance logic alone
+    // would happily reuse (and silently clobber) the earlier file the moment this session's first
+    // annotation edit fires auto-export — a fingerprint match is not proof this session's tab has
+    // ever seen that content.
+    @Test
+    fun autoExportPromptsInsteadOfOverwritingAnUnopenedExistingNoteFile() {
+        val dir = createTempDirectory("openlog-note-overwrite-prompt").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val sourcePath = File(dir, "sample.log").absolutePath
+        val existingMd = File(notesDir, "sample_analysis.md").apply { writeText("## earlier analysis\n\nkeep this") }
+        File(notesDir, "sample_analysis.ann").writeText(
+            Annotations(blocks = listOf(AnnBlock.Note(id = "n1", text = "earlier note"))).annotationsToken(sourcePath),
+        )
+        val originalBytes = existingMd.readBytes()
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = sourcePath),
+        )
+
+        state.confirmAddAnn("log", "log", listOf(1), "brand new note", null)
+
+        // The overwrite gate is synchronous — the prompt is up (or not) before this call returns,
+        // no waitUntil needed.
+        val pending = assertNotNull(state.pendingNoteOverwrite)
+        assertEquals("log", pending.tabId)
+        assertEquals("sample_analysis.md", pending.targetName)
+        assertEquals(existingMd.absolutePath, pending.targetPath)
+        assertEquals(null, state.tab("log")?.noteTargetName)
+
+        // Nothing is written to disk while the prompt is up — give any (wrongly) in-flight
+        // ioScope write a moment to land before checking.
+        Thread.sleep(150)
+        assertTrue(originalBytes.contentEquals(existingMd.readBytes()))
+    }
+
+    @Test
+    fun confirmNoteOverwriteWritesThenNeverRePrompts() {
+        val dir = createTempDirectory("openlog-note-overwrite-confirm").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val sourcePath = File(dir, "sample.log").absolutePath
+        File(notesDir, "sample_analysis.md").writeText("## earlier analysis\n\nkeep this")
+        File(notesDir, "sample_analysis.ann").writeText(Annotations().annotationsToken(sourcePath))
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = sourcePath),
+        )
+        state.confirmAddAnn("log", "log", listOf(1), "brand new note", null)
+        assertNotNull(state.pendingNoteOverwrite)
+
+        state.confirmNoteOverwrite()
+
+        assertEquals(null, state.pendingNoteOverwrite)
+        assertEquals("sample_analysis.md", state.tab("log")?.noteTargetName)
+        waitUntil { File(notesDir, "sample_analysis.md").readText().contains("brand new note") }
+
+        // Further edits must never re-prompt — the pin now short-circuits the gate entirely.
+        state.addNoteBlock("log", "second note")
+        assertEquals(null, state.pendingNoteOverwrite)
+        waitUntil { File(notesDir, "sample_analysis.md").readText().contains("second note") }
+        assertTrue(!File(notesDir, "sample_analysis_2.md").exists())
+    }
+
+    @Test
+    fun openExistingNoteInsteadOfOverwriteLoadsTheAnnAndPins() {
+        val dir = createTempDirectory("openlog-note-overwrite-open-existing").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val sourcePath = File(dir, "sample.log").absolutePath
+        File(notesDir, "sample_analysis.md").writeText("## earlier analysis\n\nkeep this")
+        File(notesDir, "sample_analysis.ann").writeText(
+            Annotations(blocks = listOf(AnnBlock.Note(id = "n1", text = "earlier note"))).annotationsToken(sourcePath),
+        )
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = sourcePath),
+        )
+        state.confirmAddAnn("log", "log", listOf(1), "brand new note", null)
+        assertNotNull(state.pendingNoteOverwrite)
+
+        state.openExistingNoteInsteadOfOverwrite()
+
+        assertEquals(null, state.pendingNoteOverwrite)
+        assertEquals("sample_analysis.md", state.tab("log")?.noteTargetName)
+        // Merged, not replaced: the file's earlier content comes back AND the note the user was
+        // mid-way through adding (the one that raised the prompt) survives, appended after it.
+        // "Open existing" is a choice about which file to write to, never a discard of typed work.
+        // confirmAddAnn creates a LogRef (it cites line 1), so read each block's own text field.
+        assertEquals(
+            listOf("earlier note", "brand new note"),
+            state.tab("log")?.annotations?.blocks?.map { block ->
+                when (block) {
+                    is AnnBlock.Note -> block.text
+                    is AnnBlock.LogRef -> block.caption
+                    else -> block.toString()
+                }
+            },
+        )
+
+        // A further edit keeps exporting to the same (now-pinned) file, never re-prompting.
+        state.addNoteBlock("log", "another note")
+        assertEquals(null, state.pendingNoteOverwrite)
+        waitUntil { File(notesDir, "sample_analysis.md").readText().contains("another note") }
+    }
+
+    @Test
+    fun saveNotesToNewNoteFileWritesASuffixedFileAndKeepsWritingThere() {
+        val dir = createTempDirectory("openlog-note-overwrite-save-new").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val sourcePath = File(dir, "sample.log").absolutePath
+        File(notesDir, "sample_analysis.md").writeText("## earlier analysis\n\nkeep this")
+        File(notesDir, "sample_analysis.ann").writeText(Annotations().annotationsToken(sourcePath))
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = sourcePath),
+        )
+        state.confirmAddAnn("log", "log", listOf(1), "brand new note", null)
+        assertNotNull(state.pendingNoteOverwrite)
+
+        state.saveNotesToNewNoteFile()
+
+        assertEquals(null, state.pendingNoteOverwrite)
+        assertEquals("sample_analysis_2.md", state.tab("log")?.noteTargetName)
+        // Unlike the other tests in this group, this file doesn't already exist before the write —
+        // guard with exists() first so an early poll doesn't throw FileNotFoundException instead of
+        // just retrying.
+        val newFile = File(notesDir, "sample_analysis_2.md")
+        waitUntil { newFile.exists() && newFile.readText().contains("brand new note") }
+        // The original file must survive untouched.
+        assertEquals("## earlier analysis\n\nkeep this", File(notesDir, "sample_analysis.md").readText())
+
+        // Pin regression: without it, the second edit would re-run the fingerprint walk (which
+        // still resolves to the plain name, since the fingerprint matches) and silently drift back
+        // to overwriting "sample_analysis.md" instead of continuing to write "_2.md".
+        state.addNoteBlock("log", "second note")
+        assertEquals(null, state.pendingNoteOverwrite)
+        waitUntil { File(notesDir, "sample_analysis_2.md").readText().contains("second note") }
+        assertTrue(!File(notesDir, "sample_analysis_3.md").exists())
+    }
+
+    @Test
+    fun cancelNoteOverwriteLeavesTheDecisionUnsetSoTheNextEditRePrompts() {
+        val dir = createTempDirectory("openlog-note-overwrite-cancel").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val sourcePath = File(dir, "sample.log").absolutePath
+        val existingMd = File(notesDir, "sample_analysis.md").apply { writeText("## earlier analysis\n\nkeep this") }
+        File(notesDir, "sample_analysis.ann").writeText(Annotations().annotationsToken(sourcePath))
+        val originalBytes = existingMd.readBytes()
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = sourcePath),
+        )
+        state.confirmAddAnn("log", "log", listOf(1), "brand new note", null)
+        assertNotNull(state.pendingNoteOverwrite)
+
+        state.cancelNoteOverwrite()
+        assertEquals(null, state.pendingNoteOverwrite)
+        assertEquals(null, state.tab("log")?.noteTargetName)
+        assertTrue(originalBytes.contentEquals(existingMd.readBytes()))
+
+        // Dismissing must NOT be a permanent silent no-save state — the very next mutation re-prompts.
+        state.addNoteBlock("log", "yet another note")
+        assertNotNull(state.pendingNoteOverwrite)
+        Thread.sleep(100)
+        assertTrue(originalBytes.contentEquals(existingMd.readBytes()))
+    }
+
+    @Test
+    fun openNoteFileOnANonDefaultNameKeepsExportingToThatName() {
+        val dir = createTempDirectory("openlog-open-note-non-default").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val renamedMd = File(notesDir, "sample_analysis_2.md").apply { writeText("## renamed analysis\n\nold content") }
+        File(notesDir, "sample_analysis_2.ann").writeText(
+            Annotations(blocks = listOf(AnnBlock.Note(id = "n1", text = "old note"))).annotationsToken(),
+        )
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))))
+
+        state.openNoteFile("log", renamedMd)
+        assertEquals("sample_analysis_2.md", state.tab("log")?.noteTargetName)
+
+        // Adjacent latent bug this also fixes: before the pin, editing after opening a non-default
+        // name re-exported to the plain "sample_analysis.md" instead of the file that was opened.
+        state.addNoteBlock("log", "new note")
+        assertEquals(null, state.pendingNoteOverwrite)
+        waitUntil { renamedMd.readText().contains("new note") }
+        assertTrue(!File(notesDir, "sample_analysis.md").exists())
     }
 
     @Test
