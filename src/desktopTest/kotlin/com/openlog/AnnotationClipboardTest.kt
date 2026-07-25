@@ -2,6 +2,7 @@ package com.openlog
 
 import com.openlog.model.AnnBlock
 import com.openlog.model.Annotations
+import com.openlog.model.AnnotationLogBlockStyle
 import com.openlog.model.AppSettings
 import com.openlog.model.CopyMaskRule
 import com.openlog.model.LogEntry
@@ -85,7 +86,10 @@ class AnnotationClipboardTest {
             ),
         )
 
-        val markdown = buildMd(tab)
+        // INDENTED explicitly: this test is about caption/source/image ordering, not about C2's
+        // JIRA_JAVA-gated `!frame-0N.jpg!` anchors — buildMd()'s default AppSettings() is JIRA_JAVA,
+        // which would emit an anchor here instead of the plain "[screenshot]" marker this asserts.
+        val markdown = buildMd(tab, AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED))
         val html = buildAnnotationsHtml(tab)
 
         val markdownCaption = markdown.indexOf("Crash dialog")

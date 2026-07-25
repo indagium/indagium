@@ -18,6 +18,7 @@ import com.openlog.model.SequenceDef
 import com.openlog.source.SourceMatch
 import com.openlog.ui.AppState
 import com.openlog.ui.DesktopStorage
+import com.openlog.ui.FollowDiagnostics
 import com.openlog.ui.HL_COLORS
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitSource
@@ -140,6 +141,9 @@ internal class OpenLogToolOperations(
         "reindex_cases" to { reindexCasesRoute() },
         "get_video_frame" to { a ->
             getVideoFrameRoute(a.str("tabId") ?: "", a.anyInt("lineId"), a.anyInt("videoMs")?.toLong())
+        },
+        "get_follow_diagnostics" to { a ->
+            getFollowDiagnosticsRoute(a.str("tabId") ?: "", a.anyInt("videoMs")?.toLong() ?: 0L)
         },
     )
 
@@ -952,6 +956,13 @@ internal class OpenLogToolOperations(
         )
     }
 
+    // No tab-existence/anchor check here beyond what AppState.followDiagnostics already does
+    // internally (it degrades to status NO_ANCHOR rather than throwing) — unlike get_video_frame,
+    // there is nothing more actionable to say for a missing tab/anchor than the dump's own fields
+    // already report (hasAnchor: false, status: NO_ANCHOR), so this stays a thin pass-through.
+    private fun getFollowDiagnosticsRoute(tabId: String, videoMs: Long): Map<String, Any?> =
+        followDiagnosticsToMap(appState.followDiagnostics(tabId, videoMs))
+
     // ── DTO helpers ───────────────────────────────────────────────────
 
     private fun filterToMap(f: Filter): Map<String, Any?> = mapOf(
@@ -1020,6 +1031,33 @@ internal class OpenLogToolOperations(
         "id" to site.id, "kind" to site.kind.name, "groupGid" to site.groupGid,
         "logId" to site.entry.id, "ts" to site.entry.ts, "level" to site.entry.level.key.toString(),
         "tag" to site.entry.tag, "msg" to site.entry.msg,
+    )
+
+    // id/ts/elapsedMs (or id/ts) only, matching FollowDiagnosticRow/RolloverDiagnosticEvent's own
+    // confidentiality guarantee — see their doc comments in AppState.kt.
+    private fun followDiagnosticsToMap(d: FollowDiagnostics): Map<String, Any?> = mapOf(
+        "tabId" to d.tabId,
+        "hasAnchor" to d.hasAnchor,
+        "anchor" to d.anchor?.let { mapOf("id" to it.id, "ts" to it.ts, "elapsedMs" to it.elapsedMs) },
+        "anchorVideoMs" to d.anchorVideoMs,
+        "playheadVideoMs" to d.playheadVideoMs,
+        "mappedElapsedMs" to d.mappedElapsedMs,
+        "mappedElapsedClock" to d.mappedElapsedClock,
+        "chosenVisibleFloor" to d.chosenVisibleFloor?.let { mapOf("id" to it.id, "ts" to it.ts, "elapsedMs" to it.elapsedMs) },
+        "nextVisibleCandidatesAfterFloor" to d.nextVisibleCandidatesAfterFloor.map { mapOf("id" to it.id, "ts" to it.ts, "elapsedMs" to it.elapsedMs) },
+        "visibleCandidateCount" to d.visibleCandidateCount,
+        "candidatesFromSummaryFallback" to d.candidatesFromSummaryFallback,
+        "fullLogFloor" to d.fullLogFloor?.let { mapOf("id" to it.id, "ts" to it.ts, "elapsedMs" to it.elapsedMs) },
+        "status" to d.status.name,
+        "rolloverAppliedCount" to d.rolloverAppliedCount,
+        "rolloverAppliedSamples" to d.rolloverAppliedSamples.map { mapOf("id" to it.id, "ts" to it.ts) },
+        "rolloverSuppressedCount" to d.rolloverSuppressedCount,
+        "rolloverSuppressedSamples" to d.rolloverSuppressedSamples.map { mapOf("id" to it.id, "ts" to it.ts) },
+        "dayOffsetModelValid" to d.dayOffsetModelValid,
+        "showUnfiltered" to d.showUnfiltered,
+        "filterActive" to d.filterActive,
+        "totalLogDataSize" to d.totalLogDataSize,
+        "displayedItemCount" to d.displayedItemCount,
     )
 
     private fun sourceMatchToMap(match: SourceMatch): Map<String, Any?> = mapOf(

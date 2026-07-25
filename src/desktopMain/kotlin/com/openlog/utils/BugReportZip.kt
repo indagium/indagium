@@ -201,6 +201,33 @@ fun extractEntryToTempFile(archiveFile: File, candidate: ZipLogCandidate, maxEnt
 
 private val archiveVideoCacheLock = Any()
 
+// Skips in-flight extractions: extractArchiveVideoToCache stages into ".<name>.partial" before the
+// atomic rename to the real cache filename, so a prune that races an extraction must never treat
+// that staging file as unreferenced garbage.
+private fun isPartialCacheFile(file: File): Boolean = file.name.startsWith(".") && file.name.endsWith(".partial")
+
+/**
+ * Pure fingerprint->key->filename computation shared by [extractArchiveVideoToCache] and the
+ * prune/budget functions below, so the two sides of the cache lifecycle can never diverge on what
+ * a given archive+candidate is named on disk. Callers reconstructing this for pruning purposes
+ * (see [com.openlog.ui.AppState.referencedArchiveVideoFileNames]) must pass a [ZipLogCandidate]
+ * with `sizeBytes = -1L`, matching how `resolveVideoPlaybackPath` reconstructs it for playback.
+ */
+fun archiveVideoCacheFileName(archiveFile: File, candidate: ZipLogCandidate): String {
+    val fingerprint = listOf(
+        archiveFile.canonicalPath,
+        archiveFile.length().toString(),
+        archiveFile.lastModified().toString(),
+        candidate.entryPath,
+        candidate.sizeBytes.toString(),
+    ).joinToString("\u0000")
+    val key = MessageDigest.getInstance("SHA-256").digest(fingerprint.toByteArray())
+        .joinToString("") { byte -> "%02x".format(byte) }
+    val suffix = candidate.displayName.substringAfterLast('.', missingDelimiterValue = "bin")
+        .lowercase().replace(Regex("[^a-z0-9]"), "").ifBlank { "bin" }
+    return "$key.$suffix"
+}
+
 /**
  * Materializes a video archive entry into app-managed cache storage. The returned path is only a
  * playback implementation detail: callers must persist [ZipLogCandidate.entryPath] plus the
@@ -214,20 +241,12 @@ fun extractArchiveVideoToCache(
     maxEntryBytes: Long = MAX_ARCHIVE_ENTRY_BYTES,
 ): File? = runCatching {
     if (candidate.kind != ZipLogCandidateKind.VIDEO || !archiveFile.isFile) return@runCatching null
-    val fingerprint = listOf(
-        archiveFile.canonicalPath,
-        archiveFile.length().toString(),
-        archiveFile.lastModified().toString(),
-        candidate.entryPath,
-        candidate.sizeBytes.toString(),
-    ).joinToString("\u0000")
-    val key = MessageDigest.getInstance("SHA-256").digest(fingerprint.toByteArray())
-        .joinToString("") { byte -> "%02x".format(byte) }
-    val suffix = candidate.displayName.substringAfterLast('.', missingDelimiterValue = "bin")
-        .lowercase().replace(Regex("[^a-z0-9]"), "").ifBlank { "bin" }
-    val destination = File(File(cacheDir, "videos"), "$key.$suffix")
+    val destination = File(File(cacheDir, "videos"), archiveVideoCacheFileName(archiveFile, candidate))
     synchronized(archiveVideoCacheLock) {
-        if (destination.isFile && destination.length() > 0) return@synchronized destination
+        if (destination.isFile && destination.length() > 0) {
+            runCatching { destination.setLastModified(System.currentTimeMillis()) }
+            return@synchronized destination
+        }
         destination.parentFile?.mkdirs()
         val partial = File(destination.parentFile, ".${destination.name}.partial")
         runCatching { partial.delete() }
@@ -319,3 +338,35 @@ private fun openSevenZCandidateStream(archiveFile: File, candidate: ZipLogCandid
         }
     }
 }.getOrNull()
+
+// Deletes cached archive-video files under cacheDir/videos that no open tab references anymore.
+// [referencedFileNames] must be built with [archiveVideoCacheFileName] using sizeBytes = -1L (see
+// that function's doc) or every live file looks unreferenced and gets deleted. In-flight
+// ".*.partial" staging files are left alone regardless of referencedFileNames.
+fun pruneUnreferencedArchiveVideos(cacheDir: File, referencedFileNames: Set<String>) {
+    synchronized(archiveVideoCacheLock) {
+        val files = File(cacheDir, "videos").listFiles() ?: return
+        for (file in files) {
+            if (isPartialCacheFile(file)) continue
+            if (file.name !in referencedFileNames) runCatching { file.delete() }
+        }
+    }
+}
+
+// Evicts least-recently-modified cached archive-video files (skipping [protectedFileNames], the
+// currently-referenced set) until total size is back under [budgetBytes], or only protected files
+// remain. extractArchiveVideoToCache bumps lastModified on every cache hit, so recency here tracks
+// playback use, not extraction time.
+fun enforceArchiveVideoCacheBudget(cacheDir: File, budgetBytes: Long, protectedFileNames: Set<String>) {
+    synchronized(archiveVideoCacheLock) {
+        val files = (File(cacheDir, "videos").listFiles() ?: return).filterNot(::isPartialCacheFile)
+        var total = files.sumOf { it.length() }
+        if (total <= budgetBytes) return
+        val evictable = files.filter { it.name !in protectedFileNames }.sortedBy { it.lastModified() }
+        for (file in evictable) {
+            if (total <= budgetBytes) break
+            val length = file.length()
+            if (runCatching { file.delete() }.getOrDefault(false)) total -= length
+        }
+    }
+}

@@ -128,6 +128,7 @@ fun AnnotationPanel(
     onCopy: () -> Unit,
     onCopyImage: (AnnBlock.Image) -> Unit,
     onCopyRichPreview: () -> Unit,
+    onExportFrames: () -> Unit,
     onSave: () -> Unit,
     onToggleRecentNotes: () -> Unit,
     onOpenNote: (File) -> Unit,
@@ -453,7 +454,7 @@ fun AnnotationPanel(
         if (tab.showAnnMd && hasAnnotationBlocks) {
             MdPreviewDialog(
                 tab = tab, settings = settings, mono = mono,
-                onCopy = onCopy, onCopyRichPreview = onCopyRichPreview, onDismiss = onToggleMd,
+                onCopy = onCopy, onCopyRichPreview = onCopyRichPreview, onExportFrames = onExportFrames, onDismiss = onToggleMd,
             )
         }
 
@@ -882,11 +883,13 @@ private fun MdPreviewDialog(
     mono: FontFamily,
     onCopy: () -> Unit,
     onCopyRichPreview: () -> Unit,
+    onExportFrames: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val tc = tc()
     var copied by remember { mutableStateOf(false) }
     var richCopied by remember { mutableStateOf(false) }
+    var framesExported by remember { mutableStateOf(false) }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
             Modifier.fillMaxWidth(0.75f).fillMaxHeight(0.8f)
@@ -921,6 +924,25 @@ private fun MdPreviewDialog(
                         onClick = {
                             onCopyRichPreview()
                             richCopied = true
+                        },
+                        modifier = Modifier.height(28.dp),
+                    )
+                }
+                TooltipArea(
+                    tooltip = {
+                        ToolbarTooltip(
+                            "Writes each note image as frame-0N.jpg into a <logname>_frames folder inside " +
+                                "a folder you choose. With the Jira {code:java} style, Copy's text references " +
+                                "images by that filename — paste it, then attach the exported files so Jira " +
+                                "renders them inline.",
+                        )
+                    },
+                ) {
+                    AppButton(
+                        if (framesExported) "Exported!" else "Export frames",
+                        onClick = {
+                            onExportFrames()
+                            framesExported = true
                         },
                         modifier = Modifier.height(28.dp),
                     )

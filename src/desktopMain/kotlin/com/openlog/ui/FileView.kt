@@ -249,6 +249,7 @@ internal fun FileView(
                     onCopy = { state.copyAnn(tab.id) },
                     onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
                     onCopyRichPreview = { state.copyRichPreview(tab.id) },
+                    onExportFrames = { state.exportAnnotationFrames(tab.id) },
                     onSave = { state.saveAnalysis(tab.id) },
                     onToggleRecentNotes = { state.toggleRecentNotesMenu() },
                     onOpenNote = { state.openNoteFileAsync(tab.id, it) },

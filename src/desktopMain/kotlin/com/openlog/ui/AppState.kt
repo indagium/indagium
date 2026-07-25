@@ -57,6 +57,9 @@ import com.openlog.utils.exportFilteredToFile
 import com.openlog.utils.extractAppVersionHeuristic
 import com.openlog.utils.extractCandidate
 import com.openlog.utils.extractArchiveVideoToCache
+import com.openlog.utils.annotationImageFileName
+import com.openlog.utils.archiveVideoCacheFileName
+import com.openlog.utils.enforceArchiveVideoCacheBudget
 import com.openlog.utils.indexOfEntryId
 import com.openlog.utils.invalidateComputeCache
 import com.openlog.utils.isLikelyTextFile
@@ -67,6 +70,8 @@ import com.openlog.utils.mergeLogs
 import com.openlog.utils.newId
 import com.openlog.utils.openArchiveCandidateStream
 import com.openlog.utils.parseLogcat
+import com.openlog.utils.pruneUnreferencedArchiveVideos
+import com.openlog.utils.formatElapsedAsClock
 import com.openlog.utils.parseMillisOfDay
 import com.openlog.utils.passesFilter
 import com.openlog.utils.planSplitOutputs
@@ -74,6 +79,7 @@ import com.openlog.utils.requiresSplitPrompt
 import com.openlog.utils.splitFileToFiles
 import com.openlog.utils.splitStreamToFiles
 import com.openlog.utils.suggestedSplitPartCount
+import com.openlog.video.FailedVideoPlayerController
 import com.openlog.video.VideoPlayerController
 import com.openlog.video.defaultVideoPlayerController
 import kotlinx.coroutines.*
@@ -491,6 +497,24 @@ internal const val SEARCH_RECOMPUTE_DEBOUNCE_MS = 150L
 internal const val VIDEO_ATTACH_AWAIT_TIMEOUT_MS = 30_000L
 internal const val VIDEO_ATTACH_AWAIT_POLL_MS = 100L
 
+// Cap on how many samples of each kind (applied/suppressed) AppState.buildLogElapsedIndex keeps —
+// the Follow diagnostic dump (AppState.followDiagnostics) only ever shows a handful, and a
+// pathological log with thousands of qualifying rows must not turn every reload into an unbounded
+// list build.
+private const val ROLLOVER_SAMPLE_CAP = 5
+
+// How far buildLogElapsedIndex's lone-outlier check is willing to scan past a candidate-rollover
+// row for the next PARSEABLE timestamp (skipping TS_UNKNOWN/brief/RAW rows). Bounded so a long run
+// of unparseable rows can't turn the check into an O(n) scan per candidate; when the cap is hit
+// without finding one, the lookahead is treated as unavailable (same as end-of-file) and the old
+// unconditional-rollover behavior applies — never a false "it's fine" reading of missing data.
+private const val ROLLOVER_LOOKAHEAD_SCAN_CAP = 200
+
+// How many rows after the chosen visible floor AppState.followDiagnostics reports as candidates —
+// per the diagnostic's spec, just enough to see whether the timeline resumes sanely right after the
+// hold point (e.g. a corrupted +24h jump shows up immediately in the first one or two).
+private const val FOLLOW_DIAGNOSTIC_CANDIDATE_COUNT = 3
+
 data class PendingSequenceStart(val text: String, val tag: String)
 
 data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val currentFilterId: String?)
@@ -582,6 +606,174 @@ data class AnnotationNavigationRequest(
     val logIds: List<Int>,
     val scrollMode: NavigationScrollMode = NavigationScrollMode.CENTER,
 )
+
+/**
+ * How [AppState.videoFollowMapping]'s playhead-to-log mapping relates to the currently displayed
+ * (filtered) log. Mirrors what [AppState.followTargetVisibleLogId] actually does under the hood —
+ * without this, a filtered view that clamps Follow to one boundary row for the rest of playback
+ * looks indistinguishable from a genuinely static log.
+ */
+enum class FollowMappingStatus {
+    NO_ANCHOR,
+    BEFORE_FIRST,
+    AFTER_LAST,
+
+    /** The playhead's own log line exists AND actually fails the active filter (verified against
+     *  [com.openlog.utils.passesFilter], not just inferred from a floor mismatch), so Follow is
+     *  holding on the last visible line before it. `mappedNearestLogId` is that visible line. */
+    HIDDEN_BY_FILTER,
+
+    /** The playhead's own log line exists and PASSES the active filter, but a collapsed sequence,
+     *  manual-collapse, or stack-trace group currently folds it away under a header row elsewhere —
+     *  the filter is not the reason it isn't independently visible. Distinguished from
+     *  [HIDDEN_BY_FILTER] so the readout never blames "the filter" for something a collapsed group
+     *  is actually doing; see AppState.videoFollowMapping's doc comment for how the two are told
+     *  apart. `mappedNearestLogId` is the header (or other) row Follow is holding on instead. */
+    HIDDEN_BY_COLLAPSE,
+
+    /** The filter hides every timestamped row, so there is nothing Follow could select at all. */
+    NO_VISIBLE_ROW,
+    ON_VISIBLE_ROW,
+}
+
+/** Everything a Follow readout needs to explain the current playhead-to-log mapping, including why
+ *  it might look "stuck" — see [FollowMappingStatus]. */
+data class VideoFollowMapping(
+    val anchorLogTs: String?,
+    val anchorVideoMs: Long?,
+    val mappedNearestLogId: Int?,
+    val mappedNearestLogTs: String?,
+    val status: FollowMappingStatus,
+    // The raw (day-unrolled) elapsed timestamp Follow computed for the current playhead, BEFORE any
+    // visible/full-log floor resolution — i.e. what "the video says" independent of what's actually
+    // selectable. Null exactly when status is NO_ANCHOR (no anchor to map from at all). Lets a
+    // readout show the computed target time alongside whatever row Follow actually holds on,
+    // instead of leaving the reader to guess whether "holding" means "close" or "very far behind."
+    val mappedElapsedMs: Long? = null,
+)
+
+/** One row-shaped fact inside a [FollowDiagnostics] dump: id/ts/elapsed ONLY, deliberately never
+ *  message text or tag — this is the shape that lets the whole dump stay safe to hand back over a
+ *  confidential log. [elapsedMs] is the raw day-unrolled value from AppState's elapsed timeline, not
+ *  a clock string, on purpose: it is what actually drives every floor comparison, so a corrupted
+ *  value (e.g. from a spurious rollover) is visible as an implausible number rather than laundered
+ *  into a plausible-looking wrapped clock string. */
+data class FollowDiagnosticRow(val id: Int, val ts: String?, val elapsedMs: Long?)
+
+/** One row that either committed a day-rollover or was suppressed as a lone outlier while building
+ *  the elapsed timeline — see AppState.buildLogElapsedIndex's lone-outlier guard. */
+data class RolloverDiagnosticEvent(val id: Int, val ts: String)
+
+/**
+ * Full diagnostic snapshot of what [AppState.videoFollowMapping]/[AppState.followTargetVisibleLogId]
+ * resolved for one tab at one playhead position — every number needed to identify why Follow looks
+ * "stuck," safe to hand back over a confidential log because every field is an id, a timestamp, a
+ * count, or a boolean; never message text or a tag. Produced by [AppState.followDiagnostics]. See
+ * `debug/ControlServer.kt`'s `get_follow_diagnostics` tool (curl/MCP) and VideoPanel's readout
+ * right-click "Copy Follow diagnostics" entry (clipboard) for the two ways to obtain this without
+ * enabling anything else.
+ */
+data class FollowDiagnostics(
+    val tabId: String,
+    val hasAnchor: Boolean,
+    val anchor: FollowDiagnosticRow?,
+    val anchorVideoMs: Long?,
+    val playheadVideoMs: Long,
+    // Null only when hasAnchor is false — everything below is what Follow computed FROM this value,
+    // so a null here means every "chosen"/"candidates"/"status" field downstream is meaningless.
+    val mappedElapsedMs: Long?,
+    val mappedElapsedClock: String?,
+    val chosenVisibleFloor: FollowDiagnosticRow?,
+    val nextVisibleCandidatesAfterFloor: List<FollowDiagnosticRow>,
+    val visibleCandidateCount: Int,
+    // True when the candidate set was resolved via a fresh computeItems() call rather than the
+    // viewer's own last-reported ItemsSummary (see FollowFloorIndex.fromSummaryFallback) — a freshly
+    // opened tab whose viewer hasn't rendered a first frame yet, most commonly.
+    val candidatesFromSummaryFallback: Boolean,
+    // What the FULL (unfiltered, unfolded) log was on at the mapped moment — what HIDDEN_BY_FILTER
+    // and HIDDEN_BY_COLLAPSE both compare the visible floor against to decide there's a mismatch at all.
+    val fullLogFloor: FollowDiagnosticRow?,
+    val status: FollowMappingStatus,
+    val rolloverAppliedCount: Int,
+    val rolloverAppliedSamples: List<RolloverDiagnosticEvent>,
+    val rolloverSuppressedCount: Int,
+    val rolloverSuppressedSamples: List<RolloverDiagnosticEvent>,
+    // False when this tab's log looked like a concatenated multi-buffer capture (or otherwise broke
+    // the single-monotonic-timeline assumption) and the elapsed timeline fell back to raw
+    // time-of-day for every row instead of trusting the dayOffset counts above — see
+    // AppState.buildLogElapsedIndex's doc comment. When false, rolloverAppliedCount/
+    // rolloverSuppressedCount still describe what the per-row classifier DECIDED, but neither
+    // classification actually shaped the elapsed values the rest of this dump is built from — the
+    // detected-jump count (applied+suppressed) is what tells you how many buffer-boundary-shaped
+    // jumps were found, i.e. a rough segment count (segments ≈ that count + 1).
+    val dayOffsetModelValid: Boolean,
+    val showUnfiltered: Boolean,
+    // Approximate "is any filtering criterion actually configured" check — for observability only,
+    // not a substitute for utils/Filter.kt's real passesFilter() decision, which fullFloorHiddenReason
+    // already uses to classify individual rows. This exists purely to answer the "does this tab even
+    // have a filter active" framing question at a glance in the dump.
+    val filterActive: Boolean,
+    val totalLogDataSize: Int,
+    val displayedItemCount: Int,
+)
+
+private fun FollowDiagnosticRow.format(): String = "id=$id ts=${ts ?: "?"} elapsed=${elapsedMs?.toString() ?: "?"}ms"
+
+private fun RolloverDiagnosticEvent.format(): String = "id=$id ts=$ts"
+
+/**
+ * Plain-text rendering of a [FollowDiagnostics] snapshot for the clipboard/curl escape hatches
+ * (VideoPanel's readout context menu, ControlServer's `get_follow_diagnostics`) — every line is an
+ * id/ts/count/boolean, matching the data class's own confidentiality guarantee. Kept as a free
+ * function (not a method) since it has no AppState dependency of its own — pure DTO formatting.
+ */
+fun formatFollowDiagnostics(d: FollowDiagnostics): String = buildString {
+    appendLine("openLog Follow diagnostics — tab ${d.tabId}")
+    appendLine("has anchor: ${d.hasAnchor}")
+    if (d.anchor != null) appendLine("anchor: ${d.anchor.format()} videoMs=${d.anchorVideoMs}")
+    appendLine("playhead videoMs: ${d.playheadVideoMs}")
+    appendLine("mapped target: elapsed=${d.mappedElapsedMs?.toString() ?: "?"}ms clock=${d.mappedElapsedClock ?: "?"}")
+    appendLine("status: ${d.status}")
+    appendLine("chosen visible floor: ${d.chosenVisibleFloor?.format() ?: "none"}")
+    appendLine(
+        "visible candidates: count=${d.visibleCandidateCount} " +
+            "source=${if (d.candidatesFromSummaryFallback) "computeItems fallback" else "reported ItemsSummary"}",
+    )
+    if (d.nextVisibleCandidatesAfterFloor.isEmpty()) {
+        appendLine("next candidates after floor: none")
+    } else {
+        appendLine("next candidates after floor:")
+        d.nextVisibleCandidatesAfterFloor.forEach { appendLine("  ${it.format()}") }
+    }
+    appendLine("full-log floor: ${d.fullLogFloor?.format() ?: "none"}")
+    appendLine(
+        "day-offset model: ${
+            if (d.dayOffsetModelValid) {
+                "valid (rollover accumulation, if any, applied normally)"
+            } else {
+                "INVALID — looks like a concatenated multi-buffer log; fell back to raw " +
+                    "time-of-day for the WHOLE timeline. rollover counts below are what the " +
+                    "per-row check decided, NOT what shaped the numbers above."
+            }
+        }"
+    )
+    appendLine("rollover applied: count=${d.rolloverAppliedCount}")
+    if (d.rolloverAppliedSamples.isNotEmpty()) {
+        d.rolloverAppliedSamples.forEach { appendLine("  applied at ${it.format()}") }
+    }
+    appendLine("rollover suppressed (lone outlier): count=${d.rolloverSuppressedCount}")
+    if (d.rolloverSuppressedSamples.isNotEmpty()) {
+        d.rolloverSuppressedSamples.forEach { appendLine("  suppressed at ${it.format()}") }
+    }
+    if (!d.dayOffsetModelValid) {
+        val detectedJumps = d.rolloverAppliedCount + d.rolloverSuppressedCount
+        appendLine("detected backward jumps: $detectedJumps (approx segments: ${detectedJumps + 1})")
+    }
+    appendLine("showUnfiltered: ${d.showUnfiltered}")
+    appendLine("filterActive: ${d.filterActive}")
+    appendLine("totalLogDataSize: ${d.totalLogDataSize}")
+    append("displayedItemCount: ${d.displayedItemCount}")
+}
 
 // Search next/prev's own navigation request — deliberately separate from
 // AnnotationNavigationRequest above rather than reusing it. Annotation/crash/ctx-anchor jumps are
@@ -680,6 +872,10 @@ class AppState(
     // 500MB default so tests can exercise the ArchiveBudgetExceededException/showOpenError path
     // with small fixtures instead of needing multi-hundred-MB archives.
     private val archiveEntryByteBudget: Long = MAX_ARCHIVE_ENTRY_BYTES,
+    // Total size cap for archiveCacheDir/videos (extracted archive-video copies), enforced by
+    // pruneArchiveVideoCache after every removeVideo/closeTabsById. Injectable so tests can shrink
+    // it far below the real 2GB default and exercise LRU eviction with tiny fixtures.
+    private val archiveVideoCacheBudgetBytes: Long = 2L * 1024L * 1024L * 1024L,
     // Restore-only seams: refreshed archive metadata must be resolved off the UI thread before
     // publishing parsed rows. Keeping the production threshold unchanged while injecting both
     // pieces lets tests cross it with tiny fixtures and prove construction never lists archives.
@@ -1088,8 +1284,18 @@ class AppState(
     // exactly like the on-screen list it mirrors.
     private val visibleItemsByTab = ConcurrentHashMap<String, ItemsSummary>()
 
+    // visibleItemsByTab is a plain ConcurrentHashMap, so a Compose reader of it observes nothing
+    // when a freshly computed summary lands. This counter is the snapshot-state half of that read:
+    // anything deriving UI from the visible row set (the video Follow target and its readout) reads
+    // it too, so a landed summary invalidates them. Without it, changing a filter while playback is
+    // paused left Follow resolving against the pre-filter row set indefinitely — the next
+    // recomposition only arrived with the next playhead tick, which never came.
+    var visibleItemsVersion by mutableStateOf(0)
+        private set
+
     fun noteVisibleItems(tabId: String, summary: ItemsSummary) {
         visibleItemsByTab[tabId] = summary
+        visibleItemsVersion += 1
     }
 
     // Lazily-created, cached off this map — same pattern as TailCoordinator's activeTails — rather
@@ -2501,9 +2707,10 @@ class AppState(
 
             else -> if (t.selected == setOf(id)) emptySet() else setOf(id)
         }
-        // A direct selection is an explicit user navigation decision, so it must take control
-        // back from the video playhead rather than immediately being overwritten by Follow logs.
-        t.copy(selected = n, videoFollowLog = false)
+        // A manual click is no longer treated as opting out of Follow: it's a one-off look-around,
+        // and Follow resumes driving selection on the next playhead move. Only the explicit
+        // "Following" toggle (setVideoFollowLog) turns Follow off.
+        t.copy(selected = n)
     }
 
     fun selRowRange(tabId: String, fromId: Int, toId: Int) = upTab(tabId) { t ->
@@ -2518,14 +2725,14 @@ class AppState(
         val a = ids.indexOfId(fromId)
         val b = ids.indexOfId(toId)
         if (a < 0 || b < 0) return@upTab t
-        t.copy(selected = (minOf(a, b)..maxOf(a, b)).map { ids[it] }.toSet(), videoFollowLog = false)
+        t.copy(selected = (minOf(a, b)..maxOf(a, b)).map { ids[it] }.toSet())
     }
 
     fun setSelectedRows(tabId: String, ids: List<Int>) = upTab(tabId) { t ->
-        t.copy(selected = ids.toSet(), videoFollowLog = false)
+        t.copy(selected = ids.toSet())
     }
 
-    fun clearSelection(tabId: String) = upTab(tabId) { it.copy(selected = emptySet(), videoFollowLog = false) }
+    fun clearSelection(tabId: String) = upTab(tabId) { it.copy(selected = emptySet()) }
 
     fun selectAll(tabId: String) {
         val t = tab(tabId) ?: return
@@ -2766,6 +2973,8 @@ class AppState(
         }
         // There can be no embedded player after removing the active tab's only attachment.
         if (tabId == activeTabId) videoPanelVisible = false
+        // Detached archive-video attachment may have been the cache's last referencer.
+        pruneArchiveVideoCache()
     }
 
     /** Clockwise orientation, kept independently for each tab's current video attachment. */
@@ -2778,11 +2987,30 @@ class AppState(
     /** Lazily creates (and caches) the [VideoPlayerController] for [tabId]'s attached video. Null
      *  when the tab doesn't exist or has no video attached — a tab that later gets a video needs a
      *  fresh call after [attachVideoToActiveTab]/[attachVideoFromZip], since the controller is
-     *  bound to one file path for its whole lifetime (see [close][VideoPlayerController.close]). */
+     *  bound to one file path for its whole lifetime (see [close][VideoPlayerController.close]).
+     *
+     *  Never null merely because the underlying file/archive entry couldn't be resolved: a
+     *  [VideoSource.LocalFile] whose file has vanished already reaches [videoControllerFactory]
+     *  regardless (FFmpeg fails to open it and reports that through the controller's own `error`),
+     *  but a [VideoSource.ArchiveEntry] whose archive has since been moved or deleted — an ordinary
+     *  workflow for a disposable bug-report zip download, unlike an explicitly attached local
+     *  recording — used to fail one step earlier, in [resolveVideoPlaybackPath], with nothing to
+     *  carry the failure. That made the whole video panel and every "Link"/"Show in video" action
+     *  silently act as if no video were attached, instead of showing the same failure state a
+     *  broken local file already gets. [FailedVideoPlayerController] fills that one gap so this
+     *  function's contract — non-null whenever [LogTab.attachedVideo] is non-null — actually holds. */
     fun videoController(tabId: String): VideoPlayerController? {
         val attachment = tab(tabId)?.attachedVideo ?: return null
-        val path = resolveVideoPlaybackPath(attachment.source) ?: return null
-        return videoControllers.getOrPut(tabId) { videoControllerFactory(path) }
+        val path = resolveVideoPlaybackPath(attachment.source)
+        return videoControllers.getOrPut(tabId) {
+            if (path != null) videoControllerFactory(path) else FailedVideoPlayerController(videoUnavailableMessage(attachment))
+        }
+    }
+
+    private fun videoUnavailableMessage(attachment: VideoAttachment): String = when (val source = attachment.source) {
+        is VideoSource.LocalFile -> "No video path is set for \"${attachment.sourceLabel}\""
+        is VideoSource.ArchiveEntry -> "Could not read \"${attachment.sourceLabel}\" — " +
+            "the original archive \"${File(source.archivePath).name}\" may have been moved, renamed, or deleted"
     }
 
     private fun resolveVideoPlaybackPath(source: VideoSource): String? = when (source) {
@@ -2798,6 +3026,38 @@ class AppState(
             cacheDir = archiveCacheDir,
             maxEntryBytes = archiveEntryByteBudget,
         )?.absolutePath
+    }
+
+    /**
+     * The cache filenames every currently-attached [VideoSource.ArchiveEntry] resolves to, keyed
+     * exactly as [resolveVideoPlaybackPath] does (`sizeBytes = -1L`) — anything else drifts from
+     * playback and a prune pass would delete a file a tab still needs.
+     */
+    private fun referencedArchiveVideoFileNames(): Set<String> = synchronized(stateLock) {
+        tabs.mapNotNull { it.attachedVideo?.source as? VideoSource.ArchiveEntry }
+            .map { source ->
+                archiveVideoCacheFileName(
+                    File(source.archivePath),
+                    ZipLogCandidate(
+                        entryPath = source.entryPath,
+                        displayName = source.displayName,
+                        sizeBytes = -1L,
+                        kind = ZipLogCandidateKind.VIDEO,
+                    ),
+                )
+            }
+            .toSet()
+    }
+
+    /** Evicts extracted archive-video cache entries no open tab references, then enforces the size
+     *  budget over what's left. Called after every mutation that can drop a tab's last reference to
+     *  a cached video (removeVideo, closeTabsById) so the cache doesn't grow unbounded. */
+    private fun pruneArchiveVideoCache() {
+        val referenced = referencedArchiveVideoFileNames()
+        ioScope.launch {
+            pruneUnreferencedArchiveVideos(archiveCacheDir, referenced)
+            enforceArchiveVideoCacheBudget(archiveCacheDir, archiveVideoCacheBudgetBytes, protectedFileNames = referenced)
+        }
     }
 
     /** Session-only per-tab transport preference, deliberately false for every new/restored tab. */
@@ -2851,10 +3111,7 @@ class AppState(
         t.attachedVideo?.let { t.copy(attachedVideo = it.copy(anchor = null)) } ?: t
     }
 
-    /** Video-time (ms) for [logId], relative to [tab]'s single anchor — null when there's no
-     *  video/anchor, [logId] isn't in this tab, or either row's `ts` doesn't parse (see
-     *  LogTime.parseMillisOfDay: blank on brief/RAW-format rows). Pure — no AppState/controller
-     *  access — so it's directly unit-testable against a bare LogTab. */
+    /** Video-time (ms) for [logId], relative to [tab]'s single anchor. */
     fun logIdToVideoMs(tab: LogTab, logId: Int): Long? {
         val anchor = tab.attachedVideo?.anchor ?: return null
         val elapsed = monotonicLogElapsedById(tab)
@@ -2863,11 +3120,7 @@ class AppState(
         return anchor.videoMs + (targetElapsed - anchorElapsed)
     }
 
-    /** Inverse of [logIdToVideoMs]: the entry id whose mapped video-time is closest to [videoMs].
-     *  Linear over [tab]'s own logData (parse order tracks ascending id — see LogTime.kt's own
-     *  doc) since Task A's substrate only needs correctness; Task B's UI-driven "Show in logs" nav
-     *  can index/binary-search this if it turns out to matter on a very large tab. Null under the
-     *  same conditions as [logIdToVideoMs], or if no entry in the tab has a parseable `ts`. */
+    /** Inverse of [logIdToVideoMs]: the entry whose mapped video-time is closest to [videoMs]. */
     fun videoMsToNearestLogId(tab: LogTab, videoMs: Long): Int? {
         val anchor = tab.attachedVideo?.anchor ?: return null
         val elapsed = monotonicLogElapsedById(tab)
@@ -2885,82 +3138,588 @@ class AppState(
         return bestId
     }
 
+    // (id, ts) pair identifying a row that either triggered a committed rollover or was suppressed
+    // as a lone outlier — see buildLogElapsedIndex. Deliberately just id+ts, never message/tag: this
+    // exists to be printed in the Follow diagnostic dump, which the user hands back over a
+    // confidential log.
+    internal data class RolloverSample(val id: Int, val ts: String)
+
+    /**
+     * The elapsed timeline of one tab's whole log, in three shapes the video mapping needs: an
+     * id->elapsed map for point lookups, id/elapsed arrays in log order for floor searches, and the
+     * range endpoints. Cached per tab against `logDataRef` identity because building it is O(n)
+     * over every row and the Follow UI resolves a position on *every* decoded frame — a 300k-row
+     * tab measured ~20ms per rebuild, and the panel used to pay for four of them per frame.
+     *
+     * [ascending] records whether `elapsed` is non-decreasing. It normally is, but a log with real
+     * out-of-order rows (see the day-rollover rule below) can dip, and a binary search would then
+     * be wrong — so the floor search falls back to a linear scan for those.
+     */
+    private class LogElapsedIndex(
+        val logDataRef: List<LogEntry>,
+        val byId: Map<Int, Long>,
+        val ids: IntArray,
+        val elapsed: LongArray,
+        val ascending: Boolean,
+        // Stored, not computed on read: videoFollowMapping consults both on every decoded frame, and
+        // as getters over a 300k-row LongArray they were the whole remaining per-frame cost.
+        val minElapsed: Long,
+        val maxElapsed: Long,
+        // Rollover observability for followDiagnostics (see its doc comment) — counts are exact,
+        // sample lists are capped at ROLLOVER_SAMPLE_CAP. These ALWAYS reflect what the per-row
+        // classifier decided (see buildLogElapsedIndex's doc comment on the lone-outlier guard),
+        // regardless of [dayOffsetModelValid] below — "applied" is a candidate the classifier called
+        // a real rollover, "suppressed" is one it called a lone outlier. When the global model is
+        // invalid, NEITHER classification actually shaped `elapsed` (raw time-of-day was used
+        // unconditionally instead), so a reader must check [dayOffsetModelValid] before trusting
+        // these counts as "what happened to the numbers below" rather than "what the per-row
+        // heuristic would have done in isolation."
+        val rolloverAppliedCount: Int,
+        val rolloverAppliedSamples: List<RolloverSample>,
+        val rolloverSuppressedCount: Int,
+        val rolloverSuppressedSamples: List<RolloverSample>,
+        // False when this tab's log is a concatenated multi-buffer capture (or otherwise violates
+        // the single-monotonic-timeline assumption) and the whole accumulating-dayOffset model was
+        // abandoned in favor of raw time-of-day for every row — see buildLogElapsedIndex's doc
+        // comment for the detection rule and rationale. True is the overwhelming common case (one
+        // capture, at most one genuine midnight crossing).
+        val dayOffsetModelValid: Boolean,
+    )
+
+    private val elapsedIndexByTab = ConcurrentHashMap<String, LogElapsedIndex>()
+
+    private fun logElapsedIndex(tab: LogTab): LogElapsedIndex {
+        elapsedIndexByTab[tab.id]?.takeIf { it.logDataRef === tab.logData }?.let { return it }
+        return buildLogElapsedIndex(tab).also { elapsedIndexByTab[tab.id] = it }
+    }
+
+    // Forward scan from `fromIndex` for the next row with a parseable `ts`, skipping TS_UNKNOWN
+    // (blank ts on brief/RAW rows) — bounded by ROLLOVER_LOOKAHEAD_SCAN_CAP. Returns null when the
+    // scan runs off the end of the log or hits the cap first, either of which the caller treats as
+    // "no confirmation available."
+    private fun nextParseableMillis(data: List<LogEntry>, fromIndex: Int): Long? {
+        val limit = minOf(data.size, fromIndex + ROLLOVER_LOOKAHEAD_SCAN_CAP)
+        for (i in fromIndex until limit) {
+            val millis = parseMillisOfDay(data[i].ts)
+            if (millis != TS_UNKNOWN) return millis
+        }
+        return null
+    }
+
     /**
      * Unfolds time-of-day timestamps in log order into an elapsed timeline. Unlike a one-off
      * `deltaMillis(anchor, row)`, this works in both directions around midnight and across
      * multiple rollovers while preserving small real backwards jumps. Rows without a timestamp
      * remain unmappable.
+     *
+     * A backwards jump past half a day is ambiguous on `ts` alone (no date survives parsing — see
+     * parseMillisOfDay): it is either a genuine midnight rollover, or a single anomalous row (a
+     * stale clock, a concatenated bugreport section on a different time base, an out-of-order merge
+     * artifact) that has nothing to do with the next day. Committing +24h for the latter is
+     * permanent and silent — every later row inherits the wrong offset, and Follow (which floors on
+     * this timeline) then strands itself on the last row before the bad one for the rest of
+     * playback, unable to ever reach anything after it. Distinguished here by looking one row
+     * further: a genuine rollover's very next parseable row continues from the LOW post-jump time;
+     * a lone outlier's next row instead resumes close to the PRE-jump baseline, as if the bad row
+     * had never appeared. Only that second, confirming row makes the call — a single sample is
+     * deliberately not enough to accuse a row of being fabricated. When no confirming row exists
+     * (candidate is at/near end of file, or ROLLOVER_LOOKAHEAD_SCAN_CAP is exhausted by unparseable
+     * rows), the old unconditional-rollover behavior applies, since there is nothing to demonstrate
+     * it should be suppressed and the existing real-rollover tests must still pass on a
+     * lookahead-free (2-row) fixture.
+     *
+     * A single accumulating `dayOffset` additionally assumes the log is ONE monotonically-advancing
+     * capture — true for a plain logcat grab, false for an Android bug report, which concatenates
+     * several buffers (main/system/radio/events/kernel) one after another. LogParser drops the
+     * `------ ... LOG ------` separators between them (nothing survives to mark the boundary), and
+     * each buffer restarts at its OWN earlier timestamp for potentially thousands of rows — too many
+     * to be a lone outlier, so the guard above correctly commits the rollover. But that commit is
+     * permanent: every row for the rest of the file inherits +24h, including once a later buffer
+     * resumes at the ORIGINAL (correct) time-of-day, which now reads as tomorrow and can never again
+     * be reached by a floor search. This is not a hypothetical — it is the confirmed mechanism behind
+     * a real report where Follow held ~46s (later, ~24h) behind a correct target.
+     *
+     * Detecting this from `ts` alone (no date survives parsing) leans on one fact: a genuine midnight
+     * crossing never sees the log's raw time-of-day climb back up to (or past) where it was just
+     * before the crossing — that would take another ~24h of real capture. A concatenated buffer's
+     * next segment can and does resume anywhere, including back above the pre-jump point, because its
+     * clock has nothing to do with the previous buffer's. So: once ANY row after the first committed
+     * rollover has a raw time-of-day exceeding that rollover's pre-jump baseline, or a SECOND
+     * candidate rollover ever gets committed, the single-timeline assumption is treated as violated
+     * for the WHOLE file and `dayOffset` is abandoned entirely — every row maps to its bare
+     * millis-of-day instead (`dayOffsetModelValid = false`). Most real logcat captures span far less
+     * than 24h, so raw time-of-day is then exactly the right timeline, multi-buffer or not.
+     *
+     * This does mean a log that both crosses midnight for real AND concatenates buffers (or crosses
+     * midnight twice) cannot be told apart from a multi-buffer log by `ts` alone — genuinely
+     * ambiguous, and resolved here in favor of raw time-of-day, which degrades far more gracefully for
+     * Follow (a floor search that's merely non-monotonic in a few places) than a silent, permanent
+     * +24h would (a floor search that's provably and unrecoverably wrong for the rest of the file).
+     * Deliberately scoped to THIS timeline only, not [com.openlog.utils.LogTime.deltaMillis] or
+     * [com.openlog.utils.LogMerge]'s own 12h heuristics: those compute one-off deltas between
+     * ADJACENT rows for display (the Δt gutter, a merge sort key) — a wrong call there mislabels one
+     * row's shown delta, it does not accumulate into a permanent, unbounded corruption of everything
+     * after it the way this timeline's running `dayOffset` does, so the failure mode this guards
+     * against does not exist there.
      */
-    private fun monotonicLogElapsedById(tab: LogTab): Map<Int, Long> {
-        val result = LinkedHashMap<Int, Long>()
+    private fun buildLogElapsedIndex(tab: LogTab): LogElapsedIndex {
+        val data = tab.logData
+        val byId = LinkedHashMap<Int, Long>()
         var previousMillis: Long? = null
         var dayOffset = 0L
         val dayMs = 24L * 60L * 60L * 1_000L
-        for (entry in tab.logData) {
+        val rolloverSamples = mutableListOf<RolloverSample>()
+        var rolloverCount = 0
+        val suppressedSamples = mutableListOf<RolloverSample>()
+        var suppressedCount = 0
+        // Set on the FIRST committed (non-suppressed) rollover to that row's pre-jump baseline —
+        // see the doc comment above. Once set, every later row (any buffer, any segment) is checked
+        // against this SAME value for the rest of the file, not just the row that set it: a
+        // concatenated buffer resuming above the original time-of-day is the tell, however many rows
+        // later that resumption happens to land.
+        var firstCommittedBaseline: Long? = null
+        var modelInvalidated = false
+        for (i in data.indices) {
+            val entry = data[i]
             val millis = parseMillisOfDay(entry.ts)
             if (millis == TS_UNKNOWN) continue
+            firstCommittedBaseline?.let { fcb -> if (millis > fcb) modelInvalidated = true }
+            val baseline = previousMillis
             // Preserve LogTime.deltaMillis's established interpretation: only a backwards jump
-            // larger than half a day is midnight. Small backwards jumps are real out-of-order
-            // rows/clock corrections, not a fabricated next-day recording.
-            if (previousMillis != null && millis - previousMillis < -(dayMs / 2)) dayOffset += dayMs
-            result[entry.id] = dayOffset + millis
+            // larger than half a day is midnight-shaped at all. Small backwards jumps are real
+            // out-of-order rows/clock corrections, not a fabricated next-day recording, and never
+            // reach this branch.
+            if (baseline != null && millis - baseline < -(dayMs / 2)) {
+                val next = nextParseableMillis(data, i + 1)
+                val resumesPreJumpBaseline = next != null && kotlin.math.abs(next - baseline) <= dayMs / 2
+                val doesNotContinueFromThisRow = next != null && kotlin.math.abs(next - millis) > dayMs / 2
+                if (resumesPreJumpBaseline && doesNotContinueFromThisRow) {
+                    // Lone outlier: leave dayOffset (and `previousMillis`, the comparison baseline
+                    // for the row after this one) untouched, so the next row is judged against the
+                    // same pre-jump baseline this row itself failed to continue from. This row still
+                    // gets an elapsed value (so it has *something* mappable), just an unreliable one
+                    // — expected to make `ascending` false, which is exactly what routes the floor
+                    // search to the already-existing linear-scan fallback instead of silently
+                    // trusting a corrupted binary search.
+                    suppressedCount++
+                    if (suppressedSamples.size < ROLLOVER_SAMPLE_CAP) suppressedSamples += RolloverSample(entry.id, entry.ts)
+                    byId[entry.id] = dayOffset + millis
+                    continue
+                }
+                dayOffset += dayMs
+                rolloverCount++
+                if (rolloverSamples.size < ROLLOVER_SAMPLE_CAP) rolloverSamples += RolloverSample(entry.id, entry.ts)
+                if (firstCommittedBaseline == null) {
+                    firstCommittedBaseline = baseline
+                } else {
+                    // A second committed rollover is itself invalidating, independent of whether
+                    // anything ever climbs back above the first baseline — see doc comment.
+                    modelInvalidated = true
+                }
+            }
+            byId[entry.id] = dayOffset + millis
             previousMillis = millis
         }
-        return result
-    }
 
-    /** Current log row for a transport position, suitable for a follow-playhead UI. */
-    fun mappedVideoLogId(tabId: String, videoMs: Long): Int? =
-        tab(tabId)?.let { videoMsToNearestLogId(it, videoMs) }
-
-    /**
-     * Chooses the displayed row nearest [mappedLogId] in the log's actual timeline. The viewer
-     * reports its derived rows after filtering and folding, so this deliberately uses `rowIds`
-     * rather than `allIds`: headers are navigable anchors, but they are not a meaningful playhead
-     * selection. Returning null when the filtered view has no timestamped rows leaves the existing
-     * selection alone instead of replacing it with an id the user cannot see.
-     *
-     * Crucially, row ids are identities, not elapsed time. A filtered log can hide thousands of
-     * repeated/nearby records between two visible rows, so choosing by id distance would make a
-     * line a minute ahead appear closer than the anchor after only a second of playback. Build the
-     * timeline from the complete source order first, then choose among the visible candidates by
-     * that timeline. On an exact tie, the earlier displayed row wins because `rowIds` are source
-     * ordered and `minWithOrNull` retains the first equal candidate.
-     */
-    private fun closestVisibleFollowLogId(tab: LogTab, mappedLogId: Int): Int? {
-        val visibleRows = visibleItemsByTab[tab.id]?.rowIds
-            ?: computeItems(tab, applyFilter = true).filterIsInstance<LogItem.Row>().map { it.entry.id }.toIntArray()
-        if (visibleRows.isEmpty()) return null
-
-        val elapsed = monotonicLogElapsedById(tab)
-        val mappedElapsed = elapsed[mappedLogId] ?: return null
-        var closestId: Int? = null
-        var closestDelta = Long.MAX_VALUE
-        for (visibleId in visibleRows) {
-            val visibleElapsed = elapsed[visibleId] ?: continue
-            val delta = kotlin.math.abs(visibleElapsed - mappedElapsed)
-            if (delta < closestDelta) {
-                closestDelta = delta
-                closestId = visibleId
+        val dayOffsetModelValid = !modelInvalidated
+        if (!dayOffsetModelValid) {
+            // Discard the dayOffset-accumulated values and rebuild with the offset pinned at 0 for
+            // every row — raw time-of-day, unconditionally. Only paid on this rare path: the common
+            // (single-timeline) case above already built the real result in one pass.
+            byId.clear()
+            for (entry in data) {
+                val millis = parseMillisOfDay(entry.ts)
+                if (millis != TS_UNKNOWN) byId[entry.id] = millis
             }
         }
-        return closestId
+
+        val ids = IntArray(byId.size)
+        val elapsed = LongArray(byId.size)
+        var i = 0
+        var ascending = true
+        for ((id, value) in byId) {
+            if (i > 0 && value < elapsed[i - 1]) ascending = false
+            ids[i] = id
+            elapsed[i] = value
+            i++
+        }
+        return LogElapsedIndex(
+            logDataRef = tab.logData,
+            byId = byId,
+            ids = ids,
+            elapsed = elapsed,
+            ascending = ascending,
+            minElapsed = if (elapsed.isEmpty()) 0L else elapsed.min(),
+            maxElapsed = if (elapsed.isEmpty()) 0L else elapsed.max(),
+            rolloverAppliedCount = rolloverCount,
+            rolloverAppliedSamples = rolloverSamples,
+            rolloverSuppressedCount = suppressedCount,
+            rolloverSuppressedSamples = suppressedSamples,
+            dayOffsetModelValid = dayOffsetModelValid,
+        )
+    }
+
+    private fun monotonicLogElapsedById(tab: LogTab): Map<Int, Long> = logElapsedIndex(tab).byId
+
+    /**
+     * Index of the last entry in [elapsed] whose value is at or before [target] — i.e. the state
+     * the log was in at that moment — or -1 when [target] precedes every entry. O(log n) on the
+     * usual non-decreasing timeline, O(n) on a log with out-of-order rows. Ties resolve to the
+     * *last* duplicate: with several rows sharing a timestamp, the newest is what was current.
+     */
+    private fun floorIndexOfElapsed(elapsed: LongArray, ascending: Boolean, target: Long): Int {
+        if (elapsed.isEmpty()) return -1
+        if (!ascending) {
+            var found = -1
+            for (i in elapsed.indices) if (elapsed[i] <= target) found = i
+            return found
+        }
+        var lo = 0
+        var hi = elapsed.lastIndex
+        var found = -1
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            if (elapsed[mid] <= target) {
+                found = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return found
+    }
+
+    /**
+     * The single source of truth for "what would clicking Follow at this playhead position select"
+     * — maps [videoMs] to the last currently visible timestamp at or before it. This is a floor,
+     * not a nearest-neighbor lookup: playback must never jump ahead to a future visible line.
+     */
+    fun followTargetVisibleLogId(tabId: String, videoMs: Long): Int? =
+        tab(tabId)?.let { tab ->
+            val anchor = tab.attachedVideo?.anchor ?: return@let null
+            val anchorElapsed = logElapsedIndex(tab).byId[anchor.logId] ?: return@let null
+            lastVisibleLogIdAtOrBefore(tab, anchorElapsed + (videoMs - anchor.videoMs))
+        }
+
+    /**
+     * Chooses the last displayed entry at or before [mappedLogId]. Returning null when the filtered
+     * view has no timestamped entry leaves the existing selection alone instead of replacing it
+     * with an id the user cannot see.
+     *
+     * Source order settles equal timestamps: the last duplicate is the state that was available at
+     * that moment. If the playhead is before every visible timestamp, the first visible timestamp
+     * is returned rather than jumping to the end.
+     */
+    private fun closestVisibleFollowLogId(tab: LogTab, mappedLogId: Int): Int? {
+        val mappedElapsed = logElapsedIndex(tab).byId[mappedLogId] ?: return null
+        return lastVisibleLogIdAtOrBefore(tab, mappedElapsed)
+    }
+
+    /**
+     * Every timestamped entry the viewer currently displays, in display order, paired with its
+     * elapsed time — the searchable form of "what Follow is allowed to select". Cached against the
+     * identity of the viewer's own id array (a fresh array per item-list computation, so a
+     * filter/expand change invalidates this for free) for the same per-frame reason as
+     * [LogElapsedIndex].
+     *
+     * Deliberately built from `allIds`, NOT `rowIds`. Every Seq/Manual/StackTrace header is itself
+     * one real log entry rendered in header style (see ItemsSummary), and `rowIds` holds only
+     * `LogItem.Row`. Since stack-trace folding is always on, restricting Follow to `rowIds` made any
+     * line that happened to head a group unreachable *while plainly visible on screen*: the playhead
+     * would sail past it and Follow would sit on the last plain row before it for the rest of
+     * playback — reported as "the same line is calculated as nearest but shouldn't be", with an
+     * on-screen line 11 seconds later that Follow refused to move to. A collapsed group contributes
+     * only its header here (its members aren't displayed), which is exactly the right target for a
+     * playhead landing inside that group.
+     */
+    private class FollowFloorIndex(
+        val logDataRef: List<LogEntry>,
+        val visibleIdsRef: IntArray,
+        val summaryVersion: Int,
+        val ids: IntArray,
+        val elapsed: LongArray,
+        val ascending: Boolean,
+        // True when this run had no ItemsSummary to read (visibleItemsByTab[tab.id] was null) and
+        // fell back to a fresh computeItems() call instead — surfaced by followDiagnostics so a
+        // diagnostic dump can tell "resolved against what the viewer actually reported" apart from
+        // "resolved against a freshly recomputed guess because the viewer hadn't reported yet."
+        val fromSummaryFallback: Boolean,
+    )
+
+    private val followFloorIndexByTab = ConcurrentHashMap<String, FollowFloorIndex>()
+
+    private fun followFloorIndex(tab: LogTab): FollowFloorIndex {
+        val elapsedIndex = logElapsedIndex(tab)
+        // Part of the cache key AND the reason a Compose caller re-derives once a newly computed
+        // summary lands: visibleItemsByTab is a plain map, so this snapshot-state read is the only
+        // thing that invalidates a composition holding a stale visible row set.
+        val summaryVersion = visibleItemsVersion
+        val summaryVisibleIds = visibleItemsByTab[tab.id]?.allIds
+        if (summaryVisibleIds == null) {
+            // No summary yet (a freshly opened tab whose viewer hasn't reported its first item list).
+            // Derive it, but don't cache: the derived array is a new instance every time, so a cache
+            // keyed on identity could never hit anyway. computeItems memoizes internally.
+            val derived = computeItems(tab, applyFilter = true).map(::logItemEntryId).toIntArray()
+            return buildFollowFloorIndex(tab, derived, summaryVersion, elapsedIndex, fromSummaryFallback = true)
+        }
+        followFloorIndexByTab[tab.id]
+            ?.takeIf {
+                it.logDataRef === tab.logData &&
+                    it.visibleIdsRef === summaryVisibleIds &&
+                    it.summaryVersion == summaryVersion
+            }
+            ?.let { return it }
+        return buildFollowFloorIndex(tab, summaryVisibleIds, summaryVersion, elapsedIndex, fromSummaryFallback = false)
+            .also { followFloorIndexByTab[tab.id] = it }
+    }
+
+    private fun buildFollowFloorIndex(
+        tab: LogTab,
+        visibleIds: IntArray,
+        summaryVersion: Int,
+        elapsedIndex: LogElapsedIndex,
+        fromSummaryFallback: Boolean,
+    ): FollowFloorIndex {
+        val ids = IntArray(visibleIds.size)
+        val elapsed = LongArray(visibleIds.size)
+        var n = 0
+        var ascending = true
+        for (visibleId in visibleIds) {
+            val value = elapsedIndex.byId[visibleId] ?: continue
+            if (n > 0 && value < elapsed[n - 1]) ascending = false
+            ids[n] = visibleId
+            elapsed[n] = value
+            n++
+        }
+        return FollowFloorIndex(
+            logDataRef = tab.logData,
+            visibleIdsRef = visibleIds,
+            summaryVersion = summaryVersion,
+            ids = ids.copyOf(n),
+            elapsed = elapsed.copyOf(n),
+            ascending = ascending,
+            fromSummaryFallback = fromSummaryFallback,
+        )
+    }
+
+    /**
+     * The last displayed row at or before [targetElapsed]. Row ids are identities, not time: a
+     * filtered log can hide thousands of records between two visible rows, so the search runs over
+     * the timeline built from the complete source order, restricted to the visible candidates.
+     *
+     * If [targetElapsed] precedes every visible timestamp, the first visible one is returned rather
+     * than jumping to the end. Null only when the current filter leaves no timestamped row at all,
+     * which leaves the existing selection alone instead of replacing it with an unseeable id.
+     */
+    private fun lastVisibleLogIdAtOrBefore(tab: LogTab, targetElapsed: Long): Int? {
+        val index = followFloorIndex(tab)
+        if (index.ids.isEmpty()) return null
+        val floor = floorIndexOfElapsed(index.elapsed, index.ascending, targetElapsed)
+        return if (floor >= 0) index.ids[floor] else index.ids[0]
+    }
+
+    // Tells HIDDEN_BY_FILTER apart from HIDDEN_BY_COLLAPSE for a fullFloorId that differs from the
+    // visible floor: a floor mismatch alone is ambiguous between "the row fails the active filter"
+    // and "the row passes the filter but a collapsed sequence/manual/stack-trace group folds it away
+    // under a header elsewhere" — both LEAVE the row out of followFloorIndex's visible id set, for
+    // completely different reasons. Verified against the exact same passesFilter() computeItems
+    // itself runs (utils/Filter.kt's visibleEntries), so this can never disagree with what the
+    // filtered view actually shows. Missing tab.rmap entry (should not happen for a real id) treats
+    // as filtered, the more actionable of the two guesses.
+    private fun fullFloorHiddenReason(tab: LogTab, fullFloorId: Int): FollowMappingStatus {
+        val entry = tab.rmap[fullFloorId] ?: return FollowMappingStatus.HIDDEN_BY_FILTER
+        return if (passesFilter(entry, tab.filter)) {
+            FollowMappingStatus.HIDDEN_BY_COLLAPSE
+        } else {
+            FollowMappingStatus.HIDDEN_BY_FILTER
+        }
+    }
+
+    /**
+     * Explains what Follow would do at [videoMs], for a readout — not a navigation call. It is the
+     * one place that resolves the playhead against BOTH the full log and the visible rows, which is
+     * what lets [FollowMappingStatus.HIDDEN_BY_FILTER]/[FollowMappingStatus.HIDDEN_BY_COLLAPSE] be
+     * distinguishable at all: the exact moment lands on a row that either fails the filter, or that
+     * passes it but sits folded inside a collapsed group — either way Follow correctly holds on an
+     * older visible line and needs to say which one rather than looking frozen or blaming the wrong
+     * cause (see fullFloorHiddenReason). [mappedNearestLogId] is always the row Follow would
+     * actually select — the same value [followTargetVisibleLogId] returns — so the readout can never
+     * disagree with the selection. Pure (no controller access), so it is directly unit-testable.
+     */
+    fun videoFollowMapping(tabId: String, videoMs: Long): VideoFollowMapping {
+        val tab = tab(tabId)
+        val anchor = tab?.attachedVideo?.anchor
+        val elapsedIndex = tab?.let(::logElapsedIndex)
+        val anchorElapsed = anchor?.let { elapsedIndex?.byId?.get(it.logId) }
+        if (tab == null || anchor == null || elapsedIndex == null || anchorElapsed == null || elapsedIndex.ids.isEmpty()) {
+            return VideoFollowMapping(
+                anchorLogTs = tab?.rmap?.get(anchor?.logId ?: -1)?.ts,
+                anchorVideoMs = anchor?.videoMs,
+                mappedNearestLogId = null,
+                mappedNearestLogTs = null,
+                status = FollowMappingStatus.NO_ANCHOR,
+                mappedElapsedMs = null,
+            )
+        }
+
+        val mappedElapsed = anchorElapsed + (videoMs - anchor.videoMs)
+        val visibleFloorId = lastVisibleLogIdAtOrBefore(tab, mappedElapsed)
+        // The row the *unfiltered* log was on at this moment. When it differs from the visible
+        // floor, the line that actually matches the video isn't independently visible — the single
+        // most confusing filtered/folded-view state, and the whole reason these statuses exist.
+        val fullFloor = floorIndexOfElapsed(elapsedIndex.elapsed, elapsedIndex.ascending, mappedElapsed)
+        val fullFloorId = fullFloor.takeIf { it >= 0 }?.let { elapsedIndex.ids[it] }
+        val status = when {
+            visibleFloorId == null -> FollowMappingStatus.NO_VISIBLE_ROW
+            mappedElapsed < elapsedIndex.minElapsed -> FollowMappingStatus.BEFORE_FIRST
+            mappedElapsed > elapsedIndex.maxElapsed -> FollowMappingStatus.AFTER_LAST
+            fullFloorId != null && fullFloorId != visibleFloorId -> fullFloorHiddenReason(tab, fullFloorId)
+            else -> FollowMappingStatus.ON_VISIBLE_ROW
+        }
+        return VideoFollowMapping(
+            anchorLogTs = tab.rmap[anchor.logId]?.ts,
+            anchorVideoMs = anchor.videoMs,
+            mappedNearestLogId = visibleFloorId,
+            mappedNearestLogTs = visibleFloorId?.let { tab.rmap[it]?.ts },
+            status = status,
+            mappedElapsedMs = mappedElapsed,
+        )
+    }
+
+    // Approximate "is any filtering criterion configured at all" check backing
+    // FollowDiagnostics.filterActive — deliberately not the real matching decision (that's
+    // passesFilter, already used per-row by fullFloorHiddenReason). Mirrors utils/Filter.kt's own
+    // hasActiveBaseFilter() shape but across BOTH modes at once (that function is mode-scoped and
+    // private), since a diagnostic dump needs one summary boolean regardless of which mode is active.
+    private fun isFilterConfigured(filter: Filter): Boolean =
+        filter.levels != LogLevel.entries.toSet() ||
+            filter.activeTags.isNotEmpty() || filter.pkgPrefixes.isNotEmpty() ||
+            filter.excludeTags.isNotEmpty() || filter.excludePkgPrefixes.isNotEmpty() ||
+            filter.kwText.isNotBlank() || filter.excludeKw.isNotBlank() || filter.kwInTag.isNotBlank() ||
+            filter.pidTidFilter.isNotBlank() || filter.messageRules.any { it.enabled }
+
+    private fun List<RolloverSample>.toDiagnosticEvents() = map { RolloverDiagnosticEvent(it.id, it.ts) }
+
+    /**
+     * Assembles the full [FollowDiagnostics] snapshot for [tabId] at [videoMs] — the observability
+     * counterpart to [videoFollowMapping]: where that function returns just enough to render one
+     * readout line, this returns every number needed to tell the three standing hypotheses for "Follow
+     * looks stuck" apart (see the plan doc/PR description this shipped with): a spurious day-rollover
+     * corrupting the elapsed timeline, a genuinely-filtered-out match, or a match merely folded inside
+     * a collapsed sequence/manual/stack-trace group. Deliberately duplicates (rather than shares) some
+     * of videoFollowMapping's floor-resolution arithmetic: that function only needs the resolved ids,
+     * this one also needs the intermediate array POSITIONS (to walk forward for candidates), and
+     * threading positions through the hot per-frame function just for this rarely-called diagnostic
+     * would cost every real caller a signature change for no benefit.
+     */
+    fun followDiagnostics(tabId: String, videoMs: Long): FollowDiagnostics {
+        val tab = tab(tabId)
+        val anchor = tab?.attachedVideo?.anchor
+        val elapsedIndex = tab?.let(::logElapsedIndex)
+        val anchorElapsed = anchor?.let { elapsedIndex?.byId?.get(it.logId) }
+        val summary = visibleItemsByTab[tabId]
+        if (tab == null || anchor == null || elapsedIndex == null || anchorElapsed == null || elapsedIndex.ids.isEmpty()) {
+            return FollowDiagnostics(
+                tabId = tabId,
+                hasAnchor = anchor != null,
+                anchor = anchor?.let { a -> FollowDiagnosticRow(a.logId, tab.rmap[a.logId]?.ts, elapsedIndex?.byId?.get(a.logId)) },
+                anchorVideoMs = anchor?.videoMs,
+                playheadVideoMs = videoMs,
+                mappedElapsedMs = null,
+                mappedElapsedClock = null,
+                chosenVisibleFloor = null,
+                nextVisibleCandidatesAfterFloor = emptyList(),
+                visibleCandidateCount = 0,
+                candidatesFromSummaryFallback = false,
+                fullLogFloor = null,
+                status = FollowMappingStatus.NO_ANCHOR,
+                rolloverAppliedCount = elapsedIndex?.rolloverAppliedCount ?: 0,
+                rolloverAppliedSamples = elapsedIndex?.rolloverAppliedSamples?.toDiagnosticEvents() ?: emptyList(),
+                rolloverSuppressedCount = elapsedIndex?.rolloverSuppressedCount ?: 0,
+                rolloverSuppressedSamples = elapsedIndex?.rolloverSuppressedSamples?.toDiagnosticEvents() ?: emptyList(),
+                dayOffsetModelValid = elapsedIndex?.dayOffsetModelValid ?: true,
+                showUnfiltered = tab?.showUnfiltered ?: false,
+                filterActive = tab?.let { isFilterConfigured(it.filter) } ?: false,
+                totalLogDataSize = tab?.logData?.size ?: 0,
+                displayedItemCount = summary?.allIds?.size ?: 0,
+            )
+        }
+
+        val mappedElapsed = anchorElapsed + (videoMs - anchor.videoMs)
+        val floorIdx = followFloorIndex(tab)
+        val visibleFloorPos = floorIndexOfElapsed(floorIdx.elapsed, floorIdx.ascending, mappedElapsed)
+        // Mirrors lastVisibleLogIdAtOrBefore's own "before every visible timestamp -> first visible
+        // one, not the end" rule, but keeping the POSITION (not just the id) so candidates below can
+        // walk forward from it.
+        val chosenPos = if (visibleFloorPos >= 0) visibleFloorPos else if (floorIdx.ids.isNotEmpty()) 0 else -1
+        val visibleFloorId = chosenPos.takeIf { it >= 0 }?.let { floorIdx.ids[it] }
+
+        val fullFloorPos = floorIndexOfElapsed(elapsedIndex.elapsed, elapsedIndex.ascending, mappedElapsed)
+        val fullFloorId = fullFloorPos.takeIf { it >= 0 }?.let { elapsedIndex.ids[it] }
+
+        val status = when {
+            visibleFloorId == null -> FollowMappingStatus.NO_VISIBLE_ROW
+            mappedElapsed < elapsedIndex.minElapsed -> FollowMappingStatus.BEFORE_FIRST
+            mappedElapsed > elapsedIndex.maxElapsed -> FollowMappingStatus.AFTER_LAST
+            fullFloorId != null && fullFloorId != visibleFloorId -> fullFloorHiddenReason(tab, fullFloorId)
+            else -> FollowMappingStatus.ON_VISIBLE_ROW
+        }
+
+        fun rowAt(pos: Int): FollowDiagnosticRow = FollowDiagnosticRow(floorIdx.ids[pos], tab.rmap[floorIdx.ids[pos]]?.ts, floorIdx.elapsed[pos])
+        val chosenRow = chosenPos.takeIf { it >= 0 }?.let(::rowAt)
+        val candidates = if (chosenPos >= 0) {
+            ((chosenPos + 1) until floorIdx.ids.size).take(FOLLOW_DIAGNOSTIC_CANDIDATE_COUNT).map(::rowAt)
+        } else {
+            emptyList()
+        }
+        val fullFloorRow = fullFloorId?.let { id -> FollowDiagnosticRow(id, tab.rmap[id]?.ts, elapsedIndex.byId[id]) }
+        // Falls back to a fresh computeItems() count exactly when followFloorIndex itself did (no
+        // summary reported yet) — computeItems memoizes internally, so this second call is a cache
+        // hit whenever floorIdx already forced the same recompute, not a second real pass.
+        val displayedItemCount = summary?.allIds?.size ?: computeItems(tab, applyFilter = true).size
+
+        return FollowDiagnostics(
+            tabId = tabId,
+            hasAnchor = true,
+            anchor = FollowDiagnosticRow(anchor.logId, tab.rmap[anchor.logId]?.ts, anchorElapsed),
+            anchorVideoMs = anchor.videoMs,
+            playheadVideoMs = videoMs,
+            mappedElapsedMs = mappedElapsed,
+            mappedElapsedClock = formatElapsedAsClock(mappedElapsed),
+            chosenVisibleFloor = chosenRow,
+            nextVisibleCandidatesAfterFloor = candidates,
+            visibleCandidateCount = floorIdx.ids.size,
+            candidatesFromSummaryFallback = floorIdx.fromSummaryFallback,
+            fullLogFloor = fullFloorRow,
+            status = status,
+            rolloverAppliedCount = elapsedIndex.rolloverAppliedCount,
+            rolloverAppliedSamples = elapsedIndex.rolloverAppliedSamples.toDiagnosticEvents(),
+            rolloverSuppressedCount = elapsedIndex.rolloverSuppressedCount,
+            rolloverSuppressedSamples = elapsedIndex.rolloverSuppressedSamples.toDiagnosticEvents(),
+            dayOffsetModelValid = elapsedIndex.dayOffsetModelValid,
+            showUnfiltered = tab.showUnfiltered,
+            filterActive = isFilterConfigured(tab.filter),
+            totalLogDataSize = tab.logData.size,
+            displayedItemCount = displayedItemCount,
+        )
     }
 
     /**
      * Selects and centers the visible row represented by a mapped playhead position.
      *
-     * A video timestamp may map to a row excluded by the current filter. Resolve that to the
-     * closest displayed log row before changing selection, then avoid publishing another
-     * navigation request when several mapped rows resolve to that same visible row. Follow uses
-     * a distinct viewport mode so rapid playhead updates do not fight the annotation jump path's
-     * deliberate two-phase re-centering.
+     * A video timestamp may map to a filtered-out row. Resolve that to the last visible row at or
+     * before its timestamp, then avoid publishing another request when playback remains there.
+     *
+     * [forceRecenter] skips the "already selected" dedupe: the automatic follow effect passes
+     * false (rapid playhead ticks that keep resolving to the same visible row must not spam
+     * re-centering requests), while the explicit "Logs" button passes true — the row can already
+     * be selected but scrolled off-screen, and a click on that button must always re-center it.
      */
-    fun navigateToVideoLog(tabId: String, logId: Int) {
+    fun navigateToVideoLog(tabId: String, logId: Int, forceRecenter: Boolean = false) {
         val currentTab = tab(tabId) ?: return
         if (logId !in currentTab.rmap) return
         val visibleLogId = closestVisibleFollowLogId(currentTab, logId) ?: return
-        if (currentTab.selected == setOf(visibleLogId)) return
+        if (!forceRecenter && currentTab.selected == setOf(visibleLogId)) return
         // Follow navigation is the one selection source that deliberately does not turn Follow
         // logs back off. Do not activate the already-active tab: the redundant state write can
         // restart composable effects while a follow scroll is in flight.
@@ -3503,6 +4262,8 @@ class AppState(
                 tailCoordinator.cancelTailingFor(tabId)
                 videoControllers.remove(tabId)?.close()
                 visibleItemsByTab.remove(tabId)
+                elapsedIndexByTab.remove(tabId)
+                followFloorIndexByTab.remove(tabId)
                 invalidateComputeCache(tabId)
                 logViewerScrollStateStore.removeTab(tabId)
             }
@@ -3517,6 +4278,8 @@ class AppState(
         filterDraftsByTab = filterDraftsByTab - tabIds
         activeFilterDraftTabIds = activeFilterDraftTabIds - tabIds
         transientRegexSearchTabIds = transientRegexSearchTabIds - tabIds
+        // Closed tabs may have held the cache's last reference to one or more archive-video files.
+        pruneArchiveVideoCache()
     }
 
     // Ships "merge already-open tabs" (v1) — data's already in memory, no re-parsing needed.
@@ -4104,7 +4867,23 @@ class AppState(
         return runCatching {
             file.parentFile?.mkdirs()
             file.writeText(buildMd(t, settings))
+            writeAnnotationFrameImages(t, file)
         }.isSuccess
+    }
+
+    // Writes every AnnBlock.Image's bytes into a "<mdFile-base-name>_frames/" subfolder next to
+    // [mdFile], named via the SAME annotationImageFileName() ordinal buildMd()'s JIRA_JAVA style
+    // uses for its `!frame-0N.jpg!` wiki anchors — so any place that writes a user-facing analysis
+    // .md also leaves the images those anchors reference sitting right beside it. No-ops (and never
+    // creates the subfolder) when the tab has no image blocks.
+    private fun writeAnnotationFrameImages(t: LogTab, mdFile: File) {
+        val images = t.annotations.blocks.filterIsInstance<AnnBlock.Image>()
+        if (images.isEmpty()) return
+        val framesDir = File(mdFile.parentFile, "${mdFile.nameWithoutExtension}_frames")
+        framesDir.mkdirs()
+        // writeFileAtomically is text/Writer-only (AutosaveCodec) — image bytes need a plain
+        // File.writeBytes.
+        images.forEachIndexed { index, image -> File(framesDir, annotationImageFileName(index + 1, image.format)).writeBytes(image.bytes) }
     }
 
     fun exportFilteredTo(tabId: String, file: File, csv: Boolean): Boolean {
@@ -4149,10 +4928,40 @@ class AppState(
                 saved.writeText(buildMd(t, settings))
                 File(saved.parent, saved.nameWithoutExtension + ".ann")
                     .writeText(t.annotations.withDetectedAppVersion(t.logData).annotationsToken(t.sourcePath))
+                writeAnnotationFrameImages(t, saved)
                 rememberRecentNote(saved)
             }.fold(
                 onSuccess = { AppLogger.info("export", "Saved analysis to ${saved.absolutePath}") },
                 onFailure = { e -> AppLogger.error("export", "Failed to save analysis to ${saved.absolutePath}", e) },
+            )
+        }
+    }
+
+    /**
+     * Writes every Notes image, ONLY the images (no `.md`, no `.ann`), as `frame-0N.jpg` (see
+     * [annotationImageFileName] — the SAME ordinal buildMd's JIRA_JAVA style uses for its
+     * `!frame-0N.jpg!` wiki anchors), into a `<logname>_frames` subfolder of a user-chosen folder.
+     * Paired with a JIRA_JAVA "Copy" and attaching these files, this is the reliable two-step path
+     * to get note images into Jira in one paste — Jira's editor strips base64 images from "Copy as
+     * HTML", and the clipboard can only carry one image at a time regardless. No-ops when the tab
+     * has no image blocks or the folder pick is cancelled.
+     */
+    fun exportAnnotationFrames(tabId: String) {
+        val t = tab(tabId) ?: return
+        val images = t.annotations.blocks.filterIsInstance<AnnBlock.Image>()
+        if (images.isEmpty()) return
+        val dir = pickDirectory("Export Frames", settings.defaultSaveDir?.let(::File)) ?: return
+        settings = settings.copy(defaultSaveDir = dir.absolutePath)
+        val framesDir = File(dir, "${t.filename.substringBeforeLast('.')}_frames")
+        ioScope.launch {
+            runCatching {
+                framesDir.mkdirs()
+                // writeFileAtomically is text/Writer-only (AutosaveCodec) — image bytes need a
+                // plain File.writeBytes.
+                images.forEachIndexed { index, image -> File(framesDir, annotationImageFileName(index + 1, image.format)).writeBytes(image.bytes) }
+            }.fold(
+                onSuccess = { AppLogger.info("export", "Exported ${images.size} frame image(s) to ${framesDir.absolutePath}") },
+                onFailure = { e -> AppLogger.error("export", "Failed to export frame images to ${framesDir.absolutePath}", e) },
             )
         }
     }
@@ -4317,6 +5126,7 @@ class AppState(
                 File(targetDir, "${mdFile.nameWithoutExtension}.ann")
                     .writeText(tab.annotations.withDetectedAppVersion(tab.logData).annotationsToken(tab.sourcePath))
                 legacySourceFingerprintFile(mdFile).delete()
+                writeAnnotationFrameImages(tab, mdFile)
                 rememberRecentNote(mdFile)
             }
         }

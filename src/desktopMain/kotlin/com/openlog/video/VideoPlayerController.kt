@@ -118,6 +118,38 @@ interface VideoPlayerController {
  *  substitute a fake [VideoPlayerController] instead (see AppState's videoControllerFactory). */
 fun defaultVideoPlayerController(path: String): VideoPlayerController = FfmpegVideoPlayerController(path)
 
+/**
+ * Stands in for a real controller when AppState.videoController can't even get as far as opening
+ * one — currently the one gap in that function's own "non-null whenever a video is attached"
+ * contract: a [com.openlog.model.VideoSource.ArchiveEntry] whose archive has since been moved or
+ * deleted (a very normal workflow for a disposable bug-report zip download, unlike an explicitly
+ * attached local recording a user wouldn't casually delete) fails before [FfmpegVideoPlayerController]
+ * ever gets a path to open. Without this, [error] had nowhere to live and the video panel/context-menu
+ * actions silently acted as if no video were attached at all, instead of showing the same
+ * "Couldn't play this video" failure state a broken local file already gets via its own
+ * FFmpeg-reported [error]. Every mutator is a no-op; there is nothing to play, seek, or grab.
+ */
+internal class FailedVideoPlayerController(override val error: String) : VideoPlayerController {
+    override val currentFrame: ImageBitmap? = null
+    override val positionMs: Long = 0L
+    override val durationMs: Long = 0L
+    override val isPlaying: Boolean = false
+
+    override fun play() = Unit
+
+    override fun pause() = Unit
+
+    override fun seek(ms: Long) = Unit
+
+    override fun setRate(rate: Float) = Unit
+
+    override fun grabCurrentFrame(): ByteArray? = null
+
+    override fun grabFrameAt(ms: Long): ByteArray? = null
+
+    override fun close() = Unit
+}
+
 private class FfmpegVideoPlayerController(private val path: String) : VideoPlayerController {
     private val grabber = FFmpegFrameGrabber(path)
     private val converter = Java2DFrameConverter()

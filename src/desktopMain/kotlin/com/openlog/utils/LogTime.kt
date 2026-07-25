@@ -109,6 +109,23 @@ fun formatSignedDelta(ms: Long): String {
     return formatDelta(ms)
 }
 
+/** Formats a raw elapsed-timeline value — as produced by AppState's day-unrolled follow index,
+ *  where midnight rollovers accumulate whole [HOURS_PER_DAY]-hour offsets rather than wrapping —
+ *  back into an "HH:MM:SS.mmm" wall-clock string, by wrapping modulo 24h. Purely a display inverse
+ *  of that unrolling (e.g. the Follow diagnostic dump's "computed mapped target" line); it does not
+ *  recover which calendar day a multi-rollover value belonged to, only the time-of-day. A negative
+ *  input (a target before the log's own start) wraps forward into the same 24h range rather than
+ *  producing a negative clock string. */
+fun formatElapsedAsClock(elapsedMs: Long): String {
+    val dayMs = HOURS_PER_DAY * MILLIS_PER_HOUR
+    val ms = ((elapsedMs % dayMs) + dayMs) % dayMs
+    val hh = ms / MILLIS_PER_HOUR
+    val mm = (ms % MILLIS_PER_HOUR) / MILLIS_PER_MINUTE
+    val ss = (ms % MILLIS_PER_MINUTE) / MILLIS_PER_SECOND
+    val mmm = ms % MILLIS_PER_SECOND
+    return String.format(Locale.US, "%02d:%02d:%02d.%03d", hh, mm, ss, mmm)
+}
+
 /** Which entry id anchors the Δt column's selected-line mode when [selected] holds more than one
  *  id — deterministically the LOWEST id. That's equivalent to "the first in display order" for
  *  any tab: folding/collapsing/sequences only ever HIDE rows, they never reorder them, so display

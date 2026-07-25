@@ -59,7 +59,7 @@ fun parseLogcatLines(lines: Sequence<String>, startId: Int = 1): List<LogEntry> 
         }
         RE_THREADTIME.matchEntire(line)?.let { m ->
             return@mapNotNull LogEntry(
-                id++, m.groupValues[1].substringAfter(' '),
+                id++, stripDatePrefix(m.groupValues[1]),
                 LogLevel.from(m.groupValues[4][0]), intern(m.groupValues[5].trim()), m.groupValues[6],
                 pid = m.groupValues[2].toIntOrNull() ?: 0,
                 tid = m.groupValues[3].toIntOrNull() ?: 0,
@@ -67,7 +67,7 @@ fun parseLogcatLines(lines: Sequence<String>, startId: Int = 1): List<LogEntry> 
         }
         RE_TIME.matchEntire(line)?.let { m ->
             return@mapNotNull LogEntry(
-                id++, m.groupValues[1].substringAfter(' '),
+                id++, stripDatePrefix(m.groupValues[1]),
                 LogLevel.from(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[5],
                 pid = m.groupValues[4].toIntOrNull() ?: 0,
             )
@@ -85,6 +85,21 @@ fun parseLogcatLines(lines: Sequence<String>, startId: Int = 1): List<LogEntry> 
         LogEntry(id++, "", LogLevel.I, "RAW", raw.trimEnd())
     }.toList()
 }
+
+// LogEntry.ts deliberately carries no date (see LogTime.parseMillisOfDay, which requires a bare
+// "HH:MM:SS[.frac]" and rejects anything else outright). RE_THREADTIME/RE_TIME both capture
+// "MM-DD<\s+>HH:MM:SS.frac" as one group, so the date has to come off here.
+//
+// This used to be `substringAfter(' ')`, which only works for a SINGLE space: dumpstate/bugreport
+// logs that align the columns with two spaces left ts as " HH:MM:SS.frac" (leading space), and a
+// tab separator left the date attached entirely. Both then failed parseMillisOfDay, so EVERY row
+// became untimestamped — which silently disabled the whole video<->log time mapping (empty elapsed
+// timeline => AppState.videoFollowMapping reports NO_ANCHOR) as well as the Δt column, while the
+// rows themselves still displayed and filtered normally. The date is exactly the 5 chars the regex
+// matched, so drop those and trim whatever whitespace the log used to separate the columns.
+private fun stripDatePrefix(dateAndTime: String): String = dateAndTime.substring(DATE_PREFIX_LENGTH).trimStart()
+
+private const val DATE_PREFIX_LENGTH = 5
 
 private class ThreadtimeParts(
     val ts: String,
@@ -128,12 +143,15 @@ private fun parseThreadtimeFast(line: String): ThreadtimeParts? {
     // HH:MM:SS.d+
     if (i + 8 >= n || !digits(i, 2) || !digits(i + 3, 2) || !digits(i + 6, 2)) return null
     if (line[i + 2] != ':' || line[i + 5] != ':' || line[i + 8] != '.') return null
+    val timeStart = i
     i += 9
     val fracStart = i
     while (i < n && line[i].isAsciiDigit()) i++
     if (i == fracStart) return null
-    // Regex path: group(1) is "MM-DD<ws>HH:MM:SS.d+", then .substringAfter(' ').
-    val ts = line.substring(0, i).substringAfter(' ')
+    // Sliced from the already-known time offset rather than stripping the date back off the whole
+    // prefix — equivalent to the regex path's stripDatePrefix() for every separator the loop above
+    // accepts (one space, several spaces, tabs), which a `substringAfter(' ')` here was not.
+    val ts = line.substring(timeStart, i)
 
     fun spacesThenInt(start: Int): Pair<Int, Int>? {
         var p = start
