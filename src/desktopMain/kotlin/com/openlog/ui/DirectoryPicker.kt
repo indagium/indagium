@@ -39,14 +39,45 @@ private object MacDirectoryPicker : DirectoryPicker {
 /** Used on Linux and Windows, where AWT FileDialog has no directory-only mode. */
 private object SwingDirectoryPicker : DirectoryPicker {
     override fun pick(title: String, initialDirectory: File?): File? {
-        val chooser = JFileChooser(initialDirectoryForPicker(initialDirectory)).apply {
-            dialogTitle = title
-            fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
-            isAcceptAllFileFilterUsed = false
-        }
+        val chooser = JFileChooser()
+        configureDirectoryChooser(chooser, title, initialDirectoryForPicker(initialDirectory))
         if (chooser.showOpenDialog(null) != JFileChooser.APPROVE_OPTION) return null
-        return chooser.selectedFile?.takeIf(File::isDirectory)
+        return resolveChosenDirectory(chooser.selectedFile, chooser.currentDirectory)
     }
+}
+
+/**
+ * Swing's approve action reads the file-name text field, not selectedFile directly — and on GTK
+ * (Linux) that field starts empty until a directory-changed/selected-file event has fired, so the
+ * very first Open press on a freshly opened chooser silently did nothing. Pre-selecting startDir
+ * (opening one level up, with startDir itself selected) populates the field immediately instead of
+ * relying on the user navigating first.
+ *
+ * currentDirectory is set before selectedFile: JFileChooser.setSelectedFile() calls
+ * setCurrentDirectory(file.parentFile) whenever the file isn't already inside the current
+ * directory, so setting selectedFile first would immediately walk currentDirectory back up again.
+ */
+internal fun configureDirectoryChooser(chooser: JFileChooser, title: String, startDir: File?) {
+    chooser.dialogTitle = title
+    chooser.fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
+    chooser.isAcceptAllFileFilterUsed = false
+    if (startDir != null) {
+        chooser.currentDirectory = startDir.parentFile ?: startDir
+        chooser.selectedFile = startDir
+    }
+}
+
+/**
+ * Decides which directory a Swing [JFileChooser] approval actually refers to. Pure so it's
+ * unit-testable without a real dialog. A selected directory wins outright; a selected regular file
+ * (possible if the user types a name directly into the field) resolves to its parent directory;
+ * with nothing selected, the chooser's current directory is what was being browsed when the user
+ * pressed Open.
+ */
+internal fun resolveChosenDirectory(selectedFile: File?, currentDirectory: File?): File? = when {
+    selectedFile != null && selectedFile.isDirectory -> selectedFile
+    selectedFile != null && selectedFile.isFile -> selectedFile.parentFile?.takeIf(File::isDirectory)
+    else -> currentDirectory?.takeIf(File::isDirectory)
 }
 
 /**
