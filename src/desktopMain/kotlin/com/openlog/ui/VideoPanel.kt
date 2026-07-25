@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+
 package com.openlog.ui
 
 import androidx.compose.foundation.Image
@@ -19,23 +21,30 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.KeyboardReturn
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.automirrored.outlined.RotateRight
+import androidx.compose.material.icons.automirrored.outlined.VolumeDown
+import androidx.compose.material.icons.automirrored.outlined.VolumeOff
+import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.outlined.AddAPhoto
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.LinkOff
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
-import androidx.compose.material3.Icon
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -51,24 +60,35 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.rememberWindowState
 import com.openlog.model.LogTab
 import com.openlog.model.VideoAttachment
 import com.openlog.model.VideoSource
 import com.openlog.video.VideoPlayerController
 import com.openlog.video.formatVideoTime
+import com.openlog.video.formatVideoTimeShort
+import kotlinx.coroutines.delay
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -461,14 +481,44 @@ private fun VideoTransportBar(
     val sliderColors = SliderDefaults.colors(thumbColor = tc.ac, activeTrackColor = tc.ac, inactiveTrackColor = tc.br)
     val sliderInteractionSource = remember { MutableInteractionSource() }
     Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        // This narrow strip separates the picture from the timeline while retaining drag-time
-        // feedback (sliderValueMs includes the uncommitted thumb position).
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 2.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            AppText(formatVideoTime(sliderValueMs), color = tc.td, fontSize = 9.sp, fontFamily = MONO)
-            AppText(formatVideoTime(controller.durationMs), color = tc.td, fontSize = 9.sp, fontFamily = MONO)
+        // Elapsed/duration at the edges, transport controls centered between them — all in the
+        // same strip above the timeline, so play/volume/overflow read as belonging to the clock
+        // they control rather than to the anchor row below the slider.
+        Box(Modifier.fillMaxWidth().height(28.dp).padding(horizontal = 2.dp)) {
+            AppText(
+                formatVideoTimeShort(sliderValueMs),
+                color = tc.td,
+                fontSize = 9.sp,
+                fontFamily = MONO,
+                modifier = Modifier.align(Alignment.CenterStart),
+            )
+            Row(
+                Modifier.align(Alignment.Center),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                VolumeControl(controller = controller)
+                ToolbarBtn(
+                    if (controller.isPlaying) "Pause" else "Play",
+                    icon = if (controller.isPlaying) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+                    showLabel = false,
+                    tooltip = if (controller.isPlaying) "Pause" else "Play",
+                    enabled = playable,
+                    onClick = { if (controller.isPlaying) controller.pause() else controller.play() },
+                )
+                VideoOverflowMenu(
+                    selectedRate = selectedRate,
+                    onRateSelected = onRateSelected,
+                    onRotateClockwise = onRotateClockwise,
+                )
+            }
+            AppText(
+                formatVideoTimeShort(controller.durationMs),
+                color = tc.td,
+                fontSize = 9.sp,
+                fontFamily = MONO,
+                modifier = Modifier.align(Alignment.CenterEnd),
+            )
         }
         // Material's normal slider reserves a 48dp touch target. This desktop transport uses the
         // same 28dp control height as the adjacent play and rate controls while retaining a
@@ -507,25 +557,6 @@ private fun VideoTransportBar(
                 modifier = Modifier.fillMaxWidth().height(28.dp).padding(horizontal = 2.dp),
             )
         }
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            ToolbarBtn(
-                if (controller.isPlaying) "Pause" else "Play",
-                icon = if (controller.isPlaying) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
-                showLabel = false,
-                tooltip = if (controller.isPlaying) "Pause" else "Play",
-                enabled = playable,
-                onClick = { if (controller.isPlaying) controller.pause() else controller.play() },
-            )
-            PlaybackRateStepper(selectedRate = selectedRate, onRateSelected = onRateSelected)
-            ToolbarBtn(
-                label = "Rotate clockwise",
-                icon = Icons.AutoMirrored.Outlined.RotateRight,
-                showLabel = false,
-                tooltip = "Rotate clockwise",
-                onClick = onRotateClockwise,
-                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
-            )
-        }
         VideoAnchorRow(
             state = state,
             tab = tab,
@@ -535,7 +566,9 @@ private fun VideoTransportBar(
             followLogs = followLogs,
             onFollowLogsChange = onFollowLogsChange,
         )
-        VideoFollowReadout(state = state, tab = tab, mapping = mapping, positionMs = controller.positionMs)
+        if (state.settings.showVideoFollowReadout) {
+            VideoFollowReadout(state = state, tab = tab, mapping = mapping, positionMs = controller.positionMs)
+        }
     }
 }
 
@@ -584,7 +617,7 @@ private fun VideoFollowReadout(state: AppState, tab: LogTab, mapping: VideoFollo
     var justCopied by remember(tab.id) { mutableStateOf(false) }
     LaunchedEffect(justCopied) {
         if (justCopied) {
-            kotlinx.coroutines.delay(COPIED_FEEDBACK_MS)
+            delay(COPIED_FEEDBACK_MS)
             justCopied = false
         }
     }
@@ -665,6 +698,248 @@ private fun rateLabel(rate: Float): String {
     return if (rate == whole.toFloat()) "${whole}x" else "${rate}x"
 }
 
+// The popover's vertical slider is a horizontal Slider rotated -90°. VOLUME_TRACK_LENGTH is its
+// pre-rotation WIDTH (i.e. its visual length once rotated) and is the single source of truth for
+// that dimension — the container height below is derived from it arithmetically rather than the
+// two being sized independently, which is what previously let them drift apart: either the slider
+// was hardcoded wider than its container (clipped into a misshapen blob), or the container was
+// enlarged without the slider following (a short track floating in a mostly-empty box).
+private val VOLUME_TRACK_LENGTH = 130.dp
+private val VOLUME_POPOVER_VERTICAL_PADDING = 14.dp
+private val VOLUME_POPOVER_HEIGHT = VOLUME_TRACK_LENGTH + VOLUME_POPOVER_VERTICAL_PADDING * 2
+private val VOLUME_POPOVER_WIDTH = 28.dp
+private val VOLUME_TRACK_WIDTH = 4.dp
+private val VOLUME_THUMB_SIZE = 12.dp
+
+/**
+ * A plain vertical track/fill/thumb drawn directly with Box layers and a raw pointer loop — no
+ * Material3 Slider, no rotation. [trackLength] is the ONLY thing that determines how long this
+ * renders; there's no second, independently-sized element it can drift out of sync with.
+ */
+@Composable
+private fun VerticalVolumeBar(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    trackLength: Dp,
+    activeColor: Color,
+    inactiveColor: Color,
+    thumbColor: Color,
+) {
+    val clamped = value.coerceIn(0f, 1f)
+    var trackHeightPx by remember { mutableStateOf(0f) }
+    Box(
+        Modifier
+            .width(VOLUME_POPOVER_WIDTH)
+            .height(trackLength)
+            .onSizeChanged { trackHeightPx = it.height.toFloat() }
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull() ?: continue
+                        val isDrag = event.type == PointerEventType.Press || event.type == PointerEventType.Move
+                        if (isDrag && change.pressed && trackHeightPx > 0f) {
+                            change.consume()
+                            // Top of the track is max, bottom is min (0), matching a physical
+                            // volume-fader convention: push up to raise it.
+                            val y = change.position.y.coerceIn(0f, trackHeightPx)
+                            onValueChange(1f - (y / trackHeightPx))
+                        }
+                    }
+                }
+            },
+    ) {
+        Box(
+            Modifier.align(Alignment.Center).width(VOLUME_TRACK_WIDTH).fillMaxHeight()
+                .background(inactiveColor, RoundedCornerShape(VOLUME_TRACK_WIDTH / 2)),
+        )
+        Box(
+            Modifier.align(Alignment.BottomCenter).width(VOLUME_TRACK_WIDTH).fillMaxHeight(clamped)
+                .background(activeColor, RoundedCornerShape(VOLUME_TRACK_WIDTH / 2)),
+        )
+        Box(
+            Modifier
+                .align(Alignment.TopCenter)
+                .offset(y = trackLength * (1f - clamped) - VOLUME_THUMB_SIZE / 2)
+                .size(VOLUME_THUMB_SIZE)
+                .background(thumbColor, CircleShape),
+        )
+    }
+}
+
+// Vertical clearance between the popover's bottom edge and the trigger button's top edge. Without
+// this the popover (aligned TopCenter, i.e. popup-top = trigger-top by default) only clears the
+// trigger by exactly its own height, landing flush against — and in practice slightly over — the
+// button, which then swallowed clicks meant for it (see dismissOnClickOutside below).
+private val VOLUME_POPOVER_GAP = 6.dp
+
+/**
+ * Speaker button that toggles mute on click and reveals a vertical volume slider on hover — the
+ * slider stays hidden the rest of the time so it doesn't compete with play/overflow for space in
+ * the centered transport cluster. Hover tracking (trigger + popup, with a grace-period close)
+ * mirrors CtxHighlightAction's swatch popover in Components.kt.
+ */
+@Composable
+private fun VolumeControl(controller: VideoPlayerController) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var hoveringTrigger by remember { mutableStateOf(false) }
+    var hoveringPopup by remember { mutableStateOf(false) }
+    var popupOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(hoveringTrigger, hoveringPopup) {
+        if (hoveringTrigger || hoveringPopup) {
+            popupOpen = true
+        } else if (popupOpen) {
+            delay(CTX_SUBMENU_CLOSE_DELAY_MS)
+            popupOpen = false
+        }
+    }
+    val muted = controller.isMuted || controller.volume <= 0f
+    val icon = when {
+        muted -> Icons.AutoMirrored.Outlined.VolumeOff
+        controller.volume < 0.5f -> Icons.AutoMirrored.Outlined.VolumeDown
+        else -> Icons.AutoMirrored.Outlined.VolumeUp
+    }
+    Box {
+        ToolbarBtn(
+            if (muted) "Unmute" else "Mute",
+            icon = icon,
+            showLabel = false,
+            tooltip = if (muted) "Unmute" else "Mute",
+            onClick = { controller.setMuted(!controller.isMuted) },
+            modifier = Modifier
+                .onPointerEvent(PointerEventType.Enter) { hoveringTrigger = true }
+                .onPointerEvent(PointerEventType.Exit) { hoveringTrigger = false },
+        )
+        if (popupOpen) {
+            Popup(
+                alignment = Alignment.TopCenter,
+                offset = IntOffset(0, -with(density) { (VOLUME_POPOVER_HEIGHT + VOLUME_POPOVER_GAP).roundToPx() }),
+                onDismissRequest = { popupOpen = false },
+                // Entirely hover-driven (see LaunchedEffect above), so it must NOT dismiss on an
+                // outside click: with dismissOnClickOutside's default of true, a click on the mute
+                // button itself counts as "outside" the popup and got consumed by the dismiss
+                // handler before the button's own onClick ever ran — unmuting by click silently did
+                // nothing.
+                properties = PopupProperties(focusable = false, dismissOnClickOutside = false),
+            ) {
+                Box(
+                    Modifier.width(VOLUME_POPOVER_WIDTH).height(VOLUME_POPOVER_HEIGHT)
+                        .shadow(8.dp, CORNER_MD)
+                        .background(tc.p, CORNER_MD)
+                        .border(0.5.dp, tc.br, CORNER_MD)
+                        .onPointerEvent(PointerEventType.Enter) { hoveringPopup = true }
+                        .onPointerEvent(PointerEventType.Exit) { hoveringPopup = false },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    VerticalVolumeBar(
+                        value = if (muted) 0f else controller.volume,
+                        onValueChange = { v ->
+                            controller.setVolume(v)
+                            if (controller.isMuted && v > 0f) controller.setMuted(false)
+                        },
+                        trackLength = VOLUME_TRACK_LENGTH,
+                        activeColor = tc.ac,
+                        inactiveColor = tc.ts.copy(alpha = 0.4f),
+                        thumbColor = tc.ac,
+                    )
+                }
+            }
+        }
+    }
+}
+
+// Fixed popup width. Without an explicit width here, the "Rotate clockwise" row's
+// Modifier.fillMaxWidth() had nothing to bound itself against inside a Popup (which otherwise
+// hands its content effectively the whole window as its measuring constraints) and stretched the
+// menu across the full app width instead of wrapping its two short rows.
+private val VIDEO_OVERFLOW_MENU_WIDTH = 172.dp
+private val VIDEO_OVERFLOW_MENU_GAP = 6.dp
+
+/**
+ * Overflow menu for the two transport actions that don't need to be one click away: rotate and
+ * playback speed. A click-to-open popup (not hover, unlike [VolumeControl]) since both actions
+ * inside benefit from staying open across repeated clicks (e.g. stepping through speed presets).
+ */
+@Composable
+private fun VideoOverflowMenu(
+    selectedRate: Float,
+    onRateSelected: (Float) -> Unit,
+    onRotateClockwise: () -> Unit,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var menuOpen by remember { mutableStateOf(false) }
+    // Popup's default dismissOnClickOutside fires for ANY click outside its content — including a
+    // second click on the trigger button itself, since the trigger isn't part of the popup's own
+    // content bounds. That dismiss and the trigger's own onClick both fired for that same click, so
+    // "close, then immediately reopen" is what a second press looked like. Recording when a dismiss
+    // last happened and ignoring an onClick that follows within the same click lets the trigger
+    // toggle normally instead of racing its own dismiss handler.
+    var lastDismissedAtMs by remember { mutableStateOf(0L) }
+    // Measured (not guessed) trigger height, so the popup's offset clears the actual button
+    // instead of a hardcoded estimate that could under-shoot for a different font/density.
+    var triggerHeightPx by remember { mutableStateOf(0) }
+    Box(Modifier.onGloballyPositioned { triggerHeightPx = it.size.height }) {
+        ToolbarBtn(
+            "More options",
+            icon = Icons.Outlined.MoreVert,
+            showLabel = false,
+            tooltip = "Rotate, playback speed",
+            active = menuOpen,
+            onClick = {
+                val now = System.currentTimeMillis()
+                if (now - lastDismissedAtMs > CTX_SUBMENU_CLOSE_DELAY_MS) menuOpen = !menuOpen
+            },
+        )
+        if (menuOpen) {
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, triggerHeightPx + with(density) { VIDEO_OVERFLOW_MENU_GAP.roundToPx() }),
+                onDismissRequest = {
+                    menuOpen = false
+                    lastDismissedAtMs = System.currentTimeMillis()
+                },
+                properties = PopupProperties(focusable = false),
+            ) {
+                Column(
+                    Modifier.width(VIDEO_OVERFLOW_MENU_WIDTH)
+                        .shadow(8.dp, RoundedCornerShape(7.dp))
+                        .background(tc.p, RoundedCornerShape(7.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    HoverBox(
+                        // Stays open on click — rotating is usually a "tap a few times to get to
+                        // 90/180/270" action, so closing the menu on the first tap would force
+                        // reopening it for every subsequent turn.
+                        modifier = Modifier.fillMaxWidth().clip(CORNER_MD),
+                        onClick = onRotateClockwise,
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(Icons.AutoMirrored.Outlined.RotateRight, contentDescription = null, tint = tc.tx, modifier = Modifier.size(16.dp))
+                            AppText("Rotate clockwise", color = tc.tx, fontSize = 12.sp)
+                        }
+                    }
+                    Column(
+                        Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        AppText("Playback speed", color = tc.td, fontSize = 10.sp)
+                        PlaybackRateStepper(selectedRate = selectedRate, onRateSelected = onRateSelected)
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 @OptIn(ExperimentalLayoutApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 private fun VideoAnchorRow(
@@ -701,6 +976,15 @@ private fun VideoAnchorRow(
             horizontalPadding = 6.dp,
         )
         if (anchor != null) {
+            // What "Link to current video position" silently captured, shown on hover rather than
+            // as a permanent line — the anchored log line's own timestamp alongside it when
+            // available (ts is empty for RAW/unparsed rows).
+            val anchorLogTs = tab.rmap[anchor.logId]?.ts
+            val anchorSummary = if (!anchorLogTs.isNullOrEmpty()) {
+                "⚓ $anchorLogTs = ${formatVideoTime(anchor.videoMs)}"
+            } else {
+                "⚓ ${formatVideoTime(anchor.videoMs)}"
+            }
             TooltipArea(
                 tooltip = {
                     Box(
@@ -708,11 +992,7 @@ private fun VideoAnchorRow(
                             .border(0.5.dp, tc.br, CORNER_SM)
                             .padding(horizontal = 8.dp, vertical = 4.dp),
                     ) {
-                        AppText(
-                            "Anchored to line #${anchor.logId} at ${formatVideoTime(anchor.videoMs)}",
-                            color = tc.tx,
-                            fontSize = 11.sp,
-                        )
+                        AppText(anchorSummary, color = tc.tx, fontSize = 11.sp)
                     }
                 },
             ) {
@@ -724,22 +1004,6 @@ private fun VideoAnchorRow(
                     horizontalPadding = 6.dp,
                 )
             }
-            // Always-visible summary of what "Link to current video position" silently captured —
-            // previously this was tooltip-only, which left users unable to tell what video-time got
-            // linked without hovering. Shows the anchored log line's own timestamp alongside it when
-            // available (ts is empty for RAW/unparsed rows).
-            val anchorLogTs = tab.rmap[anchor.logId]?.ts
-            AppText(
-                if (!anchorLogTs.isNullOrEmpty()) {
-                    "⚓ $anchorLogTs = ${formatVideoTime(anchor.videoMs)}"
-                } else {
-                    "⚓ ${formatVideoTime(anchor.videoMs)}"
-                },
-                color = tc.td,
-                fontSize = 10.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
         }
         AppButton(
             if (followLogs) "Following" else "Follow",

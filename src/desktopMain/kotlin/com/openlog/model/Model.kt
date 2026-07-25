@@ -728,6 +728,11 @@ data class AppSettings(
     // default, since it's strictly more useful than a plain scrollbar the moment a file has any
     // errors/crashes. Trailing with a default so old settings tokens (without this field) still parse.
     val showMinimap: Boolean = true,
+    // The video transport bar's "video X → log Y → holding at ..." diagnostic line
+    // (ui/VideoPanel.kt's VideoFollowReadout) explains what Follow is doing, but it's dense and
+    // most users never need it. Off by default; a user who wants the detail can flip it on in
+    // Settings. Trailing with a default so old settings tokens (without this field) still parse.
+    val showVideoFollowReadout: Boolean = false,
 )
 
 enum class ThemePreset(val label: String) {

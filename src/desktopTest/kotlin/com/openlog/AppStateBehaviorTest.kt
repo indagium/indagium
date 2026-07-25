@@ -2319,6 +2319,8 @@ class AppStateBehaviorTest {
         override val positionMs: Long = 0L
         override val durationMs: Long = 0L
         override val isPlaying: Boolean = false
+        override val volume: Float = 1f
+        override val isMuted: Boolean = false
         override val error: String? = null
 
         override fun play() = Unit
@@ -2328,6 +2330,10 @@ class AppStateBehaviorTest {
         override fun seek(ms: Long) = Unit
 
         override fun setRate(rate: Float) = Unit
+
+        override fun setVolume(volume: Float) = Unit
+
+        override fun setMuted(muted: Boolean) = Unit
 
         override fun grabCurrentFrame(): ByteArray? = null
 
