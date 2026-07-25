@@ -17,8 +17,6 @@ import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.Layers
-import androidx.compose.material.icons.outlined.Link
-import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
@@ -53,6 +51,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.*
 import com.openlog.source.SourceCodeView
+import com.openlog.video.formatVideoTimeShort
 import kotlinx.coroutines.delay
 import java.awt.Toolkit
 import java.io.File
@@ -515,12 +514,16 @@ fun App(
                                 }
                             }
                             // Video anchoring/nav (plan doc's Task B) — only offered when this tab
-                            // has a video attached at all. "Link" always overwrites whatever anchor
-                            // already existed (one anchor per tab — see VideoAttachment.anchor's own
-                            // doc); "Show in video" stays visible but disabled (matching Source's own
-                            // enabled-not-hidden convention below) until BOTH an anchor exists AND
-                            // this row's `ts` actually maps to a video-time (logIdToVideoMs is null
-                            // for TS_UNKNOWN rows — brief/RAW-format lines with no timestamp).
+                            // has a video attached at all, grouped under one "Video" header the same
+                            // way Threads groups its show/hide-map pair. "Link to <time>" always
+                            // overwrites whatever anchor already existed (one anchor per tab — see
+                            // VideoAttachment.anchor's own doc) with the CURRENT playhead position;
+                            // there is deliberately no separate "link to 0:00" action — anyone wanting
+                            // that anchor seeks the video to 0:00 first, then links. "Show" stays
+                            // visible but disabled (matching Source's own enabled-not-hidden
+                            // convention below) until BOTH an anchor exists AND this row's `ts`
+                            // actually maps to a video-time (logIdToVideoMs is null for TS_UNKNOWN
+                            // rows — brief/RAW-format lines with no timestamp).
                             run {
                                 val attachedVideo = ctxTab.attachedVideo
                                 if (attachedVideo != null) {
@@ -528,25 +531,18 @@ fun App(
                                     val mappedMs = state.logIdToVideoMs(ctxTab, entry.id)
                                     val hasValidMappedPosition = mappedMs?.let { state.isVideoPositionValid(ctxTab, it) } == true
                                     add(
-                                        CtxMenuEntry.Action(Icons.Outlined.Link, "Link to current video position") {
-                                            videoController?.let { vc -> state.setVideoAnchor(ctxTab.id, vc.positionMs, entry.id) }
-                                            state.ctx = null
-                                        },
-                                    )
-                                    add(
-                                        CtxMenuEntry.Action(Icons.Outlined.Link, "Link to video start (0:00)") {
-                                            state.setVideoAnchor(ctxTab.id, 0L, entry.id)
-                                            state.ctx = null
-                                        },
-                                    )
-                                    add(
-                                        CtxMenuEntry.Action(
-                                            Icons.Outlined.Movie, "Show in video",
-                                            enabled = attachedVideo.anchor != null && hasValidMappedPosition,
-                                        ) {
-                                            mappedMs?.takeIf { state.isVideoPositionValid(ctxTab, it) }?.let { ms -> videoController?.seek(ms) }
-                                            state.ctx = null
-                                        },
+                                        CtxMenuEntry.VideoActions(
+                                            linkLabel = "Link to ${formatVideoTimeShort(videoController?.positionMs ?: 0L)}",
+                                            onLink = {
+                                                videoController?.let { vc -> state.setVideoAnchor(ctxTab.id, vc.positionMs, entry.id) }
+                                                state.ctx = null
+                                            },
+                                            showEnabled = attachedVideo.anchor != null && hasValidMappedPosition,
+                                            onShow = {
+                                                mappedMs?.takeIf { state.isVideoPositionValid(ctxTab, it) }?.let { ms -> videoController?.seek(ms) }
+                                                state.ctx = null
+                                            },
+                                        ),
                                     )
                                     add(CtxMenuEntry.Divider)
                                 }
@@ -581,7 +577,7 @@ fun App(
                         val selectableEntries = menuEntries.filter {
                             it is CtxMenuEntry.ActionHeader || it is CtxMenuEntry.Action ||
                                 it is CtxMenuEntry.TagActions || it is CtxMenuEntry.CollapseActions ||
-                                it is CtxMenuEntry.ThreadsActions ||
+                                it is CtxMenuEntry.ThreadsActions || it is CtxMenuEntry.VideoActions ||
                                 it is CtxMenuEntry.SelectionActions || it is CtxMenuEntry.SourceActions ||
                                 it is CtxMenuEntry.ActionWithSubmenu
                         }
@@ -621,6 +617,7 @@ fun App(
                                                     is CtxMenuEntry.TagActions -> it.onInclude()
                                                     is CtxMenuEntry.CollapseActions -> it.onToStart?.invoke()
                                                     is CtxMenuEntry.ThreadsActions -> it.onShowMap?.invoke() ?: it.onHideMap?.invoke()
+                                                    is CtxMenuEntry.VideoActions -> it.onLink()
                                                     is CtxMenuEntry.SelectionActions -> it.onAskAi()
                                                     is CtxMenuEntry.SourceActions -> it.onShowCode()
                                                     is CtxMenuEntry.ActionWithSubmenu -> it.onClick()
@@ -673,6 +670,14 @@ fun App(
                                                 highlighted = e === selectedEntry,
                                                 onShowMap = e.onShowMap,
                                                 onHideMap = e.onHideMap,
+                                            )
+                                        is CtxMenuEntry.VideoActions ->
+                                            CtxVideoActions(
+                                                highlighted = e === selectedEntry,
+                                                linkLabel = e.linkLabel,
+                                                onLink = e.onLink,
+                                                showEnabled = e.showEnabled,
+                                                onShow = e.onShow,
                                             )
                                         is CtxMenuEntry.SelectionActions ->
                                             CtxSelectionActions(

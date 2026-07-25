@@ -4948,10 +4948,15 @@ class AppState(
     }
 
     // Writes every AnnBlock.Image's bytes into a "<mdFile-base-name>_frames/" subfolder next to
-    // [mdFile], named via the SAME annotationImageFileName() ordinal buildMd()'s JIRA_JAVA style
-    // uses for its `!frame-0N.jpg!` wiki anchors — so any place that writes a user-facing analysis
-    // .md also leaves the images those anchors reference sitting right beside it. No-ops (and never
-    // creates the subfolder) when the tab has no image blocks.
+    // [mdFile], named via the SAME annotationImageFileName() ordinal (and the SAME
+    // t.annotations.frameStamp) buildMd()'s JIRA_JAVA style uses for its `!frame-0N.jpg!` /
+    // `!frame-<stamp>-0N.jpg!` wiki anchors — so any place that writes a user-facing analysis .md
+    // also leaves the images those anchors reference sitting right beside it, under the exact same
+    // name. No-ops (and never creates the subfolder) when the tab has no image blocks. Note this is
+    // called from autoExportAnnotations on EVERY debounced note edit — the stamp must already be
+    // sitting in `t.annotations.frameStamp` (set once, at image-insertion time, by
+    // AnnotationManager.addImageBlock) rather than generated here, or every edit would mint a fresh
+    // stamp, rename the files out from under the previous export, and orphan the old ones.
     private fun writeAnnotationFrameImages(t: LogTab, mdFile: File) {
         val images = t.annotations.blocks.filterIsInstance<AnnBlock.Image>()
         if (images.isEmpty()) return
@@ -4959,7 +4964,9 @@ class AppState(
         framesDir.mkdirs()
         // writeFileAtomically is text/Writer-only (AutosaveCodec) — image bytes need a plain
         // File.writeBytes.
-        images.forEachIndexed { index, image -> File(framesDir, annotationImageFileName(index + 1, image.format)).writeBytes(image.bytes) }
+        images.forEachIndexed { index, image ->
+            File(framesDir, annotationImageFileName(index + 1, image.format, t.annotations.frameStamp)).writeBytes(image.bytes)
+        }
     }
 
     fun exportFilteredTo(tabId: String, file: File, csv: Boolean): Boolean {
@@ -5026,13 +5033,14 @@ class AppState(
     }
 
     /**
-     * Writes every Notes image, ONLY the images (no `.md`, no `.ann`), as `frame-0N.jpg` (see
-     * [annotationImageFileName] — the SAME ordinal buildMd's JIRA_JAVA style uses for its
-     * `!frame-0N.jpg!` wiki anchors), into a `<logname>_frames` subfolder of a user-chosen folder.
-     * Paired with a JIRA_JAVA "Copy" and attaching these files, this is the reliable two-step path
-     * to get note images into Jira in one paste — Jira's editor strips base64 images from "Copy as
-     * HTML", and the clipboard can only carry one image at a time regardless. No-ops when the tab
-     * has no image blocks or the folder pick is cancelled.
+     * Writes every Notes image, ONLY the images (no `.md`, no `.ann`), as `frame-0N.jpg` — or
+     * `frame-<stamp>-0N.jpg` once the analysis has a [com.openlog.model.Annotations.frameStamp] —
+     * (see [annotationImageFileName], the SAME ordinal+stamp buildMd's JIRA_JAVA style uses for its
+     * wiki anchors), into a `<logname>_frames` subfolder of a user-chosen folder. Paired with a
+     * JIRA_JAVA "Copy" and attaching these files, this is the reliable two-step path to get note
+     * images into Jira in one paste — Jira's editor strips base64 images from "Copy as HTML", and
+     * the clipboard can only carry one image at a time regardless. No-ops when the tab has no image
+     * blocks or the folder pick is cancelled.
      */
     fun exportAnnotationFrames(tabId: String) {
         val t = tab(tabId) ?: return
@@ -5046,7 +5054,9 @@ class AppState(
                 framesDir.mkdirs()
                 // writeFileAtomically is text/Writer-only (AutosaveCodec) — image bytes need a
                 // plain File.writeBytes.
-                images.forEachIndexed { index, image -> File(framesDir, annotationImageFileName(index + 1, image.format)).writeBytes(image.bytes) }
+                images.forEachIndexed { index, image ->
+                    File(framesDir, annotationImageFileName(index + 1, image.format, t.annotations.frameStamp)).writeBytes(image.bytes)
+                }
             }.fold(
                 onSuccess = { AppLogger.info("export", "Exported ${images.size} frame image(s) to ${framesDir.absolutePath}") },
                 onFailure = { e -> AppLogger.error("export", "Failed to export frame images to ${framesDir.absolutePath}", e) },

@@ -8,6 +8,8 @@ import com.openlog.model.AnnBlock
 import com.openlog.model.VideoFrameReference
 import com.openlog.model.VideoSource
 import com.openlog.utils.downscaleAndEncodeJpeg
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 // Extracted from AppState (Task 12 slice 5, mechanical — no behavior change): the annotation
 // block-model mutations (add/update/remove/move/reorder a note or log-ref block, prefix/suffix/
@@ -16,6 +18,11 @@ import com.openlog.utils.downscaleAndEncodeJpeg
 // machinery it depends on stay on AppState — upAnn (bumped to internal) is the shared choke
 // point both this class and AppState.loadAnnotationsFrom route tabs-list writes through, so
 // auto-export keeps firing on every annotation edit regardless of which class made it.
+// Local time, not UTC: this only needs to be unique-enough per analysis (see addImageBlock's own
+// doc on Annotations.frameStamp), and a local timestamp is what a human skimming a Jira attachment
+// list would expect to line up with when they were actually looking at the recording.
+private val FRAME_STAMP_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
+
 internal class AnnotationManager(private val appState: AppState) {
     // App.kt binds this directly two-way (Dialog dismiss/confirm write it, not just read it),
     // so it stays a plain mutableStateOf var rather than a callback-driven method.
@@ -116,6 +123,14 @@ internal class AnnotationManager(private val appState: AppState) {
     // capture would bloat autosave, which re-serializes the whole Annotations tree on every
     // debounced edit (see AutosaveCodec.kt persistedSnapshot()). Returns null (adding nothing) if
     // sourceBytes doesn't decode as an image at all.
+    //
+    // This is also the sole producer of AnnBlock.Image, which makes it the one place that can set
+    // Annotations.frameStamp: the "yyyyMMdd-HHmmss" moment stamped into every exported frame's
+    // filename (utils/annotationImageFileName) so two people's analyses of two different logs don't
+    // both produce a colliding "frame-01.jpg" when attached to the same Jira issue. Generated only
+    // the FIRST time a tab gains an image (frameStamp is still null) and left untouched on every
+    // later image add — a fresh stamp per image, or per export, would rename files out from under
+    // already-shared Markdown anchors instead of merely creating new ones.
     fun addImageBlock(
         tabId: String,
         sourceBytes: ByteArray,
@@ -146,7 +161,20 @@ internal class AnnotationManager(private val appState: AppState) {
                 blocks.indexOfFirst { it.id == anchorId }.takeIf { it >= 0 }?.plus(1)
             } ?: blocks.size
             blocks.add(idx, block)
-            t.copy(annotations = t.annotations.copy(blocks = blocks))
+            // Gated on "this analysis had NO image at all until now", not merely on a null stamp.
+            // An analysis created before frameStamp existed has a null stamp AND existing images:
+            // stamping it here would rename every one of its frames on the next export, orphaning
+            // the files already sitting in its _frames folder and breaking the `!frame-0N.jpg!`
+            // anchors in Markdown that may already be pasted into a Jira issue. Those analyses keep
+            // the legacy unstamped naming for good; only analyses that get their first image from
+            // this version onwards are stamped.
+            val isFirstImage = t.annotations.blocks.none { it is AnnBlock.Image }
+            t.copy(
+                annotations = t.annotations.copy(
+                    blocks = blocks,
+                    frameStamp = if (isFirstImage) FRAME_STAMP_FORMAT.format(LocalDateTime.now()) else t.annotations.frameStamp,
+                ),
+            )
         }
         return id
     }

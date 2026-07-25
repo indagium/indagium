@@ -465,8 +465,10 @@ class VideoTimeMappingTest {
 
     @Test
     fun setVideoAnchorAtVideoStartStoresZeroMs() {
-        // Mirrors the "Link to video start (0:00)" context-menu entry: an explicit videoMs = 0,
-        // independent of wherever the playhead happens to be.
+        // AppState.setVideoAnchor itself must still accept an explicit videoMs = 0 regardless of
+        // wherever the playhead happens to be — e.g. a user who seeks the video to 0:00 first and
+        // then uses the context menu's "Link to 0:00" (there's no dedicated "link to start" action;
+        // seeking to 0:00 and linking IS that action), or the MCP set_video_anchor tool.
         val tab = tabWith(entries = listOf(entry(1, "10:00:00.000")), anchor = null).copy(
             attachedVideo = VideoAttachment(path = "/tmp/repro.mp4", sourceLabel = "/tmp/repro.mp4", durationMs = 60_000),
         )

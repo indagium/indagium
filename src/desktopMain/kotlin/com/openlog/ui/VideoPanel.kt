@@ -220,16 +220,16 @@ private fun VideoHeaderFollowActions(
 ) {
     val anchor = attachment.anchor
     val clearTooltip = if (anchor != null) {
-        // Enabled tooltip has to carry two things since Clear is icon-only: what "Link to current
-        // video position" (the log row's right-click action) silently captured — the anchored log
-        // line's own timestamp alongside it when available (ts is empty for RAW/unparsed rows) —
-        // and, spelled out explicitly, that clicking removes just that anchor, not the video itself
+        // Enabled tooltip has to carry two things since Clear is icon-only: what the log row's
+        // right-click Video → "Link to <time>" action silently captured — the anchored log line's
+        // own timestamp alongside it when available (ts is empty for RAW/unparsed rows) — and,
+        // spelled out explicitly, that clicking removes just that anchor, not the video itself
         // (that's the separate trash-can button in this same header).
         val anchorLogTs = tab.rmap[anchor.logId]?.ts
         val anchorSummary = if (!anchorLogTs.isNullOrEmpty()) "⚓ $anchorLogTs = ${formatVideoTime(anchor.videoMs)}" else "⚓ ${formatVideoTime(anchor.videoMs)}"
         "$anchorSummary — click to clear this anchor. The video itself stays attached."
     } else {
-        "No anchor to clear yet — right-click a log row and choose \"Link to current video position\" first."
+        "No anchor to clear yet — right-click a log row and use Video → \"Link to <time>\" first."
     }
     ToolbarBtn(
         label = "Clear",
@@ -248,7 +248,7 @@ private fun VideoHeaderFollowActions(
         icon = Icons.Outlined.Sync,
         showLabel = false,
         tooltip = "Keeps the log selection continuously tracking the video as it plays. Needs a log line " +
-            "linked to a video moment — right-click a log row and choose \"Link to current video position\".",
+            "linked to a video moment — right-click a log row and use Video → \"Link to <time>\".",
         active = followLogs,
         enabled = targetLogId != null,
         onClick = { state.setVideoFollowLog(tab.id, !followLogs) },
@@ -676,7 +676,7 @@ private fun VideoTransportBar(
                     icon = Icons.Outlined.MyLocation,
                     showLabel = false,
                     tooltip = "Jumps to the log line matching the current video position. Needs a log line " +
-                        "linked to a video moment — right-click a log row and choose \"Link to current video position\".",
+                        "linked to a video moment — right-click a log row and use Video → \"Link to <time>\".",
                     enabled = targetLogId != null,
                     onClick = { navigateLogId?.let { state.navigateToVideoLog(tab.id, it, forceRecenter = true) } },
                 )

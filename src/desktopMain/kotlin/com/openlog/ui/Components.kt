@@ -27,6 +27,8 @@ import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.FindInPage
 import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
@@ -1005,6 +1007,54 @@ internal fun CtxThreadsActions(
     }
 }
 
+// Mirrors CtxThreadsActions's own shape exactly (header + a row of Ghost buttons) — the "Link to
+// current video position"/"Show in video" pair used to render as two independent (and a third, now-
+// dropped "Link to video start (0:00)") CtxMenuEntry.Action rows; this groups the surviving two
+// under a "Video" header the same way Threads groups its own show/hide-map actions.
+@Composable
+internal fun CtxVideoActions(
+    highlighted: Boolean = false,
+    linkLabel: String,
+    onLink: () -> Unit,
+    showEnabled: Boolean,
+    onShow: () -> Unit,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth(),
+        hoverBg = tc.hv,
+        forceHover = highlighted,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            AppText("Video", color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CtxActionSlot(CTX_VIDEO_BUTTON_WIDTH) {
+                    AppButton(
+                        linkLabel, onClick = onLink, variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth().height(26.dp),
+                        leadingIcon = Icons.Outlined.Link, horizontalPadding = 4.dp,
+                    )
+                }
+                CtxActionDivider(tc)
+                CtxActionSlot(CTX_VIDEO_BUTTON_WIDTH) {
+                    AppButton(
+                        "Show", onClick = onShow, variant = ButtonVariant.Ghost, enabled = showEnabled,
+                        modifier = Modifier.fillMaxWidth().height(26.dp),
+                        leadingIcon = Icons.Outlined.Movie, horizontalPadding = 4.dp,
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 internal fun CtxSelectionActions(
     highlighted: Boolean = false,
@@ -1125,6 +1175,12 @@ private val CTX_ACTION_BUTTON_WIDTH = 78.dp
 // entirely from wide glyphs ('w' and 'm' each appear twice between them), so they render measurably
 // wider than the single-word labels the 78dp width was originally sized for.
 private val CTX_THREADS_BUTTON_WIDTH = 100.dp
+
+// Video (CtxVideoActions) also has exactly 2 slots, but "Link to 12:34" runs measurably longer
+// than "Show map"/"Hide map" (a fixed "Link to " prefix plus a variable mm:ss timestamp) — 100dp
+// clipped its trailing digits on longer recordings, so this gets its own, wider width rather than
+// reusing CTX_THREADS_BUTTON_WIDTH.
+private val CTX_VIDEO_BUTTON_WIDTH = 118.dp
 
 // Extends into the row's existing right padding so the picker target can align with the
 // Show/Hide chevron without overlapping the Highlight label or leaving its hit area.
@@ -1380,6 +1436,18 @@ internal sealed class CtxMenuEntry {
     data class ThreadsActions(
         val onShowMap: (() -> Unit)? = null,
         val onHideMap: (() -> Unit)? = null,
+    ) : CtxMenuEntry()
+
+    // "Link" always overwrites whatever anchor already existed (one anchor per tab — see
+    // VideoAttachment.anchor's own doc); its label is precomputed by the call site (App.kt) rather
+    // than formatted in here, since only that site has the live VideoPlayerController position.
+    // "Show" mirrors SourceActions' enabled-not-hidden convention: it stays visible but disabled
+    // until an anchor exists AND the row actually maps to a video position.
+    data class VideoActions(
+        val linkLabel: String,
+        val onLink: () -> Unit,
+        val showEnabled: Boolean,
+        val onShow: () -> Unit,
     ) : CtxMenuEntry()
 
     data class SelectionActions(

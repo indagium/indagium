@@ -1102,10 +1102,10 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
         "get_video_frame",
         "Return the video frame for a tab's attached video, as a real inline image. Position is " +
             "given either as a log line (mapped to a video position via the tab's single anchor — " +
-            "see \"Link to current video position\" in the UI) or as an explicit video-time offset; " +
-            "provide exactly one of lineId or videoMs. Requires a video to already be attached to " +
-            "the tab (drag-and-drop or a zip candidate) — returns an error otherwise, and another " +
-            "error naming the missing step when lineId is given but no anchor is set.",
+            "see the Video section's \"Link to <time>\" context-menu action in the UI) or as an " +
+            "explicit video-time offset; provide exactly one of lineId or videoMs. Requires a video " +
+            "to already be attached to the tab (drag-and-drop or a zip candidate) — returns an error " +
+            "otherwise, and another error naming the missing step when lineId is given but no anchor is set.",
         schema(
             "tabId" to "string", "lineId" to "integer", "videoMs" to "integer",
             required = listOf("tabId"),
@@ -1127,8 +1127,8 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
             "folded inside a collapsed sequence/manual/stack-trace group (status HIDDEN_BY_COLLAPSE). " +
             "Every field is an id, a timestamp, a count, or a boolean — never message text or a tag — " +
             "so this is safe to hand back over a confidential log. Requires a video already attached " +
-            "with an anchor set (\"Link to current video position\" in the UI); returns status " +
-            "NO_ANCHOR otherwise rather than an error.",
+            "with an anchor set (the Video section's \"Link to <time>\" context-menu action in the " +
+            "UI); returns status NO_ANCHOR otherwise rather than an error.",
         schema(
             "tabId" to "string", "videoMs" to "integer",
             required = listOf("tabId", "videoMs"),
