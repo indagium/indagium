@@ -703,9 +703,10 @@ fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildS
     }
     var blockNumber = 1
     // Counts AnnBlock.Image blocks only, independent of blockNumber above (which also counts
-    // Note/LogRef blocks and is gated on numberAnnotationBlocks) — must match the ordinal
-    // AppState.exportAnnotationFrames() assigns the same images, via the shared
-    // annotationImageFileName() helper, or the anchors below would reference the wrong files.
+    // Note/LogRef blocks and is gated on numberAnnotationBlocks) — must match the ordinal (and the
+    // same tab.annotations.frameStamp) AppState.writeAnnotationFrameImages()/exportAnnotationFrames()
+    // assign the same images, via the shared annotationImageFileName() helper, or the anchors below
+    // would reference files that don't exist (or exist under a different, unstamped/stamped name).
     var imageOrdinal = 0
     for (block in tab.annotations.blocks) {
         when (block) {
@@ -725,7 +726,8 @@ fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildS
                 if (block.caption.isNotBlank()) appendLine(block.caption)
                 block.displayProvenance?.let { appendLine(it) }
                 when (settings.annotationLogBlockStyle) {
-                    AnnotationLogBlockStyle.JIRA_JAVA -> appendLine("!${annotationImageFileName(imageOrdinal, block.format)}!")
+                    AnnotationLogBlockStyle.JIRA_JAVA ->
+                        appendLine("!${annotationImageFileName(imageOrdinal, block.format, tab.annotations.frameStamp)}!")
                     AnnotationLogBlockStyle.INDENTED -> appendLine("[screenshot]")
                 }
                 appendLine()

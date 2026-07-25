@@ -254,6 +254,17 @@ data class Annotations(
     // set_case_metadata MCP tool at the end of an investigation. Optional; empty when absent.
     // Persisted as token field index 6, appended the same way as [appVersion] above.
     val decisiveTags: List<String> = emptyList(),
+    // Captured ONCE per analysis — the first time AnnotationManager.addImageBlock inserts an
+    // AnnBlock.Image into a tab that didn't have one yet — and never touched again afterwards, so
+    // every later edit (including auto-export's every-keystroke re-serialization) keeps naming
+    // exported frames after the same moment. This is what makes utils/annotationImageFileName()'s
+    // output collision-resistant across two people analysing different logs (both would otherwise
+    // produce identical "frame-01.jpg" names and collide as Jira attachments on the same issue).
+    // null for an analysis that has never had an image block (never generated, nothing to persist)
+    // and for any note saved before this field existed — both cases fall back to the original
+    // unstamped "frame-01.jpg" naming. Formatted "yyyyMMdd-HHmmss" (local time). Persisted as token
+    // field index 7, appended the same way as [decisiveTags] above.
+    val frameStamp: String? = null,
 )
 
 // ── In-view search (Ctrl/Cmd+F "Find" bar, ui/SearchBar.kt) ────────

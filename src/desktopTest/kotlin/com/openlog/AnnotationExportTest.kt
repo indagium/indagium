@@ -41,6 +41,23 @@ class AnnotationExportTest {
         assertEquals("frame-01.png", annotationImageFileName(1, "png"))
     }
 
+    // ── frameStamp naming (Jira attachment collision fix) ────────────────
+
+    @Test
+    fun annotationImageFileNameWithNullStampReproducesTheLegacyUnstampedName() {
+        // No explicit third argument, and an explicit null, must both be indistinguishable from
+        // the pre-existing (pre-stamp) behavior above — old analyses must keep their old names.
+        assertEquals("frame-01.jpg", annotationImageFileName(1, "jpeg", null))
+        assertEquals("frame-01.jpg", annotationImageFileName(1, "jpeg"))
+    }
+
+    @Test
+    fun annotationImageFileNameWithAStampInsertsItBetweenFrameAndTheOrdinal() {
+        assertEquals("frame-20260725-143012-01.jpg", annotationImageFileName(1, "jpeg", "20260725-143012"))
+        assertEquals("frame-20260725-143012-02.jpg", annotationImageFileName(2, "jpeg", "20260725-143012"))
+        assertEquals("frame-20260725-143012-01.png", annotationImageFileName(1, "png", "20260725-143012"))
+    }
+
     // ── buildMd Jira anchors (C2) ────────────────────────────────────────
 
     @Test
@@ -131,6 +148,37 @@ class AnnotationExportTest {
         assertEquals(22, File(framesDir, "frame-02.jpg").readBytes().single())
         // Only the images are written — no .md/.ann note file lands in the picked folder.
         assertTrue(dir.listFiles().orEmpty().none { it.isFile })
+    }
+
+    @Test
+    fun exportedFrameFilenamesMatchBuildMdsJiraAnchorsWhenAFrameStampIsSet() {
+        // Same regression fence as the unstamped test above, but with Annotations.frameStamp set —
+        // proves buildMd's anchors and exportAnnotationFrames' written files agree on the STAMPED
+        // name too, not just the legacy unstamped one.
+        val dir = createTempDirectory("openlog-frame-export-stamped").toFile()
+        val tab = mkTab("t1", "app.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "line 1"))).copy(
+            annotations = Annotations(
+                blocks = listOf(
+                    imageBlock("i1", "First", bytes = byteArrayOf(11)),
+                    AnnBlock.LogRef("r1", listOf(1), "Evidence"),
+                    imageBlock("i2", "Second", bytes = byteArrayOf(22)),
+                ),
+                frameStamp = "20260725-143012",
+            ),
+        )
+        val state = AppState(directoryPicker = { _, _ -> dir })
+        state.tabs = listOf(tab)
+        state.settings = state.settings.copy(annotationLogBlockStyle = AnnotationLogBlockStyle.JIRA_JAVA)
+        val md = buildMd(tab, state.settings)
+
+        state.exportAnnotationFrames(tab.id)
+
+        val framesDir = File(dir, "app_frames")
+        waitUntil { File(framesDir, "frame-20260725-143012-02.jpg").isFile }
+        assertTrue(md.contains("!frame-20260725-143012-01.jpg!"))
+        assertTrue(md.contains("!frame-20260725-143012-02.jpg!"))
+        assertEquals(11, File(framesDir, "frame-20260725-143012-01.jpg").readBytes().single())
+        assertEquals(22, File(framesDir, "frame-20260725-143012-02.jpg").readBytes().single())
     }
 
     // ── exportAnalysisTo also writes the referenced frame images (Fix 2) ──

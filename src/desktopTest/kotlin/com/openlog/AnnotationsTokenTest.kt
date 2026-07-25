@@ -14,14 +14,15 @@ import kotlin.test.assertTrue
 /**
  * Covers the backward-compatibility-sensitive `.ann` sidecar / autosave token format
  * (Annotations.annotationsToken / String.annotationsFromToken, AutosaveCodec.kt) after
- * appending `appVersion` (field index 5) and `decisiveTags` (field index 6) for the "similar
- * past issues" retrieval feature (com.openlog.cases).
+ * appending `appVersion` (field index 5), `decisiveTags` (field index 6) for the "similar
+ * past issues" retrieval feature (com.openlog.cases), and `frameStamp` (field index 7) for the
+ * unique-exported-frame-filenames fix (utils/annotationImageFileName).
  *
- * The two new fields are APPENDED after the original 5 fields (prefix, suffix, blocks,
+ * All three new fields are APPENDED after the original 5 fields (prefix, suffix, blocks,
  * issueDescription, sourcePath) — never inserted/reordered — so:
  *  - a legacy 5-field token (written before this change) must still parse with no error, with
- *    appVersion/decisiveTags simply defaulting to empty;
- *  - a new 7-field token must round-trip losslessly, including through the no-sourcePath
+ *    appVersion/decisiveTags defaulting to empty and frameStamp defaulting to null;
+ *  - a new 8-field token must round-trip losslessly, including through the no-sourcePath
  *    autosave (tabToken) path.
  */
 class AnnotationsTokenTest {
@@ -128,10 +129,11 @@ class AnnotationsTokenTest {
             issueDescription = "legacy issue",
             appVersion = "should-not-appear",
             decisiveTags = listOf("should-not-appear-either"),
+            frameStamp = "should-not-appear-either",
         )
         val fullToken = current.annotationsToken("/legacy/source.log")
-        // Simulate a pre-existing .ann sidecar written before appVersion/decisiveTags existed:
-        // exactly the first 5 "|"-separated fields, nothing appended.
+        // Simulate a pre-existing .ann sidecar written before appVersion/decisiveTags/frameStamp
+        // existed: exactly the first 5 "|"-separated fields, nothing appended.
         val legacyToken = fullToken.split("|").take(5).joinToString("|")
 
         val restored = legacyToken.annotationsFromToken()
@@ -144,6 +146,7 @@ class AnnotationsTokenTest {
         assertEquals(1, restored.blocks.size)
         assertEquals("", restored.appVersion)
         assertEquals(emptyList(), restored.decisiveTags)
+        assertEquals(null, restored.frameStamp, "a legacy note must keep its original unstamped frame names")
     }
 
     @Test
@@ -153,9 +156,35 @@ class AnnotationsTokenTest {
         val token = Annotations(issueDescription = "desc", appVersion = "9.9.9", decisiveTags = listOf("X"))
             .annotationsToken("/some/source/path.log")
         val fields = token.tokenFields()
-        assertEquals(7, fields.size, "new token must carry exactly 7 fields (0..6)")
+        assertEquals(8, fields.size, "new token must carry exactly 8 fields (0..7)")
         assertEquals("/some/source/path.log", fields.getOrNull(4))
         assertEquals("9.9.9", fields.getOrNull(5))
         assertEquals("X", fields.getOrNull(6))
+        assertEquals("", fields.getOrNull(7), "no frameStamp was set, so field 7 is empty (not absent)")
+    }
+
+    @Test
+    fun roundTripsFrameStampWithSourcePath() {
+        val original = Annotations(
+            blocks = listOf(AnnBlock.Note("n1", "root cause: race condition")),
+            issueDescription = "App crashes on cold start",
+            frameStamp = "20260725-143012",
+        )
+        val restored = original.annotationsToken("/path/to/source.log").annotationsFromToken()
+
+        assertEquals(original, restored)
+        assertEquals("20260725-143012", restored?.frameStamp)
+    }
+
+    @Test
+    fun frameStampDefaultsToNullWhenNeverSet() {
+        // An analysis that never gained an image block never gains a frameStamp either — its
+        // token must round-trip with frameStamp still null, not an empty string masquerading as
+        // "no stamp yet".
+        val original = Annotations(blocks = listOf(AnnBlock.Note("n1", "no images here")))
+        val restored = original.annotationsToken().annotationsFromToken()
+
+        assertEquals(original, restored)
+        assertEquals(null, restored?.frameStamp)
     }
 }
