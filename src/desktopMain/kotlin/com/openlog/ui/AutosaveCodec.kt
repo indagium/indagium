@@ -580,6 +580,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("debugLoggingEnabled", debugLoggingEnabled)
     debugLogFilePath?.let { put("debugLogFilePath", it) }
     put("showMinimap", showMinimap)
+    put("showVideoFollowReadout", showVideoFollowReadout)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -803,6 +804,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         debugLoggingEnabled = o.boolOrDefault("debugLoggingEnabled", false),
         debugLogFilePath = o.stringOrNull("debugLogFilePath"),
         showMinimap = o.boolOrDefault("showMinimap", true),
+        showVideoFollowReadout = o.boolOrDefault("showVideoFollowReadout", false),
     )
 }.getOrNull()
 

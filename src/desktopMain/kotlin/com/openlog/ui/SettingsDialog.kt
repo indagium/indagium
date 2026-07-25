@@ -735,6 +735,17 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             onToggle = { idx -> state.updateSettings { it.copy(showMinimap = idx == 0) } },
         )
     }
+    CompactSettingWithTooltip(
+        label = "Video follow readout",
+        tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
+            "bar, explaining exactly what Follow is doing at the current playhead position.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.showVideoFollowReadout) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(showVideoFollowReadout = idx == 0) } },
+        )
+    }
 }
 
 @Composable

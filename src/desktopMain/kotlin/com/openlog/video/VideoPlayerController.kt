@@ -18,7 +18,9 @@ import javax.imageio.ImageIO
 import javax.sound.sampled.AudioFormat
 import javax.sound.sampled.AudioSystem
 import javax.sound.sampled.DataLine
+import javax.sound.sampled.FloatControl
 import javax.sound.sampled.SourceDataLine
+import kotlin.math.log10
 
 // Presentation tolerance for the timestamped wall-clock wait below: a video frame within this
 // many microseconds of the current clock is shown immediately rather than sleeping for a
@@ -42,6 +44,12 @@ private const val NANOS_PER_MICRO = 1_000L
 
 private const val MIN_PLAYBACK_RATE = 0.1f
 private const val MAX_PLAYBACK_RATE = 8f
+
+// Below this linear gain, treat the line as silent rather than computing a (very large negative)
+// decibel value from log10(0..epsilon) — MASTER_GAIN's own minimum already represents "silent" for
+// this hardware line, so clamping to it directly avoids depending on log10's behavior near zero.
+private const val SILENT_VOLUME_THRESHOLD = 0.0001f
+private const val DB_PER_DECADE = 20f
 
 // 16-bit PCM: grabber.setSampleFormat(AV_SAMPLE_FMT_S16) below guarantees Frame.samples is a
 // ShortBuffer, so each sample is exactly 2 bytes for both the AudioFormat and the little-endian
@@ -87,6 +95,13 @@ interface VideoPlayerController {
     val durationMs: Long
     val isPlaying: Boolean
 
+    /** Linear gain in [0, 1] applied to the audio line, independent of [isMuted]. Defaults to 1
+     *  (full volume) on a freshly opened controller. */
+    val volume: Float
+
+    /** True when audio output is silenced without discarding the [volume] level to restore. */
+    val isMuted: Boolean
+
     /** Human-readable failure reason (unsupported/corrupt file, no audio device, ...) — the file
      *  failing to open is surfaced here, never as a crash. Null while healthy. */
     val error: String?
@@ -101,6 +116,12 @@ interface VideoPlayerController {
      *  video presentation but JavaSound audio remains at 1x. Real variable-speed audio needs
      *  resampling, out of scope for this substrate. */
     fun setRate(rate: Float)
+
+    /** Sets the linear gain in [0, 1]. Does not change [isMuted]. */
+    fun setVolume(volume: Float)
+
+    /** Toggles silence without losing the [volume] level to restore on unmute. */
+    fun setMuted(muted: Boolean)
 
     /** PNG bytes of whatever [currentFrame] currently shows. Null before the first frame decodes. */
     fun grabCurrentFrame(): ByteArray?
@@ -134,6 +155,8 @@ internal class FailedVideoPlayerController(override val error: String) : VideoPl
     override val positionMs: Long = 0L
     override val durationMs: Long = 0L
     override val isPlaying: Boolean = false
+    override val volume: Float = 1f
+    override val isMuted: Boolean = false
 
     override fun play() = Unit
 
@@ -142,6 +165,10 @@ internal class FailedVideoPlayerController(override val error: String) : VideoPl
     override fun seek(ms: Long) = Unit
 
     override fun setRate(rate: Float) = Unit
+
+    override fun setVolume(volume: Float) = Unit
+
+    override fun setMuted(muted: Boolean) = Unit
 
     override fun grabCurrentFrame(): ByteArray? = null
 
@@ -159,11 +186,15 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     private var _durationMs by mutableStateOf(0L)
     private var _isPlaying by mutableStateOf(false)
     private var _error by mutableStateOf<String?>(null)
+    private var _volume by mutableStateOf(1f)
+    private var _isMuted by mutableStateOf(false)
 
     override val currentFrame: ImageBitmap? get() = _currentFrame
     override val positionMs: Long get() = _positionMs
     override val durationMs: Long get() = _durationMs
     override val isPlaying: Boolean get() = _isPlaying
+    override val volume: Float get() = _volume
+    override val isMuted: Boolean get() = _isMuted
     override val error: String? get() = _error
 
     // Written only from the decode thread; read from any thread (Compose recomposition, MCP,
@@ -171,6 +202,11 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     // (a fresh BufferedImage), never mutated in place.
     @Volatile private var lastImage: BufferedImage? = null
     private var audioLine: SourceDataLine? = null
+
+    // MASTER_GAIN is a plain javax.sound control, unlike `grabber` — safe to touch from any
+    // thread, so setVolume/setMuted apply it directly rather than routing through the decode
+    // thread's cross-thread command volatiles.
+    private var gainControl: FloatControl? = null
 
     // Cross-thread commands: play()/pause()/seek()/setRate()/close() are called from the UI
     // thread; the decode loop (below) polls these volatiles at the top of every iteration rather
@@ -251,6 +287,27 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     override fun setRate(rate: Float) {
         pendingRate = rate.coerceIn(MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE)
         wakeDecoder()
+    }
+
+    override fun setVolume(volume: Float) {
+        _volume = volume.coerceIn(0f, 1f)
+        applyGain()
+    }
+
+    override fun setMuted(muted: Boolean) {
+        _isMuted = muted
+        applyGain()
+    }
+
+    private fun applyGain() {
+        val control = gainControl ?: return
+        val effective = if (_isMuted) 0f else _volume
+        val db = if (effective < SILENT_VOLUME_THRESHOLD) {
+            control.minimum
+        } else {
+            (DB_PER_DECADE * log10(effective)).coerceIn(control.minimum, control.maximum)
+        }
+        runCatching { control.value = db }
     }
 
     override fun grabCurrentFrame(): ByteArray? = lastImage?.let(::encodePng)
@@ -497,6 +554,10 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
                 return
             }
             audioLine = (AudioSystem.getLine(info) as SourceDataLine).apply { open(format) }
+            gainControl = runCatching {
+                audioLine?.getControl(FloatControl.Type.MASTER_GAIN) as? FloatControl
+            }.getOrNull()
+            applyGain()
         }.onFailure {
             AppLogger.warn("video", "No audio output line for $path — playing video-only", it)
             hasAudioStream = false

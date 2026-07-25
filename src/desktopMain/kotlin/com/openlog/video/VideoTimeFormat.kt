@@ -22,3 +22,14 @@ fun formatVideoTime(ms: Long): String {
     val millis = clamped % MS_PER_SECOND
     return String.format(Locale.US, "%02d:%02d.%03d", minutes, seconds, millis)
 }
+
+/**
+ * Same as [formatVideoTime] but without the milliseconds segment ("mm:ss") — used by the transport
+ * bar's elapsed/duration labels, where sub-second precision is just visual noise.
+ */
+fun formatVideoTimeShort(ms: Long): String {
+    val clamped = ms.coerceAtLeast(0L)
+    val minutes = clamped / MS_PER_MINUTE
+    val seconds = (clamped % MS_PER_MINUTE) / MS_PER_SECOND
+    return String.format(Locale.US, "%02d:%02d", minutes, seconds)
+}
