@@ -12,8 +12,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -43,6 +41,7 @@ import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Sync
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
@@ -144,47 +143,113 @@ private fun rotatedFramePng(sourceBytes: ByteArray, rotationDegrees: Int): ByteA
     }.getOrNull()
 }
 
+/**
+ * Two lines: the video's display name on its own row (full path on hover, unchanged), then a
+ * second row with [leading] pinned to the left edge and [trailing] pinned to the right — Clear/
+ * Follow vs. delete/maximize read as two opposed action groups rather than one crowded row. Kept a
+ * dumb layout component (no [AppState]/[LogTab] dependency of its own): both call sites already
+ * have everything [leading] and [trailing] need, so building those buttons here would just mean
+ * threading state through a component whose only job is arranging boxes.
+ */
 @Composable
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 private fun VideoHeader(
     attachment: VideoAttachment,
+    leading: @Composable RowScope.() -> Unit,
     trailing: @Composable RowScope.() -> Unit,
 ) {
     val colors = tc()
     val fullPath = videoFullPath(attachment)
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(Modifier.weight(1f)) {
-            TooltipArea(
-                tooltip = {
-                    Box(
-                        Modifier.background(colors.p2, CORNER_SM)
-                            .border(0.5.dp, colors.br, CORNER_SM)
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                    ) {
-                        AppText(fullPath, color = colors.tx, fontSize = 11.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
-                    }
-                },
-            ) {
-                AppText(
-                    "Video: ${videoDisplayName(attachment)}",
-                    color = colors.td,
-                    fontSize = 10.sp,
-                    fontFamily = UI,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+    // Tighter vertical padding than the old single-row header (7dp) since this is now two lines —
+    // otherwise the name would read as gaining a band of empty space rather than just sitting one
+    // row above the button strip.
+    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp)) {
+        TooltipArea(
+            tooltip = {
+                Box(
+                    Modifier.background(colors.p2, CORNER_SM)
+                        .border(0.5.dp, colors.br, CORNER_SM)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    AppText(fullPath, color = colors.tx, fontSize = 11.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                }
+            },
+        ) {
+            AppText(
+                "Video: ${videoDisplayName(attachment)}",
+                color = colors.td,
+                fontSize = 10.sp,
+                fontFamily = UI,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        Spacer(Modifier.height(3.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                leading()
+            }
+            Spacer(Modifier.weight(1f))
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                trailing()
             }
         }
-        Spacer(Modifier.width(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-            trailing()
-        }
     }
+}
+
+/**
+ * Clear + Follow, icon-only, at the header's leading edge. Always rendered — never conditionally
+ * hidden like Clear used to be — so the header's width doesn't jump as an anchor comes and goes;
+ * each button just disables itself and says why via its tooltip. Shared by [VideoPanel] and
+ * [VideoPlayerWindow]'s headers so the detached player window offers the identical pair rather
+ * than silently losing them.
+ */
+@Composable
+private fun VideoHeaderFollowActions(
+    state: AppState,
+    tab: LogTab,
+    attachment: VideoAttachment,
+    targetLogId: Int?,
+    followLogs: Boolean,
+) {
+    val anchor = attachment.anchor
+    val clearTooltip = if (anchor != null) {
+        // Enabled tooltip has to carry two things since Clear is icon-only: what "Link to current
+        // video position" (the log row's right-click action) silently captured — the anchored log
+        // line's own timestamp alongside it when available (ts is empty for RAW/unparsed rows) —
+        // and, spelled out explicitly, that clicking removes just that anchor, not the video itself
+        // (that's the separate trash-can button in this same header).
+        val anchorLogTs = tab.rmap[anchor.logId]?.ts
+        val anchorSummary = if (!anchorLogTs.isNullOrEmpty()) "⚓ $anchorLogTs = ${formatVideoTime(anchor.videoMs)}" else "⚓ ${formatVideoTime(anchor.videoMs)}"
+        "$anchorSummary — click to clear this anchor. The video itself stays attached."
+    } else {
+        "No anchor to clear yet — right-click a log row and choose \"Link to current video position\" first."
+    }
+    ToolbarBtn(
+        label = "Clear",
+        icon = Icons.Outlined.LinkOff,
+        showLabel = false,
+        tooltip = clearTooltip,
+        enabled = anchor != null,
+        onClick = { state.clearVideoAnchor(tab.id) },
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
+    )
+    ToolbarBtn(
+        label = if (followLogs) "Following" else "Follow",
+        // Distinct from Logs' MyLocation: Sync reads as "keep tracking," not "jump once," which is
+        // the whole behavioral difference between the two buttons — and doubles as the toggle's own
+        // active-state cue once ToolbarBtn's `active` fill kicks in below.
+        icon = Icons.Outlined.Sync,
+        showLabel = false,
+        tooltip = "Keeps the log selection continuously tracking the video as it plays. Needs a log line " +
+            "linked to a video moment — right-click a log row and choose \"Link to current video position\".",
+        active = followLogs,
+        enabled = targetLogId != null,
+        onClick = { state.setVideoFollowLog(tab.id, !followLogs) },
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
+    )
 }
 
 @Composable
@@ -273,6 +338,49 @@ internal fun BoundVideoPanel(
     }
 }
 
+/**
+ * What the header's Clear/Follow buttons and everything in [VideoPlayerContents] below them need
+ * from the current playhead position, resolved once and shared by both.
+ */
+private data class VideoFollowState(
+    val followLogs: Boolean,
+    val mapping: VideoFollowMapping,
+    val targetLogId: Int?,
+)
+
+/**
+ * Resolves [VideoFollowState] for the current recomposition. Called once from each of [VideoPanel]
+ * and [VideoPlayerWindow] — the common ancestor of [VideoHeader] (needs it for Clear/Follow) and
+ * [VideoPlayerContents] (needs it for the auto-follow effect, the transport bar's Logs button, and
+ * the diagnostic readout) — so neither has to re-derive it and the two can't disagree.
+ *
+ * Reading controller.positionMs here (during composition) makes the caller recompose on every
+ * decode-thread position update, so [VideoFollowMapping] below is always current. A snapshotFlow on
+ * the same state did NOT reliably re-fire on those background-thread writes, which froze Follow on
+ * one row while the video kept playing.
+ *
+ * The mapping resolve itself is the expensive part: the readout and the "Logs" button used to each
+ * re-resolve it independently, and every resolve was an O(n) pass over the whole log, so a
+ * 300k-row tab spent ~60ms of the UI thread per decoded frame — Follow, log scrolling and playback
+ * all stalled together. AppState now caches its indexes per tab, but resolving it exactly ONCE per
+ * recomposition and threading the same value everywhere is still the right shape.
+ */
+@Composable
+private fun videoFollowState(state: AppState, tab: LogTab, controller: VideoPlayerController): VideoFollowState {
+    val followLogs = state.isVideoFollowLogEnabled(tab.id)
+    val mapping = state.videoFollowMapping(tab.id, controller.positionMs)
+    // "Show in logs"/Follow's target: the visible log row Follow itself would select at this
+    // playhead position — null (and both buttons disabled) when there's no anchor yet, the
+    // anchor/target rows' `ts` doesn't parse (LogTime.parseMillisOfDay's TS_UNKNOWN case —
+    // brief/RAW-format rows), the current filter hides every timestamped row, or the position
+    // itself falls outside the known video duration. Taking it from the SAME mapping the readout
+    // and the automatic follow effect use keeps "enabled", "what the readout says" and "where the
+    // click lands" in sync — resolving it separately per button is how a filtered view could show
+    // an enabled button whose click target isn't actually visible.
+    val targetLogId = mapping.mappedNearestLogId?.takeIf { state.isVideoPositionValid(tab, controller.positionMs) }
+    return VideoFollowState(followLogs, mapping, targetLogId)
+}
+
 @Composable
 internal fun VideoPanel(
     state: AppState,
@@ -289,10 +397,20 @@ internal fun VideoPanel(
     // selection to 1x even if the controller's actual rate is still whatever was last set — a minor
     // cosmetic gap, not a functional one (the controller keeps playing at its real rate regardless).
     var selectedRate by remember(tab.id) { mutableStateOf(1f) }
+    val followState = videoFollowState(state, tab, controller)
 
     Column(modifier.fillMaxSize().background(tc.p)) {
         VideoHeader(
             attachment = attachment,
+            leading = {
+                VideoHeaderFollowActions(
+                    state = state,
+                    tab = tab,
+                    attachment = attachment,
+                    targetLogId = followState.targetLogId,
+                    followLogs = followState.followLogs,
+                )
+            },
             trailing = {
                 VideoRemoveAction(state = state, tab = tab)
                 ToolbarBtn(
@@ -310,6 +428,7 @@ internal fun VideoPanel(
             tab = tab,
             attachment = attachment,
             controller = controller,
+            followState = followState,
             selectedRate = selectedRate,
             onRateSelected = { rate -> selectedRate = rate; controller.setRate(rate) },
         )
@@ -332,9 +451,19 @@ private fun VideoPlayerWindow(
         state = rememberWindowState(size = DpSize(820.dp, 600.dp)),
         resizable = true,
     ) {
+        val followState = videoFollowState(state, tab, controller)
         Column(Modifier.fillMaxSize().background(tc.p)) {
             VideoHeader(
                 attachment = attachment,
+                leading = {
+                    VideoHeaderFollowActions(
+                        state = state,
+                        tab = tab,
+                        attachment = attachment,
+                        targetLogId = followState.targetLogId,
+                        followLogs = followState.followLogs,
+                    )
+                },
                 trailing = {
                     VideoRemoveAction(state = state, tab = tab)
                     ToolbarBtn(
@@ -352,6 +481,7 @@ private fun VideoPlayerWindow(
                 tab = tab,
                 attachment = attachment,
                 controller = controller,
+                followState = followState,
                 selectedRate = selectedRate,
                 onRateSelected = { rate -> selectedRate = rate; controller.setRate(rate) },
             )
@@ -365,22 +495,11 @@ private fun ColumnScope.VideoPlayerContents(
     tab: LogTab,
     attachment: VideoAttachment,
     controller: VideoPlayerController,
+    followState: VideoFollowState,
     selectedRate: Float,
     onRateSelected: (Float) -> Unit,
 ) {
-    val followLogs = state.isVideoFollowLogEnabled(tab.id)
-
-    // Reading controller.positionMs here (during composition) makes VideoPlayerContents recompose on
-    // every decode-thread position update, so the mapping below is always current. A snapshotFlow on
-    // the same state did NOT reliably re-fire on those background-thread writes, which froze Follow
-    // on one row while the video kept playing.
-    //
-    // Resolved exactly ONCE per recomposition and threaded down to the transport bar: the readout
-    // and the "Logs" button used to each re-resolve it, and every resolve was an O(n) pass over the
-    // whole log, so a 300k-row tab spent ~60ms of the UI thread per decoded frame — Follow, log
-    // scrolling and playback all stalled together. AppState now caches its indexes per tab, but one
-    // shared mapping is still the right shape: the readout and the selection can't disagree.
-    val mapping = state.videoFollowMapping(tab.id, controller.positionMs)
+    val (followLogs, mapping, targetLogId) = followState
     val followTarget = mapping.mappedNearestLogId.takeIf { followLogs }
 
     // `selectionKey` is what lets Follow re-assert itself. Keyed on followTarget alone, Follow went
@@ -395,9 +514,10 @@ private fun ColumnScope.VideoPlayerContents(
         if (followLogs && followTarget != null) state.navigateToVideoLog(tab.id, followTarget)
     }
 
+    val rotationDegrees = state.videoRotationDegrees(tab.id)
     VideoFrameArea(
         controller = controller,
-        rotationDegrees = state.videoRotationDegrees(tab.id),
+        rotationDegrees = rotationDegrees,
         modifier = Modifier.fillMaxWidth().weight(1f),
     )
     VideoTransportBar(
@@ -406,10 +526,10 @@ private fun ColumnScope.VideoPlayerContents(
         attachment = attachment,
         controller = controller,
         mapping = mapping,
+        targetLogId = targetLogId,
+        rotationDegrees = rotationDegrees,
         selectedRate = selectedRate,
         onRateSelected = onRateSelected,
-        followLogs = followLogs,
-        onFollowLogsChange = { state.setVideoFollowLog(tab.id, it) },
         onRotateClockwise = { state.rotateVideoClockwise(tab.id) },
     )
 }
@@ -462,10 +582,10 @@ private fun VideoTransportBar(
     attachment: VideoAttachment,
     controller: VideoPlayerController,
     mapping: VideoFollowMapping,
+    targetLogId: Int?,
+    rotationDegrees: Int,
     selectedRate: Float,
     onRateSelected: (Float) -> Unit,
-    followLogs: Boolean,
-    onFollowLogsChange: (Boolean) -> Unit,
     onRotateClockwise: () -> Unit,
 ) {
     val tc = tc()
@@ -482,8 +602,8 @@ private fun VideoTransportBar(
     val sliderInteractionSource = remember { MutableInteractionSource() }
     Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         // Elapsed/duration at the edges, transport controls centered between them — all in the
-        // same strip above the timeline, so play/volume/overflow read as belonging to the clock
-        // they control rather than to the anchor row below the slider.
+        // same strip above the timeline, so play/volume/frame-capture/overflow read as belonging
+        // to the clock they control rather than floating in a separate row.
         Box(Modifier.fillMaxWidth().height(28.dp).padding(horizontal = 2.dp)) {
             AppText(
                 formatVideoTimeShort(sliderValueMs),
@@ -505,6 +625,38 @@ private fun VideoTransportBar(
                     tooltip = if (controller.isPlaying) "Pause" else "Play",
                     enabled = playable,
                     onClick = { if (controller.isPlaying) controller.pause() else controller.play() },
+                )
+                ToolbarBtn(
+                    label = "Add frame to notes",
+                    icon = Icons.Outlined.AddAPhoto,
+                    showLabel = false,
+                    tooltip = "Add frame to notes",
+                    enabled = controller.currentFrame != null,
+                    onClick = {
+                        // Capture all context before encoding; playback can advance while ImageIO works.
+                        val capturedPositionMs = controller.positionMs
+                        controller.grabCurrentFrame()?.let { bytes ->
+                            rotatedFramePng(bytes, rotationDegrees)?.let { orientedBytes ->
+                                state.addVideoFrameNote(
+                                    tabId = tab.id,
+                                    sourceBytes = orientedBytes,
+                                    source = attachment.source,
+                                    sourceLabel = attachment.sourceLabel,
+                                    positionMs = capturedPositionMs,
+                                )
+                            }
+                            if (!state.annotationVisible) state.updateAnnotationVisible(true)
+                        }
+                    },
+                )
+                ToolbarBtn(
+                    label = "Logs",
+                    icon = Icons.Outlined.MyLocation,
+                    showLabel = false,
+                    tooltip = "Jumps to the log line matching the current video position. Needs a log line " +
+                        "linked to a video moment — right-click a log row and choose \"Link to current video position\".",
+                    enabled = targetLogId != null,
+                    onClick = { targetLogId?.let { state.navigateToVideoLog(tab.id, it, forceRecenter = true) } },
                 )
                 VideoOverflowMenu(
                     selectedRate = selectedRate,
@@ -557,15 +709,6 @@ private fun VideoTransportBar(
                 modifier = Modifier.fillMaxWidth().height(28.dp).padding(horizontal = 2.dp),
             )
         }
-        VideoAnchorRow(
-            state = state,
-            tab = tab,
-            attachment = attachment,
-            controller = controller,
-            mapping = mapping,
-            followLogs = followLogs,
-            onFollowLogsChange = onFollowLogsChange,
-        )
         if (state.settings.showVideoFollowReadout) {
             VideoFollowReadout(state = state, tab = tab, mapping = mapping, positionMs = controller.positionMs)
         }
@@ -937,105 +1080,5 @@ private fun VideoOverflowMenu(
                 }
             }
         }
-    }
-}
-
-@Composable
-@OptIn(ExperimentalLayoutApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
-private fun VideoAnchorRow(
-    state: AppState,
-    tab: LogTab,
-    attachment: VideoAttachment,
-    controller: VideoPlayerController,
-    mapping: VideoFollowMapping,
-    followLogs: Boolean,
-    onFollowLogsChange: (Boolean) -> Unit,
-) {
-    val tc = tc()
-    val anchor = attachment.anchor
-    val rotationDegrees = state.videoRotationDegrees(tab.id)
-    // "Show in logs" jumps to the visible log row Follow itself would select at this playhead
-    // position — null (and the button disabled) when there's no anchor yet, the anchor/target rows'
-    // `ts` doesn't parse (LogTime.parseMillisOfDay's TS_UNKNOWN case — brief/RAW-format rows), or the
-    // current filter hides every timestamped row. Taking it from the SAME mapping the readout and the
-    // automatic follow effect use keeps "enabled", "what the readout says" and "where the click
-    // lands" in sync — resolving them separately is how a filtered view could show an enabled button
-    // whose click target isn't actually visible.
-    val targetLogId = mapping.mappedNearestLogId?.takeIf { state.isVideoPositionValid(tab, controller.positionMs) }
-    FlowRow(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        AppButton(
-            "Logs",
-            onClick = { targetLogId?.let { state.navigateToVideoLog(tab.id, it, forceRecenter = true) } },
-            variant = ButtonVariant.Secondary,
-            enabled = targetLogId != null,
-            leadingIcon = Icons.Outlined.MyLocation,
-            horizontalPadding = 6.dp,
-        )
-        if (anchor != null) {
-            // What "Link to current video position" silently captured, shown on hover rather than
-            // as a permanent line — the anchored log line's own timestamp alongside it when
-            // available (ts is empty for RAW/unparsed rows).
-            val anchorLogTs = tab.rmap[anchor.logId]?.ts
-            val anchorSummary = if (!anchorLogTs.isNullOrEmpty()) {
-                "⚓ $anchorLogTs = ${formatVideoTime(anchor.videoMs)}"
-            } else {
-                "⚓ ${formatVideoTime(anchor.videoMs)}"
-            }
-            TooltipArea(
-                tooltip = {
-                    Box(
-                        Modifier.background(tc.p2, CORNER_SM)
-                            .border(0.5.dp, tc.br, CORNER_SM)
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                    ) {
-                        AppText(anchorSummary, color = tc.tx, fontSize = 11.sp)
-                    }
-                },
-            ) {
-                AppButton(
-                    "Clear",
-                    onClick = { state.clearVideoAnchor(tab.id) },
-                    variant = ButtonVariant.Secondary,
-                    leadingIcon = Icons.Outlined.LinkOff,
-                    horizontalPadding = 6.dp,
-                )
-            }
-        }
-        AppButton(
-            if (followLogs) "Following" else "Follow",
-            onClick = { onFollowLogsChange(!followLogs) },
-            variant = if (followLogs) ButtonVariant.Primary else ButtonVariant.Secondary,
-            enabled = targetLogId != null,
-            leadingIcon = Icons.Outlined.MyLocation,
-            horizontalPadding = 6.dp,
-        )
-        ToolbarBtn(
-            label = "Add frame to notes",
-            icon = Icons.Outlined.AddAPhoto,
-            showLabel = false,
-            tooltip = "Add frame to notes",
-            enabled = controller.currentFrame != null,
-            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
-            onClick = {
-                // Capture all context before encoding; playback can advance while ImageIO works.
-                val capturedPositionMs = controller.positionMs
-                controller.grabCurrentFrame()?.let { bytes ->
-                    rotatedFramePng(bytes, rotationDegrees)?.let { orientedBytes ->
-                        state.addVideoFrameNote(
-                            tabId = tab.id,
-                            sourceBytes = orientedBytes,
-                            source = attachment.source,
-                            sourceLabel = attachment.sourceLabel,
-                            positionMs = capturedPositionMs,
-                        )
-                    }
-                    if (!state.annotationVisible) state.updateAnnotationVisible(true)
-                }
-            },
-        )
     }
 }
