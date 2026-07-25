@@ -45,6 +45,30 @@ private const val NANOS_PER_MICRO = 1_000L
 private const val MIN_PLAYBACK_RATE = 0.1f
 private const val MAX_PLAYBACK_RATE = 8f
 
+// A decoded video frame whose presentation timestamp already trails the playback clock by more
+// than this is skipped instead of paid for with a convert()+publish() — converting it would only
+// delay showing a frame that matters more (the next one), digging an already-behind pipeline (or a
+// fast-forward rate) further behind. 100ms is roughly 3 frame periods at 30fps: generous enough
+// that ordinary decode jitter or a GC pause doesn't cost a visible drop, small enough that a
+// genuinely-behind pipeline (or rate > 1, which relies on this path to skip frames at all — see
+// setRate) catches back up within a handful of frames rather than converting nothing usefully.
+private const val FRAME_DROP_LATENESS_US = 100_000L
+
+// Caps shouldDropLateFrame's run of consecutive drops so the picture always eventually updates,
+// even under a persistently overloaded decode pipeline. Must comfortably clear the drop run a
+// legitimate MAX_PLAYBACK_RATE (8x) needs — at 8x roughly 7 of every 8 frames are expected to drop
+// by design — so the safety valve never fights ordinary fast playback, while still bounding how
+// long the picture can go without a single visible update.
+private const val MAX_CONSECUTIVE_FRAME_DROPS = 15
+
+// Decoded/converted frame size is capped on its long edge before playback conversion (see
+// openGrabber's downscale). Java2DFrameConverter.convert() and toComposeImageBitmap() each pay for
+// a full-resolution copy of every frame; at a 4K+ screen-recording source that is tens of MB per
+// frame, single-threaded, on the decode thread. Pushing the resize into native swscale (by setting
+// grabber.imageWidth/imageHeight) instead shrinks both Java-side copies by the same factor. 1280px
+// is comfortably more than this app's video panel ever renders at, so it costs no visible quality.
+private const val MAX_DECODE_LONG_EDGE_PX = 1280
+
 // Below this linear gain, treat the line as silent rather than computing a (very large negative)
 // decibel value from log10(0..epsilon) — MASTER_GAIN's own minimum already represents "silent" for
 // this hardware line, so clamping to it directly avoids depending on log10's behavior near zero.
@@ -75,6 +99,26 @@ internal class PlaybackTimeline(initialUs: Long = 0L) {
 
     fun advance(candidateUs: Long): Long = maxOf(positionUs, candidateUs.coerceAtLeast(0L)).also { positionUs = it }
 }
+
+/**
+ * Decides whether a decoded video frame should be skipped rather than converted and shown, given
+ * how far behind the playback clock its presentation timestamp already is. [latenessUs] is
+ * `currentClock - frame.timestamp` (positive once the frame's moment has passed);
+ * [consecutiveDrops] is how many frames in a row were already dropped since the last one that WAS
+ * shown.
+ *
+ * This is the mechanism that makes [FfmpegVideoPlayerController.setRate] actually change playback
+ * speed rather than only being able to slow it down: at rate > 1 the clock outruns the frames'
+ * natural spacing by design, so this function is what skips the ones the clock has already passed.
+ * At rate == 1 with a decode pipeline that's keeping up, `latenessUs` stays near zero and nothing
+ * is dropped.
+ *
+ * Deliberately independent of FFmpeg/Compose types — like [PlaybackTimeline] — so the drop
+ * threshold and the "always make forward visual progress" safety valve can be unit tested without
+ * native video libraries.
+ */
+internal fun shouldDropLateFrame(latenessUs: Long, consecutiveDrops: Int): Boolean =
+    latenessUs > FRAME_DROP_LATENESS_US && consecutiveDrops < MAX_CONSECUTIVE_FRAME_DROPS
 
 /**
  * Behind-an-interface video playback engine (plan doc's Task A "player core"). The concrete
@@ -112,9 +156,14 @@ interface VideoPlayerController {
 
     fun seek(ms: Long)
 
-    /** Playback speed multiplier. MVP limitation (documented, not silently wrong): it re-paces
-     *  video presentation but JavaSound audio remains at 1x. Real variable-speed audio needs
-     *  resampling, out of scope for this substrate. */
+    /** Playback speed multiplier. MVP limitation (documented, not silently wrong): real
+     *  variable-speed audio needs pitch-correct resampling, out of scope for this substrate, so
+     *  audio is silenced entirely whenever rate != 1x instead — playing it unmodified would be
+     *  wrong-pitched (rate < 1) or reduced to chopped garbage by the truncate-to-available() path
+     *  in `writeAudio` (rate > 1). Audio resumes automatically once rate returns to 1x. Video
+     *  presentation re-paces correctly at any rate: frames whose timestamps the (rate-scaled)
+     *  playback clock has already passed are dropped rather than decoded, which is also the
+     *  mechanism that lets rate > 1 actually play faster (see `shouldDropLateFrame`). */
     fun setRate(rate: Float)
 
     /** Sets the linear gain in [0, 1]. Does not change [isMuted]. */
@@ -240,6 +289,10 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     private var playbackStartNanos = 0L
     private var playbackStartTimestampUs = 0L
     private var hasAudioStream = false
+
+    // Decode-thread-owned run length of frames dropped in a row by shouldDropLateFrame, reset to 0
+    // every time a frame is actually shown. See shouldDropLateFrame's KDoc for why this is bounded.
+    private var consecutiveDrops = 0
 
     private val decodeThread = Thread({ runLoop() }, "openlog-video-decode").apply {
         isDaemon = true
@@ -369,6 +422,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     private fun openGrabber(): Boolean = runCatching {
         grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_S16)
         grabber.start()
+        applyDecodeDownscale()
         _durationMs = grabber.lengthInTime / MICROS_PER_MS
         hasAudioStream = grabber.hasAudio()
         if (hasAudioStream) openAudioLine()
@@ -377,6 +431,41 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         AppLogger.error("video", "Failed to open $path", t)
         _error = t.message ?: t::class.simpleName ?: "Failed to open video"
         false
+    }
+
+    /**
+     * Caps the decoded frame size on its long edge, preserving aspect ratio, by setting
+     * `grabber.imageWidth`/`imageHeight` so FFmpeg's native swscale does the resize instead of every
+     * frame paying for two full-resolution Java-side copies (`Java2DFrameConverter.convert()`, then
+     * `toComposeImageBitmap()`) — see MAX_DECODE_LONG_EDGE_PX's comment for why that matters.
+     *
+     * Ordering constraint: `imageWidth`/`imageHeight` default to 0 ("use the source's native size"),
+     * and FFmpegFrameGrabber's own getters only resolve that to an actual pixel count once the
+     * stream is open (`video_c != null`, per its `getImageWidth()`/`getImageHeight()` overrides) —
+     * before `start()` there is nothing to compute an aspect-preserving cap from. So this must run
+     * AFTER `grabber.start()`, reading the still-zero fields (whose getters fall back to the native
+     * decoder width/height while unset) to learn the source size, then writing back a capped size.
+     * Setting them after `start()` is not too late, despite that: FFmpegFrameGrabber re-derives the
+     * output size from those same fields on every decoded frame (`processImage()`, via a
+     * `sws_getCachedContext` that's cheap to re-fetch when parameters are unchanged and reallocates
+     * when they change), so the very next grab already comes out at the capped resolution — no
+     * restart of the grabber needed.
+     *
+     * [grabFrameAt] intentionally does not call this: it opens its own separate, short-lived grabber
+     * for MCP/screenshot frame grabs, which stays full resolution on purpose.
+     */
+    private fun applyDecodeDownscale() {
+        val sourceWidth = grabber.imageWidth
+        val sourceHeight = grabber.imageHeight
+        if (sourceWidth <= 0 || sourceHeight <= 0) return // no video stream (e.g. audio-only file)
+        val longEdge = maxOf(sourceWidth, sourceHeight)
+        if (longEdge <= MAX_DECODE_LONG_EDGE_PX) return // already small enough; never upscale
+        val scale = MAX_DECODE_LONG_EDGE_PX.toDouble() / longEdge
+        // swscale needs even dimensions for the YUV chroma-subsampled pixel formats most video uses;
+        // an odd target can fail to convert or misalign chroma planes. Round down to even, and
+        // coerceAtLeast(2) guards the (pathological) case of a source with a >1280x1 aspect ratio.
+        grabber.imageWidth = (((sourceWidth * scale).toInt()) / 2 * 2).coerceAtLeast(2)
+        grabber.imageHeight = (((sourceHeight * scale).toInt()) / 2 * 2).coerceAtLeast(2)
     }
 
     /** Returns true (and restarts the loop) if a seek was applied this iteration. */
@@ -451,11 +540,38 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     private fun presentVideoFrame(frame: Frame, epoch: Long) {
         waitUntilPresentationTime(frame.timestamp, epoch)
         if (closed || !playRequested || !isCurrentEpoch(epoch)) return // superseded while waiting
+
+        // waitUntilPresentationTime returns as soon as the clock has reached (or already passed)
+        // this frame's timestamp, without sleeping further — so a frame that was already late on
+        // entry (this decode step took too long, or rate > 1 made the clock outrun it) reaches here
+        // with a positive latenessUs instead of ever causing a wait. Drop it before paying for the
+        // conversion, which is the expensive part (see MAX_DECODE_LONG_EDGE_PX's comment).
+        val latenessUs = currentClockUs() - frame.timestamp
+        if (shouldDropLateFrame(latenessUs, consecutiveDrops)) {
+            consecutiveDrops++
+            // Still advance the published position to this frame's timestamp even though its
+            // picture is being skipped — video-to-log sync (and the slider) must keep moving
+            // forward with the clock rather than stalling on the last frame that was actually shown.
+            publishClockPosition(frame.timestamp, epoch)
+            return
+        }
+
+        consecutiveDrops = 0
         val image = runCatching { converter.convert(frame) }.getOrNull() ?: return
         publishFrame(image, frame.timestamp, epoch)
     }
 
     private fun presentAudioFrame(frame: Frame) {
+        // JavaSound plays PCM at a fixed sample rate, i.e. always at 1x pitch — there is no
+        // resampling here (see setRate's KDoc). Writing frames unmodified at rate != 1x would be
+        // wrong in two different ways depending on direction: at rate < 1 the audio would play at
+        // the wrong (higher) pitch and finish before the video does; at rate > 1, writeAudio's
+        // truncate-to-line.available() path would silently drop most of it, since audio frames are
+        // still decoded and offered at their normal real-time cadence while a faster clock consumes
+        // video sooner — the result is not slow/fast audio but chopped garbage. Silence is the
+        // correct MVP behavior for either case; audio resumes automatically once rate returns to 1x
+        // (this check is re-evaluated per frame, on the same decode thread that owns `rate`).
+        if (rate != 1f) return
         writeAudio(frame)
     }
 
@@ -533,8 +649,17 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
             lastImage = image
             runCatching { _currentFrame = image.toComposeImageBitmap() }
             _positionMs = positionUs / MICROS_PER_MS
-            playbackStartNanos = System.nanoTime()
-            playbackStartTimestampUs = positionUs
+            // Deliberately NOT rebasing playbackStartNanos/playbackStartTimestampUs here. This used
+            // to reset the wall-clock origin to "now = this frame's timestamp" on every published
+            // frame, which made currentClockUs() measure decode throughput instead of real elapsed
+            // time — the clock could never observe (or recover from) the pipeline falling behind,
+            // which is also why setRate had no way to speed anything up: doing so requires the
+            // clock to outrun frames so shouldDropLateFrame can skip them, and a clock that
+            // re-anchors to every frame it shows can never get ahead of the frame it just showed.
+            // The clock origin is established ONLY at a seek (applyPendingSeek), a play
+            // (applyPendingPlaybackClockChanges' resetPlaybackClockRequested branch), and a rate
+            // change (applyPendingPlaybackClockChanges' pendingRate branch) — see those for why each
+            // one is still correct without this rebase.
         }
     }
 
