@@ -73,7 +73,7 @@ private fun StringBuilder.appendImageHtml(block: AnnBlock.Image, settings: AppSe
         val prefix = if (settings.numberAnnotationBlocks) "${num++}. " else ""
         append("<p><b>").append(escapeHtmlMultiline(prefix + block.caption)).append("</b></p>")
     }
-    append("<p><i>").append(escapeHtml(block.videoFrame?.provenanceLabel ?: block.provenance)).append("</i></p>")
+    block.displayProvenance?.let { append("<p><i>").append(escapeHtml(it)).append("</i></p>") }
     val encoded = Base64.getEncoder().encodeToString(block.bytes)
     append("<p><img src=\"data:image/${block.format};base64,").append(encoded).append("\" style=\"max-width:100%\"></p>")
     return num

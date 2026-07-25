@@ -54,6 +54,7 @@ import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.*
 import com.openlog.source.SourceCodeView
 import kotlinx.coroutines.delay
+import java.awt.Toolkit
 import java.io.File
 import java.net.URI
 import kotlin.math.roundToInt
@@ -162,6 +163,9 @@ fun App(
                 .onPointerEvent(PointerEventType.Press, PointerEventPass.Initial) {
                     state.keyboardFocusVisible = false
                 }
+                // Bubble phase — see handleGlobalImagePaste's doc comment for why this one must
+                // NOT join the onPreviewKeyEvent chain below.
+                .onKeyEvent { ev -> handleGlobalImagePaste(ev, state) }
                 .onPreviewKeyEvent { ev ->
                     handleGlobalKey(
                         ev = ev,
@@ -1005,6 +1009,69 @@ fun App(
                                     danger = true
                                 ) { state.discardPendingFilterChangesAndLoad() }
                                 DialogActionButton("Cancel", active = false) { state.cancelPendingFilterLoad() }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // See PendingNoteOverwrite / AppState.autoExportAnnotations: this fires when the very
+            // first annotation edit on a tab resolves to a "<base>_analysis.md" that already exists
+            // on disk from an unrelated earlier session. dismissOnClickOutside = false, same as the
+            // zip-picker and other consequential dialogs below, so an accidental outside click can't
+            // silently pick "Cancel" for the user.
+            state.pendingNoteOverwrite?.let { pending ->
+                Dialog(
+                    onDismissRequest = { state.cancelNoteOverwrite() },
+                    properties = DialogProperties(dismissOnClickOutside = false),
+                ) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(380.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText(
+                            "Existing notes found",
+                            color = tc2.tx,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "\"${pending.targetName}\" already has saved notes for this log, from a session that " +
+                                "never opened this file. Nothing is being written to disk while this is open — " +
+                                "choose how to proceed.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 5,
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                DialogActionButton(
+                                    "Open existing notes",
+                                    active = true,
+                                ) { state.openExistingNoteInsteadOfOverwrite() }
+                                DialogActionButton(
+                                    "Save to a new file",
+                                    active = true,
+                                ) { state.saveNotesToNewNoteFile() }
+                            }
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                DialogActionButton(
+                                    "Overwrite",
+                                    active = true,
+                                    danger = true,
+                                ) { state.confirmNoteOverwrite() }
+                                DialogActionButton("Cancel", active = false) { state.cancelNoteOverwrite() }
                             }
                         }
                     }
@@ -2069,6 +2136,30 @@ private fun SavedFilterFolderPicker(
             }
         }
     }
+}
+
+/**
+ * Cmd/Ctrl+V anywhere in the window drops a clipboard image straight into Notes, so a screenshot
+ * can be pasted without first clicking into the Notes panel.
+ *
+ * Deliberately wired on the root Box's BUBBLE phase (`onKeyEvent`), never the preview phase the
+ * neighbouring [handleGlobalKey] uses. Preview runs root→leaf and would beat AnnotationPanel's own
+ * paste handler, losing that panel's smarter insertion point (imageInsertionAfterId() puts the
+ * image beside the block being edited). Bubbling runs leaf→root: the panel keeps winning while it
+ * has focus, and this only fires from everywhere else.
+ *
+ * Returns false whenever the clipboard holds no image, so an ordinary text paste is untouched.
+ */
+private fun handleGlobalImagePaste(ev: KeyEvent, state: AppState): Boolean {
+    if (ev.type != KeyEventType.KeyDown || !ev.isActionKey || ev.key != Key.V) return false
+    val tabId = state.activeTab()?.id ?: return false
+    val bytes = runCatching { Toolkit.getDefaultToolkit().systemClipboard.getContents(null) }
+        .getOrNull()
+        ?.let(::imageBytesFromTransferable) ?: return false
+    // Appended at the end: with focus outside Notes there is no "block being edited" to anchor to.
+    state.addImageBlock(tabId, bytes, "pasted from clipboard", null) ?: return false
+    if (!state.annotationVisible) state.updateAnnotationVisible(true)
+    return true
 }
 
 private fun handleGlobalKey(

@@ -122,13 +122,17 @@ internal class AnnotationManager(private val appState: AppState) {
         provenance: String,
         afterId: String? = null,
         videoFrame: VideoFrameReference? = null,
+        // Set at insertion rather than through a follow-up updateBlock: every upAnn triggers an
+        // autosave re-serialization plus a note auto-export, so a caption-carrying producer (the
+        // MCP add_image_note tool) would otherwise write the whole Annotations tree twice.
+        caption: String = "",
     ): String? {
         val encoded = downscaleAndEncodeJpeg(sourceBytes) ?: return null
         val id = "i${System.nanoTime()}"
         appState.upAnn(tabId) { t ->
             val block = AnnBlock.Image(
                 id = id,
-                caption = "",
+                caption = caption,
                 provenance = provenance,
                 format = "jpeg",
                 bytes = encoded,
@@ -155,6 +159,7 @@ internal class AnnotationManager(private val appState: AppState) {
         sourceLabel: String,
         positionMs: Long,
         afterId: String? = null,
+        caption: String = "",
     ): String? = addImageBlock(
         tabId = tabId,
         sourceBytes = sourceBytes,
@@ -165,6 +170,7 @@ internal class AnnotationManager(private val appState: AppState) {
             sourceLabel = sourceLabel,
             positionMs = positionMs.coerceAtLeast(0L),
         ),
+        caption = caption,
     )
 
     fun removeBlock(tabId: String, blockId: String) = appState.upAnn(tabId) { t ->

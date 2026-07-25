@@ -253,6 +253,9 @@ internal fun FilterPanel(
     onExportFilters: () -> Unit,
     onImportFilters: () -> Unit,
     onImportFiltersFromFiles: (List<File>) -> Unit,
+    // Anything dropped here that isn't a filter .json — a log, a video — is handed back to the
+    // app-wide drop routing instead of being swallowed by this panel's own target.
+    onUnhandledFileDrop: (List<File>) -> Unit,
     onClearFilter: () -> Unit,
     onNavigateCrash: (CrashSite) -> Unit,
     onUiStateChanged: () -> Unit = {},
@@ -740,14 +743,21 @@ internal fun FilterPanel(
         if (msgRuleScopeOpen) runCatching { msgRuleScopeFr.requestFocus() }
     }
     val scroll = rememberScrollState()
-    val filterDropTarget = remember(onImportFiltersFromFiles) {
+    val filterDropTarget = remember(onImportFiltersFromFiles, onUnhandledFileDrop) {
         object : DragAndDropTarget {
             override fun onDrop(event: DragAndDropEvent): Boolean {
-                val files = runCatching { (event.dragData() as DragData.FilesList).readFiles() }.getOrElse { return false }
+                val dropped = runCatching { (event.dragData() as DragData.FilesList).readFiles() }.getOrElse { return false }
                     .mapNotNull { uri -> runCatching { File(URI.create(uri)) }.getOrNull() }
-                    .filter { it.exists() && it.extension.equals("json", ignoreCase = true) }
-                if (files.isEmpty()) return false
-                onImportFiltersFromFiles(files)
+                val filterFiles = dropped.filter { it.exists() && it.extension.equals("json", ignoreCase = true) }
+                // Compose hands a drop to the innermost target that accepted the drag and does NOT
+                // retry the ancestor when this returns false — so without an explicit hand-off, a
+                // log or video dropped on this sidebar would vanish with no feedback at all.
+                if (filterFiles.isEmpty()) {
+                    if (dropped.isEmpty()) return false
+                    onUnhandledFileDrop(dropped)
+                    return true
+                }
+                onImportFiltersFromFiles(filterFiles)
                 return true
             }
         }

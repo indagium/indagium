@@ -1,6 +1,7 @@
 package com.openlog
 
 import com.openlog.ui.analysisNoteMarkdownName
+import com.openlog.ui.nextFreeNoteTargetName
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -32,5 +33,32 @@ class AnalysisNoteNameTest {
     @Test
     fun blankBaseFallsBackToAnalysis() {
         assertEquals("analysis_analysis.md", analysisNoteMarkdownName(".", null))
+    }
+
+    // AppState.saveNotesToNewNoteFile's "Save to a new file" choice on the note-overwrite prompt —
+    // pure, filesystem-free (the caller supplies `taken` instead of this function ever touching disk).
+    @Test
+    fun nextFreeNoteTargetNameReturnsTheBaseNameWhenItIsFree() {
+        assertEquals("sample_analysis.md", nextFreeNoteTargetName("sample_analysis.md", 1000) { false })
+    }
+
+    @Test
+    fun nextFreeNoteTargetNameSkipsToTheFirstFreeNumberedSuffix() {
+        val taken = setOf("sample_analysis.md", "sample_analysis_2.md")
+        assertEquals(
+            "sample_analysis_3.md",
+            nextFreeNoteTargetName("sample_analysis.md", 1000) { it in taken },
+        )
+    }
+
+    @Test
+    fun nextFreeNoteTargetNameGivesUpAtMaxSuffixAndReturnsTheLastCandidateTried() {
+        // Every name (including every numbered suffix) is reported taken — the walk must still
+        // terminate at maxSuffix rather than looping forever, returning whatever it last tried
+        // (suffixes 2, 3, 4 are attempted before the loop condition stops at suffix 5).
+        assertEquals(
+            "sample_analysis_4.md",
+            nextFreeNoteTargetName("sample_analysis.md", maxSuffix = 5) { true },
+        )
     }
 }

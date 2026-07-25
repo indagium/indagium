@@ -93,7 +93,10 @@ class AnnotationExportTest {
 
         val md = buildMd(tab, AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED))
 
-        assertTrue(md.contains("[screenshot: from repro.mp4]"))
+        // Bare marker: the source of a pasted/dropped image is never named in an export — only a
+        // video frame carries a "From <video> @ <time>" line (AnnBlock.Image.displayProvenance).
+        assertTrue(md.contains("[screenshot]"))
+        assertFalse(md.contains("from repro.mp4"))
         assertFalse(md.contains("!frame-01.jpg!"))
     }
 

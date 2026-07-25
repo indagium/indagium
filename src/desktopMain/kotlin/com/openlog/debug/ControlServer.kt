@@ -845,6 +845,29 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
         schema("tabId" to "string", "lineIds" to "array<integer>", "caption" to "string", required = listOf("tabId", "lineIds")),
     ),
     McpTool(
+        "add_image_note",
+        "Append an image evidence block to the tab's Notes. Provide EXACTLY ONE source: " +
+            "imageBase64 (raw encoded image bytes you already hold), imagePath (an image file on " +
+            "this machine), or videoMs (grab that position from the tab's attached video). The " +
+            "videoMs form is the one to prefer for video evidence — it records the video identity " +
+            "and timestamp, so the block renders a \"From <video> @ <time>\" line and stays " +
+            "clickable to seek the player there; the other two forms produce a plain image with no " +
+            "source line. Returns the new block id.",
+        schema(
+            "tabId" to "string", "imageBase64" to "string", "imagePath" to "string",
+            "videoMs" to "integer", "caption" to "string", "afterId" to "string",
+            required = listOf("tabId"),
+            descriptions = mapOf(
+                "imageBase64" to "Base64-encoded image bytes (png/jpeg). Mutually exclusive with imagePath and videoMs.",
+                "imagePath" to "Absolute path to an image file. Mutually exclusive with imageBase64 and videoMs.",
+                "videoMs" to "Position in the tab's attached video to capture, in milliseconds. " +
+                    "Mutually exclusive with imageBase64 and imagePath.",
+                "caption" to "Optional caption shown above the image.",
+                "afterId" to "Optional existing block id to insert after; appended at the end when omitted.",
+            ),
+        ),
+    ),
+    McpTool(
         "update_note_block", "Update a text note's text or a log note's caption.",
         schema("tabId" to "string", "blockId" to "string", "text" to "string", required = listOf("tabId", "blockId", "text")),
     ),
@@ -1142,6 +1165,7 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/annotations/section/append", "append_annotation_section"),
     Triple(HttpMethod.Post, "/annotations/note", "add_text_note"),
     Triple(HttpMethod.Post, "/annotations/log", "add_log_note"),
+    Triple(HttpMethod.Post, "/annotations/image", "add_image_note"),
     Triple(HttpMethod.Post, "/annotations/update", "update_note_block"),
     Triple(HttpMethod.Post, "/annotations/move", "move_note_block"),
     Triple(HttpMethod.Post, "/annotations/delete", "delete_note_block"),

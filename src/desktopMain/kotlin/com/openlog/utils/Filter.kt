@@ -723,10 +723,10 @@ fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildS
                 imageOrdinal += 1
                 if (settings.numberAnnotationBlocks) append("${blockNumber++}. ")
                 if (block.caption.isNotBlank()) appendLine(block.caption)
-                appendLine(block.videoFrame?.provenanceLabel ?: block.provenance)
+                block.displayProvenance?.let { appendLine(it) }
                 when (settings.annotationLogBlockStyle) {
                     AnnotationLogBlockStyle.JIRA_JAVA -> appendLine("!${annotationImageFileName(imageOrdinal, block.format)}!")
-                    AnnotationLogBlockStyle.INDENTED -> appendLine(if (block.videoFrame != null) "[screenshot]" else "[screenshot: ${block.provenance}]")
+                    AnnotationLogBlockStyle.INDENTED -> appendLine("[screenshot]")
                 }
                 appendLine()
             }

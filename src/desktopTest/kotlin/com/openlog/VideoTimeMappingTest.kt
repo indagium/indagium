@@ -401,6 +401,10 @@ class VideoTimeMappingTest {
         assertEquals(listOf(2), assertNotNull(state.pendingAnnotationNavigation).logIds)
         assertEquals(NavigationScrollMode.FOLLOW, state.pendingAnnotationNavigation?.scrollMode)
         assertTrue(state.isVideoFollowLogEnabled(tab.id))
+        // Filter-hidden rows can never be revealed by expanding a group (there is no group to
+        // expand), so this must keep clamping to the visible floor byte-for-byte, not ask the
+        // viewer to expand anything.
+        assertFalse(state.pendingAnnotationNavigation?.expandCollapsedGroups ?: true)
     }
 
     @Test
@@ -545,6 +549,100 @@ class VideoTimeMappingTest {
         val secondRequest = assertNotNull(state.pendingAnnotationNavigation)
         assertNotEquals(firstRequest.id, secondRequest.id)
         assertEquals(setOf(2), state.tab(tab.id)?.selected)
+    }
+
+    // Shared by the followRevealTarget tests below: entry 2 heads a collapsed manual block that
+    // folds entries 3 and 4 away, exactly the fixture followMappingIsHiddenByCollapse... above uses
+    // to prove the mapping distinguishes HIDDEN_BY_COLLAPSE from HIDDEN_BY_FILTER.
+    private fun tabWithFoldedRow(largeFileMode: Boolean = false): LogTab {
+        val entries = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "any", "anchor"),
+            LogEntry(2, "10:00:01.000", LogLevel.I, "any", "collapse block anchor"),
+            LogEntry(3, "10:00:02.000", LogLevel.I, "any", "folded away"),
+            LogEntry(4, "10:00:03.000", LogLevel.I, "any", "folded away"),
+            LogEntry(5, "10:00:04.000", LogLevel.I, "any", "after the block"),
+        )
+        val block = ManualCollapseBlock(id = "m1", anchorId = 2, direction = ManualCollapseDirection.TO_END)
+        return tabWith(entries, anchor = VideoAnchor(videoMs = 0, logId = 1)).copy(
+            manualBlocks = listOf(block),
+            largeFileMode = largeFileMode,
+            // expanded stays empty (default) -> the block renders collapsed.
+        )
+    }
+
+    // followRevealTarget's whole reason to exist: a row folded by a collapsed group (not filtered
+    // out) must navigate to the REAL row rather than clamping to the group's header, and must tell
+    // the viewer to expand the group to reach it.
+    @Test
+    fun navigateToVideoLogRevealsAFoldedRowAndSetsExpandCollapsedGroups() {
+        val tab = tabWithFoldedRow()
+        state.tabs = listOf(tab)
+        state.activeTabId = tab.id
+        state.noteVisibleItems(tab.id, summarizeItems(computeItems(tab, applyFilter = true)))
+
+        state.navigateToVideoLog(tab.id, logId = 3)
+
+        assertEquals(setOf(3), state.tab(tab.id)?.selected)
+        val request = assertNotNull(state.pendingAnnotationNavigation)
+        assertEquals(listOf(3), request.logIds)
+        assertEquals(NavigationScrollMode.FOLLOW, request.scrollMode)
+        assertTrue(request.expandCollapsedGroups)
+    }
+
+    // followExpandAttemptByTab bounds the reveal path to one attempt per folded run: while playback
+    // keeps landing on the same folded row (the visible floor never advances), repeated automatic
+    // Follow ticks must not keep republishing the same expand request.
+    @Test
+    fun navigateToVideoLogAllowsOnlyOneExpandAttemptPerFoldedRun() {
+        val tab = tabWithFoldedRow()
+        state.tabs = listOf(tab)
+        state.activeTabId = tab.id
+        state.noteVisibleItems(tab.id, summarizeItems(computeItems(tab, applyFilter = true)))
+
+        state.navigateToVideoLog(tab.id, logId = 3)
+        val firstRequest = assertNotNull(state.pendingAnnotationNavigation)
+
+        // Same folded run (the visible floor is still row 2, since nothing expanded tab.expanded
+        // in this pure test): no republish.
+        state.navigateToVideoLog(tab.id, logId = 3)
+        assertEquals(firstRequest, state.pendingAnnotationNavigation)
+        assertEquals(setOf(3), state.tab(tab.id)?.selected)
+    }
+
+    // forceRecenter (the explicit "Logs" button) must bypass the one-attempt-per-run memo too,
+    // exactly like it bypasses the plain clamp-path dedupe above.
+    @Test
+    fun forceRecenterBypassesTheFoldedRunExpandMemo() {
+        val tab = tabWithFoldedRow()
+        state.tabs = listOf(tab)
+        state.activeTabId = tab.id
+        state.noteVisibleItems(tab.id, summarizeItems(computeItems(tab, applyFilter = true)))
+
+        state.navigateToVideoLog(tab.id, logId = 3)
+        val firstRequest = assertNotNull(state.pendingAnnotationNavigation)
+
+        state.navigateToVideoLog(tab.id, logId = 3, forceRecenter = true)
+        val secondRequest = assertNotNull(state.pendingAnnotationNavigation)
+        assertNotEquals(firstRequest.id, secondRequest.id)
+        assertEquals(setOf(3), state.tab(tab.id)?.selected)
+        assertTrue(secondRequest.expandCollapsedGroups)
+    }
+
+    // largeFileMode disables the viewer's collapsed-group search outright (LogViewer.kt), so a
+    // reveal request there could only ever be dropped — followRevealTarget must not publish one.
+    @Test
+    fun navigateToVideoLogClampsWhenLargeFileModeDisablesGroupSearch() {
+        val tab = tabWithFoldedRow(largeFileMode = true)
+        state.tabs = listOf(tab)
+        state.activeTabId = tab.id
+        state.noteVisibleItems(tab.id, summarizeItems(computeItems(tab, applyFilter = true)))
+
+        state.navigateToVideoLog(tab.id, logId = 3)
+
+        assertEquals(setOf(2), state.tab(tab.id)?.selected)
+        val request = assertNotNull(state.pendingAnnotationNavigation)
+        assertEquals(listOf(2), request.logIds)
+        assertFalse(request.expandCollapsedGroups)
     }
 
     // B3: followTargetVisibleLogId is the shared visible-floor resolver for the transport bar and
@@ -824,6 +922,12 @@ class VideoTimeMappingTest {
         assertEquals(FollowMappingStatus.HIDDEN_BY_COLLAPSE, mapping.status)
         assertEquals(2, mapping.mappedNearestLogId)
         assertEquals(state.followTargetVisibleLogId(tab.id, 3_000), mapping.mappedNearestLogId)
+        // The un-clamped full-log floor is exposed too — this is what followRevealTarget plumbs
+        // through navigateToVideoLog to reveal the real row instead of stalling on the header.
+        // videoMs 3_000 maps exactly onto entry 4's own timestamp (10:00:03.000, 3s after the
+        // anchor), not entry 3 — the mapped moment lands ON the later folded row, and the visible
+        // floor still clamps to entry 2 because both 3 and 4 sit inside the same collapsed block.
+        assertEquals(4, mapping.mappedFullFloorLogId)
     }
 
     // The genuinely-filtered case (proven above) must stay HIDDEN_BY_FILTER, not get relabeled by
@@ -843,7 +947,11 @@ class VideoTimeMappingTest {
         state.tabs = listOf(tab)
         state.noteVisibleItems(tab.id, summarizeItems(computeItems(tab, applyFilter = true)))
 
-        assertEquals(FollowMappingStatus.HIDDEN_BY_FILTER, state.videoFollowMapping(tab.id, 2_000).status)
+        val mapping = state.videoFollowMapping(tab.id, 2_000)
+        assertEquals(FollowMappingStatus.HIDDEN_BY_FILTER, mapping.status)
+        // The mapping still exposes the un-clamped floor — it's followRevealTarget, not the
+        // mapping itself, that decides a filtered-out row can never be revealed by expanding.
+        assertEquals(3, mapping.mappedFullFloorLogId)
     }
 
     // followDiagnostics is the observability counterpart to videoFollowMapping: it must report the

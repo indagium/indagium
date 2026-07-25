@@ -22,6 +22,8 @@ import com.openlog.ui.FollowDiagnostics
 import com.openlog.ui.HL_COLORS
 import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitSource
+import com.openlog.ui.imageBytesFromFile
+import com.openlog.ui.rotatedFramePng
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.computeItems
 import com.openlog.utils.indexOfEntryId
@@ -101,6 +103,16 @@ internal class OpenLogToolOperations(
         },
         "add_log_note" to { a ->
             addLogNoteRoute(a.str("tabId") ?: "", a.intList("lineIds") ?: emptyList(), a.str("caption") ?: "")
+        },
+        "add_image_note" to { a ->
+            addImageNoteRoute(
+                tabId = a.str("tabId") ?: "",
+                imageBase64 = a.str("imageBase64"),
+                imagePath = a.str("imagePath"),
+                videoMs = a.anyInt("videoMs")?.toLong(),
+                caption = a.str("caption") ?: "",
+                afterId = a.str("afterId"),
+            )
         },
         "update_note_block" to { a ->
             updateAnnotationRoute(a.str("tabId") ?: "", a.str("blockId") ?: "", a.str("text") ?: "")
@@ -829,6 +841,67 @@ internal class OpenLogToolOperations(
     private fun addLogNoteRoute(tabId: String, lineIds: List<Int>, caption: String): Map<String, Any?> {
         if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
         val id = appState.addLogRefBlock(tabId, lineIds, caption) ?: return mapOf("error" to "log note was not created")
+        return mapOf("ok" to true, "tabId" to tabId, "blockId" to id)
+    }
+
+    // The only writer of AnnBlock.Image outside the video panel's own "Add frame to notes" button.
+    // Exactly one source must be supplied — silently preferring one over another would make a
+    // caller that passed two think the wrong one had been used. The videoMs form deliberately goes
+    // through addVideoFrameNote (not addImageBlock) so the block carries a real VideoFrameReference
+    // and stays clickable-to-seek, exactly like a frame captured from the UI; rotation is baked in
+    // the same way too, so an API capture is oriented the way the user sees the player.
+    private fun addImageNoteRoute(
+        tabId: String,
+        imageBase64: String?,
+        imagePath: String?,
+        videoMs: Long?,
+        caption: String,
+        afterId: String?,
+    ): Map<String, Any?> {
+        if (tabId.isBlank()) return mapOf("error" to "missing tabId")
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val sources = listOfNotNull(
+            imageBase64?.takeIf { it.isNotBlank() }?.let { "imageBase64" },
+            imagePath?.takeIf { it.isNotBlank() }?.let { "imagePath" },
+            videoMs?.let { "videoMs" },
+        )
+        if (sources.size != 1) {
+            return mapOf("error" to "provide exactly one of imageBase64, imagePath, videoMs (got: ${sources.size})")
+        }
+
+        if (videoMs != null) {
+            val attachment = tab.attachedVideo ?: return mapOf("error" to "no video attached to tab: $tabId")
+            if (!appState.isVideoPositionValid(tab, videoMs)) {
+                return mapOf("error" to "video position is outside the attached video's known range")
+            }
+            val frame = appState.videoController(tabId)?.grabFrameAt(videoMs)
+                ?: return mapOf("error" to "could not extract frame at ${videoMs}ms")
+            val oriented = rotatedFramePng(frame, appState.videoRotationDegrees(tabId))
+                ?: return mapOf("error" to "could not apply the video's rotation to the captured frame")
+            val id = appState.addVideoFrameNote(
+                tabId = tabId,
+                sourceBytes = oriented,
+                source = attachment.source,
+                sourceLabel = attachment.sourceLabel,
+                positionMs = videoMs,
+                afterId = afterId,
+                caption = caption,
+            ) ?: return mapOf("error" to "image note was not created")
+            return mapOf("ok" to true, "tabId" to tabId, "blockId" to id, "videoMs" to videoMs)
+        }
+
+        val bytes = if (imagePath != null && imagePath.isNotBlank()) {
+            if (invalidPath(imagePath)) return mapOf("error" to "invalid path: $imagePath")
+            // imageBytesFromFile bounds the source size and verifies it actually decodes, so an
+            // archive or a raw multi-hundred-MB capture can't be pulled into the heap by mistake.
+            imageBytesFromFile(File(imagePath))
+                ?: return mapOf("error" to "not a readable image file (or too large): $imagePath")
+        } else {
+            runCatching { Base64.getDecoder().decode(imageBase64) }.getOrNull()
+                ?: return mapOf("error" to "imageBase64 is not valid base64")
+        }
+        val id = appState.addImageBlock(tabId, bytes, provenance = "added via API", afterId = afterId, caption = caption)
+            ?: return mapOf("error" to "image note was not created (bytes did not decode as an image)")
         return mapOf("ok" to true, "tabId" to tabId, "blockId" to id)
     }
 

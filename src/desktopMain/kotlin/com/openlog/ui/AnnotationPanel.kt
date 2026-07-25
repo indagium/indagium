@@ -141,6 +141,9 @@ fun AnnotationPanel(
     onReorderBlock: (String, Int) -> Unit,
     onAddNoteAfter: (String?) -> Unit,
     onAddImage: (sourceBytes: ByteArray, provenance: String, afterId: String?) -> String?,
+    // Anything dropped here that isn't an image — a log, a video — is handed back to the app-wide
+    // drop routing instead of being swallowed by this panel's own target.
+    onUnhandledFileDrop: (List<File>) -> Unit,
     onNavigateLogRef: (AnnBlock.LogRef) -> Unit,
     onNavigateVideoFrame: (VideoFrameReference) -> Unit,
     width: Float,
@@ -232,9 +235,11 @@ fun AnnotationPanel(
                 controlsDp + filenameBadgeDp + captionDp + 6f + rowsDp + outerChromeDp
             }
             is AnnBlock.Image -> {
-                val provenanceDp = 16f
+                // Label plus its trailing Spacer, and only when the block actually renders one —
+                // a pasted/dropped image draws neither (see displayProvenance at the render site).
+                val provenanceDp = if (block.displayProvenance != null) 16f + 5f else 0f
                 val captionDp = textFieldDp(block.caption, 20.7f, 40f)
-                controlsDp + IMAGE_BLOCK_THUMBNAIL_DP + 5f + provenanceDp + 5f + captionDp + outerChromeDp
+                controlsDp + IMAGE_BLOCK_THUMBNAIL_DP + 5f + provenanceDp + captionDp + outerChromeDp
             }
         }
         return dp * blockDensity
@@ -307,13 +312,20 @@ fun AnnotationPanel(
         return addedAny
     }
 
-    val imageDropTarget = remember(tab.id, activeBlockFieldId, navIndex, ann.blocks, onAddImage) {
+    val imageDropTarget = remember(tab.id, activeBlockFieldId, navIndex, ann.blocks, onAddImage, onUnhandledFileDrop) {
         object : DragAndDropTarget {
             override fun onDrop(event: DragAndDropEvent): Boolean {
                 val files = runCatching { (event.dragData() as DragData.FilesList).readFiles() }
                     .getOrElse { return false }
                     .mapNotNull { uri -> runCatching { File(URI.create(uri)) }.getOrNull() }
-                return addDroppedImageFiles(files)
+                if (addDroppedImageFiles(files)) return true
+                // Nothing here decoded as an image. Compose gives a drop to the innermost target
+                // that accepted the drag and never retries the ancestor on a false return, so a
+                // video or log dropped on Notes would otherwise disappear silently — hand the
+                // whole batch to the same app-wide routing a drop on the log view would hit.
+                if (files.isEmpty()) return false
+                onUnhandledFileDrop(files)
+                return true
             }
         }
     }
@@ -1041,7 +1053,9 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                                 overflow = TextOverflow.Clip,
                             )
                         }
-                        AppText(imageProvenanceLabel(block), color = tc.td, fontSize = 11.sp, fontFamily = mono)
+                        block.displayProvenance?.let {
+                            AppText(it, color = tc.td, fontSize = 11.sp, fontFamily = mono)
+                        }
                         val bitmap = decodeImageBlockBitmap(block.bytes)
                         if (bitmap != null) {
                             Image(
@@ -1236,21 +1250,26 @@ private fun ImageBlockView(
             },
         )
         Spacer(Modifier.height(5.dp))
-        val provenanceModifier = if (onNavigateVideoFrame != null) {
-            Modifier
-                .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)))
-                .clickable(onClick = onNavigateVideoFrame)
-        } else {
-            Modifier
+        // Only a video frame gets a "From …" line (AnnBlock.Image.displayProvenance) — the label
+        // and its surrounding spacing disappear entirely for a pasted or dropped image, which is
+        // why this is one nullable read rather than an empty-string AppText.
+        block.displayProvenance?.let { provenance ->
+            val provenanceModifier = if (onNavigateVideoFrame != null) {
+                Modifier
+                    .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)))
+                    .clickable(onClick = onNavigateVideoFrame)
+            } else {
+                Modifier
+            }
+            AppText(
+                provenance,
+                color = tc.td,
+                fontSize = 9.sp,
+                fontFamily = MONO,
+                modifier = provenanceModifier,
+            )
+            Spacer(Modifier.height(5.dp))
         }
-        AppText(
-            imageProvenanceLabel(block),
-            color = tc.td,
-            fontSize = 9.sp,
-            fontFamily = MONO,
-            modifier = provenanceModifier,
-        )
-        Spacer(Modifier.height(5.dp))
         if (bitmap != null) {
             Image(
                 bitmap = bitmap,
@@ -1268,9 +1287,6 @@ private fun ImageBlockView(
         }
     }
 }
-
-/** Structured video frames render their canonical source label; free-form image provenance stays intact. */
-private fun imageProvenanceLabel(block: AnnBlock.Image): String = block.videoFrame?.provenanceLabel ?: block.provenance
 
 // Pure decode of a stored image block's bytes into something Compose can draw. Returns null
 // (rendered as a placeholder above) rather than throwing on a corrupt/unsupported blob — an

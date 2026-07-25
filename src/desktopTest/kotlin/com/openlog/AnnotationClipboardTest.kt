@@ -62,7 +62,9 @@ class AnnotationClipboardTest {
 
         assertTrue(html.contains("data:image/jpeg;base64,"))
         assertTrue(html.contains("Crash dialog"))
-        assertTrue(html.contains("from bugreport.zip/screen.mp4"))
+        // No videoFrame ⇒ no "From …" line. provenance survives on the model as the plain-text
+        // clipboard fallback, but it never reaches an export (AnnBlock.Image.displayProvenance).
+        assertFalse(html.contains("from bugreport.zip/screen.mp4"))
     }
 
     @Test

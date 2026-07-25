@@ -96,9 +96,9 @@ fun reconstructAnnotationsText(annotations: Annotations): String = buildString {
                 appendLine()
             }
             is AnnBlock.Image -> {
-                appendLine(if (block.videoFrame != null) "[screenshot]" else "[screenshot: ${block.provenance}]")
+                appendLine("[screenshot]")
                 if (block.caption.isNotBlank()) appendLine(block.caption)
-                appendLine(block.videoFrame?.provenanceLabel ?: block.provenance)
+                block.displayProvenance?.let { appendLine(it) }
                 appendLine()
             }
         }
