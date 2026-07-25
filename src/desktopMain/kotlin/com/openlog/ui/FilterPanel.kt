@@ -1899,7 +1899,7 @@ internal fun FilterPanel(
         // Same row-limit/collapse shape as Highlighters — always-on detection, not a user-defined
         // list, so there's nothing to add/remove here, only to browse and jump from.
         SectionHeader(
-            "Crashes",
+            "Issues",
             trailing = if (crashSites.isNotEmpty()) ({
                 AppText("${crashSites.size}", color = tc.td, fontSize = 10.sp, fontFamily = UI)
             }) else null,
@@ -1938,7 +1938,7 @@ internal fun FilterPanel(
                     )
                 }
             } else {
-                BoundedScrollBox(minOf(crashSites.size, filterListRows), rowDp = 44) {
+                BoundedScrollBox(minOf(crashSites.size, filterListRows), rowDp = CRASH_ROW_DP) {
                     crashSites.forEach { site ->
                         CrashSiteRow(site, tc, onClick = { onNavigateCrash(site) })
                     }
@@ -2765,17 +2765,35 @@ private fun BoundedScrollBox(
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
+    // heightIn(max) rather than height(): rowDp is only ever a guessed average row height, and a
+    // fixed height clips real content that's taller than the guess (e.g. a wrapping message line).
+    // heightIn(max) makes rowDp a cap for many rows while letting fewer/shorter rows size to their
+    // own content instead of being stretched-then-clipped to it.
     val h = (rowLimit * rowDp).dp
     val scrollState = rememberScrollState()
-    Box(modifier.fillMaxWidth().height(h)) {
-        Column(Modifier.fillMaxSize().verticalScroll(scrollState), content = content)
-        VerticalScrollbar(
-            adapter = rememberScrollbarAdapter(scrollState),
-            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-            style = appScrollbarStyle(tc()),
-        )
+    Box(modifier.fillMaxWidth().heightIn(max = h)) {
+        // fillMaxWidth, not fillMaxSize: fillMaxSize would claim the full `h` cap regardless of
+        // actual content height, forcing the Box back to a fixed size and defeating heightIn above.
+        Column(Modifier.fillMaxWidth().verticalScroll(scrollState), content = content)
+        // The scrollbar sits inside a matchParentSize() Box (same pattern as UpdateDialog) so its
+        // fillMaxHeight() doesn't participate in sizing the outer Box — a plain fillMaxHeight child
+        // measures at the full `h` cap and would pin the Box to it, defeating heightIn above.
+        Box(Modifier.matchParentSize()) {
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(scrollState),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+                style = appScrollbarStyle(tc()),
+            )
+        }
     }
 }
+
+// CrashSiteRow's real height, used as the multi-row cap for its BoundedScrollBox (44dp was a stale
+// single-line guess and clipped the two-line message). Derived from the composable's own paddings:
+// border 1dp top+bottom (2dp) + Column vertical padding 6dp top+bottom (12dp) + the header Row
+// (9sp pill with 1dp top+bottom padding, ~15dp tall) + 3dp spacer above the message + the 11sp
+// message at maxLines=2 (~16dp/line, ~32dp for two lines) = 2 + 12 + 15 + 3 + 32 = 64dp.
+private const val CRASH_ROW_DP = 64
 
 private val NATIVE_CRASH_COLOR = Color(0xFF8957e5)
 
