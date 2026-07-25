@@ -16,6 +16,11 @@ variables:
 workflow:
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+    # "Run pipeline" from the UI on any branch. Not `push`: every branch pipeline would then
+    # burn shared-runner minutes on work that GitHub Actions already does per commit. This
+    # exists so a one-off binary can be built for a platform GitHub Actions has no runner for
+    # (see package-linux-arm64-deb), on demand rather than on every push.
+    - if: '$CI_PIPELINE_SOURCE == "web"'
 
 .gradle_cache: &gradle_cache
   key:
@@ -29,13 +34,16 @@ workflow:
 verify:
   stage: verify
   cache: *gradle_cache
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
   script:
     - chmod +x gradlew
     - ./gradlew build
 
-package-linux-deb:
+# Shared by the x64 and arm64 .deb jobs — identical packaging, different runner architecture.
+# jpackage only ever builds for the machine it runs on, so an arm64 .deb needs an arm64 runner.
+.package-linux-deb:
   stage: package
-  needs: ["verify"]
   cache: *gradle_cache
   before_script:
     - apt-get update -qq && apt-get install -y -qq desktop-file-utils fakeroot
@@ -85,10 +93,33 @@ package-linux-deb:
     - grep -q '^Exec=.* %F$' "$desktop_file"
     - rm -rf "$workdir"
   artifacts:
-    name: "openLog-linux-x64-$CI_COMMIT_TAG"
     paths:
       - build/compose/binaries/main/deb/*.deb
     expire_in: 90 days
+
+package-linux-deb:
+  extends: .package-linux-deb
+  needs: ["verify"]
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+  artifacts:
+    name: "openLog-linux-x64-$CI_COMMIT_TAG"
+
+# GitHub Actions has no Linux arm64 runner, so this is the only way to get an arm64 build.
+# Runs automatically in a "Run pipeline" (web) pipeline on any branch and is manual on tags:
+# a plain binary for testing, deliberately not wired into the release flow. No `needs: verify`
+# — verify is tag-only, and packageDeb compiles everything it needs anyway.
+package-linux-arm64-deb:
+  extends: .package-linux-deb
+  tags:
+    - saas-linux-medium-arm64
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+      when: manual
+      allow_failure: true
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+  artifacts:
+    name: "openLog-linux-arm64-$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
 
 # Optional, triggered manually from the pipeline view (the "play" button on this job) — not
 # part of the automatic tag pipeline.
