@@ -13,7 +13,9 @@ import java.util.zip.ZipOutputStream
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -162,6 +164,81 @@ class VideoDropBehaviorTest {
         waitUntil { state.tabs.size == 1 && state.tabs.single().attachedVideo != null }
         val source = assertIs<VideoSource.ArchiveEntry>(state.tabs.single().attachedVideo?.source)
         assertEquals("screen/recording.mp4", source.entryPath)
+    }
+
+    // A disposable bug-report zip is routinely deleted right after its logs are opened — unlike an
+    // explicitly attached local recording, which a user has no reason to remove. Extraction is
+    // deferred until first playback access (attachVideoFromZip's own doc comment), so that access
+    // can land after the archive is already gone. videoController's contract is "non-null whenever
+    // attachedVideo is non-null" (its own doc comment) — a LocalFile source already keeps that
+    // promise by handing FFmpeg a bad path and surfacing the failure through the controller's own
+    // `error`, but an ArchiveEntry source used to return null one step earlier, in
+    // resolveVideoPlaybackPath, with nowhere for the failure to go. That silently made the whole
+    // video panel (BoundVideoPanel's `?: return`) and every Link/"Show in video" action act as if no
+    // video were attached at all, instead of showing the same failure state a broken local file
+    // already gets.
+    @Test
+    fun videoControllerReturnsAFailedControllerInsteadOfNullWhenTheArchiveHasBeenDeleted() {
+        val dir = createTempDirectory("openlog-video-archive-gone").toFile()
+        val archive = zip(
+            dir, "bugreport.zip",
+            mapOf(
+                "logs/main.log" to "06-26 10:00:00.000  1  1 I Main: loaded\n",
+                "screen/recording.mp4" to "not decoded by this test",
+            ),
+        )
+        val state = AppState(File(dir, "state.cache"))
+        state.openZipFile(archive)
+        val picker = checkNotNull(state.pendingZipPicker)
+        state.openZipEntries(archive, picker.candidates, picker.videoCandidates.single())
+        waitUntil { state.tabs.size == 1 && state.tabs.single().attachedVideo != null }
+        val tab = state.tabs.single()
+
+        assertTrue(archive.delete())
+
+        val controller = state.videoController(tab.id)
+        assertNotNull(controller)
+        assertNotNull(controller.error)
+        assertTrue(controller.error!!.contains("bugreport.zip"))
+        // A failure this early must disable playback, not merely leave positionMs/durationMs
+        // looking plausible — VideoTransportBar's `playable = controller.error == null` relies on
+        // this to grey out the slider/play button instead of offering controls for nothing.
+        assertEquals(0L, controller.durationMs)
+        assertFalse(controller.isPlaying)
+    }
+
+    // The mapping/anchor machinery (AppState.logIdToVideoMs, setVideoAnchor, navigateToVideoLog) is
+    // pure and never touches the controller, so it must keep working even while the controller
+    // itself reports failure — only actual playback (seeking, scrubbing, "Link to current video
+    // position") is unavailable without a real decoder.
+    @Test
+    fun anchoringAndFollowMappingStillWorkWhenTheArchiveVideoControllerHasFailed() {
+        val dir = createTempDirectory("openlog-video-archive-gone-mapping").toFile()
+        val archive = zip(
+            dir, "bugreport.zip",
+            mapOf(
+                "logs/main.log" to "06-26 10:00:00.000  1  1 I Main: first\n06-26 10:00:02.000  1  1 I Main: second\n",
+                "screen/recording.mp4" to "not decoded by this test",
+            ),
+        )
+        val state = AppState(File(dir, "state.cache"))
+        state.openZipFile(archive)
+        val picker = checkNotNull(state.pendingZipPicker)
+        state.openZipEntries(archive, picker.candidates, picker.videoCandidates.single())
+        waitUntil { state.tabs.size == 1 && state.tabs.single().attachedVideo != null }
+        val tab = state.tabs.single()
+        state.activeTabId = tab.id
+        assertTrue(archive.delete())
+        assertNotNull(state.videoController(tab.id)) // resolves (to a FailedVideoPlayerController)
+
+        val firstId = tab.logData[0].id
+        val secondId = tab.logData[1].id
+        state.setVideoAnchor(tab.id, videoMs = 0L, logId = firstId)
+        assertEquals(2_000L, state.logIdToVideoMs(state.tab(tab.id)!!, secondId))
+
+        state.setVideoFollowLog(tab.id, true)
+        state.navigateToVideoLog(tab.id, secondId)
+        assertEquals(setOf(secondId), state.tab(tab.id)?.selected)
     }
 
     private fun stateWithActiveTab(dir: File): AppState = AppState(File(dir, "state.cache")).also { state ->

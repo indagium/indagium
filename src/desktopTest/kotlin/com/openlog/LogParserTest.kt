@@ -2,6 +2,7 @@ package com.openlog
 
 import com.openlog.model.LogLevel
 import com.openlog.utils.parseLogcat
+import com.openlog.utils.parseMillisOfDay
 import kotlin.io.path.createTempFile
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -198,5 +199,37 @@ class LogParserTest {
 
         assertEquals(1, entries.size)
         assertEquals("emoji 😀 and CJK 中文", entries.single().msg)
+    }
+
+    // ts must come out as a bare, immediately-parseable "HH:MM:SS.frac" no matter how the log
+    // separated the date column from the time — dumpstate/bug-report logs use two spaces or a tab
+    // where plain `adb logcat` uses one. Stripping the date with substringAfter(' ') left a leading
+    // space (two spaces) or the whole date (tab), both of which LogTime.parseMillisOfDay rejects,
+    // so every row silently became untimestamped: no Δt column and, because the elapsed timeline
+    // came out empty, no video<->log time mapping at all.
+    @Test
+    fun stripsTheDatePrefixForEverySeparatorWidth() {
+        val separators = mapOf("one space" to " ", "two spaces" to "  ", "tab" to "\t", "tab and space" to "\t ")
+        for ((label, separator) in separators) {
+            val file = createTempFile(prefix = "openlog-sep", suffix = ".txt")
+            file.writeText("06-29${separator}12:34:56.789  1234  5678 I App: hello")
+
+            val entry = parseLogcat(file.toFile()).single()
+
+            assertEquals("12:34:56.789", entry.ts, "ts for $label separator")
+            assertEquals(45_296_789L, parseMillisOfDay(entry.ts), "parsed millis for $label separator")
+        }
+    }
+
+    // Same requirement for the `-v time` format, which shares the dated-timestamp capture group.
+    @Test
+    fun stripsTheDatePrefixForTheTimeFormatToo() {
+        val file = createTempFile(prefix = "openlog-time-sep", suffix = ".txt")
+        file.writeText("06-29  12:34:56.789 I/App( 1234): hello")
+
+        val entry = parseLogcat(file.toFile()).single()
+
+        assertEquals("12:34:56.789", entry.ts)
+        assertEquals(45_296_789L, parseMillisOfDay(entry.ts))
     }
 }

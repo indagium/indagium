@@ -3,8 +3,8 @@ package com.openlog
 import com.openlog.model.LogLevel
 import com.openlog.utils.ArchiveBudgetExceededException
 import com.openlog.utils.ZipLogCandidateKind
-import com.openlog.utils.extractCandidate
 import com.openlog.utils.extractArchiveVideoToCache
+import com.openlog.utils.extractCandidate
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.isZipFile
 import com.openlog.utils.listArchiveLogCandidates

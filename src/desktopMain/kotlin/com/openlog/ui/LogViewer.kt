@@ -1415,10 +1415,6 @@ fun LogViewer(
             LaunchedEffect(annotationNavigationRequest?.id, itemsVersion, allItemsVersion, tab.expanded) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
                 if (request.scrollMode == NavigationScrollMode.FOLLOW) {
-                    // Follow targets come from AppState's currently displayed `rowIds`, so they
-                    // are already visible rather than hidden in a collapsed group. Keeping this
-                    // branch expansion-free also prevents its own tab.expanded state changes from
-                    // restarting this effect and producing a second, conflicting jump.
                     request.logIds.firstNotNullOfOrNull { entryId ->
                         items.indexOfEntry(entryId).takeIf { it >= 0 }
                     }?.let { filteredLazyState.followItem(it) }
@@ -1646,9 +1642,6 @@ fun LogViewer(
             LaunchedEffect(annotationNavigationRequest?.id, itemsVersion) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
                 if (request.scrollMode == NavigationScrollMode.FOLLOW) {
-                    // Follow never expands collapsed content. Its target is selected from the
-                    // visible filtered rows, and a direct, hysteretic move avoids the ordinary
-                    // annotation path's scroll-to-top-then-recenter flash.
                     request.logIds.firstNotNullOfOrNull { entryId ->
                         items.indexOfEntry(entryId).takeIf { it >= 0 }
                     }?.let { mainLazyState.followItem(it) }

@@ -1,6 +1,7 @@
 package com.openlog
 
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import com.openlog.debug.ControlServer
 import com.openlog.model.AiProviderKind
 import com.openlog.model.AiProviderProfile
@@ -59,9 +60,14 @@ import com.openlog.ui.summarizeItems
 import com.openlog.ui.tabDisplayLabel
 import com.openlog.ui.themeColors
 import com.openlog.utils.SPLIT_PROMPT_BYTES
+import com.openlog.utils.ZipLogCandidate
+import com.openlog.utils.ZipLogCandidateKind
+import com.openlog.utils.archiveVideoCacheFileName
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
 import com.openlog.utils.listArchiveLogCandidates
+import com.openlog.utils.listArchiveVideoCandidates
+import com.openlog.video.VideoPlayerController
 import kotlinx.coroutines.delay
 import java.io.File
 import java.io.RandomAccessFile
@@ -553,7 +559,10 @@ class AppStateBehaviorTest {
             ),
         )
 
-        val md = buildMd(tab, AppSettings())
+        // INDENTED explicitly: JIRA_JAVA (buildMd's default AppSettings()) now emits a
+        // `!frame-01.jpg!` wiki anchor for an image block instead of this marker (C2) — this test
+        // is specifically about the older/INDENTED plain-text marker still being correct.
+        val md = buildMd(tab, AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED))
 
         assertTrue(md.contains("Crash dialog"))
         assertTrue(md.contains("[screenshot: from bugreport.zip/screen.mp4]"))
@@ -2305,6 +2314,68 @@ class AppStateBehaviorTest {
         assertEquals(0L, state.temporaryDataSizeBytes)
     }
 
+    private class FakeVideoControllerForCacheTest : VideoPlayerController {
+        override val currentFrame: ImageBitmap? = null
+        override val positionMs: Long = 0L
+        override val durationMs: Long = 0L
+        override val isPlaying: Boolean = false
+        override val error: String? = null
+
+        override fun play() = Unit
+
+        override fun pause() = Unit
+
+        override fun seek(ms: Long) = Unit
+
+        override fun setRate(rate: Float) = Unit
+
+        override fun grabCurrentFrame(): ByteArray? = null
+
+        override fun grabFrameAt(ms: Long): ByteArray? = null
+
+        override fun close() = Unit
+    }
+
+    // A-04 (video cache lifecycle): closing one of two tabs, each with its own archive-video
+    // attachment, must prune only the closed tab's now-unreferenced cache file and leave the
+    // surviving tab's file untouched — pruneArchiveVideoCache runs off the UI thread (ioScope), so
+    // the assertions need to wait for it rather than read the cache synchronously.
+    @Test
+    fun closingOneOfTwoTabsPrunesOnlyTheClosedTabsCachedVideo() {
+        val dir = createTempDirectory("openlog-video-cache-lifecycle").toFile()
+        val archiveCacheDir = File(dir, "archive-cache").apply { mkdirs() }
+        val archiveA = buildZipFixture(dir, "bugreportA.zip", mapOf("screen/a.mp4" to "video A bytes"))
+        val archiveB = buildZipFixture(dir, "bugreportB.zip", mapOf("screen/b.mp4" to "video B bytes"))
+        val candidateA = listArchiveVideoCandidates(archiveA).single()
+        val candidateB = listArchiveVideoCandidates(archiveB).single()
+        val state = AppState(
+            autosaveFile = File(dir, "state.cache"),
+            archiveCacheDir = archiveCacheDir,
+            videoControllerFactory = { FakeVideoControllerForCacheTest() },
+        )
+        state.tabs = listOf(mkTab("tabA", "a.log", emptyList()), mkTab("tabB", "b.log", emptyList()))
+        state.attachVideoFromZip(archiveA, candidateA, targetTabId = "tabA")
+        state.attachVideoFromZip(archiveB, candidateB, targetTabId = "tabB")
+        // Lazily triggers extraction into the managed cache for both tabs' attachments.
+        state.videoController("tabA")
+        state.videoController("tabB")
+        val videosDir = File(archiveCacheDir, "videos")
+        val nameA = archiveVideoCacheFileName(
+            archiveA,
+            ZipLogCandidate(candidateA.entryPath, candidateA.displayName, sizeBytes = -1L, kind = ZipLogCandidateKind.VIDEO),
+        )
+        val nameB = archiveVideoCacheFileName(
+            archiveB,
+            ZipLogCandidate(candidateB.entryPath, candidateB.displayName, sizeBytes = -1L, kind = ZipLogCandidateKind.VIDEO),
+        )
+        waitUntil { File(videosDir, nameA).exists() && File(videosDir, nameB).exists() }
+
+        state.closeTab("tabA")
+
+        waitUntil { !File(videosDir, nameA).exists() }
+        assertTrue(File(videosDir, nameB).exists(), "surviving tab's cached video must not be pruned")
+    }
+
     @Test
     fun openingRecentNotesPrunesDeletedNoteFiles() {
         val dir = createTempDirectory("openlog-recent-notes-prune").toFile()
@@ -2549,6 +2620,35 @@ class AppStateBehaviorTest {
         assertTrue(File(notesDir, "sample_analysis.ann").exists())
         assertTrue(!File(notesDir, "sample.log_notes.md").exists())
         assertEquals(listOf(File(notesDir, "sample_analysis.md").absolutePath), state.recentNotes)
+    }
+
+    @Test
+    fun autoExportWritesFrameImagesAlongsideTheMdWhenTabHasImageBlocks() {
+        val dir = createTempDirectory("openlog-auto-export-frames").toFile()
+        val notesDir = File(dir, "notes")
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))))
+
+        state.upAnn("log") { t ->
+            t.copy(
+                annotations = t.annotations.copy(
+                    blocks = t.annotations.blocks + AnnBlock.Image(
+                        id = "i1",
+                        caption = "",
+                        provenance = "from repro.mp4",
+                        format = "jpeg",
+                        bytes = byteArrayOf(9, 8, 7),
+                    ),
+                ),
+            )
+        }
+
+        waitUntil { File(notesDir, "sample_analysis.md").exists() }
+        val framesDir = File(notesDir, "sample_analysis_frames")
+        // Same name buildMd's JIRA_JAVA `!frame-01.jpg!` anchor references — the auto-exported
+        // note's image refs must not be left dangling.
+        waitUntil { File(framesDir, "frame-01.jpg").isFile }
+        assertTrue(byteArrayOf(9, 8, 7).contentEquals(File(framesDir, "frame-01.jpg").readBytes()))
     }
 
     @Test
@@ -4746,6 +4846,34 @@ class AppStateBehaviorTest {
         state.clearSelection("t1")
 
         assertTrue(state.tabs.single().selected.isEmpty())
+    }
+
+    // B1: a manual selection used to silently turn Follow back off; now it's a one-off look-around
+    // and Follow resumes driving selection on the next playhead move. Only the explicit "Following"
+    // toggle (setVideoFollowLog) may disable it. Covers every row-selection setter that flows
+    // through a manual click/range/multi-select/clear.
+    @Test
+    fun manualRowSelectionSettersLeaveVideoFollowLogEnabled() {
+        val state = AppState()
+        val entries = (1..4).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "App", "msg $it") }
+        state.tabs = listOf(mkTab("t1", "test.log", entries))
+        state.setVideoFollowLog("t1", enabled = true)
+
+        state.selRow("t1", 2, multi = false, range = false)
+        assertTrue(state.isVideoFollowLogEnabled("t1"))
+
+        state.selRowRange("t1", 1, 3)
+        assertTrue(state.isVideoFollowLogEnabled("t1"))
+
+        state.setSelectedRows("t1", listOf(1, 2))
+        assertTrue(state.isVideoFollowLogEnabled("t1"))
+
+        state.clearSelection("t1")
+        assertTrue(state.isVideoFollowLogEnabled("t1"))
+
+        // Only the explicit toggle turns it off.
+        state.setVideoFollowLog("t1", enabled = false)
+        assertFalse(state.isVideoFollowLogEnabled("t1"))
     }
 
     // ── extractMsgText (via hideMessagesLikeCtx) ──────────────────────────────

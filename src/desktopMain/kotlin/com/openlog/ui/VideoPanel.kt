@@ -45,12 +45,16 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -345,21 +349,30 @@ private fun ColumnScope.VideoPlayerContents(
     onRateSelected: (Float) -> Unit,
 ) {
     val followLogs = state.isVideoFollowLogEnabled(tab.id)
-    var lastFollowedLogId by remember(tab.id) { mutableStateOf<Int?>(null) }
 
-    // A decoded frame can arrive many times while the closest log row remains the same. Navigating
-    // only on an actual mapped-row change keeps the log view stable and makes a user's manual
-    // scroll/selection meaningful until playback crosses into a new row.
-    LaunchedEffect(followLogs, tab.attachedVideo?.anchor, controller.positionMs) {
-        if (!followLogs) {
-            lastFollowedLogId = null
-            return@LaunchedEffect
-        }
-        val mappedId = state.mappedVideoLogId(tab.id, controller.positionMs)
-        if (mappedId != null && mappedId != lastFollowedLogId) {
-            state.navigateToVideoLog(tab.id, mappedId)
-            lastFollowedLogId = mappedId
-        }
+    // Reading controller.positionMs here (during composition) makes VideoPlayerContents recompose on
+    // every decode-thread position update, so the mapping below is always current. A snapshotFlow on
+    // the same state did NOT reliably re-fire on those background-thread writes, which froze Follow
+    // on one row while the video kept playing.
+    //
+    // Resolved exactly ONCE per recomposition and threaded down to the transport bar: the readout
+    // and the "Logs" button used to each re-resolve it, and every resolve was an O(n) pass over the
+    // whole log, so a 300k-row tab spent ~60ms of the UI thread per decoded frame — Follow, log
+    // scrolling and playback all stalled together. AppState now caches its indexes per tab, but one
+    // shared mapping is still the right shape: the readout and the selection can't disagree.
+    val mapping = state.videoFollowMapping(tab.id, controller.positionMs)
+    val followTarget = mapping.mappedNearestLogId.takeIf { followLogs }
+
+    // `selectionKey` is what lets Follow re-assert itself. Keyed on followTarget alone, Follow went
+    // permanently silent after any manual click: with filters active the target holds for as long as
+    // the gap to the next *visible* row (often minutes, sometimes the rest of the file), so the key
+    // never changed and the user's click stuck while the video played on. While playback is running,
+    // a selection change re-fires this and Follow takes back over; while paused it does not, so a
+    // manual click is still the one-off look-around it should be. navigateToVideoLog's own
+    // already-selected dedupe (forceRecenter = false) keeps this from spamming scroll requests.
+    val selectionKey = tab.selected.takeIf { controller.isPlaying }
+    LaunchedEffect(followLogs, followTarget, selectionKey) {
+        if (followLogs && followTarget != null) state.navigateToVideoLog(tab.id, followTarget)
     }
 
     VideoFrameArea(
@@ -372,6 +385,7 @@ private fun ColumnScope.VideoPlayerContents(
         tab = tab,
         attachment = attachment,
         controller = controller,
+        mapping = mapping,
         selectedRate = selectedRate,
         onRateSelected = onRateSelected,
         followLogs = followLogs,
@@ -427,6 +441,7 @@ private fun VideoTransportBar(
     tab: LogTab,
     attachment: VideoAttachment,
     controller: VideoPlayerController,
+    mapping: VideoFollowMapping,
     selectedRate: Float,
     onRateSelected: (Float) -> Unit,
     followLogs: Boolean,
@@ -516,10 +531,114 @@ private fun VideoTransportBar(
             tab = tab,
             attachment = attachment,
             controller = controller,
+            mapping = mapping,
             followLogs = followLogs,
             onFollowLogsChange = onFollowLogsChange,
         )
+        VideoFollowReadout(state = state, tab = tab, mapping = mapping, positionMs = controller.positionMs)
     }
+}
+
+/**
+ * Spells out what Follow is actually doing at the current playhead position. Follow can only ever
+ * select a row the filter leaves visible, so in a filtered view it legitimately holds on one line
+ * for as long as the gap to the next visible one — which reads as a silent freeze without this
+ * line. HIDDEN_BY_FILTER and HIDDEN_BY_COLLAPSE are the cases that matter most: the log line
+ * matching this video moment exists but isn't independently visible, so the selection is
+ * deliberately behind the video — for two DIFFERENT reasons the readout must not conflate (see
+ * AppState.fullFloorHiddenReason): the filter actually excludes it, or it passes the filter but
+ * sits folded inside a collapsed sequence/manual/stack-trace group. Every branch that resolves to a
+ * held row also names the computed target time (`mappedElapsedMs`, formatted back to a clock string)
+ * ahead of it, so "how far behind is Follow actually holding" is visible at a glance instead of
+ * requiring the reader to do timestamp arithmetic themselves — this is the single most useful number
+ * for telling a genuinely-filtered/-folded hold apart from Follow being stuck on stale data.
+ */
+@Composable
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+private fun VideoFollowReadout(state: AppState, tab: LogTab, mapping: VideoFollowMapping, positionMs: Long) {
+    val tc = tc()
+    val posLabel = formatVideoTime(positionMs)
+    val targetClock = mapping.mappedElapsedMs?.let { com.openlog.utils.formatElapsedAsClock(it) }
+    val videoArrow = if (targetClock != null) "$posLabel → $targetClock" else posLabel
+    val target = "log ${mapping.mappedNearestLogTs} · #${mapping.mappedNearestLogId}"
+    val line = when (mapping.status) {
+        FollowMappingStatus.NO_ANCHOR -> "Link a log line to a video moment to enable follow"
+        FollowMappingStatus.BEFORE_FIRST -> "video $videoArrow → before first log line"
+        FollowMappingStatus.AFTER_LAST -> "video $videoArrow → past last log line"
+        FollowMappingStatus.NO_VISIBLE_ROW -> "video $videoArrow → no matching log line is visible (filtered out)"
+        FollowMappingStatus.HIDDEN_BY_FILTER -> "video $videoArrow → holding at $target (matching line hidden by filter)"
+        FollowMappingStatus.HIDDEN_BY_COLLAPSE -> "video $videoArrow → holding at $target (matching line folded inside a collapsed group)"
+        FollowMappingStatus.ON_VISIBLE_ROW -> "video $videoArrow → $target"
+    }
+    // pointerInput below is keyed on tab.id alone (so right-clicking doesn't restart a coroutine on
+    // every decoded frame) — which means its awaitPointerEventScope loop, once launched, keeps
+    // running the SAME suspend closure across recompositions rather than getting a fresh one each
+    // time. A closure over the plain `positionMs` parameter would then freeze at whatever position
+    // was current when that closure was first launched, silently copying a stale diagnostic dump on
+    // every later right-click. rememberUpdatedState is the standard fix: the pointerInput block
+    // reads `.value` (via the property delegate) at click time, not at launch time.
+    val latestPositionMs by rememberUpdatedState(positionMs)
+    // Transient "Copied" confirmation for the right-click diagnostic-copy action below — same
+    // COPIED_FEEDBACK_MS/auto-reset shape as McpInfoDialog's copy buttons, just rendered inline
+    // since this line has no room for a second control next to it.
+    var justCopied by remember(tab.id) { mutableStateOf(false) }
+    LaunchedEffect(justCopied) {
+        if (justCopied) {
+            kotlinx.coroutines.delay(COPIED_FEEDBACK_MS)
+            justCopied = false
+        }
+    }
+    val readoutText: @Composable () -> Unit = {
+        AppText(
+            if (justCopied) "Follow diagnostics copied to clipboard" else line,
+            color = if (justCopied) tc.ac else tc.td,
+            fontSize = 10.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp)
+                // Right-click (not left) so the readout's normal left-click-to-select-nothing
+                // behavior elsewhere in the app is undisturbed — this is a deliberate, secondary
+                // "debug dump" action, not the line's primary purpose. No visible affordance beyond
+                // the tooltip below: the readout is already the smallest sensible surface for this
+                // (see the task's own framing) rather than adding a whole new button/menu.
+                .pointerInput(tab.id) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull() ?: continue
+                            if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
+                                change.consume()
+                                state.copyToClipboard(formatFollowDiagnostics(state.followDiagnostics(tab.id, latestPositionMs)))
+                                justCopied = true
+                            }
+                        }
+                    }
+                },
+        )
+    }
+    // Confirms what the anchor itself links, without spending a second line of vertical space on
+    // it — the main readout above already carries the live mapping. Also documents the right-click
+    // diagnostic-copy action, since nothing else on this line hints it exists.
+    TooltipArea(
+        tooltip = {
+            Box(
+                Modifier.background(tc.p2, CORNER_SM)
+                    .border(0.5.dp, tc.br, CORNER_SM)
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                Column {
+                    if (mapping.anchorLogTs != null && mapping.anchorVideoMs != null) {
+                        AppText(
+                            "⚓ log ${mapping.anchorLogTs} = video ${formatVideoTime(mapping.anchorVideoMs)}",
+                            color = tc.tx,
+                            fontSize = 11.sp,
+                        )
+                    }
+                    AppText("Right-click: copy Follow diagnostics to clipboard", color = tc.tx, fontSize = 11.sp)
+                }
+            }
+        },
+    ) { readoutText() }
 }
 
 /** A compact, single segmented control for the fixed playback-speed choices. */
@@ -553,20 +672,21 @@ private fun VideoAnchorRow(
     tab: LogTab,
     attachment: VideoAttachment,
     controller: VideoPlayerController,
+    mapping: VideoFollowMapping,
     followLogs: Boolean,
     onFollowLogsChange: (Boolean) -> Unit,
 ) {
     val tc = tc()
     val anchor = attachment.anchor
     val rotationDegrees = state.videoRotationDegrees(tab.id)
-    // "Show in logs" jumps to whatever log row currently maps closest to the playhead — null (and
-    // the button disabled) when there's no anchor yet, or the anchor/target rows' `ts` doesn't
-    // parse (LogTime.parseMillisOfDay's TS_UNKNOWN case — brief/RAW-format rows).
-    val targetLogId = if (anchor != null && state.isVideoPositionValid(tab, controller.positionMs)) {
-        state.mappedVideoLogId(tab.id, controller.positionMs)
-    } else {
-        null
-    }
+    // "Show in logs" jumps to the visible log row Follow itself would select at this playhead
+    // position — null (and the button disabled) when there's no anchor yet, the anchor/target rows'
+    // `ts` doesn't parse (LogTime.parseMillisOfDay's TS_UNKNOWN case — brief/RAW-format rows), or the
+    // current filter hides every timestamped row. Taking it from the SAME mapping the readout and the
+    // automatic follow effect use keeps "enabled", "what the readout says" and "where the click
+    // lands" in sync — resolving them separately is how a filtered view could show an enabled button
+    // whose click target isn't actually visible.
+    val targetLogId = mapping.mappedNearestLogId?.takeIf { state.isVideoPositionValid(tab, controller.positionMs) }
     FlowRow(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -574,7 +694,7 @@ private fun VideoAnchorRow(
     ) {
         AppButton(
             "Logs",
-            onClick = { targetLogId?.let { state.navigateToVideoLog(tab.id, it) } },
+            onClick = { targetLogId?.let { state.navigateToVideoLog(tab.id, it, forceRecenter = true) } },
             variant = ButtonVariant.Secondary,
             enabled = targetLogId != null,
             leadingIcon = Icons.Outlined.MyLocation,
@@ -604,6 +724,22 @@ private fun VideoAnchorRow(
                     horizontalPadding = 6.dp,
                 )
             }
+            // Always-visible summary of what "Link to current video position" silently captured —
+            // previously this was tooltip-only, which left users unable to tell what video-time got
+            // linked without hovering. Shows the anchored log line's own timestamp alongside it when
+            // available (ts is empty for RAW/unparsed rows).
+            val anchorLogTs = tab.rmap[anchor.logId]?.ts
+            AppText(
+                if (!anchorLogTs.isNullOrEmpty()) {
+                    "⚓ $anchorLogTs = ${formatVideoTime(anchor.videoMs)}"
+                } else {
+                    "⚓ ${formatVideoTime(anchor.videoMs)}"
+                },
+                color = tc.td,
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         AppButton(
             if (followLogs) "Following" else "Follow",

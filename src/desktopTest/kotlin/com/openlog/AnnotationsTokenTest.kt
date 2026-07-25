@@ -115,7 +115,7 @@ class AnnotationsTokenTest {
         val image = restored.blocks.single() as AnnBlock.Image
 
         assertEquals(original, restored)
-        assertEquals("From bugreport.zip/screen.mp4", image.videoFrame?.provenanceLabel)
+        assertEquals("From bugreport.zip/screen.mp4 @ 00:12.345", image.videoFrame?.provenanceLabel)
         assertEquals(12_345L, image.videoFrame?.positionMs)
     }
 

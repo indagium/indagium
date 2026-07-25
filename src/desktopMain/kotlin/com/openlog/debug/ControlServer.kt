@@ -1093,6 +1093,28 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
             ),
         ),
     ),
+    McpTool(
+        "get_follow_diagnostics",
+        "Return a full diagnostic snapshot of what video<->log Follow resolved for a tab at a given " +
+            "video position — every id/timestamp/count/boolean needed to tell apart the standing " +
+            "reasons Follow can look \"stuck\": a spurious day-rollover corrupting the log's elapsed " +
+            "timeline (see rolloverApplied/rolloverSuppressed — a single anomalous row far behind its " +
+            "neighbors can permanently shift every later row by 24h), a match that genuinely fails " +
+            "the active filter (status HIDDEN_BY_FILTER), or a match that passes the filter but sits " +
+            "folded inside a collapsed sequence/manual/stack-trace group (status HIDDEN_BY_COLLAPSE). " +
+            "Every field is an id, a timestamp, a count, or a boolean — never message text or a tag — " +
+            "so this is safe to hand back over a confidential log. Requires a video already attached " +
+            "with an anchor set (\"Link to current video position\" in the UI); returns status " +
+            "NO_ANCHOR otherwise rather than an error.",
+        schema(
+            "tabId" to "string", "videoMs" to "integer",
+            required = listOf("tabId", "videoMs"),
+            descriptions = mapOf(
+                "tabId" to "Id of a tab with a video attached and an anchor set.",
+                "videoMs" to "Video playhead position in milliseconds to diagnose the mapping at.",
+            ),
+        ),
+    ),
 )
 
 // REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl
@@ -1139,4 +1161,5 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/sequence", "add_sequence"),
     Triple(HttpMethod.Post, "/filter/save-preset", "save_filter_preset"),
     Triple(HttpMethod.Get, "/video/frame", "get_video_frame"),
+    Triple(HttpMethod.Get, "/video/follow-diagnostics", "get_follow_diagnostics"),
 )

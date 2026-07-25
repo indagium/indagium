@@ -688,11 +688,25 @@ private fun StringBuilder.appendLogRefBlock(tab: LogTab, settings: AppSettings, 
     return if (settings.numberAnnotationBlocks) blockNumber + 1 else blockNumber
 }
 
+// No Markdown/data-URI image is ever embedded here — it won't render in Jira plain text, and a
+// bare clipboard paste can only carry one image at a time anyway. Two-step workflow instead:
+// "Export frames" (AppState.exportAnnotationFrames) writes each image as frame-0N.jpg next to a
+// sibling .md of this exact text, then the user pastes the text and attaches the files. Under
+// JIRA_JAVA style, the marker line below is a `!frame-0N.jpg!` wiki anchor Jira Server/DC renders
+// inline once the same-named file is attached — a bare Copy without exporting first yields anchors
+// with no attachment behind them yet. JIRA_JAVA is the only style shown these anchors (Jira Cloud
+// users on Indented would otherwise see broken `!filename!` syntax); INDENTED keeps the older
+// plain-text `[screenshot]` marker.
 fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildString {
     if (tab.annotations.prefix.isNotBlank()) {
         appendLine(tab.annotations.prefix); appendLine()
     }
     var blockNumber = 1
+    // Counts AnnBlock.Image blocks only, independent of blockNumber above (which also counts
+    // Note/LogRef blocks and is gated on numberAnnotationBlocks) — must match the ordinal
+    // AppState.exportAnnotationFrames() assigns the same images, via the shared
+    // annotationImageFileName() helper, or the anchors below would reference the wrong files.
+    var imageOrdinal = 0
     for (block in tab.annotations.blocks) {
         when (block) {
             is AnnBlock.Note -> {
@@ -706,13 +720,14 @@ fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildS
             is AnnBlock.LogRef -> blockNumber = appendLogRefBlock(tab, settings, block, blockNumber)
 
             is AnnBlock.Image -> {
-                // No Markdown/data-URI image here — it won't render in Jira plain text. The real
-                // image bytes are meant to travel via clipboard (per-image "Copy image" — Task D,
-                // not yet implemented), so this exported text only carries the provenance marker.
+                imageOrdinal += 1
                 if (settings.numberAnnotationBlocks) append("${blockNumber++}. ")
                 if (block.caption.isNotBlank()) appendLine(block.caption)
                 appendLine(block.videoFrame?.provenanceLabel ?: block.provenance)
-                appendLine(if (block.videoFrame != null) "[screenshot]" else "[screenshot: ${block.provenance}]")
+                when (settings.annotationLogBlockStyle) {
+                    AnnotationLogBlockStyle.JIRA_JAVA -> appendLine("!${annotationImageFileName(imageOrdinal, block.format)}!")
+                    AnnotationLogBlockStyle.INDENTED -> appendLine(if (block.videoFrame != null) "[screenshot]" else "[screenshot: ${block.provenance}]")
+                }
                 appendLine()
             }
         }

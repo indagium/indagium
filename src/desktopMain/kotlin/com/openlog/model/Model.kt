@@ -2,6 +2,7 @@ package com.openlog.model
 
 import androidx.compose.ui.graphics.Color
 import com.openlog.utils.ZipLogCandidate
+import com.openlog.video.formatVideoTime
 
 private val MANUAL_COLLAPSE_DEFAULT_COLOR = Color(0xFF06b6d4)
 val DEFAULT_KEYWORD_HIGHLIGHT_COLOR = Color(0xFFfacc15)
@@ -390,7 +391,7 @@ data class VideoFrameReference(
     val sourceLabel: String,
     val positionMs: Long,
 ) {
-    val provenanceLabel: String get() = "From $sourceLabel"
+    val provenanceLabel: String get() = "From $sourceLabel @ ${formatVideoTime(positionMs)}"
 }
 
 // Recognized by both the drag-drop attach path (ui/App.kt's onDrop) and the zip-archive

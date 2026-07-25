@@ -299,6 +299,7 @@ internal fun CompareView(
                                 onCopy = { state.copyAnn(leftTab.id) },
                                 onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
                                 onCopyRichPreview = { state.copyRichPreview(leftTab.id) },
+                                onExportFrames = { state.exportAnnotationFrames(leftTab.id) },
                                 onSave = { state.saveAnalysis(leftTab.id) },
                                 onToggleRecentNotes = { state.toggleRecentNotesMenu() },
                                 onOpenNote = { state.openNoteFileAsync(leftTab.id, it) },

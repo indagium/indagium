@@ -530,6 +530,12 @@ fun App(
                                         },
                                     )
                                     add(
+                                        CtxMenuEntry.Action(Icons.Outlined.Link, "Link to video start (0:00)") {
+                                            state.setVideoAnchor(ctxTab.id, 0L, entry.id)
+                                            state.ctx = null
+                                        },
+                                    )
+                                    add(
                                         CtxMenuEntry.Action(
                                             Icons.Outlined.Movie, "Show in video",
                                             enabled = attachedVideo.anchor != null && hasValidMappedPosition,
