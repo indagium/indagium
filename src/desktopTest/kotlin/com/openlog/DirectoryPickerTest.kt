@@ -4,6 +4,7 @@ import com.openlog.ui.configureDirectoryChooser
 import com.openlog.ui.initialDirectoryForPicker
 import com.openlog.ui.isMacOs
 import com.openlog.ui.resolveChosenDirectory
+import org.junit.Assume.assumeNoException
 import java.awt.HeadlessException
 import java.io.File
 import javax.swing.JFileChooser
@@ -12,7 +13,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
-import org.junit.Assume.assumeNoException
 
 class DirectoryPickerTest {
     @Test

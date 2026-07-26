@@ -394,7 +394,7 @@ private fun videoFollowState(state: AppState, tab: LogTab, controller: VideoPlay
     val navigateLogId = (
         mapping.mappedFullFloorLogId?.takeIf { mapping.status == FollowMappingStatus.HIDDEN_BY_COLLAPSE }
             ?: mapping.mappedNearestLogId
-        )?.takeIf { positionValid }
+    )?.takeIf { positionValid }
     return VideoFollowState(followLogs, mapping, targetLogId, navigateLogId)
 }
 

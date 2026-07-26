@@ -15,6 +15,7 @@ import com.openlog.ui.FollowMappingStatus
 import com.openlog.ui.NavigationScrollMode
 import com.openlog.ui.summarizeItems
 import com.openlog.utils.computeItems
+import java.util.Locale
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -319,7 +320,7 @@ class VideoTimeMappingTest {
         // view by a tag filter, exactly like the real bug report's non-`main` buffers.
         repeat(3_000) { i ->
             val sec = 3_600 + i
-            entries += entry(id++, String.format("%02d:%02d:%02d.000", sec / 3_600, (sec % 3_600) / 60, sec % 60), tag = "hidden")
+            entries += entry(id++, String.format(Locale.ROOT, "%02d:%02d:%02d.000", sec / 3_600, (sec % 3_600) / 60, sec % 60), tag = "hidden")
         }
 
         entries += entry(id++, "14:11:04.663")
