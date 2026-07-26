@@ -3496,6 +3496,12 @@ class AppStateBehaviorTest {
         state.openFile(file)
         waitUntil { state.tabs.size == 1 && !state.isLoading }
         val tabId = state.tabs.single().id
+        // Wait for the initial analysis to settle rather than assuming it already has: isLoading
+        // going false only means the file is parsed, and the analysis pass that clears `pending`
+        // completes independently of it. Asserting straight off the load left a race that a slow
+        // runner loses — the baseline this establishes is "a normal open ends up not pending",
+        // which waiting expresses correctly and an immediate assert only expressed by luck.
+        waitUntil { !state.tab(tabId)!!.analysis.pending }
         assertFalse(state.tab(tabId)!!.analysis.pending)
 
         state.startTailing(tabId)
@@ -6595,7 +6601,12 @@ class AppStateBehaviorTest {
     private fun String.withMalformedAnnotationField(index: Int): String =
         split("|").toMutableList().also { fields -> fields[index] = "%%%" }.joinToString("|")
 
-    private fun waitUntil(timeoutMs: Long = 2_000, condition: () -> Boolean) {
+    // 10s, not the 2s this used to default to. The timeout is a failure ceiling, never a delay a
+    // passing test pays — every call returns the moment its condition holds — so a generous bound
+    // costs nothing on green runs and buys immunity to a loaded CI runner. Two tests here started
+    // failing on GitHub's macOS runner (which took 5m13s for a suite that runs in ~1m45s locally)
+    // purely because 2s of wall clock isn't a safe assumption on a shared machine.
+    private fun waitUntil(timeoutMs: Long = 10_000, condition: () -> Boolean) {
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
         while (System.nanoTime() < deadline) {
             if (condition()) return
