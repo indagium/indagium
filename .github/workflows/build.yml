@@ -77,6 +77,16 @@ jobs:
             artifact_path: build/compose/binaries/main/dmg
             artifact_name: openLog-macos-arm64
 
+          # ubuntu-24.04-arm is GitHub's hosted Linux arm64 runner, free for public repos like this
+          # one. jpackage derives the .deb filename's arch segment from `dpkg --print-architecture`
+          # on the machine that builds it, so this job emits openlog_<ver>-1_arm64.deb — a distinct
+          # filename from the amd64 job's openlog_<ver>-1_amd64.deb — which is why the release job
+          # below needs no rename step to avoid the two colliding as GitHub Release assets.
+          - os: ubuntu-24.04-arm
+            task: packageDeb
+            artifact_path: build/compose/binaries/main/deb
+            artifact_name: openLog-linux-arm64
+
     runs-on: ${{ matrix.os }}
     # windows-latest defaults `run:` steps to PowerShell, where `chmod`/`./gradlew` don't work.
     # GitHub-hosted Windows runners ship Git Bash, so force bash uniformly across all three OSes.
@@ -102,15 +112,20 @@ jobs:
       # branch (master) if present, or a clean cache-miss otherwise — so tag builds stop writing
       # new dead caches. Restore-keys prefix is unversioned so any master-branch Gradle cache still
       # gives a useful partial hit even when the exact dependency hash has since moved on.
+      #
+      # runner.arch is folded into the key too: this matrix now runs two Linux jobs (amd64 and
+      # arm64) that would otherwise both report runner.os == 'Linux' and share one cache — the
+      # arm64 job restoring x86_64 native jars (bytedeco/FFmpeg) from the amd64 job and failing to
+      # link against them.
       - name: Restore Gradle cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
-            ${{ runner.os }}-gradle-
+            ${{ runner.os }}-${{ runner.arch }}-gradle-
 
       - name: Make gradlew executable
         run: chmod +x gradlew
@@ -158,7 +173,7 @@ jobs:
       # the system's own <comment>) with the hand-authored packaging/linux/openlog-mimeinfo.xml,
       # which only declares globs for extensions the system doesn't already type.
       - name: Add StartupWMClass and desktop-database refresh to Linux .desktop/postinst
-        if: matrix.os == 'ubuntu-latest'
+        if: startsWith(matrix.os, 'ubuntu')
         run: |
           set -euo pipefail
           deb=$(find build/compose/binaries/main/deb -name '*.deb')
@@ -196,7 +211,7 @@ jobs:
       # desktop-file-validate is exactly the tool that flags "declares MimeType but Exec takes no
       # arguments" — this gate would have caught the original %F-less Exec regressing silently.
       - name: Validate generated .desktop entry
-        if: matrix.os == 'ubuntu-latest'
+        if: startsWith(matrix.os, 'ubuntu')
         run: |
           set -euo pipefail
           sudo apt-get update && sudo apt-get install -y desktop-file-utils

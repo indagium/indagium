@@ -81,21 +81,51 @@ class UpdateCheckerTest {
     @Test
     fun assetForCurrentOsPicksThePackagedFormatForEachPlatform() {
         val assets = listOf(
-            ReleaseAsset("openLog-1.5.0.dmg", "https://example.test/dmg", 1L),
-            ReleaseAsset("openLog_1.5.0.deb", "https://example.test/deb", 2L),
-            ReleaseAsset("openLog-1.5.0.msi", "https://example.test/msi", 3L),
+            ReleaseAsset("openLog-1.7.0.dmg", "https://example.test/dmg", 1L),
+            ReleaseAsset("openlog_1.7.0-1_amd64.deb", "https://example.test/amd64-deb", 2L),
+            ReleaseAsset("openlog_1.7.0-1_arm64.deb", "https://example.test/arm64-deb", 3L),
+            ReleaseAsset("openLog-1.7.0.msi", "https://example.test/msi", 4L),
         )
 
         assertEquals(assets[0], assetForCurrentOs(assets, osName = "Mac OS X"))
-        assertEquals(assets[2], assetForCurrentOs(assets, osName = "Windows 11"))
-        assertEquals(assets[1], assetForCurrentOs(assets, osName = "Linux"))
+        assertEquals(assets[3], assetForCurrentOs(assets, osName = "Windows 11"))
+        assertEquals(assets[1], assetForCurrentOs(assets, osName = "Linux", osArch = "amd64"))
+        assertEquals(assets[2], assetForCurrentOs(assets, osName = "Linux", osArch = "aarch64"))
+        assertEquals(assets[2], assetForCurrentOs(assets, osName = "Linux", osArch = "arm64"))
+    }
+
+    @Test
+    fun assetForCurrentOsIgnoresArchOnMacAndWindows() {
+        // The .dmg and .msi filenames carry no arch token at all, so the arch parameter must be
+        // irrelevant on those platforms — neither an arm nor an x86 osArch should change the result.
+        val assets = listOf(
+            ReleaseAsset("openLog-1.7.0.dmg", "https://example.test/dmg", 1L),
+            ReleaseAsset("openLog-1.7.0.msi", "https://example.test/msi", 2L),
+        )
+
+        assertEquals(assets[0], assetForCurrentOs(assets, osName = "Mac OS X", osArch = "aarch64"))
+        assertEquals(assets[0], assetForCurrentOs(assets, osName = "Mac OS X", osArch = "x86_64"))
+        assertEquals(assets[1], assetForCurrentOs(assets, osName = "Windows 11", osArch = "aarch64"))
+        assertEquals(assets[1], assetForCurrentOs(assets, osName = "Windows 11", osArch = "x86_64"))
     }
 
     @Test
     fun assetForCurrentOsReturnsNullWhenNoAssetMatches() {
-        val onlyDeb = listOf(ReleaseAsset("openLog_1.5.0.deb", "https://example.test/deb", 2L))
-        assertNull(assetForCurrentOs(onlyDeb, osName = "Mac OS X"))
-        assertNull(assetForCurrentOs(emptyList(), osName = "Linux"))
+        val onlyAmd64Deb = listOf(ReleaseAsset("openlog_1.7.0-1_amd64.deb", "https://example.test/deb", 2L))
+        assertNull(assetForCurrentOs(onlyAmd64Deb, osName = "Mac OS X"))
+        assertNull(assetForCurrentOs(emptyList(), osName = "Linux", osArch = "amd64"))
+    }
+
+    @Test
+    fun assetForCurrentOsReturnsNullOnLinuxWhenNoDebMatchesTheArchitecture() {
+        // The strict contract, and the real regression guard: a pre-1.7.0 release only ever shipped
+        // an amd64 .deb. An arm64 machine checking for updates must be told "nothing for you" rather
+        // than silently downloading a package it can't install.
+        val amd64Only = listOf(ReleaseAsset("openlog_1.7.0-1_amd64.deb", "https://example.test/amd64-deb", 2L))
+        assertNull(assetForCurrentOs(amd64Only, osName = "Linux", osArch = "aarch64"))
+
+        val arm64Only = listOf(ReleaseAsset("openlog_1.7.0-1_arm64.deb", "https://example.test/arm64-deb", 3L))
+        assertNull(assetForCurrentOs(arm64Only, osName = "Linux", osArch = "amd64"))
     }
 
     @Test
