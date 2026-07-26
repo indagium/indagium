@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import com.openlog.debug.AppLogger
+import org.bytedeco.ffmpeg.avcodec.AVPacket
 import org.bytedeco.ffmpeg.global.avutil
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.Frame
@@ -36,6 +37,10 @@ private const val MAX_WAIT_SLEEP_MS = 20L
 // javacv/FFmpeg timestamps (Frame.timestamp, getLengthInTime, setTimestamp) are always
 // microseconds; every positionMs/durationMs field this controller exposes is milliseconds.
 private const val MICROS_PER_MS = 1_000L
+
+// scanDurationMs converts an AVStream time_base (rational seconds per tick) to microseconds, not
+// milliseconds — kept distinct from MICROS_PER_MS so that conversion's intent reads standalone.
+private const val MICROS_PER_SECOND = 1_000_000L
 
 // System.nanoTime() is nanoseconds; currentClockUs()'s wall-clock fallback converts to
 // microseconds. Numerically identical to MICROS_PER_MS but a distinct unit conversion, kept as
@@ -119,6 +124,61 @@ internal class PlaybackTimeline(initialUs: Long = 0L) {
  */
 internal fun shouldDropLateFrame(latenessUs: Long, consecutiveDrops: Int): Boolean =
     latenessUs > FRAME_DROP_LATENESS_US && consecutiveDrops < MAX_CONSECUTIVE_FRAME_DROPS
+
+/**
+ * Recovers a container's true duration by scanning packet timestamps only — no image/audio
+ * decoding — for files whose format header reports no duration at all. `grabber.lengthInTime`
+ * (AVFormatContext.duration) comes back 0 for containers written by a live-mode/streaming muxer
+ * that never got to record its own trailer: a screen recorder that streams its output, or is
+ * killed before finalizing, produces exactly this. `lengthInVideoFrames` is ALSO 0 for the same
+ * files (confirmed against real `-f matroska -live 1` / `-f webm -live 1` output), so a
+ * frames-times-frame-rate fallback can't rescue them either — packet timestamps are the only
+ * signal left.
+ *
+ * Walks every packet's own presentation end time (`pts` — falling back to `dts` when `pts` is
+ * unset, since some streams only carry decode timestamps — plus that packet's `duration`,
+ * converted out of its stream's own `time_base` into microseconds) and keeps the maximum seen.
+ * That maximum IS the container duration a well-formed header would have reported: the true end
+ * of whichever stream runs longest. This is I/O-bound only, not decode-bound (measured ~0-21ms
+ * against multi-second fixtures), so it stays cheap even though it walks the whole file — but see
+ * this function's only call site for why it must still never run on a normal file.
+ *
+ * Deliberately a plain top-level function taking just a path (unlike [PlaybackTimeline]/
+ * [shouldDropLateFrame] above, this one DOES need real FFmpeg natives, which the test classpath
+ * has) rather than a method on [FfmpegVideoPlayerController] — so a test can call it directly
+ * against a committed fixture without spinning up that class's decode thread. [isCancelled] is
+ * the one seam the controller needs and a plain path-only test doesn't: it lets the controller's
+ * duration-recovery thread (see `maybeStartDurationRecoveryScan`) stop walking a file whose
+ * controller has since been [FfmpegVideoPlayerController.close]d, without this function taking on
+ * any dependency on that class's lifecycle. Returns 0 (== "still unknown") if the file has no
+ * packet with a resolvable timestamp, e.g. an empty stream or a cancelled scan.
+ */
+internal fun scanDurationMs(path: String, isCancelled: () -> Boolean = { false }): Long {
+    FFmpegFrameGrabber(path).use { grabber ->
+        grabber.start()
+        var lastEndUs = 0L
+        while (!isCancelled()) {
+            val packet = grabber.grabPacket() ?: break
+            val endUs = packetEndUs(packet, grabber) ?: continue
+            if (endUs > lastEndUs) lastEndUs = endUs
+        }
+        return lastEndUs / MICROS_PER_MS
+    }
+}
+
+/**
+ * This packet's presentation end time in microseconds, or null when it carries nothing usable —
+ * neither `pts` nor `dts` set (kept out of [scanDurationMs]'s own loop so that function has only
+ * the two jump statements detekt's LoopWithTooManyJumpStatements allows: `break` on end-of-stream,
+ * `continue` on a packet [scanDurationMs] can't use).
+ */
+private fun packetEndUs(packet: AVPacket, grabber: FFmpegFrameGrabber): Long? {
+    val pts = if (packet.pts() != avutil.AV_NOPTS_VALUE) packet.pts() else packet.dts()
+    if (pts == avutil.AV_NOPTS_VALUE) return null
+    val timeBase = grabber.formatContext.streams(packet.stream_index()).time_base()
+    if (timeBase.den() == 0) return null // a malformed/unknown time_base can't be converted
+    return ((pts + maxOf(packet.duration(), 0L)).toDouble() * timeBase.num() / timeBase.den() * MICROS_PER_SECOND).toLong()
+}
 
 /**
  * Behind-an-interface video playback engine (plan doc's Task A "player core"). The concrete
@@ -424,6 +484,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         grabber.start()
         applyDecodeDownscale()
         _durationMs = grabber.lengthInTime / MICROS_PER_MS
+        maybeStartDurationRecoveryScan(_durationMs)
         hasAudioStream = grabber.hasAudio()
         if (hasAudioStream) openAudioLine()
         true
@@ -431,6 +492,42 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         AppLogger.error("video", "Failed to open $path", t)
         _error = t.message ?: t::class.simpleName ?: "Failed to open video"
         false
+    }
+
+    /**
+     * `grabber.lengthInTime` reporting 0 (or negative) means the container's own header carries no
+     * duration — see [scanDurationMs]'s KDoc for why that happens and why a frame-count fallback
+     * can't help either. Declared-duration files return immediately here and never pay for a scan.
+     *
+     * Runs on its own short-lived daemon thread, separate from both [decodeThread] and the UI
+     * thread's Compose recomposition, exactly like [grabFrameAt] opens its own separate grabber
+     * rather than touching this controller's playing one — spawning it here (from [openGrabber],
+     * itself already running on [decodeThread]) is non-blocking, so opening a durationless file
+     * never delays showing its first frame. `_durationMs` is a Compose `mutableStateOf`, snapshot-
+     * safe to write from any thread (see CLAUDE.md), so the transport bar simply recomposes once
+     * this publishes a real value — no signaling back to [decodeThread] or the UI is needed.
+     *
+     * Cancellation: [scanDurationMs]'s `isCancelled` callback reads [closed] on every packet, so a
+     * scan racing [close] stops promptly instead of walking the rest of the file; the final publish
+     * is ALSO gated on `!closed` in case the scan's last iteration finishes between that check and
+     * [close] being called. Either way the scan's own `FFmpegFrameGrabber` is opened and released
+     * entirely inside [scanDurationMs]'s `use` block, so there is nothing here left to leak.
+     */
+    private fun maybeStartDurationRecoveryScan(declaredMs: Long) {
+        if (declaredMs > 0L) return
+        val scanPath = path
+        Thread({
+            val recoveredMs = runCatching { scanDurationMs(scanPath) { closed } }
+                .onFailure { AppLogger.warn("video", "duration recovery scan failed for $scanPath", it) }
+                .getOrNull()
+            // Logged unconditionally (success, failure, or "found nothing") so a future report
+            // shaped like this one is diagnosable from the log alone, not just from the live UI.
+            AppLogger.info(
+                "video",
+                "duration recovery for $scanPath: declaredMs=$declaredMs recoveredMs=${recoveredMs ?: "n/a"}",
+            )
+            if (!closed && recoveredMs != null && recoveredMs > 0L) _durationMs = recoveredMs
+        }, "openlog-video-duration-scan").apply { isDaemon = true }.start()
     }
 
     /**

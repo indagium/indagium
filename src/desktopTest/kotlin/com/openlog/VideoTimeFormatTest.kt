@@ -1,5 +1,6 @@
 package com.openlog
 
+import com.openlog.video.formatVideoDurationShort
 import com.openlog.video.formatVideoTime
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -32,5 +33,19 @@ class VideoTimeFormatTest {
     @Test
     fun treatsNegativeInputAsZero() {
         assertEquals("00:00.000", formatVideoTime(-500))
+    }
+
+    @Test
+    fun durationShortRendersUnknownAsDashesRatherThanZero() {
+        // VideoPlayerController.durationMs is 0 both transiently (right after opening) and,
+        // for a file whose duration-recovery scan comes up empty, potentially forever — "00:00"
+        // there would misreport a video that's actually playing as zero seconds long.
+        assertEquals("--:--", formatVideoDurationShort(0))
+        assertEquals("--:--", formatVideoDurationShort(-500))
+    }
+
+    @Test
+    fun durationShortRendersAKnownDurationLikeTheShortFormatter() {
+        assertEquals("05:03", formatVideoDurationShort(303_500))
     }
 }
