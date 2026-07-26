@@ -12,6 +12,7 @@ import com.openlog.ui.editorCommandArguments
 import com.openlog.ui.linuxDesktopEditorTemplates
 import com.openlog.ui.mkTab
 import com.openlog.ui.resolveExecutable
+import com.openlog.ui.resolveInstalledEditors
 import com.openlog.ui.splitEditorCommand
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -763,6 +764,39 @@ class SourceIndexAppStateTest {
         assertEquals(
             listOf("${app.absolutePath} --line {line} {file}"),
             templates["intellij"],
+        )
+    }
+
+    @Test
+    fun linuxDesktopEntryIsUsedForTheSameResolvedChoiceThatOpenLaunches() {
+        val dir = createTempDirectory("openlog-linux-desktop-open").toFile()
+        val appDir = File(dir, "applications").apply { mkdirs() }
+        val app = File(dir, "android-studio/bin/studio.sh").apply {
+            parentFile.mkdirs()
+            writeText("#!/bin/sh\n")
+            setExecutable(true)
+        }
+        val source = File(dir, "Source.kt").apply { writeText("class Source\n") }
+        File(appDir, "android-studio.desktop").writeText(
+            """
+            [Desktop Entry]
+            Name=Android Studio
+            Exec=${app.absolutePath} %f
+            """.trimIndent(),
+        )
+
+        val desktopTemplates = linuxDesktopEditorTemplates(listOf(appDir), emptyList())
+        // A deliberately empty catalog candidate list keeps this test independent of any Android
+        // Studio installation on the machine running it; the resolved command must come from the
+        // desktop entry alone.
+        val studio = EditorPreset("studio", "Android Studio", emptyList())
+        val resolved = resolveInstalledEditors(listOf(studio), emptyList(), desktopTemplates)
+        val template = resolved.single { (preset, _) -> preset.id == "studio" }.second
+
+        assertEquals("${app.absolutePath} --line {line} {file}", template)
+        assertEquals(
+            listOf(app.absolutePath, "--line", "42", source.absolutePath),
+            editorCommandArguments(template, source, line = 42, dirs = emptyList()),
         )
     }
 

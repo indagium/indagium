@@ -160,6 +160,46 @@ class SourceIndexerTest {
     }
 
     @Test
+    fun autoDiscoveryFindsDirectKotlinObjectWrapperCalls() {
+        val dir = createTempDirectory("openlog-src-object-wrapper")
+        dir.write(
+            "LogUtil.kt",
+            """
+            package demo.logging
+
+            object LogUtil {
+                fun d(tag: String, message: String) {
+                    Log.d(tag, message)
+                }
+            }
+            """.trimIndent(),
+        )
+        dir.write(
+            "Feature.kt",
+            """
+            package demo.feature
+
+            import demo.logging.LogUtil
+
+            class Feature {
+                fun run() {
+                    LogUtil.d("ObjectWrapper", "Feature failed")
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(
+            listOf(dir.toFile()),
+            options = SourceIndexBuildOptions(autoDiscover = true),
+        )
+
+        val matches = LogSourceResolver(index).resolve("ObjectWrapper", "Feature failed")
+        assertEquals(1, matches.size)
+        assertEquals("run", matches.single().site.methodName)
+    }
+
+    @Test
     fun qualifiedConstantsResolveAcrossFiles() {
         val dir = createTempDirectory("openlog-src-qualified-constant")
         dir.write("Telemetry.kt", "package demo\nobject Telemetry { const val BUG = \"BugTag\" }")
