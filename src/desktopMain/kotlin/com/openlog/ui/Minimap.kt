@@ -406,16 +406,16 @@ fun Minimap(
     // reason rememberComputedLogItems's largeFileMode path (LogViewer.kt) never walks the full item
     // list synchronously during composition. Highlighter matching (resolveMinimapColor) happens in
     // here too, for the same reason — a few hundred rows' worth of regex/substring matching is fine
-    // off-thread, never in the draw loop below. Re-keyed on analysis too: crashSites only appears
-    // once the background stack-trace/crash analysis finishes (LogAnalysis.pending), so the strip's
-    // crash rows appear the moment that lands, same as row folding already does.
-    LaunchedEffect(items, rowCount, analysis, highlighters, tc) {
+    // off-thread, never in the draw loop below. Only built-in crash sites affect this strip;
+    // custom Issues anchors intentionally do not trigger minimap work or receive crash priority.
+    val crashSites = analysis.crashSites
+    LaunchedEffect(items, rowCount, crashSites, highlighters, tc) {
         bars = if (items.isEmpty() || rowCount <= 0) {
             emptyList()
         } else {
             withContext(Dispatchers.Default) {
                 val crashIds = BitSet()
-                analysis.crashSites.forEach { crashIds.set(it.entry.id) }
+                crashSites.forEach { crashIds.set(it.entry.id) }
                 computeMinimapBars(items, crashIds, rowCount, highlighters, tc.td)
             }
         }

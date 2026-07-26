@@ -286,11 +286,13 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
     val filter = tab.filter
     val expanded = tab.expanded
     val manualBlocks = tab.manualBlocks
-    // analysis is a key so folding appears once the deferred background analysis lands
-    // (tab.analysis flips from pending to full after a large-file load).
     val analysis = tab.analysis
+    // Only folding-relevant analysis belongs in these keys. Custom Issues anchors must not
+    // recompute rows or alter folding when their Settings rule list changes.
+    val stackTraceGroups = analysis.stackTraceGroups
+    val analysisPending = analysis.pending
     if (!tab.largeFileMode) {
-        return remember(tab.id, dataSize, lastId, filter, expanded, manualBlocks, analysis, applyFilter) {
+        return remember(tab.id, dataSize, lastId, filter, expanded, manualBlocks, stackTraceGroups, analysisPending, applyFilter) {
             val items = computeItems(tab, applyFilter)
             ComputedLogItems(items, summarizeItems(items), loading = false)
         }
@@ -299,7 +301,7 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
     var computed by remember(tab.id, applyFilter) {
         mutableStateOf(ComputedLogItems(emptyList(), EMPTY_SUMMARY, loading = true))
     }
-    LaunchedEffect(tab.id, dataSize, lastId, filter, expanded, manualBlocks, analysis, applyFilter) {
+    LaunchedEffect(tab.id, dataSize, lastId, filter, expanded, manualBlocks, stackTraceGroups, analysisPending, applyFilter) {
         val snapshot = tab.copy(selected = emptySet())
         val previous = computed
         coroutineScope {

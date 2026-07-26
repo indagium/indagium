@@ -130,9 +130,12 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         tailAnalysisJobs[tabId] = scope.launch {
             delay(TAIL_ANALYSIS_DEBOUNCE_MS)
             val logData = synchronized(appState.stateLock) { appState.tab(tabId)?.logData } ?: return@launch
-            val full = buildLogAnalysis(logData)
+            val issueRules = appState.settings.customIssueRules
+            val full = buildLogAnalysis(logData, issueRules)
             ensureActive()
-            appState.upTab(tabId) { it.copy(analysis = full) }
+            appState.upTab(tabId) { current ->
+                if (appState.settings.customIssueRules == issueRules && current.logData == logData) current.copy(analysis = full) else current
+            }
         }
     }
 }

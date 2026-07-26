@@ -3,6 +3,10 @@ package com.openlog.utils
 import com.openlog.model.CrashCategory
 import com.openlog.model.CrashKind
 import com.openlog.model.CrashSite
+import com.openlog.model.CustomIssueRule
+import com.openlog.model.CustomIssueSite
+import com.openlog.model.IssueCategorySelection
+import com.openlog.model.IssueSite
 import com.openlog.model.LogEntry
 import com.openlog.model.StackTraceGroup
 
@@ -199,6 +203,36 @@ fun computeCrashSites(logData: List<LogEntry>, stackGroups: List<StackTraceGroup
     return (exceptionSites + anrSites + nativeCrashSites).sortedBy { it.entry.id }
 }
 
+/**
+ * Evaluates Settings-defined issue anchors once during background log analysis. A rule matches
+ * either the log tag or message. Invalid patterns
+ * are deliberately ignored here: Settings validates drafts before persisting, and a malformed
+ * hand-edited cache must not prevent a log from opening.
+ */
+fun computeCustomIssueSites(logData: List<LogEntry>, rules: List<CustomIssueRule>): List<CustomIssueSite> {
+    val enabledRules = rules.asSequence()
+        .filter { it.enabled && it.name.isNotBlank() && it.regex.isNotBlank() }
+        .filter { rule -> runCatching { Regex(rule.regex) }.isSuccess }
+        .toList()
+    val regexContext = RegexEvaluationContext()
+    return enabledRules.flatMap { rule ->
+        logData.asSequence()
+            .filter { entry ->
+                containsPattern(entry.tag, rule.regex, regex = true, ignoreCase = false, regexContext = regexContext) ||
+                    containsPattern(entry.msg, rule.regex, regex = true, ignoreCase = false, regexContext = regexContext)
+            }
+            .map { entry ->
+                CustomIssueSite(
+                    id = "custom_issue_${rule.id}_${entry.id}",
+                    entry = entry,
+                    ruleId = rule.id,
+                    categoryName = rule.name,
+                )
+            }
+            .toList()
+    }
+}
+
 // Selects the crash sites belonging to one crash-panel dropdown category. ALL is the default; the
 // next four each narrow to exactly one kind (CRASHES = native, ANRS = ANR) or one EXCEPTION
 // subtype (FATAL_EXCEPTIONS / EXCEPTIONS, split by isFatal); OTHERS is whatever (if anything)
@@ -212,4 +246,19 @@ fun crashSitesForCategory(sites: List<CrashSite>, category: CrashCategory): List
     CrashCategory.OTHERS -> sites.filterNot {
         it.kind == CrashKind.NATIVE_CRASH || it.kind == CrashKind.ANR || it.kind == CrashKind.EXCEPTION
     }
+}
+
+/** Selects Issues rows for the picker; All keeps one row per log entry and favors built-in crash metadata. */
+fun issueSitesForCategory(
+    crashSites: List<CrashSite>,
+    customSites: List<CustomIssueSite>,
+    category: IssueCategorySelection,
+): List<IssueSite> = when (category) {
+    is IssueCategorySelection.BuiltIn -> when (category.category) {
+        CrashCategory.ALL -> (crashSites + customSites)
+            .sortedBy { it.entry.id }
+            .distinctBy { it.entry.id }
+        else -> crashSitesForCategory(crashSites, category.category)
+    }
+    is IssueCategorySelection.Custom -> customSites.filter { it.ruleId == category.ruleId }
 }

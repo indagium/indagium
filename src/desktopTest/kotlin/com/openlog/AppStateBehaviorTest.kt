@@ -11,6 +11,8 @@ import com.openlog.model.Annotations
 import com.openlog.model.AppSettings
 import com.openlog.model.CopyMaskRule
 import com.openlog.model.CrashCategory
+import com.openlog.model.CustomIssueRule
+import com.openlog.model.IssueCategorySelection
 import com.openlog.model.CtrlFTarget
 import com.openlog.model.CtxMenuState
 import com.openlog.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
@@ -2566,7 +2568,7 @@ class AppStateBehaviorTest {
             incPillsExpanded = false
             incMsgPillsExpanded = false
             excMsgPillsExpanded = true
-            crashCategory = CrashCategory.FATAL_EXCEPTIONS
+            crashCategory = IssueCategorySelection.BuiltIn(CrashCategory.FATAL_EXCEPTIONS)
             sfCollapsedFolderIds = setOf("folder-a", "__ungrouped__")
         }
 
@@ -2580,7 +2582,7 @@ class AppStateBehaviorTest {
         assertEquals(false, restored.fpState.incPillsExpanded)
         assertEquals(false, restored.fpState.incMsgPillsExpanded)
         assertEquals(true, restored.fpState.excMsgPillsExpanded)
-        assertEquals(CrashCategory.FATAL_EXCEPTIONS, restored.fpState.crashCategory)
+        assertEquals(IssueCategorySelection.BuiltIn(CrashCategory.FATAL_EXCEPTIONS), restored.fpState.crashCategory)
         assertEquals(setOf("folder-a", "__ungrouped__"), restored.fpState.sfCollapsedFolderIds)
     }
 
@@ -4337,6 +4339,33 @@ class AppStateBehaviorTest {
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
         assertEquals(expected, restored.settings)
+    }
+
+    @Test
+    fun customIssueRulesRoundTripThroughSettingsJsonAndOldJsonDefaultsEmpty() {
+        val settings = AppSettings(
+            customIssueRules = listOf(
+                CustomIssueRule("network", "Network timeouts", "timeout\\s+after\\s+\\d+ms"),
+                CustomIssueRule("disabled", "Disabled", "ignored", enabled = false),
+            ),
+        )
+
+        val json = settings.settingsJson()
+
+        assertEquals(settings.customIssueRules, settingsFromJson(json)!!.customIssueRules)
+        assertEquals(emptyList(), settingsFromJson("{}")!!.customIssueRules)
+    }
+
+    @Test
+    fun customIssueRulesIgnoreMalformedEntriesWithoutDiscardingValidSiblings() {
+        val json = """{"customIssueRules":[
+            {"id":"valid","name":"Alerts","regex":"timeout","enabled":true},
+            {"id":"broken","name":"Broken","regex":"(","enabled":true}
+        ]}"""
+
+        val rules = settingsFromJson(json)!!.customIssueRules
+
+        assertEquals(listOf(CustomIssueRule("valid", "Alerts", "timeout", enabled = true)), rules)
     }
 
     @Test
