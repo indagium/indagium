@@ -29,6 +29,9 @@ object DesktopStorage {
 
     fun customCommandsDir(): File = File(appDataDir(), "custom-ai-commands")
 
+    /** Locally installed, explicitly user-downloaded speech models. Never contains recordings. */
+    fun voiceModelsDir(): File = File(appDataDir(), "voice-models")
+
     fun filterBackupsDir(): File = File(appDataDir(), "filter-backups")
 
     fun controlTokenFile(): File = File(appDataDir(), "control-token")

@@ -35,6 +35,8 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -78,6 +80,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.window.Dialog
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
@@ -99,9 +102,24 @@ import com.openlog.ai.isLoopbackHost
 import com.openlog.ai.normalizeAiProviderProfiles
 import com.openlog.model.AiProviderKind
 import com.openlog.model.LogTab
+import com.openlog.voice.JavaSoundVoiceCapture
+import com.openlog.voice.VoiceAudio
+import com.openlog.voice.VoiceInputController
+import com.openlog.voice.VoiceInputState
+import com.openlog.voice.VoiceLanguageCatalog
+import com.openlog.voice.VoiceModelCatalog
+import com.openlog.voice.VoiceModelInstallResult
+import com.openlog.voice.VoiceModelInstaller
+import com.openlog.voice.VoiceTranscriptionOptions
+import com.openlog.voice.WhisperJniVoiceTranscriber
+import com.openlog.voice.appendVoiceTranscript
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.awt.Cursor as AwtCursor
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /** Provider and Actions share one row as an accordion: opening one closes the other. */
 internal enum class AiSidebarSection { PROVIDER, ACTIONS }
@@ -267,6 +285,7 @@ private fun AiSidebarPanel(
     val profile = profiles.first { it.selected }
     val session = runtime.sessionFor(tab.id)
     val scope = rememberCoroutineScope()
+    val voiceInputSupported = remember { System.getProperty("os.name").contains("mac", ignoreCase = true) }
     val scroll = rememberScrollState()
     var panelFocused by remember { mutableStateOf(false) }
     var prompt by remember(tab.id) { mutableStateOf("") }
@@ -275,7 +294,42 @@ private fun AiSidebarPanel(
     var keyDraft by remember(profile.id) { mutableStateOf(state.aiProviderApiKey(profile.id)) }
     var error by remember(tab.id, profile.id) { mutableStateOf<String?>(null) }
     var modelDiscovery by remember(profile.id) { mutableStateOf<ModelDiscoveryResult?>(null) }
+    val voiceSettings = state.settings.voiceInput
+    val voiceModelInstaller = remember(voiceSettings.modelId) {
+        VoiceModelInstaller(DesktopStorage.voiceModelsDir(), VoiceModelCatalog.byId(voiceSettings.modelId))
+    }
+    val translateVoiceToEnglish = voiceSettings.translateToEnglish
+    val voiceTranslationPreference = remember { AtomicBoolean(translateVoiceToEnglish) }
+    LaunchedEffect(translateVoiceToEnglish) { voiceTranslationPreference.set(translateVoiceToEnglish) }
+    val voiceLanguagePreference = remember { AtomicReference(voiceSettings.selectedRecognitionLanguageCode) }
+    LaunchedEffect(voiceSettings.selectedRecognitionLanguageCode) {
+        voiceLanguagePreference.set(voiceSettings.selectedRecognitionLanguageCode)
+    }
+    val voiceController = remember(voiceModelInstaller) {
+        VoiceInputController(
+            hasInstalledModel = voiceModelInstaller::isInstalled,
+            capture = JavaSoundVoiceCapture(),
+            transcriber = WhisperJniVoiceTranscriber { voiceModelInstaller.modelFile },
+            scope = scope,
+            optionsProvider = {
+                val language = voiceLanguagePreference.get()
+                VoiceTranscriptionOptions(
+                    translateToEnglish = voiceTranslationPreference.get(),
+                    language = language,
+                    initialPrompt = VoiceTranscriptionOptions.technicalPrompt(language),
+                )
+            },
+        )
+    }
+    val voiceState by voiceController.state.collectAsState()
+    var voiceInstallDialogOpen by remember { mutableStateOf(false) }
     val density = LocalDensity.current
+
+    LaunchedEffect(voiceState) {
+        val transcript = voiceController.consumeTranscript() ?: return@LaunchedEffect
+        prompt = appendVoiceTranscript(prompt, transcript)
+        error = null
+    }
 
     // Without this, switching providers and back showed the saved model but silently hid its
     // reasoning dropdown (modelDiscovery resets to null on every profile switch) until the model
@@ -340,6 +394,9 @@ private fun AiSidebarPanel(
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 when {
+                    voiceInputSupported && event.key == Key.Escape && (voiceState is VoiceInputState.Recording || voiceState is VoiceInputState.Transcribing) -> {
+                        voiceController.cancel(); true
+                    }
                     event.key == Key.Escape && session.activeRun != null -> {
                         runtime.cancel(session.activeRun!!); true
                     }
@@ -542,6 +599,30 @@ private fun AiSidebarPanel(
                 }
             },
             onStop = { session.activeRun?.let(runtime::cancel) },
+            voiceSupported = voiceInputSupported,
+            voiceState = voiceState,
+            translateVoiceToEnglish = translateVoiceToEnglish,
+            voiceRecognitionLanguageCodes = voiceSettings.recognitionLanguageCodes,
+            selectedVoiceRecognitionLanguageCode = voiceSettings.selectedRecognitionLanguageCode,
+            onVoiceTranslationToggle = {
+                state.updateSettings { settings ->
+                    settings.copy(voiceInput = settings.voiceInput.copy(translateToEnglish = !settings.voiceInput.translateToEnglish))
+                }
+            },
+            onVoiceRecognitionLanguageSelect = { code ->
+                state.updateSettings { settings ->
+                    settings.copy(voiceInput = settings.voiceInput.copy(selectedRecognitionLanguageCode = code))
+                }
+            },
+            onVoiceAction = {
+                when (voiceState) {
+                    is VoiceInputState.Recording -> voiceController.stopAndTranscribe()
+                    VoiceInputState.Transcribing -> Unit
+                    else -> if (voiceController.startRecording() is VoiceInputState.ModelRequired) {
+                        voiceInstallDialogOpen = true
+                    }
+                }
+            },
             onRetry = {
                 val currentProfile = profileForRun() ?: return@AiPromptComposer
                 state.setAiProviderApiKey(currentProfile.id, keyDraft)
@@ -551,6 +632,13 @@ private fun AiSidebarPanel(
                 }
             },
         )
+        if (voiceInputSupported && voiceInstallDialogOpen) {
+            VoiceModelInstallDialog(
+                installer = voiceModelInstaller,
+                onDismiss = { voiceInstallDialogOpen = false },
+                onInstalled = { voiceInstallDialogOpen = false },
+            )
+        }
     }
 }
 
@@ -1434,10 +1522,28 @@ private fun AiPromptComposer(
     onPromptChange: (String) -> Unit,
     onSend: (AiComposerSubmission) -> Boolean,
     onStop: () -> Unit,
+    voiceSupported: Boolean,
+    voiceState: VoiceInputState,
+    translateVoiceToEnglish: Boolean,
+    voiceRecognitionLanguageCodes: List<String>,
+    selectedVoiceRecognitionLanguageCode: String,
+    onVoiceTranslationToggle: () -> Unit,
+    onVoiceRecognitionLanguageSelect: (String) -> Unit,
+    onVoiceAction: () -> Unit,
     onRetry: () -> Unit,
 ) {
     val colors = tc()
     val density = LocalDensity.current
+    var voiceLanguageMenuOpen by remember { mutableStateOf(false) }
+    var recordingElapsedSeconds by remember(voiceState) { mutableStateOf(0L) }
+    LaunchedEffect(voiceState) {
+        val recording = voiceState as? VoiceInputState.Recording ?: return@LaunchedEffect
+        while (true) {
+            recordingElapsedSeconds = ((System.currentTimeMillis() - recording.startedAtMillis) / 1_000L)
+                .coerceIn(0L, VoiceAudio.MAX_DURATION_MILLIS / 1_000L)
+            delay(250)
+        }
+    }
     // Custom commands intentionally win name collisions, matching resolveSlashCommand(). This
     // preserves an existing user's /name behavior after predefined commands were introduced.
     val availableCommands = remember(customCommands) {
@@ -1622,11 +1728,189 @@ private fun AiPromptComposer(
                     variant = ButtonVariant.Primary,
                     enabled = prompt.isNotBlank() || selectedCommand != null,
                 )
+                val voiceRecording = voiceSupported && voiceState is VoiceInputState.Recording
+                val voiceTranscribing = voiceSupported && voiceState is VoiceInputState.Transcribing
+                if (voiceSupported) {
+                    TooltipArea(
+                        tooltip = {
+                            Box(Modifier.background(colors.p2, CORNER_SM).border(1.dp, colors.br, CORNER_SM).padding(7.dp)) {
+                                AppText(
+                                    if (translateVoiceToEnglish) {
+                                        "Translate dictated speech to English locally. Click to keep the spoken language."
+                                    } else {
+                                        "Keep the spoken language. Click to translate to English locally."
+                                    },
+                                    color = colors.tx,
+                                    fontSize = 10.sp,
+                                    maxLines = 3,
+                                )
+                            }
+                        },
+                    ) {
+                        AppButton(
+                            label = "EN",
+                            onClick = onVoiceTranslationToggle,
+                            // Match the Δt stateful toolbar control: filled when the local
+                            // translation mode is on, outlined when it is off.
+                            variant = if (translateVoiceToEnglish) ButtonVariant.Primary else ButtonVariant.Secondary,
+                            enabled = !voiceTranscribing,
+                            horizontalPadding = 7.dp,
+                        )
+                    }
+                    Box {
+                        TooltipArea(
+                            tooltip = {
+                                Box(Modifier.background(colors.p2, CORNER_SM).border(1.dp, colors.br, CORNER_SM).padding(7.dp)) {
+                                    AppText(
+                                        "Recognition language: ${VoiceLanguageCatalog.label(selectedVoiceRecognitionLanguageCode)}. Choose another configured language.",
+                                        color = colors.tx,
+                                        fontSize = 10.sp,
+                                        maxLines = 3,
+                                    )
+                                }
+                            },
+                        ) {
+                            AppButton(
+                                label = if (selectedVoiceRecognitionLanguageCode == "auto") "Auto" else selectedVoiceRecognitionLanguageCode.uppercase(),
+                                onClick = { voiceLanguageMenuOpen = !voiceLanguageMenuOpen },
+                                variant = ButtonVariant.Secondary,
+                                enabled = !voiceRecording && !voiceTranscribing,
+                                horizontalPadding = 7.dp,
+                            )
+                        }
+                        if (voiceLanguageMenuOpen) {
+                            Popup(
+                                alignment = Alignment.BottomStart,
+                                offset = IntOffset(0, with(density) { 4.dp.roundToPx() }),
+                                onDismissRequest = { voiceLanguageMenuOpen = false },
+                                properties = PopupProperties(focusable = true),
+                            ) {
+                                Column(
+                                    Modifier.width(150.dp).background(colors.p, CORNER_SM)
+                                        .border(1.dp, colors.br, CORNER_SM).padding(4.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                ) {
+                                    voiceRecognitionLanguageCodes.forEach { code ->
+                                        val selected = code == selectedVoiceRecognitionLanguageCode
+                                        HoverBox(
+                                            modifier = Modifier.fillMaxWidth().clip(CORNER_SM),
+                                            baseBg = if (selected) colors.abg else Color.Transparent,
+                                            onClick = {
+                                                onVoiceRecognitionLanguageSelect(code)
+                                                voiceLanguageMenuOpen = false
+                                            },
+                                        ) {
+                                            AppText(
+                                                VoiceLanguageCatalog.label(code),
+                                                color = if (selected) colors.ac else colors.tx,
+                                                fontSize = 11.sp,
+                                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    val elapsedLabel = "${recordingElapsedSeconds / 60}:${(recordingElapsedSeconds % 60).toString().padStart(2, '0')}"
+                    AppButton(
+                        label = when {
+                            voiceRecording -> elapsedLabel
+                            voiceTranscribing -> "Transcribing…"
+                            else -> ""
+                        },
+                        onClick = onVoiceAction,
+                        variant = if (voiceRecording) ButtonVariant.Primary else ButtonVariant.Ghost,
+                        isDanger = voiceRecording,
+                        enabled = !voiceTranscribing,
+                        leadingIcon = if (voiceRecording) Icons.Outlined.Stop else Icons.Outlined.Mic,
+                        horizontalPadding = if (voiceRecording || voiceTranscribing) 8.dp else 6.dp,
+                    )
+                }
                 if (retryAvailable) AppButton("Retry", onClick = onRetry, variant = ButtonVariant.Secondary)
-                AppText("Ctrl/Cmd + Enter to send", color = colors.td, fontSize = 10.sp)
+                val composerHint = if (!voiceSupported) "Ctrl/Cmd + Enter to send" else when (voiceState) {
+                    is VoiceInputState.Recording -> "Recording — click stop or Esc"
+                    VoiceInputState.Transcribing -> "Transcribing locally…"
+                    is VoiceInputState.Failed -> voiceState.message
+                    else -> "Ctrl/Cmd + Enter to send"
+                }
+                AppText(
+                    composerHint,
+                    color = if (voiceSupported && voiceState is VoiceInputState.Failed) DANGER_RED else colors.td,
+                    fontSize = 10.sp,
+                )
             } else {
                 AppButton("Stop", onClick = onStop, variant = ButtonVariant.Secondary, isDanger = true)
                 AppText("Esc to stop", color = colors.td, fontSize = 10.sp)
+            }
+        }
+    }
+}
+
+/** Explicit consent boundary: the only voice-feature network request is this model download. */
+@Composable
+private fun VoiceModelInstallDialog(
+    installer: VoiceModelInstaller,
+    onDismiss: () -> Unit,
+    onInstalled: () -> Unit,
+) {
+    val colors = tc()
+    val scope = rememberCoroutineScope()
+    var installing by remember { mutableStateOf(false) }
+    var downloadedBytes by remember { mutableStateOf(0L) }
+    var failure by remember { mutableStateOf<String?>(null) }
+
+    Dialog(onDismissRequest = { if (!installing) onDismiss() }) {
+        Column(
+            Modifier.width(430.dp).background(colors.p, RoundedCornerShape(8.dp))
+                .border(1.dp, colors.br, RoundedCornerShape(8.dp)).padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            AppText("Download local voice model", color = colors.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            AppText(
+                "Voice recordings and transcription stay on this Mac. Downloading the multilingual ${installer.descriptor.id.removePrefix("whisper-")} model (${formatByteSize(installer.descriptor.sizeBytes)}) is the only network step.",
+                color = colors.td,
+                fontSize = 11.sp,
+                maxLines = 4,
+            )
+            AppText(
+                "The selected recognition language and translation mode are applied locally. Text remains editable and is never sent until you press Send.",
+                color = colors.td,
+                fontSize = 11.sp,
+                maxLines = 3,
+            )
+            if (installing) {
+                AppText("Downloading ${formatByteSize(downloadedBytes)}…", color = colors.ac, fontSize = 11.sp)
+            }
+            failure?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 3) }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppButton("Cancel", onClick = onDismiss, variant = ButtonVariant.Ghost, enabled = !installing)
+                AppButton(
+                    if (installing) "Downloading…" else "Download local model",
+                    onClick = {
+                        installing = true
+                        failure = null
+                        scope.launch {
+                            when (val result = withContext(Dispatchers.IO) {
+                                installer.install { downloadedBytes = it }
+                            }) {
+                                is VoiceModelInstallResult.Installed,
+                                is VoiceModelInstallResult.AlreadyInstalled -> onInstalled()
+                                is VoiceModelInstallResult.Failure -> {
+                                    installing = false
+                                    failure = result.message
+                                }
+                            }
+                        }
+                    },
+                    variant = ButtonVariant.Primary,
+                    enabled = !installing,
+                )
             }
         }
     }

@@ -37,6 +37,7 @@ com.mikepenz:multiplatform-markdown-renderer:0.41.0=desktopCompileClasspath,desk
 com.typesafe:config:1.4.5=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 commons-codec:commons-codec:1.19.0=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 commons-io:commons-io:2.20.0=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
+io.github.givimad:whisper-jni:1.7.1=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 io.github.oshai:kotlin-logging-jvm:8.0.4=desktopRuntimeClasspath,desktopTestRuntimeClasspath
 io.github.oshai:kotlin-logging:8.0.4=desktopRuntimeClasspath,desktopTestRuntimeClasspath
 io.ktor:ktor-client-cio-jvm:3.4.3=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath

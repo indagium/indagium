@@ -8,6 +8,7 @@ import com.openlog.utils.ZipLogCandidateKind
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
@@ -588,6 +589,12 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     // aiProviderProfilesToken() to apply — reused here so the persisted list is always
     // exactly-one-selected/id-deduplicated the same way the writer always guaranteed before.
     put("aiProviderProfiles", aiProviderProfilesJson(normalizeAiProviderProfiles(aiProviderProfiles)))
+    put("voiceInput", buildJsonObject {
+        put("translateToEnglish", voiceInput.translateToEnglish)
+        put("selectedRecognitionLanguageCode", voiceInput.selectedRecognitionLanguageCode)
+        put("modelId", voiceInput.modelId)
+        put("recognitionLanguageCodes", buildJsonArray { voiceInput.recognitionLanguageCodes.forEach(::add) })
+    })
     put("copyMaskRules", copyMaskRulesJson(copyMaskRules))
     put("mcpAllowBrowserClients", mcpAllowBrowserClients)
     put("showRowNumbers", showRowNumbers)
@@ -750,6 +757,26 @@ private fun JsonObject.aiProviderProfilesFromJson(key: String): List<AiProviderP
     return normalizeAiProviderProfiles(profiles)
 }
 
+private fun JsonObject.voiceInputFromJson(key: String): VoiceInputSettings {
+    val value = this[key] as? JsonObject ?: return VoiceInputSettings()
+    val languages = (value["recognitionLanguageCodes"] as? JsonArray)
+        ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        ?: VoiceInputSettings().recognitionLanguageCodes
+    val normalized = com.openlog.voice.VoiceLanguageCatalog.normalize(languages)
+    val selected = value.stringOrNull("selectedRecognitionLanguageCode")?.trim()?.lowercase()
+        ?.takeIf { it in normalized }
+        ?: "auto"
+    val modelId = value.stringOrNull("modelId")
+        ?.takeIf { candidate -> com.openlog.voice.VoiceModelCatalog.all.any { it.id == candidate } }
+        ?: VoiceInputSettings().modelId
+    return VoiceInputSettings(
+        translateToEnglish = value.boolOrDefault("translateToEnglish", true),
+        recognitionLanguageCodes = normalized,
+        selectedRecognitionLanguageCode = selected,
+        modelId = modelId,
+    )
+}
+
 private fun JsonObject.copyMaskRulesFromJson(key: String): List<CopyMaskRule> =
     (this[key] as? JsonArray)?.mapNotNull { el ->
         val obj = el as? JsonObject ?: return@mapNotNull null
@@ -830,6 +857,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         aiProviderProfiles = o.aiProviderProfilesFromJson("aiProviderProfiles"),
         aiMaxToolRounds = o.intOrDefault("aiMaxToolRounds", DEFAULT_AI_MAX_TOOL_ROUNDS)
             .coerceIn(MIN_AI_MAX_TOOL_ROUNDS, MAX_AI_MAX_TOOL_ROUNDS),
+        voiceInput = o.voiceInputFromJson("voiceInput"),
         sourceFolderInfo = o.sourceFolderInfoFromJson("sourceFolderInfo"),
         sourceLogConfigurations = o.sourceLogConfigurationsFromJson("sourceLogConfigurations"),
         sourceFolderConfigurationIds = o.sourceFolderConfigurationIdsFromJson("sourceFolderConfigurationIds"),
