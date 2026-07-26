@@ -3,17 +3,56 @@ package com.openlog
 import com.openlog.model.CrashCategory
 import com.openlog.model.CrashKind
 import com.openlog.model.CrashSite
+import com.openlog.model.CustomIssueRule
+import com.openlog.model.IssueCategorySelection
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
 import com.openlog.utils.computeCrashSites
+import com.openlog.utils.computeCustomIssueSites
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.crashSitesForCategory
+import com.openlog.utils.issueSitesForCategory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class CrashPanelDetectionTest {
+    @Test
+    fun customIssueRulesMatchEnabledRegexesAgainstTagsAndMessages() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.W, "Net", "timeout after 20ms"),
+            LogEntry(2, "10:00:01.000", LogLevel.I, "timeout-tag", "connected"),
+        )
+        val rules = listOf(
+            CustomIssueRule("timeout", "Timeouts", "timeout(?:\\s+after|-tag)", enabled = true),
+            CustomIssueRule("disabled", "Disabled", "connected", enabled = false),
+        )
+
+        val sites = computeCustomIssueSites(logs, rules)
+
+        assertEquals(listOf(1, 2), sites.map { it.entry.id })
+        assertEquals("Timeouts", sites.first().categoryName)
+    }
+
+    @Test
+    fun allIssuesDeduplicateCustomMatchesAndPreferCrashMetadata() {
+        val crashEntry = LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main")
+        val otherEntry = LogEntry(2, "10:00:01.000", LogLevel.W, "App", "timeout after 20ms")
+        val crash = CrashSite("crash_1", crashEntry, CrashKind.EXCEPTION, "st_1", isFatal = true)
+        val custom = computeCustomIssueSites(
+            listOf(crashEntry, otherEntry),
+            listOf(CustomIssueRule("a", "Alerts", "EXCEPTION|timeout")),
+        )
+
+        val all = issueSitesForCategory(listOf(crash), custom, IssueCategorySelection.BuiltIn(CrashCategory.ALL))
+        val alerts = issueSitesForCategory(listOf(crash), custom, IssueCategorySelection.Custom("a"))
+
+        assertEquals(listOf(1, 2), all.map { it.entry.id })
+        assertEquals(CrashSite::class, all.first()::class)
+        assertEquals(listOf(1, 2), alerts.map { it.entry.id })
+    }
+
     @Test
     fun exceptionSiteIsAnchoredAtTheStackTraceHeaderLine() {
         val logs = listOf(

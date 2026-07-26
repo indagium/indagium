@@ -56,6 +56,7 @@ import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.containsPattern
 import com.openlog.utils.crashSitesForCategory
 import com.openlog.utils.firstRegexMatch
+import com.openlog.utils.issueSitesForCategory
 import com.openlog.utils.passesFilter
 import java.io.File
 import java.net.URI
@@ -166,7 +167,7 @@ class FilterPanelUiState {
     var lvlExpanded         by mutableStateOf(true)
     var seqExpanded         by mutableStateOf(true)
     var crashExpanded       by mutableStateOf(true)
-    var crashCategory       by mutableStateOf(CrashCategory.ALL)
+    var crashCategory       by mutableStateOf<IssueCategorySelection>(IssueCategorySelection.BuiltIn(CrashCategory.ALL))
     var sfExpanded          by mutableStateOf(true)
     var sfFavoritesExpanded by mutableStateOf(true)
     var sfSearch            by mutableStateOf("")
@@ -257,10 +258,11 @@ internal fun FilterPanel(
     // app-wide drop routing instead of being swallowed by this panel's own target.
     onUnhandledFileDrop: (List<File>) -> Unit,
     onClearFilter: () -> Unit,
-    onNavigateCrash: (CrashSite) -> Unit,
+    onNavigateCrash: (IssueSite) -> Unit,
     onUiStateChanged: () -> Unit = {},
     mostUsedTagLimit: Int,
     filterListRows: Int,
+    customIssueRules: List<CustomIssueRule>,
     width: Float,
     focusRequester: FocusRequester? = null,
     filterSearchRequest: FilterSearchRequest? = null,
@@ -280,8 +282,11 @@ internal fun FilterPanel(
     val allCrashSites = remember(tab.id, tab.analysis.crashSites, tab.analysis.pending) {
         if (tab.analysis.pending) emptyList() else tab.analysis.crashSites
     }
-    val crashSites = remember(allCrashSites, fpState.crashCategory) {
-        crashSitesForCategory(allCrashSites, fpState.crashCategory)
+    val customIssueSites = remember(tab.id, tab.analysis.customIssueSites, tab.analysis.pending) {
+        if (tab.analysis.pending) emptyList() else tab.analysis.customIssueSites
+    }
+    val crashSites = remember(allCrashSites, customIssueSites, fpState.crashCategory) {
+        issueSitesForCategory(allCrashSites, customIssueSites, fpState.crashCategory)
     }
 
     // Tags sorted by frequency in log data. tagCounts is populated by both pendingAnalysis() and
@@ -1910,13 +1915,19 @@ internal fun FilterPanel(
             },
         )
         if (fpState.crashExpanded) {
-            val crashCategoryCounts = remember(allCrashSites) {
-                CrashCategory.entries.associateWith { c -> crashSitesForCategory(allCrashSites, c).size }
+            val issueCategoryOptions = remember(allCrashSites, customIssueSites, customIssueRules) {
+                issueCategoryOptions(allCrashSites, customIssueSites, customIssueRules)
+            }
+            LaunchedEffect(issueCategoryOptions, fpState.crashCategory) {
+                if (issueCategoryOptions.none { it.selection == fpState.crashCategory }) {
+                    fpState.crashCategory = IssueCategorySelection.BuiltIn(CrashCategory.ALL)
+                    onUiStateChanged()
+                }
             }
             Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
-                CrashCategoryDropdown(
+                IssueCategoryDropdown(
                     category = fpState.crashCategory,
-                    counts = crashCategoryCounts,
+                    options = issueCategoryOptions,
                     onSelect = { category ->
                         fpState.crashCategory = category
                         onUiStateChanged()
@@ -1940,7 +1951,7 @@ internal fun FilterPanel(
             } else {
                 BoundedScrollBox(minOf(crashSites.size, filterListRows), rowDp = CRASH_ROW_DP) {
                     crashSites.forEach { site ->
-                        CrashSiteRow(site, tc, onClick = { onNavigateCrash(site) })
+                        IssueSiteRow(site, tc, onClick = { onNavigateCrash(site) })
                     }
                 }
             }
@@ -2797,18 +2808,24 @@ private const val CRASH_ROW_DP = 64
 
 private val NATIVE_CRASH_COLOR = Color(0xFF8957e5)
 
-private fun CrashSite.accentColor(): Color = when {
-    kind == CrashKind.NATIVE_CRASH -> NATIVE_CRASH_COLOR
-    kind == CrashKind.ANR -> LogLevel.W.defaultColor
-    isFatal -> DANGER_RED
-    else -> LogLevel.D.defaultColor
+private fun IssueSite.accentColor(): Color = when (this) {
+    is CustomIssueSite -> LogLevel.I.defaultColor
+    is CrashSite -> when {
+        kind == CrashKind.NATIVE_CRASH -> NATIVE_CRASH_COLOR
+        kind == CrashKind.ANR -> LogLevel.W.defaultColor
+        isFatal -> DANGER_RED
+        else -> LogLevel.D.defaultColor
+    }
 }
 
-private fun CrashSite.kindLabel(): String = when {
-    kind == CrashKind.NATIVE_CRASH -> "Native crash"
-    kind == CrashKind.ANR -> "ANR"
-    isFatal -> "Fatal exception"
-    else -> "Exception"
+private fun IssueSite.kindLabel(): String = when (this) {
+    is CustomIssueSite -> categoryName
+    is CrashSite -> when {
+        kind == CrashKind.NATIVE_CRASH -> "Native crash"
+        kind == CrashKind.ANR -> "ANR"
+        isFatal -> "Fatal exception"
+        else -> "Exception"
+    }
 }
 
 private fun CrashCategory.label(): String = when (this) {
@@ -2824,11 +2841,32 @@ private fun CrashCategory.label(): String = when (this) {
 // than Material's default DropdownMenu chrome) — a clickable field showing the current category
 // that opens a themed option list on click. The popup's width is measured from the field itself
 // (rather than a fixed guess) so it never leaves a gap at the edge showing the crash list behind it.
+private data class IssueCategoryOption(
+    val selection: IssueCategorySelection,
+    val label: String,
+    val count: Int,
+)
+
+private fun issueCategoryOptions(
+    crashSites: List<CrashSite>,
+    customSites: List<CustomIssueSite>,
+    rules: List<CustomIssueRule>,
+): List<IssueCategoryOption> = buildList {
+    CrashCategory.entries.forEach { category ->
+        val selection = IssueCategorySelection.BuiltIn(category)
+        add(IssueCategoryOption(selection, category.label(), issueSitesForCategory(crashSites, customSites, selection).size))
+    }
+    rules.filter { it.enabled }.forEach { rule ->
+        val selection = IssueCategorySelection.Custom(rule.id)
+        add(IssueCategoryOption(selection, rule.name, issueSitesForCategory(crashSites, customSites, selection).size))
+    }
+}
+
 @Composable
-private fun CrashCategoryDropdown(
-    category: CrashCategory,
-    counts: Map<CrashCategory, Int>,
-    onSelect: (CrashCategory) -> Unit,
+private fun IssueCategoryDropdown(
+    category: IssueCategorySelection,
+    options: List<IssueCategoryOption>,
+    onSelect: (IssueCategorySelection) -> Unit,
 ) {
     val tc = tc()
     val density = LocalDensity.current
@@ -2859,7 +2897,7 @@ private fun CrashCategoryDropdown(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                AppText(category.label(), color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                AppText(options.firstOrNull { it.selection == category }?.label ?: "All", color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.Medium)
                 AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
             }
         }
@@ -2881,12 +2919,12 @@ private fun CrashCategoryDropdown(
                         .padding(4.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    CrashCategory.entries.forEach { c ->
-                        val active = c == category
+                    options.forEach { option ->
+                        val active = option.selection == category
                         HoverBox(
                             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
                             baseBg = if (active) tc.abg else Color.Transparent,
-                            onClick = { open = false; onSelect(c) },
+                            onClick = { open = false; onSelect(option.selection) },
                         ) {
                             Row(
                                 Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
@@ -2894,12 +2932,12 @@ private fun CrashCategoryDropdown(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 AppText(
-                                    c.label(),
+                                    option.label,
                                     color = if (active) tc.ac else tc.tx,
                                     fontSize = 11.sp,
                                     fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
                                 )
-                                AppText("${counts[c] ?: 0}", color = if (active) tc.ac else tc.td, fontSize = 10.sp)
+                                AppText("${option.count}", color = if (active) tc.ac else tc.td, fontSize = 10.sp)
                             }
                         }
                     }
@@ -2910,8 +2948,8 @@ private fun CrashCategoryDropdown(
 }
 
 @Composable
-private fun CrashSiteRow(
-    site: CrashSite,
+private fun IssueSiteRow(
+    site: IssueSite,
     tc: ThemeColors,
     onClick: () -> Unit,
 ) {

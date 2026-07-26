@@ -600,6 +600,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     debugLogFilePath?.let { put("debugLogFilePath", it) }
     put("showMinimap", showMinimap)
     put("showVideoFollowReadout", showVideoFollowReadout)
+    put("customIssueRules", customIssueRulesJson(customIssueRules))
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -664,6 +665,17 @@ private fun aiProviderProfilesJson(profiles: List<AiProviderProfile>) = buildJso
 
 private fun copyMaskRulesJson(rules: List<CopyMaskRule>) = buildJsonArray {
     rules.forEach { rule -> add(buildJsonObject { put("target", rule.target); put("replacement", rule.replacement) }) }
+}
+
+private fun customIssueRulesJson(rules: List<CustomIssueRule>) = buildJsonArray {
+    rules.forEach { rule ->
+        add(buildJsonObject {
+            put("id", rule.id)
+            put("name", rule.name)
+            put("regex", rule.regex)
+            put("enabled", rule.enabled)
+        })
+    }
 }
 
 private fun JsonObject.stringOrNull(key: String): String? = this[key]?.jsonPrimitive?.contentOrNull
@@ -743,6 +755,16 @@ private fun JsonObject.copyMaskRulesFromJson(key: String): List<CopyMaskRule> =
         val obj = el as? JsonObject ?: return@mapNotNull null
         CopyMaskRule(target = obj.stringOrNull("target").orEmpty(), replacement = obj.stringOrNull("replacement").orEmpty())
     } ?: listOf(CopyMaskRule("java", "j*ava"))
+
+private fun JsonObject.customIssueRulesFromJson(key: String): List<CustomIssueRule> =
+    (this[key] as? JsonArray)?.mapNotNull { el ->
+        val obj = el as? JsonObject ?: return@mapNotNull null
+        val id = obj.stringOrNull("id")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        val name = obj.stringOrNull("name")?.trim().orEmpty()
+        val regex = obj.stringOrNull("regex").orEmpty()
+        if (name.isBlank() || regex.isBlank() || runCatching { Regex(regex) }.isFailure) null
+        else CustomIssueRule(id, name, regex, obj.boolOrDefault("enabled", true))
+    }?.distinctBy { it.id } ?: emptyList()
 
 // (ARCH-2) Reads the current keyed-JSON settings format written by settingsJson() above. Every
 // lookup is by name with an explicit default matching AppSettings' own default — a missing key
@@ -824,6 +846,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         debugLogFilePath = o.stringOrNull("debugLogFilePath"),
         showMinimap = o.boolOrDefault("showMinimap", true),
         showVideoFollowReadout = o.boolOrDefault("showVideoFollowReadout", false),
+        customIssueRules = o.customIssueRulesFromJson("customIssueRules"),
     )
 }.getOrNull()
 
@@ -872,7 +895,7 @@ internal fun FilterPanelUiState.filterPanelToken(): String = tokenFields(
     incMsgPillsExpanded.toString(),
     excMsgPillsExpanded.toString(),
     crashExpanded.toString(),
-    crashCategory.name,
+    crashCategory.token(),
     sfCollapsedFolderIds.sorted().joinToString(",") { it.b64() },
     sfFavoritesExpanded.toString(),
 )
@@ -888,13 +911,23 @@ internal fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
     incMsgPillsExpanded = p[5].toBoolean()
     excMsgPillsExpanded = p[6].toBoolean()
     crashExpanded = p.getOrNull(7)?.toBooleanStrictOrNull() ?: crashExpanded
-    crashCategory = p.getOrNull(8)?.let { runCatching { CrashCategory.valueOf(it) }.getOrNull() } ?: crashCategory
+    crashCategory = p.getOrNull(8)?.issueCategorySelectionFromToken() ?: crashCategory
     sfCollapsedFolderIds = p.getOrNull(9)
         ?.split(',')
         ?.mapNotNull { encoded -> runCatching { encoded.unb64() }.getOrNull() }
         ?.toSet()
         ?: emptySet()
     sfFavoritesExpanded = p.getOrNull(10)?.toBooleanStrictOrNull() ?: sfFavoritesExpanded
+}
+
+private fun IssueCategorySelection.token(): String = when (this) {
+    is IssueCategorySelection.BuiltIn -> category.name // preserves the legacy built-in representation
+    is IssueCategorySelection.Custom -> "custom:$ruleId"
+}
+
+private fun String.issueCategorySelectionFromToken(): IssueCategorySelection? = when {
+    startsWith("custom:") -> removePrefix("custom:").takeIf { it.isNotBlank() }?.let(IssueCategorySelection::Custom)
+    else -> runCatching { CrashCategory.valueOf(this) }.getOrNull()?.let(IssueCategorySelection::BuiltIn)
 }
 
 internal fun AppState.activeFilterMapToken(): String =

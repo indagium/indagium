@@ -119,6 +119,7 @@ internal fun BoundFilterPanel(
         onUiStateChanged = { state.autosaveNow() },
         mostUsedTagLimit = state.settings.mostUsedTagLimit,
         filterListRows = state.settings.filterListRows,
+        customIssueRules = state.settings.customIssueRules,
         width = state.filterPanelWidth,
         focusRequester = focusRequester,
         filterSearchRequest = filterSearchRequest,

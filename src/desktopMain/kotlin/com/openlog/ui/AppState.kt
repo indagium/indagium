@@ -51,6 +51,7 @@ import com.openlog.utils.archiveVideoCacheFileName
 import com.openlog.utils.buildAnnotationsHtml
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeCrashSites
+import com.openlog.utils.computeCustomIssueSites
 import com.openlog.utils.computeItems
 import com.openlog.utils.computeSearchMatches
 import com.openlog.utils.computeStackTraceGroups
@@ -140,12 +141,13 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
 // hard stop against an unbounded loop.
 private const val MAX_NOTE_TARGET_SUFFIX = 1000
 
-internal fun buildLogAnalysis(data: List<LogEntry>): LogAnalysis {
+internal fun buildLogAnalysis(data: List<LogEntry>, customIssueRules: List<CustomIssueRule> = emptyList()): LogAnalysis {
     val stackGroups = computeStackTraceGroups(data)
     return LogAnalysis(
         tagCounts = data.groupingBy { it.tag }.eachCount(),
         stackTraceGroups = stackGroups,
         crashSites = computeCrashSites(data, stackGroups),
+        customIssueSites = computeCustomIssueSites(data, customIssueRules),
         pending = false,
     )
 }
@@ -1727,7 +1729,21 @@ class AppState(
         if (settings == next) return
         settings = next
         if (next.theme != prev.theme) recomputeTidMapColorsForThemeChange()
+        if (next.customIssueRules != prev.customIssueRules) recomputeIssueAnalysis(next.customIssueRules)
         autosaveNow()
+    }
+
+    /** Rebuilds cached issue anchors off the UI thread after Settings changes. */
+    private fun recomputeIssueAnalysis(rules: List<CustomIssueRule>) {
+        tabs.forEach { snapshot ->
+            ioScope.launch {
+                val customSites = withContext(Dispatchers.Default) { computeCustomIssueSites(snapshot.logData, rules) }
+                if (settings.customIssueRules != rules) return@launch
+                upTab(snapshot.id) { current ->
+                    if (current.logData == snapshot.logData) current.copy(analysis = current.analysis.copy(customIssueSites = customSites)) else current
+                }
+            }
+        }
     }
 
     // Theme swap invalidates every active tid map's color palette — toggleTidMap computes colors
@@ -4405,9 +4421,12 @@ class AppState(
                 }
                 finishLoading()
                 published = true
-                val full = buildLogAnalysis(merged)
+                val issueRules = settings.customIssueRules
+                val full = buildLogAnalysis(merged, issueRules)
                 ensureActive()
-                upTab("t$n") { it.copy(analysis = full) }
+                upTab("t$n") { current ->
+                    if (settings.customIssueRules == issueRules && current.logData == merged) current.copy(analysis = full) else current
+                }
             } finally {
                 if (!published) finishLoading()
             }
@@ -4569,9 +4588,12 @@ class AppState(
                 AppLogger.info("open", "Opened ${file.name} (${logData.size} entries)")
                 markActiveLoadFinished(tabId)
                 published = true
-                val full = buildLogAnalysis(logData)
+                val issueRules = settings.customIssueRules
+                val full = buildLogAnalysis(logData, issueRules)
                 ensureActive()
-                upTab(tabId) { it.copy(analysis = full) }
+                upTab(tabId) { current ->
+                    if (settings.customIssueRules == issueRules && current.logData == logData) current.copy(analysis = full) else current
+                }
             } finally {
                 val load = activeLoads.remove(tabId)
                 if (!published) finishActiveLoad(load)
@@ -4794,9 +4816,12 @@ class AppState(
                 AppLogger.info("open", "Opened ${candidate.displayName} from archive (${logData.size} entries)")
                 markActiveLoadFinished(tabId)
                 published = true
-                val full = buildLogAnalysis(logData)
+                val issueRules = settings.customIssueRules
+                val full = buildLogAnalysis(logData, issueRules)
                 ensureActive()
-                upTab(tabId) { it.copy(analysis = full) }
+                upTab(tabId) { current ->
+                    if (settings.customIssueRules == issueRules && current.logData == logData) current.copy(analysis = full) else current
+                }
             } finally {
                 val load = activeLoads.remove(tabId)
                 if (!published) finishActiveLoad(load)
@@ -4903,7 +4928,7 @@ class AppState(
             return
         }
         val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
-        val t = mkTab(tabId, file.name, logData)
+        val t = mkTab(tabId, file.name, logData, analysis = buildLogAnalysis(logData, settings.customIssueRules))
             .copy(
                 sourcePath = path,
                 annotations = Annotations(prefix = "$prefixLabel ${file.name}"),
@@ -6025,9 +6050,12 @@ class AppState(
                 }
                 markActiveLoadFinished(tabId)
                 published = true
-                val full = buildLogAnalysis(result.logData)
+                val issueRules = settings.customIssueRules
+                val full = buildLogAnalysis(result.logData, issueRules)
                 ensureActive()
-                upTab(tabId) { it.copy(analysis = full) }
+                upTab(tabId) { current ->
+                    if (settings.customIssueRules == issueRules && current.logData == result.logData) current.copy(analysis = full) else current
+                }
             } finally {
                 val load = activeLoads.remove(tabId)
                 if (!published) finishActiveLoad(load)

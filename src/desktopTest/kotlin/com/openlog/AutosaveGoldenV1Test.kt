@@ -3,6 +3,7 @@ package com.openlog
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.AnnotationLogBlockStyle
 import com.openlog.model.CrashCategory
+import com.openlog.model.IssueCategorySelection
 import com.openlog.model.CtrlFTarget
 import com.openlog.model.ThemePreset
 import com.openlog.ui.AppState
@@ -169,7 +170,7 @@ class AutosaveGoldenV1Test {
         assertEquals(false, restored.fpState.incMsgPillsExpanded)
         assertEquals(true, restored.fpState.excMsgPillsExpanded)
         assertEquals(true, restored.fpState.crashExpanded)
-        assertEquals(CrashCategory.CRASHES, restored.fpState.crashCategory)
+        assertEquals(IssueCategorySelection.BuiltIn(CrashCategory.CRASHES), restored.fpState.crashCategory)
 
         // ── Tabs: see the class doc comment above for why a frozen golden can't exercise full
         // tab restoration — both sourcePaths are deliberately absent on every machine, so

@@ -69,6 +69,7 @@ internal enum class SettingsSection(val title: String, val icon: ImageVector) {
     AiProviders("AI providers", Icons.Outlined.Psychology),
     CustomAiCommands("AI commands", Icons.Outlined.Terminal),
     SourceCode("Source code", Icons.Outlined.Code),
+    Issues("Issues", Icons.Outlined.Bolt),
 }
 
 @Composable
@@ -177,6 +178,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                         when (selectedSection) {
                             SettingsSection.Appearance -> AppearanceSettingsSection(state)
                             SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state)
+                            SettingsSection.Issues -> IssuesSettingsSection(state)
                             SettingsSection.ExportAnnotations -> ExportAnnotationsSettingsSection(state)
                             SettingsSection.Automation -> AutomationSettingsSection(state)
                             SettingsSection.AiProviders -> AiProviderSettingsSection(state) { aiProviderGuard = it }
@@ -745,6 +747,99 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             selectedIndices = setOf(if (state.settings.showVideoFollowReadout) 0 else 1),
             onToggle = { idx -> state.updateSettings { it.copy(showVideoFollowReadout = idx == 0) } },
         )
+    }
+}
+
+private fun customIssueRulesValidation(rules: List<CustomIssueRule>): String? {
+    val builtInNames = CrashCategory.entries.map { it.name.lowercase() }.toSet() +
+        setOf("all", "crashes", "anrs", "fatal exceptions", "exceptions", "others")
+    rules.forEachIndexed { index, rule ->
+        if (rule.name.isBlank()) return "Category ${index + 1} needs a name."
+        if (rule.name.trim().lowercase() in builtInNames) return "Category ${index + 1} conflicts with a built-in Issues category."
+        if (rule.regex.isBlank()) return "Category ${index + 1} needs a regex."
+        runCatching { Regex(rule.regex) }.exceptionOrNull()?.let { return "Category ${index + 1}: ${it.message ?: "invalid regex"}" }
+    }
+    if (rules.groupingBy { it.name.trim().lowercase() }.eachCount().any { it.value > 1 }) {
+        return "Category names must be unique."
+    }
+    return null
+}
+
+@Composable
+private fun IssuesSettingsSection(state: AppState) {
+    var drafts by remember { mutableStateOf(state.settings.customIssueRules) }
+    val validation = customIssueRulesValidation(drafts)
+    val dirty = drafts != state.settings.customIssueRules
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppText("Custom issue categories", color = tc().tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            AppText(
+                "Each enabled regex is matched against a log tag or message and adds a clickable anchor to Issues. " +
+                    "It does not change stack-trace folding or built-in crash detection.",
+                color = tc().td, fontSize = 11.sp, maxLines = 3,
+            )
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AppText("Category", color = tc().td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(0.8f))
+            AppText("Tag or message regex", color = tc().td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(1.2f))
+            Spacer(Modifier.width(132.dp))
+        }
+        SettingsScrollableRows {
+            if (drafts.isEmpty()) {
+                AppText("No custom issue categories yet.", color = tc().td, fontSize = 11.sp)
+            }
+            drafts.forEachIndexed { index, rule ->
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    InlineField(
+                        rule.name,
+                        { value -> drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(name = value) else current } },
+                        "Network timeouts",
+                        Modifier.weight(0.8f),
+                        fontSize = 12.sp,
+                    )
+                    InlineField(
+                        rule.regex,
+                        { value -> drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(regex = value) else current } },
+                        "timeout\\\\s+after\\\\s+\\\\d+ms",
+                        Modifier.weight(1.2f),
+                        fontSize = 12.sp,
+                    )
+                    SegmentedControl(
+                        options = listOf("On", "Off"),
+                        selectedIndices = setOf(if (rule.enabled) 0 else 1),
+                        onToggle = { selected ->
+                            drafts = drafts.mapIndexed { i, current -> if (i == index) current.copy(enabled = selected == 0) else current }
+                        },
+                    )
+                    AppButton(
+                        "Remove",
+                        onClick = { drafts = drafts.filterIndexed { i, _ -> i != index } },
+                        variant = ButtonVariant.Secondary,
+                        isDanger = true,
+                    )
+                }
+            }
+        }
+        validation?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp, maxLines = 2) }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AppButton(
+                "Add category",
+                onClick = { drafts = drafts + CustomIssueRule(UUID.randomUUID().toString(), "", "") },
+                variant = ButtonVariant.Secondary,
+            )
+            AppButton(
+                "Save changes",
+                onClick = { state.updateSettings { it.copy(customIssueRules = drafts.map { rule -> rule.copy(name = rule.name.trim()) }) } },
+                enabled = dirty && validation == null,
+            )
+            if (dirty) {
+                AppButton("Discard", onClick = { drafts = state.settings.customIssueRules }, variant = ButtonVariant.Secondary)
+            }
+        }
     }
 }
 

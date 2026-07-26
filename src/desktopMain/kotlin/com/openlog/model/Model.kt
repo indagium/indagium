@@ -70,7 +70,34 @@ enum class CrashKind { EXCEPTION, ANR, NATIVE_CRASH }
 // isFatal only distinguishes EXCEPTION sites ("FATAL EXCEPTION" dumps vs. a merely-logged
 // <Class>Exception/Error that didn't kill the process) — ANR and NATIVE_CRASH are always
 // process-ending by definition, so it's left false (unused) for those kinds.
-data class CrashSite(val id: String, val entry: LogEntry, val kind: CrashKind, val groupGid: String?, val isFatal: Boolean = false)
+sealed interface IssueSite {
+    val id: String
+    val entry: LogEntry
+}
+
+data class CrashSite(
+    override val id: String,
+    override val entry: LogEntry,
+    val kind: CrashKind,
+    val groupGid: String?,
+    val isFatal: Boolean = false,
+) : IssueSite
+
+/** A user-defined message-regex match shown as an Issues anchor; it never creates a foldable group. */
+data class CustomIssueSite(
+    override val id: String,
+    override val entry: LogEntry,
+    val ruleId: String,
+    val categoryName: String,
+) : IssueSite
+
+/** Global Settings rule for adding message-only anchors to the Issues panel. */
+data class CustomIssueRule(
+    val id: String,
+    val name: String,
+    val regex: String,
+    val enabled: Boolean = true,
+)
 
 // Crash-panel dropdown filter categories. ALL is the default/umbrella; CRASHES/ANRS/
 // FATAL_EXCEPTIONS/EXCEPTIONS each narrow to exactly one CrashKind or EXCEPTION subtype (split by
@@ -80,10 +107,16 @@ data class CrashSite(val id: String, val entry: LogEntry, val kind: CrashKind, v
 // every specific filter.
 enum class CrashCategory { ALL, CRASHES, ANRS, FATAL_EXCEPTIONS, EXCEPTIONS, OTHERS }
 
+sealed interface IssueCategorySelection {
+    data class BuiltIn(val category: CrashCategory) : IssueCategorySelection
+    data class Custom(val ruleId: String) : IssueCategorySelection
+}
+
 data class LogAnalysis(
     val tagCounts: Map<String, Int> = emptyMap(),
     val stackTraceGroups: List<StackTraceGroup> = emptyList(),
     val crashSites: List<CrashSite> = emptyList(),
+    val customIssueSites: List<CustomIssueSite> = emptyList(),
     // True while the stack-trace/crash analysis is still computing in the background after a
     // load — it costs as much as the parse itself on multi-GB files, and the initial render
     // doesn't need it. Rows render unfolded and the crash panel shows an "analyzing" hint until
@@ -772,6 +805,8 @@ data class AppSettings(
     // most users never need it. Off by default; a user who wants the detail can flip it on in
     // Settings. Trailing with a default so old settings tokens (without this field) still parse.
     val showVideoFollowReadout: Boolean = false,
+    // Global message-only regex anchors shown alongside built-in crashes/ANRs in the Issues panel.
+    val customIssueRules: List<CustomIssueRule> = emptyList(),
 )
 
 enum class ThemePreset(val label: String) {
