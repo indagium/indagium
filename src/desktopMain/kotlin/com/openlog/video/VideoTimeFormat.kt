@@ -33,3 +33,15 @@ fun formatVideoTimeShort(ms: Long): String {
     val seconds = (clamped % MS_PER_MINUTE) / MS_PER_SECOND
     return String.format(Locale.US, "%02d:%02d", minutes, seconds)
 }
+
+/**
+ * Same as [formatVideoTimeShort], except a non-positive [ms] renders as "--:--" instead of
+ * "00:00" — the transport bar's total-duration label uses this, never [formatVideoTimeShort]
+ * directly, because 0 there is not a real (zero-length) duration. `VideoPlayerController.durationMs`
+ * reads 0 both transiently (right after opening, before FFmpeg's header duration or the background
+ * `scanDurationMs` recovery scan has reported one — see that function's own KDoc for why some
+ * containers need it) and, for a genuinely durationless file whose scan also comes up empty,
+ * potentially forever. "00:00" would misreport a video that's actually playing (a real, non-zero
+ * elapsed position already shows next to it) as zero seconds long.
+ */
+fun formatVideoDurationShort(ms: Long): String = if (ms > 0L) formatVideoTimeShort(ms) else "--:--"

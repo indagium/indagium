@@ -85,6 +85,7 @@ import com.openlog.model.LogTab
 import com.openlog.model.VideoAttachment
 import com.openlog.model.VideoSource
 import com.openlog.video.VideoPlayerController
+import com.openlog.video.formatVideoDurationShort
 import com.openlog.video.formatVideoTime
 import com.openlog.video.formatVideoTimeShort
 import kotlinx.coroutines.delay
@@ -618,6 +619,14 @@ private fun VideoTransportBar(
     // during a drag would fight the decode thread's own (asynchronous, one-loop-iteration-later)
     // position updates and make the thumb visibly stutter/snap back mid-drag.
     var dragPositionMs by remember(tab.id) { mutableStateOf<Long?>(null) }
+    // durationMs is 0 until FFmpeg's own header duration is known — and stays 0 forever for a
+    // container a live-mode/streaming muxer wrote with no trailer (see VideoPlayerController's
+    // scanDurationMs), until its background recovery scan publishes a real value. Slider math must
+    // not treat that 0 as a real (near-zero) duration: valueRange 0f..1f with a real positionMs in
+    // the hundreds/thousands would coerce the thumb hard to the right for a video at the START of
+    // an UNKNOWN-length recording — exactly the "pinned to the end, drags snap back" report this
+    // durationKnown branch exists to prevent. See the Slider block below for how it's used.
+    val durationKnown = controller.durationMs > 0L
     val durationF = controller.durationMs.coerceAtLeast(1L).toFloat()
     val sliderValueMs = dragPositionMs ?: controller.positionMs
     val sliderColors = SliderDefaults.colors(thumbColor = tc.ac, activeTrackColor = tc.ac, inactiveTrackColor = tc.br)
@@ -687,7 +696,7 @@ private fun VideoTransportBar(
                 )
             }
             AppText(
-                formatVideoTimeShort(controller.durationMs),
+                formatVideoDurationShort(controller.durationMs),
                 color = tc.td,
                 fontSize = 9.sp,
                 fontFamily = MONO,
@@ -699,21 +708,28 @@ private fun VideoTransportBar(
         // high-contrast 14dp thumb and a 4dp track for accurate mouse seeking.
         CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 28.dp) {
             Slider(
-                value = sliderValueMs.toFloat().coerceIn(0f, durationF),
-                onValueChange = { dragPositionMs = it.toLong() },
+                // With duration unknown there is no meaningful position within it to show — 0f
+                // (not sliderValueMs coerced into the placeholder 0f..1f range, which is what used
+                // to pin the thumb hard right for any real, non-zero positionMs) keeps the thumb at
+                // the truthful "can't place this yet" left edge until durationKnown flips true.
+                value = if (durationKnown) sliderValueMs.toFloat().coerceIn(0f, durationF) else 0f,
+                onValueChange = { if (durationKnown) dragPositionMs = it.toLong() },
                 onValueChangeFinished = {
-                    dragPositionMs?.let { controller.seek(it) }
+                    if (durationKnown) dragPositionMs?.let { controller.seek(it) }
                     dragPositionMs = null
                 },
                 valueRange = 0f..durationF,
-                enabled = playable,
+                // Disabled (not just visually inert) while duration is unknown: a seek target
+                // computed against the placeholder 0f..1f range would be meaningless, so dragging
+                // must be impossible rather than merely have its result discarded.
+                enabled = playable && durationKnown,
                 colors = sliderColors,
                 interactionSource = sliderInteractionSource,
                 thumb = {
                     SliderDefaults.Thumb(
                         interactionSource = sliderInteractionSource,
                         colors = sliderColors,
-                        enabled = playable,
+                        enabled = playable && durationKnown,
                         thumbSize = DpSize(14.dp, 14.dp),
                     )
                 },
@@ -721,7 +737,7 @@ private fun VideoTransportBar(
                     SliderDefaults.Track(
                         sliderState = sliderState,
                         modifier = Modifier.height(4.dp),
-                        enabled = playable,
+                        enabled = playable && durationKnown,
                         colors = sliderColors,
                         drawStopIndicator = null,
                         thumbTrackGapSize = 0.dp,
