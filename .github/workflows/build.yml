@@ -24,7 +24,7 @@ jobs:
           distribution: 'temurin'
 
       - name: Restore Gradle cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.gradle/caches
@@ -118,7 +118,7 @@ jobs:
       # arm64 job restoring x86_64 native jars (bytedeco/FFmpeg) from the amd64 job and failing to
       # link against them.
       - name: Restore Gradle cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.gradle/caches
