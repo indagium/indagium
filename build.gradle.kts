@@ -129,6 +129,10 @@ kotlin {
                 // In-app AI providers use the same Ktor line as the MCP server. Keeping the
                 // transport explicit avoids depending on the server engine transitively.
                 implementation("io.ktor:ktor-client-cio:$ktorVersion")
+                // Offline AI-composer dictation. The jar carries the macOS arm64/x64 whisper.cpp
+                // natives; the multilingual model itself is deliberately downloaded only after an
+                // explicit user action (see voice/VoiceModelCatalog.kt).
+                implementation("io.github.givimad:whisper-jni:1.7.1")
                 // Streaming AI answers are Markdown. This Compose Multiplatform renderer supports
                 // the app's Material 3 stack without adding a web view or a second UI toolkit.
                 implementation("com.mikepenz:multiplatform-markdown-renderer:0.41.0")
@@ -227,6 +231,18 @@ compose.desktop {
             macOS {
                 bundleID = "com.romanarnaut.openlog"
                 iconFile.set(project.file("icons/openlog.icns"))
+                // jpackage's defaults cover JVM JIT, but microphone access from its hardened
+                // launcher also needs the explicit audio-input entitlement. Keep the same file
+                // on the bundled runtime so a release signing/notarization pass preserves it.
+                entitlementsFile.set(project.file("macos/openLog.entitlements"))
+                runtimeEntitlementsFile.set(project.file("macos/openLog.entitlements"))
+                // macOS rejects microphone access from a bundled app without this purpose string.
+                infoPlist {
+                    extraKeysRawXml = """
+                        <key>NSMicrophoneUsageDescription</key>
+                        <string>openLog uses the microphone only to turn your AI question into local text on this device.</string>
+                    """.trimIndent()
+                }
             }
             windows {
                 iconFile.set(project.file("icons/openlog.ico"))

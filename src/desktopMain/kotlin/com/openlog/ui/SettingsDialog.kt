@@ -1,4 +1,8 @@
-@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+)
 
 package com.openlog.ui
 
@@ -11,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Terminal
@@ -43,8 +48,13 @@ import com.openlog.ai.OpenAiCompatibleProvider
 import com.openlog.ai.normalizeAiProviderProfiles
 import com.openlog.generated.BuildInfo
 import com.openlog.model.*
+import com.openlog.voice.VoiceModelCatalog
+import com.openlog.voice.VoiceModelInstallResult
+import com.openlog.voice.VoiceModelInstaller
+import com.openlog.voice.VoiceLanguageCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.awt.Desktop
 import java.io.File
 import java.net.URI
@@ -67,6 +77,7 @@ internal enum class SettingsSection(val title: String, val icon: ImageVector) {
     ExportAnnotations("Export & annotations", Icons.Outlined.Description),
     Automation("Automation", Icons.Outlined.Bolt),
     AiProviders("AI providers", Icons.Outlined.Psychology),
+    VoiceInput("Voice input", Icons.Outlined.Mic),
     CustomAiCommands("AI commands", Icons.Outlined.Terminal),
     SourceCode("Source code", Icons.Outlined.Code),
     Issues("Issues", Icons.Outlined.Bolt),
@@ -79,6 +90,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     var selectedSection by remember {
         mutableStateOf(state.requestedSettingsSection ?: SettingsSection.Appearance)
     }
+    val voiceInputSupported = remember { System.getProperty("os.name").contains("mac", ignoreCase = true) }
     LaunchedEffect(Unit) {
         state.requestedSettingsSection?.let {
             selectedSection = it
@@ -139,7 +151,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                     Modifier.width(190.dp).fillMaxHeight().padding(vertical = 12.dp, horizontal = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
-                    SettingsSection.entries.forEach { section ->
+                    SettingsSection.entries.filter { it != SettingsSection.VoiceInput || voiceInputSupported }.forEach { section ->
                         SettingsMenuItem(
                             section = section,
                             selected = section == selectedSection,
@@ -182,6 +194,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                             SettingsSection.ExportAnnotations -> ExportAnnotationsSettingsSection(state)
                             SettingsSection.Automation -> AutomationSettingsSection(state)
                             SettingsSection.AiProviders -> AiProviderSettingsSection(state) { aiProviderGuard = it }
+                            SettingsSection.VoiceInput -> VoiceInputSettingsSection(state)
                             SettingsSection.CustomAiCommands -> CustomAiCommandsSettingsSection(state)
                             SettingsSection.SourceCode -> SourceCodeSettingsSection(state)
                         }
@@ -1637,6 +1650,245 @@ private fun SourceFolderRow(state: AppState, path: String) {
                 fontFamily = UI,
             )
         }
+    }
+}
+
+@Composable
+private fun VoiceInputSettingsSection(state: AppState) {
+    val tc = tc()
+    val scope = rememberCoroutineScope()
+    val voiceSettings = state.settings.voiceInput
+    val selectedModel = VoiceModelCatalog.byId(voiceSettings.modelId)
+    val installer = remember(selectedModel.id) { VoiceModelInstaller(DesktopStorage.voiceModelsDir(), selectedModel) }
+    var installed by remember { mutableStateOf(false) }
+    var checkingModel by remember { mutableStateOf(true) }
+    var installing by remember { mutableStateOf(false) }
+    var downloadedBytes by remember { mutableStateOf(0L) }
+    var statusMessage by remember { mutableStateOf<String?>(null) }
+    var languageToAdd by remember { mutableStateOf("") }
+
+    LaunchedEffect(installer) {
+        installed = withContext(Dispatchers.IO) { installer.isInstalled() }
+        checkingModel = false
+    }
+
+    fun installModel() {
+        installing = true
+        statusMessage = null
+        scope.launch {
+            when (val result = withContext(Dispatchers.IO) {
+                installer.install { downloadedBytes = it }
+            }) {
+                is VoiceModelInstallResult.Installed,
+                is VoiceModelInstallResult.AlreadyInstalled -> {
+                    installed = true
+                    installing = false
+                    statusMessage = "Local voice model is ready."
+                }
+                is VoiceModelInstallResult.Failure -> {
+                    installing = false
+                    statusMessage = result.message
+                }
+            }
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        AppText("Voice input", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+        AppText(
+            "Dictate into the AI composer using the default microphone. Audio and transcription stay on this Mac; AI providers receive only the text you choose to send.",
+            color = tc.tx,
+            fontSize = 12.sp,
+            maxLines = 4,
+        )
+        CheckRow(
+            checked = voiceSettings.translateToEnglish,
+            onToggle = {
+                state.updateSettings { settings ->
+                    settings.copy(voiceInput = settings.voiceInput.copy(translateToEnglish = !settings.voiceInput.translateToEnglish))
+                }
+            },
+        ) {
+            AppText("Translate dictated speech to English", color = tc.tx, fontSize = 12.sp)
+        }
+        AppText(
+            if (voiceSettings.translateToEnglish) {
+                "Output mode: English translation after ${VoiceLanguageCatalog.label(voiceSettings.selectedRecognitionLanguageCode)} recognition. You can edit the result before sending."
+            } else {
+                "Output mode: ${VoiceLanguageCatalog.label(voiceSettings.selectedRecognitionLanguageCode)} transcript. You can edit the result before sending."
+            },
+            color = tc.td,
+            fontSize = 10.sp,
+            maxLines = 3,
+        )
+        Divider()
+        AppText("Recognition language", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+        AppText(
+            "Automatic detects the spoken language. Choose Ukrainian for short Ukrainian phrases; it avoids an English-recognition bias.",
+            color = tc.tx,
+            fontSize = 12.sp,
+            maxLines = 3,
+        )
+        val selectedLanguageIndex = voiceSettings.recognitionLanguageCodes
+            .indexOf(voiceSettings.selectedRecognitionLanguageCode).coerceAtLeast(0)
+        SegmentedControl(
+            options = voiceSettings.recognitionLanguageCodes.map(VoiceLanguageCatalog::label),
+            selectedIndices = setOf(selectedLanguageIndex),
+            onToggle = { index ->
+                val code = voiceSettings.recognitionLanguageCodes[index]
+                state.updateSettings { settings ->
+                    settings.copy(voiceInput = settings.voiceInput.copy(selectedRecognitionLanguageCode = code))
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            fillWidth = voiceSettings.recognitionLanguageCodes.size <= 3,
+        )
+        val addableLanguages = VoiceLanguageCatalog.additional.filter { it.code !in voiceSettings.recognitionLanguageCodes }
+        if (addableLanguages.isNotEmpty()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                InlineField(
+                    value = languageToAdd,
+                    onValue = { languageToAdd = it.lowercase().filter(Char::isLetter).take(3) },
+                    placeholder = "Language code, e.g. ru",
+                    modifier = Modifier.weight(1f),
+                    fontSize = 11.sp,
+                    onSubmit = {
+                        val code = languageToAdd
+                        if (addableLanguages.any { it.code == code }) {
+                            state.updateSettings { settings ->
+                                settings.copy(voiceInput = settings.voiceInput.copy(
+                                    recognitionLanguageCodes = settings.voiceInput.recognitionLanguageCodes + code,
+                                ))
+                            }
+                            languageToAdd = ""
+                        }
+                    },
+                )
+                AppButton(
+                    "Add language",
+                    onClick = {
+                        val code = languageToAdd
+                        if (addableLanguages.any { it.code == code }) {
+                            state.updateSettings { settings ->
+                                settings.copy(voiceInput = settings.voiceInput.copy(
+                                    recognitionLanguageCodes = settings.voiceInput.recognitionLanguageCodes + code,
+                                ))
+                            }
+                            languageToAdd = ""
+                        }
+                    },
+                    enabled = addableLanguages.any { it.code == languageToAdd },
+                )
+            }
+            AppText(
+                "Additional supported codes: ${addableLanguages.joinToString { "${it.label} (${it.code})" }}",
+                color = tc.td,
+                fontSize = 10.sp,
+                maxLines = 3,
+            )
+        }
+        val removableLanguages = voiceSettings.recognitionLanguageCodes.filter { code ->
+            VoiceLanguageCatalog.defaults.none { it.code == code }
+        }
+        if (removableLanguages.isNotEmpty()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                removableLanguages.forEach { code ->
+                    AppButton(
+                        "Remove ${VoiceLanguageCatalog.label(code)}",
+                        onClick = {
+                            state.updateSettings { settings ->
+                                val languages = settings.voiceInput.recognitionLanguageCodes - code
+                                settings.copy(voiceInput = settings.voiceInput.copy(
+                                    recognitionLanguageCodes = languages,
+                                    selectedRecognitionLanguageCode = settings.voiceInput.selectedRecognitionLanguageCode
+                                        .takeIf { it in languages } ?: "auto",
+                                ))
+                            }
+                        },
+                        variant = ButtonVariant.Ghost,
+                        horizontalPadding = 7.dp,
+                    )
+                }
+            }
+        }
+        Divider()
+        AppText("Local model", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+        SegmentedControl(
+            options = VoiceModelCatalog.all.map { model ->
+                if (model.id == VoiceModelCatalog.base.id) "Base (${formatByteSize(model.sizeBytes)})"
+                else "Small (${formatByteSize(model.sizeBytes)})"
+            },
+            selectedIndices = setOf(VoiceModelCatalog.all.indexOfFirst { it.id == selectedModel.id }),
+            onToggle = { index ->
+                val model = VoiceModelCatalog.all[index]
+                state.updateSettings { settings ->
+                    settings.copy(voiceInput = settings.voiceInput.copy(modelId = model.id))
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            fillWidth = true,
+        )
+        AppText(
+            (
+                if (selectedModel.id == VoiceModelCatalog.small.id) {
+                    "Whisper small (multilingual): more accurate for Ukrainian/Russian and short phrases, but uses more disk, memory, and CPU."
+                } else {
+                    "Whisper base (multilingual): faster and smaller, best for English or longer, clear speech."
+                }
+            ) + " One explicit HTTPS download; no cloud speech-recognition service.",
+            color = tc.tx,
+            fontSize = 12.sp,
+            maxLines = 3,
+        )
+        AppText(
+            when {
+                checkingModel -> "Checking local model…"
+                installed -> "Status: installed at openLog application data/voice-models."
+                else -> "Status: not installed."
+            },
+            color = if (installed) tc.ac else tc.td,
+            fontSize = 11.sp,
+        )
+        if (installing) AppText("Downloading ${formatByteSize(downloadedBytes)}…", color = tc.ac, fontSize = 11.sp)
+        statusMessage?.let { message ->
+            AppText(message, color = if (installed) tc.ac else DANGER_RED, fontSize = 10.sp, maxLines = 3)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (installed) {
+                AppButton(
+                    "Remove model",
+                    onClick = {
+                        if (installer.remove()) {
+                            installed = false
+                            statusMessage = "Local voice model removed."
+                        } else {
+                            statusMessage = "Could not remove the local voice model."
+                        }
+                    },
+                    variant = ButtonVariant.Secondary,
+                    isDanger = true,
+                    enabled = !installing,
+                )
+                AppButton(
+                    "Reinstall",
+                    onClick = {
+                        installer.remove()
+                        installed = false
+                        installModel()
+                    },
+                    variant = ButtonVariant.Secondary,
+                    enabled = !installing,
+                )
+            } else {
+                AppButton(
+                    if (installing) "Downloading…" else "Download local model",
+                    onClick = ::installModel,
+                    variant = ButtonVariant.Primary,
+                    enabled = !installing && !checkingModel,
+                )
+            }
+        }
+        AppText("Model license: ${selectedModel.licenseUrl}", color = tc.td, fontSize = 10.sp, maxLines = 2)
     }
 }
 

@@ -681,6 +681,17 @@ const val MIN_INTERFACE_SCALE_PERCENT = 80
 const val MAX_INTERFACE_SCALE_PERCENT = 200
 const val DEFAULT_INTERFACE_SCALE_PERCENT = 100
 
+/** Non-secret preferences for the on-device dictation feature. The downloaded model is discovered
+ * from [com.openlog.ui.DesktopStorage.voiceModelsDir], so no machine-specific model path is saved. */
+data class VoiceInputSettings(
+    val translateToEnglish: Boolean = true,
+    /** `auto` uses Whisper's language detection. The three defaults are always kept available. */
+    val recognitionLanguageCodes: List<String> = listOf("auto", "uk", "en"),
+    val selectedRecognitionLanguageCode: String = "auto",
+    /** A catalog identifier, not a filesystem path. */
+    val modelId: String = "whisper-base",
+)
+
 data class AppSettings(
     val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
@@ -760,6 +771,9 @@ data class AppSettings(
     // Caps tool-call round trips per AI request (see AiAgentRunner). Trailing with a default so
     // old settings tokens (without this field) still parse - see settingsFromToken.
     val aiMaxToolRounds: Int = DEFAULT_AI_MAX_TOOL_ROUNDS,
+    // Dictation runs entirely on-device and has no provider credential or endpoint setting.
+    // Trailing default keeps older settings snapshots compatible.
+    val voiceInput: VoiceInputSettings = VoiceInputSettings(),
     /** Ordered copy-mask rules. An empty list intentionally means no replacements. */
     val copyMaskRules: List<CopyMaskRule> = listOf(CopyMaskRule("java", "j*ava")),
     // (SEC-1) The control server's CORS block previously installed unconditionally with

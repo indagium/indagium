@@ -15,7 +15,7 @@ A desktop log viewer for Android logcat files, built with Kotlin and Compose Mul
 - **Highlighters** — color-code lines by message pattern
 - **Annotations** — annotate log selections with notes, exported as Markdown
 - **Show in code** — register your project's source folder(s) in Settings, then right-click a log line to view the exact method that emitted it (Kotlin/Java, `Log.*` + Timber); also exposed to AI assistants via the `resolve_log_source` MCP tool
-- **In-app AI assistant** — use LM Studio, OpenAI, Anthropic, Codex, Claude Code, or another compatible provider to investigate the active log tab with the same log, filter, source, and notes tools exposed through MCP
+- **In-app AI assistant** — use LM Studio, OpenAI, Anthropic, Codex, Claude Code, or another compatible provider to investigate the active log tab with the same log, filter, source, and notes tools exposed through MCP; macOS also supports on-device voice dictation into the editable composer
 - **Compare view** — diff two open tabs line by line
 - **Themes** — 20 built-in themes (light, dark, and paper variants)
 - **Autosave** — session is fully restored on next launch
@@ -95,6 +95,22 @@ workspace plus a private, short-lived managed MCP endpoint. That endpoint expose
 openLog tools and confirmation rules as the LM Studio panel path, pins requests to the active log
 tab, and is revoked when the run ends. The account agents do not receive source-folder or app
 workspace access; log and source evidence is available only through openLog tools.
+
+### Local voice dictation (macOS)
+
+The microphone button beside **Send** records the default microphone in memory, transcribes it
+with a local Whisper model, and appends the result to the editable composer. The default language
+choices are **Automatic**, **Ukrainian**, and **English**; Settings can add other Whisper languages.
+The `EN` control beside the microphone switches local English translation on or off. Nothing is
+sent and a request is never started until you edit or accept the text and press **Send** yourself.
+
+On first use, openLog asks before downloading the selected multilingual Whisper model: Base
+(~142 MiB, faster) or Small (~465 MiB, more accurate for short non-English dictation). After that
+one-time model download, recording and transcription work offline and independently of the
+selected chat provider. **Settings → Voice input** shows the model state, language, translation
+mode, and remove/reinstall controls. The downloaded model lives in the app-data `voice-models`
+folder; audio recordings and transcripts are never written there or kept after the dictation
+attempt.
 
 ### Data and action safety
 
