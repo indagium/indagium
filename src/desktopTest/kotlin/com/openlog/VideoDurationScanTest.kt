@@ -1,7 +1,11 @@
 package com.openlog
 
+import com.openlog.video.PacketScanResult
 import com.openlog.video.defaultVideoPlayerController
+import com.openlog.video.growDurationIfNeeded
+import com.openlog.video.resolveScannedDurationMs
 import com.openlog.video.scanDurationMs
+import com.openlog.video.scanPackets
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -12,25 +16,32 @@ import kotlin.test.assertTrue
 private const val MICROS_PER_MS = 1_000L
 
 /**
- * Exercises `scanDurationMs` (video/VideoPlayerController.kt) — the packet-only duration-recovery
- * scan for containers whose header reports no length — against two committed binary fixtures under
- * `resources/video/`. Both were generated once via `ffmpeg -f lavfi -i testsrc=duration=5:...` (see
- * CLAUDE.md's task notes for the exact commands) and are never regenerated at test time: CI runners
- * have no ffmpeg, so this test only ever reads the committed bytes.
+ * Exercises the duration-recovery chain in video/VideoPlayerController.kt — `scanDurationMs` and
+ * the `scanPackets`/`resolveScannedDurationMs`/`growDurationIfNeeded` pieces it's built from — for
+ * containers whose header reports no length, against three committed binary fixtures under
+ * `resources/video/`. All three were generated once (see CLAUDE.md's task notes / each fixture's
+ * own KDoc below for the exact commands) and are never regenerated at test time: CI runners have no
+ * ffmpeg, so this test only ever reads the committed bytes.
  *
  *  - `live-noduration.mkv`: muxed with `-f matroska -live 1`, whose header duration
  *    (`AVFormatContext.duration`, what `grabber.lengthInTime` reads) is 0 despite the file playing
  *    fine — a live-mode/streaming muxer never got to write the trailer that would carry a length.
- *    This is the exact shape of file that produced the reported bug (00:01 elapsed / 00:00
- *    duration, seek slider pinned to the far right): a screen recorder that streams its output, or
- *    is killed before finalizing, produces the same header.
+ *    This file DOES carry real packet timestamps, so it resolves via step 2 (the exact
+ *    packet-timestamp scan) of the recovery chain.
  *  - `normal-duration.mkv`: the same test pattern muxed normally, whose header DOES report a
  *    duration — the control case proving the fixtures differ only in exactly the property under
  *    test, not in content or length.
+ *  - `raw-h264-no-timestamps.h264`: a RAW elementary H.264 stream with no container at all
+ *    (`ffmpeg -f lavfi -i testsrc=duration=5:size=320x240:rate=15 -c:v libx264 raw-stream.h264`),
+ *    the second, previously-unhandled shape of durationless file this task adds coverage for.
+ *    Android tooling sometimes writes exactly this (occasionally even named `.mp4`). FFmpeg
+ *    content-probes and plays it happily, but every one of its packets carries neither pts nor
+ *    dts — step 2 finds nothing here, so this fixture is what exercises step 3, the
+ *    packet-count/frame-rate fallback.
  *
- * Deliberately tests the extracted pure function directly rather than the whole
+ * Deliberately tests the extracted pure functions directly rather than the whole
  * `FfmpegVideoPlayerController` (which spawns a decode thread and a duration-scan thread) — see
- * `scanDurationMs`'s own KDoc for why it takes a bare path rather than being a method on that class.
+ * `scanPackets`'s own KDoc for why it takes a bare path rather than being a method on that class.
  */
 class VideoDurationScanTest {
     private fun fixture(name: String): String {
@@ -109,5 +120,110 @@ class VideoDurationScanTest {
         assertTrue(
             runCatching { scanDurationMs("/nonexistent/openlog-duration-scan-fixture.mkv") }.isFailure,
         )
+    }
+
+    @Test
+    fun rawStreamFixtureHasNeitherHeaderDurationNorPacketTimestamps() {
+        // Precondition the packet-count/frame-rate fallback (step 3) exists to fix: proves this
+        // fixture actually reproduces a raw elementary stream's shape — no container duration AND
+        // no packet ever carries a resolvable pts/dts — rather than accidentally exercising
+        // something step 2 (the exact packet-timestamp scan) could already have handled. Without
+        // this assertion, a change that broke the raw-stream fixture generation could silently turn
+        // rawStreamFixtureResolvesViaPacketCountFallback below into a step-2 test instead.
+        val path = fixture("raw-h264-no-timestamps.h264")
+        assertEquals(0L, declaredDurationMs(path))
+        val scanned = scanPackets(path)
+        assertEquals(0L, scanned.maxEndUs, "expected no packet to carry a resolvable pts/dts")
+        assertTrue(scanned.videoPacketCount > 0L, "expected the scan to have walked real video packets")
+    }
+
+    @Test
+    fun rawStreamFixtureResolvesViaPacketCountFallback() {
+        // 75 packets at FFmpeg's guessed 25fps for this fixture works out to 3000ms — see this
+        // task's own measurements. Asserted as a floor + rough ceiling rather than an exact
+        // millisecond figure since the fallback is an approximation by construction (the frame rate
+        // itself is guessed, not declared) — the point of this test is "step 3 produces a real,
+        // usable, roughly-right duration", not that it reproduces FFmpeg's guess to the millisecond.
+        val recoveredMs = scanDurationMs(fixture("raw-h264-no-timestamps.h264"))
+        assertTrue(recoveredMs in 2_000..4_000, "expected roughly 3000ms via the packet-count fallback, got $recoveredMs")
+    }
+
+    @Test
+    fun realControllerPublishesAFallbackDurationForARawElementaryStream() {
+        // The raw-stream equivalent of realControllerPublishesARecoveredDurationForADurationlessFile
+        // above: the user's reported bug had TWO distinct root causes (a live-mode container with
+        // real timestamps, and a raw elementary stream with none at all), and this is the one that
+        // was still broken before this task — scanDurationMs found nothing via timestamps and
+        // openGrabber had nothing else to fall back to. Drives the real controller end to end so the
+        // wiring (openGrabber -> maybeStartDurationRecoveryScan -> scanDurationMs's step 3) is what's
+        // under test, not just the pure function.
+        val controller = defaultVideoPlayerController(fixture("raw-h264-no-timestamps.h264"))
+        try {
+            val deadline = System.currentTimeMillis() + 15_000
+            while (controller.durationMs <= 0L && controller.error == null && System.currentTimeMillis() < deadline) {
+                Thread.sleep(50)
+            }
+            assertEquals(null, controller.error, "the fixture must open cleanly; only its length is unknown")
+            assertTrue(
+                controller.durationMs > 0L,
+                "controller should publish a fallback duration via the packet-count/frame-rate step, got ${controller.durationMs}",
+            )
+        } finally {
+            controller.close()
+        }
+    }
+
+    @Test
+    fun resolveScannedDurationPrefersTheExactPacketTimestampTotalWhenPresent() {
+        // Step 2 wins outright over step 3 whenever it has anything to offer — even a videoPacketCount
+        // of 0 (which a real scan wouldn't produce alongside a positive maxEndUs, but this is testing
+        // the pure decision function in isolation) must not affect the result.
+        assertEquals(5_000L, resolveScannedDurationMs(PacketScanResult(maxEndUs = 5_000_000L, videoPacketCount = 0L, videoFrameRate = 0.0)))
+    }
+
+    @Test
+    fun resolveScannedDurationFallsBackToPacketCountOverFrameRateWhenNoTimestampsExist() {
+        assertEquals(
+            3_000L,
+            resolveScannedDurationMs(PacketScanResult(maxEndUs = 0L, videoPacketCount = 75L, videoFrameRate = 25.0)),
+        )
+    }
+
+    @Test
+    fun resolveScannedDurationGuardsAgainstAnUnusableFrameRate() {
+        // A raw stream FFmpeg couldn't even guess a frame rate for (0, negative, NaN, or Infinity —
+        // e.g. a malformed or single-packet stream) must resolve to "still unknown" (0), not a
+        // divide-by-zero garbage value or a crash.
+        assertEquals(0L, resolveScannedDurationMs(PacketScanResult(maxEndUs = 0L, videoPacketCount = 75L, videoFrameRate = 0.0)))
+        assertEquals(0L, resolveScannedDurationMs(PacketScanResult(maxEndUs = 0L, videoPacketCount = 75L, videoFrameRate = -1.0)))
+        assertEquals(0L, resolveScannedDurationMs(PacketScanResult(maxEndUs = 0L, videoPacketCount = 75L, videoFrameRate = Double.NaN)))
+        assertEquals(
+            0L,
+            resolveScannedDurationMs(PacketScanResult(maxEndUs = 0L, videoPacketCount = 75L, videoFrameRate = Double.POSITIVE_INFINITY)),
+        )
+        // And a frame rate that IS usable but with no packets counted (an empty/audio-only scan)
+        // must not fabricate a duration out of nothing either.
+        assertEquals(0L, resolveScannedDurationMs(PacketScanResult(maxEndUs = 0L, videoPacketCount = 0L, videoFrameRate = 25.0)))
+    }
+
+    @Test
+    fun growDurationLeavesAnAlreadySufficientDurationUnchanged() {
+        assertEquals(5_000L, growDurationIfNeeded(currentDurationMs = 5_000L, positionMs = 3_000L))
+    }
+
+    @Test
+    fun growDurationRaisesAnUndershotDurationToTheObservedPosition() {
+        // This is the exact scenario the user's report demands never regress: a 3000ms estimate
+        // (step 3's guessed frame rate) must not re-pin the slider thumb at the far right once
+        // playback actually runs past it on a genuinely-longer stream.
+        assertEquals(5_000L, growDurationIfNeeded(currentDurationMs = 3_000L, positionMs = 5_000L))
+    }
+
+    @Test
+    fun growDurationMakesAWhollyUnknownDurationUsableTheMomentPlaybackAdvances() {
+        // Covers "even if every step above yields 0, the timeline becomes usable the moment the
+        // video plays" — no recovery step needs to have found anything for the transport bar to
+        // stop being stuck at "--:--" once real playback positions start arriving.
+        assertEquals(1_500L, growDurationIfNeeded(currentDurationMs = 0L, positionMs = 1_500L))
     }
 }
