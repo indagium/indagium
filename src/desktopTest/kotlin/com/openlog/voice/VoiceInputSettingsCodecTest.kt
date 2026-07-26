@@ -1,6 +1,7 @@
 package com.openlog.voice
 
 import com.openlog.model.AppSettings
+import com.openlog.model.VoiceRecognitionEngine
 import com.openlog.model.VoiceInputSettings
 import com.openlog.ui.settingsFromJson
 import com.openlog.ui.settingsJson
@@ -19,6 +20,7 @@ class VoiceInputSettingsCodecTest {
                     recognitionLanguageCodes = listOf("auto", "uk", "en", "ru"),
                     selectedRecognitionLanguageCode = "uk",
                     modelId = "whisper-small",
+                    recognitionEngine = VoiceRecognitionEngine.WHISPER,
                 ),
             ).settingsJson(),
         )!!
@@ -27,6 +29,7 @@ class VoiceInputSettingsCodecTest {
         assertEquals(listOf("auto", "uk", "en", "ru"), restored.voiceInput.recognitionLanguageCodes)
         assertEquals("uk", restored.voiceInput.selectedRecognitionLanguageCode)
         assertEquals("whisper-small", restored.voiceInput.modelId)
+        assertEquals(VoiceRecognitionEngine.WHISPER, restored.voiceInput.recognitionEngine)
     }
 
     @Test

@@ -55,6 +55,30 @@ val appAuthor = "Roman Arnaut"
 val licenseVersion = "2026-07-19"
 val generatedBuildInfoDir = layout.buildDirectory.dir("generated/openlogBuildInfo/desktopMain/kotlin")
 val generatedLicenseResourcesDir = layout.buildDirectory.dir("generated/openlogLicenseResources/desktopMain/resources")
+val generatedNativeResourcesDir = layout.buildDirectory.dir("generated/openlogNativeResources/desktopMain/resources")
+val isMacHost = org.gradle.internal.os.OperatingSystem.current().isMacOsX
+
+// Apple Speech is called inside the JVM process through a very small Objective-C JNI bridge.
+// Keeping it generated rather than committed as a binary makes the native code reviewable and
+// lets macOS code-signing/notarization sign the exact dylib produced for the release.
+val compileAppleSpeechNative by tasks.registering(Exec::class) {
+    onlyIf { isMacHost }
+    val output = generatedNativeResourcesDir.get().file("native/macos/libopenlog_speech.dylib").asFile
+    inputs.file("native/macos/openlog_speech.m")
+    outputs.file(output)
+    doFirst {
+        output.parentFile.mkdirs()
+        val javaHome = javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        }.get().metadata.installationPath.asFile
+        commandLine(
+            "clang", "-dynamiclib", "-fobjc-arc", "-fblocks",
+            "-I${javaHome}/include", "-I${javaHome}/include/darwin",
+            "-framework", "Foundation", "-framework", "Speech", "-framework", "AVFoundation",
+            "native/macos/openlog_speech.m", "-o", output.absolutePath,
+        )
+    }
+}
 
 val generateBuildInfo by tasks.registering {
     inputs.property("appVersion", appVersion)
@@ -113,6 +137,7 @@ kotlin {
         val desktopMain by getting {
             kotlin.srcDir(generatedBuildInfoDir)
             resources.srcDir(generatedLicenseResourcesDir)
+            resources.srcDir(generatedNativeResourcesDir)
             dependencies {
                 implementation(compose.desktop.currentOs)
                 implementation(compose.material3)
@@ -241,6 +266,8 @@ compose.desktop {
                     extraKeysRawXml = """
                         <key>NSMicrophoneUsageDescription</key>
                         <string>openLog uses the microphone only to turn your AI question into local text on this device.</string>
+                        <key>NSSpeechRecognitionUsageDescription</key>
+                        <string>openLog uses Apple Speech only to turn your recorded AI question into text on this device.</string>
                     """.trimIndent()
                 }
             }
@@ -264,6 +291,7 @@ tasks.named("compileKotlinDesktop") {
 
 tasks.matching { it.name.contains("ProcessResources", ignoreCase = true) }.configureEach {
     dependsOn(generateLicenseResources)
+    if (isMacHost) dependsOn(compileAppleSpeechNative)
 }
 
 // jpackage/jlink bundle whatever JVM is running Gradle ITSELF into the native distribution's

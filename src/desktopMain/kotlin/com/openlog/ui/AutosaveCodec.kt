@@ -593,6 +593,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
         put("translateToEnglish", voiceInput.translateToEnglish)
         put("selectedRecognitionLanguageCode", voiceInput.selectedRecognitionLanguageCode)
         put("modelId", voiceInput.modelId)
+        put("recognitionEngine", voiceInput.recognitionEngine.name)
         put("recognitionLanguageCodes", buildJsonArray { voiceInput.recognitionLanguageCodes.forEach(::add) })
     })
     put("copyMaskRules", copyMaskRulesJson(copyMaskRules))
@@ -769,11 +770,15 @@ private fun JsonObject.voiceInputFromJson(key: String): VoiceInputSettings {
     val modelId = value.stringOrNull("modelId")
         ?.takeIf { candidate -> com.openlog.voice.VoiceModelCatalog.all.any { it.id == candidate } }
         ?: VoiceInputSettings().modelId
+    val recognitionEngine = value.stringOrNull("recognitionEngine")
+        ?.let { raw -> runCatching { com.openlog.model.VoiceRecognitionEngine.valueOf(raw) }.getOrNull() }
+        ?: VoiceInputSettings().recognitionEngine
     return VoiceInputSettings(
         translateToEnglish = value.boolOrDefault("translateToEnglish", true),
         recognitionLanguageCodes = normalized,
         selectedRecognitionLanguageCode = selected,
         modelId = modelId,
+        recognitionEngine = recognitionEngine,
     )
 }
 

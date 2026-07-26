@@ -24,6 +24,21 @@ class VoiceInputControllerTest {
     }
 
     @Test
+    fun unavailableNativeEngineReportsItsOwnRecoverableMessageInsteadOfModelDownload() {
+        val capture = FakeCapture()
+        val controller = VoiceInputController(
+            hasInstalledModel = { false },
+            unavailableMessage = { "Apple Speech has no local Ukrainian model." },
+            requiresInstallation = false,
+            capture = capture,
+            transcriber = VoiceTranscriber { _, _ -> error("not called") },
+        )
+
+        assertEquals(VoiceInputState.Failed("Apple Speech has no local Ukrainian model."), controller.startRecording())
+        assertEquals(0, capture.starts)
+    }
+
+    @Test
     fun transcriptUsesConfiguredTranslationAndIsConsumedOnlyOnce() = runBlocking {
         val capture = FakeCapture(audio = audio())
         var options: VoiceTranscriptionOptions? = null
