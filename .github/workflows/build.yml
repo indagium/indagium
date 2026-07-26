@@ -255,7 +255,7 @@ jobs:
       # hand — including anyone updating FROM a pre-1.7.0 build, whose updater predates arch
       # awareness and will hand an arm64 machine the amd64 package exactly once.
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: artifacts/**/*
           generate_release_notes: true
