@@ -46,6 +46,8 @@ import com.openlog.utils.SearchComputeResult
 import com.openlog.utils.TS_UNKNOWN
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.ZipLogCandidateKind
+import com.openlog.utils.annotationImageFileName
+import com.openlog.utils.archiveVideoCacheFileName
 import com.openlog.utils.buildAnnotationsHtml
 import com.openlog.utils.buildMd
 import com.openlog.utils.computeCrashSites
@@ -53,13 +55,12 @@ import com.openlog.utils.computeItems
 import com.openlog.utils.computeSearchMatches
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.computeTidMapColors
+import com.openlog.utils.enforceArchiveVideoCacheBudget
 import com.openlog.utils.exportFilteredToFile
 import com.openlog.utils.extractAppVersionHeuristic
-import com.openlog.utils.extractCandidate
 import com.openlog.utils.extractArchiveVideoToCache
-import com.openlog.utils.annotationImageFileName
-import com.openlog.utils.archiveVideoCacheFileName
-import com.openlog.utils.enforceArchiveVideoCacheBudget
+import com.openlog.utils.extractCandidate
+import com.openlog.utils.formatElapsedAsClock
 import com.openlog.utils.indexOfEntryId
 import com.openlog.utils.invalidateComputeCache
 import com.openlog.utils.isLikelyTextFile
@@ -70,11 +71,10 @@ import com.openlog.utils.mergeLogs
 import com.openlog.utils.newId
 import com.openlog.utils.openArchiveCandidateStream
 import com.openlog.utils.parseLogcat
-import com.openlog.utils.pruneUnreferencedArchiveVideos
-import com.openlog.utils.formatElapsedAsClock
 import com.openlog.utils.parseMillisOfDay
 import com.openlog.utils.passesFilter
 import com.openlog.utils.planSplitOutputs
+import com.openlog.utils.pruneUnreferencedArchiveVideos
 import com.openlog.utils.requiresSplitPrompt
 import com.openlog.utils.splitFileToFiles
 import com.openlog.utils.splitStreamToFiles
@@ -1391,6 +1391,7 @@ class AppState(
     /** Compatibility alias for callers that still use the previous cache-only name. */
     val archiveCacheSizeBytes: Long get() = temporaryDataSizeBytes
     var pendingSequenceStart by mutableStateOf<PendingSequenceStart?>(null)
+
     // See PendingNoteOverwrite's doc comment / autoExportAnnotations. Dismissing (Dialog's
     // onDismissRequest, or the explicit "Cancel" button) must only set this back to null — never a
     // permanent silent no-save decision — so the very next annotation edit re-prompts instead of

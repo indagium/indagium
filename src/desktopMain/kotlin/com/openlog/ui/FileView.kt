@@ -241,48 +241,48 @@ internal fun FileView(
                     if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == aiFr }
                 },
                 notesContent = {
-                AnnotationPanel(
-                    tab = tab,
-                    settings = state.settings,
-                    recentNotes = state.recentNotesForTab(tab),
-                    recentNotesMenuOpen = state.recentNotesMenuOpen,
-                    onToggleMd = { state.toggleMd(tab.id) },
-                    onCopy = { state.copyAnn(tab.id) },
-                    onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
-                    onCopyRichPreview = { state.copyRichPreview(tab.id) },
-                    onExportFrames = { state.exportAnnotationFrames(tab.id) },
-                    onSave = { state.saveAnalysis(tab.id) },
-                    onToggleRecentNotes = { state.toggleRecentNotesMenu() },
-                    onOpenNote = { state.openNoteFileAsync(tab.id, it) },
-                    onUpdatePrefix = { state.setPrefix(tab.id, it) },
-                    onUpdateSuffix = { state.setSuffix(tab.id, it) },
-                    onUpdateIssueDescription = { state.setIssueDescription(tab.id, it) },
-                    onUpdateBlock = { blockId, text -> state.updateBlock(tab.id, blockId, text) },
-                    onRemoveBlock = { state.removeBlock(tab.id, it) },
-                    onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
-                    onReorderBlock = { blockId, idx -> state.reorderBlock(tab.id, blockId, idx) },
-                    onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
-                    onAddImage = { bytes, provenance, after -> state.addImageBlock(tab.id, bytes, provenance, after) },
-                    onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
-                    onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
-                    onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it) },
-                    width = state.annotationPanelWidth,
-                    focusRequester = annotationFr,
-                    onPanelFocusChanged = { focused ->
-                        if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
-                    },
-                    keyboardFocusVisible = state.keyboardFocusVisible,
-                    scrollStateStore = state.logViewerScrollStateStore,
-                    highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == tab.id }?.blockId,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            },
-            videoContent = if (state.videoPanelVisible && tab.attachedVideo != null) {
-                { BoundVideoPanel(state = state, tab = tab, modifier = Modifier.fillMaxSize()) }
-            } else {
-                null
-            },
-        )
+                    AnnotationPanel(
+                        tab = tab,
+                        settings = state.settings,
+                        recentNotes = state.recentNotesForTab(tab),
+                        recentNotesMenuOpen = state.recentNotesMenuOpen,
+                        onToggleMd = { state.toggleMd(tab.id) },
+                        onCopy = { state.copyAnn(tab.id) },
+                        onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
+                        onCopyRichPreview = { state.copyRichPreview(tab.id) },
+                        onExportFrames = { state.exportAnnotationFrames(tab.id) },
+                        onSave = { state.saveAnalysis(tab.id) },
+                        onToggleRecentNotes = { state.toggleRecentNotesMenu() },
+                        onOpenNote = { state.openNoteFileAsync(tab.id, it) },
+                        onUpdatePrefix = { state.setPrefix(tab.id, it) },
+                        onUpdateSuffix = { state.setSuffix(tab.id, it) },
+                        onUpdateIssueDescription = { state.setIssueDescription(tab.id, it) },
+                        onUpdateBlock = { blockId, text -> state.updateBlock(tab.id, blockId, text) },
+                        onRemoveBlock = { state.removeBlock(tab.id, it) },
+                        onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
+                        onReorderBlock = { blockId, idx -> state.reorderBlock(tab.id, blockId, idx) },
+                        onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
+                        onAddImage = { bytes, provenance, after -> state.addImageBlock(tab.id, bytes, provenance, after) },
+                        onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
+                        onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
+                        onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it) },
+                        width = state.annotationPanelWidth,
+                        focusRequester = annotationFr,
+                        onPanelFocusChanged = { focused ->
+                            if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
+                        },
+                        keyboardFocusVisible = state.keyboardFocusVisible,
+                        scrollStateStore = state.logViewerScrollStateStore,
+                        highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == tab.id }?.blockId,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                },
+                videoContent = if (state.videoPanelVisible && tab.attachedVideo != null) {
+                    { BoundVideoPanel(state = state, tab = tab, modifier = Modifier.fillMaxSize()) }
+                } else {
+                    null
+                },
+            )
         }
     }
 }

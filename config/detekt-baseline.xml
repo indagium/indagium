@@ -2,30 +2,50 @@
 <SmellBaseline>
   <ManuallySuppressedIssues></ManuallySuppressedIssues>
   <CurrentIssues>
+    <ID>ComplexCondition:AppState.kt$AppState$tab == null || anchor == null || elapsedIndex == null || anchorElapsed == null || elapsedIndex.ids.isEmpty()</ID>
     <ID>CyclomaticComplexMethod:AccountAgentRunner.kt$AccountAgentRunner$private suspend fun runCodex( run: AiRun, profile: AiProviderProfile, prompt: String, systemPrompt: String, workspace: Path, lease: ManagedMcpServerLease, )</ID>
     <ID>CyclomaticComplexMethod:App.kt$private fun handleGlobalKey( ev: KeyEvent, state: AppState, onFocusPanel: (KeyboardPanel) -&gt; Unit, onFocusFilterSearch: () -&gt; Unit, ): Boolean</ID>
+    <ID>CyclomaticComplexMethod:AppState.kt$AppState$fun followDiagnostics(tabId: String, videoMs: Long): FollowDiagnostics</ID>
+    <ID>CyclomaticComplexMethod:AppState.kt$AppState$private fun buildLogElapsedIndex(tab: LogTab): LogElapsedIndex</ID>
     <ID>CyclomaticComplexMethod:AutosaveCodec.kt$internal fun settingsFromToken(token: String): AppSettings?</ID>
     <ID>CyclomaticComplexMethod:ClaudeCodeClient.kt$ClaudeCodeClient$fun stream(request: ClaudeCodeRequest): Flow&lt;ClaudeCodeEvent&gt;</ID>
     <ID>CyclomaticComplexMethod:CodexAppServerClient.kt$CodexAppServerClient$private fun notification(method: String, params: JsonObject): CodexAppServerEvent?</ID>
     <ID>CyclomaticComplexMethod:LogViewer.kt$private fun handleNavKey( ev: KeyEvent, items: List&lt;LogItem&gt;, tab: LogTab, lazyState: LazyListState, scope: CoroutineScope, scrollMargin: Int, cursor: SelectionCursor, summary: ItemsSummary, onSelectRow: (Int) -&gt; Unit, ): Boolean</ID>
     <ID>CyclomaticComplexMethod:LogViewer.kt$private fun handleSelKey( ev: KeyEvent, items: List&lt;LogItem&gt;, tab: LogTab, lazyState: LazyListState, scope: CoroutineScope, scrollMargin: Int, onSelRowRange: (List&lt;Int&gt;) -&gt; Unit, cursor: SelectionCursor, summary: ItemsSummary, actions: SelKeyActions, ): Boolean</ID>
+    <ID>DestructuringDeclarationWithTooManyEntries:AutosaveCodec.kt$val (kind, primaryPath, archiveEntry, displayName) = when (val videoSource = source) { is VideoSource.LocalFile -&gt; listOf("LOCAL", videoSource.path, "", "") is VideoSource.ArchiveEntry -&gt; listOf( "ARCHIVE", videoSource.archivePath, videoSource.entryPath, videoSource.displayName, ) }</ID>
+    <ID>DestructuringDeclarationWithTooManyEntries:AutosaveCodec.kt$val (legacyPath, kind, archiveEntry, displayName) = when (val videoSource = source) { is VideoSource.LocalFile -&gt; listOf(videoSource.path, "LOCAL", "", "") is VideoSource.ArchiveEntry -&gt; listOf( videoSource.archivePath, "ARCHIVE", videoSource.entryPath, videoSource.displayName, ) }</ID>
     <ID>LargeClass:AppState.kt$AppState</ID>
     <ID>LargeClass:AppStateBehaviorTest.kt$AppStateBehaviorTest</ID>
+    <ID>MagicNumber:AppState.kt$AppState$1024L</ID>
+    <ID>MagicNumber:AppState.kt$AppState$1_000L</ID>
+    <ID>MagicNumber:AppState.kt$AppState$60L</ID>
     <ID>MagicNumber:AutosaveCodec.kt$11</ID>
     <ID>MagicNumber:AutosaveCodec.kt$15</ID>
+    <ID>MagicNumber:AutosaveCodec.kt$180</ID>
     <ID>MagicNumber:AutosaveCodec.kt$19</ID>
     <ID>MagicNumber:AutosaveCodec.kt$20_000</ID>
     <ID>MagicNumber:AutosaveCodec.kt$21</ID>
     <ID>MagicNumber:AutosaveCodec.kt$22</ID>
+    <ID>MagicNumber:AutosaveCodec.kt$270</ID>
     <ID>MagicNumber:AutosaveCodec.kt$80</ID>
+    <ID>MagicNumber:AutosaveCodec.kt$90</ID>
     <ID>MagicNumber:ClaudeCodeClientTest.kt$ClaudeCodeClientTest.ReleasingInputStream$0xff</ID>
     <ID>MagicNumber:CodexAppServerClient.kt$CodexAppServerClient$32000</ID>
     <ID>MagicNumber:ControlServerMcpTest.kt$ControlServerMcpTest$200</ID>
     <ID>MagicNumber:ControlServerMcpTest.kt$ControlServerMcpTest$299</ID>
+    <ID>MagicNumber:ImageDownscale.kt$0.75f</ID>
+    <ID>MagicNumber:VideoPanel.kt$180</ID>
+    <ID>MagicNumber:VideoPanel.kt$270</ID>
+    <ID>MagicNumber:VideoPanel.kt$360</ID>
+    <ID>MagicNumber:VideoPanel.kt$90</ID>
     <ID>ReturnCount:AiSidebarRuntime.kt$AiSidebarRuntime$@Suppress("TooGenericExceptionCaught") fun start( tabId: String, profile: AiProviderProfile, apiKey: String, prompt: String, context: AiInvestigationContext = AiInvestigationContext(tabId), ): AiStartResult</ID>
+    <ID>ReturnCount:OpenLogToolOperations.kt$OpenLogToolOperations$private fun addImageNoteRoute( tabId: String, imageBase64: String?, imagePath: String?, videoMs: Long?, caption: String, afterId: String?, ): Map&lt;String, Any?&gt;</ID>
+    <ID>ReturnCount:OpenLogToolOperations.kt$OpenLogToolOperations$private fun getVideoFrameRoute(tabId: String, lineId: Int?, videoMs: Long?): Map&lt;String, Any?&gt;</ID>
+    <ID>ThrowsCount:UpdateChecker.kt$UpdateChecker$suspend fun downloadAsset( asset: ReleaseAsset, destination: File, onProgress: (bytesRead: Long, total: Long) -&gt; Unit = { _, _ -&gt; }, ): File</ID>
     <ID>TooGenericExceptionCaught:AccountAgentRunner.kt$AccountAgentRunner$error: Exception</ID>
     <ID>TooGenericExceptionCaught:AccountCliCheck.kt$error: Exception</ID>
     <ID>TooGenericExceptionCaught:AiToolExecutionCoordinator.kt$AiToolExecutionCoordinator$error: Exception</ID>
+    <ID>TooGenericExceptionCaught:BugReportZip.kt$t: Throwable</ID>
     <ID>TooGenericExceptionCaught:ClaudeCodeClient.kt$ClaudeCodeClient$error: Exception</ID>
     <ID>TooGenericExceptionCaught:CodexAppServerClient.kt$CodexAppServerClient$error: Throwable</ID>
     <ID>TooGenericExceptionCaught:ControlServer.kt$ControlServer$error: Exception</ID>

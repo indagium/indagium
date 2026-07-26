@@ -373,6 +373,7 @@ data class VideoAnchor(val videoMs: Long, val logId: Int)
  */
 sealed interface VideoSource {
     data class LocalFile(val path: String) : VideoSource
+
     data class ArchiveEntry(
         val archivePath: String,
         val entryPath: String,

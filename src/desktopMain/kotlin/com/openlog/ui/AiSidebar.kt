@@ -138,71 +138,71 @@ internal fun RightSidebarPanel(
     var videoSplit by remember(tab.id) { mutableStateOf(0.42f) }
     var videoSidebarVisible by remember(tab.id) { mutableStateOf(true) }
     CompositionLocalProvider(LocalVideoSidebarExpandedChange provides { videoSidebarVisible = it }) {
-    Column(Modifier.width(width.dp).fillMaxHeight().background(tc().p)) {
-        // notesContent() and AiSidebarPanel() each appear at exactly one call site below,
-        // regardless of notesOn/aiOn - only their weight changes. Branching into separate `when`
-        // arms that each called them (as this used to) puts them in structurally different
-        // composition groups, so Compose tears down and rebuilds the whole subtree - and every
-        // `remember`ed UI state (collapsed sections, scroll position) - the moment the other panel
-        // is toggled, rather than just resizing in place.
-        //
-        // Height comes from onSizeChanged rather than BoxWithConstraints: the latter is backed by
-        // SubcomposeLayout, and nesting a Popup-based dropdown (the model/provider pickers below)
-        // several levels inside one has been observed to throw a Compose Desktop
-        // "layouts are not part of the same hierarchy" IllegalArgumentException when the popup
-        // tries to position itself relative to its anchor. Plain onSizeChanged avoids the extra
-        // subcomposition boundary entirely.
-        Column(Modifier.weight(1f).fillMaxWidth().onSizeChanged { totalHeightPx = it.height }) {
-            val totalHeightDp = with(density) { totalHeightPx.toDp().value }
-            // Keep videoContent composed after detaching it. The detached Window is owned by
-            // BoundVideoPanel, so removing this slot would also discard its remembered detached
-            // state and immediately close the Window. A zero-height parking slot preserves that
-            // ownership without reserving sidebar space.
-            if (videoOn) {
-                Box(
-                    Modifier.fillMaxWidth().then(
-                        if (videoSidebarVisible) {
-                            Modifier.weight(if (notesOn || aiOn) videoSplit else 1f)
-                        } else {
-                            Modifier.height(0.dp)
-                        },
-                    ),
-                ) {
-                    videoContent.invoke()
-                }
-            }
-            if (videoOn && videoSidebarVisible && (notesOn || aiOn)) {
-                VDivider { delta ->
-                    val next = (videoSplit * totalHeightDp + delta) / totalHeightDp
-                    videoSplit = next.coerceIn(0.18f, 0.82f)
-                }
-            }
-            if (notesOn || aiOn) {
-                Column(Modifier.weight(if (videoOn && videoSidebarVisible) 1f - videoSplit else 1f).fillMaxWidth()) {
-                    if (notesOn) {
-                        Box(Modifier.weight(if (aiOn) state.rightSidebarSplit else 1f).fillMaxWidth()) { notesContent() }
+        Column(Modifier.width(width.dp).fillMaxHeight().background(tc().p)) {
+            // notesContent() and AiSidebarPanel() each appear at exactly one call site below,
+            // regardless of notesOn/aiOn - only their weight changes. Branching into separate `when`
+            // arms that each called them (as this used to) puts them in structurally different
+            // composition groups, so Compose tears down and rebuilds the whole subtree - and every
+            // `remember`ed UI state (collapsed sections, scroll position) - the moment the other panel
+            // is toggled, rather than just resizing in place.
+            //
+            // Height comes from onSizeChanged rather than BoxWithConstraints: the latter is backed by
+            // SubcomposeLayout, and nesting a Popup-based dropdown (the model/provider pickers below)
+            // several levels inside one has been observed to throw a Compose Desktop
+            // "layouts are not part of the same hierarchy" IllegalArgumentException when the popup
+            // tries to position itself relative to its anchor. Plain onSizeChanged avoids the extra
+            // subcomposition boundary entirely.
+            Column(Modifier.weight(1f).fillMaxWidth().onSizeChanged { totalHeightPx = it.height }) {
+                val totalHeightDp = with(density) { totalHeightPx.toDp().value }
+                // Keep videoContent composed after detaching it. The detached Window is owned by
+                // BoundVideoPanel, so removing this slot would also discard its remembered detached
+                // state and immediately close the Window. A zero-height parking slot preserves that
+                // ownership without reserving sidebar space.
+                if (videoOn) {
+                    Box(
+                        Modifier.fillMaxWidth().then(
+                            if (videoSidebarVisible) {
+                                Modifier.weight(if (notesOn || aiOn) videoSplit else 1f)
+                            } else {
+                                Modifier.height(0.dp)
+                            },
+                        ),
+                    ) {
+                        videoContent.invoke()
                     }
-                    if (notesOn && aiOn) {
-                        VDivider { delta ->
-                            val lowerHeightDp = totalHeightDp * (if (videoOn && videoSidebarVisible) 1f - videoSplit else 1f)
-                            val newFrac = (state.rightSidebarSplit * lowerHeightDp + delta) / lowerHeightDp
-                            state.updateRightSidebarSplit(newFrac)
+                }
+                if (videoOn && videoSidebarVisible && (notesOn || aiOn)) {
+                    VDivider { delta ->
+                        val next = (videoSplit * totalHeightDp + delta) / totalHeightDp
+                        videoSplit = next.coerceIn(0.18f, 0.82f)
+                    }
+                }
+                if (notesOn || aiOn) {
+                    Column(Modifier.weight(if (videoOn && videoSidebarVisible) 1f - videoSplit else 1f).fillMaxWidth()) {
+                        if (notesOn) {
+                            Box(Modifier.weight(if (aiOn) state.rightSidebarSplit else 1f).fillMaxWidth()) { notesContent() }
                         }
-                    }
-                    if (aiOn) {
-                        Box(Modifier.weight(if (notesOn) 1f - state.rightSidebarSplit else 1f).fillMaxWidth()) {
-                            AiSidebarPanel(
-                                state = state,
-                                tab = tab,
-                                focusRequester = aiFocusRequester,
-                                onPanelFocusChanged = onAiPanelFocusChanged,
-                            )
+                        if (notesOn && aiOn) {
+                            VDivider { delta ->
+                                val lowerHeightDp = totalHeightDp * (if (videoOn && videoSidebarVisible) 1f - videoSplit else 1f)
+                                val newFrac = (state.rightSidebarSplit * lowerHeightDp + delta) / lowerHeightDp
+                                state.updateRightSidebarSplit(newFrac)
+                            }
+                        }
+                        if (aiOn) {
+                            Box(Modifier.weight(if (notesOn) 1f - state.rightSidebarSplit else 1f).fillMaxWidth()) {
+                                AiSidebarPanel(
+                                    state = state,
+                                    tab = tab,
+                                    focusRequester = aiFocusRequester,
+                                    onPanelFocusChanged = onAiPanelFocusChanged,
+                                )
+                            }
                         }
                     }
                 }
             }
         }
-    }
     }
 }
 

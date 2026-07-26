@@ -1,8 +1,8 @@
 package com.openlog
 
 import com.openlog.model.AnnBlock
-import com.openlog.model.Annotations
 import com.openlog.model.AnnotationLogBlockStyle
+import com.openlog.model.Annotations
 import com.openlog.model.AppSettings
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
