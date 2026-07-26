@@ -1038,6 +1038,11 @@ private fun discoverWrapperRules(texts: Map<String, String>): List<SourceWrapper
             val ownerName = if (pkg.isNullOrBlank()) owner else "$pkg.$owner"
             val rule = SourceWrapperRule(ownerName, method.name, tagIndex, messageIndex)
             discovered += rule
+            // A direct Kotlin object/static-style call such as `Telemetry.debug(...)` exposes
+            // only the simple receiver to wrapper matching. Keep the fully qualified rule for
+            // typed receivers and add the simple spelling so auto-discovery handles that common
+            // call form too.
+            discovered += rule.copy(ownerType = owner)
             implementedTypes(text, owner).forEach { interfaceName ->
                 discovered += rule.copy(ownerType = interfaceName)
                 if (!pkg.isNullOrBlank()) discovered += rule.copy(ownerType = "$pkg.$interfaceName")
