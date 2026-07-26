@@ -52,6 +52,7 @@ import com.openlog.voice.VoiceModelCatalog
 import com.openlog.voice.VoiceModelInstallResult
 import com.openlog.voice.VoiceModelInstaller
 import com.openlog.voice.VoiceLanguageCatalog
+import com.openlog.voice.VoiceRecognitionEngines
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -90,7 +91,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     var selectedSection by remember {
         mutableStateOf(state.requestedSettingsSection ?: SettingsSection.Appearance)
     }
-    val voiceInputSupported = remember { System.getProperty("os.name").contains("mac", ignoreCase = true) }
+    val voiceInputSupported = true
     LaunchedEffect(Unit) {
         state.requestedSettingsSection?.let {
             selectedSection = it
@@ -1696,31 +1697,49 @@ private fun VoiceInputSettingsSection(state: AppState) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         AppText("Voice input", color = tc.td, fontSize = 10.sp, fontFamily = UI)
         AppText(
-            "Dictate into the AI composer using the default microphone. Audio and transcription stay on this Mac; AI providers receive only the text you choose to send.",
+            "Dictate into the AI composer using the default microphone. Audio stays local; AI providers receive only the text you choose to send.",
             color = tc.tx,
             fontSize = 12.sp,
             maxLines = 4,
         )
-        CheckRow(
-            checked = voiceSettings.translateToEnglish,
-            onToggle = {
+        AppText("Recognition engine", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+        val engineChoices = VoiceRecognitionEngines.availableChoices()
+        SegmentedControl(
+            options = engineChoices.map { it.label },
+            selectedIndices = setOf(engineChoices.indexOf(voiceSettings.recognitionEngine).coerceAtLeast(0)),
+            onToggle = { index ->
                 state.updateSettings { settings ->
-                    settings.copy(voiceInput = settings.voiceInput.copy(translateToEnglish = !settings.voiceInput.translateToEnglish))
+                    settings.copy(voiceInput = settings.voiceInput.copy(recognitionEngine = engineChoices[index]))
                 }
             },
-        ) {
-            AppText("Translate dictated speech to English", color = tc.tx, fontSize = 12.sp)
-        }
-        AppText(
-            if (voiceSettings.translateToEnglish) {
-                "Output mode: English translation after ${VoiceLanguageCatalog.label(voiceSettings.selectedRecognitionLanguageCode)} recognition. You can edit the result before sending."
-            } else {
-                "Output mode: ${VoiceLanguageCatalog.label(voiceSettings.selectedRecognitionLanguageCode)} transcript. You can edit the result before sending."
-            },
-            color = tc.td,
-            fontSize = 10.sp,
-            maxLines = 3,
+            modifier = Modifier.fillMaxWidth(),
+            fillWidth = engineChoices.size <= 2,
         )
+        AppText(VoiceRecognitionEngines.description(voiceSettings.recognitionEngine), color = tc.td, fontSize = 10.sp, maxLines = 3)
+        if (VoiceRecognitionEngines.supportsTranslation(voiceSettings.recognitionEngine)) {
+            CheckRow(
+                checked = voiceSettings.translateToEnglish,
+                onToggle = {
+                    state.updateSettings { settings ->
+                        settings.copy(voiceInput = settings.voiceInput.copy(translateToEnglish = !settings.voiceInput.translateToEnglish))
+                    }
+                },
+            ) {
+                AppText("Translate dictated speech to English", color = tc.tx, fontSize = 12.sp)
+            }
+            AppText(
+                if (voiceSettings.translateToEnglish) {
+                    "Output mode: English translation after ${VoiceLanguageCatalog.label(voiceSettings.selectedRecognitionLanguageCode)} recognition. You can edit the result before sending."
+                } else {
+                    "Output mode: ${VoiceLanguageCatalog.label(voiceSettings.selectedRecognitionLanguageCode)} transcript. You can edit the result before sending."
+                },
+                color = tc.td,
+                fontSize = 10.sp,
+                maxLines = 3,
+            )
+        } else {
+            AppText("This OS engine returns the recognized spoken language only; English translation remains available with Whisper.", color = tc.td, fontSize = 10.sp, maxLines = 3)
+        }
         Divider()
         AppText("Recognition language", color = tc.td, fontSize = 10.sp, fontFamily = UI)
         AppText(
@@ -1812,6 +1831,7 @@ private fun VoiceInputSettingsSection(state: AppState) {
             }
         }
         Divider()
+        if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WHISPER) {
         AppText("Local model", color = tc.td, fontSize = 10.sp, fontFamily = UI)
         SegmentedControl(
             options = VoiceModelCatalog.all.map { model ->
@@ -1889,6 +1909,19 @@ private fun VoiceInputSettingsSection(state: AppState) {
             }
         }
         AppText("Model license: ${selectedModel.licenseUrl}", color = tc.td, fontSize = 10.sp, maxLines = 2)
+        } else {
+            AppText("Native engine", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            AppText(
+                if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.APPLE_SPEECH) {
+                    "At first use macOS asks for Speech Recognition permission. If the selected language has no on-device Apple model, openLog refuses to send audio and you can switch back to Whisper."
+                } else {
+                    "Windows uses the selected installed offline speech-recognition language pack. If it is missing, openLog refuses to send audio and you can switch back to Whisper."
+                },
+                color = tc.tx,
+                fontSize = 12.sp,
+                maxLines = 4,
+            )
+        }
     }
 }
 

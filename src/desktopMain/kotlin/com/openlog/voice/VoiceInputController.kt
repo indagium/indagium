@@ -16,6 +16,10 @@ import kotlinx.coroutines.launch
  */
 class VoiceInputController(
     private val hasInstalledModel: () -> Boolean,
+    /** Native engines use this to surface a permission/language-pack issue without sending the
+     * user to Whisper's model installer. */
+    private val unavailableMessage: () -> String? = { null },
+    private val requiresInstallation: Boolean = true,
     private val capture: VoiceCapture,
     private val transcriber: VoiceTranscriber,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
@@ -32,7 +36,12 @@ class VoiceInputController(
 
     fun startRecording(): VoiceInputState {
         if (activeSession != null || state.value is VoiceInputState.Transcribing) return state.value
-        if (!hasInstalledModel()) return transition(VoiceInputState.ModelRequired)
+        if (!hasInstalledModel()) {
+            return transition(
+                if (requiresInstallation) VoiceInputState.ModelRequired
+                else VoiceInputState.Failed(unavailableMessage() ?: "Local speech recognition is unavailable. Choose Whisper instead."),
+            )
+        }
         return when (val start = capture.start()) {
             is VoiceCaptureStartResult.Failure -> transition(VoiceInputState.Failed(start.message))
             is VoiceCaptureStartResult.Started -> {
@@ -100,7 +109,8 @@ class VoiceInputController(
         }
     }
 
-    private fun idleOrModelRequired(): VoiceInputState = if (hasInstalledModel()) VoiceInputState.Idle else VoiceInputState.ModelRequired
+    private fun idleOrModelRequired(): VoiceInputState =
+        if (hasInstalledModel() || !requiresInstallation) VoiceInputState.Idle else VoiceInputState.ModelRequired
 
     private fun transitionIfCurrent(generation: Long, next: VoiceInputState) {
         if (generation == requestGeneration) transition(next)

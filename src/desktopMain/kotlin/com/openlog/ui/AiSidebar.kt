@@ -102,6 +102,9 @@ import com.openlog.ai.isLoopbackHost
 import com.openlog.ai.normalizeAiProviderProfiles
 import com.openlog.model.AiProviderKind
 import com.openlog.model.LogTab
+import com.openlog.model.VoiceRecognitionEngine
+import com.openlog.voice.AppleSpeechNative
+import com.openlog.voice.AppleSpeechTranscriber
 import com.openlog.voice.JavaSoundVoiceCapture
 import com.openlog.voice.VoiceAudio
 import com.openlog.voice.VoiceInputController
@@ -110,8 +113,10 @@ import com.openlog.voice.VoiceLanguageCatalog
 import com.openlog.voice.VoiceModelCatalog
 import com.openlog.voice.VoiceModelInstallResult
 import com.openlog.voice.VoiceModelInstaller
+import com.openlog.voice.VoiceRecognitionEngines
 import com.openlog.voice.VoiceTranscriptionOptions
 import com.openlog.voice.WhisperJniVoiceTranscriber
+import com.openlog.voice.WindowsSpeechTranscriber
 import com.openlog.voice.appendVoiceTranscript
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -285,7 +290,9 @@ private fun AiSidebarPanel(
     val profile = profiles.first { it.selected }
     val session = runtime.sessionFor(tab.id)
     val scope = rememberCoroutineScope()
-    val voiceInputSupported = remember { System.getProperty("os.name").contains("mac", ignoreCase = true) }
+    // WhisperJNI ships macOS/Windows/Linux native binaries; OS speech engines are optional
+    // overlays, so the microphone remains available on every packaged desktop target.
+    val voiceInputSupported = true
     val scroll = rememberScrollState()
     var panelFocused by remember { mutableStateOf(false) }
     var prompt by remember(tab.id) { mutableStateOf("") }
@@ -295,6 +302,11 @@ private fun AiSidebarPanel(
     var error by remember(tab.id, profile.id) { mutableStateOf<String?>(null) }
     var modelDiscovery by remember(profile.id) { mutableStateOf<ModelDiscoveryResult?>(null) }
     val voiceSettings = state.settings.voiceInput
+    // A preference can travel with autosave from another OS; never attempt to load that platform's
+    // native bridge. Whisper remains the safe cross-platform fallback.
+    val selectedVoiceEngine = voiceSettings.recognitionEngine
+        .takeIf { it in VoiceRecognitionEngines.availableChoices() }
+        ?: VoiceRecognitionEngine.WHISPER
     val voiceModelInstaller = remember(voiceSettings.modelId) {
         VoiceModelInstaller(DesktopStorage.voiceModelsDir(), VoiceModelCatalog.byId(voiceSettings.modelId))
     }
@@ -305,16 +317,34 @@ private fun AiSidebarPanel(
     LaunchedEffect(voiceSettings.selectedRecognitionLanguageCode) {
         voiceLanguagePreference.set(voiceSettings.selectedRecognitionLanguageCode)
     }
-    val voiceController = remember(voiceModelInstaller) {
+    val voiceController = remember(voiceModelInstaller, selectedVoiceEngine) {
         VoiceInputController(
-            hasInstalledModel = voiceModelInstaller::isInstalled,
+            hasInstalledModel = {
+                when (selectedVoiceEngine) {
+                    VoiceRecognitionEngine.WHISPER -> voiceModelInstaller.isInstalled()
+                    VoiceRecognitionEngine.APPLE_SPEECH -> AppleSpeechNative.ensureReady(voiceLanguagePreference.get())
+                    VoiceRecognitionEngine.WINDOWS_SPEECH -> VoiceRecognitionEngines.isWindows()
+                }
+            },
+            unavailableMessage = {
+                when (selectedVoiceEngine) {
+                    VoiceRecognitionEngine.APPLE_SPEECH -> AppleSpeechNative.availabilityMessage(voiceLanguagePreference.get())
+                    VoiceRecognitionEngine.WINDOWS_SPEECH -> "Windows Speech could not start. Install the selected offline speech-recognition language pack or choose Whisper."
+                    VoiceRecognitionEngine.WHISPER -> null
+                }
+            },
+            requiresInstallation = selectedVoiceEngine == VoiceRecognitionEngine.WHISPER,
             capture = JavaSoundVoiceCapture(),
-            transcriber = WhisperJniVoiceTranscriber { voiceModelInstaller.modelFile },
+            transcriber = when (selectedVoiceEngine) {
+                VoiceRecognitionEngine.WHISPER -> WhisperJniVoiceTranscriber { voiceModelInstaller.modelFile }
+                VoiceRecognitionEngine.APPLE_SPEECH -> AppleSpeechTranscriber()
+                VoiceRecognitionEngine.WINDOWS_SPEECH -> WindowsSpeechTranscriber()
+            },
             scope = scope,
             optionsProvider = {
                 val language = voiceLanguagePreference.get()
                 VoiceTranscriptionOptions(
-                    translateToEnglish = voiceTranslationPreference.get(),
+                    translateToEnglish = voiceTranslationPreference.get() && VoiceRecognitionEngines.supportsTranslation(selectedVoiceEngine),
                     language = language,
                     initialPrompt = VoiceTranscriptionOptions.technicalPrompt(language),
                 )
@@ -602,6 +632,7 @@ private fun AiSidebarPanel(
             voiceSupported = voiceInputSupported,
             voiceState = voiceState,
             translateVoiceToEnglish = translateVoiceToEnglish,
+            voiceTranslationSupported = VoiceRecognitionEngines.supportsTranslation(selectedVoiceEngine),
             voiceRecognitionLanguageCodes = voiceSettings.recognitionLanguageCodes,
             selectedVoiceRecognitionLanguageCode = voiceSettings.selectedRecognitionLanguageCode,
             onVoiceTranslationToggle = {
@@ -618,7 +649,7 @@ private fun AiSidebarPanel(
                 when (voiceState) {
                     is VoiceInputState.Recording -> voiceController.stopAndTranscribe()
                     VoiceInputState.Transcribing -> Unit
-                    else -> if (voiceController.startRecording() is VoiceInputState.ModelRequired) {
+                    else -> if (voiceController.startRecording() is VoiceInputState.ModelRequired && selectedVoiceEngine == VoiceRecognitionEngine.WHISPER) {
                         voiceInstallDialogOpen = true
                     }
                 }
@@ -1525,6 +1556,7 @@ private fun AiPromptComposer(
     voiceSupported: Boolean,
     voiceState: VoiceInputState,
     translateVoiceToEnglish: Boolean,
+    voiceTranslationSupported: Boolean,
     voiceRecognitionLanguageCodes: List<String>,
     selectedVoiceRecognitionLanguageCode: String,
     onVoiceTranslationToggle: () -> Unit,
@@ -1731,7 +1763,7 @@ private fun AiPromptComposer(
                 val voiceRecording = voiceSupported && voiceState is VoiceInputState.Recording
                 val voiceTranscribing = voiceSupported && voiceState is VoiceInputState.Transcribing
                 if (voiceSupported) {
-                    TooltipArea(
+                    if (voiceTranslationSupported) TooltipArea(
                         tooltip = {
                             Box(Modifier.background(colors.p2, CORNER_SM).border(1.dp, colors.br, CORNER_SM).padding(7.dp)) {
                                 AppText(

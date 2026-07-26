@@ -683,6 +683,12 @@ const val DEFAULT_INTERFACE_SCALE_PERCENT = 100
 
 /** Non-secret preferences for the on-device dictation feature. The downloaded model is discovered
  * from [com.openlog.ui.DesktopStorage.voiceModelsDir], so no machine-specific model path is saved. */
+enum class VoiceRecognitionEngine(val label: String) {
+    WHISPER("Local Whisper"),
+    APPLE_SPEECH("Apple Speech"),
+    WINDOWS_SPEECH("Windows Speech"),
+}
+
 data class VoiceInputSettings(
     val translateToEnglish: Boolean = true,
     /** `auto` uses Whisper's language detection. The three defaults are always kept available. */
@@ -690,6 +696,8 @@ data class VoiceInputSettings(
     val selectedRecognitionLanguageCode: String = "auto",
     /** A catalog identifier, not a filesystem path. */
     val modelId: String = "whisper-base",
+    /** Whisper stays the cross-platform private default; OS engines are opt-in. */
+    val recognitionEngine: VoiceRecognitionEngine = VoiceRecognitionEngine.WHISPER,
 )
 
 data class AppSettings(
