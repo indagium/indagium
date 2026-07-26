@@ -5,6 +5,7 @@ import com.openlog.ui.UpdateDownloadState
 import com.openlog.update.ReleaseAsset
 import com.openlog.update.ReleaseInfo
 import com.openlog.update.UpdateChecker
+import com.openlog.update.assetForCurrentOs
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -63,40 +64,36 @@ class FolderPickerAppStateTest {
     }
 
     @Test
-    fun updateDownloadUsesAndPersistsTheDirectoryReturnedByThePicker() {
+    fun updateDownloadUsesAndPersistsTheParentOfTheFileReturnedByTheSavePicker() {
         val root = createTempDirectory("openlog-update-picker").toFile()
-        val selected = File(root, "downloads").apply { mkdir() }
+        val selectedDir = File(root, "downloads").apply { mkdir() }
         val legacyFile = File(root, "first-item").apply { writeText("legacy incorrect selection") }
-        val picker = FakeDirectoryPicker(selected)
+        val expectedAssetName = requireNotNull(assetForCurrentOs(releaseWithAssets().assets)).name
+        val picker = FakeSavePicker(File(selectedDir, expectedAssetName))
         val client = HttpClient(MockEngine {
             respond("package", HttpStatusCode.OK, headersOf("Content-Length", "7"))
         }) { expectSuccess = false }
         val state = AppState(
             autosaveFile = File(root, "state.cache"),
-            directoryPicker = picker::pick,
+            updateSavePicker = picker::pick,
             updateChecker = UpdateChecker(client),
         )
 
         try {
             state.updateSettings { it.copy(updateDownloadDir = legacyFile.absolutePath) }
-            state.availableUpdate = ReleaseInfo(
-                version = "1.0.1",
-                tag = "v1.0.1",
-                htmlUrl = "https://example.test/release",
-                body = "",
-                assets = listOf(
-                    ReleaseAsset("openLog.dmg", "https://example.test/openLog.dmg", 7L),
-                    ReleaseAsset("openLog.deb", "https://example.test/openLog.deb", 7L),
-                    ReleaseAsset("openLog.msi", "https://example.test/openLog.msi", 7L),
-                ),
-            )
+            state.availableUpdate = releaseWithAssets()
 
             state.downloadUpdate()
             waitUntil { state.updateDownload is UpdateDownloadState.Done }
 
-            assertEquals(selected.absolutePath, state.settings.updateDownloadDir)
-            assertEquals(listOf("Choose Download Folder"), picker.titles)
-            assertEquals(legacyFile, picker.initialDirectories.single())
+            // The picker returns a FILE (the user can rename it), but what's persisted for next
+            // time is its parent DIRECTORY, not the file path itself.
+            assertEquals(selectedDir.absolutePath, state.settings.updateDownloadDir)
+            assertEquals(listOf("Save Update"), picker.titles)
+            assertEquals(listOf(expectedAssetName), picker.suggestedNames)
+            // legacyFile is a FILE (not a directory) — the seam must receive it resolved to its
+            // parent, not the raw settings value, so the dialog seeds with a real folder.
+            assertEquals(legacyFile.parentFile, picker.initialDirectories.single())
             assertIs<UpdateDownloadState.Done>(state.updateDownload)
         } finally {
             state.close()
@@ -104,12 +101,93 @@ class FolderPickerAppStateTest {
         }
     }
 
+    @Test
+    fun cancellingTheUpdateSaveDialogStartsNoDownloadAndLeavesDirUnchanged() {
+        val root = createTempDirectory("openlog-update-picker-cancel").toFile()
+        val originalDir = File(root, "original-downloads").apply { mkdir() }
+        val picker = FakeSavePicker(null)
+        val state = AppState(
+            autosaveFile = File(root, "state.cache"),
+            updateSavePicker = picker::pick,
+        )
+
+        try {
+            state.updateSettings { it.copy(updateDownloadDir = originalDir.absolutePath) }
+            state.availableUpdate = releaseWithAssets()
+
+            state.downloadUpdate()
+
+            assertEquals(originalDir.absolutePath, state.settings.updateDownloadDir)
+            assertEquals(listOf("Save Update"), picker.titles)
+            assertEquals(UpdateDownloadState.Idle, state.updateDownload)
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test
+    fun updateDownloadHonoursAFileNameTheUserChoseInTheSaveDialog() {
+        val root = createTempDirectory("openlog-update-picker-rename").toFile()
+        val selectedDir = File(root, "downloads").apply { mkdir() }
+        val renamed = File(selectedDir, "renamed-update.deb")
+        val picker = FakeSavePicker(renamed)
+        val client = HttpClient(MockEngine {
+            respond("package", HttpStatusCode.OK, headersOf("Content-Length", "7"))
+        }) { expectSuccess = false }
+        val state = AppState(
+            autosaveFile = File(root, "state.cache"),
+            updateSavePicker = picker::pick,
+            updateChecker = UpdateChecker(client),
+        )
+
+        try {
+            state.availableUpdate = releaseWithAssets()
+
+            state.downloadUpdate()
+            waitUntil { state.updateDownload is UpdateDownloadState.Done }
+
+            val done = assertIs<UpdateDownloadState.Done>(state.updateDownload)
+            assertEquals(renamed, done.file)
+            assertEquals("package", renamed.readText())
+            val originalAssetName = requireNotNull(assetForCurrentOs(releaseWithAssets().assets)).name
+            assertTrue(!File(selectedDir, originalAssetName).exists())
+        } finally {
+            state.close()
+            client.close()
+        }
+    }
+
+    private fun releaseWithAssets(): ReleaseInfo = ReleaseInfo(
+        version = "1.0.1",
+        tag = "v1.0.1",
+        htmlUrl = "https://example.test/release",
+        body = "",
+        assets = listOf(
+            ReleaseAsset("openLog.dmg", "https://example.test/openLog.dmg", 7L),
+            ReleaseAsset("openLog.deb", "https://example.test/openLog.deb", 7L),
+            ReleaseAsset("openLog.msi", "https://example.test/openLog.msi", 7L),
+        ),
+    )
+
     private class FakeDirectoryPicker(private val selection: File?) {
         val titles = mutableListOf<String>()
         val initialDirectories = mutableListOf<File?>()
 
         fun pick(title: String, initialDirectory: File?): File? {
             titles += title
+            initialDirectories += initialDirectory
+            return selection
+        }
+    }
+
+    private class FakeSavePicker(private val selection: File?) {
+        val titles = mutableListOf<String>()
+        val suggestedNames = mutableListOf<String>()
+        val initialDirectories = mutableListOf<File?>()
+
+        fun pick(title: String, suggestedName: String, initialDirectory: File?): File? {
+            titles += title
+            suggestedNames += suggestedName
             initialDirectories += initialDirectory
             return selection
         }

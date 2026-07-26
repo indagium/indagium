@@ -931,6 +931,13 @@ class AppState(
     private val directoryPicker: (String, File?) -> File? = { title, initialDirectory ->
         PlatformDirectoryPicker.pick(title, initialDirectory)
     },
+    // Update downloads need a single destination FILE, not a folder — FileDialog.SAVE already
+    // covers that natively on every platform (see pickSaveFile's doc comment), so this seam is
+    // just a thin, independently-injectable wrapper around it, kept separate from directoryPicker
+    // above so tests can drive downloadUpdate() without a real dialog.
+    private val updateSavePicker: (String, String, File?) -> File? = { title, suggestedName, initialDirectory ->
+        pickSaveFile(title, suggestedName, initialDirectory)
+    },
     private val updateChecker: UpdateChecker = UpdateChecker(),
     // Test seam for video/VideoPlayerController.kt: production wraps a real FFmpegFrameGrabber
     // (needs the bytedeco natives on the classpath); tests substitute a fake VideoPlayerController
@@ -1797,13 +1804,27 @@ class AppState(
     fun downloadUpdate() {
         val release = availableUpdate ?: return
         val asset = assetForCurrentOs(release.assets) ?: return
-        val chosenDir = pickDirectory("Choose Download Folder", settings.updateDownloadDir?.let(::File)) ?: return
+        // A native FileDialog.SAVE prompt for ONE file, seeded with the asset's own name — see
+        // pickSaveFile's doc comment for why this needs no directory-only picker the way other
+        // folder-choosing flows do. A cancel surfaces as null here (pickSaveFile already collapses
+        // AWT's null-file/null-directory cancel signals into a single null).
+        //
+        // Resolved through initialDirectoryForPicker (not passed raw) so a legacy updateDownloadDir
+        // left over from before this seam existed — which could hold a FILE path rather than a
+        // directory — still seeds the dialog with a real folder instead of silently falling back to
+        // whatever default AWT picks for a non-directory `directory`. Done here, at the call site,
+        // rather than inside pickSaveFile itself: the updateSavePicker seam is exactly what tests
+        // substitute a fake for (bypassing pickSaveFile entirely), so resolving downstream of the
+        // seam would leave that fake path — and this exact regression — uncovered.
+        val initialDir = initialDirectoryForPicker(settings.updateDownloadDir?.let(::File))
+        val chosenFile = updateSavePicker("Save Update", asset.name, initialDir) ?: return
+        val chosenDir = chosenFile.parentFile ?: return
         updateSettings { it.copy(updateDownloadDir = chosenDir.absolutePath) }
         updateDownload = UpdateDownloadState.InProgress(0f)
         AppLogger.info("update", "Update download started")
         ioScope.launch {
             runCatching {
-                updateChecker.downloadAsset(asset, chosenDir) { bytesRead, total ->
+                updateChecker.downloadAsset(asset, chosenFile) { bytesRead, total ->
                     val fraction = if (total > 0) (bytesRead.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
                     updateDownload = UpdateDownloadState.InProgress(fraction)
                 }
