@@ -187,12 +187,35 @@ fun compareVersions(current: String, latest: String): Int {
     return 0
 }
 
-/** Picks the packaged asset matching this JVM's OS: macOS -> .dmg, Windows -> .msi, else -> .deb. */
-fun assetForCurrentOs(assets: List<ReleaseAsset>, osName: String = System.getProperty("os.name").orEmpty()): ReleaseAsset? {
-    val lower = osName.lowercase()
+/**
+ * Picks the packaged asset matching this JVM's OS: macOS -> first `.dmg`, Windows -> first `.msi`.
+ * Neither of those carries an architecture in its filename (jpackage doesn't add one, and only one
+ * build of each is ever published), so there's nothing to discriminate on and the first match wins.
+ *
+ * Linux is different: as of 1.7.0 a release ships one `.deb` per architecture (amd64 and arm64), so
+ * "any `.deb`" is no longer a safe answer — it could hand an arm64 machine an amd64 package it can't
+ * install. So for Linux we also require the asset name to carry an arch token matching [osArch]:
+ * `aarch64`/`arm64` (some JVMs report one, some the other) select an asset whose name contains
+ * `arm64` or `aarch64`; anything else is treated as x86-64 and must contain `amd64`, `x86_64`, or
+ * `x64`. If no `.deb` carries the matching token — e.g. an arm64 machine checking against an older
+ * release that only ever shipped an amd64 build — this returns null rather than silently falling
+ * back to a mismatched package. That's a real, expected outcome: [com.openlog.ui.UpdateDialog]
+ * already renders a "View on GitHub" link instead of a "Download" button when this returns null.
+ */
+fun assetForCurrentOs(
+    assets: List<ReleaseAsset>,
+    osName: String = System.getProperty("os.name").orEmpty(),
+    osArch: String = System.getProperty("os.arch").orEmpty(),
+): ReleaseAsset? {
+    val lowerOsName = osName.lowercase()
     return when {
-        lower.contains("mac") -> assets.firstOrNull { it.name.endsWith(".dmg") }
-        lower.contains("win") -> assets.firstOrNull { it.name.endsWith(".msi") }
-        else -> assets.firstOrNull { it.name.endsWith(".deb") }
+        lowerOsName.contains("mac") -> assets.firstOrNull { it.name.endsWith(".dmg") }
+        lowerOsName.contains("win") -> assets.firstOrNull { it.name.endsWith(".msi") }
+        else -> {
+            val debs = assets.filter { it.name.endsWith(".deb") }
+            val isArm = osArch.lowercase().trim() in setOf("aarch64", "arm64")
+            val archTokens = if (isArm) listOf("arm64", "aarch64") else listOf("amd64", "x86_64", "x64")
+            debs.firstOrNull { deb -> archTokens.any { token -> deb.name.lowercase().contains(token) } }
+        }
     }
 }

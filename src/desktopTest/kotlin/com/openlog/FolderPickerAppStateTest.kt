@@ -163,9 +163,12 @@ class FolderPickerAppStateTest {
         htmlUrl = "https://example.test/release",
         body = "",
         assets = listOf(
-            ReleaseAsset("openLog.dmg", "https://example.test/openLog.dmg", 7L),
-            ReleaseAsset("openLog.deb", "https://example.test/openLog.deb", 7L),
-            ReleaseAsset("openLog.msi", "https://example.test/openLog.msi", 7L),
+            ReleaseAsset("openLog-1.7.0.dmg", "https://example.test/openLog-1.7.0.dmg", 7L),
+            // Both Linux arches present (deliberately, with arch tokens in the names) so
+            // assetForCurrentOs() resolves the same way on an amd64 or an arm64 test host.
+            ReleaseAsset("openlog_1.7.0-1_amd64.deb", "https://example.test/openlog_1.7.0-1_amd64.deb", 7L),
+            ReleaseAsset("openlog_1.7.0-1_arm64.deb", "https://example.test/openlog_1.7.0-1_arm64.deb", 7L),
+            ReleaseAsset("openLog-1.7.0.msi", "https://example.test/openLog-1.7.0.msi", 7L),
         ),
     )
 

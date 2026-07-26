@@ -38,8 +38,8 @@ Skipping this leaves the README showing a stale version after a release ships, w
 ./gradlew packageDeb        # Linux .deb (run on Linux)
 ./gradlew packageMsi        # Windows .msi (run on Windows)
 
-# Release (triggers GitHub Actions → builds Linux + Windows + macOS → creates GitHub Release)
-git tag v1.6.1 && git push --tags
+# Release (triggers GitHub Actions → builds Linux x86-64 + Linux arm64 + Windows + macOS → creates GitHub Release)
+git tag v1.7.0 && git push --tags
 ```
 
 Source sets are `desktopMain` and `desktopTest` (Kotlin Multiplatform with a single `jvm("desktop")` target).

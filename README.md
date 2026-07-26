@@ -2,7 +2,7 @@
 
 A desktop log viewer for Android logcat files, built with Kotlin and Compose Multiplatform.
 
-![Version](https://img.shields.io/badge/version-1.6.1-blue)
+![Version](https://img.shields.io/badge/version-1.7.0-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
 ## Features
@@ -31,9 +31,10 @@ Download the latest release for your platform from the [Releases](../../releases
 
 | Platform | File |
 |---|---|
-| Linux | `openLog_x.y.z_amd64.deb` |
+| Linux (x86-64) | `openLog_x.y.z_amd64.deb` |
+| Linux (arm64) | `openLog_x.y.z_arm64.deb` |
 | Windows | `openLog-x.y.z.msi` |
-| macOS | `openLog-x.y.z.dmg` |
+| macOS (Apple Silicon) | `openLog-x.y.z.dmg` |
 
 ### macOS: "could not verify... free of malware"
 
@@ -46,7 +47,8 @@ they never get the quarantine flag a browser download adds). To open it anyway, 
 
 ### Linux
 
-Install with `sudo dpkg -i openLog_x.y.z_amd64.deb` (or your package manager's equivalent). The
+Install with `sudo dpkg -i openLog_x.y.z_amd64.deb` (substitute `arm64` for `amd64` if that's the
+package you downloaded, or use your package manager's equivalent). The
 package registers openLog as a candidate handler for `.log`/`.txt`/`.logcat`/`.trace`/`.out`
 files, but does **not** make itself the system default — a package has no business silently
 rewriting another user's `mimeapps.list`. To open `.log`/`.txt` files with openLog by default,
@@ -161,10 +163,10 @@ clients such as LM Studio, Codex, and Claude Code; see [the MCP guide](docs/mcp/
 
 ## Releasing
 
-Push a version tag to trigger the GitHub Actions build, which produces Linux, Windows, and macOS packages and creates a GitHub Release automatically:
+Push a version tag to trigger the GitHub Actions build, which produces Linux (x86-64 and arm64), Windows, and macOS packages and creates a GitHub Release automatically:
 
 ```bash
-git tag v1.6.1 && git push --tags
+git tag v1.7.0 && git push --tags
 ```
 
 The macOS build is unsigned (no Apple Developer certificate in CI) — see the Installation section above for the Gatekeeper workaround.
