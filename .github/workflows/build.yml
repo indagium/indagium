@@ -246,8 +246,32 @@ jobs:
         with:
           path: artifacts
 
+      # `body` is prepended to what generate_release_notes produces, so the download guidance sits
+      # above the auto-generated commit list rather than replacing it. Worth the space because the
+      # two Linux assets differ by four characters in the middle of a filename: an arm64 tester who
+      # grabs the amd64 one gets dpkg's "Wrong architecture 'amd64'" and no hint about which of the
+      # four files was theirs. The in-app updater picks correctly on its own from 1.7.0 onward
+      # (see assetForCurrentOs), so this list is for people downloading from the Releases page by
+      # hand — including anyone updating FROM a pre-1.7.0 build, whose updater predates arch
+      # awareness and will hand an arm64 machine the amd64 package exactly once.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: artifacts/**/*
           generate_release_notes: true
+          body: |
+            ### Which file do I need?
+
+            | Your system | Download |
+            |---|---|
+            | Linux — Intel/AMD 64-bit (`dpkg --print-architecture` prints `amd64`) | `openlog_*_amd64.deb` |
+            | Linux — ARM 64-bit (prints `arm64`) | `openlog_*_arm64.deb` |
+            | Windows | `openLog-*.msi` |
+            | macOS — Apple Silicon | `openLog-*.dmg` |
+
+            Install on Linux with `sudo dpkg -i <file>`. The macOS build is unsigned, so Gatekeeper
+            warns on first launch — see the README's Installation section for the workaround.
+
+            Updating from **1.6.1 or earlier on Linux ARM64?** Download the `arm64` package by hand
+            this once: that version's updater matched only on the `.deb` extension and will offer
+            you the amd64 build. From 1.7.0 onward it selects by architecture automatically.
