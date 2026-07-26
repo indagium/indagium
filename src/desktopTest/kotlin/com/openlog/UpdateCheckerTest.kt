@@ -99,23 +99,58 @@ class UpdateCheckerTest {
     }
 
     @Test
-    fun downloadAssetWritesTheReleaseAssetIntoTheDestinationDirectory() = runBlocking {
+    fun downloadAssetWritesTheReleaseAssetToTheGivenDestinationFile() = runBlocking {
         val client = HttpClient(MockEngine {
             respond("package", HttpStatusCode.OK, headersOf("Content-Length", "7"))
         }) { expectSuccess = false }
-        val destination = createTempDirectory("openlog-update-download").toFile()
+        val destinationDir = createTempDirectory("openlog-update-download").toFile()
+        val destination = File(destinationDir, "openLog.deb")
         val asset = ReleaseAsset("openLog.deb", "https://example.test/openLog.deb", 7L)
 
         val result = UpdateChecker(httpClient = client).downloadAsset(asset, destination)
 
-        assertEquals(File(destination, asset.name), result)
+        assertEquals(destination, result)
         assertEquals("package", result.readText())
     }
 
     @Test
-    fun downloadAssetRejectsAFileAsTheDestinationDirectory() = runBlocking {
-        val destination = File(createTempDirectory("openlog-update-destination-file").toFile(), "selected-file")
-            .apply { writeText("not a directory") }
+    fun downloadAssetHonoursADestinationFileNameDifferentFromTheAsset() = runBlocking {
+        // The save dialog lets the user rename the file — the bytes must land wherever they picked,
+        // not back under the release asset's own name.
+        val client = HttpClient(MockEngine {
+            respond("package", HttpStatusCode.OK, headersOf("Content-Length", "7"))
+        }) { expectSuccess = false }
+        val destinationDir = createTempDirectory("openlog-update-download-rename").toFile()
+        val destination = File(destinationDir, "my-custom-name.deb")
+        val asset = ReleaseAsset("openLog.deb", "https://example.test/openLog.deb", 7L)
+
+        val result = UpdateChecker(httpClient = client).downloadAsset(asset, destination)
+
+        assertEquals(destination, result)
+        assertEquals("package", result.readText())
+        assertTrue(!File(destinationDir, asset.name).exists())
+    }
+
+    @Test
+    fun downloadAssetCreatesTheDestinationParentDirectoryWhenMissing() = runBlocking {
+        val client = HttpClient(MockEngine {
+            respond("package", HttpStatusCode.OK, headersOf("Content-Length", "7"))
+        }) { expectSuccess = false }
+        val root = createTempDirectory("openlog-update-download-missing-parent").toFile()
+        val destination = File(File(root, "nested/does-not-exist-yet"), "openLog.deb")
+        val asset = ReleaseAsset("openLog.deb", "https://example.test/openLog.deb", 7L)
+
+        val result = UpdateChecker(httpClient = client).downloadAsset(asset, destination)
+
+        assertEquals(destination, result)
+        assertEquals("package", result.readText())
+    }
+
+    @Test
+    fun downloadAssetRejectsADestinationWhoseParentIsAFile() = runBlocking {
+        val root = createTempDirectory("openlog-update-destination-file").toFile()
+        val parentThatIsActuallyAFile = File(root, "not-a-directory").apply { writeText("I'm a file") }
+        val destination = File(parentThatIsActuallyAFile, "openLog.deb")
         val asset = ReleaseAsset("openLog.deb", "https://example.test/openLog.deb", 7L)
 
         val error = assertFailsWith<IOException> {

@@ -99,26 +99,31 @@ class UpdateChecker(
     }
 
     /**
-     * Streams [asset] into [destDir]/[ReleaseAsset.name], via a `.part` temp file that's only
-     * moved into place once the whole download completes — mirroring
+     * Streams [asset] into [destination] (a full file path — the caller/user picks the exact name
+     * via a native save dialog, which need not match [ReleaseAsset.name]), via a `.part` temp file
+     * that's only moved into place once the whole download completes — mirroring
      * [com.openlog.utils.writeFileAtomically]'s temp-file-then-atomic-move shape (that helper is
-     * text-Writer only, so this duplicates rather than reuses it). [onProgress] is called after
-     * every chunk with the running byte count and the response's Content-Length as the total,
-     * falling back to [ReleaseAsset.size] when that header is missing or non-positive.
+     * text-Writer only, so this duplicates rather than reuses it). The temp file lives in
+     * [destination]'s own parent directory (not a shared temp dir) so the final move stays on one
+     * filesystem and [moveAtomicallyIfPossible]'s atomic-rename path actually applies.
+     * [onProgress] is called after every chunk with the running byte count and the response's
+     * Content-Length as the total, falling back to [ReleaseAsset.size] when that header is missing
+     * or non-positive.
      */
     suspend fun downloadAsset(
         asset: ReleaseAsset,
-        destDir: File,
+        destination: File,
         onProgress: (bytesRead: Long, total: Long) -> Unit = { _, _ -> },
     ): File {
-        if (destDir.exists() && !destDir.isDirectory) {
-            throw IOException("Download destination is not a directory: ${destDir.absolutePath}")
+        val parent = destination.absoluteFile.parentFile
+            ?: throw IOException("Download destination has no parent directory: ${destination.absolutePath}")
+        if (parent.exists() && !parent.isDirectory) {
+            throw IOException("Download destination's parent is not a directory: ${parent.absolutePath}")
         }
-        if (!destDir.exists() && !destDir.mkdirs() && !destDir.isDirectory) {
-            throw IOException("Could not create download directory: ${destDir.absolutePath}")
+        if (!parent.exists() && !parent.mkdirs() && !parent.isDirectory) {
+            throw IOException("Could not create download directory: ${parent.absolutePath}")
         }
-        val dest = File(destDir, asset.name)
-        val tmp = File(destDir, ".${asset.name}.part")
+        val tmp = File(parent, ".${destination.name}.part")
         val buffer = ByteArray(DOWNLOAD_BUFFER_BYTES)
         var totalRead = 0L
         var moved = false
@@ -137,12 +142,12 @@ class UpdateChecker(
                     }
                 }
             }
-            moveAtomicallyIfPossible(tmp, dest)
+            moveAtomicallyIfPossible(tmp, destination)
             moved = true
         } finally {
             if (!moved) tmp.delete()
         }
-        return dest
+        return destination
     }
 
     private companion object {

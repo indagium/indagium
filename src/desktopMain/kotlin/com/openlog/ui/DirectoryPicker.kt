@@ -95,3 +95,21 @@ internal fun isMacOs(osName: String = System.getProperty("os.name").orEmpty()): 
     osName.contains("mac", ignoreCase = true)
 
 private const val MAC_DIRECTORY_DIALOG_PROPERTY = "apple.awt.fileDialogForDirectories"
+
+/**
+ * Native single-FILE save prompt (used by the update-download flow in AppState.kt). Unlike
+ * directory selection above, `FileDialog.SAVE` is already natively backed on every platform with
+ * no directory-only gap to work around, so — unlike [PlatformDirectoryPicker] — this needs no
+ * per-OS branching or Swing fallback. Returns the full chosen file (directory + name), or null if
+ * the user cancels (AWT reports a cancel as either a null file or a null directory).
+ */
+internal fun pickSaveFile(title: String, suggestedName: String, initialDirectory: File?): File? {
+    val dialog = FileDialog(null as Frame?, title, FileDialog.SAVE).apply {
+        file = suggestedName
+        initialDirectory?.let { directory = it.absolutePath }
+        isVisible = true
+    }
+    val name = dialog.file ?: return null
+    val dir = dialog.directory ?: return null
+    return File(dir, name)
+}
