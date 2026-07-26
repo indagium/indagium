@@ -42,6 +42,12 @@ private const val MICROS_PER_MS = 1_000L
 // milliseconds — kept distinct from MICROS_PER_MS so that conversion's intent reads standalone.
 private const val MICROS_PER_SECOND = 1_000_000L
 
+// resolveScannedDurationMs's packet-count/frame-rate fallback (step 3) converts a packets-per-
+// second rate straight into milliseconds — no microseconds step involved — so this is deliberately
+// its own constant rather than reusing MICROS_PER_SECOND (a different unit) or MICROS_PER_MS (a
+// different conversion direction).
+private const val MS_PER_SECOND = 1_000.0
+
 // System.nanoTime() is nanoseconds; currentClockUs()'s wall-clock fallback converts to
 // microseconds. Numerically identical to MICROS_PER_MS but a distinct unit conversion, kept as
 // its own constant so a future change to one doesn't silently also change the other.
@@ -126,51 +132,82 @@ internal fun shouldDropLateFrame(latenessUs: Long, consecutiveDrops: Int): Boole
     latenessUs > FRAME_DROP_LATENESS_US && consecutiveDrops < MAX_CONSECUTIVE_FRAME_DROPS
 
 /**
- * Recovers a container's true duration by scanning packet timestamps only — no image/audio
- * decoding — for files whose format header reports no duration at all. `grabber.lengthInTime`
- * (AVFormatContext.duration) comes back 0 for containers written by a live-mode/streaming muxer
- * that never got to record its own trailer: a screen recorder that streams its output, or is
- * killed before finalizing, produces exactly this. `lengthInVideoFrames` is ALSO 0 for the same
- * files (confirmed against real `-f matroska -live 1` / `-f webm -live 1` output), so a
- * frames-times-frame-rate fallback can't rescue them either — packet timestamps are the only
- * signal left.
+ * Step 4 of the duration-recovery chain (see [scanDurationMs]'s KDoc for steps 1-3): raises
+ * [currentDurationMs] to [positionMs] whenever real playback has moved past what's currently
+ * believed to be the file's length. This is what makes an approximate or even entirely absent
+ * duration estimate safe to show at all — [resolveScannedDurationMs]'s packet-count/frame-rate
+ * fallback (step 3) is a guess by construction (FFmpeg guesses a raw stream's frame rate), and
+ * even the exact packet-timestamp scan (step 2) is a background scan racing the decode thread's
+ * own first published positions — so no earlier step can be trusted to never undershoot. Called on
+ * every published position (one comparison — cheap enough to pay per frame) rather than only while
+ * a fallback is active, so it also covers the should-be-rare case where every recovery step above
+ * still yields 0: the timeline becomes usable the moment the video actually plays, rather than
+ * staying stuck at "--:--" for a file no automated technique could measure up front. Never lets the
+ * duration regress (see [FfmpegVideoPlayerController]'s use at both its position-publish sites and
+ * its duration-recovery-scan publish, the latter guarding against the scan's own exact/approximate
+ * value arriving lower than a position playback had already reached in the meantime).
  *
- * Walks every packet's own presentation end time (`pts` — falling back to `dts` when `pts` is
- * unset, since some streams only carry decode timestamps — plus that packet's `duration`,
- * converted out of its stream's own `time_base` into microseconds) and keeps the maximum seen.
- * That maximum IS the container duration a well-formed header would have reported: the true end
- * of whichever stream runs longest. This is I/O-bound only, not decode-bound (measured ~0-21ms
- * against multi-second fixtures), so it stays cheap even though it walks the whole file — but see
- * this function's only call site for why it must still never run on a normal file.
+ * Deliberately independent of FFmpeg/Compose types, like [PlaybackTimeline]/[shouldDropLateFrame]
+ * above, so growth's own "never regress, only grow" contract can be unit tested without native
+ * video libraries.
+ */
+internal fun growDurationIfNeeded(currentDurationMs: Long, positionMs: Long): Long = maxOf(currentDurationMs, positionMs)
+
+/**
+ * Raw signals from ONE packet-only pass over a container — no image/audio decoding — that
+ * [resolveScannedDurationMs] combines into a duration a format header didn't report:
+ *  - [maxEndUs]: the maximum resolvable packet end timestamp seen (microseconds), or 0 if no
+ *    packet carried a usable pts/dts at all.
+ *  - [videoPacketCount]: how many of the packets walked belonged to the video stream.
+ *  - [videoFrameRate]: `grabber.videoFrameRate` as read from this same short-lived scan grabber
+ *    (an instant header/stream property, not something the pass has to compute).
+ *
+ * A single type carrying all three instead of [scanDurationMs] returning a Long directly is what
+ * lets steps 2 and 3 of that function's chain share one walk of the file rather than reading it
+ * twice — the timestamp total, the video-stream packet count, and the frame rate are three numbers
+ * pulled from the exact same pass, so there is no reason to open the file a second time just to
+ * count packets after already having walked every one of them for timestamps.
+ */
+internal data class PacketScanResult(val maxEndUs: Long, val videoPacketCount: Long, val videoFrameRate: Double)
+
+/**
+ * Walks every packet in [path] exactly once — no image/audio decoding, so this is I/O-bound only
+ * (measured ~0-21ms against multi-second fixtures), cheap enough to walk the whole file — collecting
+ * the raw signals [resolveScannedDurationMs] turns into a duration. Kept separate from that
+ * resolving logic so a test can assert this scan's own precondition directly (e.g. "this fixture
+ * truly has no packet timestamps, only packets") without that assertion being masked by the
+ * fallback [scanDurationMs] applies on top.
  *
  * Deliberately a plain top-level function taking just a path (unlike [PlaybackTimeline]/
- * [shouldDropLateFrame] above, this one DOES need real FFmpeg natives, which the test classpath
- * has) rather than a method on [FfmpegVideoPlayerController] — so a test can call it directly
- * against a committed fixture without spinning up that class's decode thread. [isCancelled] is
- * the one seam the controller needs and a plain path-only test doesn't: it lets the controller's
- * duration-recovery thread (see `maybeStartDurationRecoveryScan`) stop walking a file whose
- * controller has since been [FfmpegVideoPlayerController.close]d, without this function taking on
- * any dependency on that class's lifecycle. Returns 0 (== "still unknown") if the file has no
- * packet with a resolvable timestamp, e.g. an empty stream or a cancelled scan.
+ * [shouldDropLateFrame]/[growDurationIfNeeded] above, this one DOES need real FFmpeg natives, which
+ * the test classpath has) rather than a method on [FfmpegVideoPlayerController] — so a test can call
+ * it directly against a committed fixture without spinning up that class's decode thread.
+ * [isCancelled] is the one seam the controller needs and a plain path-only test doesn't: it lets the
+ * controller's duration-recovery thread (see `maybeStartDurationRecoveryScan`) stop walking a file
+ * whose controller has since been [FfmpegVideoPlayerController.close]d, without this function taking
+ * on any dependency on that class's lifecycle.
  */
-internal fun scanDurationMs(path: String, isCancelled: () -> Boolean = { false }): Long {
+internal fun scanPackets(path: String, isCancelled: () -> Boolean = { false }): PacketScanResult {
     FFmpegFrameGrabber(path).use { grabber ->
         grabber.start()
         var lastEndUs = 0L
+        var videoPacketCount = 0L
         while (!isCancelled()) {
             val packet = grabber.grabPacket() ?: break
+            if (packet.stream_index() == grabber.videoStream) videoPacketCount++
             val endUs = packetEndUs(packet, grabber) ?: continue
             if (endUs > lastEndUs) lastEndUs = endUs
         }
-        return lastEndUs / MICROS_PER_MS
+        return PacketScanResult(lastEndUs, videoPacketCount, grabber.videoFrameRate)
     }
 }
 
 /**
  * This packet's presentation end time in microseconds, or null when it carries nothing usable —
- * neither `pts` nor `dts` set (kept out of [scanDurationMs]'s own loop so that function has only
- * the two jump statements detekt's LoopWithTooManyJumpStatements allows: `break` on end-of-stream,
- * `continue` on a packet [scanDurationMs] can't use).
+ * neither `pts` nor `dts` set (kept out of [scanPackets]'s own loop so that function has only the
+ * two jump statements detekt's LoopWithTooManyJumpStatements allows: `break` on end-of-stream,
+ * `continue` on a packet [scanPackets] can't use for the timestamp total — it is still counted
+ * towards [PacketScanResult.videoPacketCount] before this returns null).
  */
 private fun packetEndUs(packet: AVPacket, grabber: FFmpegFrameGrabber): Long? {
     val pts = if (packet.pts() != avutil.AV_NOPTS_VALUE) packet.pts() else packet.dts()
@@ -178,6 +215,54 @@ private fun packetEndUs(packet: AVPacket, grabber: FFmpegFrameGrabber): Long? {
     val timeBase = grabber.formatContext.streams(packet.stream_index()).time_base()
     if (timeBase.den() == 0) return null // a malformed/unknown time_base can't be converted
     return ((pts + maxOf(packet.duration(), 0L)).toDouble() * timeBase.num() / timeBase.den() * MICROS_PER_SECOND).toLong()
+}
+
+/**
+ * Recovers a container's true duration for files whose format header reports none at all.
+ * `grabber.lengthInTime` (AVFormatContext.duration) comes back 0 for two different shapes of file,
+ * both handled here as two fallback steps sharing the single packet pass [scanPackets] performs:
+ *
+ *  - **Step 2 (exact)**: a container written by a live-mode/streaming muxer that never got to
+ *    record its own trailer — a screen recorder that streams its output, or is killed before
+ *    finalizing — still carries real per-packet timestamps. [PacketScanResult.maxEndUs] (the
+ *    maximum packet presentation-end time across the whole file) IS the container duration a
+ *    well-formed header would have reported: the true end of whichever stream runs longest.
+ *    `lengthInVideoFrames` is ALSO 0 for these files (confirmed against real `-f matroska -live 1`
+ *    / `-f webm -live 1` output), so a frames-times-frame-rate fallback can't rescue them — packet
+ *    timestamps are the only exact signal available, which is why this step is preferred whenever
+ *    it has anything to offer.
+ *  - **Step 3 (approximate fallback)**: a RAW elementary stream (h264/hevc — Android tooling
+ *    sometimes writes these, occasionally even with a `.mp4` extension) carries no container
+ *    timestamps at all. FFmpeg content-probes and plays it happily, but every packet comes back
+ *    with neither pts nor dts set, so step 2 finds nothing (maxEndUs stays 0) even though the file
+ *    plainly has content. The only signal left is how many packets went by on the video stream,
+ *    divided by FFmpeg's own frame rate for that stream — [PacketScanResult.videoFrameRate], which
+ *    for a raw stream is itself a guess (`avg_frame_rate` on content with no declared frame rate),
+ *    not something the format actually declares. This can be off from the real duration in either
+ *    direction, which is exactly why [growDurationIfNeeded] (step 4, applied where playback
+ *    position is published, not here) exists: an approximate estimate from this step is safe only
+ *    because playback can never run past it without immediately raising it to match.
+ *
+ * Guards `videoFrameRate <= 0` (unset) and non-finite (NaN/Infinity, e.g. a 0/0 avg_frame_rate)
+ * rather than dividing by it blindly — either would otherwise produce a garbage or infinite
+ * "duration". Returns 0 (== "still unknown") if neither step above found anything usable, e.g. an
+ * empty stream, a cancelled scan, or a raw stream FFmpeg couldn't even guess a frame rate for.
+ *
+ * See [scanPackets] for why the packet walk itself is a separate function (both to share one pass
+ * for these two steps and so a test can assert its precondition), and its own KDoc for what
+ * [isCancelled] is for.
+ */
+internal fun scanDurationMs(path: String, isCancelled: () -> Boolean = { false }): Long =
+    resolveScannedDurationMs(scanPackets(path, isCancelled))
+
+/** The step 2 / step 3 decision described in [scanDurationMs]'s KDoc, pulled out as its own pure
+ *  function so the fallback arithmetic can be unit-tested against a hand-built [PacketScanResult]
+ *  without needing a real (or even a cancelled) file scan to produce one. */
+internal fun resolveScannedDurationMs(result: PacketScanResult): Long {
+    if (result.maxEndUs > 0L) return result.maxEndUs / MICROS_PER_MS
+    val frameRate = result.videoFrameRate
+    if (result.videoPacketCount <= 0L || frameRate <= 0.0 || !frameRate.isFinite()) return 0L
+    return (result.videoPacketCount / frameRate * MS_PER_SECOND).toLong()
 }
 
 /**
@@ -496,8 +581,9 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
 
     /**
      * `grabber.lengthInTime` reporting 0 (or negative) means the container's own header carries no
-     * duration — see [scanDurationMs]'s KDoc for why that happens and why a frame-count fallback
-     * can't help either. Declared-duration files return immediately here and never pay for a scan.
+     * duration — see [scanDurationMs]'s KDoc for the two different shapes of durationless file this
+     * covers (steps 2 and 3 of the chain) and why a plain frame-count fallback alone can't help.
+     * Declared-duration files return immediately here and never pay for a scan.
      *
      * Runs on its own short-lived daemon thread, separate from both [decodeThread] and the UI
      * thread's Compose recomposition, exactly like [grabFrameAt] opens its own separate grabber
@@ -505,13 +591,23 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
      * itself already running on [decodeThread]) is non-blocking, so opening a durationless file
      * never delays showing its first frame. `_durationMs` is a Compose `mutableStateOf`, snapshot-
      * safe to write from any thread (see CLAUDE.md), so the transport bar simply recomposes once
-     * this publishes a real value — no signaling back to [decodeThread] or the UI is needed.
+     * this publishes a real value — no signaling back to [decodeThread] or the UI is needed. In
+     * practice this thread finishes in single-digit-to-low-double-digit milliseconds (I/O bound, no
+     * decoding), so by the time a user could react to the panel, a real duration is already showing
+     * — see [scanDurationMs]'s own KDoc for the exact numbers this was measured against.
      *
      * Cancellation: [scanDurationMs]'s `isCancelled` callback reads [closed] on every packet, so a
      * scan racing [close] stops promptly instead of walking the rest of the file; the final publish
      * is ALSO gated on `!closed` in case the scan's last iteration finishes between that check and
      * [close] being called. Either way the scan's own `FFmpegFrameGrabber` is opened and released
-     * entirely inside [scanDurationMs]'s `use` block, so there is nothing here left to leak.
+     * entirely inside [scanPackets]'s `use` block, so there is nothing here left to leak.
+     *
+     * The publish itself goes through [growDurationIfNeeded] rather than a plain assignment: this
+     * scan can take a few milliseconds, during which the decode thread may already have published
+     * real playback positions (see [setPositionMs]) that pushed `_durationMs` up via step 4's
+     * self-correcting growth. A recovered value that turned out lower than a position already
+     * reached must not yank the duration back down — [growDurationIfNeeded] keeps this monotonic
+     * either way, so the transport bar never regresses once a real length is showing.
      */
     private fun maybeStartDurationRecoveryScan(declaredMs: Long) {
         if (declaredMs > 0L) return
@@ -526,7 +622,9 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
                 "video",
                 "duration recovery for $scanPath: declaredMs=$declaredMs recoveredMs=${recoveredMs ?: "n/a"}",
             )
-            if (!closed && recoveredMs != null && recoveredMs > 0L) _durationMs = recoveredMs
+            if (!closed && recoveredMs != null && recoveredMs > 0L) {
+                _durationMs = growDurationIfNeeded(_durationMs, recoveredMs)
+            }
         }, "openlog-video-duration-scan").apply { isDaemon = true }.start()
     }
 
@@ -728,7 +826,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
 
     private fun publishSeekPositionLocked(command: SeekCommand) {
         if (!isCurrentEpoch(command.epoch)) return
-        _positionMs = timeline.seek(command.targetUs) / MICROS_PER_MS
+        setPositionMs(timeline.seek(command.targetUs) / MICROS_PER_MS)
     }
 
     private fun publishClockPosition(frameTimestampUs: Long, epoch: Long) {
@@ -745,7 +843,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
             val positionUs = timeline.advance(timestampUs)
             lastImage = image
             runCatching { _currentFrame = image.toComposeImageBitmap() }
-            _positionMs = positionUs / MICROS_PER_MS
+            setPositionMs(positionUs / MICROS_PER_MS)
             // Deliberately NOT rebasing playbackStartNanos/playbackStartTimestampUs here. This used
             // to reset the wall-clock origin to "now = this frame's timestamp" on every published
             // frame, which made currentClockUs() measure decode throughput instead of real elapsed
@@ -763,8 +861,19 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     private fun publishPosition(candidateUs: Long, epoch: Long) {
         synchronized(presentationLock) {
             if (closed || !isCurrentEpoch(epoch)) return
-            _positionMs = timeline.advance(candidateUs) / MICROS_PER_MS
+            setPositionMs(timeline.advance(candidateUs) / MICROS_PER_MS)
         }
+    }
+
+    // Step 4 of the duration-recovery chain (see growDurationIfNeeded's KDoc): every publish of a
+    // real position is also a chance to notice the currently-known duration has been undershot, and
+    // fix that on the spot. Routing every _positionMs write through this one function (rather than
+    // duplicating the growth check at each call site) is what guarantees no future publish site can
+    // forget it — the three current call sites are a seek, a shown frame, and a dropped-frame clock
+    // advance, and any new one inherits the same guarantee for free.
+    private fun setPositionMs(ms: Long) {
+        _positionMs = ms
+        _durationMs = growDurationIfNeeded(_durationMs, ms)
     }
 
     private fun openAudioLine() {
