@@ -70,11 +70,14 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -125,6 +128,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
 /** Provider and Actions share one row as an accordion: opening one closes the other. */
@@ -1610,8 +1614,27 @@ private fun AiPromptComposer(
     var fieldWidthPx by remember { mutableStateOf(0) }
     var popupHeightPx by remember { mutableStateOf(0) }
     val promptScroll = rememberScrollState()
+    var promptEditorHeight by remember { mutableStateOf(60.dp) }
+    var promptViewportHeightPx by remember { mutableStateOf(0) }
+    var promptLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var promptValue by remember(tabId) { mutableStateOf(TextFieldValue(prompt, TextRange(prompt.length))) }
     var selectedCommand by remember(tabId) { mutableStateOf<AiChipCommand?>(null) }
     var contextLineIds by remember(tabId) { mutableStateOf(emptyList<Int>()) }
+
+    // The string belongs to the tab-level composer state, while TextFieldValue keeps the cursor
+    // location necessary to reveal the line currently being edited.
+    LaunchedEffect(prompt) {
+        if (prompt != promptValue.text) promptValue = TextFieldValue(prompt, TextRange(prompt.length))
+    }
+    LaunchedEffect(promptValue, promptLayout, promptViewportHeightPx) {
+        val layout = promptLayout ?: return@LaunchedEffect
+        if (promptViewportHeightPx == 0) return@LaunchedEffect
+        val caretBottom = layout.getCursorRect(promptValue.selection.end).bottom
+        val target = (caretBottom - promptViewportHeightPx + with(density) { 12.dp.toPx() })
+            .roundToInt()
+            .coerceIn(0, promptScroll.maxValue)
+        promptScroll.animateScrollTo(target)
+    }
 
     // Context-menu requests are deliberately consumed only by their owning tab's composer. They
     // merge so the user can add several selections before writing one question, and are rendered
@@ -1657,16 +1680,19 @@ private fun AiPromptComposer(
             }
         }
         Box(
-            // 60dp matches the original single-line composer viewport on a 2x display; the
-            // scrollbar handles longer prompts without doubling the visible editor height.
-            Modifier.fillMaxWidth().height(60.dp)
-                .onGloballyPositioned { fieldWidthPx = it.size.width },
+            Modifier.fillMaxWidth().height(promptEditorHeight)
+                .onGloballyPositioned { fieldWidthPx = it.size.width }
+                .onSizeChanged { promptViewportHeightPx = it.height },
         ) {
             androidx.compose.foundation.text.BasicTextField(
-                value = prompt,
-                onValueChange = onPromptChange,
+                value = promptValue,
+                onValueChange = {
+                    promptValue = it
+                    onPromptChange(it.text)
+                },
                 textStyle = TextStyle(color = colors.tx, fontSize = 12.sp),
                 cursorBrush = SolidColor(colors.ac),
+                onTextLayout = { promptLayout = it },
                 modifier = Modifier.fillMaxSize()
                     .background(colors.bg, CORNER_SM).border(1.dp, colors.br, CORNER_SM)
                     .padding(start = 7.dp, top = 7.dp, end = 18.dp, bottom = 7.dp)
@@ -1757,6 +1783,11 @@ private fun AiPromptComposer(
                 }
             }
         }
+        VDivider(
+            onDelta = { delta ->
+                promptEditorHeight = (promptEditorHeight + delta.dp).coerceIn(60.dp, 260.dp)
+            },
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             if (running == null) {
                 AppButton(
