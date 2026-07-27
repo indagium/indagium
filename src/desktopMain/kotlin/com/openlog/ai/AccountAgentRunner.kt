@@ -86,9 +86,10 @@ internal class AccountAgentRunner(
     ) {
         val command = CodexAppServerClient.command(profile.executablePath) +
             codexDisableUserServersConfig() +
-            codexManagedMcpConfig(lease.url, lease.token)
+            codexManagedMcpConfig(lease.url)
         CodexAppServerClient.launch(
             command = command,
+            environment = codexManagedMcpEnvironment(lease.token),
             scope = scope,
         ).use { client ->
             client.initialize()
@@ -295,19 +296,24 @@ internal fun resolveAccountAgentWorkspace(session: AiSession, kind: AiProviderKi
     }
 
 /**
- * The bundled Codex app-server currently ignores `bearer_token_env_var` and `env_http_headers`
- * during its Streamable HTTP MCP handshake. Use its supported static-header configuration instead.
- * The token is a fresh, localhost-only credential that is discarded when this run ends.
+ * Supplies the localhost MCP endpoint to Codex without placing its temporary bearer credential on
+ * the command line. This matters for the Windows `codex.cmd` launcher: it reparses command-line
+ * arguments, so a quoted `Bearer <token>` header can be split and mistaken for a subcommand.
  */
-internal fun codexManagedMcpConfig(url: String, token: String): List<String> = listOf(
+internal fun codexManagedMcpConfig(url: String): List<String> = listOf(
     "--config", "mcp_servers.openlog.url=\"$url\"",
-    "--config", "mcp_servers.openlog.http_headers={ Authorization = \"Bearer $token\" }",
+    "--config", "mcp_servers.openlog.bearer_token_env_var=\"$CODEX_OPENLOG_MCP_TOKEN_ENV\"",
     // `approval_mode` is not a key Codex's app-server recognizes; in app-server mode Codex always
     // delegates tool-call approval to the host via `mcpServer/elicitation/request`; see
     // [decideCodexElicitation]. openLog itself routes sensitive actions through
     // AiToolExecutionCoordinator, so auto-approving Codex's side of that handshake is correct.
     "--config", "mcp_servers.openlog.approval_mode=\"never\"",
 )
+
+internal fun codexManagedMcpEnvironment(token: String): Map<String, String> =
+    mapOf(CODEX_OPENLOG_MCP_TOKEN_ENV to token)
+
+private const val CODEX_OPENLOG_MCP_TOKEN_ENV = "OPENLOG_MCP_TOKEN"
 
 /**
  * `--config mcp_servers.<name>.enabled=false` for every MCP server in the user's Codex config

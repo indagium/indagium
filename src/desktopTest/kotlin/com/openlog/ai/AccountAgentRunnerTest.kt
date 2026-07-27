@@ -52,15 +52,16 @@ class AccountAgentRunnerTest {
     }
 
     @Test
-    fun codexManagedMcpConfigUsesTheStaticHeaderAcceptedByAppServer() {
+    fun codexManagedMcpConfigKeepsTheTemporaryBearerTokenOutOfCommandArguments() {
         assertEquals(
             listOf(
                 "--config", "mcp_servers.openlog.url=\"http://127.0.0.1:41723/mcp\"",
-                "--config", "mcp_servers.openlog.http_headers={ Authorization = \"Bearer temporary-token\" }",
+                "--config", "mcp_servers.openlog.bearer_token_env_var=\"OPENLOG_MCP_TOKEN\"",
                 "--config", "mcp_servers.openlog.approval_mode=\"never\"",
             ),
-            codexManagedMcpConfig("http://127.0.0.1:41723/mcp", "temporary-token"),
+            codexManagedMcpConfig("http://127.0.0.1:41723/mcp"),
         )
+        assertEquals(mapOf("OPENLOG_MCP_TOKEN" to "temporary-token"), codexManagedMcpEnvironment("temporary-token"))
     }
 
     // decideCodexElicitation covers the mcpServer/elicitation/request handshake: it is a tool-call
