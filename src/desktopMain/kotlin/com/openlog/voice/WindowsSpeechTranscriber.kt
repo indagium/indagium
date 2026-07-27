@@ -35,9 +35,7 @@ class WindowsSpeechTranscriber : VoiceTranscriber {
             val output = process.inputStream.bufferedReader().readText().trim()
             when {
                 process.exitValue() != 0 -> VoiceTranscriptionResult.Failure(
-                    output.ifBlank {
-                        "Windows Speech could not recognize this language. Install its offline speech pack or choose Whisper."
-                    },
+                    failureMessage(output, language),
                 )
                 output.isBlank() -> VoiceTranscriptionResult.Failure("No speech was recognized. Try again.")
                 else -> VoiceTranscriptionResult.Success(VoiceTranscript(output, language, translatedToEnglish = false))
@@ -64,15 +62,34 @@ class WindowsSpeechTranscriber : VoiceTranscriber {
         return header + pcm16le
     }
 
-    private companion object {
+    companion object {
+        private const val LANGUAGE_UNAVAILABLE_MARKER = "OPENLOG_SPEECH_LANGUAGE_UNAVAILABLE"
+
+        internal fun failureMessage(output: String, language: String): String = when {
+            output.contains(LANGUAGE_UNAVAILABLE_MARKER) -> {
+                val languageLabel = VoiceLanguageCatalog.label(language.substringBefore('-').lowercase())
+                "Windows Speech has no installed offline recognizer for $languageLabel. " +
+                    "Choose Local Whisper, or install Basic or Enhanced speech recognition for a supported Windows language."
+            }
+            output.isBlank() -> "Windows Speech could not recognize this language. Install its offline speech pack or choose Whisper."
+            else -> output
+        }
+
         // `$input` is only this process's stdin. SetInputToWaveStream makes System.Speech use the
         // installed local engine rather than any browser/search dictation service.
-        val POWERSHELL_SCRIPT = """
+        private val POWERSHELL_SCRIPT = """
 Add-Type -AssemblyName System.Speech
 ${'$'}bytes = [Convert]::FromBase64String([Console]::In.ReadToEnd())
 ${'$'}stream = New-Object System.IO.MemoryStream(,${'$'}bytes)
 ${'$'}culture = [System.Globalization.CultureInfo]::GetCultureInfo(${ '$' }env:OPENLOG_SPEECH_LOCALE)
-${'$'}recognizer = New-Object System.Speech.Recognition.SpeechRecognitionEngine(${ '$' }culture)
+${'$'}recognizerInfo = [System.Speech.Recognition.SpeechRecognitionEngine]::InstalledRecognizers() |
+    Where-Object { ${'$'}_.Culture.Name -eq ${'$'}culture.Name } |
+    Select-Object -First 1
+if (${ '$' }null -eq ${'$'}recognizerInfo) {
+    [Console]::Error.Write("OPENLOG_SPEECH_LANGUAGE_UNAVAILABLE")
+    exit 2
+}
+${'$'}recognizer = New-Object System.Speech.Recognition.SpeechRecognitionEngine(${ '$' }recognizerInfo)
 ${'$'}recognizer.LoadGrammar((New-Object System.Speech.Recognition.DictationGrammar))
 ${'$'}recognizer.SetInputToWaveStream(${ '$' }stream)
 ${'$'}result = ${'$'}recognizer.Recognize()

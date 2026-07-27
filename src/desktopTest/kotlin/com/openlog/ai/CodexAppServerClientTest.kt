@@ -219,13 +219,37 @@ class CodexAppServerClientTest {
         }
     }
 
+    @Test
+    fun processExitReportsItsExitCodeAndStderrTail() = runBlocking {
+        lateinit var process: FakeProcess
+        process = FakeProcess(
+            onWrite = { line ->
+                if (Json.parseToJsonElement(line).jsonObject["method"]?.jsonPrimitive?.content == "initialize") {
+                    process.exit(17)
+                }
+            },
+            diagnostics = "Error: app-server configuration is invalid",
+        )
+
+        CodexAppServerClient(process).use { client ->
+            val error = kotlin.test.assertFailsWith<CodexAppServerException> { client.initialize() }
+            assertEquals(
+                "Codex app-server exited (exit 17): Error: app-server configuration is invalid",
+                error.message,
+            )
+        }
+    }
+
     private class FakeProcess(
+        private val diagnostics: String? = null,
         private val onWrite: (String) -> Unit,
     ) : CodexAppServerProcess {
         private val output = LinkedBlockingQueue<String>()
         private val writes = mutableListOf<String>()
 
         @Volatile private var alive = true
+
+        @Volatile private var completedExitCode: Int? = null
 
         val sentMethods: List<String>
             get() = synchronized(writes) {
@@ -250,11 +274,19 @@ class CodexAppServerClientTest {
 
         override fun isAlive(): Boolean = alive
 
-        override fun exitCode(): Int? = if (alive) null else 0
+        override fun exitCode(): Int? = if (alive) null else completedExitCode ?: 0
+
+        override fun diagnosticOutput(): String? = diagnostics
 
         override fun destroy() {
             if (!alive) return
             alive = false
+            output.offer(EOF)
+        }
+
+        fun exit(code: Int) {
+            alive = false
+            completedExitCode = code
             output.offer(EOF)
         }
 

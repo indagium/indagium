@@ -1753,7 +1753,11 @@ private fun VoiceInputSettingsSection(state: AppState) {
         Divider()
         AppText("Recognition language", color = tc.td, fontSize = 10.sp, fontFamily = UI)
         AppText(
-            "Automatic detects the spoken language. Choose Ukrainian for short Ukrainian phrases; it avoids an English-recognition bias.",
+            if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WINDOWS_SPEECH) {
+                "Windows Speech needs a matching installed legacy recognizer. For Ukrainian or any unavailable language, choose Local Whisper."
+            } else {
+                "Automatic detects the spoken language. Choose Ukrainian for short Ukrainian phrases; it avoids an English-recognition bias."
+            },
             color = tc.tx,
             fontSize = 12.sp,
             maxLines = 3,
@@ -1927,8 +1931,8 @@ private fun VoiceInputSettingsSection(state: AppState) {
                         "language has no on-device Apple model, openLog refuses to send audio and " +
                         "you can switch back to Whisper."
                 } else {
-                    "Windows uses the selected installed offline speech-recognition language pack. " +
-                        "If it is missing, openLog refuses to send audio and you can switch back to Whisper."
+                    "Windows Speech uses a matching installed legacy recognizer. Language availability is narrower than Whisper; " +
+                        "if there is no recognizer for the selected language, openLog shows the reason and you can switch back to Whisper."
                 },
                 color = tc.tx,
                 fontSize = 12.sp,

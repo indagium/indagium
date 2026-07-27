@@ -22,6 +22,8 @@ object VoiceRecognitionEngines {
     fun description(engine: VoiceRecognitionEngine): String = when (engine) {
         VoiceRecognitionEngine.WHISPER -> "Runs locally on macOS, Windows, and Linux after the selected Whisper model is installed."
         VoiceRecognitionEngine.APPLE_SPEECH -> "Uses Apple's Speech framework in on-device-only mode. It never falls back to network recognition."
-        VoiceRecognitionEngine.WINDOWS_SPEECH -> "Uses Windows' installed offline speech-recognition language pack. It never sends audio to a provider."
+        VoiceRecognitionEngine.WINDOWS_SPEECH ->
+            "Uses a matching installed legacy Windows Speech recognizer. It never sends audio to a provider, " +
+                "but supports fewer languages than Whisper."
     }
 }
