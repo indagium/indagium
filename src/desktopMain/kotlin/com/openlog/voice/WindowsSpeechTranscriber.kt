@@ -1,3 +1,5 @@
+@file:Suppress("MagicNumber", "MaxLineLength", "TooGenericExceptionCaught")
+
 package com.openlog.voice
 
 import java.io.BufferedWriter

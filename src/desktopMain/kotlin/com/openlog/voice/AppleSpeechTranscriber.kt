@@ -1,3 +1,5 @@
+@file:Suppress("TooGenericExceptionCaught")
+
 package com.openlog.voice
 
 import kotlinx.serialization.json.Json
