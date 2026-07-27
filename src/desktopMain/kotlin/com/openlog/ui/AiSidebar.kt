@@ -79,6 +79,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -301,6 +302,7 @@ private fun AiSidebarPanel(
     val scroll = rememberScrollState()
     var panelFocused by remember { mutableStateOf(false) }
     var prompt by remember(tab.id) { mutableStateOf("") }
+    var promptEditorHeight by remember { mutableStateOf(60.dp) }
     var modelDraft by remember(profile.id, profile.model) { mutableStateOf(profile.model) }
     var reasoningEffortDraft by remember(profile.id, profile.reasoningEffort) { mutableStateOf(profile.reasoningEffort) }
     var keyDraft by remember(profile.id) { mutableStateOf(state.aiProviderApiKey(profile.id)) }
@@ -608,9 +610,13 @@ private fun AiSidebarPanel(
                 style = appScrollbarStyle(colors),
             )
         }
+        VDivider { delta ->
+            promptEditorHeight = (promptEditorHeight - delta.dp).coerceIn(60.dp, 260.dp)
+        }
         AiPromptComposer(
             tabId = tab.id,
             prompt = prompt,
+            editorHeight = promptEditorHeight,
             running = session.activeRun,
             retryAvailable = session.activeRun == null && session.lastPrompt != null,
             customCommands = state.customAiCommands,
@@ -1554,6 +1560,7 @@ private fun AiConfirmationCard(
 private fun AiPromptComposer(
     tabId: String,
     prompt: String,
+    editorHeight: Dp,
     running: AiRun?,
     retryAvailable: Boolean,
     customCommands: List<CustomAiCommand>,
@@ -1614,7 +1621,6 @@ private fun AiPromptComposer(
     var fieldWidthPx by remember { mutableStateOf(0) }
     var popupHeightPx by remember { mutableStateOf(0) }
     val promptScroll = rememberScrollState()
-    var promptEditorHeight by remember { mutableStateOf(60.dp) }
     var promptViewportHeightPx by remember { mutableStateOf(0) }
     var promptLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
     var promptValue by remember(tabId) { mutableStateOf(TextFieldValue(prompt, TextRange(prompt.length))) }
@@ -1680,7 +1686,7 @@ private fun AiPromptComposer(
             }
         }
         Box(
-            Modifier.fillMaxWidth().height(promptEditorHeight)
+            Modifier.fillMaxWidth().height(editorHeight)
                 .onGloballyPositioned { fieldWidthPx = it.size.width }
                 .onSizeChanged { promptViewportHeightPx = it.height },
         ) {
@@ -1695,7 +1701,7 @@ private fun AiPromptComposer(
                 onTextLayout = { promptLayout = it },
                 modifier = Modifier.fillMaxSize()
                     .background(colors.bg, CORNER_SM).border(1.dp, colors.br, CORNER_SM)
-                    .padding(start = 7.dp, top = 7.dp, end = 18.dp, bottom = 7.dp)
+                    .padding(start = 7.dp, top = 7.dp, end = 28.dp, bottom = 7.dp)
                     .verticalScroll(promptScroll)
                     // Runs before BasicTextField's own key handling (arrow-key cursor movement,
                     // Enter-inserts-newline), so it can steal command-list navigation and the
@@ -1735,9 +1741,19 @@ private fun AiPromptComposer(
             )
             VerticalScrollbar(
                 adapter = rememberScrollbarAdapter(promptScroll),
-                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight()
+                    .padding(top = if (prompt.isBlank()) 4.dp else 24.dp, bottom = 4.dp),
                 style = appScrollbarStyle(colors),
             )
+            if (prompt.isNotBlank()) {
+                SquareIconButton(
+                    "×",
+                    fontSize = 12.sp,
+                    onClick = { onPromptChange("") },
+                    modifier = Modifier.align(Alignment.TopEnd).padding(4.dp),
+                    size = 16.dp,
+                )
+            }
             if (suggestions.isNotEmpty()) {
                 Popup(
                     alignment = Alignment.TopStart,
@@ -1783,11 +1799,6 @@ private fun AiPromptComposer(
                 }
             }
         }
-        VDivider(
-            onDelta = { delta ->
-                promptEditorHeight = (promptEditorHeight + delta.dp).coerceIn(60.dp, 260.dp)
-            },
-        )
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             if (running == null) {
                 AppButton(

@@ -63,7 +63,7 @@ fun main(args: Array<String>) {
             val taskbar = Taskbar.getTaskbar()
             if (taskbar.isSupported(Taskbar.Feature.ICON_IMAGE)) {
                 val url = Thread.currentThread().contextClassLoader
-                    .getResource("icons/openlog.png")
+                    .getResource(platformIconResourceName())
                 if (url != null) taskbar.iconImage = Toolkit.getDefaultToolkit().getImage(url)
             }
         }
@@ -212,7 +212,14 @@ private fun maybeAutoCheckForUpdates(appState: AppState, isPackaged: Boolean) {
 // remains the application icon. Windows and Linux still need this image for their taskbar/window
 // representation. Keeping the platform branch out of main() also keeps its lifecycle code simple.
 @Composable
-private fun platformWindowIcon() = if (isMacOs) null else painterResource("icons/openlog.png")
+private fun platformWindowIcon() = if (isMacOs) null else painterResource(platformIconResourceName())
+
+private fun platformIconResourceName(): String =
+    if (System.getProperty("os.name").orEmpty().contains("windows", ignoreCase = true)) {
+        "icons/openlog-windows.png"
+    } else {
+        "icons/openlog.png"
+    }
 
 // GNOME/Mutter routinely ignores a bare toFront() under focus-stealing prevention; the brief
 // isAlwaysOnTop toggle forces the compositor to actually raise the window. Harmless no-op-ish on
