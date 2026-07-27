@@ -1,3 +1,5 @@
+@file:Suppress("MaxLineLength", "TooGenericExceptionCaught")
+
 package com.openlog.voice
 
 import kotlinx.coroutines.CoroutineDispatcher

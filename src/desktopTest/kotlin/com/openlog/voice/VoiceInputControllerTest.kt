@@ -1,3 +1,5 @@
+@file:Suppress("MaxLineLength")
+
 package com.openlog.voice
 
 import java.util.concurrent.CountDownLatch

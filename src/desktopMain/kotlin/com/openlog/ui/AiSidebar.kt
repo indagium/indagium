@@ -3,6 +3,7 @@
     androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
     androidx.compose.foundation.ExperimentalFoundationApi::class,
 )
+@file:Suppress("MaxLineLength")
 
 package com.openlog.ui
 
