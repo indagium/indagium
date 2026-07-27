@@ -11,14 +11,14 @@ import com.openlog.model.Annotations
 import com.openlog.model.AppSettings
 import com.openlog.model.CopyMaskRule
 import com.openlog.model.CrashCategory
-import com.openlog.model.CustomIssueRule
-import com.openlog.model.IssueCategorySelection
 import com.openlog.model.CtrlFTarget
 import com.openlog.model.CtxMenuState
+import com.openlog.model.CustomIssueRule
 import com.openlog.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.Highlighter
+import com.openlog.model.IssueCategorySelection
 import com.openlog.model.LogAnalysis
 import com.openlog.model.LogEntry
 import com.openlog.model.LogItem

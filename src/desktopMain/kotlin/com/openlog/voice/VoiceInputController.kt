@@ -67,11 +67,19 @@ class VoiceInputController(
             if (generation != requestGeneration) return@launch
             when (result) {
                 is VoiceCaptureResult.Captured -> {
-                    if (result.audio.isSilentOrEmpty()) transitionIfCurrent(generation, VoiceInputState.Failed("No speech was captured. Try again."))
-                    else transcribe(generation, result.audio, translateToEnglish)
+                    if (result.audio.isSilentOrEmpty()) {
+                        transitionIfCurrent(generation, VoiceInputState.Failed("No speech was captured. Try again."))
+                    } else {
+                        transcribe(generation, result.audio, translateToEnglish)
+                    }
                 }
                 VoiceCaptureResult.Cancelled -> transitionIfCurrent(generation, idleOrModelRequired())
-                VoiceCaptureResult.TimedOut -> transitionIfCurrent(generation, VoiceInputState.Failed("Recording stopped after 90 seconds. Try a shorter request."))
+                VoiceCaptureResult.TimedOut -> {
+                    transitionIfCurrent(
+                        generation,
+                        VoiceInputState.Failed("Recording stopped after 90 seconds. Try a shorter request."),
+                    )
+                }
                 is VoiceCaptureResult.Failure -> transitionIfCurrent(generation, VoiceInputState.Failed(result.message))
             }
         }

@@ -5,7 +5,6 @@ package com.openlog.voice
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import java.io.File
 import java.nio.file.Files
 
 /** macOS Speech.framework adapter. The JNI code sets `requiresOnDeviceRecognition`, therefore
@@ -97,6 +96,8 @@ object AppleSpeechNative {
     }
 
     @JvmStatic private external fun nativeEnsureReady(language: String): Boolean
+
     @JvmStatic private external fun nativeAvailabilityMessage(language: String): String
+
     @JvmStatic private external fun nativeTranscribe(pcm16le: ByteArray, language: String): String
 }

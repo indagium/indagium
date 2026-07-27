@@ -54,7 +54,6 @@ import androidx.compose.ui.zIndex
 import com.openlog.model.*
 import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.containsPattern
-import com.openlog.utils.crashSitesForCategory
 import com.openlog.utils.firstRegexMatch
 import com.openlog.utils.issueSitesForCategory
 import com.openlog.utils.passesFilter

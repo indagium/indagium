@@ -76,9 +76,13 @@ private class JavaSoundVoiceCaptureSession(
 ) : VoiceCaptureSession {
     private val maximumBytes = (VoiceAudio.SAMPLE_RATE_HZ * VoiceAudio.CHANNELS * VoiceAudio.BYTES_PER_SAMPLE * maxDurationMillis / 1_000L).toInt()
     private val samples = ByteArrayOutputStream()
+
     @Volatile private var recording = true
+
     @Volatile private var cancelled = false
+
     @Volatile private var timedOut = false
+
     @Volatile private var readFailure: Throwable? = null
 
     private val reader = Thread({ readSamples() }, "openLog-voice-capture").apply {

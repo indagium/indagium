@@ -2,12 +2,12 @@
 
 package com.openlog.voice
 
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runBlocking
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -44,9 +44,16 @@ class VoiceInputControllerTest {
     fun transcriptUsesConfiguredTranslationAndIsConsumedOnlyOnce() = runBlocking {
         val capture = FakeCapture(audio = audio())
         var options: VoiceTranscriptionOptions? = null
-        val controller = controller(capture = capture, optionsProvider = { VoiceTranscriptionOptions(translateToEnglish = false, initialPrompt = "terms") }) { _, transcriptionOptions ->
+        val controller = controller(
+            capture = capture,
+            optionsProvider = {
+                VoiceTranscriptionOptions(translateToEnglish = false, initialPrompt = "terms")
+            },
+        ) { _, transcriptionOptions ->
             options = transcriptionOptions
-            VoiceTranscriptionResult.Success(VoiceTranscript("  Explain the Gradle error  ", "uk", translatedToEnglish = false))
+            VoiceTranscriptionResult.Success(
+                VoiceTranscript("  Explain the Gradle error  ", "uk", translatedToEnglish = false),
+            )
         }
 
         assertIs<VoiceInputState.Recording>(controller.startRecording())

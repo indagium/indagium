@@ -79,9 +79,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
-import androidx.compose.ui.window.Dialog
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
@@ -123,9 +123,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.awt.Cursor as AwtCursor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.awt.Cursor as AwtCursor
 
 /** Provider and Actions share one row as an accordion: opening one closes the other. */
 internal enum class AiSidebarSection { PROVIDER, ACTIONS }
@@ -330,7 +330,9 @@ private fun AiSidebarPanel(
             unavailableMessage = {
                 when (selectedVoiceEngine) {
                     VoiceRecognitionEngine.APPLE_SPEECH -> AppleSpeechNative.availabilityMessage(voiceLanguagePreference.get())
-                    VoiceRecognitionEngine.WINDOWS_SPEECH -> "Windows Speech could not start. Install the selected offline speech-recognition language pack or choose Whisper."
+                    VoiceRecognitionEngine.WINDOWS_SPEECH ->
+                        "Windows Speech could not start. Install the selected offline speech-recognition " +
+                            "language pack or choose Whisper."
                     VoiceRecognitionEngine.WHISPER -> null
                 }
             },
@@ -425,7 +427,9 @@ private fun AiSidebarPanel(
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 when {
-                    voiceInputSupported && event.key == Key.Escape && (voiceState is VoiceInputState.Recording || voiceState is VoiceInputState.Transcribing) -> {
+                    voiceInputSupported &&
+                        event.key == Key.Escape &&
+                        (voiceState is VoiceInputState.Recording || voiceState is VoiceInputState.Transcribing) -> {
                         voiceController.cancel(); true
                     }
                     event.key == Key.Escape && session.activeRun != null -> {
@@ -1795,7 +1799,9 @@ private fun AiPromptComposer(
                             tooltip = {
                                 Box(Modifier.background(colors.p2, CORNER_SM).border(1.dp, colors.br, CORNER_SM).padding(7.dp)) {
                                     AppText(
-                                        "Recognition language: ${VoiceLanguageCatalog.label(selectedVoiceRecognitionLanguageCode)}. Choose another configured language.",
+                                        "Recognition language: " +
+                                            "${VoiceLanguageCatalog.label(selectedVoiceRecognitionLanguageCode)}. " +
+                                            "Choose another configured language.",
                                         color = colors.tx,
                                         fontSize = 10.sp,
                                         maxLines = 3,
@@ -1902,7 +1908,9 @@ private fun VoiceModelInstallDialog(
         ) {
             AppText("Download local voice model", color = colors.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             AppText(
-                "Voice recordings and transcription stay on this Mac. Downloading the multilingual ${installer.descriptor.id.removePrefix("whisper-")} model (${formatByteSize(installer.descriptor.sizeBytes)}) is the only network step.",
+                "Voice recordings and transcription stay on this Mac. Downloading the multilingual " +
+                    "${installer.descriptor.id.removePrefix("whisper-")} model " +
+                    "(${formatByteSize(installer.descriptor.sizeBytes)}) is the only network step.",
                 color = colors.td,
                 fontSize = 11.sp,
                 maxLines = 4,

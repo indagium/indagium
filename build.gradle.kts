@@ -73,7 +73,7 @@ val compileAppleSpeechNative by tasks.registering(Exec::class) {
         }.get().metadata.installationPath.asFile
         commandLine(
             "clang", "-dynamiclib", "-fobjc-arc", "-fblocks",
-            "-I${javaHome}/include", "-I${javaHome}/include/darwin",
+            "-I$javaHome/include", "-I$javaHome/include/darwin",
             "-framework", "Foundation", "-framework", "Speech", "-framework", "AVFoundation",
             "native/macos/openlog_speech.m", "-o", output.absolutePath,
         )
