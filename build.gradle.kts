@@ -57,6 +57,7 @@ val generatedBuildInfoDir = layout.buildDirectory.dir("generated/openlogBuildInf
 val generatedLicenseResourcesDir = layout.buildDirectory.dir("generated/openlogLicenseResources/desktopMain/resources")
 val generatedNativeResourcesDir = layout.buildDirectory.dir("generated/openlogNativeResources/desktopMain/resources")
 val isMacHost = org.gradle.internal.os.OperatingSystem.current().isMacOsX
+val isWindowsHost = org.gradle.internal.os.OperatingSystem.current().isWindows
 
 // Apple Speech is called inside the JVM process through a very small Objective-C JNI bridge.
 // Keeping it generated rather than committed as a binary makes the native code reviewable and
@@ -216,6 +217,18 @@ compose.desktop {
         // (not -Xmx) so small machines aren't over-committed; memory is only committed as used.
         jvmArgs("-XX:MaxRAMPercentage=50")
 
+        // Company TLS-inspection roots are often installed only in the Windows certificate store,
+        // not in the bundled JRE's static cacerts file. Let the Windows installer trust the same
+        // roots as the rest of the OS, including when UpdateChecker follows GitHub's asset redirect.
+        // The property must be present before Ktor creates its first TLS client; NONE stops JSSE
+        // from attempting to load the default cacerts path as a Windows-native keystore.
+        if (isWindowsHost) {
+            jvmArgs(
+                "-Djavax.net.ssl.trustStoreType=Windows-ROOT",
+                "-Djavax.net.ssl.trustStore=NONE",
+            )
+        }
+
         // Linux only (jpackage builds for the host OS, so host OS == target OS here): lets
         // Main.kt overwrite sun.awt.X11.XToolkit.awtAppClassName so the window's WM_CLASS is
         // "openLog" instead of "MainKt" — required for docks/taskbars to match the running
@@ -253,6 +266,10 @@ compose.desktop {
             // the MCP control server in a packaged .dmg/.deb/.msi. desktopRun never surfaces
             // this because it runs on your full local JDK, not the trimmed runtime image.
             modules("jdk.httpserver")
+            // Windows-ROOT is implemented by the SunMSCAPI provider. It is dynamically chosen
+            // from the JVM trust-store properties above, so jdeps cannot discover it on its own.
+            // Keep it Windows-only: the module does not exist in macOS/Linux JDKs.
+            if (isWindowsHost) modules("jdk.crypto.mscapi")
             macOS {
                 bundleID = "com.romanarnaut.openlog"
                 iconFile.set(project.file("icons/openlog.icns"))
