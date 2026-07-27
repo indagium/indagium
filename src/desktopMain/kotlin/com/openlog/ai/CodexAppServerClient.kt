@@ -28,7 +28,9 @@ import java.io.BufferedWriter
 import java.io.Closeable
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /** The small process surface needed by the JSONL transport, suitable for deterministic fakes. */
@@ -40,6 +42,9 @@ interface CodexAppServerProcess : Closeable {
     fun isAlive(): Boolean
 
     fun exitCode(): Int?
+
+    /** A short, display-safe tail of stderr when the child process terminates unexpectedly. */
+    fun diagnosticOutput(): String? = null
 
     fun destroy()
 
@@ -325,7 +330,7 @@ class CodexAppServerClient(
                 handleMessage(line)
             }
             if (!closed) {
-                val failure = CodexAppServerException("Codex app-server process exited")
+                val failure = CodexAppServerException(appServerExitMessage(process.exitCode(), process.diagnosticOutput()))
                 pending.values.forEach { it.completeExceptionally(failure) }
                 pending.clear()
                 eventBus.emit(CodexAppServerEvent.ProcessExited(process.exitCode()))
@@ -543,7 +548,6 @@ class CodexAppServerClient(
             scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
         ): CodexAppServerClient {
             val builder = ProcessBuilder(command)
-                .redirectError(ProcessBuilder.Redirect.INHERIT)
             builder.environment().putAll(environment)
             val process = builder.start()
             return CodexAppServerClient(JavaCodexAppServerProcess(process), scope)
@@ -554,6 +558,10 @@ class CodexAppServerClient(
 private class JavaCodexAppServerProcess(private val process: Process) : CodexAppServerProcess {
     private val stdout: BufferedReader = InputStreamReader(process.inputStream).buffered()
     private val stdin: BufferedWriter = OutputStreamWriter(process.outputStream).buffered()
+    private val stderrTail = ProcessDiagnosticTail()
+    private val stderrDrainer: CompletableFuture<Void> = CompletableFuture.runAsync {
+        process.errorStream.bufferedReader().useLines { lines -> lines.forEach(stderrTail::append) }
+    }
 
     override fun writeLine(line: String) {
         synchronized(stdin) {
@@ -573,9 +581,54 @@ private class JavaCodexAppServerProcess(private val process: Process) : CodexApp
         null
     }
 
+    override fun diagnosticOutput(): String? {
+        if (!process.isAlive) runCatching { stderrDrainer.get(STDERR_DRAIN_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS) }
+        return stderrTail.text()
+    }
+
     override fun destroy() {
         stdin.close()
         stdout.close()
+        process.errorStream.close()
         if (process.isAlive) process.destroy()
+    }
+
+    private companion object {
+        const val STDERR_DRAIN_TIMEOUT_MILLIS = 250L
+    }
+}
+
+internal fun appServerExitMessage(exitCode: Int?, diagnostics: String?): String = buildString {
+    append("Codex app-server exited")
+    exitCode?.let { append(" (exit $it)") }
+    diagnostics?.trim()?.takeIf(String::isNotBlank)?.let { append(": ").append(it) }
+}
+
+/** Keeps stderr useful for repair without letting a verbose or sensitive child-process error escape. */
+private class ProcessDiagnosticTail {
+    private val lines = ArrayDeque<String>()
+    private var characterCount = 0
+
+    @Synchronized
+    fun append(line: String) {
+        val safeLine = line
+            .replace(Regex("(?i)(bearer\\s+)[^\\s,;]+"), "$1[REDACTED]")
+            .replace(Regex("(?i)((?:api[_-]?key|token|secret|password|authorization)\\s*[=:]\\s*)[^\\s,;]+"), "$1[REDACTED]")
+            .trim()
+            .take(MAX_LINE_CHARS)
+        if (safeLine.isBlank()) return
+        lines.addLast(safeLine)
+        characterCount += safeLine.length + 1
+        while (characterCount > MAX_TAIL_CHARS && lines.isNotEmpty()) {
+            characterCount -= lines.removeFirst().length + 1
+        }
+    }
+
+    @Synchronized
+    fun text(): String? = lines.joinToString("\n").takeIf(String::isNotBlank)
+
+    private companion object {
+        const val MAX_LINE_CHARS = 500
+        const val MAX_TAIL_CHARS = 2_000
     }
 }
