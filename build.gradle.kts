@@ -19,7 +19,7 @@ plugins {
 
 // MCP SDK 0.14.0 is built with Kotlin 2.3.21 (consumable by our 2.4.0 compiler) and Ktor 3.4.3;
 // it exposes the mcpStreamableHttp {} Ktor helper the older 0.8.x line lacked.
-val ktorVersion = "3.4.3"
+val ktorVersion = "3.5.1"
 
 // bytedeco/javacv 1.5.13 (com.openlog.video.VideoPlayerController) — FFmpeg natives ship INSIDE
 // the jar (no user install), decode every phone recording format incl. HEVC/.mov/WebM, and stay
