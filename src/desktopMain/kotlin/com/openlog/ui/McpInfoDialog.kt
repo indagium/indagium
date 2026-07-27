@@ -40,6 +40,7 @@ internal fun agoLabel(lastSeenMs: Long): String {
 private enum class McpCopiedField {
     Url,
     Config,
+    CodexConfig,
     CurlCommand,
 }
 
@@ -108,6 +109,20 @@ internal fun McpInfoDialog(state: AppState, port: Int, token: String, onDismiss:
                 },
             )
             if (copiedField == McpCopiedField.Config) {
+                Spacer(Modifier.width(8.dp))
+                AppText("Copied", color = tc.ac, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AppButton(
+                "Copy config for Codex",
+                onClick = {
+                    state.copyToClipboard(codexMcpConfigSnippet(port, liveToken))
+                    copiedField = McpCopiedField.CodexConfig
+                },
+            )
+            if (copiedField == McpCopiedField.CodexConfig) {
                 Spacer(Modifier.width(8.dp))
                 AppText("Copied", color = tc.ac, fontSize = 11.sp, fontWeight = FontWeight.Medium)
             }

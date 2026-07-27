@@ -2435,6 +2435,16 @@ internal fun mcpConfigSnippet(port: Int, token: String): String =
     }
     """.trimIndent()
 
+internal fun codexMcpConfigSnippet(port: Int, token: String): String =
+    """
+    [mcp_servers.openlog]
+    url = "${mcpUrl(port)}"
+    http_headers = { Authorization = "Bearer $token" }
+
+    [mcp_servers.openlog.tools.list_tabs]
+    approval_mode = "approve"
+    """.trimIndent()
+
 internal fun mcpUrl(port: Int): String = "http://127.0.0.1:$port/mcp"
 
 @Composable
