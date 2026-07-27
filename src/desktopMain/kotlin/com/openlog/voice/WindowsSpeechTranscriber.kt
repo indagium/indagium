@@ -34,7 +34,11 @@ class WindowsSpeechTranscriber : VoiceTranscriber {
             }
             val output = process.inputStream.bufferedReader().readText().trim()
             when {
-                process.exitValue() != 0 -> VoiceTranscriptionResult.Failure(output.ifBlank { "Windows Speech could not recognize this language. Install its offline speech pack or choose Whisper." })
+                process.exitValue() != 0 -> VoiceTranscriptionResult.Failure(
+                    output.ifBlank {
+                        "Windows Speech could not recognize this language. Install its offline speech pack or choose Whisper."
+                    },
+                )
                 output.isBlank() -> VoiceTranscriptionResult.Failure("No speech was recognized. Try again.")
                 else -> VoiceTranscriptionResult.Success(VoiceTranscript(output, language, translatedToEnglish = false))
             }
@@ -49,7 +53,9 @@ class WindowsSpeechTranscriber : VoiceTranscriber {
 
     private fun VoiceAudio.toWavBytes(): ByteArray {
         val header = ByteArray(44)
+
         fun writeInt(offset: Int, value: Int) { repeat(4) { index -> header[offset + index] = (value ushr (index * 8)).toByte() } }
+
         fun writeShort(offset: Int, value: Int) { repeat(2) { index -> header[offset + index] = (value ushr (index * 8)).toByte() } }
         "RIFF".encodeToByteArray().copyInto(header, 0); writeInt(4, 36 + pcm16le.size); "WAVEfmt ".encodeToByteArray().copyInto(header, 8)
         writeInt(16, 16); writeShort(20, 1); writeShort(22, channels); writeInt(24, sampleRateHz)

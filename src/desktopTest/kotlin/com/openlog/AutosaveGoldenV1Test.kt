@@ -3,8 +3,8 @@ package com.openlog
 import androidx.compose.ui.graphics.Color
 import com.openlog.model.AnnotationLogBlockStyle
 import com.openlog.model.CrashCategory
-import com.openlog.model.IssueCategorySelection
 import com.openlog.model.CtrlFTarget
+import com.openlog.model.IssueCategorySelection
 import com.openlog.model.ThemePreset
 import com.openlog.ui.AppState
 import kotlin.io.path.createTempDirectory

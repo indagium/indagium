@@ -1,12 +1,12 @@
 package com.openlog.voice
 
 import com.openlog.model.AppSettings
-import com.openlog.model.VoiceRecognitionEngine
 import com.openlog.model.VoiceInputSettings
+import com.openlog.model.VoiceRecognitionEngine
 import com.openlog.ui.settingsFromJson
 import com.openlog.ui.settingsJson
-import kotlin.test.assertEquals
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 

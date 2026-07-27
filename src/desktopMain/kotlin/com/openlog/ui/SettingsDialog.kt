@@ -49,10 +49,10 @@ import com.openlog.ai.OpenAiCompatibleProvider
 import com.openlog.ai.normalizeAiProviderProfiles
 import com.openlog.generated.BuildInfo
 import com.openlog.model.*
+import com.openlog.voice.VoiceLanguageCatalog
 import com.openlog.voice.VoiceModelCatalog
 import com.openlog.voice.VoiceModelInstallResult
 import com.openlog.voice.VoiceModelInstaller
-import com.openlog.voice.VoiceLanguageCatalog
 import com.openlog.voice.VoiceRecognitionEngines
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -1730,16 +1730,25 @@ private fun VoiceInputSettingsSection(state: AppState) {
             }
             AppText(
                 if (voiceSettings.translateToEnglish) {
-                    "Output mode: English translation after ${VoiceLanguageCatalog.label(voiceSettings.selectedRecognitionLanguageCode)} recognition. You can edit the result before sending."
+                    "Output mode: English translation after " +
+                        "${VoiceLanguageCatalog.label(voiceSettings.selectedRecognitionLanguageCode)} recognition. " +
+                        "You can edit the result before sending."
                 } else {
-                    "Output mode: ${VoiceLanguageCatalog.label(voiceSettings.selectedRecognitionLanguageCode)} transcript. You can edit the result before sending."
+                    "Output mode: ${VoiceLanguageCatalog.label(voiceSettings.selectedRecognitionLanguageCode)} " +
+                        "transcript. You can edit the result before sending."
                 },
                 color = tc.td,
                 fontSize = 10.sp,
                 maxLines = 3,
             )
         } else {
-            AppText("This OS engine returns the recognized spoken language only; English translation remains available with Whisper.", color = tc.td, fontSize = 10.sp, maxLines = 3)
+            AppText(
+                "This OS engine returns the recognized spoken language only; English translation " +
+                    "remains available with Whisper.",
+                color = tc.td,
+                fontSize = 10.sp,
+                maxLines = 3,
+            )
         }
         Divider()
         AppText("Recognition language", color = tc.td, fontSize = 10.sp, fontFamily = UI)
@@ -1833,90 +1842,93 @@ private fun VoiceInputSettingsSection(state: AppState) {
         }
         Divider()
         if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WHISPER) {
-        AppText("Local model", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-        SegmentedControl(
-            options = VoiceModelCatalog.all.map { model ->
-                if (model.id == VoiceModelCatalog.base.id) "Base (${formatByteSize(model.sizeBytes)})"
-                else "Small (${formatByteSize(model.sizeBytes)})"
-            },
-            selectedIndices = setOf(VoiceModelCatalog.all.indexOfFirst { it.id == selectedModel.id }),
-            onToggle = { index ->
-                val model = VoiceModelCatalog.all[index]
-                state.updateSettings { settings ->
-                    settings.copy(voiceInput = settings.voiceInput.copy(modelId = model.id))
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            fillWidth = true,
-        )
-        AppText(
-            (
-                if (selectedModel.id == VoiceModelCatalog.small.id) {
-                    "Whisper small (multilingual): more accurate for Ukrainian/Russian and short phrases, but uses more disk, memory, and CPU."
-                } else {
-                    "Whisper base (multilingual): faster and smaller, best for English or longer, clear speech."
-                }
-            ) + " One explicit HTTPS download; no cloud speech-recognition service.",
-            color = tc.tx,
-            fontSize = 12.sp,
-            maxLines = 3,
-        )
-        AppText(
-            when {
-                checkingModel -> "Checking local model…"
-                installed -> "Status: installed at openLog application data/voice-models."
-                else -> "Status: not installed."
-            },
-            color = if (installed) tc.ac else tc.td,
-            fontSize = 11.sp,
-        )
-        if (installing) AppText("Downloading ${formatByteSize(downloadedBytes)}…", color = tc.ac, fontSize = 11.sp)
-        statusMessage?.let { message ->
-            AppText(message, color = if (installed) tc.ac else DANGER_RED, fontSize = 10.sp, maxLines = 3)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (installed) {
-                AppButton(
-                    "Remove model",
-                    onClick = {
-                        if (installer.remove()) {
-                            installed = false
-                            statusMessage = "Local voice model removed."
-                        } else {
-                            statusMessage = "Could not remove the local voice model."
-                        }
-                    },
-                    variant = ButtonVariant.Secondary,
-                    isDanger = true,
-                    enabled = !installing,
-                )
-                AppButton(
-                    "Reinstall",
-                    onClick = {
-                        installer.remove()
-                        installed = false
-                        installModel()
-                    },
-                    variant = ButtonVariant.Secondary,
-                    enabled = !installing,
-                )
-            } else {
-                AppButton(
-                    if (installing) "Downloading…" else "Download local model",
-                    onClick = ::installModel,
-                    variant = ButtonVariant.Primary,
-                    enabled = !installing && !checkingModel,
-                )
+            AppText("Local model", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            SegmentedControl(
+                options = VoiceModelCatalog.all.map { model ->
+                    if (model.id == VoiceModelCatalog.base.id) "Base (${formatByteSize(model.sizeBytes)})"
+                    else "Small (${formatByteSize(model.sizeBytes)})"
+                },
+                selectedIndices = setOf(VoiceModelCatalog.all.indexOfFirst { it.id == selectedModel.id }),
+                onToggle = { index ->
+                    val model = VoiceModelCatalog.all[index]
+                    state.updateSettings { settings ->
+                        settings.copy(voiceInput = settings.voiceInput.copy(modelId = model.id))
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                fillWidth = true,
+            )
+            AppText(
+                (
+                    if (selectedModel.id == VoiceModelCatalog.small.id) {
+                        "Whisper small (multilingual): more accurate for Ukrainian/Russian and short phrases, but uses more disk, memory, and CPU."
+                    } else {
+                        "Whisper base (multilingual): faster and smaller, best for English or longer, clear speech."
+                    }
+                ) + " One explicit HTTPS download; no cloud speech-recognition service.",
+                color = tc.tx,
+                fontSize = 12.sp,
+                maxLines = 3,
+            )
+            AppText(
+                when {
+                    checkingModel -> "Checking local model…"
+                    installed -> "Status: installed at openLog application data/voice-models."
+                    else -> "Status: not installed."
+                },
+                color = if (installed) tc.ac else tc.td,
+                fontSize = 11.sp,
+            )
+            if (installing) AppText("Downloading ${formatByteSize(downloadedBytes)}…", color = tc.ac, fontSize = 11.sp)
+            statusMessage?.let { message ->
+                AppText(message, color = if (installed) tc.ac else DANGER_RED, fontSize = 10.sp, maxLines = 3)
             }
-        }
-        AppText("Model license: ${selectedModel.licenseUrl}", color = tc.td, fontSize = 10.sp, maxLines = 2)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (installed) {
+                    AppButton(
+                        "Remove model",
+                        onClick = {
+                            if (installer.remove()) {
+                                installed = false
+                                statusMessage = "Local voice model removed."
+                            } else {
+                                statusMessage = "Could not remove the local voice model."
+                            }
+                        },
+                        variant = ButtonVariant.Secondary,
+                        isDanger = true,
+                        enabled = !installing,
+                    )
+                    AppButton(
+                        "Reinstall",
+                        onClick = {
+                            installer.remove()
+                            installed = false
+                            installModel()
+                        },
+                        variant = ButtonVariant.Secondary,
+                        enabled = !installing,
+                    )
+                } else {
+                    AppButton(
+                        if (installing) "Downloading…" else "Download local model",
+                        onClick = ::installModel,
+                        variant = ButtonVariant.Primary,
+                        enabled = !installing && !checkingModel,
+                    )
+                }
+            }
+            AppText("Model license: ${selectedModel.licenseUrl}", color = tc.td, fontSize = 10.sp, maxLines = 2)
         } else {
             AppText("Native engine", color = tc.td, fontSize = 10.sp, fontFamily = UI)
             AppText(
                 if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.APPLE_SPEECH) {
-                    "At first use macOS asks for Speech Recognition permission. If the selected language has no on-device Apple model, openLog refuses to send audio and you can switch back to Whisper."
+                    "At first use macOS asks for Speech Recognition permission. If the selected " +
+                        "language has no on-device Apple model, openLog refuses to send audio and " +
+                        "you can switch back to Whisper."
                 } else {
-                    "Windows uses the selected installed offline speech-recognition language pack. If it is missing, openLog refuses to send audio and you can switch back to Whisper."
+                    "Windows uses the selected installed offline speech-recognition language pack. " +
+                        "If it is missing, openLog refuses to send audio and you can switch back to Whisper."
                 },
                 color = tc.tx,
                 fontSize = 12.sp,

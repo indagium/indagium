@@ -109,6 +109,7 @@ enum class CrashCategory { ALL, CRASHES, ANRS, FATAL_EXCEPTIONS, EXCEPTIONS, OTH
 
 sealed interface IssueCategorySelection {
     data class BuiltIn(val category: CrashCategory) : IssueCategorySelection
+
     data class Custom(val ruleId: String) : IssueCategorySelection
 }
 
