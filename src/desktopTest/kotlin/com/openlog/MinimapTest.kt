@@ -12,8 +12,8 @@ import com.openlog.ui.MINIMAP_MAX_BUCKETS
 import com.openlog.ui.MinimapWord
 import com.openlog.ui.computeMinimapBars
 import com.openlog.ui.minimapBucketOf
-import com.openlog.ui.minimapFirstVisibleIndexForViewportCenter
 import com.openlog.ui.minimapFirstVisibleIndexForCenteredItem
+import com.openlog.ui.minimapFirstVisibleIndexForViewportCenter
 import com.openlog.ui.minimapFirstVisibleIndexForViewportDrag
 import com.openlog.ui.minimapItemIndexAtPointer
 import com.openlog.ui.minimapItemIndexOf

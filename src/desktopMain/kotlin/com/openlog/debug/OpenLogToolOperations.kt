@@ -24,6 +24,7 @@ import com.openlog.ui.SEQ_COLORS
 import com.openlog.ui.SplitSource
 import com.openlog.ui.imageBytesFromFile
 import com.openlog.ui.rotatedFramePng
+import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.computeItems
 import com.openlog.utils.containsPattern
@@ -31,7 +32,6 @@ import com.openlog.utils.indexOfEntryId
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.newId
-import com.openlog.utils.RegexEvaluationContext
 import java.io.File
 import java.util.Base64
 import kotlin.math.roundToInt
@@ -665,10 +665,14 @@ internal class OpenLogToolOperations(
     @Suppress("CyclomaticComplexMethod") // Mirrors SeqComputer's matching/end/nesting algorithm in one scan.
     private fun computeSequenceOccurrences(data: List<LogEntry>, definitions: List<SequenceDef>): List<SequenceOccurrence> {
         if (data.isEmpty() || definitions.isEmpty()) return emptyList()
+
         data class Candidate(val startIndex: Int, val definition: SequenceDef, var endExclusive: Int = 0, var parent: Int = -1)
+
         val regexContext = RegexEvaluationContext()
+
         fun matches(entry: LogEntry, text: String, regex: Boolean, tag: String?): Boolean =
             (tag == null || entry.tag == tag) && containsPattern("${entry.tag} ${entry.msg}", text, regex, regexContext = regexContext)
+
         val candidates = ArrayList<Candidate>()
         val endIndices = HashMap<String, MutableList<Int>>()
         val endingDefinitions = definitions.filter { !it.endMatchText.isNullOrBlank() }
@@ -682,6 +686,7 @@ internal class OpenLogToolOperations(
             }
         }
         if (candidates.isEmpty()) return emptyList()
+
         fun firstAfter(indices: List<Int>, index: Int): Int? {
             var low = 0
             var high = indices.size
@@ -730,6 +735,7 @@ internal class OpenLogToolOperations(
             }
             stack += index
         }
+
         fun depth(index: Int): Int {
             var result = 0
             var parent = candidates[index].parent

@@ -1,5 +1,6 @@
 package com.openlog.debug
 
+import androidx.compose.ui.graphics.Color
 import com.openlog.model.AnnBlock
 import com.openlog.model.FilterMode
 import com.openlog.model.LogEntry
@@ -8,7 +9,6 @@ import com.openlog.model.SequenceDef
 import com.openlog.model.VideoAttachment
 import com.openlog.ui.AppState
 import com.openlog.ui.mkTab
-import androidx.compose.ui.graphics.Color
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import java.awt.image.BufferedImage
