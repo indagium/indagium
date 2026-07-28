@@ -43,12 +43,62 @@ internal enum class AiQuickAction(val label: String, val prompt: String, val req
     ),
     ISSUE_INVESTIGATION(
         label = "Investigate issue",
-        prompt = "Call get_issue_description for this tab and read its issueDescription field as the problem to " +
-            "investigate; if it is blank, say so and stop instead of guessing what the issue is. Otherwise use " +
-            "set_filter and the log/source tools to narrow down and gather only tool-returned evidence relevant " +
-            "to that description. Once you have a conclusion, call add_text_note to write a note summarizing the " +
-            "root cause, the supporting evidence, and recommended next steps - do not just describe the analysis " +
-            "in your reply without also saving it as a note.",
+        prompt = """
+            Investigate the issue in this pinned tab and leave a durable, evidence-backed analysis in Notes.
+
+            ## Intake and scope
+            1. Call `get_issue_description`. If `issueDescription` is blank, say that the issue description is
+               missing and stop; do not infer a bug from the log.
+            2. Call `get_annotation_sections` to preserve existing From and Next steps context. Call `get_filter`
+               and `get_crash_sites` once to establish the current view and any high-signal anchors. Use
+               `get_project_info` at most once when registered source-folder context would help identify the
+               functional area. Do not ask for source code or README content repeatedly.
+            3. State a working functional area only as a hypothesis, derived from the issue description, exact
+               tags/packages, crash site, or a source mapping. Do not treat the reporter's area as proof of cause.
+
+            ## Evidence loop — minimise tokens
+            - Never call unfiltered `get_visible_lines`. First narrow with `set_filter`, using exact tags,
+              package prefixes, PIDs/TIDs, levels, or a literal keyword discovered from a crash/description.
+              Use `get_tags` or `get_packages` only when needed to discover valid filter values.
+            - Read small samples: normally 50–200 rows with `compact: true` and fields `id`, `ts`, `level`,
+              `tag`, and `msg`. Paginate or widen only when the prior sample creates a specific question.
+            - For an anchor, use `get_line_context` with a small before/after window rather than widening the
+              filter. Resolve source only for the few decisive lines with `resolve_log_source`; source matches
+              identify ownership and control flow, not proof on their own.
+            - Inspect existing sequences through `get_sequence_summary`; then inspect only error-containing,
+              longest, or otherwise representative occurrences by their boundary line ids. Add a new sequence
+              only after bounded evidence reveals real start/end markers. Never expand every group or read every
+              sequence occurrence.
+            - Keep a claim only when its time order and causal connection are supported by returned evidence.
+              A missing line, noisy framework message, or a past case is a lead, not evidence of this root cause.
+
+            ## Functional-area pivot and critic pass
+            Before writing Notes, perform a separate compact critic pass over the tentative analysis: list the
+            strongest alternative cause, each unsupported leap, and the one most valuable missing check. If the
+            critic finds a material gap, gather only the targeted evidence and revise the hypothesis before
+            continuing. Do not claim that an external reviewer or subagent was used.
+
+            If the evidence points to a root-cause functional area different from the reported area, explicitly
+            record both areas and restart the narrowed evidence loop in the newly discovered area before making a
+            root-cause conclusion. Do not merely relabel the conclusion; confirm the cross-area handoff with log
+            or source evidence. If it remains uncertain, report competing hypotheses rather than a false root cause.
+
+            ## Required Notes output
+            Save the result even if the outcome is "inconclusive". Preserve existing Notes; only append useful,
+            non-duplicated content:
+            1. Use `append_annotation_section` on `prefix` to add a concise investigation scope/title when the
+               existing From section does not already identify it.
+            2. Create a chronological evidence timeline with `add_log_note` for the decisive log rows. Anchor each
+               block to the smallest useful set of line ids (first/last for a contiguous range) and give it a
+               factual caption. Do not dump all matching rows into Notes.
+            3. Use `add_text_note` for the synthesis: issue, reported area, root-cause area, conclusion and
+               confidence, causal chain, evidence limitations, and rejected alternatives.
+            4. Use `append_annotation_section` on `suffix` for concrete follow-up: fix owner/area, verification,
+               and any unanswered question. Do not overwrite existing From or Next steps text.
+
+            In the chat reply, give a short summary and link it to the note/evidence you created. Cite only
+            tool-returned facts; never invent log lines, source mappings, or actions.
+        """.trimIndent(),
         requiresLine = false,
         slashName = "investigate_issue",
     ),

@@ -15,6 +15,19 @@ import kotlin.test.assertTrue
 
 class AiInvestigationEvidenceTest {
     @Test
+    fun issueInvestigationPromptRequiresBoundedEvidenceCritiqueAndNotes() {
+        val prompt = AiQuickAction.ISSUE_INVESTIGATION.prompt
+
+        assertTrue(prompt.contains("Never call unfiltered `get_visible_lines`"))
+        assertTrue(prompt.contains("get_sequence_summary"))
+        assertTrue(prompt.contains("critic pass"))
+        assertTrue(prompt.contains("root-cause functional area different"))
+        assertTrue(prompt.contains("append_annotation_section"))
+        assertTrue(prompt.contains("add_log_note"))
+        assertTrue(prompt.contains("add_text_note"))
+    }
+
+    @Test
     fun quickActionPinsTheExplicitTabAndSelectedLine() {
         val state = stateWithTabs()
         try {
