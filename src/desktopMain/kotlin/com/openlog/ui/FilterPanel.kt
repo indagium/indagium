@@ -174,6 +174,7 @@ class FilterPanelUiState {
     var incPillsExpanded    by mutableStateOf(true)
     var incMsgPillsExpanded by mutableStateOf(true)
     var excMsgPillsExpanded by mutableStateOf(true)
+
     // These are drafts for the two discovery fields, rather than filter state.  In particular a
     // tag query is not applied until the user chooses a candidate, and a message query can be
     // hidden while its debounce is still pending.  Keep them per tab so collapsing/reopening the
