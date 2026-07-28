@@ -23,6 +23,9 @@ If a tab looks filtered but `activeTags`/levels seem empty, read `get_filter` in
 
 - Never request unfiltered `get_visible_lines` on a file without applying a filter first.
 - Prefer `set_filter` (tags/keywords/pid) over asking the user to do it manually.
+- After resolving a decisive log line, use `list_source_declarations` and then
+  `get_source_declarations` for exact class/member context. Use paginated `get_source_file` only
+  when the declaration is not enough.
 - If a tool call would be destructive or hard to undo (closing a tab, splitting to disk,
   exporting), stop and ask for confirmation instead of calling it.
 

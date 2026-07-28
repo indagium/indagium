@@ -24,12 +24,14 @@ import com.openlog.source.LogCallSite
 import com.openlog.source.LogSourceResolver
 import com.openlog.source.SOURCE_INDEX_VERSION
 import com.openlog.source.SourceCodeView
+import com.openlog.source.SourceFileSnapshot
 import com.openlog.source.SourceIndex
 import com.openlog.source.SourceIndexBuildOptions
 import com.openlog.source.SourceIndexStatus
 import com.openlog.source.SourceIndexStore
 import com.openlog.source.SourceIndexer
 import com.openlog.source.SourceMatch
+import com.openlog.source.SourceStructureParser
 import com.openlog.source.sourceConfigurationFingerprint
 import com.openlog.update.ReleaseInfo
 import com.openlog.update.UpdateCheckResult
@@ -5744,6 +5746,29 @@ class AppState(
             if (startIdx < 0 || endIdx > lines.size || startIdx >= endIdx) return@runCatching null
             lines.subList(startIdx, endIdx).joinToString("\n")
         }.getOrNull()
+    }
+
+    /**
+     * Reads a live Kotlin/Java source file only when it remains inside one of the source folders
+     * the user explicitly registered in Settings. Canonical paths close both `..` traversal and
+     * symlinks that point outside that consented boundary.
+     */
+    fun readRegisteredSourceFile(filePath: String): SourceFileSnapshot? {
+        val target = runCatching { File(filePath).canonicalFile }.getOrNull() ?: return null
+        if (!target.isFile || target.extension.lowercase() !in setOf("kt", "java")) return null
+        val targetPath = target.toPath()
+        val allowed = settings.sourceFolders.any { rootPath ->
+            runCatching { targetPath.startsWith(File(rootPath).canonicalFile.toPath()) }.getOrDefault(false)
+        }
+        if (!allowed) return null
+        val text = runCatching { target.readText() }.getOrNull() ?: return null
+        return SourceFileSnapshot(
+            canonicalPath = target.absolutePath,
+            text = text,
+            revision = SourceStructureParser.revision(text),
+            lineCount = if (text.isEmpty()) 0 else text.count { it == '\n' } + 1,
+            isJavaFile = target.extension.equals("java", ignoreCase = true),
+        )
     }
 
     fun showSourceForLine(tabId: String, lineId: Int) {

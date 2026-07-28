@@ -64,7 +64,10 @@ internal enum class AiQuickAction(val label: String, val prompt: String, val req
               `tag`, and `msg`. Paginate or widen only when the prior sample creates a specific question.
             - For an anchor, use `get_line_context` with a small before/after window rather than widening the
               filter. Resolve source only for the few decisive lines with `resolve_log_source`; source matches
-              identify ownership and control flow, not proof on their own.
+              identify ownership and control flow, not proof on their own. If source context is needed, first
+              call `list_source_declarations` using a returned filePath, then fetch only relevant bodies with
+              `get_source_declarations` and its revision. Use paginated `get_source_file` only for broader
+              context the exact declaration cannot provide.
             - Inspect existing sequences through `get_sequence_summary`; then inspect only error-containing,
               longest, or otherwise representative occurrences by their boundary line ids. Add a new sequence
               only after bounded evidence reveals real start/end markers. Never expand every group or read every

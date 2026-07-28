@@ -66,6 +66,10 @@ A few worth calling out:
 - `get_packages` lists dotted tag-prefixes (with counts) to discover values for `pkgPrefixes`.
 - `get_project_info` returns the description/README set per registered source folder in
   Settings → Source code — useful project context before a code-level investigation.
+- `list_source_declarations` exposes a file's top-level declarations or a class's direct members;
+  use its opaque ids with `get_source_declarations` to retrieve exact method/class bodies. Use
+  `get_source_file` only for broader context and page with `nextStartLine`. These reads are limited
+  to Kotlin/Java files under registered source folders, even when the source index is unavailable.
 - `get_annotation_sections` reads the Notes panel's From (`prefix`) and Next steps (`suffix`)
   sections. `append_annotation_section` adds non-blank text to either section without replacing
   existing notes.

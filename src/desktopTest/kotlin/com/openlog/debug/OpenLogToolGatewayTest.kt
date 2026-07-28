@@ -54,6 +54,7 @@ class OpenLogToolGatewayTest {
             "add_text_note", "add_log_note", "add_image_note", "update_note_block", "move_note_block",
             "delete_note_block", "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing", "resolve_log_source",
+            "get_source_file", "list_source_declarations", "get_source_declarations",
             "get_project_info", "set_highlighters", "reindex_sources", "add_manual_collapse", "add_sequence",
             "save_filter_preset", "search_similar_cases", "get_case", "set_case_metadata", "reindex_cases",
             "get_video_frame", "get_follow_diagnostics",
@@ -180,6 +181,81 @@ class OpenLogToolGatewayTest {
         assertEquals(true, result["ok"])
         assertEquals(FilterMode.KEYWORD, state.tab("t1")!!.filter.mode)
         assertEquals(OpenLogToolActionPolicy.AUTOMATIC, operations.toolGateway.actionPolicy("set_filter"))
+    }
+
+    @Test
+    fun sourceNavigationReadsRegisteredFilesAndExactClassMembers() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-source-navigation").toFile()
+        val source = File(dir, "Feature.kt").apply {
+            writeText(
+                """
+                package demo
+
+                class Feature {
+                    val state = 1
+                    fun run(id: String) {
+                        Log.d("Feature", "run ${'$'}id")
+                    }
+                }
+                """.trimIndent(),
+            )
+        }
+        state.updateSettings { it.copy(sourceFolders = listOf(dir.absolutePath)) }
+
+        val page = operations.toolGateway.execute(
+            "get_source_file", mapOf("filePath" to source.absolutePath, "lineCount" to 2),
+        ) as Map<*, *>
+        assertEquals(1, page["startLine"])
+        assertEquals(2, page["endLine"])
+        assertEquals(3, page["nextStartLine"])
+
+        val top = operations.toolGateway.execute(
+            "list_source_declarations", mapOf("filePath" to source.absolutePath),
+        ) as Map<*, *>
+        val feature = (top["declarations"] as List<*>).single() as Map<*, *>
+        assertEquals("class", feature["kind"])
+        val memberList = operations.toolGateway.execute(
+            "list_source_declarations", mapOf("filePath" to source.absolutePath, "parentId" to feature["id"]),
+        ) as Map<*, *>
+        val members = memberList["declarations"] as List<*>
+        assertEquals(setOf("state", "run"), members.map { (it as Map<*, *>)["name"] }.toSet())
+        val run = members.map { it as Map<*, *> }.single { it["name"] == "run" }
+        val exact = operations.toolGateway.execute(
+            "get_source_declarations",
+            mapOf("filePath" to source.absolutePath, "declarationIds" to listOf(run["id"]), "revision" to top["revision"]),
+        ) as Map<*, *>
+        assertTrue((((exact["declarations"] as List<*>).single() as Map<*, *>)["code"] as String).contains("Log.d"))
+    }
+
+    @Test
+    fun sourceNavigationRejectsUnregisteredAndStaleRequests() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-source-navigation-security").toFile()
+        val source = File(dir, "Feature.kt").apply { writeText("class Feature { fun run() = Unit }") }
+        val outside = File(dir.parentFile, "outside.kt").apply { writeText("class Outside") }
+        state.updateSettings { it.copy(sourceFolders = listOf(dir.absolutePath)) }
+
+        val denied = operations.toolGateway.execute("get_source_file", mapOf("filePath" to outside.absolutePath)) as Map<*, *>
+        assertTrue((denied["error"] as String).contains("outside registered"))
+        val symlink = File(dir, "linked-outside.kt")
+        java.nio.file.Files.createSymbolicLink(symlink.toPath(), outside.toPath())
+        val symlinkDenied = operations.toolGateway.execute("get_source_file", mapOf("filePath" to symlink.absolutePath)) as Map<*, *>
+        assertTrue((symlinkDenied["error"] as String).contains("outside registered"))
+
+        val unknownParent = operations.toolGateway.execute(
+            "list_source_declarations", mapOf("filePath" to source.absolutePath, "parentId" to "unknown"),
+        ) as Map<*, *>
+        assertTrue((unknownParent["error"] as String).contains("unknown declaration id"))
+
+        val outline = operations.toolGateway.execute(
+            "list_source_declarations", mapOf("filePath" to source.absolutePath),
+        ) as Map<*, *>
+        val id = ((outline["declarations"] as List<*>).single() as Map<*, *>)["id"]
+        source.writeText("class Feature { fun changed() = Unit }")
+        val stale = operations.toolGateway.execute(
+            "get_source_declarations",
+            mapOf("filePath" to source.absolutePath, "declarationIds" to listOf(id), "revision" to outline["revision"]),
+        ) as Map<*, *>
+        assertTrue((stale["error"] as String).contains("source file changed"))
     }
 
     @Test

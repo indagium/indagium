@@ -717,6 +717,21 @@ class ControlServerTest {
         assertEquals("""{"matches":[]}""", body)
     }
 
+    @Test
+    fun sourceNavigationRestRoutesReadRegisteredSource() {
+        val dir = createTempDirectory("openlog-source-rest").toFile()
+        val source = File(dir, "Feature.kt").apply {
+            writeText("class Feature { fun run() = Unit }")
+        }
+        state.updateSettings { it.copy(sourceFolders = listOf(dir.absolutePath)) }
+        val encodedPath = java.net.URLEncoder.encode(source.absolutePath, Charsets.UTF_8)
+
+        val file = get("/source/file?filePath=$encodedPath&lineCount=1")
+        assertTrue(file.contains("\"content\":\"class Feature"), file)
+        val outline = get("/source/declarations?filePath=$encodedPath")
+        assertTrue(outline.contains("\"name\":\"Feature\""), outline)
+    }
+
     private fun buildZipFixture(entries: Map<String, String>): File {
         val file = File.createTempFile("openlog-control-server-fixture", ".zip")
         java.util.zip.ZipOutputStream(file.outputStream()).use { zos ->
