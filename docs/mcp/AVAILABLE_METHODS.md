@@ -38,8 +38,13 @@ version-controlled map of what an AI can do and how to prompt it. Most read meth
 
 ## Source, cases, and video
 
-- `resolve_log_source`, `get_project_info`, and `reindex_sources` connect log calls to registered
-  Kotlin/Java source. `search_similar_cases`, `get_case`, `set_case_metadata`, and
+- `resolve_log_source`, `get_source_file`, `list_source_declarations`, `get_source_declarations`,
+  `get_project_info`, and `reindex_sources` connect log calls to registered Kotlin/Java source.
+  Start with a resolved source path, list its declarations, then request only the class or method
+  body needed. `get_source_file` is line-paginated (default 400, maximum 2,000 lines); use its
+  `nextStartLine` to read broader context without flooding the conversation. Source navigation is
+  limited to `.kt`/`.java` files under Settings → Source code folders and does not require an
+  index. `search_similar_cases`, `get_case`, `set_case_metadata`, and
   `reindex_cases` retrieve comparable investigations.
 - `get_video_frame` and `get_follow_diagnostics` relate a selected log line to attached video.
 

@@ -64,6 +64,8 @@ internal const val DEFAULT_VISIBLE_LIMIT = 200
 // default, capped well above what any caller has a legitimate reason to ask for at once.
 internal const val DEFAULT_RESOLVE_LIMIT = 10
 internal const val MAX_RESOLVE_LIMIT = 50
+internal const val DEFAULT_SOURCE_LINE_COUNT = 400
+internal const val MAX_SOURCE_LINE_COUNT = 2_000
 
 // Keys kept regardless of any fields/compact projection, so projected items stay identifiable.
 internal val STRUCTURAL_ITEM_KEYS = setOf("type", "id", "gid", "expanded", "count")
@@ -963,6 +965,49 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
         ),
     ),
     McpTool(
+        "get_source_file",
+        "Read a bounded, line-paginated segment of a Kotlin or Java file under a folder registered " +
+            "in Settings → Source code. Use list_source_declarations and get_source_declarations when " +
+            "you need a class or method instead of broad file context. The response includes revision, " +
+            "totalLines, and nextStartLine for safe paging. Source folders do not need to have been indexed.",
+        schema(
+            "filePath" to "string", "startLine" to "integer", "lineCount" to "integer",
+            required = listOf("filePath"),
+            descriptions = mapOf(
+                "filePath" to "Absolute path returned by resolve_log_source or a Kotlin/Java file within a registered source folder.",
+                "startLine" to "1-based first line; defaults to 1.",
+                "lineCount" to "Number of lines to return; defaults to 400 and is capped at 2,000.",
+            ),
+        ),
+    ),
+    McpTool(
+        "list_source_declarations",
+        "List source declarations in a registered Kotlin/Java file. Omit parentId for top-level " +
+            "types and declarations; pass a class/type id returned by an earlier call to list its direct " +
+            "members. Returns opaque ids, concise signatures, kinds, and inclusive line ranges without code bodies.",
+        schema(
+            "filePath" to "string", "parentId" to "string", required = listOf("filePath"),
+            descriptions = mapOf(
+                "filePath" to "Absolute Kotlin/Java source path within a registered source folder.",
+                "parentId" to "Optional declaration id for the type whose direct members should be listed.",
+            ),
+        ),
+    ),
+    McpTool(
+        "get_source_declarations",
+        "Return the full source text for one or more exact declaration ids from list_source_declarations. " +
+            "Pass the list response's revision to avoid reading a declaration after the file changed on disk.",
+        schema(
+            "filePath" to "string", "declarationIds" to "array", "revision" to "string",
+            required = listOf("filePath", "declarationIds"),
+            descriptions = mapOf(
+                "filePath" to "Absolute Kotlin/Java source path within a registered source folder.",
+                "declarationIds" to "One or more opaque ids returned by list_source_declarations for this file.",
+                "revision" to "Optional revision returned by list_source_declarations; a mismatch returns a retry error instead of stale source.",
+            ),
+        ),
+    ),
+    McpTool(
         "get_project_info",
         "Returns description and README content for registered source folders (Settings → Source " +
             "code) that have any info set. Folders with neither a description nor a README path are " +
@@ -1197,6 +1242,9 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/tail/start", "start_tailing"),
     Triple(HttpMethod.Post, "/tail/stop", "stop_tailing"),
     Triple(HttpMethod.Post, "/resolve_log_source", "resolve_log_source"),
+    Triple(HttpMethod.Get, "/source/file", "get_source_file"),
+    Triple(HttpMethod.Get, "/source/declarations", "list_source_declarations"),
+    Triple(HttpMethod.Post, "/source/declarations", "get_source_declarations"),
     Triple(HttpMethod.Post, "/highlighters", "set_highlighters"),
     Triple(HttpMethod.Post, "/reindex-sources", "reindex_sources"),
     Triple(HttpMethod.Post, "/manual-collapse", "add_manual_collapse"),

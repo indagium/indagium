@@ -15,7 +15,10 @@ import com.openlog.model.MessageRule
 import com.openlog.model.RuleTarget
 import com.openlog.model.SavedFilter
 import com.openlog.model.SequenceDef
+import com.openlog.source.SourceDeclaration
+import com.openlog.source.SourceFileSnapshot
 import com.openlog.source.SourceMatch
+import com.openlog.source.SourceStructureParser
 import com.openlog.ui.AppState
 import com.openlog.ui.DesktopStorage
 import com.openlog.ui.FollowDiagnostics
@@ -147,6 +150,20 @@ internal class OpenLogToolOperations(
         "start_tailing" to { a -> startTailingRoute(a.str("tabId") ?: "") },
         "stop_tailing" to { a -> stopTailingRoute(a.str("tabId") ?: "") },
         "resolve_log_source" to { a -> resolveLogSourceRoute(a) },
+        "get_source_file" to { a ->
+            getSourceFileRoute(
+                a.str("filePath") ?: "", a.anyInt("startLine") ?: 1,
+                a.anyInt("lineCount") ?: DEFAULT_SOURCE_LINE_COUNT,
+            )
+        },
+        "list_source_declarations" to { a ->
+            listSourceDeclarationsRoute(a.str("filePath") ?: "", a.str("parentId"))
+        },
+        "get_source_declarations" to { a ->
+            getSourceDeclarationsRoute(
+                a.str("filePath") ?: "", a.strList("declarationIds"), a.str("revision"),
+            )
+        },
         "get_project_info" to { getProjectInfoRoute() },
         "set_highlighters" to { a -> setHighlightersRoute(a.str("tabId") ?: "", a) },
         "reindex_sources" to { a -> reindexSourcesRoute(a.str("folder")) },
@@ -411,6 +428,97 @@ internal class OpenLogToolOperations(
             }
         }
     }
+
+    private fun getSourceFileRoute(filePath: String, startLine: Int, lineCount: Int): Map<String, Any?> {
+        val snapshot = authorizedSourceSnapshot(filePath) ?: return sourceAccessError(filePath)
+        if (startLine < 1) return mapOf("error" to "startLine must be at least 1")
+        if (lineCount !in 1..MAX_SOURCE_LINE_COUNT) {
+            return mapOf("error" to "lineCount must be between 1 and $MAX_SOURCE_LINE_COUNT")
+        }
+        if (snapshot.lineCount == 0) {
+            if (startLine != 1) return mapOf("error" to "startLine is outside this empty source file")
+            return mapOf(
+                "filePath" to snapshot.canonicalPath, "revision" to snapshot.revision,
+                "totalLines" to 0, "startLine" to 1, "endLine" to 0, "content" to "", "nextStartLine" to null,
+            )
+        }
+        if (startLine > snapshot.lineCount) return mapOf("error" to "startLine is outside this source file")
+        val lines = snapshot.text.split("\n", ignoreCase = false, limit = Int.MAX_VALUE)
+        val endLine = minOf(snapshot.lineCount, startLine + lineCount - 1)
+        return mapOf(
+            "filePath" to snapshot.canonicalPath,
+            "revision" to snapshot.revision,
+            "totalLines" to snapshot.lineCount,
+            "startLine" to startLine,
+            "endLine" to endLine,
+            "content" to lines.subList(startLine - 1, endLine).joinToString("\n"),
+            "nextStartLine" to (endLine + 1).takeIf { it <= snapshot.lineCount },
+        )
+    }
+
+    private fun listSourceDeclarationsRoute(filePath: String, parentId: String?): Map<String, Any?> {
+        val snapshot = authorizedSourceSnapshot(filePath) ?: return sourceAccessError(filePath)
+        val structure = SourceStructureParser.parse(snapshot.text, snapshot.isJavaFile)
+        if (parentId != null && structure.declarations.none { it.id == parentId }) {
+            return mapOf("error" to "unknown declaration id; call list_source_declarations again for this file")
+        }
+        return mapOf(
+            "filePath" to snapshot.canonicalPath,
+            "revision" to snapshot.revision,
+            "parentId" to parentId,
+            "declarations" to structure.directChildren(parentId).map(::sourceDeclarationSummary),
+        )
+    }
+
+    private fun getSourceDeclarationsRoute(
+        filePath: String,
+        declarationIds: List<String>?,
+        revision: String?,
+    ): Map<String, Any?> {
+        val snapshot = authorizedSourceSnapshot(filePath) ?: return sourceAccessError(filePath)
+        if (declarationIds.isNullOrEmpty()) return mapOf("error" to "provide one or more declarationIds")
+        if (revision != null && revision != snapshot.revision) {
+            return mapOf("error" to "source file changed; call list_source_declarations again before reading declarations")
+        }
+        val byId = SourceStructureParser.parse(snapshot.text, snapshot.isJavaFile).declarations.associateBy { it.id }
+        val missing = declarationIds.filter { it !in byId }
+        if (missing.isNotEmpty()) {
+            return mapOf("error" to "unknown declaration id; call list_source_declarations again for this file", "unknownIds" to missing)
+        }
+        return mapOf(
+            "filePath" to snapshot.canonicalPath,
+            "revision" to snapshot.revision,
+            "declarations" to declarationIds.map { declaration ->
+                sourceDeclarationSummary(byId.getValue(declaration)) + mapOf(
+                    "code" to snapshot.text.substring(
+                        byId.getValue(declaration).startOffset,
+                        byId.getValue(declaration).endOffsetExclusive,
+                    ),
+                )
+            },
+        )
+    }
+
+    private fun authorizedSourceSnapshot(filePath: String): SourceFileSnapshot? =
+        if (filePath.isBlank()) null else appState.readRegisteredSourceFile(filePath)
+
+    private fun sourceAccessError(filePath: String): Map<String, String> = when {
+        appState.settings.sourceFolders.isEmpty() ->
+            mapOf("error" to "no source folders configured — add one in Settings → Source code")
+        filePath.isBlank() -> mapOf("error" to "missing filePath")
+        else -> mapOf("error" to "source file is missing, unsupported, or outside registered source folders")
+    }
+
+    private fun sourceDeclarationSummary(declaration: SourceDeclaration): Map<String, Any?> = mapOf(
+        "id" to declaration.id,
+        "parentId" to declaration.parentId,
+        "kind" to declaration.kind,
+        "name" to declaration.name,
+        "signature" to declaration.signature,
+        "startLine" to declaration.startLine,
+        "endLine" to declaration.endLine,
+        "hasChildren" to declaration.hasChildren,
+    )
 
     private fun getProjectInfoRoute(): Map<String, Any?> {
         val folders = appState.settings.sourceFolderInfo.mapNotNull { (path, info) ->
