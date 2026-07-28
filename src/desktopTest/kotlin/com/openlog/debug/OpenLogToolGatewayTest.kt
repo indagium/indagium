@@ -4,9 +4,11 @@ import com.openlog.model.AnnBlock
 import com.openlog.model.FilterMode
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
+import com.openlog.model.SequenceDef
 import com.openlog.model.VideoAttachment
 import com.openlog.ui.AppState
 import com.openlog.ui.mkTab
+import androidx.compose.ui.graphics.Color
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import java.awt.image.BufferedImage
@@ -46,7 +48,7 @@ class OpenLogToolGatewayTest {
     fun catalogHasEveryCurrentToolExactlyOnce() {
         val expected = setOf(
             "list_tabs", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
-            "get_filter", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
+            "get_filter", "get_sequence_summary", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
             "toggle_group", "expand_all", "collapse_all", "get_tags", "get_packages", "get_crash_sites",
             "get_issue_description", "get_annotation_sections", "append_annotation_section",
             "add_text_note", "add_log_note", "add_image_note", "update_note_block", "move_note_block",
@@ -59,6 +61,103 @@ class OpenLogToolGatewayTest {
         assertEquals(expected, operations.toolGateway.tools.map { it.name }.toSet())
         assertEquals(expected.size, operations.toolGateway.tools.size)
         assertEquals(operations.toolGateway.tools, server.toolGateway.tools)
+    }
+
+    @Test
+    fun availableMethodsDocumentEveryCatalogTool() {
+        val documentation = File("docs/mcp/AVAILABLE_METHODS.md").readText()
+        operations.toolGateway.tools.forEach { tool ->
+            assertTrue(documentation.contains("`${tool.name}`"), "AVAILABLE_METHODS.md is missing ${tool.name}")
+        }
+    }
+
+    @Test
+    fun sequenceSummaryUsesRawLogAndCachesPaginatedOccurrenceDetails() {
+        state.tabs = listOf(
+            mkTab(
+                "t1", "sequences.log", listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "BEGIN"),
+                    LogEntry(2, "10:00:01.000", LogLevel.I, "App", "inside"),
+                    LogEntry(3, "10:00:02.000", LogLevel.I, "App", "END"),
+                    LogEntry(4, "10:00:03.000", LogLevel.I, "App", "BEGIN"),
+                ),
+            ),
+        )
+        state.upFlt("t1") {
+            it.copy(
+                seqOn = false,
+                sequences = listOf(
+                    SequenceDef(
+                        id = "request", matchText = "BEGIN", priority = 1, color = Color.Cyan,
+                        endMatchText = "END",
+                    ),
+                ),
+            )
+        }
+
+        val summary = operations.toolGateway.execute("get_sequence_summary", mapOf("tabId" to "t1")) as Map<*, *>
+        val definitions = summary["sequences"] as List<*>
+        assertEquals(2, (definitions.single() as Map<*, *>)["occurrenceCount"])
+        assertEquals(false, summary["cacheHit"])
+
+        val details = operations.toolGateway.execute(
+            "get_sequence_summary", mapOf("tabId" to "t1", "sequenceId" to "request", "limit" to 1),
+        ) as Map<*, *>
+        val occurrence = (details["occurrences"] as List<*>).single() as Map<*, *>
+        assertEquals(true, details["cacheHit"])
+        assertEquals(1, occurrence["startLineId"])
+        assertEquals(3, occurrence["endLineId"])
+        assertEquals(3, occurrence["lineCount"])
+        assertEquals(0, occurrence["nestingDepth"])
+        assertEquals("end_match", occurrence["endReason"])
+    }
+
+    @Test
+    fun sequenceSummaryReportsNestedFallbackRowsPaginationAndUnknownIds() {
+        state.tabs = listOf(
+            mkTab(
+                "t1", "nested-sequences.log", listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "Outer", "outer begin"),
+                    LogEntry(2, "10:00:01.000", LogLevel.I, "Inner", "inner begin"),
+                    LogEntry(3, "10:00:02.000", LogLevel.I, "Inner", "inner end"),
+                    LogEntry(4, "10:00:03.000", LogLevel.I, "Outer", "outer end"),
+                    LogEntry(5, "10:00:04.000", LogLevel.I, "Inner", "inner begin"),
+                    LogEntry(6, "10:00:05.000", LogLevel.I, "Outer", "outer begin"),
+                    LogEntry(7, "10:00:06.000", LogLevel.I, "App", "after"),
+                ),
+            ),
+        )
+        state.upFlt("t1") {
+            it.copy(
+                sequences = listOf(
+                    SequenceDef("outer", "outer begin", priority = 1, color = Color.Red, tag = "Outer", endMatchText = "outer end", endTag = "Outer"),
+                    SequenceDef("inner", "inner begin", priority = 2, color = Color.Blue, tag = "Inner", endMatchText = "inner end", endTag = "Inner"),
+                ),
+            )
+        }
+
+        val firstPage = operations.toolGateway.execute(
+            "get_sequence_summary", mapOf("tabId" to "t1", "sequenceId" to "inner", "offset" to 0, "limit" to 1),
+        ) as Map<*, *>
+        val nested = (firstPage["occurrences"] as List<*>).single() as Map<*, *>
+        assertEquals(2, firstPage["totalCount"])
+        assertEquals("sg_inner_2", nested["gid"])
+        assertEquals(2, nested["startRowNumber"])
+        assertEquals(3, nested["endRowNumber"])
+        assertEquals(1, nested["nestingDepth"])
+
+        val secondPage = operations.toolGateway.execute(
+            "get_sequence_summary", mapOf("tabId" to "t1", "sequenceId" to "inner", "offset" to 1, "limit" to 1),
+        ) as Map<*, *>
+        val fallback = (secondPage["occurrences"] as List<*>).single() as Map<*, *>
+        assertEquals(5, fallback["startRowNumber"])
+        assertEquals(5, fallback["endRowNumber"])
+        assertEquals("next_sequence_start", fallback["endReason"])
+
+        val unknown = operations.toolGateway.execute(
+            "get_sequence_summary", mapOf("tabId" to "t1", "sequenceId" to "missing"),
+        ) as Map<*, *>
+        assertTrue((unknown["error"] as String).contains("no enabled sequence"))
     }
 
     @Test

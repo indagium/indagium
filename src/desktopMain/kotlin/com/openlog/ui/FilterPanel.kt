@@ -174,6 +174,13 @@ class FilterPanelUiState {
     var incPillsExpanded    by mutableStateOf(true)
     var incMsgPillsExpanded by mutableStateOf(true)
     var excMsgPillsExpanded by mutableStateOf(true)
+    // These are drafts for the two discovery fields, rather than filter state.  In particular a
+    // tag query is not applied until the user chooses a candidate, and a message query can be
+    // hidden while its debounce is still pending.  Keep them per tab so collapsing/reopening the
+    // panel (which removes this composable from the tree) cannot discard what was being typed or
+    // leak it into another tab.
+    val tagQueryDrafts = mutableStateMapOf<String, String>()
+    val messageQueryDrafts = mutableStateMapOf<String, String>()
 }
 
 @OptIn(
@@ -299,8 +306,8 @@ internal fun FilterPanel(
     val msgRuleScopeFr = remember { FocusRequester() }
     val hlFr = remember { FocusRequester() }
 
-    var tagInput by remember { mutableStateOf("") }
-    var tagSearch by remember { mutableStateOf("") }
+    var tagInput by remember(tab.id) { mutableStateOf(fpState.tagQueryDrafts[tab.id].orEmpty()) }
+    var tagSearch by remember(tab.id) { mutableStateOf("") }
     var tagFieldFocused by remember { mutableStateOf(false) }
     var tagCandidatesHovered by remember { mutableStateOf(false) }
     var showTagCandidates by remember { mutableStateOf(false) }
@@ -318,6 +325,7 @@ internal fun FilterPanel(
     var savedFilterFolderNameDraft by remember { mutableStateOf("") }
 
     LaunchedEffect(tagInput) {
+        fpState.tagQueryDrafts[tab.id] = tagInput
         kotlinx.coroutines.delay(120)
         tagSearch = tagInput
     }
@@ -361,9 +369,11 @@ internal fun FilterPanel(
     }
     LaunchedEffect(filter.kwText) { if (filter.kwText != kwLastSent) kwDisplay = filter.kwText }
 
-    var msgRuleInput by remember(tab.id) { mutableStateOf(filter.kwInTag) }
+    var msgRuleInput by remember(tab.id) {
+        mutableStateOf(fpState.messageQueryDrafts[tab.id] ?: filter.kwInTag)
+    }
     var msgRuleLastSent by remember(tab.id) { mutableStateOf(filter.kwInTag) }
-    var msgRuleSearch by remember { mutableStateOf("") }
+    var msgRuleSearch by remember(tab.id) { mutableStateOf("") }
     var msgRuleFieldFocused by remember { mutableStateOf(false) }
     var showMsgRuleCandidates by remember { mutableStateOf(false) }
     var msgCandidatesHovered by remember { mutableStateOf(false) }
@@ -376,6 +386,7 @@ internal fun FilterPanel(
     var pendingMessageRule by remember(tab.id) { mutableStateOf<PendingMessageRuleDraft?>(null) }
     var pendingSearchFocusTarget by remember { mutableStateOf<CtrlFTarget?>(null) }
     LaunchedEffect(msgRuleInput) {
+        fpState.messageQueryDrafts[tab.id] = msgRuleInput
         val snap = msgRuleInput
         kotlinx.coroutines.delay(if (tab.largeFileMode) 350 else 120)
         if (snap == msgRuleInput) {
@@ -386,7 +397,12 @@ internal fun FilterPanel(
             if (filter.mode == FilterMode.TAGS) onSetKwInTag(msgRuleInput)
         }
     }
-    LaunchedEffect(filter.kwInTag) { if (filter.kwInTag != msgRuleLastSent) msgRuleInput = filter.kwInTag }
+    LaunchedEffect(filter.kwInTag) {
+        if (filter.kwInTag != msgRuleLastSent) {
+            msgRuleInput = filter.kwInTag
+            fpState.messageQueryDrafts[tab.id] = filter.kwInTag
+        }
+    }
     LaunchedEffect(msgRuleFieldFocused, msgCandidatesHovered) {
         if (msgRuleFieldFocused || msgCandidatesHovered) {
             showMsgRuleCandidates = true
@@ -716,8 +732,8 @@ internal fun FilterPanel(
         msgRuleScopeOpen = false
         msgRuleScopeSearch = ""
         msgRuleScopeSelectedIdx = 0
-        msgRuleInput = ""
-        msgRuleSearch = ""
+        // Keep the discovery query in place after adding a rule so closely named rules can be
+        // added one after another. Escape/the clear button remain the explicit discard actions.
         msgRuleSelectedIdx = -1
         msgRuleSelectedAction = 0
         runCatching { msgRuleFr.requestFocus() }
@@ -725,8 +741,6 @@ internal fun FilterPanel(
 
     fun commitContextualMessageRule(include: Boolean, candidate: MsgCandidate) {
         onAddMessageRule(include, candidate.pattern, false, candidate.tag, null, candidate.target)
-        msgRuleInput = ""
-        msgRuleSearch = ""
         msgRuleSelectedIdx = -1
         msgRuleSelectedAction = 0
         runCatching { msgRuleFr.requestFocus() }
@@ -944,7 +958,9 @@ internal fun FilterPanel(
                                 } else {
                                     return@onPreviewKeyEvent false
                                 }
-                                tagInput = ""; tagSelectedIdx = -1
+                                // Keep the query so the user can make a small edit and add the
+                                // next similarly named tag or prefix without typing from scratch.
+                                tagSelectedIdx = -1; tagSelectedAction = 0
                                 true
                             }
                             else -> false
@@ -967,7 +983,7 @@ internal fun FilterPanel(
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
                                 baseBg = if (isRowSelected) tc.abg else Color.Transparent,
                                 hoverBg = tc.hv,
-                                onClick = { onAddPkgPrefix(value); tagInput = ""; tagSelectedIdx = -1 },
+                                onClick = { onAddPkgPrefix(value); tagSelectedIdx = -1; tagSelectedAction = 0 },
                             ) {
                                 Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
                                     verticalAlignment = Alignment.CenterVertically,
@@ -996,7 +1012,7 @@ internal fun FilterPanel(
                                                 if (isIncluded) pkgColor.copy(.2f) else if (incKbd) pkgColor.copy(.1f)
                                                 else Color.Transparent, CORNER_SM)
                                             .border(1.dp, if (isIncluded || incKbd) pkgColor else tc.br, CORNER_SM)
-                                            .clickable { onAddPkgPrefix(value); tagInput = ""; tagSelectedIdx = -1 },
+                                            .clickable { onAddPkgPrefix(value); tagSelectedIdx = -1; tagSelectedAction = 0 },
                                         contentAlignment = Alignment.Center,
                                     ) {
                                         AppText("+", color = if (isIncluded || incKbd) pkgColor else tc.ts,
@@ -1007,7 +1023,7 @@ internal fun FilterPanel(
                                         Modifier.size(20.dp)
                                             .background(if (isExcluded) exNeg.copy(.2f) else if (exKbd) exNeg.copy(.1f) else Color.Transparent, CORNER_SM)
                                             .border(1.dp, if (isExcluded || exKbd) exNeg else tc.br, CORNER_SM)
-                                            .clickable { onAddExcludePkgPrefix(value); tagInput = ""; tagSelectedIdx = -1 },
+                                            .clickable { onAddExcludePkgPrefix(value); tagSelectedIdx = -1; tagSelectedAction = 0 },
                                         contentAlignment = Alignment.Center,
                                     ) { AppText("−", color = if (isExcluded || exKbd) exNeg else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
                                 }

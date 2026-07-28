@@ -44,11 +44,13 @@ The repo root `.mcp.json` already registers this for tools that auto-discover it
 
 ## Tools
 
-The server exposes 36 tools covering the whole analysis workflow — open files/archives, split
+The server exposes tools covering the whole analysis workflow — open files/archives, split
 oversized logs, read/set filters (including message rules and sequences), read the rendered
 (post-fold) lines, read unfiltered context around a line, list crash sites, tags and packages,
 manage selection and collapsible groups, write annotations, export, merge tabs, and live-tail.
 Call `tools/list` for the authoritative set and their schemas.
+
+See [AVAILABLE_METHODS.md](AVAILABLE_METHODS.md) for the version-controlled method index.
 
 A few worth calling out:
 - `get_filter` returns the **full** filter, including `messageRules` and `sequences` — both can
@@ -56,6 +58,9 @@ A few worth calling out:
   `clearMessageRules` / `clearSequences` to remove a stale one.
 - `get_line_context` reads raw lines around a line id **ignoring the active filter and folding** —
   the reliable way to see what surrounds a filtered line without touching the filter.
+- `get_sequence_summary` inspects enabled sequence definitions against the **full raw log** without
+  changing the filter. Omit `sequenceId` for counts; pass it for paginated occurrence bounds,
+  nesting, and end reasons.
 - `get_visible_lines` / `get_line_context` accept `fields` (column whitelist) and `compact` to
   shrink the payload when you don't need every column.
 - `get_packages` lists dotted tag-prefixes (with counts) to discover values for `pkgPrefixes`.

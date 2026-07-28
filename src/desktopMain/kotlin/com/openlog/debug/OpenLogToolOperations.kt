@@ -26,10 +26,12 @@ import com.openlog.ui.imageBytesFromFile
 import com.openlog.ui.rotatedFramePng
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.computeItems
+import com.openlog.utils.containsPattern
 import com.openlog.utils.indexOfEntryId
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.newId
+import com.openlog.utils.RegexEvaluationContext
 import java.io.File
 import java.util.Base64
 import kotlin.math.roundToInt
@@ -45,6 +47,8 @@ private const val HEX_RADIX = 16
 // Mirrors CaseSearch's own DEFAULT_SEARCH_LIMIT (private to that class) — kept in sync manually
 // since it's only reached here when the caller omits `limit` entirely.
 private const val DEFAULT_CASE_SEARCH_LIMIT = 8
+private const val DEFAULT_SEQUENCE_OCCURRENCE_LIMIT = 100
+private const val MAX_SEQUENCE_OCCURRENCE_LIMIT = 500
 
 /**
  * Transport-neutral AppState operations behind the openLog MCP catalog.
@@ -72,6 +76,14 @@ internal class OpenLogToolOperations(
         },
         "close_tab" to { a -> closeTab(a.str("tabId") ?: "") },
         "get_filter" to { a -> getFilter(a.str("tabId") ?: "") },
+        "get_sequence_summary" to { a ->
+            getSequenceSummary(
+                tabId = a.str("tabId") ?: "",
+                sequenceId = a.str("sequenceId"),
+                offset = a.anyInt("offset") ?: 0,
+                limit = a.anyInt("limit") ?: DEFAULT_SEQUENCE_OCCURRENCE_LIMIT,
+            )
+        },
         "set_filter" to { a -> setFilter(a.str("tabId") ?: "", a) },
         "get_visible_lines" to { a ->
             getVisibleLines(
@@ -165,6 +177,27 @@ internal class OpenLogToolOperations(
     private val caseSearch: CaseSearch by lazy {
         CaseSearch(noteDirs = appState::noteLookupDirs, indexFile = DesktopStorage.caseIndexFile())
     }
+
+    // Sequence rendering caches a related result in Filter.kt, but that cache uses the currently
+    // filtered data and is intentionally private to rendering.  This tool must always report the
+    // full raw log, even when the UI filter or seqOn is off, so it keeps its own identity-keyed
+    // read-only cache.  Log data and Filter are replaced wholesale by AppState updates, making
+    // reference + value equality a precise invalidation boundary without copying a large log.
+    private data class SequenceOccurrence(
+        val def: SequenceDef,
+        val startIndex: Int,
+        val endExclusive: Int,
+        val depth: Int,
+        val endReason: String,
+    )
+
+    private data class SequenceSummaryCache(
+        val logData: List<LogEntry>,
+        val definitions: List<SequenceDef>,
+        val occurrences: List<SequenceOccurrence>,
+    )
+
+    private var sequenceSummaryCache: SequenceSummaryCache? = null
 
     // Direct in-process entry point shared by MCP/REST and the future AI runner.
     internal val toolGateway = OpenLogToolGateway(MCP_TOOLS, operationHandlers)
@@ -571,6 +604,164 @@ internal class OpenLogToolOperations(
     private fun getFilter(tabId: String): Map<String, Any?> {
         val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         return filterToMap(tab.filter)
+    }
+
+    /**
+     * Read the sequence detector's raw-log result without changing UI state.  Rendering's
+     * computeItems() intentionally runs on filtered data; this route instead scans tab.logData so
+     * an agent can reason about every occurrence before deciding whether to alter a filter.
+     */
+    private fun getSequenceSummary(
+        tabId: String,
+        sequenceId: String?,
+        offset: Int,
+        limit: Int,
+    ): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val definitions = tab.filter.sequences.filter { it.enabled }.sortedBy { it.priority }
+        val prior = sequenceSummaryCache
+        val cacheHit = prior != null && prior.logData === tab.logData && prior.definitions == definitions
+        val analysis = if (cacheHit) {
+            requireNotNull(prior)
+        } else {
+            SequenceSummaryCache(tab.logData, definitions, computeSequenceOccurrences(tab.logData, definitions)).also {
+                sequenceSummaryCache = it
+            }
+        }
+        val counts = analysis.occurrences.groupingBy { it.def.id }.eachCount()
+        val summaries = definitions.map { def ->
+            sequenceDefToMap(def) + mapOf("occurrenceCount" to (counts[def.id] ?: 0))
+        }
+        if (sequenceId.isNullOrBlank()) {
+            return mapOf(
+                "tabId" to tabId,
+                "rawLineCount" to tab.logData.size,
+                "cacheHit" to cacheHit,
+                "sequences" to summaries,
+            )
+        }
+        val selected = definitions.firstOrNull { it.id == sequenceId }
+            ?: return mapOf("error" to "no enabled sequence: $sequenceId")
+        val occurrences = analysis.occurrences.filter { it.def.id == selected.id }
+        val safeOffset = offset.coerceAtLeast(0).coerceAtMost(occurrences.size)
+        val safeLimit = limit.coerceIn(1, MAX_SEQUENCE_OCCURRENCE_LIMIT)
+        return mapOf(
+            "tabId" to tabId,
+            "rawLineCount" to tab.logData.size,
+            "cacheHit" to cacheHit,
+            "sequence" to (sequenceDefToMap(selected) + mapOf("occurrenceCount" to occurrences.size)),
+            "totalCount" to occurrences.size,
+            "offset" to safeOffset,
+            "limit" to safeLimit,
+            "occurrences" to occurrences.drop(safeOffset).take(safeLimit).map { occurrenceToMap(it, tab.logData) },
+        )
+    }
+
+    // This mirrors SeqComputer's start/end semantics, including its important fallback: a
+    // missing end closes at the next start of *any* enabled definition, while a literal end is
+    // accepted unless a later start of the same definition precedes it.  Keep the compact DTO
+    // independent from SeqGroup because SeqGroup is shaped for folded rendering rather than an
+    // agent-facing occurrence list with end reasons and arbitrary nesting depth.
+    private fun computeSequenceOccurrences(data: List<LogEntry>, definitions: List<SequenceDef>): List<SequenceOccurrence> {
+        if (data.isEmpty() || definitions.isEmpty()) return emptyList()
+        data class Candidate(val startIndex: Int, val definition: SequenceDef, var endExclusive: Int = 0, var parent: Int = -1)
+        val regexContext = RegexEvaluationContext()
+        fun matches(entry: LogEntry, text: String, regex: Boolean, tag: String?): Boolean =
+            (tag == null || entry.tag == tag) && containsPattern("${entry.tag} ${entry.msg}", text, regex, regexContext = regexContext)
+        val candidates = ArrayList<Candidate>()
+        val endIndices = HashMap<String, MutableList<Int>>()
+        val endingDefinitions = definitions.filter { !it.endMatchText.isNullOrBlank() }
+        data.forEachIndexed { index, entry ->
+            definitions.firstOrNull { matches(entry, it.matchText, it.isRegex, it.tag) }
+                ?.let { candidates += Candidate(index, it) }
+            endingDefinitions.forEach { def ->
+                if (matches(entry, def.endMatchText!!, def.endIsRegex, def.endTag)) {
+                    endIndices.getOrPut(def.id) { mutableListOf() } += index
+                }
+            }
+        }
+        if (candidates.isEmpty()) return emptyList()
+        fun firstAfter(indices: List<Int>, index: Int): Int? {
+            var low = 0
+            var high = indices.size
+            while (low < high) {
+                val mid = (low + high) ushr 1
+                if (indices[mid] <= index) low = mid + 1 else high = mid
+            }
+            return indices.getOrNull(low)
+        }
+        val nextSameDefinition = IntArray(candidates.size) { -1 }
+        val nextIndexByDefinition = HashMap<String, Int>()
+        for (index in candidates.indices.reversed()) {
+            val candidate = candidates[index]
+            nextSameDefinition[index] = nextIndexByDefinition[candidate.definition.id] ?: -1
+            nextIndexByDefinition[candidate.definition.id] = candidate.startIndex
+        }
+        val endReasons = ArrayList<String>(candidates.size)
+        candidates.forEachIndexed { index, candidate ->
+            val fallback = candidates.getOrNull(index + 1)?.startIndex ?: data.size
+            val literalEnd = candidate.definition.endMatchText?.takeIf { it.isNotBlank() }
+                ?.let { firstAfter(endIndices[candidate.definition.id].orEmpty(), candidate.startIndex) }
+                ?.takeIf { nextSameDefinition[index] < 0 || it < nextSameDefinition[index] }
+            candidate.endExclusive = (literalEnd?.plus(1) ?: fallback)
+            endReasons += when {
+                literalEnd != null -> "end_match"
+                fallback < data.size -> "next_sequence_start"
+                else -> "end_of_log"
+            }
+        }
+        // Same smallest-containing-parent rule as SeqComputer.assignParents.  A stack avoids
+        // comparing occurrences that have already ended while preserving its crossing-range tie
+        // behavior exactly.
+        val stack = ArrayList<Int>()
+        candidates.forEachIndexed { index, candidate ->
+            while (stack.isNotEmpty() && candidates[stack.last()].endExclusive <= candidate.startIndex) stack.removeAt(stack.lastIndex)
+            var shortestLength = Int.MAX_VALUE
+            stack.forEach { parentIndex ->
+                val parent = candidates[parentIndex]
+                if (candidate.endExclusive <= parent.endExclusive) {
+                    val length = parent.endExclusive - parent.startIndex
+                    if (length < shortestLength) {
+                        shortestLength = length
+                        candidate.parent = parentIndex
+                    }
+                }
+            }
+            stack += index
+        }
+        fun depth(index: Int): Int {
+            var result = 0
+            var parent = candidates[index].parent
+            while (parent >= 0) {
+                result += 1
+                parent = candidates[parent].parent
+            }
+            return result
+        }
+        return candidates.indices.map { index ->
+            val candidate = candidates[index]
+            SequenceOccurrence(candidate.definition, candidate.startIndex, candidate.endExclusive, depth(index), endReasons[index])
+        }
+    }
+
+    private fun occurrenceToMap(occurrence: SequenceOccurrence, data: List<LogEntry>): Map<String, Any?> {
+        val start = data[occurrence.startIndex]
+        val end = data[(occurrence.endExclusive - 1).coerceAtLeast(occurrence.startIndex)]
+        return mapOf(
+            "gid" to "sg_${occurrence.def.id}_${start.id}",
+            "sequenceId" to occurrence.def.id,
+            "startRowNumber" to (occurrence.startIndex + 1),
+            "endRowNumber" to occurrence.endExclusive,
+            "startIndex" to occurrence.startIndex,
+            "endExclusiveIndex" to occurrence.endExclusive,
+            "startLineId" to start.id,
+            "endLineId" to end.id,
+            "startTs" to start.ts,
+            "endTs" to end.ts,
+            "lineCount" to (occurrence.endExclusive - occurrence.startIndex),
+            "nestingDepth" to occurrence.depth,
+            "endReason" to occurrence.endReason,
+        )
     }
 
     private fun setFilter(tabId: String, body: Map<String, Any?>): Map<String, Any?> {
