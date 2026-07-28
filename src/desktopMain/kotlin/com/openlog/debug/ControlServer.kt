@@ -711,6 +711,24 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(
+        "get_sequence_summary",
+        "Read enabled sequence definitions and their occurrences against the full raw log, " +
+            "ignoring the active filter and seqOn. Without sequenceId it returns a compact count " +
+            "summary for every enabled definition. With sequenceId it returns a paginated list of " +
+            "occurrences, including 1-based raw row/id/time bounds, lineCount, nestingDepth, and why the " +
+            "occurrence ended (end_match, next_sequence_start, or end_of_log). Read-only; repeated " +
+            "calls reuse the current raw-log/definition analysis cache.",
+        schema(
+            "tabId" to "string", "sequenceId" to "string", "offset" to "integer", "limit" to "integer",
+            required = listOf("tabId"),
+            descriptions = mapOf(
+                "sequenceId" to "Enabled sequence id to expand into occurrence details. Omit for all-definition counts.",
+                "offset" to "Zero-based occurrence offset (default 0).",
+                "limit" to "Maximum occurrences to return (default 100, capped at 500).",
+            ),
+        ),
+    ),
+    McpTool(
         "set_filter",
         "Partially update a tab's filter — only the fields you provide are changed. A supplied " +
             "messageRules or sequences list replaces the current one; clearMessageRules / " +

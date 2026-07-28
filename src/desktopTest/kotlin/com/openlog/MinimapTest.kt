@@ -13,7 +13,9 @@ import com.openlog.ui.MinimapWord
 import com.openlog.ui.computeMinimapBars
 import com.openlog.ui.minimapBucketOf
 import com.openlog.ui.minimapFirstVisibleIndexForViewportCenter
+import com.openlog.ui.minimapFirstVisibleIndexForCenteredItem
 import com.openlog.ui.minimapFirstVisibleIndexForViewportDrag
+import com.openlog.ui.minimapItemIndexAtPointer
 import com.openlog.ui.minimapItemIndexOf
 import com.openlog.ui.minimapScrollFraction
 import com.openlog.ui.minimapScrollOffsetPx
@@ -329,6 +331,24 @@ class MinimapTest {
     }
 
     @Test
+    fun clickResolvesTheVisibleMiniatureBarThenCentersItsRepresentativeItem() {
+        // At this scroll position, screen y=0 displays bucket 409 (not bucket 0). The old live
+        // handler ignored that offset and derived a destination from the viewport indicator.
+        val clicked = minimapItemIndexAtPointer(
+            pointerY = 0f,
+            firstVisibleItemIndex = 450,
+            visibleItemCount = 10,
+            itemCount = 1_000,
+            rowCount = 1_000,
+            rowHeightPx = 2f,
+            stripHeightPx = 200f,
+        )
+
+        assertEquals(409, clicked)
+        assertEquals(404, minimapFirstVisibleIndexForCenteredItem(clicked, visibleItemCount = 10, itemCount = 1_000))
+    }
+
+    @Test
     fun viewportDragPreservesThePointGrabbedInsideTheSelection() {
         // 1,000 items, 10 visible: the 2,000px miniature has a 20px viewport in a 200px strip.
         // A drag of 18px moves that viewport through 10% of its 180px travel, therefore 99 of the
@@ -370,6 +390,26 @@ class MinimapTest {
                 miniatureHeightPx = 2_000f,
                 stripHeightPx = 200f,
                 minViewportHeightPx = 2f,
+            ),
+        )
+    }
+
+    @Test
+    fun outsidePressClampsToTheReachableViewportCentersAtBothEdges() {
+        // A pointer at either edge cannot put the viewport center beyond the document's own first
+        // or last legal position. This guards the click mapping used by Minimap.jumpTo().
+        assertEquals(
+            0,
+            minimapFirstVisibleIndexForViewportCenter(
+                pointerY = -50f, visibleItemCount = 10, itemCount = 1_000,
+                miniatureHeightPx = 2_000f, stripHeightPx = 200f, minViewportHeightPx = 2f,
+            ),
+        )
+        assertEquals(
+            990,
+            minimapFirstVisibleIndexForViewportCenter(
+                pointerY = 250f, visibleItemCount = 10, itemCount = 1_000,
+                miniatureHeightPx = 2_000f, stripHeightPx = 200f, minViewportHeightPx = 2f,
             ),
         )
     }

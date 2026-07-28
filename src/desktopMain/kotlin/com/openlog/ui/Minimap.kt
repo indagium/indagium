@@ -169,6 +169,43 @@ fun minimapItemIndexOf(row: Int, itemCount: Int, rowCount: Int): Int {
     return ((row.toLong() * itemCount) / rowCount).toInt().coerceIn(0, itemCount - 1)
 }
 
+/** Resolves the drawable minimap bar currently under [pointerY] back to its first represented
+ * display item.  The miniature itself scrolls as the list scrolls, so the pointer must be shifted
+ * by its *current* miniature offset before converting to a bucket; using viewport geometry here
+ * instead jumps to a different part of long logs. */
+internal fun minimapItemIndexAtPointer(
+    pointerY: Float,
+    firstVisibleItemIndex: Int,
+    visibleItemCount: Int,
+    itemCount: Int,
+    rowCount: Int,
+    rowHeightPx: Float,
+    stripHeightPx: Float,
+): Int {
+    if (itemCount <= 0 || rowCount <= 0 || rowHeightPx <= 0f || stripHeightPx <= 0f) return 0
+    val miniatureHeightPx = rowCount * rowHeightPx
+    val offsetPx = minimapScrollOffsetPx(
+        minimapScrollFraction(firstVisibleItemIndex, visibleItemCount, itemCount),
+        miniatureHeightPx,
+        stripHeightPx,
+    )
+    val row = ((pointerY.coerceIn(0f, stripHeightPx) + offsetPx) / rowHeightPx)
+        .toInt()
+        .coerceIn(0, rowCount - 1)
+    return minimapItemIndexOf(row, itemCount, rowCount)
+}
+
+/** First visible index that centers [itemIndex] when possible. */
+internal fun minimapFirstVisibleIndexForCenteredItem(
+    itemIndex: Int,
+    visibleItemCount: Int,
+    itemCount: Int,
+): Int {
+    if (itemCount <= 0) return 0
+    val maxFirst = (itemCount - visibleItemCount).coerceAtLeast(0)
+    return (itemIndex - visibleItemCount.coerceAtLeast(1) / 2).coerceIn(0, maxFirst)
+}
+
 /** Buckets [items] into at most [rowCount] drawable rows and resolves each row's word-shape +
  *  color from its representative (FIRST) item — see [MinimapBar]'s doc. [highlighters] should be
  *  the tab's `filter.highlighters`; matching runs here (via [resolveMinimapColor]) so it happens
@@ -424,17 +461,19 @@ fun Minimap(
     fun jumpTo(y: Float) {
         val h = heightPx
         if (items.isEmpty() || h <= 0 || rowCount <= 0) return
-        val miniatureHeightPx = rowCount * rowHeightPx
-        val targetIndex = minimapFirstVisibleIndexForViewportCenter(
+        val visibleCount = lazyState.layoutInfo.visibleItemsInfo.size
+        val clickedItem = minimapItemIndexAtPointer(
             pointerY = y,
-            visibleItemCount = lazyState.layoutInfo.visibleItemsInfo.size,
+            firstVisibleItemIndex = lazyState.firstVisibleItemIndex,
+            visibleItemCount = visibleCount,
             itemCount = items.size,
-            miniatureHeightPx = miniatureHeightPx,
+            rowCount = rowCount,
+            rowHeightPx = rowHeightPx,
             stripHeightPx = h.toFloat(),
-            minViewportHeightPx = rowHeightPx,
         )
-        // Immediate (non-animated) jump, so the centered viewport lands precisely under the press.
-        scope.launch { lazyState.scrollToItem(targetIndex) }
+        val targetFirst = minimapFirstVisibleIndexForCenteredItem(clickedItem, visibleCount, items.size)
+        // Immediate (non-animated) jump, so the clicked bar's representative row lands centered.
+        scope.launch { lazyState.scrollToItem(targetFirst) }
     }
 
     // Box wraps the Canvas (rather than the Canvas taking modifier directly) so the context-menu

@@ -2,7 +2,7 @@
 
 A desktop log viewer for Android logcat files, built with Kotlin and Compose Multiplatform.
 
-![Version](https://img.shields.io/badge/version-1.7.6-blue)
+![Version](https://img.shields.io/badge/version-1.7.7-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
 ## Features
@@ -160,7 +160,8 @@ including writing a note if that was part of the request — rather than being c
   confirmation card. Use **Stop** if the action is no longer wanted.
 
 The AI integration is separate from the built-in MCP server. MCP remains useful for external
-clients such as LM Studio, Codex, and Claude Code; see [the MCP guide](docs/mcp/README.md).
+clients such as LM Studio, Codex, and Claude Code; see [the MCP guide](docs/mcp/README.md) and
+the [available methods and prompt guide](docs/mcp/AVAILABLE_METHODS.md).
 
 ## Building from source
 
@@ -184,7 +185,7 @@ clients such as LM Studio, Codex, and Claude Code; see [the MCP guide](docs/mcp/
 Push a version tag to trigger the GitHub Actions build, which produces Linux (x86-64 and arm64), Windows, and macOS packages and creates a GitHub Release automatically:
 
 ```bash
-git tag v1.7.6 && git push --tags
+git tag v1.7.7 && git push --tags
 ```
 
 The macOS build is unsigned (no Apple Developer certificate in CI) — see the Installation section above for the Gatekeeper workaround.
