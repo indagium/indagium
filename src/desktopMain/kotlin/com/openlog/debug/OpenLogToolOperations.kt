@@ -662,6 +662,7 @@ internal class OpenLogToolOperations(
     // accepted unless a later start of the same definition precedes it.  Keep the compact DTO
     // independent from SeqGroup because SeqGroup is shaped for folded rendering rather than an
     // agent-facing occurrence list with end reasons and arbitrary nesting depth.
+    @Suppress("CyclomaticComplexMethod") // Mirrors SeqComputer's matching/end/nesting algorithm in one scan.
     private fun computeSequenceOccurrences(data: List<LogEntry>, definitions: List<SequenceDef>): List<SequenceOccurrence> {
         if (data.isEmpty() || definitions.isEmpty()) return emptyList()
         data class Candidate(val startIndex: Int, val definition: SequenceDef, var endExclusive: Int = 0, var parent: Int = -1)
