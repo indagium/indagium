@@ -429,6 +429,7 @@ internal class OpenLogToolOperations(
         }
     }
 
+    @Suppress("ReturnCount") // The route has explicit, actionable validation responses for each invalid range.
     private fun getSourceFileRoute(filePath: String, startLine: Int, lineCount: Int): Map<String, Any?> {
         val snapshot = authorizedSourceSnapshot(filePath) ?: return sourceAccessError(filePath)
         if (startLine < 1) return mapOf("error" to "startLine must be at least 1")

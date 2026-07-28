@@ -168,6 +168,7 @@ private class StructureScanner(private val text: String, private val isJavaFile:
     }
 
     /** Finds the next direct-scope statement terminator, ignoring delimiters inside parameter lists. */
+    @Suppress("CyclomaticComplexMethod") // Each delimiter updates independent lexical nesting state.
     private fun findStatementTerminal(from: Int, until: Int): Pair<Int, Char>? {
         var parenDepth = 0
         var bracketDepth = 0
@@ -205,6 +206,7 @@ private class StructureScanner(private val text: String, private val isJavaFile:
         return until - 1
     }
 
+    @Suppress("ReturnCount") // Each declaration form maps directly to its concise source range.
     private fun declarationForBlock(
         header: String,
         start: Int,
@@ -247,6 +249,7 @@ private class StructureScanner(private val text: String, private val isJavaFile:
         return null
     }
 
+    @Suppress("ReturnCount") // Each bodyless declaration form maps directly to its concise source range.
     private fun declarationForStatement(
         header: String,
         start: Int,
