@@ -596,8 +596,8 @@ data class AiProviderProfile(
 const val DEFAULT_LM_STUDIO_PROFILE_ID = "lm-studio"
 
 // A multi-step investigation (gathering filtered evidence across several tool calls, then writing
-// a note back) can plausibly need dozens of tool round trips, especially against a small local
-// model that re-checks evidence cautiously - see AiAgentRunner.MAX_TOOL_ROUNDS.
+// a note back) can plausibly need dozens of MCP tool calls, especially against a small local
+// model that re-checks evidence cautiously.
 const val DEFAULT_AI_MAX_TOOL_ROUNDS = 100
 const val MIN_AI_MAX_TOOL_ROUNDS = 1
 const val MAX_AI_MAX_TOOL_ROUNDS = 500

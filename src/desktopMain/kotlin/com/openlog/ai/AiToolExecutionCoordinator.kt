@@ -30,7 +30,7 @@ internal class AiToolExecutionCoordinator(
 
     suspend fun execute(run: AiRun, call: LlmToolCall): AiToolExecutionResult {
         val arguments = parseArguments(call.argumentsJson)
-            ?: return complete(run, call, AiToolExecutionResult.error("Tool arguments must be a JSON object."))
+            ?: return rejectMalformedArguments(run, call)
         return execute(run, call, arguments)
     }
 
@@ -43,6 +43,21 @@ internal class AiToolExecutionCoordinator(
         arguments: Map<String, Any?>,
     ): AiToolExecutionResult {
         run.emit(AiRunEvent.ToolRequested(call))
+        // Reserve before any confirmation or gateway access. This is the shared enforcement point
+        // for direct API providers and managed Codex/Claude MCP sessions, which can call from
+        // different threads.
+        val budgetDecision = run.toolCallBudget.tryConsume(call.name)
+        if (!budgetDecision.allowed) {
+            val result = AiToolExecutionResult.error(
+                run.toolCallBudget.rejectionMessage(budgetDecision.isNotesWrite, budgetDecision.snapshot),
+            ).withBudgetFooter(run.toolCallBudget.resultFooter(budgetDecision.snapshot))
+            return complete(
+                run,
+                call,
+                result,
+                run.toolCallBudget.recordResult(result.returnedChars, result.truncated),
+            )
+        }
         // The in-app panel is always tied to the tab that created the run. External MCP clients
         // remain explicitly multi-tab; only managed account-agent sessions take this path.
         val pinnedArguments = if (
@@ -66,7 +81,9 @@ internal class AiToolExecutionCoordinator(
             } finally {
                 run.confirmations.remove(confirmation.id, decision)
             }
-            if (!accepted) return complete(run, call, AiToolExecutionResult.error("The user declined this action; no changes were made."))
+            if (!accepted) {
+                return completeCountedResult(run, call, AiToolExecutionResult.error("The user declined this action; no changes were made."))
+            }
         }
 
         val result = try {
@@ -77,11 +94,44 @@ internal class AiToolExecutionCoordinator(
         } catch (error: Exception) {
             AiToolExecutionResult.error("Tool '${call.name}' failed: ${error.message ?: "unexpected error"}")
         }
-        return complete(run, call, result)
+        return completeCountedResult(run, call, result)
     }
 
-    private suspend fun complete(run: AiRun, call: LlmToolCall, result: AiToolExecutionResult): AiToolExecutionResult {
-        run.emit(AiRunEvent.ToolCompleted(call, result.preview, result.truncated, result.evidence))
+    private suspend fun rejectMalformedArguments(run: AiRun, call: LlmToolCall): AiToolExecutionResult {
+        run.emit(AiRunEvent.ToolRequested(call))
+        val budgetDecision = run.toolCallBudget.tryConsume(call.name)
+        if (!budgetDecision.allowed) {
+            val result = AiToolExecutionResult.error(
+                run.toolCallBudget.rejectionMessage(budgetDecision.isNotesWrite, budgetDecision.snapshot),
+            ).withBudgetFooter(run.toolCallBudget.resultFooter(budgetDecision.snapshot))
+            return complete(run, call, result, run.toolCallBudget.recordResult(result.returnedChars, result.truncated))
+        }
+        return completeCountedResult(run, call, AiToolExecutionResult.error("Tool arguments must be a JSON object."))
+    }
+
+    private suspend fun completeCountedResult(
+        run: AiRun,
+        call: LlmToolCall,
+        result: AiToolExecutionResult,
+    ): AiToolExecutionResult {
+        // The warning depends only on consumed calls, so determine it before recording this
+        // response's diagnostics; the returned-character metric includes the warning itself.
+        val withFooter = result.withBudgetFooter(run.toolCallBudget.resultFooter(run.toolCallBudget.snapshot()))
+        return complete(
+            run,
+            call,
+            withFooter,
+            run.toolCallBudget.recordResult(withFooter.returnedChars, withFooter.truncated),
+        )
+    }
+
+    private suspend fun complete(
+        run: AiRun,
+        call: LlmToolCall,
+        result: AiToolExecutionResult,
+        snapshot: AiToolBudgetSnapshot,
+    ): AiToolExecutionResult {
+        run.emit(AiRunEvent.ToolCompleted(call, result.preview, result.truncated, result.evidence, snapshot, result.returnedChars))
         return result
     }
 
@@ -106,6 +156,7 @@ internal class AiToolExecutionCoordinator(
         "start_tailing", "stop_tailing" -> "Change live tailing"
         "export_analysis", "export_filtered_log" -> "Write an export file"
         "save_annotations", "load_annotations" -> "Save or load annotation files"
+        "clear_all_notes" -> "Clear all Notes sections and annotation blocks"
         else -> "Perform a confirmation-required action"
     }
 
@@ -115,9 +166,9 @@ internal class AiToolExecutionCoordinator(
             "close_tab", "get_filter", "set_filter", "get_visible_lines", "get_line_context",
             "select_lines", "get_selection", "toggle_group", "expand_all", "collapse_all",
             "get_tags", "get_packages", "get_crash_sites", "get_issue_description",
-            "get_annotation_sections", "append_annotation_section", "set_annotation_section",
+            "get_annotation_sections", "get_annotation_blocks", "append_annotation_section", "set_annotation_section",
             "add_text_note", "add_log_note", "add_image_note", "update_note_block", "move_note_block",
-            "delete_note_block", "export_analysis", "export_filtered_log", "save_annotations",
+            "delete_note_block", "clear_all_notes", "export_analysis", "export_filtered_log", "save_annotations",
             "load_annotations", "apply_filter_preset", "start_tailing", "stop_tailing",
             // search_similar_cases/get_case are deliberately NOT pinned — search_similar_cases is
             // tab-independent (it searches the whole notes corpus) and get_case takes a case `id`,
@@ -140,6 +191,11 @@ internal data class AiToolExecutionResult(
     // results, where there is no underlying tool value.
     val raw: Any? = null,
 ) {
+    val returnedChars: Int get() = content.length
+
+    fun withBudgetFooter(footer: String?): AiToolExecutionResult =
+        if (footer == null) this else copy(content = content + footer, preview = preview + footer)
+
     companion object {
         fun from(value: Any?, maxChars: Int, evidence: List<AiEvidence>): AiToolExecutionResult {
             val rendered = value?.toString() ?: "null"

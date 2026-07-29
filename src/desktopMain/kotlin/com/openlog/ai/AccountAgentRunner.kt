@@ -38,7 +38,7 @@ internal class AccountAgentRunner(
         require(profile.kind == AiProviderKind.CODEX_ACCOUNT || profile.kind == AiProviderKind.CLAUDE_CODE_ACCOUNT)
         require(prompt.isNotBlank()) { "AI prompt must not be blank" }
         session.activeRun?.cancel()
-        val run = AiRun(tabId = session.tabId, userPrompt = prompt, context = context)
+        val run = AiRun(tabId = session.tabId, userPrompt = prompt, context = context, maxToolCalls = maxToolRounds)
         session.lastPrompt = prompt
         session.lastContext = context
         session.activeRun = run
@@ -189,7 +189,7 @@ internal class AccountAgentRunner(
             try {
                 client.startTurn(
                     thread.id,
-                    accountPrompt(systemPrompt, prompt),
+                    accountPrompt(run, systemPrompt, prompt),
                     profile.model.takeIf(String::isNotBlank),
                     workspace.toString(),
                     profile.reasoningEffort.takeIf(String::isNotBlank),
@@ -223,7 +223,7 @@ internal class AccountAgentRunner(
         val turnMessages = AgentTurnMessageBuffer()
         ClaudeCodeClient(executable = LocalAccountCli.executable(profile.kind, profile.executablePath)).stream(
             ClaudeCodeRequest(
-                prompt = accountPrompt(systemPrompt, prompt),
+                prompt = accountPrompt(run, systemPrompt, prompt),
                 mcpServers = mapOf("openlog" to ClaudeCodeMcpServer(lease.url, mapOf("Authorization" to "Bearer ${lease.token}"))),
                 // Resumes the same tab's prior Claude Code session (if any) so a follow-up like "are
                 // you sure?" is answered from real conversation memory instead of a blank session
@@ -271,8 +271,8 @@ internal class AccountAgentRunner(
         run.emit(AiRunEvent.Done)
     }
 
-    private fun accountPrompt(systemPrompt: String, prompt: String): String =
-        "$systemPrompt\n\nYou have one MCP server named openlog. Use only its tools for log, source, filter, " +
+    private fun accountPrompt(run: AiRun, systemPrompt: String, prompt: String): String =
+        "$systemPrompt\n\n${run.toolCallBudget.initialGuidance()}\n\nYou have one MCP server named openlog. Use only its tools for log, source, filter, " +
             "tab, or note evidence and actions. Do not inspect the local workspace; it is intentionally empty." +
             "\n\nUser request:\n$prompt"
 

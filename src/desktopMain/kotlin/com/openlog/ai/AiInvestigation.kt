@@ -49,14 +49,17 @@ internal enum class AiQuickAction(val label: String, val prompt: String, val req
             ## Intake and scope
             1. Call `get_issue_description`. If `issueDescription` is blank, say that the issue description is
                missing and stop; do not infer a bug from the log.
-            2. Call `get_annotation_sections` to preserve existing From and Next steps context. Call `get_filter`
+            2. Call `get_annotation_sections` to preserve existing From and Next steps context, and
+               `get_annotation_blocks` to inspect existing evidence blocks by id before editing them. Call `get_filter`
                and `get_crash_sites` once to establish the current view and any high-signal anchors. Use
-               `get_project_info` at most once when registered source-folder context would help identify the
+               `get_project_info` with `maxContentChars: 4000` at most once when registered source-folder context would help identify the
                functional area. Do not ask for source code or README content repeatedly.
             3. State a working functional area only as a hypothesis, derived from the issue description, exact
                tags/packages, crash site, or a source mapping. Do not treat the reporter's area as proof of cause.
 
             ## Evidence loop — minimise tokens
+            - Aim for about 20 focused evidence/operational calls. Only those calls consume the configured
+              MCP budget; Notes/annotation reads and writes are unlimited, but still avoid noisy duplicate edits.
             - Never call unfiltered `get_visible_lines`. First narrow with `set_filter`, using exact tags,
               package prefixes, PIDs/TIDs, levels, or a literal keyword discovered from a crash/description.
               Use `get_tags` or `get_packages` only when needed to discover valid filter values.

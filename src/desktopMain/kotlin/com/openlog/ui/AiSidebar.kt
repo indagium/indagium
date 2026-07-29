@@ -101,6 +101,7 @@ import com.openlog.ai.AiRun
 import com.openlog.ai.AiRunEvent
 import com.openlog.ai.AiStartResult
 import com.openlog.ai.AiToolConfirmation
+import com.openlog.ai.AiToolBudgetSnapshot
 import com.openlog.ai.CustomAiCommand
 import com.openlog.ai.ModelDiscoveryResult
 import com.openlog.ai.isLoopbackHost
@@ -1375,12 +1376,17 @@ private fun AiRunCard(
                 )
             }
         }
-        AiRunTimingRow(run, isTerminal, usage)
+        AiRunTimingRow(run, isTerminal, usage, run.toolCallBudget.snapshot())
     }
 }
 
 @Composable
-private fun AiRunTimingRow(run: AiRun, isTerminal: Boolean, usage: AiRunEvent.Usage?) {
+private fun AiRunTimingRow(
+    run: AiRun,
+    isTerminal: Boolean,
+    usage: AiRunEvent.Usage?,
+    budget: AiToolBudgetSnapshot,
+) {
     val colors = tc()
     // Ticks once a second while active so "running Xs" advances live; freezes once terminal since
     // run.completedAt is then fixed and no further ticks are scheduled.
@@ -1401,6 +1407,14 @@ private fun AiRunTimingRow(run: AiRun, isTerminal: Boolean, usage: AiRunEvent.Us
     }
     Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
         AppText(parts.joinToString(" · "), color = colors.td, fontSize = 9.sp, maxLines = 2)
+        AppText(
+            "MCP calls: analysis/ops ${budget.evidenceUsed}/${budget.evidenceBudget} · " +
+                "Notes writes unlimited (${budget.notesWritesUsed}) · annotation reads unlimited · " +
+                "${budget.returnedChars} chars returned · ${budget.truncatedResults} truncated",
+            color = colors.td,
+            fontSize = 9.sp,
+            maxLines = 2,
+        )
         usage?.let {
             UsageTokenRows(it, colors)
         }
@@ -1554,7 +1568,11 @@ private fun AiTraceRow(event: AiRunEvent) {
         is AiRunEvent.ToolRequested -> "Using tool: ${event.call.name}"
         is AiRunEvent.ToolCompleted -> buildString {
             append("Tool finished: ${event.call.name}")
-            if (event.resultTruncated) append(" (result truncated)")
+            append(" • Analysis/ops ${event.budget.evidenceUsed}/${event.budget.evidenceBudget}")
+            append(" • Notes writes unlimited (${event.budget.notesWritesUsed}); annotation reads unlimited")
+            append(" • ${event.resultChars} chars returned")
+            if (event.resultTruncated) append(" • result truncated")
+            append(" • ${event.budget.truncatedResults} truncated total")
         }
         is AiRunEvent.Error -> event.message
         AiRunEvent.Cancelled -> "Request stopped."

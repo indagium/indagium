@@ -315,6 +315,13 @@ class ControlServerTest {
         val logBody = post("/annotations/log", """{"tabId":"t1","lineIds":[2],"caption":"Failure line"}""")
         val logId = (Json.decode(logBody) as Map<*, *>)["blockId"] as String
 
+        val listed = Json.decode(get("/annotations/blocks?tabId=t1")) as Map<*, *>
+        val listedBlocks = listed["blocks"] as List<*>
+        assertEquals(2, listedBlocks.size)
+        assertEquals(noteId, (listedBlocks[0] as Map<*, *>)["id"])
+        assertEquals("text", listedBlocks[0]?.let { (it as Map<*, *>)["type"] })
+        assertEquals(listOf(2), ((listedBlocks[1] as Map<*, *>)["lineIds"]))
+
         post("/annotations/update", """{"tabId":"t1","blockId":"$noteId","text":"Updated note"}""")
         post("/annotations/move", """{"tabId":"t1","blockId":"$logId","delta":-1}""")
         val blocks = state.tab("t1")!!.annotations.blocks
