@@ -81,7 +81,7 @@ File → LogParser.parseLogcat() → List<LogEntry>
 | `source/SourceIndexStore.kt` | Persists the index to `appDataDir()/source-index` (`openLog2-source-index-v1` token format), separate from autosave. |
 | `source/SourceModel.kt` | Index data types: `LogCallSite`, `SourceIndex`, `SourceMatch`, `SourceIndexStatus`, `SourceCodeView`. |
 | `ui/SourceCodeDialog.kt` | "Show in code" popup — the resolved method's source with V+H scrollbars, path, line range, Open-in-default-app. |
-| `debug/ControlServer.kt` | Localhost MCP + REST control server (41 tools incl. `resolve_log_source`, `get_project_info`, `set_highlighters`, `reindex_sources`, `add_manual_collapse`, `add_sequence`, `save_filter_preset`). Off by default; enabled via Settings. |
+| `debug/ControlServer.kt` | Localhost MCP + REST control server (53 tools incl. `resolve_log_source`, `get_project_info`, `set_highlighters`, `reindex_sources`, `add_manual_collapse`, `add_sequence`, `save_filter_preset`). Off by default; enabled via Settings. |
 
 ### AppState
 

@@ -113,6 +113,9 @@ internal class OpenLogToolOperations(
         "append_annotation_section" to { a ->
             appendAnnotationSection(a.str("tabId") ?: "", a.str("section") ?: "", a.str("text"))
         },
+        "set_annotation_section" to { a ->
+            setAnnotationSection(a.str("tabId") ?: "", a.str("section") ?: "", a.str("text"))
+        },
         "add_text_note" to { a ->
             addTextNoteRoute(a.str("tabId") ?: "", a.str("text") ?: "", a.str("afterId"))
         },
@@ -1292,6 +1295,22 @@ internal class OpenLogToolOperations(
             "prefix" -> appState.tab(tabId)?.annotations?.prefix
             else -> appState.tab(tabId)?.annotations?.suffix
         } ?: tab.annotations.let { if (section == "prefix") it.prefix else it.suffix }
+        return mapOf("ok" to true, "tabId" to tabId, "section" to section, "content" to content)
+    }
+
+    private fun setAnnotationSection(tabId: String, section: String, text: String?): Map<String, Any?> {
+        appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        // Unlike append, blank is a valid input here — it's the clear path, not an error.
+        val resolved = if (text.isNullOrBlank()) "" else text
+        when (section) {
+            "prefix" -> appState.setPrefix(tabId, resolved)
+            "suffix" -> appState.setSuffix(tabId, resolved)
+            else -> return mapOf("error" to "unknown annotation section '$section'; valid: prefix,suffix")
+        }
+        val content = when (section) {
+            "prefix" -> appState.tab(tabId)?.annotations?.prefix
+            else -> appState.tab(tabId)?.annotations?.suffix
+        }
         return mapOf("ok" to true, "tabId" to tabId, "section" to section, "content" to content)
     }
 
