@@ -544,15 +544,18 @@ fun AnnotationPanel(
                 AnnSection(tc) {
                     AppText("Prefix", color = tc.td, fontSize = 10.sp, fontFamily = UI)
                     Spacer(Modifier.height(3.dp))
-                    InlineField(
-                        ann.prefix,
-                        onUpdatePrefix,
-                        "Heading, context…",
-                        Modifier.fillMaxWidth()
+                    ScrollableTextArea(
+                        value = ann.prefix,
+                        onValue = onUpdatePrefix,
+                        placeholder = "Heading, context…",
+                        modifier = Modifier.fillMaxWidth()
                             .focusRequester(prefixFr)
-                            .onFocusChanged { prefixFocused = it.isFocused },
+                            // hasFocus, not isFocused — see ScrollableTextArea's own note.
+                            .onFocusChanged { prefixFocused = it.hasFocus },
                         fontSize = 12.sp,
-                        singleLine = false,
+                        maxHeight = 160.dp,
+                        resetKey = tab.id,
+                        onClear = { onUpdatePrefix("") },
                     )
                 }
 
@@ -766,15 +769,18 @@ fun AnnotationPanel(
                     AnnSection(tc) {
                         AppText("Next steps", color = tc.td, fontSize = 10.sp, fontFamily = UI)
                         Spacer(Modifier.height(3.dp))
-                        InlineField(
-                            ann.suffix,
-                            onUpdateSuffix,
-                            "Add follow-up notes…",
-                            Modifier.fillMaxWidth()
+                        ScrollableTextArea(
+                            value = ann.suffix,
+                            onValue = onUpdateSuffix,
+                            placeholder = "Add follow-up notes…",
+                            modifier = Modifier.fillMaxWidth()
                                 .focusRequester(suffixFr)
-                                .onFocusChanged { suffixFocused = it.isFocused },
+                                // hasFocus, not isFocused — see ScrollableTextArea's own note.
+                                .onFocusChanged { suffixFocused = it.hasFocus },
                             fontSize = 12.sp,
-                            singleLine = false,
+                            maxHeight = 160.dp,
+                            resetKey = tab.id,
+                            onClear = { onUpdateSuffix("") },
                         )
                     }
                 }

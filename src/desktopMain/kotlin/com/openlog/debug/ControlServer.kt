@@ -852,6 +852,16 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
         ),
     ),
     McpTool(
+        "set_annotation_section",
+        "Replace one Notes section's text entirely, discarding whatever was there before. Omitting " +
+            "or blanking `text` clears the section. Prefer append_annotation_section instead if the " +
+            "existing content should be kept.",
+        schema(
+            "tabId" to "string", "section" to "string", "text" to "string", required = listOf("tabId", "section"),
+            enums = mapOf("section" to listOf("prefix", "suffix")),
+        ),
+    ),
+    McpTool(
         "add_text_note",
         "Append a plain text analysis note block, optionally after an existing block id.",
         schema("tabId" to "string", "text" to "string", "afterId" to "string", required = listOf("tabId", "text")),
@@ -1226,6 +1236,7 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Get, "/annotations/issue-description", "get_issue_description"),
     Triple(HttpMethod.Get, "/annotations/sections", "get_annotation_sections"),
     Triple(HttpMethod.Post, "/annotations/section/append", "append_annotation_section"),
+    Triple(HttpMethod.Post, "/annotations/section/set", "set_annotation_section"),
     Triple(HttpMethod.Post, "/annotations/note", "add_text_note"),
     Triple(HttpMethod.Post, "/annotations/log", "add_log_note"),
     Triple(HttpMethod.Post, "/annotations/image", "add_image_note"),

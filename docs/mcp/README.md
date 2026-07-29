@@ -72,7 +72,8 @@ A few worth calling out:
   to Kotlin/Java files under registered source folders, even when the source index is unavailable.
 - `get_annotation_sections` reads the Notes panel's From (`prefix`) and Next steps (`suffix`)
   sections. `append_annotation_section` adds non-blank text to either section without replacing
-  existing notes.
+  existing notes. `set_annotation_section` replaces a section outright — omitting or blanking
+  `text` clears it — so prefer `append_annotation_section` unless the existing content is wrong.
 
 See [ANALYSIS_PLAYBOOK.md](ANALYSIS_PLAYBOOK.md) for a system-prompt skeleton that teaches an
 agent how to actually investigate a log with these tools.

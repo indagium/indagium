@@ -50,7 +50,7 @@ class OpenLogToolGatewayTest {
             "list_tabs", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
             "get_filter", "get_sequence_summary", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
             "toggle_group", "expand_all", "collapse_all", "get_tags", "get_packages", "get_crash_sites",
-            "get_issue_description", "get_annotation_sections", "append_annotation_section",
+            "get_issue_description", "get_annotation_sections", "append_annotation_section", "set_annotation_section",
             "add_text_note", "add_log_note", "add_image_note", "update_note_block", "move_note_block",
             "delete_note_block", "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing", "resolve_log_source",
@@ -341,6 +341,45 @@ class OpenLogToolGatewayTest {
         assertEquals(true, suffix["ok"])
         assertEquals("- Reproduce\n\n- Verify the fix", suffix["content"])
         assertEquals(OpenLogToolActionPolicy.AUTOMATIC, operations.toolGateway.actionPolicy("append_annotation_section"))
+    }
+
+    @Test
+    fun setAnnotationSectionReplacesAndClearsNotesWithoutRejectingBlankText() {
+        state.setPrefix("t1", "Existing context")
+        state.setSuffix("t1", "- Reproduce")
+
+        val replaced = operations.toolGateway.execute(
+            "set_annotation_section", mapOf("tabId" to "t1", "section" to "prefix", "text" to "Replaced heading"),
+        ) as Map<*, *>
+        assertEquals(true, replaced["ok"])
+        assertEquals("Replaced heading", replaced["content"])
+        assertEquals("Replaced heading", state.tab("t1")!!.annotations.prefix)
+
+        val clearedByOmission = operations.toolGateway.execute(
+            "set_annotation_section", mapOf("tabId" to "t1", "section" to "prefix"),
+        ) as Map<*, *>
+        assertEquals(true, clearedByOmission["ok"])
+        assertEquals("", clearedByOmission["content"])
+        assertEquals("", state.tab("t1")!!.annotations.prefix)
+
+        val clearedByBlank = operations.toolGateway.execute(
+            "set_annotation_section", mapOf("tabId" to "t1", "section" to "suffix", "text" to "   "),
+        ) as Map<*, *>
+        assertEquals(true, clearedByBlank["ok"])
+        assertEquals("", clearedByBlank["content"])
+        assertEquals("", state.tab("t1")!!.annotations.suffix)
+
+        val invalidSection = operations.toolGateway.execute(
+            "set_annotation_section", mapOf("tabId" to "t1", "section" to "body", "text" to "Ignored"),
+        ) as Map<*, *>
+        val missingTab = operations.toolGateway.execute(
+            "set_annotation_section", mapOf("tabId" to "missing", "section" to "prefix", "text" to "Ignored"),
+        ) as Map<*, *>
+        assertTrue((invalidSection["error"] as String).contains("valid: prefix,suffix"))
+        assertTrue((missingTab["error"] as String).contains("no such tab: missing"))
+        assertEquals("", state.tab("t1")!!.annotations.prefix)
+
+        assertEquals(OpenLogToolActionPolicy.AUTOMATIC, operations.toolGateway.actionPolicy("set_annotation_section"))
     }
 
     @Test

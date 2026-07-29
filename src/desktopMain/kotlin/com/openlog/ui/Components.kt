@@ -39,17 +39,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -62,6 +66,7 @@ import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.LogLevel
 import kotlinx.coroutines.delay
 import java.awt.KeyboardFocusManager
+import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
 @Composable fun tc() = LocalTheme.current
@@ -485,6 +490,115 @@ fun InlineField(
             }
         },
     )
+}
+
+// Grows with content up to `maxHeight`, then scrolls internally — shared by the Notes panel's
+// From/Next-steps fields and the Project-info Description field, all of which used to either grow
+// without limit or clip silently past a fixed height with no way to see the rest. Lifted from
+// `AiPromptComposer` (AiSidebar.kt), which solves the same viewport/caret-follow/clear-button
+// problem for the AI prompt box.
+//
+// Callers tracking focus through `modifier` must read `hasFocus`, not `isFocused`: the
+// verticalScroll below groups focus, so the caller's onFocusChanged no longer sits directly above
+// the text field and `isFocused` stays false the whole time it is being typed into. A panel that
+// gates its own Enter/arrow shortcuts on that flag would otherwise eat the field's keystrokes.
+@Composable
+fun ScrollableTextArea(
+    value: String,
+    onValue: (String) -> Unit,
+    placeholder: String = "",
+    // applied to the BasicTextField itself
+    modifier: Modifier = Modifier,
+    fontSize: TextUnit = 12.sp,
+    lineHeight: TextUnit = TextUnit.Unspecified,
+    minHeight: Dp = 0.dp,
+    maxHeight: Dp,
+    // re-seeds the caret when identity changes (tab id / folder path)
+    resetKey: Any? = null,
+    shape: Shape = CORNER_SM,
+    // null → tc.br
+    borderColor: Color? = null,
+    contentPadding: PaddingValues = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
+    onClear: (() -> Unit)? = null,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    val scroll = rememberScrollState()
+    var fieldHeightPx by remember { mutableStateOf(0) }
+    var viewportHeightPx by remember { mutableStateOf(0) }
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var fieldValue by remember(resetKey) { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
+
+    // The caller's String is the source of truth (MCP tool calls, loading a different tab/folder
+    // all write it directly); TextFieldValue only adds the caret position needed to reveal the
+    // line being edited. Reseat it whenever an external write changes the text under us.
+    LaunchedEffect(value) {
+        if (value != fieldValue.text) fieldValue = TextFieldValue(value, TextRange(value.length))
+    }
+    LaunchedEffect(fieldValue, layout, viewportHeightPx) {
+        val l = layout ?: return@LaunchedEffect
+        if (viewportHeightPx == 0) return@LaunchedEffect
+        val caretBottom = l.getCursorRect(fieldValue.selection.end).bottom
+        val target = (caretBottom - viewportHeightPx + with(density) { 12.dp.toPx() })
+            .roundToInt()
+            .coerceIn(0, scroll.maxValue)
+        scroll.animateScrollTo(target)
+    }
+
+    Box(Modifier.fillMaxWidth()) {
+        BasicTextField(
+            value = fieldValue,
+            onValueChange = {
+                fieldValue = it
+                onValue(it.text)
+            },
+            textStyle = TextStyle(color = tc.tx, fontSize = fontSize, lineHeight = lineHeight, fontFamily = FontFamily.Default),
+            cursorBrush = SolidColor(tc.ac),
+            onTextLayout = { layout = it },
+            // heightIn must come before verticalScroll: verticalScroll measures its child unbounded
+            // in the scroll axis, so the outer heightIn is what actually clips the viewport, and
+            // short text still lands at its own natural height. A fillMaxSize here (as
+            // AiPromptComposer uses inside its fixed-height editor) would pin it at maxHeight.
+            modifier = modifier
+                .heightIn(min = minHeight, max = maxHeight)
+                .onSizeChanged { fieldHeightPx = it.height }
+                .background(tc.bg, shape)
+                .border(1.dp, borderColor ?: tc.br, shape)
+                .padding(contentPadding)
+                .padding(end = 21.dp)
+                // Measured *inside* the padding: caret positions come from the text layout, which
+                // shares that inner coordinate space. Measuring the padded outer height instead
+                // leaves the caret short of the bottom edge by the padding on every reveal.
+                .onSizeChanged { viewportHeightPx = it.height }
+                .verticalScroll(scroll),
+            decorationBox = { inner ->
+                if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                inner()
+            },
+        )
+        val clearAction = onClear?.takeIf { value.isNotBlank() }
+        if (fieldHeightPx > 0) {
+            // Can't fillMaxHeight() here: in AnnotationPanel this component sits inside the panel's
+            // own verticalScroll Column — an infinite max-height constraint, where fillMaxHeight
+            // misbehaves. The field's own measured (already-capped) height stands in for it.
+            // The top inset yields the corner to the × when it is showing: both sit at the trailing
+            // edge, so without it the thumb draws under the glyph and the button swallows clicks
+            // aimed at the top of the track (same reason AiPromptComposer insets its own scrollbar).
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(scroll),
+                modifier = Modifier.align(Alignment.CenterEnd)
+                    .height(with(density) { fieldHeightPx.toDp() })
+                    .padding(top = if (clearAction != null) 24.dp else 2.dp, bottom = 2.dp),
+                style = appScrollbarStyle(tc),
+            )
+        }
+        if (clearAction != null) {
+            SquareIconButton(
+                "×", fontSize = 12.sp, onClick = clearAction,
+                modifier = Modifier.align(Alignment.TopEnd).padding(4.dp), size = 16.dp,
+            )
+        }
+    }
 }
 
 @Composable

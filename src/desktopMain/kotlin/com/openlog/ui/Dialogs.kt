@@ -205,27 +205,26 @@ internal fun SourceFolderInfoDialog(
         AppText(truncatePathForDisplay(path), color = tc.td, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             AppText("Description", color = tc.td, fontSize = 10.sp)
-            BasicTextField(
+            ScrollableTextArea(
                 value = description,
-                onValueChange = { description = it },
-                textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
-                cursorBrush = SolidColor(tc.ac),
-                modifier = Modifier.fillMaxWidth()
-                    .background(tc.bg, CORNER_MD)
-                    .border(1.dp, tc.ac.copy(.5f), CORNER_MD)
-                    .padding(10.dp).heightIn(min = 80.dp, max = 200.dp),
-                decorationBox = { inner ->
-                    if (description.isEmpty()) {
-                        AppText("What is this project / what should the AI know about it?", color = tc.td, fontSize = 12.sp)
-                    }
-                    inner()
-                },
+                onValue = { description = it },
+                placeholder = "What is this project / what should the AI know about it?",
+                modifier = Modifier.fillMaxWidth(),
+                fontSize = 12.sp,
+                lineHeight = 18.sp,
+                minHeight = 80.dp,
+                maxHeight = 200.dp,
+                resetKey = path,
+                shape = CORNER_MD,
+                borderColor = tc.ac.copy(.5f),
+                contentPadding = PaddingValues(10.dp),
+                onClear = { description = "" },
             )
         }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             AppText("README path (optional)", color = tc.td, fontSize = 10.sp)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                InlineField(readmePath, { readmePath = it }, "/path/to/README.md", Modifier.weight(1f), fontSize = 12.sp)
+                InlineField(readmePath, { readmePath = it }, "/path/to/README.md", Modifier.weight(1f), fontSize = 12.sp, onClear = { readmePath = "" })
                 AppButton(
                     "Browse",
                     onClick = { state.pickReadmeFile()?.let { readmePath = it } },
