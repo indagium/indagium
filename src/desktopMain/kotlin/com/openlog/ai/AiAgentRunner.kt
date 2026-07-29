@@ -111,11 +111,13 @@ internal class AiRun internal constructor(
     val tabId: String,
     val userPrompt: String = "",
     val context: AiInvestigationContext = AiInvestigationContext(tabId),
+    maxToolCalls: Int = com.openlog.model.DEFAULT_AI_MAX_TOOL_ROUNDS,
     val sentAt: Long = System.currentTimeMillis(),
 ) {
     private val _events = MutableSharedFlow<AiRunEvent>(replay = EVENT_REPLAY, extraBufferCapacity = EVENT_BUFFER)
     private val _history = mutableListOf<AiRunEvent>()
     internal val confirmations = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+    internal val toolCallBudget = AiToolCallBudget(maxToolCalls)
     internal var job: Job? = null
 
     /** Wall-clock time of the first model-originated event (a reply or a tool call), if any yet. */
@@ -179,6 +181,8 @@ internal sealed interface AiRunEvent {
         val resultPreview: String,
         val resultTruncated: Boolean,
         val evidence: List<AiEvidence> = emptyList(),
+        val budget: AiToolBudgetSnapshot,
+        val resultChars: Int,
     ) : AiRunEvent
 
     data class ConfirmationRequired(val confirmation: AiToolConfirmation) : AiRunEvent
@@ -238,7 +242,7 @@ internal class AiAgentRunner(
         require(prompt.isNotBlank()) { "AI prompt must not be blank" }
         require(context.tabId == session.tabId) { "AI context must belong to the session tab." }
         session.activeRun?.cancel()
-        val run = AiRun(tabId = session.tabId, userPrompt = prompt, context = context)
+        val run = AiRun(tabId = session.tabId, userPrompt = prompt, context = context, maxToolCalls = maxToolRounds)
         session.lastPrompt = prompt
         session.lastContext = context
         session.activeRun = run
@@ -283,19 +287,14 @@ internal class AiAgentRunner(
         if (conversation.isEmpty() && !systemPrompt.isNullOrBlank()) {
             conversation += LlmMessage(LlmRole.SYSTEM, systemPrompt)
         }
+        // This is independent of the caller's provider: managed Codex/Claude MCP calls consume
+        // the same per-run budget in AiToolExecutionCoordinator.
+        conversation += LlmMessage(LlmRole.SYSTEM, run.toolCallBudget.initialGuidance())
         conversation += LlmMessage(LlmRole.USER, prompt)
-        var toolRounds = 0
-        // Scales with the configured budget rather than a fixed count: a small model given a large
-        // budget (Settings -> AI providers) can otherwise spend all of it re-checking evidence and
-        // never reach the point of writing a note, which is itself several tool calls (see the
-        // ISSUE_INVESTIGATION quick action). Bounded so a small configured budget still nudges early
-        // rather than only in its very last round.
-        val nudgeLeadRounds = (maxToolRounds / NUDGE_LEAD_FRACTION).coerceIn(1, NUDGE_LEAD_ROUNDS_CAP)
-        var nudgeSent = false
 
         try {
             while (true) {
-                run.emit(AiRunEvent.Status(if (toolRounds == 0) "Generating response…" else "Continuing investigation…"))
+                run.emit(AiRunEvent.Status(if (run.toolCallBudget.snapshot().totalUsed == 0) "Generating response…" else "Continuing investigation…"))
                 val assistantText = StringBuilder()
                 val toolCalls = mutableListOf<LlmToolCall>()
                 val reasoning = mutableListOf<LlmReasoning>()
@@ -366,22 +365,9 @@ internal class AiAgentRunner(
                     return
                 }
 
-                if (toolRounds >= maxToolRounds) {
-                    run.emit(AiRunEvent.Error("Stopped after $maxToolRounds tool rounds to keep this investigation bounded."))
-                    return
-                }
-                toolRounds++
-
                 toolCalls.forEach { call ->
                     val result = toolExecutor.execute(run, call)
                     conversation += LlmMessage(LlmRole.TOOL, content = result.content, toolCallId = call.id)
-                }
-
-                val roundsLeft = maxToolRounds - toolRounds
-                if (!nudgeSent && roundsLeft <= nudgeLeadRounds) {
-                    nudgeSent = true
-                    conversation += LlmMessage(LlmRole.SYSTEM, wrapUpNudge(roundsLeft))
-                    run.emit(AiRunEvent.Status("Nearing the tool-call budget; asking the model to wrap up…"))
                 }
             }
         } finally {
@@ -389,19 +375,8 @@ internal class AiAgentRunner(
         }
     }
 
-    private fun wrapUpNudge(roundsLeft: Int): String =
-        "You have $roundsLeft tool round(s) left before this investigation is stopped automatically. " +
-            "Stop requesting more evidence now. Conclude using only what you already have: if the task " +
-            "asked you to update Notes, use the appropriate notes tool before your final reply; otherwise " +
-            "give your final answer directly without requesting further tools."
-
     private companion object {
         const val MAX_TOOL_ROUNDS = com.openlog.model.DEFAULT_AI_MAX_TOOL_ROUNDS
         const val MAX_TOOL_RESULT_CHARS = 12_000
-
-        // Cap on how many rounds before the limit the wrap-up nudge fires, and the fraction of the
-        // total budget it scales from - see the nudgeLeadRounds computation in runLoop.
-        const val NUDGE_LEAD_ROUNDS_CAP = 15
-        const val NUDGE_LEAD_FRACTION = 4
     }
 }

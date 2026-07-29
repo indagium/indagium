@@ -47,7 +47,7 @@ class AiAgentRunnerTest {
             assertTrue(events.any { it is AiRunEvent.ToolCompleted && it.resultPreview.contains("ok=true") })
             assertTrue(events.any { it == AiRunEvent.AssistantDelta("Investigation complete.") })
             assertEquals(AiRunEvent.Done, events.last())
-            assertEquals(4, session.messages.size) // user, assistant tool call, tool result, final assistant
+            assertEquals(5, session.messages.size) // user, budget guidance, assistant tool call, tool result, final assistant
             assertNull(session.activeRun)
             assertEquals(listOf(run), session.runs)
             assertEquals(events, run.history)
@@ -303,7 +303,7 @@ class AiAgentRunnerTest {
     }
 
     @Test
-    fun stopsAfterConfiguredToolRounds() = runBlocking {
+    fun analysisCallsUseTheEntireConfiguredBudget() = runBlocking {
         var executions = 0
         val toolResponse = listOf(
             LlmStreamEvent.ToolCall(LlmToolCall("call", "set_filter", "{}")),
@@ -319,23 +319,26 @@ class AiAgentRunnerTest {
             run.job!!.join()
 
             assertEquals(5, executions)
-            assertIs<AiRunEvent.Error>(run.events.replayCache.last())
-            assertTrue((run.events.replayCache.last() as AiRunEvent.Error).message.contains("5 tool rounds"))
+            val rejected = run.events.replayCache.filterIsInstance<AiRunEvent.ToolCompleted>()
+                .filter { it.resultPreview.contains("budget exhausted") }
+            assertEquals(1, rejected.size)
+            assertTrue(rejected.all { it.budget.evidenceUsed == 5 && it.budget.notesWritesUnlimited })
+            assertEquals(AiRunEvent.Done, run.events.replayCache.last())
         } finally {
             runner.close()
         }
     }
 
     @Test
-    fun nudgesTheModelToWrapUpBeforeHittingTheToolRoundLimit() = runBlocking {
+    fun sendsInitialBudgetGuidanceAndAddsFooterAtWarningThreshold() = runBlocking {
         val toolResponse = listOf(
             LlmStreamEvent.ToolCall(LlmToolCall("call", "set_filter", "{}")),
             LlmStreamEvent.Completed,
         )
         val runner = runner(
-            responses = List(6) { toolResponse },
+            responses = listOf(toolResponse, listOf(LlmStreamEvent.Completed)),
             handlers = mapOf("set_filter" to { _: Map<String, Any?> -> Unit }),
-            maxToolRounds = 5,
+            maxToolRounds = 6,
         )
         try {
             val session = AiSession("tab-1")
@@ -343,16 +346,78 @@ class AiAgentRunnerTest {
             run.job!!.join()
 
             assertTrue(
-                run.events.replayCache.any {
-                    it is AiRunEvent.Status && it.text.contains("Nearing the tool-call budget")
-                },
-            )
-            assertTrue(
                 session.messages.any {
-                    it.role == LlmRole.SYSTEM && it.content.orEmpty().contains("tool round(s) left")
+                    it.role == LlmRole.SYSTEM && it.content.orEmpty().contains("strict 6-call MCP budget")
                 },
-                "Expected a wrap-up nudge asking the model to conclude before the round limit.",
+                "Expected automatic initial model guidance.",
             )
+            val completed = run.events.replayCache.filterIsInstance<AiRunEvent.ToolCompleted>().single()
+            assertTrue(completed.resultPreview.contains("5 analysis/operational call(s) remaining"))
+            assertEquals(5, completed.budget.totalRemaining)
+        } finally {
+            runner.close()
+        }
+    }
+
+    @Test
+    fun batchedCallsCountOnlyAnalysisOperationsAgainstTheBudget() = runBlocking {
+        val calls = mutableListOf<String>()
+        val runner = runner(
+            responses = listOf(
+                listOf(
+                    LlmStreamEvent.ToolCall(LlmToolCall("evidence-1", "set_filter", "{}")),
+                    LlmStreamEvent.ToolCall(LlmToolCall("evidence-2", "set_filter", "{}")),
+                    LlmStreamEvent.ToolCall(LlmToolCall("note-1", "add_text_note", "{}")),
+                    LlmStreamEvent.Completed,
+                ),
+                listOf(LlmStreamEvent.Completed),
+            ),
+            handlers = mapOf(
+                "set_filter" to { _: Map<String, Any?> -> calls += "evidence"; mapOf("ok" to true) },
+                "add_text_note" to { _: Map<String, Any?> -> calls += "note"; mapOf("ok" to true) },
+            ),
+            maxToolRounds = 3,
+        )
+        try {
+            val run = runner.start(AiSession("tab-1"), "model", "Investigate")
+            run.job!!.join()
+
+            assertEquals(listOf("evidence", "evidence", "note"), calls)
+            val lastTool = run.events.replayCache.filterIsInstance<AiRunEvent.ToolCompleted>().last()
+            assertEquals(2, lastTool.budget.evidenceUsed)
+            assertEquals(1, lastTool.budget.notesWritesUsed)
+            assertEquals(1, lastTool.budget.totalRemaining)
+        } finally {
+            runner.close()
+        }
+    }
+
+    @Test
+    fun budgetRejectionHappensBeforeAConfirmationIsRequested() = runBlocking {
+        var executions = 0
+        val runner = runner(
+            responses = listOf(
+                listOf(
+                    LlmStreamEvent.ToolCall(LlmToolCall("evidence", "set_filter", "{}")),
+                    LlmStreamEvent.ToolCall(LlmToolCall("close", "close_tab", "{}")),
+                    LlmStreamEvent.Completed,
+                ),
+                listOf(LlmStreamEvent.Completed),
+            ),
+            handlers = mapOf(
+                "set_filter" to { _: Map<String, Any?> -> executions++; mapOf("ok" to true) },
+                "close_tab" to { _: Map<String, Any?> -> executions++; mapOf("ok" to true) },
+            ),
+            maxToolRounds = 1,
+        )
+        try {
+            val run = runner.start(AiSession("tab-1"), "model", "Investigate")
+            run.job!!.join()
+
+            assertEquals(1, executions)
+            assertTrue(run.events.replayCache.none { it is AiRunEvent.ConfirmationRequired })
+            val completed = run.events.replayCache.filterIsInstance<AiRunEvent.ToolCompleted>()
+            assertEquals(1, completed.count { it.resultPreview.contains("budget exhausted") })
         } finally {
             runner.close()
         }

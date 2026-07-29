@@ -2270,7 +2270,7 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
                 )
             }
         }
-        CompactSetting("Max tool rounds per request") {
+        CompactSetting("Max MCP tool calls per request") {
             val roundLimits = listOf(12, 25, 50, 100, 200, 500)
             ListStepper(
                 options = roundLimits,
@@ -2281,7 +2281,8 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
         AppText(
             "A multi-step investigation (filtering, reading lines, then writing a note) can take " +
                 "many tool calls, especially with a smaller local model. Raise this if a request stops " +
-                "with \"tool rounds\" before it finishes.",
+                "with \"MCP tool-call budget\" before it finishes. Notes reads and writes are unlimited; " +
+                "only analysis and operational calls consume this budget.",
             color = tc.td,
             fontSize = 10.sp,
             maxLines = 3,

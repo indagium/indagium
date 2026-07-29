@@ -65,7 +65,9 @@ A few worth calling out:
   shrink the payload when you don't need every column.
 - `get_packages` lists dotted tag-prefixes (with counts) to discover values for `pkgPrefixes`.
 - `get_project_info` returns the description/README set per registered source folder in
-  Settings → Source code — useful project context before a code-level investigation.
+  Settings → Source code — useful project context before a code-level investigation. Pass
+  `maxContentChars` to cap combined description/README text; capped responses allocate text in
+  deterministic folder order, description before README, and report truncation metadata.
 - `list_source_declarations` exposes a file's top-level declarations or a class's direct members;
   use its opaque ids with `get_source_declarations` to retrieve exact method/class bodies. Use
   `get_source_file` only for broader context and page with `nextStartLine`. These reads are limited
@@ -74,6 +76,11 @@ A few worth calling out:
   sections. `append_annotation_section` adds non-blank text to either section without replacing
   existing notes. `set_annotation_section` replaces a section outright — omitting or blanking
   `text` clears it — so prefer `append_annotation_section` unless the existing content is wrong.
+- `get_annotation_blocks` lists every existing Notes block by id with safe details for targeting
+  it: text or log caption/line ids, or image caption/format/size/video metadata (never image
+  bytes). `get_annotation_sections` intentionally does not list blocks. `clear_all_notes` clears
+  both sections and every block only after confirmation; it preserves `issueDescription`,
+  `appVersion`, and `decisiveTags`.
 
 See [ANALYSIS_PLAYBOOK.md](ANALYSIS_PLAYBOOK.md) for a system-prompt skeleton that teaches an
 agent how to actually investigate a log with these tools.

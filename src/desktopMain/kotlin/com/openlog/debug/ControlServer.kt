@@ -839,7 +839,15 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
     McpTool(
         "get_annotation_sections",
         "Read the Notes panel's From and Next steps text. `prefix` is the configurable From " +
-            "section (labelled From by default); `suffix` is Next steps.",
+            "section (labelled From by default); `suffix` is Next steps. This does not list " +
+            "annotation blocks; call get_annotation_blocks for those.",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "get_annotation_blocks",
+        "List every existing Notes annotation block with its id and safe identifying details. " +
+            "Text and log blocks include their text/caption and line ids; image blocks include caption, " +
+            "format, byte size, and video metadata but never image bytes.",
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(
@@ -908,6 +916,13 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
     McpTool(
         "delete_note_block", "Delete an annotation block by id.",
         schema("tabId" to "string", "blockId" to "string", required = listOf("tabId", "blockId")),
+    ),
+    McpTool(
+        "clear_all_notes",
+        "Clear all Notes content for a tab: From/prefix, Next steps/suffix, and every annotation block. " +
+            "This bulk destructive action requires confirmation and preserves the private issue description " +
+            "and case metadata such as appVersion and decisiveTags.",
+        schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(
         "export_analysis", "Write the tab's Markdown analysis to an absolute path.",
@@ -1022,9 +1037,16 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
         "Returns description and README content for registered source folders (Settings → Source " +
             "code) that have any info set. Folders with neither a description nor a README path are " +
             "omitted. README content is read live from disk on every call; a missing or unreadable " +
-            "file produces readmeError instead of failing the whole call. Useful context before " +
-            "starting a code-level investigation.",
-        schema(),
+            "file produces readmeError instead of failing the whole call. Optional maxContentChars caps " +
+            "combined description/README text in deterministic folder order (description before README) " +
+            "and returns truncation metadata. Useful context before starting a code-level investigation.",
+        schema(
+            "maxContentChars" to "integer",
+            descriptions = mapOf(
+                "maxContentChars" to "Optional positive cap for all returned description and README text. " +
+                    "Without it, legacy full content is returned.",
+            ),
+        ),
     ),
     McpTool(
         "set_highlighters",
@@ -1235,6 +1257,7 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Get, "/crashes", "get_crash_sites"),
     Triple(HttpMethod.Get, "/annotations/issue-description", "get_issue_description"),
     Triple(HttpMethod.Get, "/annotations/sections", "get_annotation_sections"),
+    Triple(HttpMethod.Get, "/annotations/blocks", "get_annotation_blocks"),
     Triple(HttpMethod.Post, "/annotations/section/append", "append_annotation_section"),
     Triple(HttpMethod.Post, "/annotations/section/set", "set_annotation_section"),
     Triple(HttpMethod.Post, "/annotations/note", "add_text_note"),
@@ -1243,6 +1266,7 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/annotations/update", "update_note_block"),
     Triple(HttpMethod.Post, "/annotations/move", "move_note_block"),
     Triple(HttpMethod.Post, "/annotations/delete", "delete_note_block"),
+    Triple(HttpMethod.Post, "/annotations/clear-all", "clear_all_notes"),
     Triple(HttpMethod.Post, "/annotations/save", "save_annotations"),
     Triple(HttpMethod.Post, "/annotations/load", "load_annotations"),
     Triple(HttpMethod.Post, "/export/analysis", "export_analysis"),
@@ -1261,6 +1285,7 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/manual-collapse", "add_manual_collapse"),
     Triple(HttpMethod.Post, "/sequence", "add_sequence"),
     Triple(HttpMethod.Post, "/filter/save-preset", "save_filter_preset"),
+    Triple(HttpMethod.Post, "/cases/metadata", "set_case_metadata"),
     Triple(HttpMethod.Get, "/video/frame", "get_video_frame"),
     Triple(HttpMethod.Get, "/video/follow-diagnostics", "get_follow_diagnostics"),
 )

@@ -29,10 +29,14 @@ version-controlled map of what an AI can do and how to prompt it. Most read meth
 ## Notes, exports, and follow-up material
 
 - `get_annotation_sections` / `append_annotation_section` — inspect or extend the Notes panel's
-  context and next steps. `set_annotation_section` replaces a section outright instead — omitting
-  or blanking `text` clears it — so reach for `append_annotation_section` first unless the
-  existing content needs to go. `add_text_note`, `add_log_note`, `add_image_note`,
-  `update_note_block`, `move_note_block`, and `delete_note_block` manage evidence blocks.
+  context and next steps. `get_annotation_sections` does not list evidence blocks; use
+  `get_annotation_blocks` for every block id plus safe type/text/caption/line-id/image metadata.
+  `set_annotation_section` replaces a section outright instead — omitting or blanking `text`
+  clears it — so reach for `append_annotation_section` first unless the existing content needs to
+  go. `add_text_note`, `add_log_note`, `add_image_note`, `update_note_block`, `move_note_block`,
+  and `delete_note_block` manage individual evidence blocks. `clear_all_notes` is the explicit,
+  confirmation-required bulk clear for both sections and every block; it preserves the private
+  issue description and case metadata.
 - `export_analysis`, `export_filtered_log`, `save_annotations`, and `load_annotations` write or
   restore user-requested artifacts; confirm paths and destructive choices first.
 - `list_filter_presets`, `apply_filter_preset`, and `save_filter_preset` manage reusable filters.

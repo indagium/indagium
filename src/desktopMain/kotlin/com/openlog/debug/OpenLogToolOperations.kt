@@ -4,6 +4,7 @@ import androidx.compose.ui.graphics.Color
 import com.openlog.cases.CaseIndexer
 import com.openlog.cases.CaseSearch
 import com.openlog.cases.CaseSummary
+import com.openlog.model.AnnBlock
 import com.openlog.model.CrashSite
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
@@ -110,6 +111,7 @@ internal class OpenLogToolOperations(
         "get_crash_sites" to { a -> getCrashSites(a.str("tabId") ?: "") },
         "get_issue_description" to { a -> getIssueDescription(a.str("tabId") ?: "") },
         "get_annotation_sections" to { a -> getAnnotationSections(a.str("tabId") ?: "") },
+        "get_annotation_blocks" to { a -> getAnnotationBlocks(a.str("tabId") ?: "") },
         "append_annotation_section" to { a ->
             appendAnnotationSection(a.str("tabId") ?: "", a.str("section") ?: "", a.str("text"))
         },
@@ -139,6 +141,7 @@ internal class OpenLogToolOperations(
             moveAnnotationRoute(a.str("tabId") ?: "", a.str("blockId") ?: "", a.anyInt("delta") ?: 0)
         },
         "delete_note_block" to { a -> deleteAnnotationRoute(a.str("tabId") ?: "", a.str("blockId") ?: "") },
+        "clear_all_notes" to { a -> clearAllNotesRoute(a.str("tabId") ?: "") },
         "export_analysis" to { a -> exportAnalysisRoute(a.str("tabId") ?: "", a.str("path") ?: "") },
         "export_filtered_log" to { a ->
             exportFilteredRoute(a.str("tabId") ?: "", a.str("path") ?: "", a.str("format") ?: "txt")
@@ -167,7 +170,7 @@ internal class OpenLogToolOperations(
                 a.str("filePath") ?: "", a.strList("declarationIds"), a.str("revision"),
             )
         },
-        "get_project_info" to { getProjectInfoRoute() },
+        "get_project_info" to { a -> getProjectInfoRoute(a.anyInt("maxContentChars")) },
         "set_highlighters" to { a -> setHighlightersRoute(a.str("tabId") ?: "", a) },
         "reindex_sources" to { a -> reindexSourcesRoute(a.str("folder")) },
         "add_manual_collapse" to { a ->
@@ -524,21 +527,64 @@ internal class OpenLogToolOperations(
         "hasChildren" to declaration.hasChildren,
     )
 
-    private fun getProjectInfoRoute(): Map<String, Any?> {
-        val folders = appState.settings.sourceFolderInfo.mapNotNull { (path, info) ->
+    private fun getProjectInfoRoute(maxContentChars: Int? = null): Map<String, Any?> {
+        if (maxContentChars != null && maxContentChars <= 0) {
+            return mapOf("error" to "maxContentChars must be positive when provided")
+        }
+        var remaining = maxContentChars
+        var returnedContentChars = 0
+        var truncated = false
+        val infoEntries = appState.settings.sourceFolderInfo.entries.let { entries ->
+            if (maxContentChars == null) entries else entries.sortedBy { it.key }
+        }
+        val folders = infoEntries.mapNotNull { (path, info) ->
             if (info.description.isBlank() && info.readmePath.isNullOrBlank()) return@mapNotNull null
             buildMap<String, Any?> {
                 put("path", path)
-                put("description", info.description)
+                val description = capProjectInfoContent(info.description, remaining)
+                put("description", description.content)
+                returnedContentChars += description.content.length
+                remaining = remaining?.minus(description.content.length)
+                if (maxContentChars != null) {
+                    put("descriptionTruncated", description.truncated)
+                    truncated = truncated || description.truncated
+                }
                 put("readmePath", info.readmePath)
                 if (info.readmePath != null) {
                     runCatching { File(info.readmePath).readText() }
-                        .onSuccess { put("readmeContent", it) }
+                        .onSuccess { content ->
+                            val readme = capProjectInfoContent(content, remaining)
+                            put("readmeContent", readme.content)
+                            returnedContentChars += readme.content.length
+                            remaining = remaining?.minus(readme.content.length)
+                            if (maxContentChars != null) {
+                                put("readmeTruncated", readme.truncated)
+                                truncated = truncated || readme.truncated
+                            }
+                        }
                         .onFailure { put("readmeError", it.message ?: "unreadable") }
                 }
             }
         }
-        return mapOf("folders" to folders)
+        return if (maxContentChars == null) {
+            // Keep the no-argument response byte-for-byte compatible with the original contract.
+            mapOf("folders" to folders)
+        } else {
+            mapOf(
+                "folders" to folders,
+                "maxContentChars" to maxContentChars,
+                "returnedContentChars" to returnedContentChars,
+                "contentTruncated" to truncated,
+            )
+        }
+    }
+
+    private data class CappedProjectInfoContent(val content: String, val truncated: Boolean)
+
+    private fun capProjectInfoContent(content: String, remaining: Int?): CappedProjectInfoContent {
+        if (remaining == null) return CappedProjectInfoContent(content, truncated = false)
+        val bounded = content.take(remaining.coerceAtLeast(0))
+        return CappedProjectInfoContent(bounded, truncated = bounded.length < content.length)
     }
 
     // ── New tool routes: highlighters / reindex / manual collapse / save preset ──
@@ -1233,6 +1279,23 @@ internal class OpenLogToolOperations(
         return mapOf("ok" to true)
     }
 
+    private fun clearAllNotesRoute(tabId: String): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val removedBlockCount = tab.annotations.blocks.size
+        val clearedPrefix = tab.annotations.prefix.isNotEmpty()
+        val clearedSuffix = tab.annotations.suffix.isNotEmpty()
+        appState.upAnn(tabId) { current ->
+            current.copy(annotations = current.annotations.copy(blocks = emptyList(), prefix = "", suffix = ""))
+        }
+        return mapOf(
+            "ok" to true,
+            "tabId" to tabId,
+            "removedBlockCount" to removedBlockCount,
+            "clearedPrefix" to clearedPrefix,
+            "clearedSuffix" to clearedSuffix,
+        )
+    }
+
     private fun saveAnnotationsRoute(tabId: String, path: String): Map<String, Any?> {
         if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
         val ok = appState.saveAnnotationsTo(tabId, File(path))
@@ -1281,6 +1344,16 @@ internal class OpenLogToolOperations(
     private fun getAnnotationSections(tabId: String): Map<String, Any?> {
         val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         return mapOf("tabId" to tabId, "prefix" to tab.annotations.prefix, "suffix" to tab.annotations.suffix)
+    }
+
+    /**
+     * Deliberately excludes image bytes and issueDescription. The former can be huge and the
+     * latter is a private working note, while these fields are enough to target every block for
+     * update/move/delete without guessing an id.
+     */
+    private fun getAnnotationBlocks(tabId: String): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        return mapOf("tabId" to tabId, "blocks" to tab.annotations.blocks.map(::annotationBlockToMap))
     }
 
     private fun appendAnnotationSection(tabId: String, section: String, text: String?): Map<String, Any?> {
@@ -1363,6 +1436,33 @@ internal class OpenLogToolOperations(
         followDiagnosticsToMap(appState.followDiagnostics(tabId, videoMs))
 
     // ── DTO helpers ───────────────────────────────────────────────────
+
+    private fun annotationBlockToMap(block: AnnBlock): Map<String, Any?> = when (block) {
+        is AnnBlock.Note -> mapOf("id" to block.id, "type" to "text", "text" to block.text)
+        is AnnBlock.LogRef -> mapOf(
+            "id" to block.id,
+            "type" to "log",
+            "lineIds" to block.logIds,
+            "caption" to block.caption,
+            "sourceTabId" to block.sourceTabId,
+            "sourceFilename" to block.sourceFilename,
+        )
+        is AnnBlock.Image -> mapOf(
+            "id" to block.id,
+            "type" to "image",
+            "caption" to block.caption,
+            "format" to block.format,
+            "byteCount" to block.bytes.size,
+            "provenance" to block.provenance,
+            "video" to block.videoFrame?.let { frame ->
+                mapOf(
+                    "sourceLabel" to frame.sourceLabel,
+                    "positionMs" to frame.positionMs,
+                    "displayProvenance" to frame.provenanceLabel,
+                )
+            },
+        )
+    }
 
     private fun filterToMap(f: Filter): Map<String, Any?> = mapOf(
         "levels" to f.levels.map { it.key.toString() },

@@ -6,6 +6,7 @@ import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
 import com.openlog.model.LogTab
 import com.openlog.ui.AppState
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -23,8 +24,22 @@ class AiInvestigationEvidenceTest {
         assertTrue(prompt.contains("critic pass"))
         assertTrue(prompt.contains("root-cause functional area different"))
         assertTrue(prompt.contains("append_annotation_section"))
+        assertTrue(prompt.contains("get_annotation_blocks"))
         assertTrue(prompt.contains("add_log_note"))
         assertTrue(prompt.contains("add_text_note"))
+        assertTrue(prompt.contains("maxContentChars: 4000"))
+        assertTrue(prompt.contains("about 20 focused evidence/operational calls"))
+    }
+
+    @Test
+    fun docsDescribeTheMcpCallBudgetAndProjectContentCap() {
+        val readme = File("README.md").readText()
+        val mcpGuide = File("docs/mcp/README.md").readText()
+
+        assertTrue(readme.contains("Max MCP tool calls per request"))
+        assertTrue(readme.contains("Notes and annotation reads/writes are unlimited"))
+        assertTrue(!readme.contains("95% is for"))
+        assertTrue(mcpGuide.contains("maxContentChars"))
     }
 
     @Test

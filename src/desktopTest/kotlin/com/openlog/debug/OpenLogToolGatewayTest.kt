@@ -50,9 +50,9 @@ class OpenLogToolGatewayTest {
             "list_tabs", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
             "get_filter", "get_sequence_summary", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
             "toggle_group", "expand_all", "collapse_all", "get_tags", "get_packages", "get_crash_sites",
-            "get_issue_description", "get_annotation_sections", "append_annotation_section", "set_annotation_section",
+            "get_issue_description", "get_annotation_sections", "get_annotation_blocks", "append_annotation_section", "set_annotation_section",
             "add_text_note", "add_log_note", "add_image_note", "update_note_block", "move_note_block",
-            "delete_note_block", "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
+            "delete_note_block", "clear_all_notes", "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing", "resolve_log_source",
             "get_source_file", "list_source_declarations", "get_source_declarations",
             "get_project_info", "set_highlighters", "reindex_sources", "add_manual_collapse", "add_sequence",
@@ -344,6 +344,48 @@ class OpenLogToolGatewayTest {
     }
 
     @Test
+    fun annotationBlocksListSafeIdentifiersAndClearAllPreservesNonNotesMetadata() {
+        state.setPrefix("t1", "Reporter context")
+        state.setSuffix("t1", "- Verify release")
+        val textId = (operations.toolGateway.execute(
+            "add_text_note", mapOf("tabId" to "t1", "text" to "Root cause summary"),
+        ) as Map<*, *>)["blockId"] as String
+        operations.toolGateway.execute("add_log_note", mapOf("tabId" to "t1", "lineIds" to listOf(1), "caption" to "Crash"))
+        state.upAnn("t1") { tab ->
+            tab.copy(annotations = tab.annotations.copy(
+                issueDescription = "The app crashes after login",
+                appVersion = "7.2.1",
+                decisiveTags = listOf("Auth"),
+                blocks = tab.annotations.blocks + AnnBlock.Image("image-1", "Screenshot", "pasted", "png", byteArrayOf(1, 2, 3)),
+            ))
+        }
+
+        val listed = operations.toolGateway.execute("get_annotation_blocks", mapOf("tabId" to "t1")) as Map<*, *>
+        val blocks = listed["blocks"] as List<*>
+        assertEquals(3, blocks.size)
+        val text = blocks.single { (it as Map<*, *>)["id"] == textId } as Map<*, *>
+        assertEquals("text", text["type"])
+        assertEquals("Root cause summary", text["text"])
+        val image = blocks.single { (it as Map<*, *>)["id"] == "image-1" } as Map<*, *>
+        assertEquals("image", image["type"])
+        assertEquals(3, image["byteCount"])
+        assertTrue(!image.containsKey("bytes"))
+
+        assertEquals(OpenLogToolActionPolicy.CONFIRMATION_REQUIRED, operations.toolGateway.actionPolicy("clear_all_notes"))
+        assertEquals(OpenLogToolActionPolicy.AUTOMATIC, operations.toolGateway.actionPolicy("delete_note_block"))
+        val cleared = operations.toolGateway.execute("clear_all_notes", mapOf("tabId" to "t1")) as Map<*, *>
+        assertEquals(true, cleared["ok"])
+        assertEquals(3, cleared["removedBlockCount"])
+        val annotations = state.tab("t1")!!.annotations
+        assertEquals("", annotations.prefix)
+        assertEquals("", annotations.suffix)
+        assertTrue(annotations.blocks.isEmpty())
+        assertEquals("The app crashes after login", annotations.issueDescription)
+        assertEquals("7.2.1", annotations.appVersion)
+        assertEquals(listOf("Auth"), annotations.decisiveTags)
+    }
+
+    @Test
     fun setAnnotationSectionReplacesAndClearsNotesWithoutRejectingBlankText() {
         state.setPrefix("t1", "Existing context")
         state.setSuffix("t1", "- Reproduce")
@@ -451,6 +493,58 @@ class OpenLogToolGatewayTest {
 
         assertEquals("# Hello project", folder["readmeContent"])
         assertTrue(!folder.containsKey("readmeError"))
+    }
+
+    @Test
+    fun getProjectInfoCapsDescriptionBeforeReadmeAndReportsTruncation() {
+        val readme = File.createTempFile("openlog-readme", ".md").apply { writeText("README-CONTENT") }
+        try {
+            state.updateSettings {
+                it.copy(
+                    sourceFolderInfo = mapOf(
+                        "/z" to com.openlog.model.SourceFolderInfo(description = "Z-desc", readmePath = readme.absolutePath),
+                        "/a" to com.openlog.model.SourceFolderInfo(description = "A-description", readmePath = readme.absolutePath),
+                    ),
+                )
+            }
+
+            val result = operations.toolGateway.execute("get_project_info", mapOf("maxContentChars" to 15)) as Map<*, *>
+            val folders = result["folders"] as List<*>
+            val first = folders[0] as Map<*, *>
+            val second = folders[1] as Map<*, *>
+
+            assertEquals("/a", first["path"], "Capped allocation must use deterministic path order.")
+            assertEquals("A-description", first["description"])
+            assertEquals("RE", first["readmeContent"], "Description receives the available content first.")
+            assertEquals(true, first["readmeTruncated"])
+            assertEquals("/z", second["path"])
+            assertEquals("", second["description"])
+            assertEquals(true, second["descriptionTruncated"])
+            assertEquals(15, result["returnedContentChars"])
+            assertEquals(true, result["contentTruncated"])
+        } finally {
+            readme.delete()
+        }
+    }
+
+    @Test
+    fun getProjectInfoWithoutCapKeepsLegacyFullContent() {
+        val readme = File.createTempFile("openlog-readme", ".md").apply { writeText("README-CONTENT") }
+        try {
+            state.updateSettings {
+                it.copy(sourceFolderInfo = mapOf("/a" to com.openlog.model.SourceFolderInfo(description = "Description", readmePath = readme.absolutePath)))
+            }
+
+            val result = operations.toolGateway.execute("get_project_info", emptyMap()) as Map<*, *>
+            val folder = (result["folders"] as List<*>).single() as Map<*, *>
+
+            assertEquals("Description", folder["description"])
+            assertEquals("README-CONTENT", folder["readmeContent"])
+            assertTrue(!folder.containsKey("descriptionTruncated"))
+            assertTrue(!result.containsKey("maxContentChars"))
+        } finally {
+            readme.delete()
+        }
     }
 
     @Test
