@@ -46,42 +46,62 @@ Source sets are `desktopMain` and `desktopTest` (Kotlin Multiplatform with a sin
 
 ## Architecture
 
-openLog is a Compose Multiplatform Desktop log viewer for Android logcat files. All code lives under `src/desktopMain/kotlin/com/openlog/`.
+openLog is a Compose Multiplatform Desktop log viewer for Android logcat files. All code lives under `src/desktopMain/kotlin/com/openlog/` — ~47k lines across 11 packages.
+
+> **`docs/SAAD.md` is the authoritative architecture document.** It covers module boundaries, the
+> threading model, persistence formats, security posture, and known risks, with file:line citations.
+> This section is a short index; when the two disagree, SAAD is newer.
 
 ### Data flow
 
 ```
-File → LogParser.parseLogcat() → List<LogEntry>
-                                       ↓
-                               LogTab (in AppState.tabs)
-                                       ↓
-                    Filter.computeItems(tab, sequences) → List<LogItem>
-                                       ↓
-                               LogViewer (LazyColumn)
+File → LogParser.parseLogcat()  ──→  List<LogEntry>          (sequential by design; fast path + regex chain)
+                                          ↓
+                                   LogTab (in AppState.tabs)  ── analysis filled in a second phase
+                                          ↓
+              Filter.computeItems(tab, applyFilter, cancellationCheck)
+                    ├─ memo cache: ConcurrentHashMap keyed "$tabId#$applyFilter"
+                    ├─ spliceStackToggle fast path for a single group expand/collapse
+                    └─ computeSeqGroups → manual ranges → renderRange (BitSet id sets)
+                                          ↓
+                                   List<LogItem>
+                                          ↓
+                             LogViewer (LazyColumn)
 ```
 
-### Key files
+### Packages
+
+| Package | Role |
+|---------|------|
+| `model` | All domain types (`Model.kt`, one file): `LogEntry`, `LogTab`, `Filter`, `Annotations`/`AnnBlock`, `LogAnalysis`, `LogItem`, `AppSettings`, `ThemePreset`. No behaviour. |
+| `utils` | The log engine, UI-free: `LogParser`, `Filter` (`passesFilter`/`computeItems`/`buildMd`), `SeqComputer`, `StackTraceComputer`, `TextMatch` (regex cache + backtracking budget), `EntryIdMap`, `LogTime`, `LogMerge`, `LogSplitter`, `FileTailer`, `BugReportZip`, `AtomicFileWrite`, export helpers. |
+| `ui` | Compose UI **and** `AppState` + coordinators + persistence codecs. The biggest package by far. |
+| `source` | Source indexing and log→call-site resolution. Pure text/regex/brace-matching, no compiler dep. Own store at `appDataDir()/source-index` (`openLog2-source-index-v1`, schema v9). |
+| `cases` | Similarity index over previously written analysis notes; backs `search_similar_cases`. Store at `appDataDir()/case-index`. |
+| `debug` | `ControlServer` (Ktor CIO, loopback-only, MCP over Streamable HTTP + REST, off by default), the **55-tool** catalogue + handlers joined by `OpenLogToolGateway`, hand-rolled `Json`, `AppLogger`. |
+| `ai` | `LlmProvider` (Anthropic + OpenAI-compatible over HTTP) and the subprocess account agents (Codex stdio JSON-RPC, Claude Code stream-json), `AiAgentRunner` loop, `AiToolExecutionCoordinator` (the single policy point: budget, tab pinning, confirmation gate). |
+| `video` | JavaCV/FFmpeg playback on a dedicated decode thread; per-tab controllers owned by `AppState`. |
+| `voice` | Dictation: Whisper JNI, Apple Speech (build-time-compiled JNI bridge), Windows Speech helper. |
+| `update` | GitHub Releases check and asset download. |
+| `singleinstance` | File lock + loopback socket; forwards file args to a running instance. Skipped on macOS. |
+
+### Files you'll touch most
 
 | File | Role |
 |------|------|
-| `Main.kt` | Entry point: `application { Window { App(appState) } }` |
-| `model/Model.kt` | All data types: `LogEntry`, `LogTab`, `Filter`, `LogItem`, `SequenceDef`, `AnnBlock`, etc. |
-| `ui/AppState.kt` | Central mutable state — tabs, filters, sequences, annotations, autosave. All `mutableStateOf` fields. |
-| `ui/App.kt` | Root composable — drag-and-drop, context menu, dialogs, routes between FileView and CompareView |
-| `ui/LogViewer.kt` | Log display with `LazyColumn`, horizontal scroll, row selection, drag-select |
-| `ui/FilterPanel.kt` | Left sidebar — log levels, tag filters, sequences, highlighters, message rules |
-| `ui/AnnotationPanel.kt` | Right panel — block-based annotations exported as Markdown |
-| `ui/Components.kt` | Shared widgets: `HDivider`/`VDivider` (resizable), `ColHeader`, `AppText` |
-| `ui/Theme.kt` | `ThemeColors`, `themeColors()`, `HL_COLORS`, `SEQ_COLORS` palettes |
-| `utils/LogParser.kt` | Parses 4 logcat formats: threadtime, time, brief, bare. Unrecognised lines become tag=`RAW`. |
-| `utils/Filter.kt` | `passesFilter()`, `computeItems()` (builds `List<LogItem>` with sequence/manual headers), `buildMd()` |
-| `utils/SeqComputer.kt` | `computeSeqGroups()` — nesting algorithm for sequence detection |
-| `source/SourceIndexer.kt` | Scans registered source folders (`.kt`/`.java`) for `Log.*`/Timber call sites — extracts message template, resolves `TAG`, finds enclosing method by brace-matching. Pure, no parser dep. |
-| `source/LogSourceResolver.kt` | Maps a log line's `(tag, msg)` back to source call site(s): tag-bucketed regex match, generic-literal suppression, confidence ranking. |
-| `source/SourceIndexStore.kt` | Persists the index to `appDataDir()/source-index` (`openLog2-source-index-v1` token format), separate from autosave. |
-| `source/SourceModel.kt` | Index data types: `LogCallSite`, `SourceIndex`, `SourceMatch`, `SourceIndexStatus`, `SourceCodeView`. |
-| `ui/SourceCodeDialog.kt` | "Show in code" popup — the resolved method's source with V+H scrollbars, path, line range, Open-in-default-app. |
-| `debug/ControlServer.kt` | Localhost MCP + REST control server (53 tools incl. `resolve_log_source`, `get_project_info`, `set_highlighters`, `reindex_sources`, `add_manual_collapse`, `add_sequence`, `save_filter_preset`). Off by default; enabled via Settings. |
+| `ui/AppState.kt` | 6k lines. All mutable state + most behaviour. Mutate via `upTab`/`upFlt`/`upAnn` — see below |
+| `ui/App.kt` | Root composable: layout routing, every dialog, drag-and-drop, global keys, the 400 ms autosave debounce |
+| `ui/LogViewer.kt` | The row list; the only production caller that passes a `cancellationCheck` |
+| `ui/FilterPanel.kt` | Left sidebar; bound to `AppState` by `BoundFilterPanel` in `ui/FileView.kt` |
+| `ui/AnnotationPanel.kt` + `ui/AnnotationManager.kt` | Notes UI and its block-model mutations |
+| `ui/AutosaveCodec.kt` | The on-disk format. **Append new token fields last** — see the versioning note below |
+| `debug/ControlServer.kt` + `debug/OpenLogToolOperations.kt` | Tool catalogue and handlers. Names must match or `OpenLogToolGateway`'s `init` throws |
+| `ui/Components.kt` / `ui/Theme.kt` | Shared widgets; `ThemeColors`, `themeColors()`, `HL_COLORS`, `SEQ_COLORS` |
+
+### Two invariants worth knowing before editing
+
+- **`stateLock`.** Every read-modify-write of `AppState.tabs` goes through `synchronized(stateLock)`. `upTab`/`upFlt`/`upAnn` already do this; new mutators must too. `AutosaveScheduler`'s locks must never be held together with it.
+- **Append-last token versioning.** Autosave token records are positional, `|`-joined, decoded with `getOrNull`. A new field goes at the **end** of the token; inserting one in the middle breaks every existing autosave. The legacy positional *settings* decoder is frozen by `AutosaveGoldenV1Test` — new settings go into the JSON form only.
 
 ### AppState
 

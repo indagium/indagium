@@ -7,23 +7,58 @@ A desktop log viewer for Android logcat files, built with Kotlin and Compose Mul
 
 ## Features
 
+**Filtering and folding**
+
 - **Multi-tab** — open multiple log files side by side
-- **Log level filtering** — toggle V / D / I / W / E / F / S individually
+- **Log level filtering** — toggle V / D / I / W / E / A individually
 - **Tag filters** — include or exclude tags with exact match or regex; package-level grouping
-- **Message rules** — filter lines by message content (substring or regex)
-- **Sequences** — auto-detect and collapse recurring tag patterns into collapsible groups
-- **Highlighters** — color-code lines by message pattern
-- **Annotations** — annotate log selections with notes, exported as Markdown
-- **Show in code** — register your project's source folder(s) in Settings, then right-click a log line to view the exact method that emitted it (Kotlin/Java, `Log.*` + Timber); also exposed to AI assistants via the `resolve_log_source` MCP tool
+- **Message rules** — filter lines by message content or PID/TID (substring or regex), optionally scoped to a tag or package
+- **Sequences** — collapse recurring regions into colored, nestable groups using start/end patterns
+- **Manual collapse** — fold to start, to end, or an explicit range when there's no pattern to match
+- **Highlighters** — color-code lines by message pattern without filtering anything out
+- **Find bar** — in-view search across the fully expanded log
+- **Filter presets** — save, organize into folders, favorite, export and import filter configurations
+
+**Reading**
+
+- **Crash, ANR and native-crash detection** — stack traces fold automatically; custom issue rules add your own categories
+- **Minimap** — compressed overview of the whole log in place of the scrollbar
+- **Thread map** — color every thread in a process and see interleaved activity as a branch gutter
+- **Time deltas** — per-row gaps, or offsets from a selected anchor row, to find stalls
+- **Compare view** — two tabs side by side, each with its own filter or mirroring the other's
+- **Live tailing** — watch a file as it's written, with your filter already applied
+- **Large-file support** — multi-gigabyte logs, with an optional split-on-open for the biggest
+- **Bug reports** — open `.zip` and `.7z` Android bug reports directly and pick what to load
+
+**Producing output**
+
+- **Annotations** — annotate log selections with notes, images, and video frames; export as Markdown or Jira markup
+- **Export filtered log** — write the current filtered set to TXT or CSV
+- **Merge and split** — interleave several logs by timestamp, or split one huge file into parts
+- **Show in code** — register your project's source folder(s) in Settings, then right-click a log line to view the exact method that emitted it (Kotlin/Java, `Log.*` + Timber, plus custom wrappers); also exposed to AI assistants via the `resolve_log_source` MCP tool
+
+**Extras**
+
 - **In-app AI assistant** — use LM Studio, OpenAI, Anthropic, Codex, Claude Code, or another compatible provider to investigate the active log tab with the same log, filter, source, and notes tools exposed through MCP; on-device voice dictation inserts editable text into the composer
-- **Compare view** — diff two open tabs line by line
+- **Video sync** — attach a screen recording, anchor it to a log line, and scrub either from the other
+- **MCP control server** — drive openLog from any MCP client over a local URL (off by default)
 - **Themes** — 20 built-in themes (light, dark, and paper variants)
 - **Autosave** — session is fully restored on next launch
-- **Filter presets** — save and load filter configurations
+- **Update checker** — optional in-app check against GitHub Releases
 
 ### Supported logcat formats
 
 `threadtime`, `time`, `brief`, `bare` — unrecognised lines are shown with tag `RAW`.
+
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [User guide](docs/USER_GUIDE.md) | How to use every feature, keyboard shortcuts, and worked recipes |
+| [Architecture (SAAD)](docs/SAAD.md) | System design, module boundaries, data flow, threading, persistence, security |
+| [MCP guide](docs/mcp/README.md) | Connecting an external MCP client |
+| [MCP methods](docs/mcp/AVAILABLE_METHODS.md) | The automation tool reference |
+| [Analysis playbook](docs/mcp/ANALYSIS_PLAYBOOK.md) | Prompt patterns for log analysis |
 
 ## Installation
 
