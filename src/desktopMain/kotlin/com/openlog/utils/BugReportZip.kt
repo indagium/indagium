@@ -186,19 +186,6 @@ private fun listSevenZVideoCandidates(archiveFile: File, maxEntries: Int): List<
     }
 }.getOrDefault(emptyList())
 
-// Legacy one-shot extraction API. New video attachments use [extractArchiveVideoToCache] so their
-// persisted source remains the archive entry, not this process-local temp path.
-fun extractEntryToTempFile(archiveFile: File, candidate: ZipLogCandidate, maxEntryBytes: Long = MAX_ARCHIVE_ENTRY_BYTES): File? = runCatching {
-    val stream = openArchiveCandidateStream(archiveFile, candidate) ?: return@runCatching null
-    val suffix = candidate.displayName.substringAfterLast('.', missingDelimiterValue = "").ifBlank { "bin" }
-    val tempFile = File.createTempFile("openlog-video-", ".$suffix")
-    tempFile.deleteOnExit()
-    BoundedInputStream(stream, maxEntryBytes).use { input ->
-        tempFile.outputStream().use { output -> input.copyTo(output) }
-    }
-    tempFile
-}.getOrNull()
-
 private val archiveVideoCacheLock = Any()
 
 // Skips in-flight extractions: extractArchiveVideoToCache stages into ".<name>.partial" before the
