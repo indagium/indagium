@@ -1402,13 +1402,49 @@ private fun AiRunTimingRow(run: AiRun, isTerminal: Boolean, usage: AiRunEvent.Us
     Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
         AppText(parts.joinToString(" · "), color = colors.td, fontSize = 9.sp, maxLines = 2)
         usage?.let {
-            AppText(
-                "Tokens: ${it.promptTokens} prompt + ${it.completionTokens} completion = ${it.totalTokens} total",
-                color = colors.td,
-                fontSize = 9.sp,
-            )
+            UsageTokenRows(it, colors)
         }
     }
+}
+
+@Composable
+private fun UsageTokenRows(usage: AiRunEvent.Usage, colors: ThemeColors) {
+    Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        usageTokenLines(usage).forEach { line ->
+            AppText(line, color = colors.td, fontSize = 9.sp, maxLines = 2, overflow = TextOverflow.Clip)
+        }
+    }
+}
+
+private fun usageTokenLines(usage: AiRunEvent.Usage): List<String> = buildList {
+    add(
+        buildString {
+            append("Input: ")
+            append(usage.inputTokens)
+            append(" tokens")
+            usage.cachedInputTokens?.takeIf { it > 0 && usage.cachedInputIncludedInInput }?.let { cached ->
+                append(" (")
+                append(cached)
+                append(" cached)")
+            }
+        },
+    )
+    usage.cachedInputTokens?.takeIf { it > 0 && !usage.cachedInputIncludedInInput }?.let { cached ->
+        add("Cached input: $cached tokens (separate from total)")
+    }
+    add(
+        buildString {
+            append("Output: ")
+            append(usage.outputTokens)
+            append(" tokens")
+            usage.reasoningOutputTokens?.takeIf { it > 0 }?.let { reasoning ->
+                append(" (")
+                append(reasoning)
+                append(" reasoning)")
+            }
+        },
+    )
+    add("Total: ${usage.totalTokens} tokens")
 }
 
 private fun clockTimeLabel(epochMs: Long): String =

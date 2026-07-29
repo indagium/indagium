@@ -162,9 +162,11 @@ internal class AccountAgentRunner(
                         is CodexAppServerEvent.TokenUsageUpdated -> if (event.threadId == null || event.threadId == thread.id) {
                             run.emit(
                                 AiRunEvent.Usage(
-                                    promptTokens = event.total.inputTokens.toInt(),
-                                    completionTokens = event.total.outputTokens.toInt(),
+                                    inputTokens = event.total.inputTokens.toInt(),
+                                    outputTokens = event.total.outputTokens.toInt(),
                                     totalTokens = event.total.totalTokens.toInt(),
+                                    cachedInputTokens = event.total.cachedInputTokens.toInt(),
+                                    reasoningOutputTokens = event.total.reasoningOutputTokens.toInt(),
                                 ),
                             )
                         }
@@ -251,9 +253,11 @@ internal class AccountAgentRunner(
                     event.usage?.let { usage ->
                         run.emit(
                             AiRunEvent.Usage(
-                                promptTokens = usage.inputTokens,
-                                completionTokens = usage.outputTokens,
+                                inputTokens = usage.inputTokens,
+                                outputTokens = usage.outputTokens,
                                 totalTokens = usage.inputTokens + usage.outputTokens,
+                                cachedInputTokens = usage.cacheReadInputTokens,
+                                cachedInputIncludedInInput = false,
                             ),
                         )
                     }

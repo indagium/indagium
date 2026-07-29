@@ -45,6 +45,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -56,6 +57,11 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
+import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownColor
+import com.mikepenz.markdown.m3.markdownTypography
+import com.mikepenz.markdown.model.MarkdownTypography
+import com.mikepenz.markdown.model.rememberMarkdownState
 import com.openlog.model.AnnBlock
 import com.openlog.model.AppSettings
 import com.openlog.model.LogTab
@@ -983,24 +989,15 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
     var blockNumber = 1
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (tab.annotations.prefix.isNotBlank()) {
-            AppText(
-                tab.annotations.prefix,
-                color = tc.tx,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = Int.MAX_VALUE,
-                overflow = TextOverflow.Clip,
-            )
+            AnnotationMarkdownText(tab.annotations.prefix, tc)
         }
         tab.annotations.blocks.forEach { block ->
             when (block) {
                 is AnnBlock.Note -> if (block.text.isNotBlank()) {
-                    AppText(
-                        (if (settings.numberAnnotationBlocks) "${blockNumber++}. " else "") + block.text,
-                        color = tc.tx,
-                        fontSize = 13.sp,
-                        maxLines = Int.MAX_VALUE,
-                        overflow = TextOverflow.Clip,
+                    AnnotationMarkdownText(
+                        text = block.text,
+                        tc = tc,
+                        numberPrefix = if (settings.numberAnnotationBlocks) "${blockNumber++}. " else null,
                     )
                 }
 
@@ -1008,13 +1005,10 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                     val rows = block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }
                     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (block.caption.isNotBlank() || settings.numberAnnotationBlocks) {
-                            AppText(
-                                (if (settings.numberAnnotationBlocks) "${blockNumber++}. " else "") + block.caption,
-                                color = tc.tx,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = Int.MAX_VALUE,
-                                overflow = TextOverflow.Clip,
+                            AnnotationMarkdownText(
+                                text = block.caption,
+                                tc = tc,
+                                numberPrefix = if (settings.numberAnnotationBlocks) "${blockNumber++}. " else null,
                             )
                         }
                         if (block.sourceFilename != null) {
@@ -1044,13 +1038,10 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                 is AnnBlock.Image -> {
                     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (block.caption.isNotBlank() || settings.numberAnnotationBlocks) {
-                            AppText(
-                                (if (settings.numberAnnotationBlocks) "${blockNumber++}. " else "") + block.caption,
-                                color = tc.tx,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = Int.MAX_VALUE,
-                                overflow = TextOverflow.Clip,
+                            AnnotationMarkdownText(
+                                text = block.caption,
+                                tc = tc,
+                                numberPrefix = if (settings.numberAnnotationBlocks) "${blockNumber++}. " else null,
                             )
                         }
                         block.displayProvenance?.let {
@@ -1071,9 +1062,64 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
         }
         if (tab.annotations.suffix.isNotBlank()) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
-            AppText(tab.annotations.suffix, color = tc.tx, fontSize = 13.sp, maxLines = Int.MAX_VALUE, overflow = TextOverflow.Clip)
+            AnnotationMarkdownText(tab.annotations.suffix, tc)
         }
     }
+}
+
+@Composable
+private fun AnnotationMarkdownText(text: String, tc: ThemeColors, numberPrefix: String? = null) {
+    if (text.isBlank() && numberPrefix == null) return
+    val content: @Composable () -> Unit = {
+        val markdownState = rememberMarkdownState(content = text.ifBlank { " " })
+        Markdown(
+            markdownState,
+            colors = annotationMarkdownColors(tc),
+            typography = annotationMarkdownTypography(tc),
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+    if (numberPrefix == null) {
+        content()
+    } else {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+            AppText(numberPrefix, color = tc.tx, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Box(Modifier.weight(1f)) { content() }
+        }
+    }
+}
+
+@Composable
+private fun annotationMarkdownColors(colors: ThemeColors) = markdownColor(
+    text = colors.tx,
+    codeBackground = colors.bg,
+    inlineCodeBackground = colors.bg,
+    dividerColor = colors.br,
+    tableBackground = colors.p2,
+)
+
+@Composable
+private fun annotationMarkdownTypography(colors: ThemeColors): MarkdownTypography {
+    val body = TextStyle(color = colors.tx, fontSize = 13.sp, fontFamily = UI)
+    val code = TextStyle(color = colors.ts, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+    val heading = body.copy(fontWeight = FontWeight.SemiBold)
+    return markdownTypography(
+        h1 = heading.copy(fontSize = 16.sp),
+        h2 = heading.copy(fontSize = 15.sp),
+        h3 = heading.copy(fontSize = 14.sp),
+        h4 = heading.copy(fontSize = 13.sp),
+        h5 = heading.copy(fontSize = 13.sp),
+        h6 = heading.copy(fontSize = 13.sp),
+        text = body,
+        code = code,
+        inlineCode = code,
+        quote = body.copy(fontStyle = FontStyle.Italic),
+        paragraph = body,
+        ordered = body,
+        bullet = body,
+        list = body,
+        table = body,
+    )
 }
 
 // ── Note block ─────────────────────────────────────────────────────────

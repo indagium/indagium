@@ -183,8 +183,15 @@ internal sealed interface AiRunEvent {
 
     data class ConfirmationRequired(val confirmation: AiToolConfirmation) : AiRunEvent
 
-    /** Forwarded verbatim from [LlmStreamEvent.Usage] when a provider reports it. */
-    data class Usage(val promptTokens: Int, val completionTokens: Int, val totalTokens: Int) : AiRunEvent
+    /** Forwarded from the active provider when it reports usage. */
+    data class Usage(
+        val inputTokens: Int,
+        val outputTokens: Int,
+        val totalTokens: Int,
+        val cachedInputTokens: Int? = null,
+        val cachedInputIncludedInInput: Boolean = true,
+        val reasoningOutputTokens: Int? = null,
+    ) : AiRunEvent
 
     data class Error(val message: String) : AiRunEvent
 
@@ -334,7 +341,11 @@ internal class AiAgentRunner(
                             LlmStreamEvent.Completed -> completed = true
                             is LlmStreamEvent.ToolCallDelta -> Unit // Provider-level detail is represented by ToolRequested below.
                             is LlmStreamEvent.Usage -> run.emit(
-                                AiRunEvent.Usage(event.promptTokens, event.completionTokens, event.totalTokens),
+                                AiRunEvent.Usage(
+                                    inputTokens = event.promptTokens,
+                                    outputTokens = event.completionTokens,
+                                    totalTokens = event.totalTokens,
+                                ),
                             )
                         }
                     }
