@@ -577,9 +577,7 @@ application-workspace access — all evidence reaches them through openLog's too
 <!-- GIF-10 · AI assistant · 20s · right-click a crash line → Ask AI → Find root cause →
      Investigation section streams tool calls → confirmation card appears → Allow →
      final answer with clickable evidence cards -->
-<video controls width="1280">
-  <source src="images/gif-10-ai-assistant.mp4" type="video/mp4">
-</video>
+![Asking the AI assistant to find a root cause](images/gif-10-ai-assistant.gif)
 
 ---
 
