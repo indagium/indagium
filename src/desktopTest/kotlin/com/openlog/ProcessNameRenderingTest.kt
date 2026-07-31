@@ -23,35 +23,63 @@ class ProcessNameRenderingTest {
 
     @Test
     fun offAlwaysReturnsTheOriginalFiveCharWidthRegardlessOfKnownNames() {
-        assertEquals(5, pidFieldCharWidth(ProcessNameMode.OFF, mapOf(1 to "a-very-long-package-name")))
+        assertEquals(5, pidFieldCharWidth(ProcessNameMode.OFF, mapOf(1 to "a-very-long-package-name"), emptySet()))
     }
 
     @Test
     fun allWithNoKnownNamesReturnsTheOriginalFiveCharWidth() {
-        assertEquals(5, pidFieldCharWidth(ProcessNameMode.ALL, emptyMap()))
+        assertEquals(5, pidFieldCharWidth(ProcessNameMode.ALL, emptyMap(), emptySet()))
     }
 
     @Test
     fun allFloorsAtFiveEvenWhenEveryKnownNameIsShorter() {
-        assertEquals(5, pidFieldCharWidth(ProcessNameMode.ALL, mapOf(1 to "ab", 2 to "xyz")))
+        assertEquals(5, pidFieldCharWidth(ProcessNameMode.ALL, mapOf(1 to "ab", 2 to "xyz"), emptySet()))
     }
 
     @Test
     fun allSizesToTheLongestKnownNameWhenBetweenTheFloorAndTheCap() {
-        assertEquals(12, pidFieldCharWidth(ProcessNameMode.ALL, mapOf(1 to "short", 2 to "twelve_chars")))
+        assertEquals(12, pidFieldCharWidth(ProcessNameMode.ALL, mapOf(1 to "short", 2 to "twelve_chars"), emptySet()))
     }
 
     @Test
     fun allCapsAtProcessNameMaxCharsForAnOutlierLongName() {
-        val width = pidFieldCharWidth(ProcessNameMode.ALL, mapOf(1 to "a".repeat(200)))
+        val width = pidFieldCharWidth(ProcessNameMode.ALL, mapOf(1 to "a".repeat(200)), emptySet())
         assertEquals(20, width)
     }
 
+    // ALL is unaffected by manualPicks — every known name is a candidate regardless of picks, since
+    // ALL can show any of them at any time (unlike MANUAL below).
     @Test
-    fun manualSizesTheSameWayAllDoesFromEveryKnownNameNotJustThePicks() {
-        // Deliberately NOT filtered by manualProcessNamePicks — see pidFieldCharWidth's own doc for
-        // why sizing shouldn't jitter as the user picks/hides individual pids.
-        assertEquals(12, pidFieldCharWidth(ProcessNameMode.MANUAL, mapOf(1 to "twelve_chars")))
+    fun allIgnoresManualPicksEntirely() {
+        assertEquals(12, pidFieldCharWidth(ProcessNameMode.ALL, mapOf(1 to "twelve_chars", 2 to "x"), setOf(2)))
+    }
+
+    @Test
+    fun manualWithNoPicksReturnsTheOriginalFiveCharWidthEvenWithKnownNames() {
+        // The state every restart lands in, since picks are session-only (LogTab.manualProcessNamePicks'
+        // own doc) — must not reserve column space for a name no row is actually rendering.
+        assertEquals(5, pidFieldCharWidth(ProcessNameMode.MANUAL, mapOf(1 to "twelve_chars"), emptySet()))
+    }
+
+    @Test
+    fun manualWithOnePickSizesToThatPicksNameOnly() {
+        assertEquals(12, pidFieldCharWidth(ProcessNameMode.MANUAL, mapOf(1 to "twelve_chars"), setOf(1)))
+    }
+
+    @Test
+    fun manualSizesToTheLongestPickedNameNotTheLongestKnownName() {
+        // pid 2's name is known but never picked, and is the LONGER of the two — it must not widen
+        // the column; only pid 1 (picked) counts.
+        val names = mapOf(1 to "short", 2 to "a-much-longer-name-than-short")
+        assertEquals(5, pidFieldCharWidth(ProcessNameMode.MANUAL, names, setOf(1)))
+    }
+
+    @Test
+    fun manualSizesToTheLongestAmongSeveralPicksOfDifferingLengths() {
+        // pid 4 is known and the longest of all four, but never picked — the width must come from
+        // the longest AMONG THE PICKS (pid 3, 12 chars), not the longest known overall.
+        val names = mapOf(1 to "ab", 2 to "eight_ch", 3 to "twelve_chars", 4 to "an-unpicked-name-longer-than-every-pick")
+        assertEquals(12, pidFieldCharWidth(ProcessNameMode.MANUAL, names, setOf(1, 2, 3)))
     }
 
     // ── toggledProcessNameMode: the toolbar popup's two-state toggle (Change 1) ────────
@@ -262,5 +290,28 @@ class ProcessNameRenderingTest {
             keywordRegexFilter = null, regexContext = com.openlog.utils.RegexEvaluationContext(),
         )
         assertEquals(visibleLogLineText(rawEntry), annotation.text)
+    }
+
+    // MANUAL with an empty pick set is the state every restart lands in (picks are session-only —
+    // LogTab.manualProcessNamePicks' own doc). It must render byte-identically to OFF: no row has a
+    // name to show (resolveProcessDisplayName), and the field reserves no extra width for one
+    // (pidFieldCharWidth) — same as the OFF test directly above, but driven through both of those
+    // pure functions with a known name present in processNames, to prove the empty PICK set (not an
+    // empty processNames map) is what collapses this back to the pre-feature render.
+    @Test
+    fun manualModeWithNoPicksProducesExactlyThePreFeatureVisibleLineTextByteForByte() {
+        val processNames = mapOf(entry.pid to "com.usbmon")
+        val pidFieldWidth = pidFieldCharWidth(ProcessNameMode.MANUAL, processNames, emptySet())
+        val processDisplay = com.openlog.utils.resolveProcessDisplayName(
+            ProcessNameMode.MANUAL, processNames, emptySet(), entry.pid,
+        )
+        assertEquals(5, pidFieldWidth)
+        assertEquals(null, processDisplay)
+        val annotation = buildFullLineAnnotation(
+            entry, emptyList(), Color.Gray, Color.Gray, Color.Gray, Color.Gray,
+            keywordRegexFilter = null, regexContext = com.openlog.utils.RegexEvaluationContext(),
+            processDisplay = processDisplay, pidFieldWidth = pidFieldWidth,
+        )
+        assertEquals(visibleLogLineText(entry), annotation.text)
     }
 }

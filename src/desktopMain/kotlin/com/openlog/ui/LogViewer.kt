@@ -620,17 +620,28 @@ internal fun remapPidFieldRange(
 // OFF always returns 5 (the original padStart(5) width) — LogRow/buildFullLineAnnotation then
 // render byte-identical to before this feature existed, per ProcessNameMode's own doc.
 //
-// ALL/MANUAL derive the width from the WIDEST name actually known for this tab — deliberately
-// [processNames] (every name this tab has learned), NOT filtered down to whatever MANUAL's own
-// picks currently are, so the column doesn't jitter wider/narrower each time the user picks or
-// hides one specific pid (see LogTab.manualProcessNamePicks' own doc). Floored at 5 (a numeric pid
-// must never render NARROWER than before) and capped at PROCESS_NAME_MAX_CHARS (Theme.kt) — the
-// same middle-ellipsis budget appendTsPidTid already truncates an individual long name to, so one
-// outlier name can't blow the column out for the whole file.
-internal fun pidFieldCharWidth(mode: ProcessNameMode, processNames: Map<Int, String>): Int {
+// ALL derives the width from the WIDEST name actually known for this tab ([processNames], every
+// name this tab has learned) — every known name is a candidate because ALL can show any of them at
+// any time. MANUAL, unlike ALL, only ever RENDERS a name for a pid in [manualPicks] (see
+// resolveProcessDisplayName), so it sizes to the widest name among just those picked pids —
+// anything wider that was merely learned but never picked would reserve column space for a name no
+// row is actually showing, which is exactly the "wide, mostly-empty PID column" bug this width was
+// rewritten to stop (MANUAL with nothing picked — the state every restart lands in, since picks are
+// session-only — now returns 5, the same as OFF). A column that resizes when the user explicitly
+// picks or hides a pid is an acceptable, expected trade for that; a column that never reflects what
+// it's actually rendering is not. Floored at 5 (a numeric pid must never render NARROWER than
+// before) and capped at PROCESS_NAME_MAX_CHARS (Theme.kt) — the same middle-ellipsis budget
+// appendTsPidTid already truncates an individual long name to, so one outlier name can't blow the
+// column out for the whole file.
+internal fun pidFieldCharWidth(mode: ProcessNameMode, processNames: Map<Int, String>, manualPicks: Set<Int>): Int {
     if (mode == ProcessNameMode.OFF) return 5
-    val longestKnownName = processNames.values.maxOfOrNull { it.length } ?: return 5
-    return longestKnownName.coerceIn(5, PROCESS_NAME_MAX_CHARS)
+    val candidateNames = if (mode == ProcessNameMode.MANUAL) {
+        processNames.filterKeys { it in manualPicks }.values
+    } else {
+        processNames.values
+    }
+    val longestName = candidateNames.maxOfOrNull { it.length } ?: return 5
+    return longestName.coerceIn(5, PROCESS_NAME_MAX_CHARS)
 }
 
 // Change 1: the toolbar options popup's process-name entry is a plain two-state toggle (unlike
@@ -895,9 +906,11 @@ fun LogViewer(
     // every known name's length, an O(known-pids) cost that must not repeat for every visible row)
     // and threaded down to both ColHeader and LogRow below. Keyed on the processNames map itself
     // (not just tab.id) so a name learned mid-tail (TailCoordinator's merge) updates the width, same
-    // rationale as hasPidTid's own totalCnt key above.
-    val pidFieldChars = remember(tab.id, tab.analysis.processNames, settings.processNameMode) {
-        pidFieldCharWidth(settings.processNameMode, tab.analysis.processNames)
+    // rationale as hasPidTid's own totalCnt key above — and on manualProcessNamePicks too, since
+    // MANUAL now sizes to only the picked pids (pidFieldCharWidth's own doc), so picking or hiding
+    // one must recompute this the same way learning a new name does.
+    val pidFieldChars = remember(tab.id, tab.analysis.processNames, tab.manualProcessNamePicks, settings.processNameMode) {
+        pidFieldCharWidth(settings.processNameMode, tab.analysis.processNames, tab.manualProcessNamePicks)
     }
     LaunchedEffect(computedItems) {
         if (!computedItems.loading) onVisibleItems?.invoke(computedItems.summary)
