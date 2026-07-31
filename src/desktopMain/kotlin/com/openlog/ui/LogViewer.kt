@@ -545,29 +545,102 @@ fun buildFullLineAnnotation(
 )
 
 // Split out of buildFullLineAnnotation below purely to keep that function's own cyclomatic
-// complexity under detekt's threshold — see includeTimestamp/includePid's doc on the caller for
-// what these two flags mean and the one caller (LogRow) that ever passes false.
+// complexity under detekt's threshold.
+//
+// Change 3 (process-names rework): the pid field renders either a process name (when
+// [processDisplay] is non-null) or the bare pid number, but EITHER WAY it's padded to the same
+// [pidFieldWidth] — the uniform per-tab width LogViewer computes via pidFieldCharWidth — so every
+// row's TID (and everything after it) lands at the same x regardless of whether that particular
+// row happens to show a name. A name is middle-ellipsised to fit, then padded on the right
+// (padEnd); a bare number keeps the original right-aligned convention (padStart) — the two read
+// naturally in opposite directions, but since both always occupy exactly [pidFieldWidth]
+// characters, TID starts at the same offset either way. [pidFieldWidth] is always exactly 5 (the
+// original padStart(5) width) in mode OFF and in any tab where the longest known name is no wider
+// than 5 chars, so this reproduces the pre-feature output byte-for-byte in both cases.
 private fun AnnotatedString.Builder.appendTsPidTid(
     entry: LogEntry,
     tsColor: Color,
     pidColor: Color,
-    includeTimestamp: Boolean,
-    includePid: Boolean,
+    processDisplay: String?,
+    pidFieldWidth: Int,
 ) {
-    if (includeTimestamp) {
-        withStyle(SpanStyle(color = tsColor)) { append(entry.ts) }
-    }
+    withStyle(SpanStyle(color = tsColor)) { append(entry.ts) }
     if (entry.pid > 0) {
         append("  ")
         withStyle(SpanStyle(color = pidColor)) {
-            if (includePid) {
-                append(entry.pid.toString().padStart(5))
-                append(" ")
+            if (processDisplay != null) {
+                append(middleEllipsis(processDisplay, pidFieldWidth).padEnd(pidFieldWidth))
+            } else {
+                append(entry.pid.toString().padStart(pidFieldWidth))
             }
+            append(" ")
             append(entry.tid.toString().padStart(5))
         }
     }
 }
+
+// Change 3 (process-names rework): remaps a [start, end) offset pair computed against
+// visibleLogLineText(entry) (utils/TextMatch.kt:125-133, which always writes the pid as a fixed
+// 5-char padStart field — see that function's own doc for why it's never changed by this feature)
+// onto the text buildFullLineAnnotation actually renders below, where the pid field can be a
+// different — but constant for this one row — width (appendTsPidTid's pidFieldWidth; [delta] here
+// is that width minus 5, i.e. how much every offset AFTER the field has shifted).
+//
+// - A range entirely BEFORE the field (both offsets <= [pidFieldStart]) is unaffected.
+// - A range entirely AT-OR-AFTER the field (both offsets >= [pidFieldEndVisible]) keeps its exact
+//   width, just shifted right by [delta].
+// - A range that OVERLAPS the field in either direction is widened to cover the field's full
+//   RENDERED span for the overlapping side, rather than trying to reproduce a position inside
+//   content that may no longer exist there (a highlighter matching part of the numeric pid has no
+//   meaningful analog once that pid is replaced by a name). This is a deliberate choice: it
+//   over-highlights the whole field instead of silently collapsing to an empty range (start ==
+//   end), which every caller below drops via its own `s < e` check — losing the highlight
+//   entirely would be a worse surprise than highlighting a couple of extra characters.
+internal fun remapPidFieldRange(
+    range: Pair<Int, Int>,
+    pidFieldStart: Int,
+    pidFieldEndVisible: Int,
+    delta: Int,
+): Pair<Int, Int> {
+    val pidFieldEndRendered = pidFieldEndVisible + delta
+
+    fun remap(offset: Int, clampTo: Int): Int = when {
+        offset <= pidFieldStart -> offset
+        offset < pidFieldEndVisible -> clampTo
+        else -> offset + delta
+    }
+    return remap(range.first, pidFieldStart) to remap(range.second, pidFieldEndRendered)
+}
+
+// Change 3 (process-names rework): the uniform pid-FIELD character width for this tab, shared by
+// every row (LogRow) and ColHeader's own "PID" box — see appendTsPidTid's doc for why a uniform
+// width (rather than each row sizing to its own content) is what makes TID/LVL/TAG/MESSAGE line up
+// on every row once the feature is on.
+//
+// OFF always returns 5 (the original padStart(5) width) — LogRow/buildFullLineAnnotation then
+// render byte-identical to before this feature existed, per ProcessNameMode's own doc.
+//
+// ALL/MANUAL derive the width from the WIDEST name actually known for this tab — deliberately
+// [processNames] (every name this tab has learned), NOT filtered down to whatever MANUAL's own
+// picks currently are, so the column doesn't jitter wider/narrower each time the user picks or
+// hides one specific pid (see LogTab.manualProcessNamePicks' own doc). Floored at 5 (a numeric pid
+// must never render NARROWER than before) and capped at PROCESS_NAME_MAX_CHARS (Theme.kt) — the
+// same middle-ellipsis budget appendTsPidTid already truncates an individual long name to, so one
+// outlier name can't blow the column out for the whole file.
+internal fun pidFieldCharWidth(mode: ProcessNameMode, processNames: Map<Int, String>): Int {
+    if (mode == ProcessNameMode.OFF) return 5
+    val longestKnownName = processNames.values.maxOfOrNull { it.length } ?: return 5
+    return longestKnownName.coerceIn(5, PROCESS_NAME_MAX_CHARS)
+}
+
+// Change 1: the toolbar options popup's process-name entry is a plain two-state toggle (unlike
+// Settings' own three-way SegmentedControl) — OFF shows names (goes to ALL); ALL or MANUAL hides
+// them (goes back to OFF). MANUAL is never entered from here, only ever from a row's context menu
+// (Change 2/CtxProcessActions), so this only needs to represent "off" vs "some names showing."
+// Pulled out as a pure function, like pidFieldCharWidth/resolveProcessDisplayName above, so this
+// decision is unit-testable without a Compose harness (this codebase has none).
+internal fun toggledProcessNameMode(current: ProcessNameMode): ProcessNameMode =
+    if (current == ProcessNameMode.OFF) ProcessNameMode.ALL else ProcessNameMode.OFF
 
 internal fun buildFullLineAnnotation(
     entry: LogEntry,
@@ -579,18 +652,16 @@ internal fun buildFullLineAnnotation(
     keywordRegexFilter: Filter?,
     regexContext: RegexEvaluationContext,
     searchHighlight: SearchHighlight? = null,
-    // Both default to true, reproducing the exact original append sequence — every pre-existing
-    // caller (including the whole test suite) keeps its exact prior output. LogRow's process-
-    // name-in-place-of-pid path (see its own doc) is the only caller that ever passes false: it
-    // renders the timestamp and the pid number as their own separate composables (a real hoverable
-    // cell for the name, TooltipArea-wrapped, is not achievable on a substring of a single
-    // BasicTextField — see Theme.kt's processNameCellWidth/tid-map-gutter note for why an embedded-
-    // in-the-monospace-string approach was tried and abandoned twice already) and asks this
-    // function only for the TID-onward remainder.
-    includeTimestamp: Boolean = true,
-    includePid: Boolean = true,
+    // Change 3 (process-names rework): the resolved name shown in place of this row's bare pid
+    // (null for every pre-existing caller, including the whole prior test suite — see
+    // resolveProcessDisplayName for when LogRow ever passes non-null), and the uniform per-tab
+    // pid-FIELD character width every row pads to (5 — the original padStart width — for every
+    // pre-existing caller too). Both defaults reproduce the exact pre-feature single-field render
+    // byte-for-byte; see appendTsPidTid's own doc for how they combine.
+    processDisplay: String? = null,
+    pidFieldWidth: Int = 5,
 ): AnnotatedString = buildAnnotatedString {
-    appendTsPidTid(entry, tsColor, pidColor, includeTimestamp, includePid)
+    appendTsPidTid(entry, tsColor, pidColor, processDisplay, pidFieldWidth)
     append("  ")
     withStyle(SpanStyle(color = entry.level.defaultColor, fontWeight = FontWeight.Bold)) {
         append(entry.level.key.toString())
@@ -599,24 +670,40 @@ internal fun buildFullLineAnnotation(
     withStyle(SpanStyle(color = tagColor)) { append(entry.tag); append(":") }
     append(" ")
     withStyle(SpanStyle(color = msgColor)) { append(entry.msg) }
-    // The default case (both flags true) reuses visibleLogLineText(entry) verbatim, unchanged from
-    // before this parameter pair existed — zero behavior change for every pre-existing caller. Only
-    // when either flag suppresses part of the line does this fall back to what was ACTUALLY just
-    // appended above (toAnnotatedString() returns everything built so far, mid-lambda) — self-
-    // consistent by construction, so highlight/search-match offsets below always land on the real
-    // rendered text even though it now differs from visibleLogLineText's own (always-full) shape.
-    // visibleLogLineText itself stays untouched either way — it's still what filtering/Find-bar
-    // matching read (utils/Filter.kt, utils/SearchComputeResult.kt), independent of this rendering.
-    val lineText = if (includeTimestamp && includePid) visibleLogLineText(entry) else toAnnotatedString().text
+    // Filters/highlighters/Find always match against visibleLogLineText(entry) — the single
+    // source of truth (utils/TextMatch.kt) — never against what's actually rendered above, which
+    // (once a process name, or a numeric pid padded to a wider uniform column, replaces
+    // visibleLogLineText's own fixed 5-char pid field) can differ from it — in LENGTH whenever
+    // pidFieldWidth != 5, but potentially in CONTENT even when pidFieldWidth == 5 (a resolved name
+    // no wider than 5 chars still replaces the digits at that same width). Every offset pair
+    // hlRanges/keywordRegexHighlightRanges/regexRanges hand back is therefore always passed through
+    // remapPidFieldRange (whenever this row even HAS a pid field — entry.pid <= 0 rows never do, on
+    // either side, so those skip straight to identity) before being applied to the text actually
+    // built above — see that function's own doc for the exact rule, including how it widens a range
+    // overlapping the pid field to the field's full rendered span regardless of whether delta is
+    // zero, precisely because content (not just width) can differ there. Mode OFF never resolves a
+    // name at all (LogRow's resolveProcessDisplayName), so this is a no-op there in practice, not
+    // just in the common case — see the OFF-byte-identical test coverage in
+    // ProcessNameRenderingTest.
+    val lineText = visibleLogLineText(entry)
+    val pidFieldDelta = pidFieldWidth - 5
+    val pidFieldStart = entry.ts.length + 2
+    val pidFieldEndVisible = pidFieldStart + 5
+
+    fun remap(range: Pair<Int, Int>): Pair<Int, Int> =
+        if (entry.pid <= 0) range else remapPidFieldRange(range, pidFieldStart, pidFieldEndVisible, pidFieldDelta)
+    val renderedLength = length
     for (hl in highlighters.filter { it.on && it.pattern.isNotBlank() }) {
-        hlRanges(lineText, hl, regexContext).forEach { (s, e) ->
-            if (s < e && e <= lineText.length)
+        hlRanges(lineText, hl, regexContext).forEach { rawRange ->
+            val (s, e) = remap(rawRange)
+            if (s < e && e <= renderedLength)
                 addStyle(SpanStyle(background = hl.color.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold), s, e)
         }
     }
     keywordRegexFilter?.let { filter ->
-        keywordRegexHighlightRanges(lineText, filter, regexContext).forEach { (s, e) ->
-            if (s < e && e <= lineText.length) {
+        keywordRegexHighlightRanges(lineText, filter, regexContext).forEach { rawRange ->
+            val (s, e) = remap(rawRange)
+            if (s < e && e <= renderedLength) {
                 addStyle(
                     SpanStyle(background = filter.kwHighlightColor.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold),
                     s,
@@ -630,8 +717,9 @@ internal fun buildFullLineAnnotation(
     searchHighlight?.let { sh ->
         if (sh.query.isNotEmpty()) {
             val bg = if (sh.isCurrentRow) sh.currentBg else sh.matchBg
-            regexRanges(lineText, sh.query, ignoreCase = !sh.caseSensitive, regexContext = regexContext).forEach { (s, e) ->
-                if (s < e && e <= lineText.length) {
+            regexRanges(lineText, sh.query, ignoreCase = !sh.caseSensitive, regexContext = regexContext).forEach { rawRange ->
+                val (s, e) = remap(rawRange)
+                if (s < e && e <= renderedLength) {
                     addStyle(SpanStyle(background = bg, fontWeight = FontWeight.SemiBold), s, e)
                 }
             }
@@ -801,6 +889,16 @@ fun LogViewer(
     // in this file that key on the tailed-growth size. any{} short-circuits on the first match,
     // so this only re-pays a full scan repeatedly for tabs that genuinely have zero pid/tid data.
     val hasPidTid = remember(tab.id, totalCnt) { tab.logData.any { it.pid > 0 } }
+    // Change 3 (process-names rework): the uniform pid-FIELD character width every row's pid cell
+    // (LogRow) — and ColHeader's own "PID" box — pads to, so TID/LVL/TAG/MESSAGE line up on every
+    // row once the feature is on. Computed once per tab here (not per row: pidFieldCharWidth scans
+    // every known name's length, an O(known-pids) cost that must not repeat for every visible row)
+    // and threaded down to both ColHeader and LogRow below. Keyed on the processNames map itself
+    // (not just tab.id) so a name learned mid-tail (TailCoordinator's merge) updates the width, same
+    // rationale as hasPidTid's own totalCnt key above.
+    val pidFieldChars = remember(tab.id, tab.analysis.processNames, settings.processNameMode) {
+        pidFieldCharWidth(settings.processNameMode, tab.analysis.processNames)
+    }
     LaunchedEffect(computedItems) {
         if (!computedItems.loading) onVisibleItems?.invoke(computedItems.summary)
     }
@@ -1296,6 +1394,7 @@ fun LogViewer(
                                             timeDeltaChars = timeDeltaChars,
                                             hasTidMap = effectiveTab.tidMap != null,
                                             processNameMode = settings.processNameMode,
+                                            pidFieldChars = pidFieldChars,
                                             searchHighlight = if (isSearchMatch) {
                                                 SearchHighlight(
                                                     search.query, search.caseSensitive, isCurrentSearchMatch,
@@ -1625,6 +1724,7 @@ fun LogViewer(
                         showTimeDelta = tab.showTimeDelta,
                         timeDeltaChars = originalTimeDeltaChars,
                         hasTidMap = tab.tidMap != null,
+                        pidFieldChars = pidFieldChars,
                     )
                     ItemList(
                         listItems = allItems,
@@ -1682,6 +1782,7 @@ fun LogViewer(
                         showTimeDelta = tab.showTimeDelta,
                         timeDeltaChars = filteredTimeDeltaChars,
                         hasTidMap = tab.tidMap != null,
+                        pidFieldChars = pidFieldChars,
                     )
                     ItemList(
                         listItems = items,
@@ -1789,6 +1890,7 @@ fun LogViewer(
                 showTimeDelta = tab.showTimeDelta,
                 timeDeltaChars = mainTimeDeltaChars,
                 hasTidMap = tab.tidMap != null,
+                pidFieldChars = pidFieldChars,
             )
             ItemList(
                 items, computedItems.summary, rowBoundsAbs, boxPosY,
@@ -2089,6 +2191,11 @@ private fun LogRow(
     // OFF (the default) never reads tab.analysis.processNames/manualProcessNamePicks at all below,
     // which is what guarantees this row renders pixel-identical to before this feature existed.
     processNameMode: ProcessNameMode = ProcessNameMode.OFF,
+    // The uniform per-tab pid-FIELD character width (LogViewer's pidFieldCharWidth, computed once
+    // per tab — see its own doc for why every row shares one value instead of sizing to its own
+    // content). Always 5 in mode OFF, which is what keeps this row byte-identical to before this
+    // feature existed even before processDisplay is resolved below.
+    pidFieldChars: Int = 5,
     searchHighlight: SearchHighlight? = null,
 ) {
     val density  = LocalDensity.current.density
@@ -2117,7 +2224,7 @@ private fun LogRow(
     val isCrashGroupRow = isCrashGroupRow(item.groupColor, highlightEntireCrashGroup)
     val annoLine = remember(
         tab.id, entry, tab.filter, tc.td, tc.ts, tc.tx, wrapLimitChars, isCrashGroupRow, autoWrap, searchHighlight,
-        processDisplay,
+        processDisplay, pidFieldChars,
     ) {
         val tagColor = if (isCrashGroupRow) DANGER_RED else tc.ts
         val msgColor = if (isCrashGroupRow) DANGER_RED else tc.tx
@@ -2131,11 +2238,11 @@ private fun LogRow(
             tab.filter,
             regexContext,
             searchHighlight,
-            // The ts/pid-in-place-of-name pair render as their own separate composables below
-            // (needed for a real hover tooltip — see this function's own param doc), so this field
-            // is asked only for TID onward when a name is actually being shown for this row.
-            includeTimestamp = processDisplay == null,
-            includePid = processDisplay == null,
+            // Change 3: the pid field renders inline now (name-or-number, padded to pidFieldChars),
+            // so this is a single BasicTextField again end to end — see this function's own doc for
+            // why that matters for drag-selection.
+            processDisplay = processDisplay,
+            pidFieldWidth = pidFieldChars,
         )
         if (autoWrap) built else visualLogLineForWrapLimit(built, wrapLimitChars)
     }
@@ -2362,27 +2469,15 @@ private fun LogRow(
                 modifier = Modifier.widthIn(max = 70.dp).padding(end = 4.dp),
             )
         }
-        // Process name shown IN PLACE of the numeric pid (Problem 2 of the process-names rework) —
-        // ts and the pid-or-name field render as their own composables here, ONLY for a row that is
-        // actually showing a name (processDisplay != null; see this function's own doc for why OFF/
-        // not-shown rows never reach this branch at all, guaranteeing pixel-identical rendering for
-        // them). annoLine above was built with includeTimestamp/includePid = false for exactly this
-        // case, so the BasicTextField below picks up right at TID.
-        if (processDisplay != null) {
-            AppText(
-                entry.ts, color = tc.td, fontSize = fontSize, fontFamily = mono, maxLines = 1,
-                overflow = TextOverflow.Clip,
-            )
-            Spacer(Modifier.width(6.dp))
-            TooltipArea(tooltip = { ToolbarTooltip(processDisplay) }) {
-                AppText(
-                    middleEllipsis(processDisplay, PROCESS_NAME_MAX_CHARS),
-                    color = tc.td.copy(0.5f), fontSize = fontSize, fontFamily = mono, maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = processNameCellWidth(fontSize.value)),
-                )
-            }
-        }
+        // Change 3 (process-names rework): the process name (when shown) now renders INSIDE
+        // annoLine's single BasicTextField below, padded inline to a uniform per-tab pid-field
+        // width (appendTsPidTid/pidFieldCharWidth) — no separate composable, so drag-selection
+        // spans the whole row again even on a row showing a name. This used to be two extra
+        // composables here (a plain ts AppText plus a TooltipArea-wrapped name AppText) specifically
+        // to hang a hover tooltip off the name; that tooltip is gone (the full name is still
+        // available via the row's context menu header and the tid-map header — see Change 2/the
+        // "Process —" block in App.kt/Components.kt), which is what makes folding this back into
+        // one text field possible.
         BasicTextField(
             value = TextFieldValue(annotatedString = annoLine, selection = sel),
             onValueChange = { new ->
@@ -2901,21 +2996,24 @@ private fun ToolbarOptionsPopup(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
                 )
             }
-            // Second entry point for the OFF/ALL/MANUAL mode (Settings → Appearance carries the
-            // first — see SettingsDialog.kt's EditorBehaviorSettingsSection, beside its own
-            // Row-number/Minimap controls). A label rather than a HoverBox toggle since this is a
-            // three-way choice, not a boolean.
-            AppText(
-                "Process names", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(start = 12.dp, top = 6.dp, bottom = 4.dp),
-            )
-            SegmentedControl(
-                options = listOf("Off", "All", "Manual"),
-                selectedIndices = setOf(ProcessNameMode.entries.indexOf(processNameMode)),
-                onToggle = { idx -> onSetProcessNameMode(ProcessNameMode.entries[idx]) },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
-                fillWidth = true,
-            )
+            // Second entry point for the mode (Settings → Appearance carries the full three-way
+            // choice — see SettingsDialog.kt's EditorBehaviorSettingsSection). This one is a plain
+            // two-state toggle, styled exactly like Show/Hide row numbers and Show/Hide minimap
+            // above: OFF shows names (sets ALL), and ALL or MANUAL hides them (sets OFF). MANUAL is
+            // never entered from here — it's only ever entered by picking an individual process
+            // from a row's context menu (see Change 2/CtxProcessActions) — so this toggle only ever
+            // needs to represent "off" vs "some names showing," not the full three-way state.
+            HoverBox(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = { onSetProcessNameMode(toggledProcessNameMode(processNameMode)) },
+            ) {
+                AppText(
+                    if (processNameMode == ProcessNameMode.OFF) "Show process names" else "Hide process names",
+                    color = tc.tx,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                )
+            }
         }
     }
 }

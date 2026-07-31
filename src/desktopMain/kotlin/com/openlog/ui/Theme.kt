@@ -227,11 +227,11 @@ val ROW_START_PAD = 11.dp   // base horizontal start padding before indent
 val ROW_V_PAD     =  3.dp   // vertical (top/bottom) padding for all log rows
 val ROW_NUM_GAP = 8.dp   // gap between the optional row-number gutter and the row content (Settings → Row number)
 
-// Character budget the process-name-in-place-of-pid cell's middle-ellipsis truncation
-// (ui/LogViewer.kt's middleEllipsis) targets before LogRow's own TextOverflow.Ellipsis needs to
-// kick in as a safety net for any width-estimate slack. Package names routinely exceed this
-// budget, which is the whole reason the cell truncates instead of growing to fit the longest name
-// in the file — see processNameCellWidth below and ToolbarTooltip for the full name on hover.
+// Character budget the process-name-in-place-of-pid field's middle-ellipsis truncation
+// (ui/LogViewer.kt's middleEllipsis, used from appendTsPidTid) targets — the upper bound
+// pidFieldCharWidth (LogViewer.kt) caps a tab's computed pid-field width at, so one outlier-long
+// name can't blow the column out for the whole file. Package names routinely exceed this budget,
+// which is why the field truncates instead of growing to fit the longest name verbatim.
 const val PROCESS_NAME_MAX_CHARS = 20
 
 // Approximate monospace digit advance as a fraction of font size, used to size the optional
@@ -254,15 +254,17 @@ fun rowNumberColumnWidth(fontSizeSp: Float, digitCount: Int): Dp =
 fun timeDeltaColumnWidth(fontSizeSp: Float, charCount: Int): Dp =
     (charCount.coerceAtLeast(1) * fontSizeSp * MONO_DIGIT_EM).dp
 
-// Width of the process-name-in-place-of-pid cell (ui/LogViewer.kt's LogRow) — sized to
-// PROCESS_NAME_MAX_CHARS at the row's own font size, same formula/rationale as
-// rowNumberColumnWidth/timeDeltaColumnWidth above: a real reserved-width Compose cell rather than
-// an estimated offset into a gap inside a monospace string (see the tid-map-gutter note below for
-// why that second approach was tried twice already and abandoned both times). Only ever used for
-// rows actually showing a name — a row rendered with the pre-feature single-field layout (mode OFF,
-// or this row's pid not shown) never measures against this at all.
-fun processNameCellWidth(fontSizeSp: Float): Dp =
-    (PROCESS_NAME_MAX_CHARS * fontSizeSp * MONO_DIGIT_EM).dp
+// Change 3 (process-names rework): ColHeader's own "PID" header box width when the pid FIELD
+// itself is widened to a uniform per-tab character count (LogViewer.kt's pidFieldCharWidth) —
+// same formula, same "count chars at the header's own smaller COL_HEADER_FONT_SP, not the row's
+// own configurable content font size" convention rowNumberColumnWidth/timeDeltaColumnWidth above
+// already use for the "#"/"Δt" header cells. That's fine here for the same reason it's fine there:
+// a header LABEL box only needs to roughly track the column below it, not pixel-lock to it, since
+// alignment is a monospace-text-inside-one-BasicTextField property below, not a Compose layout
+// constraint shared with the header Row. ColHeader only calls this when the field is actually
+// wider than the original 5 chars — the OFF case keeps its literal pre-feature 40.dp box untouched.
+fun pidFieldColumnWidth(fontSizeSp: Float, chars: Int): Dp =
+    (chars.coerceAtLeast(1) * fontSizeSp * MONO_DIGIT_EM).dp
 
 // NOTE: there is deliberately no width helper here for the tid-map gutter (unlike
 // rowNumberColumnWidth/timeDeltaColumnWidth above) — it doesn't need one. Two earlier versions
