@@ -146,7 +146,9 @@ internal fun CaseLibraryDialog(state: AppState, onDismiss: () -> Unit) {
             CasePreviewDialog(
                 preview = preview,
                 loading = state.caseLibraryLoadingId == preview.id,
+                notesOnlyLoading = state.caseLibraryNotesOnlyLoadingId == preview.id,
                 onReopen = { state.reopenInvestigation(preview.id) },
+                onOpenNotesOnly = { state.openCaseNotesOnly(preview.id) },
                 onCopy = { state.copyCasePreview(preview.id) },
                 onExport = { state.exportCasePreview(preview.id) },
                 onDismiss = { state.dismissCasePreview() },
@@ -336,12 +338,20 @@ private fun caseMetaLine(summary: CaseSummary): String = buildString {
 // LicenseAgreementDialog's scrollable SelectionContainer + AppText body. The metadata header above
 // the rendered Markdown surfaces exactly what buildMd() deliberately never writes to the .md
 // (issueDescription is private working context) plus the .ann-only fields (appVersion/
-// decisiveTags/the recorded filter) — see AppState.previewCase.
+// decisiveTags/the recorded filter) — see AppState.previewCase. ONE SelectionContainer spans both
+// the metadata header and the body below (not just the body, as it used to) so the issue
+// description — often the longest field here, sometimes multi-paragraph — is selectable/copyable
+// like everything else; per b/372053402 (see SelectionContainer's own source comment) its modifier
+// must carry the `.weight(1f)` that reserves the body's share of the column, since it's the
+// topmost layout node of everything it wraps. AppState.copyCasePreview's "Copy" button covers the
+// same gap for users who never select text at all.
 @Composable
 private fun CasePreviewDialog(
     preview: CaseLibraryPreview,
     loading: Boolean,
+    notesOnlyLoading: Boolean,
     onReopen: () -> Unit,
+    onOpenNotesOnly: () -> Unit,
     onCopy: () -> Unit,
     onExport: () -> Unit,
     onDismiss: () -> Unit,
@@ -369,28 +379,31 @@ private fun CasePreviewDialog(
             )
             AppButton("Copy", onClick = onCopy, variant = ButtonVariant.Secondary, modifier = Modifier.height(28.dp))
             AppButton("Export", onClick = onExport, variant = ButtonVariant.Secondary, modifier = Modifier.height(28.dp))
+            OpenNotesOnlyButton(loading = notesOnlyLoading, onClick = onOpenNotesOnly)
             ReopenInvestigationButton(loading = loading, disabledReason = preview.reopenDisabledReason, onClick = onReopen)
             CloseButton(onClick = onDismiss)
         }
         Divider()
-        CasePreviewMetadata(preview)
-        Divider()
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            SelectionContainer {
-                AppText(
-                    preview.text,
-                    color = tc.ts,
-                    fontSize = 11.sp,
-                    fontFamily = MONO,
-                    maxLines = Int.MAX_VALUE,
-                    modifier = Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp).padding(end = 8.dp),
-                )
+        SelectionContainer(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            Column(Modifier.fillMaxSize()) {
+                CasePreviewMetadata(preview)
+                Divider()
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    AppText(
+                        preview.text,
+                        color = tc.ts,
+                        fontSize = 11.sp,
+                        fontFamily = MONO,
+                        maxLines = Int.MAX_VALUE,
+                        modifier = Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp).padding(end = 8.dp),
+                    )
+                    VerticalScrollbar(
+                        adapter = rememberScrollbarAdapter(scroll),
+                        modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+                        style = appScrollbarStyle(tc),
+                    )
+                }
             }
-            VerticalScrollbar(
-                adapter = rememberScrollbarAdapter(scroll),
-                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
-                style = appScrollbarStyle(tc),
-            )
         }
     }
 }
@@ -400,7 +413,9 @@ private fun CasePreviewDialog(
 // notes — nothing existing is at risk, so it reads as an ordinary secondary action. Disabled (with
 // a tooltip explaining why, via TooltipArea/ToolbarTooltip — same house pattern as the toolbar's
 // own disabled-with-reason buttons) whenever AppState.previewCase couldn't resolve a reopenable
-// source, e.g. sourcePath blank or the original log file/archive entry no longer exists.
+// source, e.g. sourcePath blank or the original log file/archive entry no longer exists. The
+// tooltip spells out the consequence (not just the cause) now that a disabled button here no
+// longer leaves the user stuck — [OpenNotesOnlyButton] sits right next to it as the fallback.
 @Composable
 private fun ReopenInvestigationButton(loading: Boolean, disabledReason: String?, onClick: () -> Unit) {
     val button = @Composable {
@@ -416,9 +431,34 @@ private fun ReopenInvestigationButton(loading: Boolean, disabledReason: String?,
         )
     }
     if (disabledReason != null && !loading) {
-        TooltipArea(tooltip = { ToolbarTooltip(disabledReason) }) { button() }
+        TooltipArea(tooltip = { ToolbarTooltip("$disabledReason — only the notes can be opened.") }) { button() }
     } else {
         button()
+    }
+}
+
+// Always enabled, unlike ReopenInvestigationButton — this is the fallback that stays available even
+// when the original log can't be resolved (AppState.openCaseNotesOnly's whole point: the notes are
+// the durable artifact). The tooltip is the "short hint" the feature brief asked for re: LogRef
+// blocks in a log-less tab rendering but not navigating anywhere — always shown, not just when
+// disabled, since there's no disabled state here to hang it off of.
+@Composable
+private fun OpenNotesOnlyButton(loading: Boolean, onClick: () -> Unit) {
+    TooltipArea(
+        tooltip = {
+            ToolbarTooltip(
+                "Opens these notes in a new tab with no log attached. Log references still show, but " +
+                    "clicking one won't jump anywhere — there's no log loaded to jump to.",
+            )
+        },
+    ) {
+        AppButton(
+            if (loading) "Opening…" else "Open notes only",
+            onClick = onClick,
+            variant = ButtonVariant.Secondary,
+            enabled = !loading,
+            modifier = Modifier.height(28.dp),
+        )
     }
 }
 
@@ -427,7 +467,7 @@ private fun CasePreviewMetadata(preview: CaseLibraryPreview) {
     val tc = tc()
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         if (preview.issueDescription.isNotBlank()) {
-            CaseMetadataRow("Issue", preview.issueDescription)
+            CaseIssueDescriptionRow(preview.issueDescription)
         }
         CaseMetadataRow("Source", preview.sourceFilename ?: "Unknown")
         if (preview.appVersion.isNotBlank()) {
@@ -452,11 +492,45 @@ private fun CasePreviewMetadata(preview: CaseLibraryPreview) {
     }
 }
 
+// Issue descriptions are frequently long, sometimes multi-paragraph — the one genuinely long
+// metadata field here. An unbounded height would push the note body itself off screen (or out of
+// the dialog entirely, since CasePreviewMetadata is measured before the weighted body box below
+// it), so this gets its own bounded-height, independently scrollable region instead, matching the
+// body's own AppText+VerticalScrollbar shape. Still covered by CasePreviewDialog's outer
+// SelectionContainer, so it's selectable/copyable like the rest of the header.
+private val ISSUE_DESCRIPTION_MAX_HEIGHT = 120.dp
+
+@Composable
+private fun CaseIssueDescriptionRow(text: String) {
+    val tc = tc()
+    val scroll = rememberScrollState()
+    Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppText("Issue", color = tc.td, fontSize = 9.sp, modifier = Modifier.width(96.dp).padding(top = 1.dp))
+        Box(Modifier.weight(1f).heightIn(max = ISSUE_DESCRIPTION_MAX_HEIGHT)) {
+            AppText(
+                text,
+                color = tc.ts,
+                fontSize = 11.sp,
+                maxLines = Int.MAX_VALUE,
+                modifier = Modifier.fillMaxWidth().verticalScroll(scroll).padding(end = 8.dp),
+            )
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(scroll),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+                style = appScrollbarStyle(tc),
+            )
+        }
+    }
+}
+
+// Source/App version/Filter — short fields, but a filter summary (or an unusually long source
+// label) can still run past three lines; they wrap instead of ellipsizing rather than getting their
+// own scroll region like Issue above, since none of them are expected to run to paragraphs.
 @Composable
 private fun CaseMetadataRow(label: String, value: String) {
     val tc = tc()
     Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(label, color = tc.td, fontSize = 9.sp, modifier = Modifier.width(96.dp).padding(top = 1.dp))
-        AppText(value, color = tc.ts, fontSize = 11.sp, maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        AppText(value, color = tc.ts, fontSize = 11.sp, maxLines = Int.MAX_VALUE, modifier = Modifier.weight(1f))
     }
 }

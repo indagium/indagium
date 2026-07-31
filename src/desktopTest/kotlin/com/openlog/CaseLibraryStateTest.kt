@@ -7,6 +7,7 @@ import com.openlog.model.Filter
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
 import com.openlog.ui.AppState
+import com.openlog.ui.casePreviewCopyText
 import com.openlog.ui.mkTab
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -237,6 +238,105 @@ class CaseLibraryStateTest {
         waitUntil { state.caseLibraryPreview?.id == caseId }
 
         assertEquals("Original log not found", state.caseLibraryPreview!!.reopenDisabledReason)
+    }
+
+    @Test
+    fun openingNotesOnlyCreatesANewLoglessTabWithTheNotesAttachedAndLeavesExistingTabsUntouched() {
+        val notesDir = createTempDirectory("openlog-case-lib-notes-only").toFile()
+        // No sourcePath recorded at all — "Reopen investigation" would refuse this case outright,
+        // but "Open notes only" must still work: the notes are the durable artifact.
+        writeCaseNote(
+            notesDir, "zzqxx_notesonly_case", title = "Zzqxx notesonly case",
+            issueDescription = "zzqxx notesonly marker phrase",
+            tags = listOf("ZzqxxNotesOnlyTag"), decisiveTags = listOf("ZzqxxNotesOnlyTag"),
+        )
+        val state = newState(notesDir)
+        state.tabs = listOf(
+            mkTab("current", "unrelated.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))).copy(
+                annotations = Annotations(blocks = listOf(AnnBlock.Note("n1", "existing note text on current tab"))),
+            ),
+        )
+        state.activeTabId = "current"
+
+        state.openCaseLibrary("current")
+        state.updateCaseLibraryQuery("zzqxx notesonly marker phrase")
+        waitUntil { state.caseLibraryResults.isNotEmpty() }
+        val caseId = state.caseLibraryResults.first().id
+        state.previewCase(caseId)
+        waitUntil { state.caseLibraryPreview?.id == caseId }
+        assertEquals("Original log not found", state.caseLibraryPreview!!.reopenDisabledReason)
+
+        state.openCaseNotesOnly(caseId)
+
+        waitUntil { state.tabs.size == 2 && state.tabs.any { it.id != "current" && it.annotations.decisiveTags.isNotEmpty() } }
+        // The tab the dialog was opened from is completely untouched.
+        assertEquals(
+            listOf(AnnBlock.Note("n1", "existing note text on current tab")),
+            state.tab("current")!!.annotations.blocks,
+        )
+        val newTab = state.tabs.first { it.id != "current" }
+        assertTrue(newTab.logData.isEmpty())
+        assertEquals("Zzqxx notesonly case", newTab.filename)
+        assertEquals(listOf("ZzqxxNotesOnlyTag"), newTab.annotations.decisiveTags)
+        // The dialog closed itself, same as reopenInvestigation on success.
+        assertNull(state.caseLibraryTabId)
+    }
+
+    @Test
+    fun openingNotesOnlyStillWorksWhenTheOriginalLogFileNoLongerExists() {
+        val notesDir = createTempDirectory("openlog-case-lib-notes-only-missing").toFile()
+        val dir = createTempDirectory("openlog-case-lib-notes-only-missing-log").toFile()
+        val goneFile = File(dir, "gone.log")
+        writeCaseNote(
+            notesDir, "zzqxx_notesonly_missing_case", title = "Zzqxx notesonly missing case",
+            issueDescription = "zzqxx notesonly missing marker phrase",
+            tags = listOf("ZzqxxNotesOnlyMissingTag"), decisiveTags = listOf("ZzqxxNotesOnlyMissingTag"),
+            sourcePath = goneFile.absolutePath,
+        )
+        val state = newState(notesDir)
+
+        state.openCaseLibrary("phantom")
+        state.updateCaseLibraryQuery("zzqxx notesonly missing marker phrase")
+        waitUntil { state.caseLibraryResults.isNotEmpty() }
+        val caseId = state.caseLibraryResults.first().id
+        state.previewCase(caseId)
+        waitUntil { state.caseLibraryPreview?.id == caseId }
+        assertEquals("Original log not found", state.caseLibraryPreview!!.reopenDisabledReason)
+
+        state.openCaseNotesOnly(caseId)
+
+        waitUntil { state.tabs.size == 1 && state.tabs.single().annotations.decisiveTags.isNotEmpty() }
+        val newTab = state.tabs.single()
+        assertTrue(newTab.logData.isEmpty())
+        assertEquals(listOf("ZzqxxNotesOnlyMissingTag"), newTab.annotations.decisiveTags)
+    }
+
+    @Test
+    fun copyingAPreviewedCaseIncludesTheIssueDescriptionThatBuildMdOmits() {
+        val notesDir = createTempDirectory("openlog-case-lib-copy").toFile()
+        writeCaseNote(
+            notesDir, "zzqxx_copy_case", title = "Zzqxx copy case",
+            issueDescription = "zzqxx copy marker phrase, a long description of the actual bug",
+            tags = listOf("ZzqxxCopyTag"), decisiveTags = listOf("ZzqxxCopyTag"),
+        )
+        val state = newState(notesDir)
+
+        state.openCaseLibrary("phantom")
+        state.updateCaseLibraryQuery("zzqxx copy marker phrase")
+        waitUntil { state.caseLibraryResults.isNotEmpty() }
+        val caseId = state.caseLibraryResults.first().id
+        state.previewCase(caseId)
+        waitUntil { state.caseLibraryPreview?.id == caseId }
+        val preview = state.caseLibraryPreview!!
+
+        // The rendered note body alone (what buildMd/reconstructAnnotationsText produce, and what
+        // CaseIndexer.readCaseText returns as preview.text) never contains the issue description —
+        // confirms this test is actually exercising the gap, not a tautology.
+        assertTrue(!preview.text.contains("a long description of the actual bug"))
+
+        val copied = casePreviewCopyText(preview)
+
+        assertTrue(copied.contains("zzqxx copy marker phrase, a long description of the actual bug"))
     }
 
     @Test
