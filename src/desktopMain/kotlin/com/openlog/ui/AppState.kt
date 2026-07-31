@@ -569,6 +569,22 @@ data class CaseLibraryPreview(
     val reopenDisabledReason: String?,
 )
 
+// See AppState.copyCasePreview's doc comment: buildMd/reconstructAnnotationsText both omit
+// issueDescription, so preview.text alone never carries it — this is what makes Copy's output
+// whole. Mirrors the field order CasePreviewMetadata renders in CaseLibraryDialog.kt. Blank/empty
+// fields are skipped exactly like the metadata header skips them (a legacy note's blank appVersion,
+// no decisive tags, etc.), except filterSummary, which — like the header — is always a real,
+// non-blank string ("Filter not recorded" included).
+internal fun casePreviewCopyText(preview: CaseLibraryPreview): String = buildString {
+    if (preview.issueDescription.isNotBlank()) appendLine("Issue: ${preview.issueDescription}")
+    preview.sourceFilename?.let { appendLine("Source: $it") }
+    if (preview.appVersion.isNotBlank()) appendLine("App version: ${preview.appVersion}")
+    appendLine("Filter: ${preview.filterSummary}")
+    if (preview.decisiveTags.isNotEmpty()) appendLine("Decisive tags: ${preview.decisiveTags.joinToString(", ")}")
+    appendLine()
+    append(preview.text)
+}
+
 enum class ImportFilterAction { RENAME, REPLACE, SKIP, ADD }
 
 private fun isTransientRegexOnlyChange(before: Filter, after: Filter): Boolean {
@@ -5193,17 +5209,18 @@ class AppState(
         }
         rememberRecentNote(file)
         recentNotesMenuOpen = false
+        val pinName = noteExportTargetName(file)
         // Prefer .ann sidecar — restores exact blocks and structure
         val sidecar = File(file.parent, file.nameWithoutExtension + ".ann")
         if (sidecar.exists()) {
             val annotations = runCatching { sidecar.readText().annotationsFromToken() }.getOrNull()
             if (annotations != null) {
-                // Pins noteTargetName so this exact file (not the default "<base>_analysis.md")
+                // Pins noteTargetName so this file's .md pair (not the default "<base>_analysis.md")
                 // keeps receiving future auto-exports — fixes the adjacent latent bug where opening
                 // "foo_analysis_2.md" and editing it re-exported to the plain "foo_analysis.md".
                 // Uses upTab, not upAnn: opening a file is not itself an annotation edit, so this
                 // must not trigger an immediate (and here, redundant) re-export.
-                upTab(tabId) { t -> t.copy(annotations = annotations, noteTargetName = file.name) }
+                upTab(tabId) { t -> t.copy(annotations = annotations, noteTargetName = pinName) }
                 return
             }
         }
@@ -5211,9 +5228,18 @@ class AppState(
         val text = runCatching { file.readText() }.getOrElse { return }
         upTab(tabId) { t ->
             val block = AnnBlock.Note(newId("n"), text)
-            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block), noteTargetName = file.name)
+            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block), noteTargetName = pinName)
         }
     }
+
+    // autoExportAnnotations always writes Markdown, so the auto-export pin must always name a .md
+    // file — pinning the literal opened filename breaks when the user opens a lone .ann (no paired
+    // .md, e.g. a hand-copied case note): every keystroke would then write rendered Markdown into
+    // that .ann, corrupting its token-encoded format and clobbering whatever the Case Library (or a
+    // teammate) actually put there, while also skipping resolveNoteTarget's overwrite prompt. A
+    // plain .md open is unaffected (its own name already ends in .md).
+    private fun noteExportTargetName(file: File): String =
+        if (file.extension.equals("md", ignoreCase = true)) file.name else "${file.nameWithoutExtension}.md"
 
     fun openNoteFileAsync(tabId: String, file: File) {
         ioScope.launch { openNoteFile(tabId, file) }
@@ -5292,6 +5318,11 @@ class AppState(
     // dialog can disable/relabel "Reopen investigation" for that one case without touching any
     // other row mid-flight.
     var caseLibraryLoadingId by mutableStateOf<String?>(null)
+        private set
+
+    // Same shape as [caseLibraryLoadingId] but for [openCaseNotesOnly], kept as its own field so
+    // clicking one action doesn't paint the OTHER button as busy too (they resolve independently).
+    var caseLibraryNotesOnlyLoadingId by mutableStateOf<String?>(null)
         private set
 
     var caseLibraryPreview by mutableStateOf<CaseLibraryPreview?>(null)
@@ -5509,6 +5540,43 @@ class AppState(
         }
     }
 
+    /** "Open notes only" — always available, regardless of whether [reopenInvestigation] would be
+     *  (sourcePath blank, or the log file/archive entry no longer resolves). The notes are the
+     *  durable artifact and are perfectly readable without the log they were written against, so a
+     *  gone/unrecorded log should never be the reason a saved analysis can't be opened at all.
+     *  Opens the case's notes in a brand-new, log-less tab — [emptyWorkspaceTab] is the app's own
+     *  startup state, so every panel (filter panel, minimap, log viewer, Notes) already renders a
+     *  log-less tab correctly, no special-casing needed. Never touches any existing tab. Named
+     *  after the case (not "Untitled workspace") so it's identifiable in the tab strip.
+     *
+     *  Caveat (surfaced to the user via the button's tooltip, not invented UI here): AnnBlock.LogRef
+     *  blocks still render fine from their stored sourceEntries, but clicking one navigates by
+     *  logIds against a tab with no rows — nothing to jump to. Honest, if a little inert. */
+    fun openCaseNotesOnly(id: String) {
+        val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
+        val seq = ++caseReopenRequestSeq
+        caseLibraryNotesOnlyLoadingId = id
+        ioScope.launch {
+            val record = caseSearch.getCase(id)
+            val noteFile = record?.mdPath?.let(::File) ?: record?.annPath?.let(::File)
+            if (seq != caseReopenRequestSeq) return@launch
+            if (record == null || noteFile == null) {
+                caseLibraryNotesOnlyLoadingId = null
+                runCaseLibrarySearch()
+                return@launch
+            }
+            val n = tabCounter.getAndIncrement()
+            val t = emptyWorkspaceTab().copy(id = "t$n", filename = preview.title)
+            synchronized(stateLock) {
+                tabs = tabs + t
+                activeTabId = t.id
+            }
+            caseLibraryNotesOnlyLoadingId = null
+            openNoteFile(t.id, noteFile)
+            closeCaseLibrary()
+        }
+    }
+
     // Case Library preview's "Copy"/"Export" (design point: reuse the Notes panel's own copy/
     // export primitives rather than reimplementing them). copyAnn/exportAnalysisTo are both tab-
     // scoped (they build fresh Markdown via buildMd(tab, settings)), but a previewed case may not
@@ -5517,9 +5585,16 @@ class AppState(
     // writeText shape saveAnalysis uses) directly against the preview's already-rendered text
     // instead. "Copy" masks its output exactly like copyAnn — the case may contain the same
     // sensitive content the Notes panel's own Copy button is careful about.
+    //
+    // buildMd (and reconstructAnnotationsText, the .ann-only equivalent CaseIndexer.readCaseText
+    // falls back to) both deliberately omit issueDescription — it's private working context, not
+    // meant for the exported note. That means preview.text alone NEVER carries it, on either path.
+    // The metadata header the dialog already shows (issue description, source, app version, filter,
+    // decisive tags) is prepended here so Copy is not a dead end for the one field the dialog's
+    // SelectionContainer used to leave unselectable too (see CaseLibraryDialog.kt).
     fun copyCasePreview(id: String) {
         val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
-        copyToClipboard(maskWordForCopy(preview.text, settings))
+        copyToClipboard(maskWordForCopy(casePreviewCopyText(preview), settings))
     }
 
     fun exportCasePreview(id: String) {
@@ -5535,7 +5610,11 @@ class AppState(
         ioScope.launch {
             runCatching {
                 target.parentFile?.mkdirs()
-                target.writeText(preview.text)
+                // Same text Copy produces (issue description + provenance above the markdown), not
+                // the bare preview.text: buildMd deliberately omits issueDescription, so exporting
+                // preview.text alone would silently drop it — and Copy and Export handing back
+                // different documents for the same case is worse than either gap on its own.
+                target.writeText(maskWordForCopy(casePreviewCopyText(preview), settings))
             }.fold(
                 onSuccess = { AppLogger.info("case-library", "Exported case preview to ${target.absolutePath}") },
                 onFailure = { e -> AppLogger.error("case-library", "Failed to export case preview to ${target.absolutePath}", e) },
