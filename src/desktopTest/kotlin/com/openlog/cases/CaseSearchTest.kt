@@ -205,4 +205,76 @@ class CaseSearchTest {
         assertEquals("New crash", results.first().title)
         assertFalse(results.first().score < results.last().score)
     }
+
+    // ── Tiered exact/prefix/fuzzy matching (Task 1: "Search matching is too literal") ──────────
+
+    private fun newDeviceManagerCorpus(): CaseSearch {
+        val dir = createTempDirectory("openlog-case-search-devicemanager").toFile()
+        writeCaseNote(
+            dir, "device_manager_note", title = "DeviceManager crash",
+            issueDescription = "Investigating a DeviceManager failure during boot",
+            tags = listOf("DeviceManager"), decisiveTags = listOf("DeviceManager"),
+        )
+        return newSearch(dir)
+    }
+
+    @Test
+    fun queryDeviceFindsTheDeviceManagerNoteViaCamelCaseSubTokenSplitting() {
+        val results = newDeviceManagerCorpus().search(query = "device")
+        assertTrue(results.isNotEmpty())
+        assertEquals("DeviceManager crash", results.first().title)
+    }
+
+    @Test
+    fun queryDeviceManagerFindsTheDeviceManagerNoteViaAnExactWholeTokenMatch() {
+        val results = newDeviceManagerCorpus().search(query = "devicemanager")
+        assertTrue(results.isNotEmpty())
+        assertEquals("DeviceManager crash", results.first().title)
+    }
+
+    @Test
+    fun queryDevicemanFindsTheDeviceManagerNoteViaImplicitPrefixMatching() {
+        val results = newDeviceManagerCorpus().search(query = "deviceman")
+        assertTrue(results.isNotEmpty())
+        assertEquals("DeviceManager crash", results.first().title)
+    }
+
+    @Test
+    fun queryDevicemanStarFindsTheDeviceManagerNoteViaTheExplicitWildcard() {
+        val results = newDeviceManagerCorpus().search(query = "deviceman*")
+        assertTrue(results.isNotEmpty())
+        assertEquals("DeviceManager crash", results.first().title)
+    }
+
+    @Test
+    fun queryDevicemangreTypoFindsTheDeviceManagerNoteViaBoundedFuzzyMatching() {
+        val results = newDeviceManagerCorpus().search(query = "devicemangre")
+        assertTrue(results.isNotEmpty())
+        assertEquals("DeviceManager crash", results.first().title)
+    }
+
+    @Test
+    fun aQueryThatIsGenuinelyUnrelatedStillReturnsNothingEvenThoughItSharesADeviceManagerLikeShapeAndFirstLetter() {
+        // Guards against the fuzzy tier over-matching: "diagnostics" shares DeviceManager's first
+        // letter and is close in length, but is nowhere near it edit-distance-wise.
+        val results = newDeviceManagerCorpus().search(query = "diagnostics")
+        assertEquals(emptyList(), results)
+    }
+
+    @Test
+    fun exactMatchOutranksPrefixMatchOutranksFuzzyMatchForOtherwiseEquallyRareTokens() {
+        val dir = createTempDirectory("openlog-case-search-tiers").toFile()
+        writeCaseNote(dir, "tier_exact", title = "Tier ranking regression case", issueDescription = "exactmarkerword appears here")
+        writeCaseNote(dir, "tier_prefix", title = "Tier ranking regression case", issueDescription = "prefixmarkerwordlonger appears here")
+        // A one-character substitution typo ("y" -> "z") of "fuzzymarkerword" — no exact or prefix
+        // relationship to the query token, only reachable via the fuzzy tier.
+        writeCaseNote(dir, "tier_fuzzy", title = "Tier ranking regression case", issueDescription = "fuzzzmarkerword appears here")
+        val search = newSearch(dir)
+
+        val results = search.search(query = "exactmarkerword prefixmarkerword fuzzymarkerword")
+
+        assertEquals(listOf("tier_exact", "tier_prefix", "tier_fuzzy"), results.map { File(it.id).nameWithoutExtension })
+        assertTrue(results[0].score > results[1].score)
+        assertTrue(results[1].score > results[2].score)
+    }
 }

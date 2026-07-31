@@ -547,19 +547,27 @@ data class PendingFilterRename(val id: String, val currentName: String, val isDr
 // loads.
 data class PendingNoteOverwrite(val tabId: String, val targetPath: String, val targetName: String)
 
-// requestLoadCase's confirmation gate (Case Library "Load into this tab") — openNoteFile mutates
-// the target tab's Annotations one way or another (either a whole-object replace when a `.ann`
-// sidecar exists, or an append-a-block fallback when it's a lone `.md`), so this is raised
-// whenever that tab's annotations differ from a fresh Annotations() at all — not just when
-// `blocks` is non-empty, since a typed-but-unsaved issue description/prefix/suffix is just as
-// unrecoverable as a block would be. A genuinely untouched tab has nothing to lose and loads
-// immediately. [replacesNotes] tracks which of the two openNoteFile branches this particular load
-// will take (record.annPath != null -> sidecar replace; else -> append fallback) purely so the
-// confirmation dialog can describe the actual effect instead of always saying "replaced".
-data class PendingCaseLoad(val tabId: String, val caseId: String, val caseTitle: String, val replacesNotes: Boolean)
-
-/** Read-only preview text for one Case Library result, shown before any destructive action. */
-data class CaseLibraryPreview(val id: String, val title: String, val text: String)
+/** Read-only preview for one Case Library result — the rendered note text plus the metadata
+ *  `buildMd` deliberately never writes (issueDescription is private working context) and the
+ *  filter/source info needed to drive "Reopen investigation" (see AppState.reopenInvestigation).
+ *  [filterSummary] is always a real, non-blank string: either describeFilter's rendering of a
+ *  recorded Filter, or the literal "Filter not recorded" for a note saved before that field
+ *  existed — never blank, never a lie. [reopenDisabledReason] is null when "Reopen investigation"
+ *  is clickable, else the reason to show (no confirmation dialog needed any more — nothing this
+ *  action does is destructive, since it always opens a brand-new tab and only ever touches that
+ *  tab's own notes). */
+data class CaseLibraryPreview(
+    val id: String,
+    val title: String,
+    val text: String,
+    val issueDescription: String,
+    val sourceFilename: String?,
+    val appVersion: String,
+    val decisiveTags: List<String>,
+    val filterSummary: String,
+    val sourcePath: String?,
+    val reopenDisabledReason: String?,
+)
 
 enum class ImportFilterAction { RENAME, REPLACE, SKIP, ADD }
 
@@ -5097,7 +5105,7 @@ class AppState(
             runCatching {
                 saved.writeText(buildMd(t, settings))
                 File(saved.parent, saved.nameWithoutExtension + ".ann")
-                    .writeText(t.annotations.withDetectedAppVersion(t.logData).annotationsToken(t.sourcePath))
+                    .writeText(t.annotations.withDetectedAppVersion(t.logData).annotationsToken(t.sourcePath, t.filter))
                 writeAnnotationFrameImages(t, saved)
                 rememberRecentNote(saved)
             }.fold(
@@ -5278,28 +5286,26 @@ class AppState(
         private set
 
     // Id of the case currently resolving CaseSearch.getCase() on ioScope inside
-    // requestLoadCase/confirmLoadCase, or null when nothing is in flight — that call can itself
-    // trigger a full corpus rescan (missing/stale/version-bumped index), so it must never run on
-    // the Compose thread. Scoped to the in-flight case id (rather than a single dialog-wide flag)
-    // so the dialog can disable/relabel "Load into this tab" for that one case without touching
-    // any other row mid flight.
+    // [reopenInvestigation], or null when nothing is in flight — that call can itself trigger a
+    // full corpus rescan (missing/stale/version-bumped index), so it must never run on the Compose
+    // thread. Scoped to the in-flight case id (rather than a single dialog-wide flag) so the
+    // dialog can disable/relabel "Reopen investigation" for that one case without touching any
+    // other row mid-flight.
     var caseLibraryLoadingId by mutableStateOf<String?>(null)
         private set
 
     var caseLibraryPreview by mutableStateOf<CaseLibraryPreview?>(null)
         private set
-    var pendingCaseLoad by mutableStateOf<PendingCaseLoad?>(null)
-        private set
 
     private var caseLibrarySearchJob: Job? = null
 
-    // Bumped synchronously by every requestLoadCase call and by cancelLoadCase. requestLoadCase's
-    // own CaseSearch.getCase() lookup resolves on ioScope (see below), so without this a
-    // requestLoadCase already in flight when the user hits "Cancel" on the confirm dialog it just
-    // opened would still land its decision afterward — silently reopening (or worse, skipping)
-    // the confirmation the user just dismissed. A stale coroutine checks its own captured seq
-    // against the current one before writing any state.
-    private var caseLoadRequestSeq = 0
+    // Bumped synchronously by every reopenInvestigation call and by closeCaseLibrary/
+    // dismissCasePreview. reopenInvestigation's own CaseSearch.getCase() lookup resolves on
+    // ioScope (see below), so without this a call already in flight when the dialog closes (or
+    // the preview is dismissed) would still land its tab-open + note-attach afterward — silently
+    // acting on a dialog the user already walked away from. A stale coroutine checks its own
+    // captured seq against the current one before touching any state.
+    private var caseReopenRequestSeq = 0
 
     /** Opens the Case Library dialog, seeded from [tabId]'s current issue description and active
      *  filter tags (design point 5), then runs an immediate first search — including with a blank
@@ -5319,16 +5325,14 @@ class AppState(
         caseLibraryError = null
         caseLibrarySearching = true
         caseLibraryPreview = null
-        pendingCaseLoad = null
         runCaseLibrarySearch()
     }
 
     fun closeCaseLibrary() {
         caseLibrarySearchJob?.cancel()
-        caseLoadRequestSeq++
+        caseReopenRequestSeq++
         caseLibraryTabId = null
         caseLibraryPreview = null
-        pendingCaseLoad = null
     }
 
     /** Re-searches on every keystroke; see [runCaseLibrarySearch] for the debounce/cancellation
@@ -5404,8 +5408,25 @@ class AppState(
         }
     }
 
-    /** Read-only preview (design point 4) — CaseIndexer.readCaseText, never touches the target
-     *  tab's annotations. Always safe, unlike [requestLoadCase]. Resolves on ioScope: getCase()
+    // "Original log not found" covers both a blank/absent sourcePath (never recorded, or a note
+    // hand-copied without one) and a recorded one that no longer resolves — a plain file that's
+    // been moved/deleted, or an archive-composite "<zip>!<entry>" (see splitSourceFromPath) whose
+    // zip is gone or no longer contains that entry. Reuses splitSourceFromPath itself (not a
+    // separate existence check) so "disabled or not" and "what reopenInvestigation will actually
+    // open" can never disagree.
+    private fun reopenDisabledReasonFor(sourcePath: String?): String? {
+        if (sourcePath.isNullOrBlank()) return "Original log not found"
+        return if (splitSourceFromPath(sourcePath, entryPath = null) == null) "Original log not found" else null
+    }
+
+    private fun sourceFilenameFor(sourcePath: String?): String? {
+        if (sourcePath.isNullOrBlank()) return null
+        return archiveQualifiedLabel(sourcePath) ?: File(sourcePath).name
+    }
+
+    /** Read-only preview (design point 4) — CaseIndexer.readCaseText plus the metadata buildMd
+     *  never writes (issueDescription) and the .ann-only fields (appVersion/decisiveTags/the
+     *  recorded filter). Never touches the target tab's annotations. Resolves on ioScope: getCase()
      *  can trigger a full corpus rescan the same as [search], so it must never run on the Compose
      *  thread either. */
     fun previewCase(id: String) {
@@ -5420,71 +5441,106 @@ class AppState(
                 // the click silently doing nothing.
                 runCaseLibrarySearch()
             } else {
-                caseLibraryPreview = CaseLibraryPreview(id, record.title, text)
+                caseLibraryPreview = CaseLibraryPreview(
+                    id = id,
+                    title = record.title,
+                    text = text,
+                    issueDescription = record.issueDescription,
+                    sourceFilename = sourceFilenameFor(record.sourcePath),
+                    appVersion = record.appVersion,
+                    decisiveTags = record.decisiveTags,
+                    filterSummary = record.filterSummary ?: "Filter not recorded",
+                    sourcePath = record.sourcePath,
+                    reopenDisabledReason = reopenDisabledReasonFor(record.sourcePath),
+                )
             }
         }
     }
 
     fun dismissCasePreview() {
+        caseReopenRequestSeq++
         caseLibraryPreview = null
     }
 
-    /** "Load into this tab" (design point 4) — the destructive action. [openNoteFile] mutates the
-     *  target tab's Annotations in place one way or another, so this gates behind [pendingCaseLoad]
-     *  confirmation whenever the tab's annotations aren't still a fresh, untouched `Annotations()`
-     *  — an issue description typed but not yet backed by any block is just as much at risk as a
-     *  block would be. Resolves CaseSearch.getCase() on ioScope (same rescan cost as [search]);
-     *  [caseLibraryLoadingId] lets the dialog disable "Load into this tab" for this one case while
-     *  that's in flight, and the captured [seq] makes a still-resolving call a no-op if
-     *  [cancelLoadCase] (or closing the dialog) ran before it got back — otherwise a confirmation
-     *  the user just dismissed could silently reopen (or a load could silently fire) moments
-     *  later. The seq check runs *before* clearing [caseLibraryLoadingId]: a stale call must never
-     *  clear the flag a newer, still-in-flight call (or [confirmLoadCase]) just set. */
-    fun requestLoadCase(id: String) {
-        val tabId = caseLibraryTabId ?: return
-        val seq = ++caseLoadRequestSeq
+    /** "Reopen investigation" — replaces the old destructive "Load into this tab". Opens the log
+     *  this case's notes were actually written against ([CaseRecord.sourcePath]) in a BRAND-NEW
+     *  tab — never the tab the Case Library was opened from, and never any other already-open tab's
+     *  notes get touched — then attaches the case's own notes to that new tab, so every log
+     *  reference in them resolves against the log they actually describe (LogParser restarts ids
+     *  at 1 per file, so ids from an unrelated log are meaningless — the bug this whole feature
+     *  replaces). No confirmation dialog: unlike the old load, nothing existing is ever mutated.
+     *  Resolves both a plain file sourcePath and an archive-composite "<zip>!<entry>" one via the
+     *  same [splitSourceFromPath] machinery [requestSplitForTab] already uses, so an archive entry
+     *  is reopened properly rather than handed to a naive `File(...)`. No-ops when the preview's
+     *  [CaseLibraryPreview.reopenDisabledReason] is set — the dialog should already have disabled
+     *  the button in that case, this is just the same guard enforced here too. */
+    fun reopenInvestigation(id: String) {
+        val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
+        if (preview.reopenDisabledReason != null) return
+        val sourcePath = preview.sourcePath ?: return
+        val seq = ++caseReopenRequestSeq
         caseLibraryLoadingId = id
         ioScope.launch {
             val record = caseSearch.getCase(id)
-            if (seq != caseLoadRequestSeq) return@launch
-            caseLibraryLoadingId = null
-            if (record == null) {
+            val source = splitSourceFromPath(sourcePath, entryPath = null)
+            val noteFile = record?.mdPath?.let(::File) ?: record?.annPath?.let(::File)
+            if (seq != caseReopenRequestSeq) return@launch
+            if (record == null || source == null || noteFile == null) {
+                caseLibraryLoadingId = null
                 runCaseLibrarySearch()
                 return@launch
             }
-            val current = tab(tabId) ?: return@launch
-            if (current.annotations != Annotations()) {
-                pendingCaseLoad = PendingCaseLoad(tabId, id, record.title, replacesNotes = record.annPath != null)
-            } else {
-                loadCaseIntoTab(tabId, record)
+            val newTabId = when (source) {
+                is SplitSource.RealFile -> openFileInternal(source.file, bypassSplitPrompt = true)
+                is SplitSource.ArchiveEntry -> openZipEntry(source.archiveFile, source.candidate, bypassSplitPrompt = true)
             }
-        }
-    }
-
-    fun confirmLoadCase() {
-        val pending = pendingCaseLoad ?: return
-        pendingCaseLoad = null
-        val seq = ++caseLoadRequestSeq
-        caseLibraryLoadingId = pending.caseId
-        ioScope.launch {
-            val record = caseSearch.getCase(pending.caseId)
-            if (seq != caseLoadRequestSeq) return@launch
+            if (seq != caseReopenRequestSeq) return@launch
             caseLibraryLoadingId = null
-            if (record != null) loadCaseIntoTab(pending.tabId, record) else runCaseLibrarySearch()
+            if (newTabId == null) return@launch
+            // The tab is allocated synchronously above but published asynchronously once parsing
+            // finishes (see openFileInternal/openZipEntry) — wait for it to actually land in `tabs`
+            // before attaching notes, or openNoteFile's upTab would silently no-op against a tab
+            // that doesn't exist yet (same race attachVideoToTabWhenAvailable already guards against).
+            val deadline = System.currentTimeMillis() + VIDEO_ATTACH_AWAIT_TIMEOUT_MS
+            while (isLoadInFlight(newTabId) && System.currentTimeMillis() < deadline) delay(VIDEO_ATTACH_AWAIT_POLL_MS)
+            if (seq != caseReopenRequestSeq) return@launch
+            openNoteFile(newTabId, noteFile)
+            closeCaseLibrary()
         }
     }
 
-    fun cancelLoadCase() {
-        caseLoadRequestSeq++
-        pendingCaseLoad = null
+    // Case Library preview's "Copy"/"Export" (design point: reuse the Notes panel's own copy/
+    // export primitives rather than reimplementing them). copyAnn/exportAnalysisTo are both tab-
+    // scoped (they build fresh Markdown via buildMd(tab, settings)), but a previewed case may not
+    // correspond to any currently-open tab at all — so these call the SAME underlying primitives
+    // (copyToClipboard, the masking maskWordForCopy already applies, and the same FileDialog+
+    // writeText shape saveAnalysis uses) directly against the preview's already-rendered text
+    // instead. "Copy" masks its output exactly like copyAnn — the case may contain the same
+    // sensitive content the Notes panel's own Copy button is careful about.
+    fun copyCasePreview(id: String) {
+        val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
+        copyToClipboard(maskWordForCopy(preview.text, settings))
     }
 
-    // Prefers the .md (CaseRecord.id's own convention) since openNoteFile's fallback naming/recent-
-    // notes bookkeeping reads more naturally off it; falls back to a lone hand-copied .ann.
-    private fun loadCaseIntoTab(tabId: String, record: CaseRecord) {
-        val file = record.mdPath?.let(::File) ?: record.annPath?.let(::File) ?: return
-        openNoteFileAsync(tabId, file)
-        closeCaseLibrary()
+    fun exportCasePreview(id: String) {
+        val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
+        val dlg = FileDialog(null as Frame?, "Export Case Note", FileDialog.SAVE).apply {
+            file = File(preview.id).name.ifBlank { "case_note.md" }
+            settings.defaultSaveDir?.let { directory = it }
+            isVisible = true
+        }
+        val path = dlg.file ?: return
+        val dir = dlg.directory ?: return
+        val target = File(dir, path)
+        ioScope.launch {
+            runCatching {
+                target.parentFile?.mkdirs()
+                target.writeText(preview.text)
+            }.fold(
+                onSuccess = { AppLogger.info("case-library", "Exported case preview to ${target.absolutePath}") },
+                onFailure = { e -> AppLogger.error("case-library", "Failed to export case preview to ${target.absolutePath}", e) },
+            )
+        }
     }
 
     // Includes the plain-filename name alongside the (possibly archive-qualified) one so notes
@@ -5592,7 +5648,7 @@ class AppState(
                 // Sidecar stores full block state for restoration, plus the sourcePath
                 // fingerprint (5th token field) used to disambiguate same-named notes.
                 File(targetDir, "${mdFile.nameWithoutExtension}.ann")
-                    .writeText(tab.annotations.withDetectedAppVersion(tab.logData).annotationsToken(tab.sourcePath))
+                    .writeText(tab.annotations.withDetectedAppVersion(tab.logData).annotationsToken(tab.sourcePath, tab.filter))
                 legacySourceFingerprintFile(mdFile).delete()
                 writeAnnotationFrameImages(tab, mdFile)
                 rememberRecentNote(mdFile)

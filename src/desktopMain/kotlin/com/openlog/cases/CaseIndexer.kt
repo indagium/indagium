@@ -3,6 +3,7 @@ package com.openlog.cases
 import com.openlog.debug.AppLogger
 import com.openlog.model.AnnBlock
 import com.openlog.ui.annotationsFromToken
+import com.openlog.ui.filterFromAnnotationsToken
 import com.openlog.ui.tokenFields
 import java.io.File
 
@@ -80,6 +81,12 @@ object CaseIndexer {
         val issueDescription = annotations?.issueDescription.orEmpty()
         val appVersion = annotations?.appVersion.orEmpty()
         val decisiveTags = annotations?.decisiveTags.orEmpty()
+        // Field index 8 (filter), same non-Annotations-field treatment as sourcePath above — see
+        // Annotations.annotationsToken's field-8 doc comment (ui/AutosaveCodec.kt). Null means "no
+        // filter recorded" (a note saved before this field existed), surfaced as-is; describeFilter
+        // never runs on a null filter, so the Case Library preview can tell "not recorded" apart
+        // from "recorded, but had no constraints".
+        val filterSummary = annText?.filterFromAnnotationsToken()?.let(::describeFilter)
 
         val logRefEntries = annotations?.blocks.orEmpty()
             .filterIsInstance<AnnBlock.LogRef>()
@@ -107,6 +114,7 @@ object CaseIndexer {
             mdPath = mdFile.takeIf { mdExists }?.absolutePath,
             annPath = annFile.takeIf { it.isFile }?.absolutePath,
             backingPath = backing.absolutePath,
+            filterSummary = filterSummary,
         )
         return record to CaseFileMeta(mtime = backing.lastModified(), size = backing.length())
     }
