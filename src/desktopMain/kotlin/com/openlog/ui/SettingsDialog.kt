@@ -753,6 +753,21 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
         )
     }
     CompactSettingWithTooltip(
+        label = "Process names",
+        tooltip = "Shows a resolved process name (learned from the log's own \"Start proc\" lines) in " +
+            "place of the numeric pid. Off shows plain numbers. All shows every name openLog knows. " +
+            "Manual shows only the processes you've explicitly picked via a row's right-click menu — " +
+            "picking one switches this to Manual automatically. Manual's picks reset every session " +
+            "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
+    ) {
+        val modes = ProcessNameMode.entries.toList()
+        SegmentedControl(
+            options = listOf("Off", "All", "Manual"),
+            selectedIndices = setOf(modes.indexOf(state.settings.processNameMode)),
+            onToggle = { idx -> state.updateSettings { it.copy(processNameMode = modes[idx]) } },
+        )
+    }
+    CompactSettingWithTooltip(
         label = "Video follow readout",
         tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
             "bar, explaining exactly what Follow is doing at the current playhead position.",

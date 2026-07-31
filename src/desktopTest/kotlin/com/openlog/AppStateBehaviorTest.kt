@@ -27,6 +27,7 @@ import com.openlog.model.MAX_INTERFACE_SCALE_PERCENT
 import com.openlog.model.MIN_INTERFACE_SCALE_PERCENT
 import com.openlog.model.ManualCollapseBlock
 import com.openlog.model.ManualCollapseDirection
+import com.openlog.model.ProcessNameMode
 import com.openlog.model.SequenceDef
 import com.openlog.model.SourceFolderInfo
 import com.openlog.model.SourceLogConfiguration
@@ -4499,6 +4500,21 @@ class AppStateBehaviorTest {
         assertFalse(json.contains("inViewSearch"), "settingsJson must no longer emit the retired inViewSearch key: $json")
     }
 
+    @Test
+    fun legacySettingsBlobPredatingProcessNameModeDecodesWithTheModeAtItsDefault() {
+        // A settings blob written before this field existed (or any blob missing/mangling the key)
+        // must read back as OFF, the same default a fresh AppSettings() carries — see
+        // AppSettings.processNameMode's own doc.
+        assertEquals(ProcessNameMode.OFF, settingsFromJson("{}")!!.processNameMode)
+        assertEquals(ProcessNameMode.OFF, settingsFromJson("""{"processNameMode":"not-a-real-mode"}""")!!.processNameMode)
+    }
+
+    @Test
+    fun processNameModeRoundTripsThroughSettingsJson() {
+        val json = AppSettings(processNameMode = ProcessNameMode.ALL).settingsJson()
+        assertEquals(ProcessNameMode.ALL, settingsFromJson(json)!!.processNameMode)
+    }
+
     // Once editorChoice is written explicitly (current format), it round-trips as-is rather than
     // being recomputed from editorCommand — proves the migration default only kicks in when the key
     // is absent, not whenever editorCommand happens to be non-blank.
@@ -5709,6 +5725,86 @@ class AppStateBehaviorTest {
         waitUntil { !state.isLoading && state.tabs.isNotEmpty() }
 
         assertEquals(mapOf(12345 to "com.example.app"), state.tabs.single().analysis.processNames)
+    }
+
+    // ── Process-name display mode (Problem 3/4 of the process-names rework) ─────
+
+    @Test
+    fun showProcessNameForPidSwitchesModeToManualAndAddsThePickToTheTab() {
+        val state = AppState(autosaveFile = File(createTempDirectory("openlog-procname-show").toFile(), "state.cache"))
+        state.tabs = listOf(mkTab("t1", "app.log", emptyList()))
+        state.updateSettings { it.copy(processNameMode = ProcessNameMode.OFF) }
+
+        state.showProcessNameForPid("t1", 1234)
+
+        assertEquals(ProcessNameMode.MANUAL, state.settings.processNameMode)
+        assertEquals(setOf(1234), state.tab("t1")!!.manualProcessNamePicks)
+    }
+
+    @Test
+    fun showProcessNameForPidFromAllModeAlsoSwitchesToManual() {
+        // "Picking a pid switches the mode to MANUAL automatically" applies whether the user was
+        // previously in OFF or ALL — ALL already showed every name, but picking one specific pid is
+        // still a MANUAL-shaped action (see AppState.showProcessNameForPid's own doc).
+        val state = AppState(autosaveFile = File(createTempDirectory("openlog-procname-show-all").toFile(), "state.cache"))
+        state.tabs = listOf(mkTab("t1", "app.log", emptyList()))
+        state.updateSettings { it.copy(processNameMode = ProcessNameMode.ALL) }
+
+        state.showProcessNameForPid("t1", 1234)
+
+        assertEquals(ProcessNameMode.MANUAL, state.settings.processNameMode)
+        assertEquals(setOf(1234), state.tab("t1")!!.manualProcessNamePicks)
+    }
+
+    @Test
+    fun hideProcessNameForPidRemovesThePickAndSwitchesToManual() {
+        val state = AppState(autosaveFile = File(createTempDirectory("openlog-procname-hide").toFile(), "state.cache"))
+        state.tabs = listOf(mkTab("t1", "app.log", emptyList()))
+        state.showProcessNameForPid("t1", 1234)
+        state.showProcessNameForPid("t1", 5678)
+
+        state.hideProcessNameForPid("t1", 1234)
+
+        assertEquals(ProcessNameMode.MANUAL, state.settings.processNameMode)
+        assertEquals(setOf(5678), state.tab("t1")!!.manualProcessNamePicks)
+    }
+
+    @Test
+    fun manualProcessNamePicksIsAbsentFromPersistedSnapshotAndDoesNotSurviveAnAutosaveRoundTrip() {
+        // The requirement most likely to regress silently (see the process-names rework's own
+        // notes): pids are recycled across process runs, so persisting a manual pick would risk
+        // silently naming the WRONG process next session. Assert both the cheap structural
+        // guarantee (persistedSnapshot ignores it, same as `selected`) and the actual autosave
+        // round trip (a real write-then-restore forgets it).
+        val base = mkTab("t1", "app.log", emptyList())
+        assertEquals(base.persistedSnapshot(), base.copy(manualProcessNamePicks = setOf(1234)).persistedSnapshot())
+
+        val dir = createTempDirectory("openlog-procname-persist").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val logFile = File(dir, "app.log").apply {
+            writeText(
+                "06-26 10:00:00.000  0  0 I ActivityManager: " +
+                    "Start proc 1234:com.example.app/u0a1 for activity com.example.app/.MainActivity\n",
+            )
+        }
+        val state = AppState(autosaveFile = cacheFile)
+        state.openFile(logFile)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        val tabId = state.tabs.single().id
+        state.showProcessNameForPid(tabId, 1234)
+        assertEquals(setOf(1234), state.tab(tabId)!!.manualProcessNamePicks)
+
+        state.autosaveNow()
+        state.close()
+
+        val restored = AppState(autosaveFile = cacheFile, restoreOnCreate = true)
+        try {
+            waitUntil { restored.tabs.isNotEmpty() && !restored.isLoading }
+            assertEquals(ProcessNameMode.MANUAL, restored.settings.processNameMode)
+            assertEquals(emptySet(), restored.tabs.single().manualProcessNamePicks)
+        } finally {
+            restored.close()
+        }
     }
 
     // ── Analysis completion is explicit, not inferred from emptiness (P-02) ─────

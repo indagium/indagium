@@ -2,9 +2,12 @@ package com.openlog
 
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
+import com.openlog.model.ProcessNameMode
 import com.openlog.utils.computeProcessNames
+import com.openlog.utils.resolveProcessDisplayName
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 
 class ProcessNamesTest {
     @Test
@@ -112,5 +115,41 @@ class ProcessNamesTest {
         val names = computeProcessNames(entries)
 
         assertEquals(mapOf(100 to "com.example.second"), names)
+    }
+
+    // ── resolveProcessDisplayName: the PID cell's OFF/ALL/MANUAL decision ──────────────
+
+    @Test
+    fun offNeverShowsAResolvedNameEvenWhenOneIsKnown() {
+        assertNull(resolveProcessDisplayName(ProcessNameMode.OFF, mapOf(1234 to "com.example.app"), setOf(1234), 1234))
+    }
+
+    @Test
+    fun allShowsTheNameForAnyPidWithAKnownOne() {
+        assertEquals(
+            "com.example.app",
+            resolveProcessDisplayName(ProcessNameMode.ALL, mapOf(1234 to "com.example.app"), emptySet(), 1234),
+        )
+    }
+
+    @Test
+    fun allFallsBackToNullWhenThisPidsNameIsntKnown() {
+        assertNull(resolveProcessDisplayName(ProcessNameMode.ALL, mapOf(1234 to "com.example.app"), emptySet(), 5678))
+    }
+
+    @Test
+    fun manualShowsTheNameOnlyForAPickedPid() {
+        val processNames = mapOf(1234 to "com.example.app", 5678 to "com.example.other")
+
+        assertEquals("com.example.app", resolveProcessDisplayName(ProcessNameMode.MANUAL, processNames, setOf(1234), 1234))
+        assertNull(resolveProcessDisplayName(ProcessNameMode.MANUAL, processNames, setOf(1234), 5678))
+    }
+
+    @Test
+    fun manualWithAnEmptyPickSetShowsNothingEvenWhenNamesAreKnown() {
+        // The known consequence of pid instability across runs (LogTab.manualProcessNamePicks'
+        // own doc): a restored MANUAL session starts with no picks, so every row falls back to the
+        // bare number until the user picks again — same as if the mode were OFF.
+        assertNull(resolveProcessDisplayName(ProcessNameMode.MANUAL, mapOf(1234 to "com.example.app"), emptySet(), 1234))
     }
 }
