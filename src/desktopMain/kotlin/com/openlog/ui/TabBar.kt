@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CompareArrows
+import androidx.compose.material.icons.automirrored.outlined.ManageSearch
 import androidx.compose.material.icons.automirrored.outlined.StickyNote2
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.FilterList
@@ -141,6 +142,15 @@ internal fun TabBar(state: AppState) {
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
         ) { state.updateCompareMode(!state.compareMode) }
+        ToolbarBtn(
+            "Cases",
+            icon = Icons.AutoMirrored.Outlined.ManageSearch,
+            showLabel = showToolbarText,
+            tooltip = "Search past analyses",
+            enabled = state.tabs.isNotEmpty(),
+            modifier = Modifier.fillMaxHeight(),
+            shape = middleShape,
+        ) { state.activeTab()?.id?.let(state::openCaseLibrary) }
         ToolbarBtn(
             "Open",
             icon = Icons.Outlined.FolderOpen,

@@ -87,6 +87,15 @@ class CaseSearch(
         return recordsById[id]
     }
 
+    /** True when the corpus has no indexed records at all, after an up-to-date rescan — distinct
+     *  from [search] returning no matches for one particular query/tag combination. The Case
+     *  Library UI uses this to decide between an "Index my notes" prompt (nothing has ever been
+     *  indexed, or every previously-indexed note is gone) and an ordinary "no matches" message. */
+    fun isEmpty(): Boolean {
+        refresh()
+        return recordsById.isEmpty()
+    }
+
     /** Escape hatch: ignores the persisted/cached index entirely and rebuilds from disk. */
     fun reindexAll() {
         synchronized(lock) {

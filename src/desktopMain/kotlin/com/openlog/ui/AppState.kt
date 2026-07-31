@@ -13,6 +13,10 @@ import com.openlog.ai.CustomAiCommand
 import com.openlog.ai.CustomAiCommandName
 import com.openlog.ai.normalizeAiProviderProfiles
 import com.openlog.ai.validateAiProviderProfile
+import com.openlog.cases.CaseIndexer
+import com.openlog.cases.CaseRecord
+import com.openlog.cases.CaseSearch
+import com.openlog.cases.CaseSummary
 import com.openlog.debug.AppLogger
 import com.openlog.debug.ControlServer
 import com.openlog.debug.OpenLogToolOperations
@@ -499,6 +503,10 @@ internal const val LARGE_FILE_MODE_BYTES = 64L * 1024L * 1024L
 // feels the same as typing into the filter's keyword field.
 internal const val SEARCH_RECOMPUTE_DEBOUNCE_MS = 150L
 
+// Debounce for the Case Library dialog's search box (AppState.updateCaseLibraryQuery) — per the
+// feature brief, typing shouldn't re-scan the notes corpus on every keystroke.
+internal const val CASE_LIBRARY_SEARCH_DEBOUNCE_MS = 200L
+
 // Bounds for attachFirstVideoCandidateAsync's wait on a just-triggered zip-entry tab load — same
 // bounded-poll shape as OpenLogToolOperations.awaitLoad, duplicated here (not shared) since that
 // class's constants are private and scoped to MCP/REST request handling, a different concern.
@@ -538,6 +546,20 @@ data class PendingFilterRename(val id: String, val currentName: String, val isDr
 // tab, targetPath (absolute) is what the dialog copy shows the user and what "Open existing notes"
 // loads.
 data class PendingNoteOverwrite(val tabId: String, val targetPath: String, val targetName: String)
+
+// requestLoadCase's confirmation gate (Case Library "Load into this tab") — openNoteFile mutates
+// the target tab's Annotations one way or another (either a whole-object replace when a `.ann`
+// sidecar exists, or an append-a-block fallback when it's a lone `.md`), so this is raised
+// whenever that tab's annotations differ from a fresh Annotations() at all — not just when
+// `blocks` is non-empty, since a typed-but-unsaved issue description/prefix/suffix is just as
+// unrecoverable as a block would be. A genuinely untouched tab has nothing to lose and loads
+// immediately. [replacesNotes] tracks which of the two openNoteFile branches this particular load
+// will take (record.annPath != null -> sidecar replace; else -> append fallback) purely so the
+// confirmation dialog can describe the actual effect instead of always saying "replaced".
+data class PendingCaseLoad(val tabId: String, val caseId: String, val caseTitle: String, val replacesNotes: Boolean)
+
+/** Read-only preview text for one Case Library result, shown before any destructive action. */
+data class CaseLibraryPreview(val id: String, val title: String, val text: String)
 
 enum class ImportFilterAction { RENAME, REPLACE, SKIP, ADD }
 
@@ -5196,16 +5218,273 @@ class AppState(
 
     private fun activeNotesDir(): File = userNotesDir() ?: notesDir
 
-    // internal (not private): OpenLogToolOperations' CaseSearch instance (com.openlog.cases)
-    // reuses this exact directory set for search_similar_cases/reindex_cases, so "similar past
-    // issues" retrieval always looks in the same places notes actually get saved/loaded from —
-    // including in tests, where notesDir is injected away from the real ~/.openlog2-equivalent.
+    // internal (not private): the caseSearch instance below (com.openlog.cases) and
+    // OpenLogToolOperations' identical one reuse this exact directory set for
+    // search_similar_cases/reindex_cases/the Case Library dialog, so "similar past issues"
+    // retrieval always looks in the same places notes actually get saved/loaded from — including
+    // in tests, where notesDir is injected away from the real ~/.openlog2-equivalent.
     internal fun noteLookupDirs(): List<File> {
         return listOfNotNull(
             userNotesDir(),
             notesDir,
             DesktopStorage.legacyNotesDir(),
         ).distinctBy { it.absolutePath }
+    }
+
+    // ── Case library (cases/CaseSearch — corpus-wide "Case Library" dialog) ────────────
+    // Built lazily (not at construction) so hosts/tests that never open the Case Library or touch
+    // case-search MCP tools never pay for a CaseSearch instance. Hoisted here (rather than living
+    // only inside debug/OpenLogToolOperations, as it used to) so the UI dialog and the AI/MCP tool
+    // surface share exactly one instance/lock over <appDataDir>/case-index — two instances would
+    // mean two independent locks writing that one file and duplicated parse work. `internal` (not
+    // `private`) so OpenLogToolOperations and tests can reach it.
+    internal val caseSearch: CaseSearch by lazy {
+        CaseSearch(noteDirs = ::noteLookupDirs, indexFile = DesktopStorage.caseIndexFile())
+    }
+
+    /** Tab id the Case Library dialog is open for; null means closed. The search itself is
+     *  corpus-wide (not filtered to this tab), but the tab supplies the seeded query/tags (design
+     *  point 5) and is the "Load into this tab" destination. */
+    var caseLibraryTabId by mutableStateOf<String?>(null)
+        private set
+    var caseLibraryQuery by mutableStateOf("")
+        private set
+
+    // Captured once when the dialog opens (design point 5's "active tags") rather than tracked
+    // live against the tab's filter — the search box's own text is what the user edits from then
+    // on, matching the "seed, don't continuously resync" behavior of RecentNotesPopup/Open Note.
+    // mutableStateOf (not a plain var): read inside CaseLibraryDialog's composable body, and a
+    // plain var's writes are snapshot-invisible to Compose.
+    internal var caseLibraryTags by mutableStateOf<List<String>>(emptyList())
+        private set
+    private var caseLibraryExcludeSourcePath: String? = null
+
+    var caseLibraryResults by mutableStateOf<List<CaseSummary>>(emptyList())
+        private set
+    var caseLibrarySearching by mutableStateOf(false)
+        private set
+
+    // True once a search has completed against a corpus with zero indexed records at all — distinct
+    // from an ordinary "no matches for this query" (see CaseSearch.isEmpty's own doc comment).
+    var caseLibraryIndexEmpty by mutableStateOf(false)
+        private set
+    var caseLibraryIndexing by mutableStateOf(false)
+        private set
+
+    // Set when a debounced search (or a request/confirm load's index lookup) throws — surfaced by
+    // the dialog instead of leaving it stuck on "Searching…" forever (runCaseLibrarySearch has no
+    // suspend point after a genuine failure other than the ones we add ourselves).
+    var caseLibraryError by mutableStateOf<String?>(null)
+        private set
+
+    // Id of the case currently resolving CaseSearch.getCase() on ioScope inside
+    // requestLoadCase/confirmLoadCase, or null when nothing is in flight — that call can itself
+    // trigger a full corpus rescan (missing/stale/version-bumped index), so it must never run on
+    // the Compose thread. Scoped to the in-flight case id (rather than a single dialog-wide flag)
+    // so the dialog can disable/relabel "Load into this tab" for that one case without touching
+    // any other row mid flight.
+    var caseLibraryLoadingId by mutableStateOf<String?>(null)
+        private set
+
+    var caseLibraryPreview by mutableStateOf<CaseLibraryPreview?>(null)
+        private set
+    var pendingCaseLoad by mutableStateOf<PendingCaseLoad?>(null)
+        private set
+
+    private var caseLibrarySearchJob: Job? = null
+
+    // Bumped synchronously by every requestLoadCase call and by cancelLoadCase. requestLoadCase's
+    // own CaseSearch.getCase() lookup resolves on ioScope (see below), so without this a
+    // requestLoadCase already in flight when the user hits "Cancel" on the confirm dialog it just
+    // opened would still land its decision afterward — silently reopening (or worse, skipping)
+    // the confirmation the user just dismissed. A stale coroutine checks its own captured seq
+    // against the current one before writing any state.
+    private var caseLoadRequestSeq = 0
+
+    /** Opens the Case Library dialog, seeded from [tabId]'s current issue description and active
+     *  filter tags (design point 5), then runs an immediate first search — including with a blank
+     *  seed, so an empty corpus shows its "Index my notes" prompt right away rather than waiting
+     *  for the user to type something first. */
+    fun openCaseLibrary(tabId: String) {
+        val tab = tab(tabId)
+        caseLibraryTabId = tabId
+        caseLibraryQuery = tab?.annotations?.issueDescription.orEmpty()
+        caseLibraryTags = tab?.filter?.activeTags?.toList().orEmpty()
+        caseLibraryExcludeSourcePath = tab?.sourcePath
+        caseLibraryResults = emptyList()
+        // Reset synchronously, not left over from whatever the dialog last showed — otherwise
+        // every open flashes a stale "No notes indexed yet"/"No matching cases" for the ~200ms
+        // debounce before the first real search result lands.
+        caseLibraryIndexEmpty = false
+        caseLibraryError = null
+        caseLibrarySearching = true
+        caseLibraryPreview = null
+        pendingCaseLoad = null
+        runCaseLibrarySearch()
+    }
+
+    fun closeCaseLibrary() {
+        caseLibrarySearchJob?.cancel()
+        caseLoadRequestSeq++
+        caseLibraryTabId = null
+        caseLibraryPreview = null
+        pendingCaseLoad = null
+    }
+
+    /** Re-searches on every keystroke; see [runCaseLibrarySearch] for the debounce/cancellation
+     *  shape. Never runs on the Compose thread: CaseSearch.search does directory listing, stats,
+     *  and (for changed notes) a full parse, none of which belongs on the UI thread. */
+    fun updateCaseLibraryQuery(query: String) {
+        caseLibraryQuery = query
+        runCaseLibrarySearch()
+    }
+
+    /** Debounced 200ms, cancel-and-relaunch on ioScope, same shape as the Find bar's own search
+     *  debounce (see the other cancel-and-relaunch comment above searchJobs) — but `job.cancel()`
+     *  alone only takes effect at a suspension point. Once the delay clears, the body below is
+     *  straight-line blocking JVM code (directory listing, stats, parses) with no further suspend
+     *  call, so a job "cancelled" after that point would otherwise run to completion and still
+     *  publish results for a query the user has since replaced. The explicit `ensureActive()`
+     *  calls are what actually make cancellation (a newer keystroke, or the dialog closing) take
+     *  effect. */
+    private fun runCaseLibrarySearch() {
+        val query = caseLibraryQuery
+        val tags = caseLibraryTags
+        val excludeSourcePath = caseLibraryExcludeSourcePath
+        caseLibrarySearchJob?.cancel()
+        caseLibrarySearchJob = ioScope.launch {
+            delay(CASE_LIBRARY_SEARCH_DEBOUNCE_MS)
+            ensureActive()
+            caseLibrarySearching = true
+            caseLibraryError = null
+            // runCatching (not try/catch): its block below is plain blocking JVM code with no
+            // suspend point of its own, so it can never actually throw CancellationException —
+            // only our own explicit ensureActive() calls (outside this block) do that.
+            val outcome = runCatching {
+                val results = caseSearch.search(query, tags, excludeSourcePath)
+                // search() above already refreshed the index, so a query that matched anything
+                // proves the corpus isn't empty — only fall back to a second rescan (isEmpty) when
+                // this particular query matched nothing, to tell "nothing indexed yet" apart from
+                // an ordinary no-match. This is the common case (a query that matches something)
+                // paying for exactly one corpus scan, not two.
+                val empty = if (results.isEmpty()) caseSearch.isEmpty() else false
+                results to empty
+            }
+            // A newer keystroke, or the dialog closing, may have cancelled this job while the
+            // (possibly slow) scan above ran.
+            ensureActive()
+            outcome.fold(
+                onSuccess = { (results, empty) ->
+                    caseLibraryResults = results
+                    caseLibraryIndexEmpty = empty
+                },
+                onFailure = { e ->
+                    AppLogger.error("case-library", "Case Library search failed for query \"$query\"", e)
+                    caseLibraryError = e.message?.takeIf { it.isNotBlank() } ?: "Search failed."
+                },
+            )
+            ensureActive()
+            caseLibrarySearching = false
+        }
+    }
+
+    /** Rebuilds the case index from scratch (cases/CaseIndexer re-parses every note) — offered
+     *  only from the empty-index prompt, since this is the one genuinely slow CaseSearch path. */
+    fun reindexCaseLibrary() {
+        if (caseLibraryIndexing) return
+        // Set synchronously, not inside the launch below — CaseLibraryDialog's "enabled = !indexing"
+        // read this on the very next click, and a coroutine dispatch is not guaranteed to have run
+        // by then, so a fast double-click could otherwise queue two concurrent full reindexes.
+        caseLibraryIndexing = true
+        ioScope.launch {
+            runCatching { caseSearch.reindexAll() }
+                .onFailure { e -> AppLogger.error("case-library", "Case Library reindex failed", e) }
+            caseLibraryIndexing = false
+            runCaseLibrarySearch()
+        }
+    }
+
+    /** Read-only preview (design point 4) — CaseIndexer.readCaseText, never touches the target
+     *  tab's annotations. Always safe, unlike [requestLoadCase]. Resolves on ioScope: getCase()
+     *  can trigger a full corpus rescan the same as [search], so it must never run on the Compose
+     *  thread either. */
+    fun previewCase(id: String) {
+        val openTabId = caseLibraryTabId
+        ioScope.launch {
+            val record = caseSearch.getCase(id)
+            val text = record?.let(CaseIndexer::readCaseText)
+            if (caseLibraryTabId != openTabId) return@launch // dialog closed/reopened meanwhile
+            if (record == null || text == null) {
+                // The row's backing file vanished on disk since the last search (deleted/moved
+                // outside the app). Re-run the search so the now-stale row drops out instead of
+                // the click silently doing nothing.
+                runCaseLibrarySearch()
+            } else {
+                caseLibraryPreview = CaseLibraryPreview(id, record.title, text)
+            }
+        }
+    }
+
+    fun dismissCasePreview() {
+        caseLibraryPreview = null
+    }
+
+    /** "Load into this tab" (design point 4) — the destructive action. [openNoteFile] mutates the
+     *  target tab's Annotations in place one way or another, so this gates behind [pendingCaseLoad]
+     *  confirmation whenever the tab's annotations aren't still a fresh, untouched `Annotations()`
+     *  — an issue description typed but not yet backed by any block is just as much at risk as a
+     *  block would be. Resolves CaseSearch.getCase() on ioScope (same rescan cost as [search]);
+     *  [caseLibraryLoadingId] lets the dialog disable "Load into this tab" for this one case while
+     *  that's in flight, and the captured [seq] makes a still-resolving call a no-op if
+     *  [cancelLoadCase] (or closing the dialog) ran before it got back — otherwise a confirmation
+     *  the user just dismissed could silently reopen (or a load could silently fire) moments
+     *  later. The seq check runs *before* clearing [caseLibraryLoadingId]: a stale call must never
+     *  clear the flag a newer, still-in-flight call (or [confirmLoadCase]) just set. */
+    fun requestLoadCase(id: String) {
+        val tabId = caseLibraryTabId ?: return
+        val seq = ++caseLoadRequestSeq
+        caseLibraryLoadingId = id
+        ioScope.launch {
+            val record = caseSearch.getCase(id)
+            if (seq != caseLoadRequestSeq) return@launch
+            caseLibraryLoadingId = null
+            if (record == null) {
+                runCaseLibrarySearch()
+                return@launch
+            }
+            val current = tab(tabId) ?: return@launch
+            if (current.annotations != Annotations()) {
+                pendingCaseLoad = PendingCaseLoad(tabId, id, record.title, replacesNotes = record.annPath != null)
+            } else {
+                loadCaseIntoTab(tabId, record)
+            }
+        }
+    }
+
+    fun confirmLoadCase() {
+        val pending = pendingCaseLoad ?: return
+        pendingCaseLoad = null
+        val seq = ++caseLoadRequestSeq
+        caseLibraryLoadingId = pending.caseId
+        ioScope.launch {
+            val record = caseSearch.getCase(pending.caseId)
+            if (seq != caseLoadRequestSeq) return@launch
+            caseLibraryLoadingId = null
+            if (record != null) loadCaseIntoTab(pending.tabId, record) else runCaseLibrarySearch()
+        }
+    }
+
+    fun cancelLoadCase() {
+        caseLoadRequestSeq++
+        pendingCaseLoad = null
+    }
+
+    // Prefers the .md (CaseRecord.id's own convention) since openNoteFile's fallback naming/recent-
+    // notes bookkeeping reads more naturally off it; falls back to a lone hand-copied .ann.
+    private fun loadCaseIntoTab(tabId: String, record: CaseRecord) {
+        val file = record.mdPath?.let(::File) ?: record.annPath?.let(::File) ?: return
+        openNoteFileAsync(tabId, file)
+        closeCaseLibrary()
     }
 
     // Includes the plain-filename name alongside the (possibly archive-qualified) one so notes

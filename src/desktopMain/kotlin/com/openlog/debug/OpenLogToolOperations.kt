@@ -21,7 +21,6 @@ import com.openlog.source.SourceFileSnapshot
 import com.openlog.source.SourceMatch
 import com.openlog.source.SourceStructureParser
 import com.openlog.ui.AppState
-import com.openlog.ui.DesktopStorage
 import com.openlog.ui.FollowDiagnostics
 import com.openlog.ui.HL_COLORS
 import com.openlog.ui.SEQ_COLORS
@@ -194,12 +193,12 @@ internal class OpenLogToolOperations(
         },
     )
 
-    // Built lazily (not at construction) so tests/hosts that never touch case-search tools never
-    // pay for a CaseSearch instance; noteDirs() is re-evaluated on every search, so a
-    // Settings -> defaultSaveDir change afterward is picked up without rebuilding this.
-    private val caseSearch: CaseSearch by lazy {
-        CaseSearch(noteDirs = appState::noteLookupDirs, indexFile = DesktopStorage.caseIndexFile())
-    }
+    // Hoisted onto AppState (ui/AppState.kt's own `caseSearch`) so this MCP/AI tool surface and the
+    // Case Library dialog search, get, and reindex the exact same in-memory index/lock over
+    // <appDataDir>/case-index — two independent CaseSearch instances would mean two independent
+    // locks writing that one file and duplicated parse work. `internal` (not `private`) so tests can
+    // assert the two callers share one instance rather than two.
+    internal val caseSearch: CaseSearch get() = appState.caseSearch
 
     // Sequence rendering caches a related result in Filter.kt, but that cache uses the currently
     // filtered data and is intentionally private to rendering.  This tool must always report the
