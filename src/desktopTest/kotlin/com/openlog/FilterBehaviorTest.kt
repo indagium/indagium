@@ -10,12 +10,15 @@ import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
 import com.openlog.model.LogTab
 import com.openlog.model.MessageRule
+import com.openlog.model.RuleTarget
 import com.openlog.model.SequenceDef
 import com.openlog.ui.buildFullLineAnnotation
 import com.openlog.ui.keywordRegexHighlightRanges
 import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.computeItems
+import com.openlog.utils.matchesPidTidTokens
 import com.openlog.utils.passesFilter
+import com.openlog.utils.resolvePidTidTokens
 import com.openlog.utils.visibleEntries
 import com.openlog.utils.visibleLogLineText
 import kotlin.test.Test
@@ -495,6 +498,64 @@ class FilterBehaviorTest {
         assertFalse(passesFilter(excluded, Filter(pidTidFilter = "1234 5678")))
         assertTrue(passesFilter(byPid, Filter(pidTidFilter = "1234,5678")))
         assertTrue(passesFilter(byTid, Filter(pidTidFilter = "1234,5678")))
+    }
+
+    // ── Name-aware PID filtering (utils/ProcessNames.kt) — both tokenizer paths ──────────
+
+    @Test
+    fun pidTidFilterResolvesAProcessNameToItsPidThroughTheFilterKtTokenizerPath() {
+        val matching = LogEntry(1, "10:00:00.000", LogLevel.I, "App", "msg", pid = 1234)
+        val notMatching = LogEntry(2, "10:00:00.001", LogLevel.I, "App", "msg", pid = 5678)
+        val processNames = mapOf(1234 to "com.example.app")
+        val filter = Filter(pidTidFilter = "com.example.app")
+
+        assertTrue(passesFilter(matching, filter, processNames, RegexEvaluationContext()))
+        assertFalse(passesFilter(notMatching, filter, processNames, RegexEvaluationContext()))
+    }
+
+    @Test
+    fun pidTidFilterByNameFallsThroughToRawNumericTokensWhenNoNamesAreKnown() {
+        val matching = LogEntry(1, "10:00:00.000", LogLevel.I, "App", "msg", pid = 1234)
+        val filter = Filter(pidTidFilter = "1234")
+
+        assertTrue(passesFilter(matching, filter, emptyMap(), RegexEvaluationContext()))
+    }
+
+    @Test
+    fun messageRulePidTidTargetAlsoResolvesAProcessNameThroughTheFilterKtTokenizerPath() {
+        val matching = LogEntry(1, "10:00:00.000", LogLevel.E, "App", "boom", pid = 1234)
+        val notMatching = LogEntry(2, "10:00:00.001", LogLevel.E, "App", "boom", pid = 5678)
+        val processNames = mapOf(1234 to "com.example.app")
+        val filter = Filter(
+            messageRules = listOf(MessageRule(id = "r1", include = false, target = RuleTarget.PID_TID, pattern = "com.example.app")),
+        )
+
+        assertFalse(passesFilter(matching, filter, processNames, RegexEvaluationContext()))
+        assertTrue(passesFilter(notMatching, filter, processNames, RegexEvaluationContext()))
+    }
+
+    @Test
+    fun resolvePidTidTokensAndMatchesPidTidTokensResolveAProcessNameThroughTheFilterPanelTokenizerPath() {
+        // ui/FilterPanel.kt's relevantScopeTags candidate scan calls exactly these two functions
+        // (resolvePidTidTokens then matchesPidTidTokens) rather than duplicating the split/compare
+        // logic — this pins that path directly, independent of Filter.kt's own passesFilter.
+        val matching = LogEntry(1, "10:00:00.000", LogLevel.I, "App", "msg", pid = 1234)
+        val notMatching = LogEntry(2, "10:00:00.001", LogLevel.I, "App", "msg", pid = 5678)
+        val processNames = mapOf(1234 to "com.example.app")
+
+        val tokens = resolvePidTidTokens("com.example.app", processNames)
+
+        assertTrue(matchesPidTidTokens(matching, tokens))
+        assertFalse(matchesPidTidTokens(notMatching, tokens))
+    }
+
+    @Test
+    fun resolvePidTidTokensIgnoresAnUnknownProcessNameToken() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "App", "msg", pid = 1234)
+
+        val tokens = resolvePidTidTokens("com.example.unknown", mapOf(1234 to "com.example.app"))
+
+        assertFalse(matchesPidTidTokens(entry, tokens))
     }
 
     @Test

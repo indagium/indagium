@@ -12,6 +12,7 @@ import com.openlog.utils.computeTidMapBranches
 import com.openlog.utils.computeTidMapColors
 import com.openlog.utils.findTidMapSpan
 import com.openlog.utils.tidMapHighlightedEntryRange
+import com.openlog.utils.tidMapProcessLabel
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -311,6 +312,31 @@ class TidMapTest {
         )
 
         assertEquals(1 to 5, tidMapHighlightedEntryRange(visible, highlightedColorKey = 10))
+    }
+
+    // ── tidMapProcessLabel: the tid-map header's process-name resolution ──────────────
+
+    @Test
+    fun processLabelResolvesTheTargetsPidToItsKnownProcessName() {
+        val target = TidMapTarget(pid = 12345, tid = 12345)
+        val processNames = mapOf(12345 to "com.example.app")
+
+        assertEquals("com.example.app", tidMapProcessLabel(target, processNames))
+    }
+
+    @Test
+    fun processLabelFallsBackToTheBarePidWhenItsNameIsUnknown() {
+        val target = TidMapTarget(pid = 999, tid = 999)
+
+        assertEquals("pid 999", tidMapProcessLabel(target, emptyMap()))
+    }
+
+    @Test
+    fun processLabelFallsBackToTheBarePidWhenOtherPidsAreKnownButNotThisOne() {
+        val target = TidMapTarget(pid = 999, tid = 999)
+        val processNames = mapOf(12345 to "com.example.app")
+
+        assertEquals("pid 999", tidMapProcessLabel(target, processNames))
     }
 
     // ── regression: the user's own fixture ────────────────────────────

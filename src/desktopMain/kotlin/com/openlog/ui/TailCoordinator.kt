@@ -2,6 +2,7 @@ package com.openlog.ui
 
 import com.openlog.debug.AppLogger
 import com.openlog.utils.FileTailer
+import com.openlog.utils.computeProcessNames
 import com.openlog.utils.parseLogcatLines
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -108,6 +109,14 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                             tagCounts = cur.analysis.tagCounts.toMutableMap().apply {
                                 newEntries.forEach { merge(it.tag, 1, Int::plus) }
                             },
+                            // Merged, not recomputed-and-replaced, same rationale as tagCounts
+                            // above (PERF-6): scanning only the new batch and unioning it onto the
+                            // running map keeps this O(batch size), not O(whole ever-growing
+                            // file), every ~500ms. `+` lets the new batch's names win on a pid
+                            // collision (matches computeProcessNames' own last-writer-wins rule —
+                            // see its doc), while pids from earlier batches not mentioned in this
+                            // one keep their previously learned name instead of being dropped.
+                            processNames = cur.analysis.processNames + computeProcessNames(newEntries),
                             pending = true,
                         ),
                     )

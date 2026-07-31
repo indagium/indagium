@@ -56,7 +56,9 @@ import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.containsPattern
 import com.openlog.utils.firstRegexMatch
 import com.openlog.utils.issueSitesForCategory
+import com.openlog.utils.matchesPidTidTokens
 import com.openlog.utils.passesFilter
+import com.openlog.utils.resolvePidTidTokens
 import java.io.File
 import java.net.URI
 import kotlin.math.roundToInt
@@ -618,7 +620,15 @@ internal fun FilterPanel(
                     .map { it.pid.toString() }.distinct()
                     .filter { it.contains(msgRuleSearch) }
                     .take(3)
-                    .map { MsgCandidate(it, RuleTarget.PID_TID, inScope = true) }
+                    .map { pid ->
+                        // The stored rule pattern stays the bare pid (matching still keys off the
+                        // number — a process can be renamed/recycled), but the suggestion itself
+                        // shows the resolved name when known, so picking from the list doesn't
+                        // require already knowing which pid belongs to which process.
+                        val name = tab.analysis.processNames[pid.toIntOrNull()]
+                        val label = if (name != null) "$pid · $name" else pid
+                        MsgCandidate(pid, RuleTarget.PID_TID, inScope = true, label = label)
+                    }
             else emptyList()
 
             fun matchingMsgsOf(entries: List<LogEntry>) = entries
@@ -681,9 +691,13 @@ internal fun FilterPanel(
                 tab.logData
             }
             if (pending.target == RuleTarget.PID_TID) {
-                val tokens = pending.pattern.split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
+                // Shares resolvePidTidTokens/matchesPidTidTokens with Filter.kt's own
+                // matchesPidTidFilter/matchesRule so a package-name pattern resolves identically
+                // here (which tags does this rule end up scoped to) and in the actual filter
+                // (which rows does this rule actually hide/show) — see those functions' doc.
+                val tokens = resolvePidTidTokens(pending.pattern, tab.analysis.processNames)
                 candidateEntries.asSequence()
-                    .filter { entry -> tokens.any { it == entry.pid.toString() || it == entry.tid.toString() } }
+                    .filter { entry -> matchesPidTidTokens(entry, tokens) }
                     .map { it.tag }.toSet()
             } else {
                 candidateEntries.asSequence()

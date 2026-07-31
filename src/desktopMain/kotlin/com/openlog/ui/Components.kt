@@ -269,6 +269,9 @@ private const val COL_HEADER_FONT_SP = 9f
 @Composable
 fun ColHeader(
     hasPidTid: Boolean = false,
+    // Gates an extra "PROCESS" label, matching LogRow's own process-name badge — see
+    // LogViewer.kt's hasProcessNames for why this is a tab-wide check, not per-row.
+    hasProcessNames: Boolean = false,
     showRowNumbers: Boolean = false,
     rowNumDigits: Int = 1,
     showTimeDelta: Boolean = false,
@@ -316,6 +319,12 @@ fun ColHeader(
         if (hasPidTid) {
             AppText("PID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(40.dp))
             AppText("TID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(40.dp))
+        }
+        if (hasProcessNames) {
+            AppText(
+                "PROCESS", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.width(PROCESS_NAME_COL_WIDTH),
+            )
         }
         AppText("LVL", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(28.dp))
         AppText("TAG", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(100.dp))
@@ -1078,6 +1087,11 @@ internal fun CtxThreadsActions(
     highlighted: Boolean = false,
     onShowMap: (() -> Unit)? = null,
     onHideMap: (() -> Unit)? = null,
+    // Appended to the "Threads" header as "Threads — <processLabel>" when known, so the header
+    // names the specific process the Show/Hide buttons below act on instead of leaving that to be
+    // remembered from whichever row was right-clicked (see ThreadsActions' own doc and
+    // utils/TidMap.kt's tidMapProcessLabel).
+    processLabel: String? = null,
 ) {
     val tc = tc()
     HoverBox(
@@ -1089,7 +1103,8 @@ internal fun CtxThreadsActions(
             Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            AppText("Threads", color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
+            val headerText = if (processLabel != null) "Threads — $processLabel" else "Threads"
+            AppText(headerText, color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
@@ -1550,6 +1565,12 @@ internal sealed class CtxMenuEntry {
     data class ThreadsActions(
         val onShowMap: (() -> Unit)? = null,
         val onHideMap: (() -> Unit)? = null,
+        // The process this block's Show/Hide targets, resolved via utils/TidMap.kt's
+        // tidMapProcessLabel — precomputed by the call site (App.kt), which is the only place that
+        // has both the row's/active map's TidMapTarget and the tab's LogAnalysis.processNames.
+        // Null only in the (untested-in-practice) case neither button is set, which the call site
+        // never actually adds as a menu entry.
+        val processLabel: String? = null,
     ) : CtxMenuEntry()
 
     // "Link" always overwrites whatever anchor already existed (one anchor per tab — see

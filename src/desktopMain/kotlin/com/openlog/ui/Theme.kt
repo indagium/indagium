@@ -227,6 +227,16 @@ val ROW_START_PAD = 11.dp   // base horizontal start padding before indent
 val ROW_V_PAD     =  3.dp   // vertical (top/bottom) padding for all log rows
 val ROW_NUM_GAP = 8.dp   // gap between the optional row-number gutter and the row content (Settings → Row number)
 
+// PID-column process-name badge (LogRow, ColHeader) — a fixed-width reserved cell, same
+// "reserved-width, never measured" precedent as TID_MAP_HIT_WIDTH (ui/TidMap.kt). Package names
+// routinely exceed this budget (see PROCESS_NAME_MAX_CHARS), so the value itself is elided with a
+// middle-ellipsis rather than widening the column to fit the longest name in the file.
+val PROCESS_NAME_COL_WIDTH = 130.dp
+
+// Character budget the middle-ellipsis truncation targets before ColHeader/LogRow's own
+// TextOverflow.Ellipsis needs to kick in as a safety net for any width-estimate slack.
+const val PROCESS_NAME_MAX_CHARS = 20
+
 // Approximate monospace digit advance as a fraction of font size, used to size the optional
 // row-number gutter (LogRow) and its "#" header cell (ColHeader) to their digit count, so short
 // numbers hug the left edge instead of floating in a fixed-width cell. Shared by both so the header

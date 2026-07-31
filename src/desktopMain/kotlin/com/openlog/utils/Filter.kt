@@ -13,18 +13,32 @@ import com.openlog.ui.SEQ_COLORS
 fun passesFilter(entry: LogEntry, filter: Filter): Boolean =
     passesFilter(entry, filter, RegexEvaluationContext())
 
-internal fun passesFilter(entry: LogEntry, filter: Filter, regexContext: RegexEvaluationContext): Boolean {
+internal fun passesFilter(entry: LogEntry, filter: Filter, regexContext: RegexEvaluationContext): Boolean =
+    passesFilter(entry, filter, emptyMap(), regexContext)
+
+// processNames resolves pid -> process name for PID/TID selectors that accept a package name
+// instead of a bare number (pidTidFilter and RuleTarget.PID_TID message rules — see
+// resolvePidTidTokens). Defaults to emptyMap() so every pre-existing 2-/3-arg caller (the whole
+// test suite, FilterPanel's candidate scans that already zero out pidTidFilter) keeps exactly its
+// prior behavior; only visibleEntries(tab, ...) — the one caller with a LogAnalysis to read the
+// map from — passes a populated one.
+internal fun passesFilter(
+    entry: LogEntry,
+    filter: Filter,
+    processNames: Map<Int, String>,
+    regexContext: RegexEvaluationContext,
+): Boolean {
     val enabledRules = if (filter.mode == FilterMode.TAGS) {
         filter.messageRules.filter { it.enabled && it.pattern.isNotBlank() && it.mode == FilterMode.TAGS }
     } else {
         emptyList()
     }
-    if (!passesExclusions(entry, filter, enabledRules.filter { !it.include }, regexContext)) return false
+    if (!passesExclusions(entry, filter, enabledRules.filter { !it.include }, processNames, regexContext)) return false
     val posRules = enabledRules.filter { it.include }
     val hasKwInTag = filter.mode == FilterMode.TAGS && filter.kwInTag.isNotBlank()
     val hasPosPidTid = filter.pidTidFilter.isNotBlank()
     if (posRules.isNotEmpty() || hasKwInTag || hasPosPidTid) {
-        return matchesPositiveSelectors(entry, posRules, hasKwInTag, hasPosPidTid, filter, regexContext)
+        return matchesPositiveSelectors(entry, posRules, hasKwInTag, hasPosPidTid, filter, processNames, regexContext)
     }
     return passesTagOrKeywordFilter(entry, filter, regexContext)
 }
@@ -33,6 +47,7 @@ private fun passesExclusions(
     entry: LogEntry,
     filter: Filter,
     negativeRules: List<MessageRule>,
+    processNames: Map<Int, String>,
     regexContext: RegexEvaluationContext,
 ): Boolean {
     if (entry.level !in filter.levels) return false
@@ -44,7 +59,7 @@ private fun passesExclusions(
     }
     if (filter.excludeKw.isNotBlank() &&
         tagMsgContainsPattern(entry.tag, entry.msg, filter.excludeKw, filter.excludeKwRegex, regexContext = regexContext)) return false
-    return negativeRules.none { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule, regexContext) }
+    return negativeRules.none { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule, processNames, regexContext) }
 }
 
 private fun matchesPositiveSelectors(
@@ -53,12 +68,13 @@ private fun matchesPositiveSelectors(
     hasKwInTag: Boolean,
     hasPosPidTid: Boolean,
     filter: Filter,
+    processNames: Map<Int, String>,
     regexContext: RegexEvaluationContext,
 ): Boolean {
     // ruleScopeMatches is a no-op (always true) for unscoped rules, so this covers both.
-    if (posRules.any { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule, regexContext) }) return true
+    if (posRules.any { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule, processNames, regexContext) }) return true
     if (hasKwInTag && containsPattern(entry.msg, filter.kwInTag, filter.kwInTagRegex, regexContext = regexContext)) return true
-    if (hasPosPidTid && matchesPidTidFilter(entry, filter.pidTidFilter)) return true
+    if (hasPosPidTid && matchesPidTidFilter(entry, filter.pidTidFilter, processNames)) return true
     return hasActiveBaseFilter(filter) && passesTagOrKeywordFilter(entry, filter, regexContext)
 }
 
@@ -67,10 +83,35 @@ private fun hasActiveBaseFilter(filter: Filter): Boolean = when (filter.mode) {
     FilterMode.KEYWORD -> filter.kwText.isNotBlank()
 }
 
-private fun matchesPidTidFilter(entry: LogEntry, pidTidFilter: String): Boolean {
-    val tokens = pidTidFilter.split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
-    return tokens.any { it == entry.pid.toString() || it == entry.tid.toString() }
+// A pid/tid selector token is either numeric (matched against BOTH entry.pid and entry.tid, the
+// pre-existing behavior — a raw number could mean either) or a process name, resolved via
+// LogAnalysis.processNames and matched only against entry.pid: a name can't collide with an
+// unrelated tid the way two small integers coincidentally can. Shared by pidTidFilter
+// (matchesPidTidFilter, below) and MessageRule's PID_TID target (matchesRule's own branch, and
+// ui/FilterPanel.kt's relevantScopeTags candidate scan) so the two UI entry points — the filter
+// itself and the scope-tag picker for a pending PID_TID rule — can never resolve a name
+// differently from each other.
+internal data class PidTidTokens(val rawTokens: Set<String>, val namedPids: Set<Int>)
+
+internal fun resolvePidTidTokens(pattern: String, processNames: Map<Int, String>): PidTidTokens {
+    val tokens = pattern.split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
+    val raw = LinkedHashSet<String>()
+    val namedPids = LinkedHashSet<Int>()
+    for (token in tokens) {
+        if (token.toIntOrNull() != null) {
+            raw += token
+        } else if (processNames.isNotEmpty()) {
+            for ((pid, name) in processNames) if (name == token) namedPids += pid
+        }
+    }
+    return PidTidTokens(raw, namedPids)
 }
+
+internal fun matchesPidTidTokens(entry: LogEntry, tokens: PidTidTokens): Boolean =
+    tokens.rawTokens.any { it == entry.pid.toString() || it == entry.tid.toString() } || entry.pid in tokens.namedPids
+
+private fun matchesPidTidFilter(entry: LogEntry, pidTidFilter: String, processNames: Map<Int, String>): Boolean =
+    matchesPidTidTokens(entry, resolvePidTidTokens(pidTidFilter, processNames))
 
 private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter, regexContext: RegexEvaluationContext): Boolean =
     when (filter.mode) {
@@ -106,12 +147,13 @@ private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter, regexConte
 private fun tagMatchesPrefix(tag: String, prefix: String): Boolean =
     tag == prefix || tag.startsWith("$prefix.")
 
-private fun matchesRule(entry: LogEntry, rule: MessageRule, regexContext: RegexEvaluationContext): Boolean = when (rule.target) {
-    RuleTarget.PID_TID -> {
-        val tokens = rule.pattern.split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
-        tokens.any { it == entry.pid.toString() || it == entry.tid.toString() }
-    }
-
+private fun matchesRule(
+    entry: LogEntry,
+    rule: MessageRule,
+    processNames: Map<Int, String>,
+    regexContext: RegexEvaluationContext,
+): Boolean = when (rule.target) {
+    RuleTarget.PID_TID -> matchesPidTidFilter(entry, rule.pattern, processNames)
     RuleTarget.MESSAGE -> rulePatternMatches(entry, rule, regexContext)
 }
 
@@ -137,7 +179,11 @@ internal fun visibleEntries(
     applyFilter: Boolean,
     regexContext: RegexEvaluationContext,
 ): List<LogEntry> =
-    if (applyFilter) tab.logData.filter { passesFilter(it, tab.filter, regexContext) } else tab.logData
+    if (applyFilter) {
+        tab.logData.filter { passesFilter(it, tab.filter, tab.analysis.processNames, regexContext) }
+    } else {
+        tab.logData
+    }
 
 // Ids are strictly increasing within a tab (parser, merge, and tailing all guarantee it) and
 // dense enough that a BitSet id-set is ~1 bit/entry — the boxed HashSet<Int> equivalents these
