@@ -10,28 +10,30 @@ import com.openlog.ui.AppState
 import com.openlog.ui.mkTab
 import java.io.File
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
  * AppState-level behavior for the Case Library dialog (ui/CaseLibraryDialog.kt +
- * AppState.openCaseLibrary/requestLoadCase/confirmLoadCase). Ranking/limit-clamping is already
+ * AppState.openCaseLibrary/previewCase/reopenInvestigation). Ranking/limit-clamping is already
  * covered by com.openlog.cases.CaseSearchTest — this file is about the AppState glue: query/tag
- * seeding and the destructive-load confirmation gate.
+ * seeding and "Reopen investigation" (the replacement for the old destructive "Load into this
+ * tab" — see AppState.reopenInvestigation's doc comment for why that was replaced).
  *
  * caseIndexFile() has no injectable seam on AppState (by design — see the feature brief), so these
  * tests go through the real on-disk case-index like CaseToolsGatewayTest already does; only
  * notesDir is injected. Search phrases/tags are namespaced with a "zzqxx" marker so they can't
  * collide with anything a real notes corpus might contain.
  *
- * requestLoadCase/confirmLoadCase resolve CaseSearch.getCase() on ioScope (never the Compose
- * thread — see AppState.requestLoadCase's doc comment), so every test that calls either now waits
- * for the resulting state change instead of asserting immediately afterward.
+ * previewCase/reopenInvestigation resolve CaseSearch.getCase() (and, for reopen, the actual file
+ * open) on ioScope (never the Compose thread), so every test that calls either now waits for the
+ * resulting state change instead of asserting immediately afterward.
  */
 class CaseLibraryStateTest {
     private var openState: AppState? = null
@@ -56,6 +58,18 @@ class CaseLibraryStateTest {
         assertTrue(condition())
     }
 
+    private fun buildZipFixture(dir: File, name: String, entries: Map<String, String>): File {
+        val file = File(dir, name)
+        ZipOutputStream(file.outputStream()).use { zos ->
+            entries.forEach { (path, content) ->
+                zos.putNextEntry(ZipEntry(path))
+                zos.write(content.toByteArray())
+                zos.closeEntry()
+            }
+        }
+        return file
+    }
+
     @Test
     fun openingCaseLibrarySeedsTheQueryFromTheTabsIssueDescriptionAndActiveTags() {
         val notesDir = createTempDirectory("openlog-case-lib-seed").toFile()
@@ -75,213 +89,193 @@ class CaseLibraryStateTest {
     }
 
     @Test
-    fun loadingACaseIntoATabWithExistingNotesRequiresConfirmationInsteadOfLoadingImmediately() {
-        val notesDir = createTempDirectory("openlog-case-lib-confirm").toFile()
+    fun previewSurfacesTheIssueDescriptionSourceFilenameAppVersionDecisiveTagsAndFilterSummary() {
+        val notesDir = createTempDirectory("openlog-case-lib-preview-meta").toFile()
+        val dir = createTempDirectory("openlog-case-lib-preview-log").toFile()
+        val logFile = File(dir, "device_manager.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I DeviceManager: root cause line\n")
+        }
         writeCaseNote(
-            notesDir, "zzqxx_confirm_case", title = "Zzqxx confirm case",
-            issueDescription = "zzqxx confirmation gate marker phrase",
-            tags = listOf("ZzqxxConfirmTag"), decisiveTags = listOf("ZzqxxConfirmTag"),
+            notesDir, "zzqxx_preview_meta_case", title = "Zzqxx preview meta case",
+            issueDescription = "zzqxx preview metadata marker phrase",
+            tags = listOf("ZzqxxPreviewTag"), decisiveTags = listOf("ZzqxxPreviewTag"),
+            appVersion = "3.2.1", sourcePath = logFile.absolutePath,
+            filter = Filter(activeTags = setOf("ZzqxxPreviewTag"), levels = setOf(LogLevel.W, LogLevel.E, LogLevel.A)),
         )
         val state = newState(notesDir)
-        state.tabs = listOf(
-            mkTab("withNotes", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))).copy(
-                annotations = Annotations(
-                    issueDescription = "zzqxx confirmation gate marker phrase",
-                    blocks = listOf(AnnBlock.Note("n1", "existing note text")),
-                ),
-            ),
-        )
 
-        state.openCaseLibrary("withNotes")
+        state.openCaseLibrary("phantom")
+        state.updateCaseLibraryQuery("zzqxx preview metadata marker phrase")
         waitUntil { state.caseLibraryResults.isNotEmpty() }
         val caseId = state.caseLibraryResults.first().id
 
-        state.requestLoadCase(caseId)
+        state.previewCase(caseId)
 
-        waitUntil { state.pendingCaseLoad != null }
-        val pending = assertNotNull(state.pendingCaseLoad)
-        assertEquals("withNotes", pending.tabId)
-        assertEquals(caseId, pending.caseId)
-        // The stock fixture note has both a .md and a matching .ann sidecar, so loading it takes
-        // openNoteFile's whole-object-replace branch, not the append fallback.
-        assertTrue(pending.replacesNotes)
-        // Nothing mutated yet — the tab's original note block is still exactly there.
-        assertEquals(listOf(AnnBlock.Note("n1", "existing note text")), state.tab("withNotes")!!.annotations.blocks)
+        waitUntil { state.caseLibraryPreview?.id == caseId }
+        val preview = state.caseLibraryPreview!!
+        assertEquals("zzqxx preview metadata marker phrase", preview.issueDescription)
+        assertEquals("device_manager.log", preview.sourceFilename)
+        assertEquals("3.2.1", preview.appVersion)
+        assertEquals(listOf("ZzqxxPreviewTag"), preview.decisiveTags)
+        assertEquals("tag=ZzqxxPreviewTag, level≥W", preview.filterSummary)
+        assertNull(preview.reopenDisabledReason)
     }
 
     @Test
-    fun loadingACaseIntoATabWithTypedTextButNoBlocksStillRequiresConfirmation() {
-        // Regression coverage for the gate's original hole: it used to check only
-        // annotations.blocks.isNotEmpty(), so a tab with a typed issue description/prefix/suffix
-        // but zero blocks (the normal state while still framing the problem — exactly when
-        // openCaseLibrary's seeded query comes FROM that same issueDescription) would load
-        // immediately with no confirmation and silently discard the write-up. The gate now
-        // compares the whole Annotations object against a fresh Annotations().
-        val notesDir = createTempDirectory("openlog-case-lib-textonly").toFile()
+    fun previewShowsFilterNotRecordedForALegacyNoteWithNoFilterField() {
+        val notesDir = createTempDirectory("openlog-case-lib-preview-nofilter").toFile()
         writeCaseNote(
-            notesDir, "zzqxx_textonly_case", title = "Zzqxx textonly case",
-            issueDescription = "zzqxx textonly marker phrase",
-            tags = listOf("ZzqxxTextonlyTag"), decisiveTags = listOf("ZzqxxTextonlyTag"),
+            notesDir, "zzqxx_nofilter_case", title = "Zzqxx nofilter case",
+            issueDescription = "zzqxx nofilter marker phrase",
+            tags = listOf("ZzqxxNofilterTag"),
         )
         val state = newState(notesDir)
-        state.tabs = listOf(
-            mkTab("textOnly", "sample3.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))).copy(
-                annotations = Annotations(
-                    issueDescription = "zzqxx textonly marker phrase",
-                    prefix = "typed prefix, never backed by a block",
-                    suffix = "typed suffix, never backed by a block",
-                ),
-            ),
-        )
-        assertTrue(state.tab("textOnly")!!.annotations.blocks.isEmpty())
 
-        state.openCaseLibrary("textOnly")
-        waitUntil { state.caseLibraryResults.isNotEmpty() }
-
-        state.requestLoadCase(state.caseLibraryResults.first().id)
-
-        waitUntil { state.pendingCaseLoad != null }
-        assertEquals("textOnly", state.pendingCaseLoad!!.tabId)
-        // Still untouched — the gate fired instead of loading immediately.
-        assertEquals("typed prefix, never backed by a block", state.tab("textOnly")!!.annotations.prefix)
-        assertEquals("typed suffix, never backed by a block", state.tab("textOnly")!!.annotations.suffix)
-    }
-
-    @Test
-    fun loadingACaseIntoATabWithNoNotesLoadsImmediatelyWithNoConfirmation() {
-        val notesDir = createTempDirectory("openlog-case-lib-immediate").toFile()
-        writeCaseNote(
-            notesDir, "zzqxx_immediate_case", title = "Zzqxx immediate case",
-            issueDescription = "zzqxx immediate load marker phrase",
-            tags = listOf("ZzqxxImmediateTag"), decisiveTags = listOf("ZzqxxImmediateTag"),
-        )
-        val state = newState(notesDir)
-        // A genuinely fresh tab — the default Annotations(), not merely "no blocks" (mkTab's own
-        // default annotations has a non-empty prefix, so it's overridden here to a real fresh one).
-        state.tabs = listOf(
-            mkTab("empty", "sample2.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))).copy(
-                annotations = Annotations(),
-            ),
-        )
-        assertEquals(Annotations(), state.tab("empty")!!.annotations)
-
-        // The tab has no issueDescription to seed the query from (that's the whole point of "no
-        // notes" now), so search for the case explicitly instead of relying on the seed.
-        state.openCaseLibrary("empty")
-        state.updateCaseLibraryQuery("zzqxx immediate load marker phrase")
+        state.openCaseLibrary("phantom")
+        state.updateCaseLibraryQuery("zzqxx nofilter marker phrase")
         waitUntil { state.caseLibraryResults.isNotEmpty() }
         val caseId = state.caseLibraryResults.first().id
 
-        state.requestLoadCase(caseId)
+        state.previewCase(caseId)
 
-        waitUntil { state.tab("empty")!!.annotations.blocks.isNotEmpty() }
-        assertNull(state.pendingCaseLoad)
-        assertEquals("zzqxx immediate load marker phrase", state.tab("empty")!!.annotations.issueDescription)
+        waitUntil { state.caseLibraryPreview?.id == caseId }
+        assertEquals("Filter not recorded", state.caseLibraryPreview!!.filterSummary)
     }
 
     @Test
-    fun loadingACaseWithOnlyAHandCopiedAnnFileAndNoMdLoadsFromTheAnnAlone() {
-        // loadCaseIntoTab's mdPath == null branch: a note with a lone `.ann` (hand-copied into the
-        // notes folder, no paired `.md`) still has to resolve to *some* file to hand to
-        // openNoteFile — CaseRecord.mdPath is null here, so it must fall back to annPath.
-        val notesDir = createTempDirectory("openlog-case-lib-annonly").toFile()
+    fun reopeningAnInvestigationOpensTheOriginalLogInANewTabAttachesTheCasesNotesAndLeavesTheCurrentTabUntouched() {
+        val notesDir = createTempDirectory("openlog-case-lib-reopen").toFile()
+        val dir = createTempDirectory("openlog-case-lib-reopen-log").toFile()
+        val logFile = File(dir, "original.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I DeviceManager: root cause line\n")
+        }
         writeCaseNote(
-            notesDir, "zzqxx_annonly_case", title = "Zzqxx annonly case",
-            issueDescription = "zzqxx annonly marker phrase",
-            tags = listOf("ZzqxxAnnonlyTag"), decisiveTags = listOf("ZzqxxAnnonlyTag"),
-            writeMd = false,
+            notesDir, "zzqxx_reopen_case", title = "Zzqxx reopen case",
+            issueDescription = "zzqxx reopen marker phrase",
+            tags = listOf("ZzqxxReopenTag"), decisiveTags = listOf("ZzqxxReopenTag"),
+            sourcePath = logFile.absolutePath,
         )
         val state = newState(notesDir)
         state.tabs = listOf(
-            mkTab("empty", "sample4.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))).copy(
-                annotations = Annotations(),
+            mkTab("current", "unrelated.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))).copy(
+                annotations = Annotations(blocks = listOf(AnnBlock.Note("n1", "existing note text on current tab"))),
             ),
         )
+        state.activeTabId = "current"
 
-        state.openCaseLibrary("empty")
-        state.updateCaseLibraryQuery("zzqxx annonly marker phrase")
+        state.openCaseLibrary("current")
+        state.updateCaseLibraryQuery("zzqxx reopen marker phrase")
         waitUntil { state.caseLibraryResults.isNotEmpty() }
         val caseId = state.caseLibraryResults.first().id
+        state.previewCase(caseId)
+        waitUntil { state.caseLibraryPreview?.id == caseId }
+        assertNull(state.caseLibraryPreview!!.reopenDisabledReason)
 
-        state.requestLoadCase(caseId)
+        state.reopenInvestigation(caseId)
 
-        waitUntil { state.tab("empty")!!.annotations.decisiveTags == listOf("ZzqxxAnnonlyTag") }
-        assertNull(state.pendingCaseLoad)
-        assertEquals("zzqxx annonly marker phrase", state.tab("empty")!!.annotations.issueDescription)
+        // Waits for the notes to actually land, not just the tab to appear — reopenInvestigation
+        // opens the tab and attaches notes in the same coroutine, but a bare tab-count check can
+        // observe the moment right after the tab publishes and before openNoteFile runs.
+        waitUntil { state.tabs.size == 2 && state.tabs.any { it.id != "current" && it.annotations.decisiveTags.isNotEmpty() } }
+        // The tab the dialog was opened from is completely untouched — same annotations object,
+        // still the only tab that existed before this call.
+        assertEquals(
+            listOf(AnnBlock.Note("n1", "existing note text on current tab")),
+            state.tab("current")!!.annotations.blocks,
+        )
+        val newTab = state.tabs.first { it.id != "current" }
+        assertEquals(logFile.absolutePath, newTab.sourcePath)
+        // Notes came from the case's .ann sidecar (openNoteFile's whole-object-replace branch) and
+        // resolve against THIS tab's own log, not "current"'s.
+        assertEquals(listOf("ZzqxxReopenTag"), newTab.annotations.decisiveTags)
+        // The dialog closed itself — no confirmation step needed any more, nothing was destroyed.
+        assertNull(state.caseLibraryTabId)
     }
 
     @Test
-    fun confirmingAPendingCaseLoadReplacesTheTargetTabsAnnotations() {
-        val notesDir = createTempDirectory("openlog-case-lib-confirm2").toFile()
+    fun reopenIsDisabledWithAClearReasonWhenNoSourcePathWasRecorded() {
+        val notesDir = createTempDirectory("openlog-case-lib-reopen-nosource").toFile()
         writeCaseNote(
-            notesDir, "zzqxx_confirmed_case", title = "Zzqxx confirmed case",
-            issueDescription = "zzqxx confirmed load marker phrase",
-            tags = listOf("ZzqxxConfirmedTag"), decisiveTags = listOf("ZzqxxConfirmedTag"),
-            extraMdText = "Root cause: the confirmed load marker.",
+            notesDir, "zzqxx_nosource_case", title = "Zzqxx nosource case",
+            issueDescription = "zzqxx nosource marker phrase",
+            tags = listOf("ZzqxxNosourceTag"),
         )
         val state = newState(notesDir)
-        state.tabs = listOf(
-            mkTab("withNotes", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))).copy(
-                annotations = Annotations(
-                    issueDescription = "zzqxx confirmed load marker phrase",
-                    blocks = listOf(AnnBlock.Note("n1", "existing note text")),
-                ),
-            ),
-        )
-        // Starts empty so its later value is real proof the load happened, unlike issueDescription
-        // below (which is identical before and after by construction of this fixture, so equaling
-        // it proves nothing about whether the load actually ran).
-        assertTrue(state.tab("withNotes")!!.annotations.decisiveTags.isEmpty())
 
-        state.openCaseLibrary("withNotes")
+        state.openCaseLibrary("phantom")
+        state.updateCaseLibraryQuery("zzqxx nosource marker phrase")
         waitUntil { state.caseLibraryResults.isNotEmpty() }
-        state.requestLoadCase(state.caseLibraryResults.first().id)
-        waitUntil { state.pendingCaseLoad != null }
+        val caseId = state.caseLibraryResults.first().id
+        state.previewCase(caseId)
+        waitUntil { state.caseLibraryPreview?.id == caseId }
 
-        state.confirmLoadCase()
+        assertEquals("Original log not found", state.caseLibraryPreview!!.reopenDisabledReason)
 
-        // Proof the case's own content actually arrived — decisiveTags started empty and only
-        // exists on the loaded case's .ann sidecar, unlike issueDescription which was identical
-        // on the tab before the load ever happened (see the seeded fixture above).
-        waitUntil { state.tab("withNotes")!!.annotations.decisiveTags == listOf("ZzqxxConfirmedTag") }
-        assertNull(state.pendingCaseLoad)
-        // The confirmed load replaced the old block entirely — the pre-existing note text is gone.
-        assertTrue(state.tab("withNotes")!!.annotations.blocks.none { it is AnnBlock.Note && it.text == "existing note text" })
+        // Calling it anyway (e.g. a stray click racing the disabled state) must be a pure no-op.
+        state.reopenInvestigation(caseId)
+        Thread.sleep(300)
+        assertTrue(state.tabs.isEmpty())
     }
 
     @Test
-    fun cancelingAPendingCaseLoadLeavesTheTargetTabsAnnotationsUnchanged() {
-        val notesDir = createTempDirectory("openlog-case-lib-cancel").toFile()
+    fun reopenIsDisabledWithAClearReasonWhenTheOriginalLogFileNoLongerExists() {
+        val notesDir = createTempDirectory("openlog-case-lib-reopen-missing").toFile()
+        val dir = createTempDirectory("openlog-case-lib-reopen-missing-log").toFile()
+        val goneFile = File(dir, "gone.log")
         writeCaseNote(
-            notesDir, "zzqxx_canceled_case", title = "Zzqxx canceled case",
-            issueDescription = "zzqxx canceled load marker phrase",
-            tags = listOf("ZzqxxCanceledTag"), decisiveTags = listOf("ZzqxxCanceledTag"),
+            notesDir, "zzqxx_missing_case", title = "Zzqxx missing case",
+            issueDescription = "zzqxx missing marker phrase",
+            tags = listOf("ZzqxxMissingTag"), sourcePath = goneFile.absolutePath,
         )
         val state = newState(notesDir)
-        state.tabs = listOf(
-            mkTab("withNotes", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))).copy(
-                annotations = Annotations(
-                    issueDescription = "zzqxx canceled load marker phrase",
-                    blocks = listOf(AnnBlock.Note("n1", "existing note text")),
-                ),
-            ),
-        )
 
-        state.openCaseLibrary("withNotes")
+        state.openCaseLibrary("phantom")
+        state.updateCaseLibraryQuery("zzqxx missing marker phrase")
         waitUntil { state.caseLibraryResults.isNotEmpty() }
-        state.requestLoadCase(state.caseLibraryResults.first().id)
-        waitUntil { state.pendingCaseLoad != null }
+        val caseId = state.caseLibraryResults.first().id
+        state.previewCase(caseId)
+        waitUntil { state.caseLibraryPreview?.id == caseId }
 
-        state.cancelLoadCase()
+        assertEquals("Original log not found", state.caseLibraryPreview!!.reopenDisabledReason)
+    }
 
-        assertNull(state.pendingCaseLoad)
-        // requestLoadCase/confirmLoadCase resolve on ioScope (finding #2), so a synchronous check
-        // right after cancelLoadCase() can't prove a delayed/mis-ordered async write from some
-        // still-in-flight or newly-fired coroutine never lands afterward. Give one a real chance
-        // to, then re-check both the confirmation state and the dialog's own tab binding.
-        Thread.sleep(500)
-        assertNull(state.pendingCaseLoad)
-        assertEquals("withNotes", state.caseLibraryTabId)
-        assertEquals(listOf(AnnBlock.Note("n1", "existing note text")), state.tab("withNotes")!!.annotations.blocks)
+    @Test
+    fun reopeningAnArchiveBackedInvestigationExtractsTheEntryInsteadOfTreatingTheCompositePathAsAPlainFile() {
+        val notesDir = createTempDirectory("openlog-case-lib-reopen-archive").toFile()
+        val dir = createTempDirectory("openlog-case-lib-reopen-archive-zip").toFile()
+        val zip = buildZipFixture(
+            dir, "bugreport.zip",
+            mapOf("FS/data/anr/main_log.txt" to "06-26 10:00:00.000  123  456 I DeviceManager: from the archive\n"),
+        )
+        val sourcePath = "${zip.absolutePath}!FS/data/anr/main_log.txt"
+        writeCaseNote(
+            notesDir, "zzqxx_archive_case", title = "Zzqxx archive case",
+            issueDescription = "zzqxx archive marker phrase",
+            tags = listOf("ZzqxxArchiveTag"), decisiveTags = listOf("ZzqxxArchiveTag"),
+            sourcePath = sourcePath,
+        )
+        // A naive File(sourcePath) would report as not-a-file (the "!"-joined string is not a real
+        // path on disk) — confirms the fixture actually exercises the archive-composite path rather
+        // than accidentally being openable as a plain file.
+        assertTrue(!File(sourcePath).isFile)
+        val state = newState(notesDir)
+
+        state.openCaseLibrary("phantom")
+        state.updateCaseLibraryQuery("zzqxx archive marker phrase")
+        waitUntil { state.caseLibraryResults.isNotEmpty() }
+        val caseId = state.caseLibraryResults.first().id
+        state.previewCase(caseId)
+        waitUntil { state.caseLibraryPreview?.id == caseId }
+        assertNull(state.caseLibraryPreview!!.reopenDisabledReason)
+
+        state.reopenInvestigation(caseId)
+
+        // See the analogous wait in the plain-file reopen test above — tab count alone can be true
+        // before openNoteFile actually runs.
+        waitUntil { state.tabs.size == 1 && !state.isLoading && state.tabs.single().annotations.decisiveTags.isNotEmpty() }
+        val newTab = state.tabs.single()
+        assertEquals(sourcePath, newTab.sourcePath)
+        assertEquals("from the archive", newTab.logData.single().msg)
+        assertEquals(listOf("ZzqxxArchiveTag"), newTab.annotations.decisiveTags)
     }
 }

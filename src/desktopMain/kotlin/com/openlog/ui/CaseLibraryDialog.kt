@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 
 package com.openlog.ui
 
@@ -30,10 +30,6 @@ import com.openlog.cases.CaseSummary
 
 private val CASE_LIBRARY_DIALOG_SHAPE = RoundedCornerShape(8.dp)
 private val CASE_LIBRARY_HEADER_SHAPE = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp)
-private const val CASE_TITLE_ELIDE_LEN = 60
-
-private fun elide(text: String, maxLen: Int): String =
-    if (text.length <= maxLen) text else text.take(maxLen) + "…"
 
 /**
  * Corpus-wide "Case Library" dialog over cases/CaseSearch (design decision: a dialog, not a
@@ -150,22 +146,10 @@ internal fun CaseLibraryDialog(state: AppState, onDismiss: () -> Unit) {
             CasePreviewDialog(
                 preview = preview,
                 loading = state.caseLibraryLoadingId == preview.id,
-                onLoad = {
-                    state.requestLoadCase(preview.id)
-                    state.dismissCasePreview()
-                },
+                onReopen = { state.reopenInvestigation(preview.id) },
+                onCopy = { state.copyCasePreview(preview.id) },
+                onExport = { state.exportCasePreview(preview.id) },
                 onDismiss = { state.dismissCasePreview() },
-            )
-        }
-    }
-
-    state.pendingCaseLoad?.let { pending ->
-        Dialog(onDismissRequest = { state.cancelLoadCase() }) {
-            CaseLoadConfirmDialog(
-                caseTitle = pending.caseTitle,
-                replacesNotes = pending.replacesNotes,
-                onConfirm = { state.confirmLoadCase() },
-                onCancel = { state.cancelLoadCase() },
             )
         }
     }
@@ -349,9 +333,19 @@ private fun caseMetaLine(summary: CaseSummary): String = buildString {
 }
 
 // Read-only note text (design point 4's "Preview, always safe") — modeled on
-// LicenseAgreementDialog's scrollable SelectionContainer + AppText body.
+// LicenseAgreementDialog's scrollable SelectionContainer + AppText body. The metadata header above
+// the rendered Markdown surfaces exactly what buildMd() deliberately never writes to the .md
+// (issueDescription is private working context) plus the .ann-only fields (appVersion/
+// decisiveTags/the recorded filter) — see AppState.previewCase.
 @Composable
-private fun CasePreviewDialog(preview: CaseLibraryPreview, loading: Boolean, onLoad: () -> Unit, onDismiss: () -> Unit) {
+private fun CasePreviewDialog(
+    preview: CaseLibraryPreview,
+    loading: Boolean,
+    onReopen: () -> Unit,
+    onCopy: () -> Unit,
+    onExport: () -> Unit,
+    onDismiss: () -> Unit,
+) {
     val tc = tc()
     val scroll = rememberScrollState()
     Column(
@@ -373,19 +367,13 @@ private fun CasePreviewDialog(preview: CaseLibraryPreview, loading: Boolean, onL
                 modifier = Modifier.weight(1f),
                 overflow = TextOverflow.Ellipsis,
             )
-            // Secondary + isDanger (not Primary): this is the same destructive "replace this tab's
-            // notes" action gated by CaseLoadConfirmDialog below, not the loudest thing in the
-            // header — see McpInfoDialog's Block/Unblock button for the house pattern.
-            AppButton(
-                if (loading) "Loading…" else "Load into this tab",
-                onClick = onLoad,
-                variant = ButtonVariant.Secondary,
-                isDanger = true,
-                enabled = !loading,
-                modifier = Modifier.height(28.dp),
-            )
+            AppButton("Copy", onClick = onCopy, variant = ButtonVariant.Secondary, modifier = Modifier.height(28.dp))
+            AppButton("Export", onClick = onExport, variant = ButtonVariant.Secondary, modifier = Modifier.height(28.dp))
+            ReopenInvestigationButton(loading = loading, disabledReason = preview.reopenDisabledReason, onClick = onReopen)
             CloseButton(onClick = onDismiss)
         }
+        Divider()
+        CasePreviewMetadata(preview)
         Divider()
         Box(Modifier.weight(1f).fillMaxWidth()) {
             SelectionContainer {
@@ -407,55 +395,68 @@ private fun CasePreviewDialog(preview: CaseLibraryPreview, loading: Boolean, onL
     }
 }
 
-// The single most important correctness point in this feature (per the design brief): loading a
-// case mutates the target tab's annotations in place — either a whole-object replace (when the
-// case has an `.ann` sidecar) or an append of a new note block onto whatever's already there (a
-// lone hand-copied `.md` with no sidecar) — so this confirmation is the only thing standing
-// between a click and an unrecoverable change to whatever the tab already had. [replacesNotes]
-// picks which of those two outcomes actually applies here (see AppState.PendingCaseLoad).
+// Not Primary/isDanger: replacing "Load into this tab" (the old destructive action, gated behind a
+// confirmation dialog), this always opens a brand-new tab and only ever touches THAT tab's own
+// notes — nothing existing is at risk, so it reads as an ordinary secondary action. Disabled (with
+// a tooltip explaining why, via TooltipArea/ToolbarTooltip — same house pattern as the toolbar's
+// own disabled-with-reason buttons) whenever AppState.previewCase couldn't resolve a reopenable
+// source, e.g. sourcePath blank or the original log file/archive entry no longer exists.
 @Composable
-private fun CaseLoadConfirmDialog(caseTitle: String, replacesNotes: Boolean, onConfirm: () -> Unit, onCancel: () -> Unit) {
-    val tc = tc()
-    // Elided before interpolation: caseTitle is arbitrary-length (a saved note's title), and this
-    // sentence has only ~one line of slack at maxLines = 4 in a 380dp-wide dialog — an untruncated
-    // title could otherwise clip mid-word with no ellipsis (AppText defaults to TextOverflow.Clip).
-    val title = elide(caseTitle, CASE_TITLE_ELIDE_LEN)
-    Column(
-        Modifier.width(420.dp).background(tc.p, CASE_LIBRARY_DIALOG_SHAPE)
-            .border(1.dp, tc.br, CASE_LIBRARY_DIALOG_SHAPE).padding(20.dp),
-    ) {
-        AppText(
-            if (replacesNotes) "Replace this tab's notes?" else "Add these notes to this tab?",
-            color = tc.tx,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Spacer(Modifier.height(6.dp))
-        AppText(
-            if (replacesNotes) {
-                "Loading \"$title\" replaces this tab's current notes entirely — nothing is merged, " +
-                    "and this can't be undone."
-            } else {
-                "Loading \"$title\" adds it as a new note block onto this tab's current notes — nothing " +
-                    "existing is removed, but this can't be undone."
+private fun ReopenInvestigationButton(loading: Boolean, disabledReason: String?, onClick: () -> Unit) {
+    val button = @Composable {
+        AppButton(
+            when {
+                loading -> "Reopening…"
+                else -> "Reopen investigation"
             },
-            color = tc.td,
-            fontSize = 11.sp,
-            maxLines = 4,
-            overflow = TextOverflow.Ellipsis,
+            onClick = onClick,
+            variant = ButtonVariant.Secondary,
+            enabled = !loading && disabledReason == null,
+            modifier = Modifier.height(28.dp),
         )
-        Spacer(Modifier.height(14.dp))
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-        ) {
-            DialogActionButton(
-                if (replacesNotes) "Replace notes" else "Add notes",
-                active = true,
-                danger = replacesNotes,
-                onClick = onConfirm,
-            )
-            DialogActionButton("Cancel", active = false, onClick = onCancel)
+    }
+    if (disabledReason != null && !loading) {
+        TooltipArea(tooltip = { ToolbarTooltip(disabledReason) }) { button() }
+    } else {
+        button()
+    }
+}
+
+@Composable
+private fun CasePreviewMetadata(preview: CaseLibraryPreview) {
+    val tc = tc()
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (preview.issueDescription.isNotBlank()) {
+            CaseMetadataRow("Issue", preview.issueDescription)
         }
+        CaseMetadataRow("Source", preview.sourceFilename ?: "Unknown")
+        if (preview.appVersion.isNotBlank()) {
+            CaseMetadataRow("App version", preview.appVersion)
+        }
+        // Always shown, even when it reads "Filter not recorded" — an old note with no field 8
+        // must say so explicitly rather than showing nothing (see AppState.previewCase).
+        CaseMetadataRow("Filter", preview.filterSummary)
+        if (preview.decisiveTags.isNotEmpty()) {
+            Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                AppText(
+                    "Decisive tags",
+                    color = tc.td,
+                    fontSize = 9.sp,
+                    modifier = Modifier.width(96.dp).padding(top = 2.dp),
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    preview.decisiveTags.forEach { tag -> CaseTagChip(tag) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CaseMetadataRow(label: String, value: String) {
+    val tc = tc()
+    Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppText(label, color = tc.td, fontSize = 9.sp, modifier = Modifier.width(96.dp).padding(top = 1.dp))
+        AppText(value, color = tc.ts, fontSize = 11.sp, maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
     }
 }
