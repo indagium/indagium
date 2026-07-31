@@ -369,13 +369,19 @@ fun App(
                         // Selection text adds a preview extension line(15) on top of that. The merged
                         // "Process" block (CtxProcessActions — tid map + process name, formerly two
                         // separate blocks) is a fixed-shape header+one-row+divider costing 73, same as
-                        // every other single-row block below, regardless of whether it renders 1, 2, or
-                        // 3 buttons in that row (see CtxProcessActions' own doc — its slots share the
-                        // row's width via weight rather than growing the row itself).
+                        // every other single-row block below, for 1 or 2 buttons (CtxActionSlot's
+                        // fixed-width slots hold at most 2 per row — see that composable's own doc).
+                        // The only way to reach a 3rd button is both map actions AND the name action
+                        // all being available at once, which wraps that 3rd button onto its own
+                        // second row, costing +28 on top — mirrors this same block's own pre-merge
+                        // two-row shape.
+                        val hasProcessBlock = hasShowMapAction || hasHideMapAction || hasNameAction
+                        val hasProcessSecondRow = hasShowMapAction && hasHideMapAction && hasNameAction
                         val estimatedMenuHeight = (458 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (state.pendingSequenceStart != null) 32 else 0) +
-                            (if (hasShowMapAction || hasHideMapAction || hasNameAction) 73 else 0) +
+                            (if (hasProcessBlock) 73 else 0) +
+                            (if (hasProcessSecondRow) 28 else 0) +
                             // Video block: 2 Action rows (32 each) + a trailing divider (9).
                             (if (ctxTab.attachedVideo != null) 73 else 0) +
                             (if (state.settings.sourceFolders.isNotEmpty()) 44 else 0)).dp

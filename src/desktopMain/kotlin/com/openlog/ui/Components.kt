@@ -1078,26 +1078,23 @@ internal fun CtxCollapseActions(
     }
 }
 
-// Mirrors CtxCollapseActions's own shape (header + one row of Ghost buttons) — merges what used to
-// be two adjacent blocks for the SAME process ("Threads" with its Show/Hide map pair, and a separate
-// "Process name" with its own Show/Hide name pair) into one "Process" section, since a user
+// Mirrors CtxCollapseActions's own shape (header + one or two rows of Ghost buttons) — merges what
+// used to be two adjacent blocks for the SAME process ("Threads" with its Show/Hide map pair, and a
+// separate "Process name" with its own Show/Hide name pair) into one "Process" section, since a user
 // right-clicking one row has no reason to read two headers naming the same process back to back.
-// The tid map's Show/Hide-map pair and the name's Show/Hide-name pair render in a SINGLE Row now,
-// same shape as CtxTagActions' Include/Exclude/Highlight row directly above it in this same menu —
-// that row already proves 3 Ghost buttons fit this menu's fixed width. onShowMap/onHideMap can
-// legitimately both be non-null at once (see App.kt's call site — hiding an unrelated already-open
-// map while also offering to show this row's own), and onShowName/onHideName are mutually exclusive
-// by construction, so the true maximum is 3 buttons (2 map + 1 name) in this one row.
+// onShowMap/onHideMap can legitimately both be non-null at once (see App.kt's call site — hiding an
+// unrelated already-open map while also offering to show this row's own); onShowName/onHideName are
+// mutually exclusive by construction (App.kt's currentlyShown boolean sets exactly one). So this
+// block renders 1 to 3 buttons total (2 map + at most 1 name).
 //
-// Each slot takes an equal share of the row's own available width (RowScope.weight, via
-// CtxActionSlotWeighted below) rather than a fixed dp like the Tag row's CTX_ACTION_BUTTON_WIDTH —
-// deliberately, since this row's button count varies (1 to 3) while Tag's is fixed at 3. "Show
-// map"/"Hide map" are two-word labels built almost entirely from wide glyphs ('w' and 'm' each
-// appear twice between them), measurably wider than same-length single-word labels elsewhere in
-// this menu, so a fixed width picked to just fit the 3-button worst case risks clipping them in
-// exactly that case. weight always fills exactly the row's own width regardless of slot count, so
-// it can never overflow the menu the way an under-budgeted fixed width could, and it gives the
-// widest labels their maximum possible room whenever fewer than 3 buttons render (the common case).
+// "Show map"/"Hide map"/"Show name"/"Hide name" are full, unambiguous labels — never truncated to a
+// bare verb, since a bare "Hide" can't tell the user which of the map or the name it would hide. A
+// prior version crammed all 3 into one Row via equal-weight slots, which squeezed these two-word
+// labels down to truncated stubs at this menu's fixed width. Buttons are laid out at most two per
+// row (fixed-width slots, like every sibling block below — CtxActionSlot centers each button's
+// content the same way CtxTagActions/CtxCollapseActions/CtxSelectionActions do), wrapping the third
+// button — only reachable when both map actions AND a name action are available at once — onto its
+// own second row. So: 1 or 2 buttons → a single row; 3 → two rows (2 + 1).
 @Composable
 internal fun CtxProcessActions(
     highlighted: Boolean = false,
@@ -1124,57 +1121,28 @@ internal fun CtxProcessActions(
         ) {
             val headerText = if (processLabel != null) "Process — $processLabel" else "Process"
             AppText(headerText, color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
-            val hasMapGroup = onShowMap != null || onHideMap != null
-            val hasNameGroup = onShowName != null || onHideName != null
-            if (hasMapGroup || hasNameGroup) {
+            val buttons = buildList {
+                onShowMap?.let { add(CtxProcessButtonSpec("Show map", Icons.Outlined.AccountTree, it)) }
+                onHideMap?.let { add(CtxProcessButtonSpec("Hide map", Icons.Outlined.VisibilityOff, it)) }
+                onShowName?.let { add(CtxProcessButtonSpec("Show name", Icons.Outlined.Badge, it)) }
+                onHideName?.let { add(CtxProcessButtonSpec("Hide name", Icons.Outlined.VisibilityOff, it)) }
+            }
+            buttons.chunked(2).forEach { rowButtons ->
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 10.dp),
                     horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    onShowMap?.let {
-                        CtxActionSlotWeighted {
+                    rowButtons.forEachIndexed { index, spec ->
+                        CtxActionSlot(CTX_THREADS_BUTTON_WIDTH) {
                             AppButton(
-                                "Show map", onClick = it, variant = ButtonVariant.Ghost,
+                                spec.label, onClick = spec.onClick, variant = ButtonVariant.Ghost,
                                 modifier = Modifier.fillMaxWidth().height(26.dp),
-                                leadingIcon = Icons.Outlined.AccountTree, horizontalPadding = 4.dp,
+                                leadingIcon = spec.icon, horizontalPadding = 4.dp,
                             )
                         }
-                    }
-                    if (onShowMap != null && onHideMap != null) {
-                        CtxActionDivider(tc)
-                    }
-                    onHideMap?.let {
-                        CtxActionSlotWeighted {
-                            AppButton(
-                                "Hide map", onClick = it, variant = ButtonVariant.Ghost,
-                                modifier = Modifier.fillMaxWidth().height(26.dp),
-                                leadingIcon = Icons.Outlined.VisibilityOff, horizontalPadding = 4.dp,
-                            )
-                        }
-                    }
-                    if (hasMapGroup && hasNameGroup) {
-                        CtxActionDivider(tc)
-                    }
-                    // onShowName/onHideName are mutually exclusive by construction (App.kt's
-                    // currentlyShown boolean sets exactly one), so unlike the map pair above there's
-                    // never a divider to place between them.
-                    onShowName?.let {
-                        CtxActionSlotWeighted {
-                            AppButton(
-                                "Show name", onClick = it, variant = ButtonVariant.Ghost,
-                                modifier = Modifier.fillMaxWidth().height(26.dp),
-                                leadingIcon = Icons.Outlined.Badge, horizontalPadding = 4.dp,
-                            )
-                        }
-                    }
-                    onHideName?.let {
-                        CtxActionSlotWeighted {
-                            AppButton(
-                                "Hide name", onClick = it, variant = ButtonVariant.Ghost,
-                                modifier = Modifier.fillMaxWidth().height(26.dp),
-                                leadingIcon = Icons.Outlined.VisibilityOff, horizontalPadding = 4.dp,
-                            )
+                        if (index != rowButtons.lastIndex) {
+                            CtxActionDivider(tc)
                         }
                     }
                 }
@@ -1182,6 +1150,8 @@ internal fun CtxProcessActions(
         }
     }
 }
+
+private data class CtxProcessButtonSpec(val label: String, val icon: ImageVector, val onClick: () -> Unit)
 
 // Mirrors CtxProcessActions' own per-row shape exactly (header + a row of Ghost buttons) — the
 // "Link to current video position"/"Show in video" pair used to render as two independent (and a
@@ -1340,17 +1310,15 @@ private fun CtxActionSlot(
     Box(Modifier.width(width), contentAlignment = alignment) { content() }
 }
 
-// CtxProcessActions' own slot: unlike CtxActionSlot above, its button count varies (1 to 3), so
-// each slot takes an equal share of the row's own available width instead of a fixed dp — see that
-// composable's own doc for why.
-@Composable
-private fun RowScope.CtxActionSlotWeighted(content: @Composable () -> Unit) {
-    Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { content() }
-}
-
 // All grouped actions deliberately use one shared width so the three columns line up
 // across Selection, Tag, and Collapse rows, regardless of label length.
 private val CTX_ACTION_BUTTON_WIDTH = 78.dp
+
+// CtxProcessActions' own width: "Show map"/"Hide map"/"Show name"/"Hide name" are two-word labels
+// built almost entirely from wide glyphs, measurably wider than the single-word labels
+// CTX_ACTION_BUTTON_WIDTH was sized for — 78dp truncated them. Sized for two per row (that block
+// wraps a third onto its own row rather than trying to fit 3 across).
+private val CTX_THREADS_BUTTON_WIDTH = 100.dp
 
 // Video (CtxVideoActions) has exactly 2 slots, and "Link to 12:34" runs measurably longer than
 // most other Ghost-button labels in this menu (a fixed "Link to " prefix plus a variable mm:ss

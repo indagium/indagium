@@ -3009,8 +3009,21 @@ class AppState(
     // The mirror action. Also asserts MANUAL — unpicking a pid while in ALL mode would otherwise be
     // meaningless (ALL shows every known name regardless of manualProcessNamePicks), so "hide this
     // one" only does something once MANUAL is the active mode, same reasoning as showProcessNameForPid.
+    //
+    // Coming FROM ALL, manualProcessNamePicks is still whatever it was left at (typically empty —
+    // ALL never reads it), so switching straight to MANUAL and subtracting one pid would leave an
+    // empty (or near-empty) set and silently un-name every OTHER process too — "hide" behaving like
+    // "hide everything". Seed the pick set with every pid this tab currently has a resolved name for
+    // (LogAnalysis.processNames, matching what ALL was actually displaying) minus the one being
+    // hidden, so the visible result is exactly what the action says: only that one pid loses its name.
+    // Coming from MANUAL (or OFF, though the context menu never offers Hide from OFF since nothing
+    // is shown to hide), the existing pick set is the right base and this reduces to the old behavior.
     fun hideProcessNameForPid(tabId: String, pid: Int) {
-        upTab(tabId) { it.copy(manualProcessNamePicks = it.manualProcessNamePicks - pid) }
+        val seedFromAll = settings.processNameMode == ProcessNameMode.ALL
+        upTab(tabId) { t ->
+            val basePicks = if (seedFromAll) t.analysis.processNames.keys else t.manualProcessNamePicks
+            t.copy(manualProcessNamePicks = basePicks - pid)
+        }
         setProcessNameMode(ProcessNameMode.MANUAL)
     }
 
