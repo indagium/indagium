@@ -1,6 +1,7 @@
 package com.openlog
 
 import androidx.compose.ui.graphics.Color
+import com.openlog.model.CtxMenuState
 import com.openlog.model.Filter
 import com.openlog.model.LogEntry
 import com.openlog.model.LogItem
@@ -527,6 +528,109 @@ class SplitViewAndTabRegressionTest {
 
         assertEquals("tab-a:r1", logItemStableKey("tab-a", LogItem.Row(entry, 0)))
         assertEquals("tab-b:r1", logItemStableKey("tab-b", LogItem.Row(entry, 0)))
+    }
+
+    @Test
+    fun addingSequenceFromTheNonActiveComparePanelLandsOnThatTabNotTheActiveOne() {
+        // Regression: BoundFilterPanel's onAddSeq (FileView.kt) is bound per-tab and always has
+        // the correct tab.id in scope — addSequence must honor it even when a *different* tab
+        // (tab "a") is the compare-mode activeTabId.
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("a", "a.log", emptyList()),
+            mkTab("b", "b.log", emptyList()),
+        )
+        state.activeTabId = "a"
+        state.compareMode = true
+        state.compareTabId = "b"
+
+        state.addSequence("b", "boot sequence", false, Color.Red)
+
+        assertEquals(listOf("boot sequence"), state.tab("b")!!.filter.sequences.map { it.matchText })
+        assertTrue(state.tab("a")!!.filter.sequences.isEmpty())
+    }
+
+    @Test
+    fun addingSequenceFromContextMenuOnTheNonActiveComparePanelLandsOnThatTab() {
+        // Regression: addSeqFromCtx resolves its target entry via ctx.tabId, but used to call the
+        // (then tab-less) addSequence which silently wrote to activeTabId instead — landing the
+        // sequence on the wrong side of a compare-mode split.
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "a",
+                "a.log",
+                listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "irrelevant")),
+            ),
+            mkTab(
+                "b",
+                "b.log",
+                listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Boot", "boot sequence")),
+            ),
+        )
+        state.activeTabId = "a"
+        state.compareMode = true
+        state.compareTabId = "b"
+        state.ctx = CtxMenuState("b", 1, 0f, 0f, "")
+
+        state.addSeqFromCtx()
+
+        assertEquals(listOf("boot sequence"), state.tab("b")!!.filter.sequences.map { it.matchText })
+        assertTrue(state.tab("a")!!.filter.sequences.isEmpty())
+    }
+
+    @Test
+    fun removingASequenceFromTheNonActiveComparePanelChangesOnlyThatTab() {
+        // Regression: removeSequence (like updateSequence/toggleSequence/setSequenceColor) used
+        // to hardcode upFlt(activeTabId) exactly like addSequence did — BoundFilterPanel's
+        // onRemoveSeq is bound per-tab (FileView.kt) and must target the panel's own tab, not
+        // whichever tab happens to be compare-mode active.
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("a", "a.log", emptyList()).copy(
+                filter = Filter(sequences = listOf(SequenceDef("seq-a", "in a", priority = 1, color = Color.Red))),
+            ),
+            mkTab("b", "b.log", emptyList()).copy(
+                filter = Filter(sequences = listOf(SequenceDef("seq-b", "in b", priority = 1, color = Color.Blue))),
+            ),
+        )
+        state.activeTabId = "a"
+        state.compareMode = true
+        state.compareTabId = "b"
+
+        state.removeSequence("b", "seq-b")
+
+        assertTrue(state.tab("b")!!.filter.sequences.isEmpty())
+        assertEquals(listOf("in a"), state.tab("a")!!.filter.sequences.map { it.matchText })
+    }
+
+    @Test
+    fun reorderingSequencesOnTheNonActiveComparePanelChangesOnlyThatTab() {
+        // Regression: reorderSequence (and moveSequenceUp/Down) had the same hardcoded
+        // upFlt(activeTabId) bug — dragging a sequence in the non-active compare panel used to
+        // silently reorder the active tab's sequence list instead.
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("a", "a.log", emptyList()).copy(
+                filter = Filter(sequences = listOf(SequenceDef("seq-a", "in a", priority = 1, color = Color.Red))),
+            ),
+            mkTab("b", "b.log", emptyList()).copy(
+                filter = Filter(
+                    sequences = listOf(
+                        SequenceDef("first", "first", priority = 1, color = Color.Red),
+                        SequenceDef("second", "second", priority = 2, color = Color.Blue),
+                    ),
+                ),
+            ),
+        )
+        state.activeTabId = "a"
+        state.compareMode = true
+        state.compareTabId = "b"
+
+        state.moveSequenceUp("b", "second")
+
+        assertEquals(listOf("second", "first"), state.tab("b")!!.filter.sequences.map { it.id })
+        assertEquals(listOf("in a"), state.tab("a")!!.filter.sequences.map { it.matchText })
     }
 
     @Test
