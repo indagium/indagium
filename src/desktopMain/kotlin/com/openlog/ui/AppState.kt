@@ -55,6 +55,7 @@ import com.openlog.utils.buildMd
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeCustomIssueSites
 import com.openlog.utils.computeItems
+import com.openlog.utils.computeProcessNames
 import com.openlog.utils.computeSearchMatches
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.computeTidMapColors
@@ -150,14 +151,19 @@ internal fun buildLogAnalysis(data: List<LogEntry>, customIssueRules: List<Custo
         stackTraceGroups = stackGroups,
         crashSites = computeCrashSites(data, stackGroups),
         customIssueSites = computeCustomIssueSites(data, customIssueRules),
+        processNames = computeProcessNames(data),
         pending = false,
     )
 }
 
 // What a freshly loaded tab carries while the stack/crash analysis still runs in the background:
 // tag counts immediately (cheap, the filter panel needs them), folding/crash data deferred.
+// processNames is computed here too, not only in buildLogAnalysis — a single tag-gated scan
+// (utils/ProcessNames.kt) costs about what tagCounts does, nowhere near computeStackTraceGroups,
+// so deferring it to the background tier would leave the PID column showing bare numbers for
+// several seconds on a large file and then reflowing once the full analysis lands.
 private fun pendingAnalysis(data: List<LogEntry>): LogAnalysis =
-    LogAnalysis(tagCounts = data.groupingBy { it.tag }.eachCount(), pending = true)
+    LogAnalysis(tagCounts = data.groupingBy { it.tag }.eachCount(), processNames = computeProcessNames(data), pending = true)
 
 internal fun logEntryMarkdownLine(entry: LogEntry): String =
     "**[${entry.ts}] `${entry.level.key}/${entry.tag}`:** ${entry.msg}"
@@ -2785,7 +2791,7 @@ class AppState(
         // above) instead of re-filtering the full logData on every shift-click.
         val regexContext = RegexEvaluationContext()
         val ids = visibleItemsByTab[tabId]?.allIds
-            ?: t.logData.filter { passesFilter(it, t.filter, regexContext) }
+            ?: t.logData.filter { passesFilter(it, t.filter, t.analysis.processNames, regexContext) }
                 .map { it.id }
                 .ifEmpty { t.logData.map { it.id } }
                 .toIntArray()
@@ -3613,7 +3619,7 @@ class AppState(
     // as filtered, the more actionable of the two guesses.
     private fun fullFloorHiddenReason(tab: LogTab, fullFloorId: Int): FollowMappingStatus {
         val entry = tab.rmap[fullFloorId] ?: return FollowMappingStatus.HIDDEN_BY_FILTER
-        return if (passesFilter(entry, tab.filter)) {
+        return if (passesFilter(entry, tab.filter, tab.analysis.processNames, RegexEvaluationContext())) {
             FollowMappingStatus.HIDDEN_BY_COLLAPSE
         } else {
             FollowMappingStatus.HIDDEN_BY_FILTER

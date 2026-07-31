@@ -21,6 +21,18 @@ import com.openlog.ui.SEQ_COLORS
 private fun matchesTidMapTarget(entry: LogEntry, target: TidMapTarget): Boolean =
     entry.pid == target.pid
 
+/** Text identity for the tid-map's own header/badge — until now the map could only be told apart
+ *  by remembering which pid you right-clicked, since neither the overlay (a pure spine/branch
+ *  Canvas, ui/TidMap.kt's TidMapOverlay) nor the "Threads" context-menu entry that opens it
+ *  rendered any text naming the process. Wired into that context-menu entry's own header (see
+ *  ui/App.kt's CtxMenuEntry.ThreadsActions construction and ui/Components.kt's CtxThreadsActions,
+ *  which renders "Threads — <label>"). Resolves [target]'s pid through [processNames]
+ *  (LogAnalysis.processNames), falling back to the bare pid — mirrored by the PID column's own
+ *  bare-number fallback (ui/LogViewer.kt's LogRow) for a name that hasn't been learned (or never
+ *  will be, for a log with no proc-start lines at all). */
+fun tidMapProcessLabel(target: TidMapTarget, processNames: Map<Int, String>): String =
+    processNames[target.pid] ?: "pid ${target.pid}"
+
 /** First-to-last index in [items] (this panel's own current, filtered/folded item list — NOT the
  *  full tab.logData) whose entry's pid is [target]'s pid — any tid. Null when the process has no
  *  occurrence in this panel's current view — e.g. filtered out, or a stale target left over from a

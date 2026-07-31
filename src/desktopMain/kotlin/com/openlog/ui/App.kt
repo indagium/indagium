@@ -51,6 +51,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.openlog.model.*
 import com.openlog.source.SourceCodeView
+import com.openlog.utils.tidMapProcessLabel
 import com.openlog.video.formatVideoTimeShort
 import kotlinx.coroutines.delay
 import java.awt.Toolkit
@@ -509,7 +510,13 @@ fun App(
                                     ?.let { { state.toggleTidMap(ctx.tabId, entry.pid, entry.tid); state.ctx = null } }
                                 val onHideMap = activeTidMap?.let { { state.closeTidMap(ctx.tabId); state.ctx = null } }
                                 if (onShowMap != null || onHideMap != null) {
-                                    add(CtxMenuEntry.ThreadsActions(onShowMap = onShowMap, onHideMap = onHideMap))
+                                    // Hiding always names the map actually on screen (activeTidMap's
+                                    // own target); showing names the row that would become the new
+                                    // target. Falls back to "pid <n>" via tidMapProcessLabel when this
+                                    // tab hasn't learned that pid's process name.
+                                    val labelTarget = activeTidMap?.target ?: tidMapTargetHere
+                                    val processLabel = tidMapProcessLabel(labelTarget, ctxTab.analysis.processNames)
+                                    add(CtxMenuEntry.ThreadsActions(onShowMap = onShowMap, onHideMap = onHideMap, processLabel = processLabel))
                                     add(CtxMenuEntry.Divider)
                                 }
                             }
@@ -670,6 +677,7 @@ fun App(
                                                 highlighted = e === selectedEntry,
                                                 onShowMap = e.onShowMap,
                                                 onHideMap = e.onHideMap,
+                                                processLabel = e.processLabel,
                                             )
                                         is CtxMenuEntry.VideoActions ->
                                             CtxVideoActions(

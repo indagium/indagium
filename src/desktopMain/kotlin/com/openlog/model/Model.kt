@@ -118,6 +118,15 @@ data class LogAnalysis(
     val stackTraceGroups: List<StackTraceGroup> = emptyList(),
     val crashSites: List<CrashSite> = emptyList(),
     val customIssueSites: List<CustomIssueSite> = emptyList(),
+    // pid -> process name, learned from "Start proc"/am_proc_start lines the log itself carries
+    // (utils/ProcessNames.kt's computeProcessNames). A side map, deliberately NOT a field on
+    // LogEntry: the mapping is a function of pid, not of any one line, and LogEntry is a tight
+    // 48-byte value class at 10M-entry scale (see model/Model.kt's own LogEntry doc / SAAD §19) —
+    // a sixth reference field there would cost ~80MB at that scale for data this map already
+    // gives every row for free via a single lookup. Computed in both pendingAnalysis() and
+    // buildLogAnalysis() (see AppState.kt), same as tagCounts, so the PID column resolves names
+    // immediately rather than reflowing seconds later once the deferred analysis lands.
+    val processNames: Map<Int, String> = emptyMap(),
     // True while the stack-trace/crash analysis is still computing in the background after a
     // load — it costs as much as the parse itself on multi-GB files, and the initial render
     // doesn't need it. Rows render unfolded and the crash panel shows an "analyzing" hint until

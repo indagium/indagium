@@ -3486,6 +3486,40 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun startTailingMergesProcessNamesAcrossBatchesInsteadOfReplacingThem() {
+        // TailCoordinator.appendTailedLines merges `cur.analysis.processNames +
+        // computeProcessNames(newEntries)` rather than recomputing from the whole (ever-growing)
+        // logData — pin that a name learned in an earlier batch survives a later batch that only
+        // ever mentions a DIFFERENT pid, while the later batch's own new name is still picked up.
+        val dir = createTempDirectory("openlog-tailing-procnames").toFile()
+        val file = File(dir, "tail.log").apply {
+            writeText(
+                "06-26 10:00:00.000  0  0 I ActivityManager: " +
+                    "Start proc 100:com.example.first/u0a1 for activity com.example.first/.Main\n",
+            )
+        }
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.openFile(file)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        val tabId = state.tabs.single().id
+        assertEquals(mapOf(100 to "com.example.first"), state.tab(tabId)!!.analysis.processNames)
+
+        state.startTailing(tabId)
+
+        file.appendText(
+            "06-26 10:00:01.000  0  0 I ActivityManager: " +
+                "Start proc 200:com.example.second/u0a2 for activity com.example.second/.Main\n",
+        )
+        waitUntil { state.tab(tabId)!!.logData.size == 2 }
+        assertEquals(
+            mapOf(100 to "com.example.first", 200 to "com.example.second"),
+            state.tab(tabId)!!.analysis.processNames,
+        )
+
+        state.stopTailing(tabId)
+    }
+
+    @Test
     fun tailedCrashDataStaysPendingDuringABurstThenResolvesOnceItSettles() {
         // P-04: appendTailedLines used to call buildLogAnalysis() — the full crash/stack-trace
         // scan — on every single tail batch. It's now debounced instead, reusing the same
@@ -5612,6 +5646,23 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun mkTabsBuildLogAnalysisResolvesProcessNamesFromProcStartLines() {
+        val tab = mkTab(
+            "t1",
+            "boot.log",
+            listOf(
+                LogEntry(
+                    1, "10:00:00.000", LogLevel.I, "ActivityManager",
+                    "Start proc 12345:com.example.app/u0a123 for activity com.example.app/.MainActivity", pid = 0,
+                ),
+                LogEntry(2, "10:00:00.001", LogLevel.I, "com.example.app", "hello from the new process", pid = 12345),
+            ),
+        )
+
+        assertEquals(mapOf(12345 to "com.example.app"), tab.analysis.processNames)
+    }
+
+    @Test
     fun openFilePublishesTabBeforeAnalysisThenFillsItIn() {
         val dir = createTempDirectory("openlog-deferred").toFile()
         val logFile = File(dir, "crash.log").apply {
@@ -5637,6 +5688,27 @@ class AppStateBehaviorTest {
         waitUntil { !state.tabs.single().analysis.pending }
         assertEquals(listOf(2), state.tabs.single().analysis.stackTraceGroups.map { it.rid })
         assertTrue(state.tabs.single().analysis.crashSites.isNotEmpty())
+    }
+
+    @Test
+    fun openFilePublishesTabWithProcessNamesAlreadyResolvedBeforeTheDeferredAnalysisLands() {
+        // processNames must be trusted directly from pendingAnalysis(), same as tagCounts — not
+        // gated on analysis.pending — otherwise the PID column would show bare numbers for seconds
+        // on a large file and then reflow once buildLogAnalysis() lands.
+        val dir = createTempDirectory("openlog-procnames-pending").toFile()
+        val logFile = File(dir, "boot.log").apply {
+            writeText(
+                "06-26 10:00:00.000  0  0 I ActivityManager: " +
+                    "Start proc 12345:com.example.app/u0a123 for activity com.example.app/.MainActivity\n" +
+                    "06-26 10:00:00.001  12345  12345 I com.example.app: hello\n",
+            )
+        }
+        val state = AppState(File(dir, "state.cache"))
+
+        state.openFile(logFile)
+        waitUntil { !state.isLoading && state.tabs.isNotEmpty() }
+
+        assertEquals(mapOf(12345 to "com.example.app"), state.tabs.single().analysis.processNames)
     }
 
     // ── Analysis completion is explicit, not inferred from emptiness (P-02) ─────

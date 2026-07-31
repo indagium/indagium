@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 
 package com.openlog.ui
 
@@ -452,7 +452,7 @@ internal fun expansionAndIndexForEntry(
     // which on a large log made a bulk exclude/hide action feel like a hang.
     if (applyFilter) {
         val entry = tab.rmap[entryId] ?: return null
-        if (!passesFilter(entry, tab.filter, regexContext)) return null
+        if (!passesFilter(entry, tab.filter, tab.analysis.processNames, regexContext)) return null
     }
     var expanded = tab.expanded
     var candidateItems = currentItems ?: computeItems(tab.copy(expanded = expanded), applyFilter, regexContext)
@@ -761,6 +761,12 @@ fun LogViewer(
     // in this file that key on the tailed-growth size. any{} short-circuits on the first match,
     // so this only re-pays a full scan repeatedly for tabs that genuinely have zero pid/tid data.
     val hasPidTid = remember(tab.id, totalCnt) { tab.logData.any { it.pid > 0 } }
+    // Gates the extra PROCESS column (LogRow's process-name badge + ColHeader's label) on the tab
+    // actually having learned ANY names, not on this row's own pid resolving — a log with zero
+    // proc-start lines must render pixel-identical to before this feature existed (no reserved
+    // width, no blank column), per LogAnalysis.processNames' own doc. Cheap (a single map isEmpty
+    // check), unlike hasPidTid's full-file scan above, so no remember() needed.
+    val hasProcessNames = tab.analysis.processNames.isNotEmpty()
     LaunchedEffect(computedItems) {
         if (!computedItems.loading) onVisibleItems?.invoke(computedItems.summary)
     }
@@ -1577,6 +1583,7 @@ fun LogViewer(
                     val originalTimeDeltaChars = rememberTimeDeltaChars(tab, allItems)
                     ColHeader(
                         hasPidTid,
+                        hasProcessNames = hasProcessNames,
                         showRowNumbers = settings.showRowNumbers,
                         rowNumDigits = tab.logData.size.toString().length,
                         showTimeDelta = tab.showTimeDelta,
@@ -1634,6 +1641,7 @@ fun LogViewer(
                     val filteredTimeDeltaChars = rememberTimeDeltaChars(tab, items)
                     ColHeader(
                         hasPidTid,
+                        hasProcessNames = hasProcessNames,
                         showRowNumbers = settings.showRowNumbers,
                         rowNumDigits = tab.logData.size.toString().length,
                         showTimeDelta = tab.showTimeDelta,
@@ -1741,6 +1749,7 @@ fun LogViewer(
             val mainTimeDeltaChars = rememberTimeDeltaChars(tab, items)
             ColHeader(
                 hasPidTid,
+                hasProcessNames = hasProcessNames,
                 showRowNumbers = settings.showRowNumbers,
                 rowNumDigits = tab.logData.size.toString().length,
                 showTimeDelta = tab.showTimeDelta,
@@ -1980,6 +1989,20 @@ private fun handleSelKey(
         ev.key == Key.Escape        -> { cursor.reset(); actions.onClearSelection?.invoke(); true }
         else -> false
     }
+}
+
+// Truncates in the MIDDLE rather than at the end, for the process-name badge (LogRow, below).
+// Android package names are dominated by a shared, low-information prefix (com.google.android.*,
+// com.example.*), while the tail often carries what actually distinguishes one from another (a
+// `:process` suffix, or the final segment) — keeping both ends visible reads better than an
+// end-truncated "com.example.reall…" that hides exactly the part that would tell two similarly-
+// named processes apart. A no-op when [text] already fits.
+internal fun middleEllipsis(text: String, maxChars: Int): String {
+    if (text.length <= maxChars) return text
+    val keep = (maxChars - 1).coerceAtLeast(2)
+    val head = (keep + 1) / 2
+    val tail = keep - head
+    return text.take(head) + "…" + text.takeLast(tail)
 }
 
 @Composable
@@ -2284,6 +2307,28 @@ private fun LogRow(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.widthIn(max = 70.dp).padding(end = 4.dp),
             )
+        }
+        // Process-name badge — alongside the row's already-rendered numeric PID (buildFullLineAnnotation,
+        // never touched by this feature; see its own doc), never a replacement for it, per the same
+        // "reserved-width, not measured into existing text" precedent the tid-map gutter above follows.
+        // Gated on the TAB having any known names at all (hasProcessNames), not on this row's own pid
+        // resolving, so a log with zero proc-start lines reserves no width and looks pixel-identical to
+        // before this feature existed; a row whose OWN pid isn't (yet) known just renders this cell blank
+        // rather than collapsing it, so the column stays aligned down the whole list.
+        if (tab.analysis.processNames.isNotEmpty()) {
+            val processName = tab.analysis.processNames[entry.pid]
+            Box(Modifier.width(PROCESS_NAME_COL_WIDTH).padding(end = 4.dp)) {
+                if (processName != null) {
+                    TooltipArea(tooltip = { ToolbarTooltip(processName) }) {
+                        AppText(
+                            middleEllipsis(processName, PROCESS_NAME_MAX_CHARS),
+                            color = tc.td, fontSize = 11.sp, fontFamily = mono, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.align(Alignment.CenterStart),
+                        )
+                    }
+                }
+            }
         }
         BasicTextField(
             value = TextFieldValue(annotatedString = annoLine, selection = sel),
