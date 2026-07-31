@@ -355,23 +355,28 @@ fun App(
                         // exactly the same "is a map active, does it match this row" facts.
                         val activeTidMap = ctxTab.tidMap
                         val tidMapTargetHere = TidMapTarget(entry.pid, entry.tid)
+                        // Same availability rules the merged "Process" block itself computes below
+                        // (run{} block, before the CtxMenuEntry.ProcessActions add()) — duplicated
+                        // here, like every other conditional block's height cost, so the height
+                        // estimate and the entries agree on exactly the same facts.
+                        val hasShowMapAction = entry.pid > 0 && activeTidMap?.target?.pid != tidMapTargetHere.pid
+                        val hasHideMapAction = activeTidMap != null
+                        val hasNameAction = ctxTab.analysis.processNames[entry.pid] != null
                         // Estimate full menu height from items that will actually render:
                         //   header(37) + divider(9) + preview(63) + 1 item(32) + divider(9)
                         //   + 2 items(64) [sequence] + divider(9) + 2 items(64) [collapse-to-start/end]
-                        //   + divider(9) + 2 items(64) [hide/show] + divider(9) + 1 row(32) [tags]
-                        //   + divider(9) + 1 row(64) + divider(9) [threads] = 531
-                        // Selection text adds a preview extension line(15) on top of that. The
-                        // Threads block is a single fixed-height row (like Collapse/Tag) regardless
-                        // of whether one or both of Show map/Hide map render, so — unlike the old
-                        // two-independent-Action-items layout — it no longer needs a conditional.
-                        val estimatedMenuHeight = (531 +
+                        //   + divider(9) + 2 items(64) [hide/show] + divider(9) + 1 row(32) [tags] = 458
+                        // Selection text adds a preview extension line(15) on top of that. The merged
+                        // "Process" block (CtxProcessActions — tid map + process name, formerly two
+                        // separate blocks) costs 73 (header+one row+divider) when either its map row
+                        // or its name row renders, plus another 28 (one more Ghost-button row) on top
+                        // of that when BOTH rows render at once (see CtxProcessActions' own doc for
+                        // why they're two separate Rows rather than one, up to 3-wide, Row).
+                        val estimatedMenuHeight = (458 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (state.pendingSequenceStart != null) 32 else 0) +
-                            // Process name block: CtxProcessNameActions is structurally identical
-                            // to CtxThreadsActions (header + one Ghost-button row), so it costs the
-                            // same 64 + a trailing divider (9) — only when this row's pid resolves
-                            // to a known name (see the "Process name" run{} block above).
-                            (if (ctxTab.analysis.processNames[entry.pid] != null) 73 else 0) +
+                            (if (hasShowMapAction || hasHideMapAction || hasNameAction) 73 else 0) +
+                            (if ((hasShowMapAction || hasHideMapAction) && hasNameAction) 28 else 0) +
                             // Video block: 2 Action rows (32 each) + a trailing divider (9).
                             (if (ctxTab.attachedVideo != null) 73 else 0) +
                             (if (state.settings.sourceFolders.isNotEmpty()) 44 else 0)).dp
@@ -492,67 +497,70 @@ fun App(
                                 }
                                 if (hasCollapseAction) add(CtxMenuEntry.Divider)
                             }
-                            // Threads (tid map) — a single Collapse-shaped block ("Threads" header +
-                            // Show map/Hide map buttons), inserted here (after Collapse, before
-                            // Source) per the approved design. Hide is offered whenever a map is
-                            // active, from ANY row — not just the row it was originally opened for —
-                            // since requiring the user to find their way back to that exact row
-                            // before they could close it was a real dead end (the row can easily
-                            // have scrolled out of view). Show is offered whenever the right-clicked
-                            // row's pid differs from the currently active target's (including when
-                            // nothing is active), so switching to a new process's map never requires
-                            // closing the old one first — RAW-fallback rows carry no real pid at all
-                            // (LogParser.kt's RAW-fallback branch never populates one, defaulting to
-                            // 0), so a "map" of a fake shared pid=0 across unrelated lines would be
-                            // actively misleading, and Show is omitted rather than disabled (same
-                            // null-to-omit convention CollapseActions itself uses). Guarded like
-                            // Collapse's own hasCollapseAction check: the rare case of a pid-less row
-                            // with no map currently active leaves NEITHER button available, and an
-                            // empty "Threads" header with no buttons under it must not render.
+                            // Process (tid map + process name, merged) — one Collapse-shaped block
+                            // ("Process" header + up to two rows of Ghost buttons: Show/Hide map,
+                            // Show/Hide name), inserted here (after Collapse, before Source) per the
+                            // approved design. These used to be two adjacent blocks — "Threads" and
+                            // "Process name" — for the same process; merged into one section since a
+                            // user right-clicking one row has no reason to read two headers naming
+                            // the same process back to back (see CtxProcessActions' own doc).
+                            //
+                            // Map: Hide is offered whenever a map is active, from ANY row — not just
+                            // the row it was originally opened for — since requiring the user to find
+                            // their way back to that exact row before they could close it was a real
+                            // dead end (the row can easily have scrolled out of view). Show is
+                            // offered whenever the right-clicked row's pid differs from the currently
+                            // active target's (including when nothing is active), so switching to a
+                            // new process's map never requires closing the old one first —
+                            // RAW-fallback rows carry no real pid at all (LogParser.kt's RAW-fallback
+                            // branch never populates one, defaulting to 0), so a "map" of a fake
+                            // shared pid=0 across unrelated lines would be actively misleading, and
+                            // Show is omitted rather than disabled (same null-to-omit convention
+                            // CollapseActions itself uses).
+                            //
+                            // Name: offered only when this row's OWN pid resolves to a known name;
+                            // Show/Hide always switch AppSettings.processNameMode to MANUAL (see
+                            // AppState.showProcessNameForPid/hideProcessNameForPid's own doc) — this
+                            // control is fundamentally a MANUAL-mode picker, so invoking it from OFF
+                            // or ALL must switch into the mode where the pick actually matters.
+                            //
+                            // The whole block (and its header) is omitted when NONE of the four
+                            // actions apply — same "an empty header with no buttons under it must
+                            // not render" rule the pre-merge Threads block already followed for a
+                            // pid-less row with no map active.
                             run {
                                 val onShowMap = (activeTidMap?.target?.pid != tidMapTargetHere.pid)
                                     .takeIf { it && entry.pid > 0 }
                                     ?.let { { state.toggleTidMap(ctx.tabId, entry.pid, entry.tid); state.ctx = null } }
                                 val onHideMap = activeTidMap?.let { { state.closeTidMap(ctx.tabId); state.ctx = null } }
-                                if (onShowMap != null || onHideMap != null) {
-                                    // Hiding always names the map actually on screen (activeTidMap's
-                                    // own target); showing names the row that would become the new
-                                    // target. Falls back to "pid <n>" via tidMapProcessLabel when this
-                                    // tab hasn't learned that pid's process name.
-                                    val labelTarget = activeTidMap?.target ?: tidMapTargetHere
-                                    val processLabel = tidMapProcessLabel(labelTarget, ctxTab.analysis.processNames)
-                                    add(CtxMenuEntry.ThreadsActions(onShowMap = onShowMap, onHideMap = onHideMap, processLabel = processLabel))
-                                    add(CtxMenuEntry.Divider)
-                                }
-                            }
-                            // Process name (Problem 4's third entry point) — offers showing this
-                            // row's process by its resolved name, or hiding it again, mirroring
-                            // exactly how the Threads block above builds its own show/hide pair.
-                            // Guarded the same way: this row's pid has to actually resolve to a
-                            // name (ctxTab.analysis.processNames), or neither button — and no
-                            // "Process name" header — renders at all (same "an empty header with no
-                            // buttons under it must not render" rule Threads follows). Both actions
-                            // always switch AppSettings.processNameMode to MANUAL (see
-                            // AppState.showProcessNameForPid/hideProcessNameForPid's own doc) — this
-                            // control is fundamentally a MANUAL-mode picker, so invoking it from
-                            // OFF or ALL must switch into the mode where the pick actually matters.
-                            run {
                                 val processName = ctxTab.analysis.processNames[entry.pid]
-                                if (processName != null) {
-                                    val currentlyShown = when (state.settings.processNameMode) {
-                                        ProcessNameMode.OFF -> false
-                                        ProcessNameMode.ALL -> true
-                                        ProcessNameMode.MANUAL -> entry.pid in ctxTab.manualProcessNamePicks
-                                    }
-                                    val onShowName = (!currentlyShown)
-                                        .takeIf { it }
-                                        ?.let { { state.showProcessNameForPid(ctxTab.id, entry.pid); state.ctx = null } }
-                                    val onHideName = currentlyShown
-                                        .takeIf { it }
-                                        ?.let { { state.hideProcessNameForPid(ctxTab.id, entry.pid); state.ctx = null } }
+                                val currentlyShown = when (state.settings.processNameMode) {
+                                    ProcessNameMode.OFF -> false
+                                    ProcessNameMode.ALL -> true
+                                    ProcessNameMode.MANUAL -> entry.pid in ctxTab.manualProcessNamePicks
+                                }
+                                val onShowName = (processName != null && !currentlyShown)
+                                    .takeIf { it }
+                                    ?.let { { state.showProcessNameForPid(ctxTab.id, entry.pid); state.ctx = null } }
+                                val onHideName = (processName != null && currentlyShown)
+                                    .takeIf { it }
+                                    ?.let { { state.hideProcessNameForPid(ctxTab.id, entry.pid); state.ctx = null } }
+                                if (onShowMap != null || onHideMap != null || onShowName != null || onHideName != null) {
+                                    // The header names THIS row's own resolved process when known —
+                                    // matching the Show/Hide name buttons exactly, and matching the
+                                    // map buttons too in the common case where they act on the same
+                                    // process. Only when this row's own name is unknown does it fall
+                                    // back to whichever process the map buttons actually act on
+                                    // (labelTarget: the ACTIVE map's own target when one is open,
+                                    // since Hide always closes THAT map even from an unrelated row —
+                                    // same fallback the pre-merge Threads block already used).
+                                    val labelTarget = activeTidMap?.target ?: tidMapTargetHere
+                                    val processLabel = processName ?: tidMapProcessLabel(labelTarget, ctxTab.analysis.processNames)
                                     add(
-                                        CtxMenuEntry.ProcessNameActions(
-                                            onShow = onShowName, onHide = onHideName, processLabel = processName,
+                                        CtxMenuEntry.ProcessActions(
+                                            onShowMap = onShowMap, onHideMap = onHideMap,
+                                            onShowName = onShowName, onHideName = onHideName,
+                                            processLabel = processLabel,
                                         ),
                                     )
                                     add(CtxMenuEntry.Divider)
@@ -622,7 +630,7 @@ fun App(
                         val selectableEntries = menuEntries.filter {
                             it is CtxMenuEntry.ActionHeader || it is CtxMenuEntry.Action ||
                                 it is CtxMenuEntry.TagActions || it is CtxMenuEntry.CollapseActions ||
-                                it is CtxMenuEntry.ThreadsActions || it is CtxMenuEntry.ProcessNameActions ||
+                                it is CtxMenuEntry.ProcessActions ||
                                 it is CtxMenuEntry.VideoActions ||
                                 it is CtxMenuEntry.SelectionActions || it is CtxMenuEntry.SourceActions ||
                                 it is CtxMenuEntry.ActionWithSubmenu
@@ -662,8 +670,9 @@ fun App(
                                                     is CtxMenuEntry.Action -> it.onClick()
                                                     is CtxMenuEntry.TagActions -> it.onInclude()
                                                     is CtxMenuEntry.CollapseActions -> it.onToStart?.invoke()
-                                                    is CtxMenuEntry.ThreadsActions -> it.onShowMap?.invoke() ?: it.onHideMap?.invoke()
-                                                    is CtxMenuEntry.ProcessNameActions -> it.onShow?.invoke() ?: it.onHide?.invoke()
+                                                    is CtxMenuEntry.ProcessActions ->
+                                                        it.onShowMap?.invoke() ?: it.onHideMap?.invoke()
+                                                            ?: it.onShowName?.invoke() ?: it.onHideName?.invoke()
                                                     is CtxMenuEntry.VideoActions -> it.onLink()
                                                     is CtxMenuEntry.SelectionActions -> it.onAskAi()
                                                     is CtxMenuEntry.SourceActions -> it.onShowCode()
@@ -712,18 +721,13 @@ fun App(
                                                 onToEnd = e.onToEnd,
                                                 onSelected = e.onSelected,
                                             )
-                                        is CtxMenuEntry.ThreadsActions ->
-                                            CtxThreadsActions(
+                                        is CtxMenuEntry.ProcessActions ->
+                                            CtxProcessActions(
                                                 highlighted = e === selectedEntry,
                                                 onShowMap = e.onShowMap,
                                                 onHideMap = e.onHideMap,
-                                                processLabel = e.processLabel,
-                                            )
-                                        is CtxMenuEntry.ProcessNameActions ->
-                                            CtxProcessNameActions(
-                                                highlighted = e === selectedEntry,
-                                                onShow = e.onShow,
-                                                onHide = e.onHide,
+                                                onShowName = e.onShowName,
+                                                onHideName = e.onHideName,
                                                 processLabel = e.processLabel,
                                             )
                                         is CtxMenuEntry.VideoActions ->

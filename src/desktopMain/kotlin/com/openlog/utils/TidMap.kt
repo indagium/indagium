@@ -23,10 +23,10 @@ private fun matchesTidMapTarget(entry: LogEntry, target: TidMapTarget): Boolean 
 
 /** Text identity for the tid-map's own header/badge — until now the map could only be told apart
  *  by remembering which pid you right-clicked, since neither the overlay (a pure spine/branch
- *  Canvas, ui/TidMap.kt's TidMapOverlay) nor the "Threads" context-menu entry that opens it
+ *  Canvas, ui/TidMap.kt's TidMapOverlay) nor the "Process" context-menu entry that opens it
  *  rendered any text naming the process. Wired into that context-menu entry's own header (see
- *  ui/App.kt's CtxMenuEntry.ThreadsActions construction and ui/Components.kt's CtxThreadsActions,
- *  which renders "Threads — <label>"). Resolves [target]'s pid through [processNames]
+ *  ui/App.kt's CtxMenuEntry.ProcessActions construction and ui/Components.kt's CtxProcessActions,
+ *  which renders "Process — <label>"). Resolves [target]'s pid through [processNames]
  *  (LogAnalysis.processNames), falling back to the bare pid — mirrored by the PID column's own
  *  bare-number fallback (ui/LogViewer.kt's LogRow) for a name that hasn't been learned (or never
  *  will be, for a log with no proc-start lines at all). */

@@ -280,6 +280,11 @@ fun ColHeader(
     // same leading position, so the header's row-number/Δt column labels below line up with the
     // body rows' actual gutters regardless of whether a tid map is active.
     hasTidMap: Boolean = false,
+    // Change 3 (process-names rework): the uniform pid-FIELD character width every row's pid cell
+    // pads to (LogViewer's pidFieldCharWidth) — 5 (the original width) whenever the feature is off
+    // or this tab has no name over 5 chars. Only widens the "PID" box below the pre-feature fixed
+    // 40.dp when this is actually > 5, so the OFF case's Compose tree is untouched.
+    pidFieldChars: Int = 5,
 ) {
     val tc = tc()
     Row(
@@ -315,7 +320,11 @@ fun ColHeader(
         }
         AppText("TIMESTAMP", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(90.dp))
         if (hasPidTid) {
-            AppText("PID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(40.dp))
+            // pidFieldChars > 5 only when the process-name feature is on AND this tab has a known
+            // name wider than 5 chars (pidFieldCharWidth) — every other case keeps the exact
+            // pre-feature 40.dp box, which is what makes mode OFF byte-identical to before.
+            val pidColWidth = if (pidFieldChars > 5) pidFieldColumnWidth(COL_HEADER_FONT_SP, pidFieldChars) else 40.dp
+            AppText("PID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(pidColWidth))
             AppText("TID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(40.dp))
         }
         AppText("LVL", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(28.dp))
@@ -1069,20 +1078,30 @@ internal fun CtxCollapseActions(
     }
 }
 
-// Mirrors CtxCollapseActions's own shape exactly (header + a row of up to N Ghost buttons) — the
-// tid map's "Hide tid map"/"Show tid map" pair used to render as two independent CtxMenuEntry.
-// Action rows (each a full-width 32dp item), which read as two unrelated menu entries rather than
-// one toggle; this groups them under a "Threads" header the same way Collapse groups its own
-// to-start/to-end/selected actions, so the menu reads consistently block-by-block.
+// Mirrors CtxCollapseActions's own shape (header + one or two rows of Ghost buttons) — merges what
+// used to be two adjacent blocks for the SAME process ("Threads" with its Show/Hide map pair, and a
+// separate "Process name" with its own Show/Hide name pair) into one "Process" section, since a user
+// right-clicking one row has no reason to read two headers naming the same process back to back.
+// The tid map's Show/Hide-map row and the name's Show/Hide-name row are kept as two SEPARATE Rows
+// (rather than crammed into one, up to 3-wide, Row) deliberately: onShowMap/onHideMap can legitimately
+// both be non-null at once (see App.kt's call site — hiding an unrelated already-open map while also
+// offering to show this row's own), which combined with a simultaneously-available name action would
+// need 3 buttons in one Row at CTX_THREADS_BUTTON_WIDTH (100dp — already sized wide specifically so
+// "Show map"/"Hide map" don't clip, see that constant's own doc) — 3 of those plus dividers doesn't
+// reliably fit this menu's fixed width. Stacking into two rows avoids that risk entirely and costs
+// only a little extra height, and only in the case both rows actually apply.
 @Composable
-internal fun CtxThreadsActions(
+internal fun CtxProcessActions(
     highlighted: Boolean = false,
     onShowMap: (() -> Unit)? = null,
     onHideMap: (() -> Unit)? = null,
-    // Appended to the "Threads" header as "Threads — <processLabel>" when known, so the header
-    // names the specific process the Show/Hide buttons below act on instead of leaving that to be
-    // remembered from whichever row was right-clicked (see ThreadsActions' own doc and
-    // utils/TidMap.kt's tidMapProcessLabel).
+    onShowName: (() -> Unit)? = null,
+    onHideName: (() -> Unit)? = null,
+    // The resolved process this whole block is about — this row's own name when known, falling
+    // back (at the call site) to the pid the ACTIVE map targets when this row's own pid has no
+    // name of its own. Appended to the header as "Process — <processLabel>"; never null in
+    // practice since the call site only ever adds this entry when at least one action is available,
+    // and at least one of the four actions being available always implies a resolvable pid.
     processLabel: String? = null,
 ) {
     val tc = tc()
@@ -1095,32 +1114,63 @@ internal fun CtxThreadsActions(
             Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            val headerText = if (processLabel != null) "Threads — $processLabel" else "Threads"
+            val headerText = if (processLabel != null) "Process — $processLabel" else "Process"
             AppText(headerText, color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                onShowMap?.let {
-                    CtxActionSlot(CTX_THREADS_BUTTON_WIDTH) {
-                        AppButton(
-                            "Show map", onClick = it, variant = ButtonVariant.Ghost,
-                            modifier = Modifier.fillMaxWidth().height(26.dp),
-                            leadingIcon = Icons.Outlined.AccountTree, horizontalPadding = 4.dp,
-                        )
+            if (onShowMap != null || onHideMap != null) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    onShowMap?.let {
+                        CtxActionSlot(CTX_THREADS_BUTTON_WIDTH) {
+                            AppButton(
+                                "Show map", onClick = it, variant = ButtonVariant.Ghost,
+                                modifier = Modifier.fillMaxWidth().height(26.dp),
+                                leadingIcon = Icons.Outlined.AccountTree, horizontalPadding = 4.dp,
+                            )
+                        }
+                    }
+                    if (onShowMap != null && onHideMap != null) {
+                        CtxActionDivider(tc)
+                    }
+                    onHideMap?.let {
+                        CtxActionSlot(CTX_THREADS_BUTTON_WIDTH) {
+                            AppButton(
+                                "Hide map", onClick = it, variant = ButtonVariant.Ghost,
+                                modifier = Modifier.fillMaxWidth().height(26.dp),
+                                leadingIcon = Icons.Outlined.VisibilityOff, horizontalPadding = 4.dp,
+                            )
+                        }
                     }
                 }
-                if (onShowMap != null && onHideMap != null) {
-                    CtxActionDivider(tc)
-                }
-                onHideMap?.let {
-                    CtxActionSlot(CTX_THREADS_BUTTON_WIDTH) {
-                        AppButton(
-                            "Hide map", onClick = it, variant = ButtonVariant.Ghost,
-                            modifier = Modifier.fillMaxWidth().height(26.dp),
-                            leadingIcon = Icons.Outlined.VisibilityOff, horizontalPadding = 4.dp,
-                        )
+            }
+            if (onShowName != null || onHideName != null) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // onShowName/onHideName are mutually exclusive by construction (App.kt's
+                    // currentlyShown boolean sets exactly one), so unlike the map row above there's
+                    // never a divider to place between them.
+                    onShowName?.let {
+                        CtxActionSlot(CTX_THREADS_BUTTON_WIDTH) {
+                            AppButton(
+                                "Show name", onClick = it, variant = ButtonVariant.Ghost,
+                                modifier = Modifier.fillMaxWidth().height(26.dp),
+                                leadingIcon = Icons.Outlined.Badge, horizontalPadding = 4.dp,
+                            )
+                        }
+                    }
+                    onHideName?.let {
+                        CtxActionSlot(CTX_THREADS_BUTTON_WIDTH) {
+                            AppButton(
+                                "Hide name", onClick = it, variant = ButtonVariant.Ghost,
+                                modifier = Modifier.fillMaxWidth().height(26.dp),
+                                leadingIcon = Icons.Outlined.VisibilityOff, horizontalPadding = 4.dp,
+                            )
+                        }
                     }
                 }
             }
@@ -1128,68 +1178,10 @@ internal fun CtxThreadsActions(
     }
 }
 
-// Mirrors CtxThreadsActions's own shape exactly (header + a row of Ghost buttons) — the per-row
-// "show this process by name" / "hide it again" pair (AppState.showProcessNameForPid/
-// hideProcessNameForPid), grouped under a "Process name" header the same way Threads groups its
-// own show/hide-map actions. Never rendered with both onShow and onHide null — the call site
-// (ui/App.kt) omits the whole block when this row's pid has no known name, same "an empty header
-// with no buttons under it must not render" rule Threads follows for a pid-less row.
-@Composable
-internal fun CtxProcessNameActions(
-    highlighted: Boolean = false,
-    onShow: (() -> Unit)? = null,
-    onHide: (() -> Unit)? = null,
-    // The resolved name itself, appended to the header as "Process name — <processLabel>" so it's
-    // unambiguous which process Show/Hide act on, mirroring CtxThreadsActions' own processLabel.
-    processLabel: String? = null,
-) {
-    val tc = tc()
-    HoverBox(
-        modifier = Modifier.fillMaxWidth(),
-        hoverBg = tc.hv,
-        forceHover = highlighted,
-    ) {
-        Column(
-            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            val headerText = if (processLabel != null) "Process name — $processLabel" else "Process name"
-            AppText(headerText, color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                onShow?.let {
-                    CtxActionSlot(CTX_THREADS_BUTTON_WIDTH) {
-                        AppButton(
-                            "Show name", onClick = it, variant = ButtonVariant.Ghost,
-                            modifier = Modifier.fillMaxWidth().height(26.dp),
-                            leadingIcon = Icons.Outlined.Badge, horizontalPadding = 4.dp,
-                        )
-                    }
-                }
-                if (onShow != null && onHide != null) {
-                    CtxActionDivider(tc)
-                }
-                onHide?.let {
-                    CtxActionSlot(CTX_THREADS_BUTTON_WIDTH) {
-                        AppButton(
-                            "Hide name", onClick = it, variant = ButtonVariant.Ghost,
-                            modifier = Modifier.fillMaxWidth().height(26.dp),
-                            leadingIcon = Icons.Outlined.VisibilityOff, horizontalPadding = 4.dp,
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-// Mirrors CtxThreadsActions's own shape exactly (header + a row of Ghost buttons) — the "Link to
-// current video position"/"Show in video" pair used to render as two independent (and a third, now-
-// dropped "Link to video start (0:00)") CtxMenuEntry.Action rows; this groups the surviving two
-// under a "Video" header the same way Threads groups its own show/hide-map actions.
+// Mirrors CtxProcessActions' own per-row shape exactly (header + a row of Ghost buttons) — the
+// "Link to current video position"/"Show in video" pair used to render as two independent (and a
+// third, now-dropped "Link to video start (0:00)") CtxMenuEntry.Action rows; this groups the
+// surviving two under a "Video" header the same way Process groups its own show/hide-map actions.
 @Composable
 internal fun CtxVideoActions(
     highlighted: Boolean = false,
@@ -1347,12 +1339,14 @@ private fun CtxActionSlot(
 // across Selection, Tag, and Collapse rows, regardless of label length.
 private val CTX_ACTION_BUTTON_WIDTH = 78.dp
 
-// Threads (CtxThreadsActions) never has more than 2 slots (unlike the 3-slot rows above), so it
-// gets its own, wider width rather than reusing CTX_ACTION_BUTTON_WIDTH. At 78dp, "Show map"/"Hide
-// map" clipped their own trailing word invisibly (TextOverflow.Clip, no ellipsis) — despite being
-// the same CHARACTER count as "Selected"/"To start", both labels are two words built almost
-// entirely from wide glyphs ('w' and 'm' each appear twice between them), so they render measurably
-// wider than the single-word labels the 78dp width was originally sized for.
+// CtxProcessActions' own two rows (map, name) never have more than 2 slots each (unlike the
+// 3-slot rows above), so it gets its own, wider width rather than reusing CTX_ACTION_BUTTON_WIDTH.
+// At 78dp, "Show map"/"Hide map" clipped their own trailing word invisibly (TextOverflow.Clip, no
+// ellipsis) — despite being the same CHARACTER count as "Selected"/"To start", both labels are two
+// words built almost entirely from wide glyphs ('w' and 'm' each appear twice between them), so
+// they render measurably wider than the single-word labels the 78dp width was originally sized
+// for. Named for its original "Threads" block; kept as-is rather than renamed to avoid a pure
+// rename diff across every use site below.
 private val CTX_THREADS_BUTTON_WIDTH = 100.dp
 
 // Video (CtxVideoActions) also has exactly 2 slots, but "Link to 12:34" runs measurably longer
@@ -1612,24 +1606,19 @@ internal sealed class CtxMenuEntry {
         val onSelected: (() -> Unit)? = null,
     ) : CtxMenuEntry()
 
-    data class ThreadsActions(
+    // The merged tid-map + process-name section for one row's process (see CtxProcessActions —
+    // used to be two separate entries, ThreadsActions and ProcessNameActions, for the same
+    // process). onShowMap/onHideMap resolve via utils/TidMap.kt's tidMapProcessLabel the same way
+    // they always did; onShowName/onHideName are mutually exclusive by construction (App.kt sets
+    // exactly one, based on whether this pid is currently shown). processLabel is null only in the
+    // (untested-in-practice) case where none of the four actions are set, which the call site never
+    // actually adds as a menu entry — see the "an empty header with no buttons under it must not
+    // render" rule both predecessor blocks followed.
+    data class ProcessActions(
         val onShowMap: (() -> Unit)? = null,
         val onHideMap: (() -> Unit)? = null,
-        // The process this block's Show/Hide targets, resolved via utils/TidMap.kt's
-        // tidMapProcessLabel — precomputed by the call site (App.kt), which is the only place that
-        // has both the row's/active map's TidMapTarget and the tab's LogAnalysis.processNames.
-        // Null only in the (untested-in-practice) case neither button is set, which the call site
-        // never actually adds as a menu entry.
-        val processLabel: String? = null,
-    ) : CtxMenuEntry()
-
-    // Per-row "show this process by name" / "hide it again" pair (see CtxProcessNameActions).
-    // Unlike ThreadsActions, the call site (App.kt) never adds this entry at all when the row's pid
-    // has no known name — so, unlike ThreadsActions' own processLabel, onShow/onHide being both null
-    // here would be a real call-site bug, not an expected edge case.
-    data class ProcessNameActions(
-        val onShow: (() -> Unit)? = null,
-        val onHide: (() -> Unit)? = null,
+        val onShowName: (() -> Unit)? = null,
+        val onHideName: (() -> Unit)? = null,
         val processLabel: String? = null,
     ) : CtxMenuEntry()
 
