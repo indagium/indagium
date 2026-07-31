@@ -368,15 +368,14 @@ fun App(
                         //   + divider(9) + 2 items(64) [hide/show] + divider(9) + 1 row(32) [tags] = 458
                         // Selection text adds a preview extension line(15) on top of that. The merged
                         // "Process" block (CtxProcessActions — tid map + process name, formerly two
-                        // separate blocks) costs 73 (header+one row+divider) when either its map row
-                        // or its name row renders, plus another 28 (one more Ghost-button row) on top
-                        // of that when BOTH rows render at once (see CtxProcessActions' own doc for
-                        // why they're two separate Rows rather than one, up to 3-wide, Row).
+                        // separate blocks) is a fixed-shape header+one-row+divider costing 73, same as
+                        // every other single-row block below, regardless of whether it renders 1, 2, or
+                        // 3 buttons in that row (see CtxProcessActions' own doc — its slots share the
+                        // row's width via weight rather than growing the row itself).
                         val estimatedMenuHeight = (458 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (state.pendingSequenceStart != null) 32 else 0) +
                             (if (hasShowMapAction || hasHideMapAction || hasNameAction) 73 else 0) +
-                            (if ((hasShowMapAction || hasHideMapAction) && hasNameAction) 28 else 0) +
                             // Video block: 2 Action rows (32 each) + a trailing divider (9).
                             (if (ctxTab.attachedVideo != null) 73 else 0) +
                             (if (state.settings.sourceFolders.isNotEmpty()) 44 else 0)).dp
