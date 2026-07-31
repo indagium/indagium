@@ -1338,6 +1338,16 @@ class AppState(
     private val videoControllers = ConcurrentHashMap<String, VideoPlayerController>()
 
     // ── Sequences (per-tab, stored in Filter) ────────────────────────
+    // Deliberately active-tab-scoped, unlike addSequence/updateSequence/removeSequence/etc: the
+    // setter has no callers anywhere in src/ (verified by grep), and every getter caller is either
+    // a single-tab test (state.addTab() with exactly one tab, so activeTab() IS that tab) or
+    // nextSequenceColor's default parameter below, whose one use (colorAfterSequenceColor, inside
+    // addSequence) computes the app-level newSeqColor cycling hint for the *next* sequence to be
+    // added — not the color of the sequence just created (that path uses f.sequences of the
+    // target tab explicitly and is correct in compare mode). newSeqColor is intentionally
+    // app-level, not per-tab (see addSequence's doc), so consulting the active tab here for that
+    // cosmetic hint — even while adding to a non-active compare-mode tab — matches the design and
+    // is not the same bug as the per-tab mutators.
     var sequences: List<SequenceDef>
         get() = activeTab()?.filter?.sequences ?: emptyList()
         set(value) { upFlt(activeTabId) { it.copy(sequences = value) } }
@@ -2149,6 +2159,9 @@ class AppState(
     }
 
     // ── Sequences ───────────────────────────────────────────────────
+    // `existing` defaults to the active-tab-scoped `sequences` property (see its doc comment
+    // above) — only colorAfterSequenceColor relies on that default, for the app-level newSeqColor
+    // hint; every correctness-relevant caller (addSequence) passes the target tab's list explicitly.
     private fun nextSequenceColor(from: Color, existing: List<SequenceDef> = sequences): Color {
         val start = SEQ_COLORS.indexOf(from).takeIf { it >= 0 } ?: 0
         val used = existing.map { it.color }.toSet()
@@ -2165,6 +2178,7 @@ class AppState(
     }
 
     fun addSequence(
+        tabId: String,
         text: String,
         isRegex: Boolean,
         color: Color,
@@ -2174,7 +2188,7 @@ class AppState(
         endTag: String? = null,
     ) {
         if (text.isBlank()) return
-        upFlt(activeTabId) { f ->
+        upFlt(tabId) { f ->
             val maxP = f.sequences.maxOfOrNull { it.priority } ?: 0
             val assignedColor = nextSequenceColor(color, f.sequences)
             newSeqColor = colorAfterSequenceColor(assignedColor)
@@ -2199,6 +2213,7 @@ class AppState(
     }
 
     fun updateSequence(
+        tabId: String,
         id: String,
         matchText: String,
         isRegex: Boolean,
@@ -2208,7 +2223,7 @@ class AppState(
         endTag: String?,
     ) {
         if (matchText.isBlank()) return
-        upFlt(activeTabId) { f ->
+        upFlt(tabId) { f ->
             f.copy(
                 sequences = f.sequences.map {
                     if (it.id != id) it else it.copy(
@@ -2224,24 +2239,24 @@ class AppState(
         }
     }
 
-    fun removeSequence(id: String) {
-        upFlt(activeTabId) { f -> f.copy(sequences = f.sequences.filter { it.id != id }) }
+    fun removeSequence(tabId: String, id: String) {
+        upFlt(tabId) { f -> f.copy(sequences = f.sequences.filter { it.id != id }) }
     }
 
-    fun toggleSequence(id: String) {
-        upFlt(activeTabId) { f ->
+    fun toggleSequence(tabId: String, id: String) {
+        upFlt(tabId) { f ->
             f.copy(sequences = f.sequences.map { if (it.id == id) it.copy(enabled = !it.enabled) else it })
         }
     }
 
-    fun setSequenceColor(id: String, color: Color) {
-        upFlt(activeTabId) { f ->
+    fun setSequenceColor(tabId: String, id: String, color: Color) {
+        upFlt(tabId) { f ->
             f.copy(sequences = f.sequences.map { if (it.id == id) it.copy(color = color) else it })
         }
     }
 
-    fun reorderSequence(fromId: String, toIdx: Int) {
-        upFlt(activeTabId) { f ->
+    fun reorderSequence(tabId: String, fromId: String, toIdx: Int) {
+        upFlt(tabId) { f ->
             val list = f.sequences.toMutableList()
             val fromIdx = list.indexOfFirst { it.id == fromId }.takeIf { it >= 0 } ?: return@upFlt f
             val item = list.removeAt(fromIdx)
@@ -2250,8 +2265,8 @@ class AppState(
         }
     }
 
-    fun moveSequenceUp(id: String) {
-        upFlt(activeTabId) { f ->
+    fun moveSequenceUp(tabId: String, id: String) {
+        upFlt(tabId) { f ->
             val idx = f.sequences.indexOfFirst { it.id == id }.takeIf { it > 0 } ?: return@upFlt f
             val list = f.sequences.toMutableList()
             val a = list[idx - 1]; val b = list[idx]
@@ -2260,8 +2275,8 @@ class AppState(
         }
     }
 
-    fun moveSequenceDown(id: String) {
-        upFlt(activeTabId) { f ->
+    fun moveSequenceDown(tabId: String, id: String) {
+        upFlt(tabId) { f ->
             val idx = f.sequences.indexOfFirst { it.id == id }.takeIf { it < f.sequences.size - 1 } ?: return@upFlt f
             val list = f.sequences.toMutableList()
             val a = list[idx]; val b = list[idx + 1]
@@ -2832,7 +2847,7 @@ class AppState(
     // Reuses the same jump-to-log-lines mechanism as annotation navigation — a crash-panel entry
     // is just "select and scroll to a log id", the exact thing pendingAnnotationNavigation already
     // does (including auto-expanding whatever collapsed header, sequence or stack-trace, owns it).
-    fun requestCrashNavigation(tabId: String, logId: Int) {
+    fun requestLineNavigation(tabId: String, logId: Int) {
         if (tab(tabId) == null) return
         if (compareMode && tabId != activeTabId) {
             compareTabId = tabId
@@ -2846,7 +2861,7 @@ class AppState(
 
     /**
      * Legacy entry point for the video panel's "Show in logs" action. Keep it as an alias for
-     * [navigateToVideoLog], rather than [requestCrashNavigation]: video-originated navigation is
+     * [navigateToVideoLog], rather than [requestLineNavigation]: video-originated navigation is
      * allowed while Follow logs is enabled and must not silently disable that mode. Both routes
      * use the same follow request, so a mapped playhead row and an explicit Show action retain
      * the same filtered-row mapping and hysteretic viewport behavior.
@@ -3957,7 +3972,7 @@ class AppState(
     // the current scroll position, so without this the row the user just acted on visually
     // "jumps" to wherever the now-stale scroll index happens to land. Reuses the same
     // jump-to-log-line mechanism as annotation/crash navigation (pendingAnnotationNavigation,
-    // see requestCrashNavigation), which already knows how to auto-expand whatever collapsed
+    // see requestLineNavigation), which already knows how to auto-expand whatever collapsed
     // group ends up owning the row.
     private fun requestScrollAnchor(tabId: String, entryId: Int) {
         setSelectedRows(tabId, listOf(entryId))
@@ -4140,15 +4155,15 @@ class AppState(
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
         val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
-        addSequence(text, false, newSeqColor, entry.tag); ctx = null
+        addSequence(c.tabId, text, false, newSeqColor, entry.tag); ctx = null
     }
 
     // Same match-scope choice as the "Hide/Show messages like this" flyout (see
     // messageRuleVariantsFromCtx) — reused as-is since SequenceDef.tag is nullable/scoping exactly
     // like MessageRule.tag.
     fun addSequenceVariant(variant: MessageRuleVariant) {
-        if (ctx == null) return
-        addSequence(variant.pattern, false, newSeqColor, variant.tag)
+        val c = ctx ?: return
+        addSequence(c.tabId, variant.pattern, false, newSeqColor, variant.tag)
         ctx = null
     }
 
@@ -4232,7 +4247,7 @@ class AppState(
         val start = pendingSequenceStart ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
         val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
-        addSequence(start.text, false, newSeqColor, start.tag, text, false, entry.tag)
+        addSequence(c.tabId, start.text, false, newSeqColor, start.tag, text, false, entry.tag)
         pendingSequenceStart = null
         ctx = null
     }

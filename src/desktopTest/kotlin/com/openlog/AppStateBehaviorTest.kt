@@ -606,8 +606,8 @@ class AppStateBehaviorTest {
         val state = AppState()
         state.addTab()
         val tabId = state.tabs.single().id
-        state.addSequence("start", false, Color.Red, "StartTag", "end", false, "EndTag")
-        state.toggleSequence(state.sequences.single().id)
+        state.addSequence(tabId, "start", false, Color.Red, "StartTag", "end", false, "EndTag")
+        state.toggleSequence(tabId, state.sequences.single().id)
 
         state.saveFilter(tabId, "with sequences")
         state.clearFilter(tabId)
@@ -668,7 +668,7 @@ class AppStateBehaviorTest {
     fun exportedFiltersRoundTripSequences() {
         val source = AppState()
         source.addTab()
-        source.addSequence("start", true, Color.Red, "StartTag", "end", false, "EndTag")
+        source.addSequence(source.tabs.single().id, "start", true, Color.Red, "StartTag", "end", false, "EndTag")
         source.saveFilter(source.tabs.single().id, "with sequences")
 
         val target = AppState()
@@ -1418,7 +1418,7 @@ class AppStateBehaviorTest {
         }
         state.newSeqColor = SEQ_COLORS[0]
 
-        state.addSequence("inner", false, state.newSeqColor)
+        state.addSequence(state.tabs.single().id, "inner", false, state.newSeqColor)
 
         assertEquals(SEQ_COLORS[1], state.sequences.last().color)
         assertEquals(SEQ_COLORS[2], state.newSeqColor)
@@ -4061,10 +4061,12 @@ class AppStateBehaviorTest {
     fun canEditSequenceAndAddEnd() {
         val state = AppState()
         state.addTab()
-        state.addSequence("flow begin", false, Color.Red, "com.app.Start")
+        val tabId = state.tabs.single().id
+        state.addSequence(tabId, "flow begin", false, Color.Red, "com.app.Start")
         val id = state.sequences.single().id
 
         state.updateSequence(
+            tabId = tabId,
             id = id,
             matchText = "flow begin",
             isRegex = false,
@@ -4770,10 +4772,11 @@ class AppStateBehaviorTest {
     fun sequenceColorWrapsAroundWhenPaletteExhausted() {
         val state = AppState()
         state.addTab()
-        SEQ_COLORS.forEachIndexed { i, color -> state.addSequence("seq$i", false, color) }
+        val tabId = state.tabs.single().id
+        SEQ_COLORS.forEachIndexed { i, color -> state.addSequence(tabId, "seq$i", false, color) }
         val countBefore = state.sequences.size
 
-        state.addSequence("overflow", false, SEQ_COLORS[0])
+        state.addSequence(tabId, "overflow", false, SEQ_COLORS[0])
 
         assertEquals(countBefore + 1, state.sequences.size)
         assertTrue(state.sequences.last().color in SEQ_COLORS)
@@ -4783,12 +4786,13 @@ class AppStateBehaviorTest {
     fun moveSequenceUpSwapsWithPreviousEntry() {
         val state = AppState()
         state.addTab()
-        state.addSequence("first", false, SEQ_COLORS[0])
-        state.addSequence("second", false, SEQ_COLORS[1])
+        val tabId = state.tabs.single().id
+        state.addSequence(tabId, "first", false, SEQ_COLORS[0])
+        state.addSequence(tabId, "second", false, SEQ_COLORS[1])
         val firstId = state.sequences[0].id
         val secondId = state.sequences[1].id
 
-        state.moveSequenceUp(secondId)
+        state.moveSequenceUp(tabId, secondId)
 
         assertEquals(secondId, state.sequences[0].id)
         assertEquals(firstId, state.sequences[1].id)
@@ -4798,11 +4802,12 @@ class AppStateBehaviorTest {
     fun moveSequenceDownAtLastIndexIsNoOp() {
         val state = AppState()
         state.addTab()
-        state.addSequence("first", false, SEQ_COLORS[0])
-        state.addSequence("second", false, SEQ_COLORS[1])
+        val tabId = state.tabs.single().id
+        state.addSequence(tabId, "first", false, SEQ_COLORS[0])
+        state.addSequence(tabId, "second", false, SEQ_COLORS[1])
         val secondId = state.sequences[1].id
 
-        state.moveSequenceDown(secondId)
+        state.moveSequenceDown(tabId, secondId)
 
         assertEquals(secondId, state.sequences[1].id)
         assertEquals(2, state.sequences.size)
@@ -4927,14 +4932,15 @@ class AppStateBehaviorTest {
     fun toggleSequenceFlipsEnabledFlag() {
         val state = AppState()
         state.addTab()
-        state.addSequence("flow", false, SEQ_COLORS[0])
+        val tabId = state.tabs.single().id
+        state.addSequence(tabId, "flow", false, SEQ_COLORS[0])
         val id = state.sequences.single().id
         assertTrue(state.sequences.single().enabled)
 
-        state.toggleSequence(id)
+        state.toggleSequence(tabId, id)
         assertFalse(state.sequences.single().enabled)
 
-        state.toggleSequence(id)
+        state.toggleSequence(tabId, id)
         assertTrue(state.sequences.single().enabled)
     }
 
