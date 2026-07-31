@@ -162,6 +162,31 @@ class CaseSearchTest {
     }
 
     @Test
+    fun isEmptyIsTrueForAFreshCorpusAndFalseOnceANoteIsIndexed() {
+        val dir = createTempDirectory("openlog-case-search-isempty").toFile()
+        val search = newSearch(dir)
+
+        assertTrue(search.isEmpty())
+
+        writeCaseNote(dir, "note_g", title = "Eta", issueDescription = "eta issue", tags = listOf("TagG"))
+
+        assertFalse(search.isEmpty())
+    }
+
+    @Test
+    fun isEmptyIsTrueAgainOnceTheOnlyIndexedNoteIsDeleted() {
+        val dir = createTempDirectory("openlog-case-search-isempty-delete").toFile()
+        val (md, ann) = writeCaseNote(dir, "note_h", title = "Theta", issueDescription = "theta issue", tags = listOf("TagH"))
+        val search = newSearch(dir)
+        assertFalse(search.isEmpty())
+
+        md?.delete()
+        ann.delete()
+
+        assertTrue(search.isEmpty())
+    }
+
+    @Test
     fun staleAppVersionMatchIsRankedBelowANewerVersionMatchForAnOtherwiseEqualQuery() {
         val dir = createTempDirectory("openlog-case-search-stale").toFile()
         writeCaseNote(
