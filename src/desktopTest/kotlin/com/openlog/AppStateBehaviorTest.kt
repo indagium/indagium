@@ -70,6 +70,7 @@ import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.listArchiveVideoCandidates
+import com.openlog.utils.resolveProcessDisplayName
 import com.openlog.video.VideoPlayerController
 import kotlinx.coroutines.delay
 import java.io.File
@@ -5767,6 +5768,42 @@ class AppStateBehaviorTest {
 
         assertEquals(ProcessNameMode.MANUAL, state.settings.processNameMode)
         assertEquals(setOf(5678), state.tab("t1")!!.manualProcessNamePicks)
+    }
+
+    @Test
+    fun hideProcessNameForPidFromAllModeSeedsThePicksSoOnlyThatOnePidLosesItsName() {
+        // Regression: from ALL, manualProcessNamePicks is still empty (ALL never reads it), so
+        // switching straight to MANUAL and subtracting just the hidden pid used to leave the set
+        // empty — every OTHER process lost its name too, not just the one the user hid. See
+        // AppState.hideProcessNameForPid's own doc for the fix (seed from the tab's known names).
+        val state = AppState(autosaveFile = File(createTempDirectory("openlog-procname-hide-all").toFile(), "state.cache"))
+        val tab = mkTab("t1", "app.log", emptyList())
+            .copy(analysis = LogAnalysis(processNames = mapOf(111 to "alpha", 222 to "bravo", 333 to "charlie"), pending = false))
+        state.tabs = listOf(tab)
+        state.updateSettings { it.copy(processNameMode = ProcessNameMode.ALL) }
+
+        state.hideProcessNameForPid("t1", 222)
+
+        assertEquals(ProcessNameMode.MANUAL, state.settings.processNameMode)
+        val restored = state.tab("t1")!!
+        assertEquals(setOf(111, 333), restored.manualProcessNamePicks)
+        // Assert on the actual resolved display name (what the PID cell renders), not just the
+        // pick set, per the fix's own requirement.
+        assertEquals(
+            "alpha",
+            resolveProcessDisplayName(state.settings.processNameMode, restored.analysis.processNames, restored.manualProcessNamePicks, 111),
+        )
+        assertEquals(
+            null,
+            resolveProcessDisplayName(state.settings.processNameMode, restored.analysis.processNames, restored.manualProcessNamePicks, 222),
+        )
+        assertEquals(
+            "charlie",
+            resolveProcessDisplayName(state.settings.processNameMode, restored.analysis.processNames, restored.manualProcessNamePicks, 333),
+        )
+        // The seeded pick set is session-only, same as every other manualProcessNamePicks value —
+        // still absent from the persisted form.
+        assertEquals(restored.copy(manualProcessNamePicks = emptySet()).persistedSnapshot(), restored.persistedSnapshot())
     }
 
     @Test

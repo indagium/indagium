@@ -1039,7 +1039,7 @@ fun LogViewer(
                     processNameMode = settings.processNameMode,
                     onToggleRowNumbers = { toolbarContextMenuOpen = false; onToggleRowNumbers() },
                     onToggleMinimap = { toolbarContextMenuOpen = false; onToggleMinimap() },
-                    onSetProcessNameMode = { mode -> onSetProcessNameMode(mode) },
+                    onSetProcessNameMode = { mode -> toolbarContextMenuOpen = false; onSetProcessNameMode(mode) },
                     onDismiss = { toolbarContextMenuOpen = false },
                     offset = toolbarContextMenuOffset,
                     tc = tc,
