@@ -5610,11 +5610,18 @@ class AppState(
         ioScope.launch {
             runCatching {
                 target.parentFile?.mkdirs()
-                // Same text Copy produces (issue description + provenance above the markdown), not
-                // the bare preview.text: buildMd deliberately omits issueDescription, so exporting
-                // preview.text alone would silently drop it — and Copy and Export handing back
-                // different documents for the same case is worse than either gap on its own.
-                target.writeText(maskWordForCopy(casePreviewCopyText(preview), settings))
+                // Same body Copy produces (issue description + provenance above the markdown),
+                // because buildMd deliberately omits issueDescription and exporting preview.text
+                // alone would silently drop it.
+                //
+                // Deliberately NOT run through maskWordForCopy, unlike copyCasePreview. Copy masking
+                // exists to stop a note's own words colliding with the destination's markup when it
+                // is pasted (the default rule rewrites "java" so Jira stops choking on it next to
+                // its {code:java} fences) — it is a per-user paste-time convenience, not a content
+                // transform. A file written to disk is the note itself, and every other file writer
+                // here agrees: exportAnalysisTo, saveAnalysis and autoExportAnnotations are all
+                // unmasked. Masking here would bake one user's Jira workaround into the artifact.
+                target.writeText(casePreviewCopyText(preview))
             }.fold(
                 onSuccess = { AppLogger.info("case-library", "Exported case preview to ${target.absolutePath}") },
                 onFailure = { e -> AppLogger.error("case-library", "Failed to export case preview to ${target.absolutePath}", e) },
