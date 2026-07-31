@@ -1,6 +1,7 @@
 package com.openlog.utils
 
 import com.openlog.model.LogEntry
+import com.openlog.model.ProcessNameMode
 
 // Logcat never gives openLog a pid -> process-name map directly, but the framework itself logs
 // process starts in a couple of well-known shapes. This scans for those and builds one — the
@@ -80,4 +81,26 @@ private fun MatchResult.pidAndName(): Pair<Int, String>? {
     val pid = groupValues[1].toIntOrNull() ?: return null
     val name = groupValues[2].trim()
     return if (pid > 0 && name.isNotBlank()) pid to name else null
+}
+
+/**
+ * Resolves what the PID cell should show for [pid] under [mode] — the resolved process name, or
+ * null when the bare pid number should render instead. Pulled out of ui/LogViewer.kt's LogRow (the
+ * only production caller) as a pure function so the OFF/ALL/MANUAL decision is unit-testable
+ * without a Compose test harness (this codebase has none — see ProcessNamesTest.kt).
+ *
+ * - OFF always returns null — the PID cell renders exactly as it did before this feature existed.
+ * - ALL returns [processNames]'s entry for [pid], or null if this pid's name was never learned.
+ * - MANUAL returns the same, but ONLY when [pid] is also in [manualPicks] — see
+ *   model/Model.kt's LogTab.manualProcessNamePicks for why that set is session-only.
+ */
+fun resolveProcessDisplayName(
+    mode: ProcessNameMode,
+    processNames: Map<Int, String>,
+    manualPicks: Set<Int>,
+    pid: Int,
+): String? = when (mode) {
+    ProcessNameMode.OFF -> null
+    ProcessNameMode.ALL -> processNames[pid]
+    ProcessNameMode.MANUAL -> processNames[pid]?.takeIf { pid in manualPicks }
 }

@@ -24,6 +24,7 @@ import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.AccountTree
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.ArrowUpward
+import androidx.compose.material.icons.outlined.Badge
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.FindInPage
 import androidx.compose.material.icons.outlined.Layers
@@ -269,9 +270,6 @@ private const val COL_HEADER_FONT_SP = 9f
 @Composable
 fun ColHeader(
     hasPidTid: Boolean = false,
-    // Gates an extra "PROCESS" label, matching LogRow's own process-name badge — see
-    // LogViewer.kt's hasProcessNames for why this is a tab-wide check, not per-row.
-    hasProcessNames: Boolean = false,
     showRowNumbers: Boolean = false,
     rowNumDigits: Int = 1,
     showTimeDelta: Boolean = false,
@@ -319,12 +317,6 @@ fun ColHeader(
         if (hasPidTid) {
             AppText("PID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(40.dp))
             AppText("TID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(40.dp))
-        }
-        if (hasProcessNames) {
-            AppText(
-                "PROCESS", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.width(PROCESS_NAME_COL_WIDTH),
-            )
         }
         AppText("LVL", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(28.dp))
         AppText("TAG", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(100.dp))
@@ -1136,6 +1128,64 @@ internal fun CtxThreadsActions(
     }
 }
 
+// Mirrors CtxThreadsActions's own shape exactly (header + a row of Ghost buttons) — the per-row
+// "show this process by name" / "hide it again" pair (AppState.showProcessNameForPid/
+// hideProcessNameForPid), grouped under a "Process name" header the same way Threads groups its
+// own show/hide-map actions. Never rendered with both onShow and onHide null — the call site
+// (ui/App.kt) omits the whole block when this row's pid has no known name, same "an empty header
+// with no buttons under it must not render" rule Threads follows for a pid-less row.
+@Composable
+internal fun CtxProcessNameActions(
+    highlighted: Boolean = false,
+    onShow: (() -> Unit)? = null,
+    onHide: (() -> Unit)? = null,
+    // The resolved name itself, appended to the header as "Process name — <processLabel>" so it's
+    // unambiguous which process Show/Hide act on, mirroring CtxThreadsActions' own processLabel.
+    processLabel: String? = null,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth(),
+        hoverBg = tc.hv,
+        forceHover = highlighted,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            val headerText = if (processLabel != null) "Process name — $processLabel" else "Process name"
+            AppText(headerText, color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                onShow?.let {
+                    CtxActionSlot(CTX_THREADS_BUTTON_WIDTH) {
+                        AppButton(
+                            "Show name", onClick = it, variant = ButtonVariant.Ghost,
+                            modifier = Modifier.fillMaxWidth().height(26.dp),
+                            leadingIcon = Icons.Outlined.Badge, horizontalPadding = 4.dp,
+                        )
+                    }
+                }
+                if (onShow != null && onHide != null) {
+                    CtxActionDivider(tc)
+                }
+                onHide?.let {
+                    CtxActionSlot(CTX_THREADS_BUTTON_WIDTH) {
+                        AppButton(
+                            "Hide name", onClick = it, variant = ButtonVariant.Ghost,
+                            modifier = Modifier.fillMaxWidth().height(26.dp),
+                            leadingIcon = Icons.Outlined.VisibilityOff, horizontalPadding = 4.dp,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Mirrors CtxThreadsActions's own shape exactly (header + a row of Ghost buttons) — the "Link to
 // current video position"/"Show in video" pair used to render as two independent (and a third, now-
 // dropped "Link to video start (0:00)") CtxMenuEntry.Action rows; this groups the surviving two
@@ -1570,6 +1620,16 @@ internal sealed class CtxMenuEntry {
         // has both the row's/active map's TidMapTarget and the tab's LogAnalysis.processNames.
         // Null only in the (untested-in-practice) case neither button is set, which the call site
         // never actually adds as a menu entry.
+        val processLabel: String? = null,
+    ) : CtxMenuEntry()
+
+    // Per-row "show this process by name" / "hide it again" pair (see CtxProcessNameActions).
+    // Unlike ThreadsActions, the call site (App.kt) never adds this entry at all when the row's pid
+    // has no known name — so, unlike ThreadsActions' own processLabel, onShow/onHide being both null
+    // here would be a real call-site bug, not an expected edge case.
+    data class ProcessNameActions(
+        val onShow: (() -> Unit)? = null,
+        val onHide: (() -> Unit)? = null,
         val processLabel: String? = null,
     ) : CtxMenuEntry()
 

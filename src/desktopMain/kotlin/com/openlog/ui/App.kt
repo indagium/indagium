@@ -367,6 +367,11 @@ fun App(
                         val estimatedMenuHeight = (531 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (state.pendingSequenceStart != null) 32 else 0) +
+                            // Process name block: CtxProcessNameActions is structurally identical
+                            // to CtxThreadsActions (header + one Ghost-button row), so it costs the
+                            // same 64 + a trailing divider (9) — only when this row's pid resolves
+                            // to a known name (see the "Process name" run{} block above).
+                            (if (ctxTab.analysis.processNames[entry.pid] != null) 73 else 0) +
                             // Video block: 2 Action rows (32 each) + a trailing divider (9).
                             (if (ctxTab.attachedVideo != null) 73 else 0) +
                             (if (state.settings.sourceFolders.isNotEmpty()) 44 else 0)).dp
@@ -520,6 +525,39 @@ fun App(
                                     add(CtxMenuEntry.Divider)
                                 }
                             }
+                            // Process name (Problem 4's third entry point) — offers showing this
+                            // row's process by its resolved name, or hiding it again, mirroring
+                            // exactly how the Threads block above builds its own show/hide pair.
+                            // Guarded the same way: this row's pid has to actually resolve to a
+                            // name (ctxTab.analysis.processNames), or neither button — and no
+                            // "Process name" header — renders at all (same "an empty header with no
+                            // buttons under it must not render" rule Threads follows). Both actions
+                            // always switch AppSettings.processNameMode to MANUAL (see
+                            // AppState.showProcessNameForPid/hideProcessNameForPid's own doc) — this
+                            // control is fundamentally a MANUAL-mode picker, so invoking it from
+                            // OFF or ALL must switch into the mode where the pick actually matters.
+                            run {
+                                val processName = ctxTab.analysis.processNames[entry.pid]
+                                if (processName != null) {
+                                    val currentlyShown = when (state.settings.processNameMode) {
+                                        ProcessNameMode.OFF -> false
+                                        ProcessNameMode.ALL -> true
+                                        ProcessNameMode.MANUAL -> entry.pid in ctxTab.manualProcessNamePicks
+                                    }
+                                    val onShowName = (!currentlyShown)
+                                        .takeIf { it }
+                                        ?.let { { state.showProcessNameForPid(ctxTab.id, entry.pid); state.ctx = null } }
+                                    val onHideName = currentlyShown
+                                        .takeIf { it }
+                                        ?.let { { state.hideProcessNameForPid(ctxTab.id, entry.pid); state.ctx = null } }
+                                    add(
+                                        CtxMenuEntry.ProcessNameActions(
+                                            onShow = onShowName, onHide = onHideName, processLabel = processName,
+                                        ),
+                                    )
+                                    add(CtxMenuEntry.Divider)
+                                }
+                            }
                             // Video anchoring/nav (plan doc's Task B) — only offered when this tab
                             // has a video attached at all, grouped under one "Video" header the same
                             // way Threads groups its show/hide-map pair. "Link to <time>" always
@@ -584,7 +622,8 @@ fun App(
                         val selectableEntries = menuEntries.filter {
                             it is CtxMenuEntry.ActionHeader || it is CtxMenuEntry.Action ||
                                 it is CtxMenuEntry.TagActions || it is CtxMenuEntry.CollapseActions ||
-                                it is CtxMenuEntry.ThreadsActions || it is CtxMenuEntry.VideoActions ||
+                                it is CtxMenuEntry.ThreadsActions || it is CtxMenuEntry.ProcessNameActions ||
+                                it is CtxMenuEntry.VideoActions ||
                                 it is CtxMenuEntry.SelectionActions || it is CtxMenuEntry.SourceActions ||
                                 it is CtxMenuEntry.ActionWithSubmenu
                         }
@@ -624,6 +663,7 @@ fun App(
                                                     is CtxMenuEntry.TagActions -> it.onInclude()
                                                     is CtxMenuEntry.CollapseActions -> it.onToStart?.invoke()
                                                     is CtxMenuEntry.ThreadsActions -> it.onShowMap?.invoke() ?: it.onHideMap?.invoke()
+                                                    is CtxMenuEntry.ProcessNameActions -> it.onShow?.invoke() ?: it.onHide?.invoke()
                                                     is CtxMenuEntry.VideoActions -> it.onLink()
                                                     is CtxMenuEntry.SelectionActions -> it.onAskAi()
                                                     is CtxMenuEntry.SourceActions -> it.onShowCode()
@@ -677,6 +717,13 @@ fun App(
                                                 highlighted = e === selectedEntry,
                                                 onShowMap = e.onShowMap,
                                                 onHideMap = e.onHideMap,
+                                                processLabel = e.processLabel,
+                                            )
+                                        is CtxMenuEntry.ProcessNameActions ->
+                                            CtxProcessNameActions(
+                                                highlighted = e === selectedEntry,
+                                                onShow = e.onShow,
+                                                onHide = e.onHide,
                                                 processLabel = e.processLabel,
                                             )
                                         is CtxMenuEntry.VideoActions ->

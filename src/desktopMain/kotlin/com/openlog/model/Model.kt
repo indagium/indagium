@@ -143,6 +143,13 @@ data class LogAnalysis(
     val pending: Boolean = true,
 )
 
+// How the PID cell decides whether to show a resolved process name (LogAnalysis.processNames) in
+// place of the bare pid number (ui/LogViewer.kt's LogRow). OFF is the default and the only mode
+// that guarantees pixel-identical rendering to before this feature existed — see AppSettings.
+// processNameMode's own doc for the persistence story and LogTab.manualProcessNamePicks for why
+// MANUAL's picks are session-only.
+enum class ProcessNameMode { OFF, ALL, MANUAL }
+
 // RANGE covers exactly [anchorId, endId] (order-independent — Filter.kt takes min/max of the two
 // resolved indices), unlike TO_START/TO_END which extend from anchorId to a file edge.
 enum class ManualCollapseDirection { TO_START, TO_END, RANGE }
@@ -513,6 +520,19 @@ data class LogTab(
     // this token later and reflexively including every LogTab field, this one is the deliberate
     // exception: do not add it there.
     val tidMap: TidMapState? = null,
+    // Which pids show a resolved process name (LogAnalysis.processNames) in MANUAL mode
+    // (AppSettings.processNameMode) — session-only, like tidMap/search/tailing above, and
+    // deliberately absent from AutosaveCodec's persistedSnapshot()/tabToken()/tabShellFromToken().
+    // Unlike those, this one is NOT just "not worth persisting" — it would be actively WRONG to
+    // persist: pids are recycled by the OS and are not stable across process runs (or even across
+    // two loads of the same file, if it's re-tailed from a live device), so a pid saved from this
+    // session could silently name a completely different process the next time the app opens. An
+    // empty pick set after restart is the correct, if unexciting, consequence — the UI that offers
+    // picking (ui/App.kt's per-row context menu, ui/LogViewer.kt's toolbar popup, Settings) makes
+    // clear that nothing is currently picked rather than presenting it as broken. Picking a pid
+    // (AppState.showProcessNameForPid) always switches processNameMode to MANUAL, so this field is
+    // meaningful only in that mode; OFF/ALL ignore it entirely.
+    val manualProcessNamePicks: Set<Int> = emptySet(),
     // The video (if any) attached to this tab (ui/AppState.kt's attachVideoToActiveTab/
     // attachVideoFromZip) — a screen recording bundled alongside this tab's log, linked to it via
     // at most one VideoAnchor. Persisted (AutosaveCodec.tabToken/tabShellFromToken), appended last
@@ -839,6 +859,14 @@ data class AppSettings(
     val showVideoFollowReadout: Boolean = false,
     // Global message-only regex anchors shown alongside built-in crashes/ANRs in the Issues panel.
     val customIssueRules: List<CustomIssueRule> = emptyList(),
+    // Whether the PID cell shows a resolved process name (LogAnalysis.processNames) in place of the
+    // bare number — OFF by default, so a log with no reader-facing use for it (or a user who simply
+    // prefers numbers) renders exactly as before this feature existed. See ProcessNameMode's own
+    // doc for ALL/MANUAL. A stable, standing preference (unlike LogTab.manualProcessNamePicks,
+    // which is session-only for pid-instability reasons — see that field's doc) so it belongs here,
+    // in JSON form only (settingsJson/settingsFromJson) — never in the frozen legacy positional
+    // settingsFromToken decoder. Trailing with a default so old settings tokens still parse.
+    val processNameMode: ProcessNameMode = ProcessNameMode.OFF,
 )
 
 enum class ThemePreset(val label: String) {

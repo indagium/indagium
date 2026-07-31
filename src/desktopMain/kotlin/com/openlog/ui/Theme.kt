@@ -227,14 +227,11 @@ val ROW_START_PAD = 11.dp   // base horizontal start padding before indent
 val ROW_V_PAD     =  3.dp   // vertical (top/bottom) padding for all log rows
 val ROW_NUM_GAP = 8.dp   // gap between the optional row-number gutter and the row content (Settings → Row number)
 
-// PID-column process-name badge (LogRow, ColHeader) — a fixed-width reserved cell, same
-// "reserved-width, never measured" precedent as TID_MAP_HIT_WIDTH (ui/TidMap.kt). Package names
-// routinely exceed this budget (see PROCESS_NAME_MAX_CHARS), so the value itself is elided with a
-// middle-ellipsis rather than widening the column to fit the longest name in the file.
-val PROCESS_NAME_COL_WIDTH = 130.dp
-
-// Character budget the middle-ellipsis truncation targets before ColHeader/LogRow's own
-// TextOverflow.Ellipsis needs to kick in as a safety net for any width-estimate slack.
+// Character budget the process-name-in-place-of-pid cell's middle-ellipsis truncation
+// (ui/LogViewer.kt's middleEllipsis) targets before LogRow's own TextOverflow.Ellipsis needs to
+// kick in as a safety net for any width-estimate slack. Package names routinely exceed this
+// budget, which is the whole reason the cell truncates instead of growing to fit the longest name
+// in the file — see processNameCellWidth below and ToolbarTooltip for the full name on hover.
 const val PROCESS_NAME_MAX_CHARS = 20
 
 // Approximate monospace digit advance as a fraction of font size, used to size the optional
@@ -256,6 +253,16 @@ fun rowNumberColumnWidth(fontSizeSp: Float, digitCount: Int): Dp =
 // the row gutter and its header cell in lockstep despite using different font sizes.
 fun timeDeltaColumnWidth(fontSizeSp: Float, charCount: Int): Dp =
     (charCount.coerceAtLeast(1) * fontSizeSp * MONO_DIGIT_EM).dp
+
+// Width of the process-name-in-place-of-pid cell (ui/LogViewer.kt's LogRow) — sized to
+// PROCESS_NAME_MAX_CHARS at the row's own font size, same formula/rationale as
+// rowNumberColumnWidth/timeDeltaColumnWidth above: a real reserved-width Compose cell rather than
+// an estimated offset into a gap inside a monospace string (see the tid-map-gutter note below for
+// why that second approach was tried twice already and abandoned both times). Only ever used for
+// rows actually showing a name — a row rendered with the pre-feature single-field layout (mode OFF,
+// or this row's pid not shown) never measures against this at all.
+fun processNameCellWidth(fontSizeSp: Float): Dp =
+    (PROCESS_NAME_MAX_CHARS * fontSizeSp * MONO_DIGIT_EM).dp
 
 // NOTE: there is deliberately no width helper here for the tid-map gutter (unlike
 // rowNumberColumnWidth/timeDeltaColumnWidth above) — it doesn't need one. Two earlier versions

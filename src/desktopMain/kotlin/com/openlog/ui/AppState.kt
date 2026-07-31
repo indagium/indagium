@@ -2991,6 +2991,29 @@ class AppState(
         t.tidMap?.let { t.copy(tidMap = it.copy(highlightedColorKey = colorKey)) } ?: t
     }
 
+    // ── Process-name display (utils/ProcessNames.kt, LogAnalysis.processNames) ──────────
+    // The standing preference (Settings → Appearance, the log toolbar's options popup) — persisted
+    // in AppSettings (JSON form only, see its own doc).
+    fun setProcessNameMode(mode: ProcessNameMode) = updateSettings { it.copy(processNameMode = mode) }
+
+    // Picking a pid to show by name always asserts MANUAL — the per-row context menu is
+    // fundamentally a MANUAL-mode control ("show/hide THIS one"), so invoking it from OFF or ALL
+    // must switch into the mode where that pick actually has an effect, per the product decision
+    // (see ProcessNameMode's own doc). manualProcessNamePicks lives on LogTab, not AppSettings — see
+    // that field's doc for why it's session-only (pid instability across runs).
+    fun showProcessNameForPid(tabId: String, pid: Int) {
+        upTab(tabId) { it.copy(manualProcessNamePicks = it.manualProcessNamePicks + pid) }
+        setProcessNameMode(ProcessNameMode.MANUAL)
+    }
+
+    // The mirror action. Also asserts MANUAL — unpicking a pid while in ALL mode would otherwise be
+    // meaningless (ALL shows every known name regardless of manualProcessNamePicks), so "hide this
+    // one" only does something once MANUAL is the active mode, same reasoning as showProcessNameForPid.
+    fun hideProcessNameForPid(tabId: String, pid: Int) {
+        upTab(tabId) { it.copy(manualProcessNamePicks = it.manualProcessNamePicks - pid) }
+        setProcessNameMode(ProcessNameMode.MANUAL)
+    }
+
     /** Reveals Original for the active tab without changing any already-visible panel. */
     fun ensureActiveTabUnfiltered() {
         val tabId = activeTabId
