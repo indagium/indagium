@@ -76,9 +76,11 @@ internal class AiToolCallBudget(totalCalls: Int) {
             "add_image_note", "update_note_block", "move_note_block", "delete_note_block",
             "clear_all_notes", "save_annotations", "load_annotations", "set_case_metadata",
         )
-        val NOTES_ANNOTATION_TOOLS = setOf(
+
+        // Set union rather than a spread: `*NOTES_WRITE_TOOLS.toTypedArray()` copies the whole set
+        // into an array just to splat it back into another set (detekt SpreadOperator).
+        val NOTES_ANNOTATION_TOOLS = NOTES_WRITE_TOOLS + setOf(
             "get_issue_description", "get_annotation_sections", "get_annotation_blocks",
-            *NOTES_WRITE_TOOLS.toTypedArray(),
         )
     }
 }
