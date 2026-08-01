@@ -167,12 +167,20 @@ sealed interface MessageCompositionState {
      *  the section is itself what triggers [Computing]. */
     data object NotComputed : MessageCompositionState
 
-    /** A scan is running on AppState.ioScope right now (AppState.requestMessageComposition). */
-    data object Computing : MessageCompositionState
+    /** A scan is running on AppState.ioScope right now (AppState.requestMessageComposition).
+     *  [forFilter] is the filter it was started for — the composition describes what the CURRENT
+     *  VIEW is made of, not the whole file, so a result is only meaningful against the filter that
+     *  produced it. Carrying it here is also what makes a superseded scan harmless: a newer request
+     *  overwrites this state with its own [forFilter], so when the older scan finishes it no longer
+     *  matches and its result is dropped rather than clobbering the fresher one. */
+    data class Computing(val forFilter: Filter) : MessageCompositionState
 
-    /** The scan completed. [histogram] may legitimately be empty — e.g. a file that is entirely
-     *  one excluded stack-trace dump — and that is a genuine, displayable result, not an error. */
-    data class Computed(val histogram: MessageTemplateHistogram) : MessageCompositionState
+    /** The scan completed for [forFilter]. [histogram] may legitimately be empty — e.g. a view that
+     *  is entirely one excluded stack-trace dump — and that is a genuine, displayable result, not
+     *  an error. When [forFilter] no longer equals the tab's filter the result is stale: still
+     *  worth showing (it is what the user was just looking at) but visibly so, while the recompute
+     *  runs. */
+    data class Computed(val histogram: MessageTemplateHistogram, val forFilter: Filter) : MessageCompositionState
 
     /** The scan threw. [message] is shown in the panel; the next expand retries from scratch. */
     data class Failed(val message: String) : MessageCompositionState

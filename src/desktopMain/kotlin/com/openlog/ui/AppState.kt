@@ -84,6 +84,7 @@ import com.openlog.utils.splitFileToFiles
 import com.openlog.utils.splitStreamToFiles
 import com.openlog.utils.suggestedSplitPartCount
 import com.openlog.utils.truncateAtSeparator
+import com.openlog.utils.visibleEntries
 import com.openlog.video.FailedVideoPlayerController
 import com.openlog.video.VideoPlayerController
 import com.openlog.video.defaultVideoPlayerController
@@ -2083,33 +2084,64 @@ class AppState(
     // NotComputed/Failed and both launch a scan. Returns whether this call actually started a new
     // scan (false when one was already running or the histogram already exists), which is what
     // the guard-against-double-start test asserts on directly rather than inferring from timing.
+    // In-flight composition scans, so a filter change can cancel the one it supersedes instead of
+    // leaving it to run to completion on a multi-GB view. Cancellation is an optimisation only —
+    // correctness comes from the forFilter check when the result lands, which holds even if a
+    // cancelled scan finishes anyway.
+    private val compositionJobs = ConcurrentHashMap<String, Job>()
+
+    /**
+     * Starts a composition scan for [tabId] over the tab's CURRENTLY VISIBLE entries, unless one is
+     * already running or finished for that exact filter. Returns whether a scan actually started —
+     * the single-flight guard is observable rather than something callers have to time.
+     */
     fun requestMessageComposition(tabId: String): Boolean {
-        var started = false
+        var target: Filter? = null
         upTab(tabId) { t ->
-            when (t.messageComposition) {
-                is MessageCompositionState.NotComputed, is MessageCompositionState.Failed -> {
-                    started = true
-                    t.copy(messageComposition = MessageCompositionState.Computing)
-                }
-                is MessageCompositionState.Computing, is MessageCompositionState.Computed -> t
+            val state = t.messageComposition
+            val alreadyCurrent = when (state) {
+                is MessageCompositionState.Computing -> state.forFilter == t.filter
+                is MessageCompositionState.Computed -> state.forFilter == t.filter
+                else -> false
+            }
+            if (alreadyCurrent) {
+                t
+            } else {
+                target = t.filter
+                t.copy(messageComposition = MessageCompositionState.Computing(t.filter))
             }
         }
-        if (!started) return false
-        ioScope.launch {
+        val startedFor = target ?: return false
+        compositionJobs.remove(tabId)?.cancel()
+        val job = ioScope.launch {
             val snapshot = tab(tabId) ?: return@launch
-            val result = runCatching { computeMessageTemplates(snapshot.logData, snapshot.analysis.stackTraceGroups) }
+            val result = runCatching {
+                // The composition answers "what is this VIEW made of", so it scans what the filter
+                // admits, not the whole file. That is also what makes it cheap in the case that
+                // matters: narrowing to one package turns a multi-second whole-log scan into a scan
+                // of the handful of lines actually on screen.
+                val visible = visibleEntries(snapshot)
+                computeMessageTemplates(visible, snapshot.analysis.stackTraceGroups) { ensureActive() }
+            }
             upTab(tabId) { t ->
-                // Only land the result while still Computing — if the tab was closed and a new one
-                // reused the id (or some future path reset this field), this must not resurrect it.
-                if (t.messageComposition !is MessageCompositionState.Computing) return@upTab t
+                // Land only if this scan is still the current one: a newer request replaced the
+                // state with its own Computing(forFilter), so a superseded scan finds a mismatch
+                // here and drops its result rather than overwriting fresher data.
+                val state = t.messageComposition
+                if (state !is MessageCompositionState.Computing || state.forFilter != startedFor) return@upTab t
                 result.fold(
-                    onSuccess = { histogram -> t.copy(messageComposition = MessageCompositionState.Computed(histogram)) },
+                    onSuccess = { histogram ->
+                        t.copy(messageComposition = MessageCompositionState.Computed(histogram, startedFor))
+                    },
                     onFailure = { e ->
+                        if (e is CancellationException) throw e
                         t.copy(messageComposition = MessageCompositionState.Failed(e.message ?: "Log composition scan failed"))
                     },
                 )
             }
         }
+        compositionJobs[tabId] = job
+        job.invokeOnCompletion { compositionJobs.remove(tabId, job) }
         return true
     }
 

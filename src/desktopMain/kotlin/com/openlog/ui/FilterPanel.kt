@@ -59,6 +59,7 @@ import com.openlog.utils.firstRegexMatch
 import com.openlog.utils.issueSitesForCategory
 import com.openlog.utils.messageRuleSpecForTemplate
 import com.openlog.utils.passesFilter
+import kotlinx.coroutines.delay
 import java.io.File
 import java.net.URI
 import kotlin.math.roundToInt
@@ -1504,7 +1505,19 @@ internal fun FilterPanel(
             // tabs while already expanded re-fires it for the newly-active tab, which is exactly
             // when ITS on-demand scan needs to start. requestMessageComposition's own single-flight
             // guard makes every one of those calls a no-op once a scan is already running or done.
-            LaunchedEffect(tab.id) { logCompositionActions.onExpand() }
+            //
+            // Keyed on the filter too, because the composition describes what the CURRENT VIEW is
+            // made of: narrowing to a package must re-answer the question for that package. The
+            // delay debounces it — `filter` changes on every keystroke in a message-rule box, and
+            // each change would otherwise start a scan. 400ms matches App.kt's content-autosave
+            // debounce rather than the 150ms search one: this is the expensive end of the scale,
+            // not a keystroke-latency path. Changing the filter again inside the window cancels
+            // this effect before it fires, and once it has fired the in-flight scan is cancelled by
+            // requestMessageComposition itself.
+            LaunchedEffect(tab.id, tab.filter) {
+                delay(LOG_COMPOSITION_REFRESH_DEBOUNCE_MS)
+                logCompositionActions.onExpand()
+            }
             when (val composition = tab.messageComposition) {
                 is MessageCompositionState.NotComputed ->
                     LogCompositionHint("◆", "Preparing to scan for repeated messages…", tc)
@@ -2935,6 +2948,11 @@ private fun BoundedScrollBox(
 // border 1dp top+bottom (2dp) + Column vertical padding 6dp top+bottom (12dp) + the header Row
 // (9sp pill with 1dp top+bottom padding, ~15dp tall) + 3dp spacer above the message + the 11sp
 // message at maxLines=2 (~16dp/line, ~32dp for two lines) = 2 + 12 + 15 + 3 + 32 = 64dp.
+// Debounce before a filter change re-triggers the log-composition scan. Matches App.kt's 400ms
+// content-autosave debounce rather than the 150ms in-view-search one: a scan over the visible set
+// is the expensive end of the debounce inventory (SAAD 12.5), not a keystroke-latency path.
+private const val LOG_COMPOSITION_REFRESH_DEBOUNCE_MS = 400L
+
 private const val CRASH_ROW_DP = 64
 
 // Top N histogram rows shown directly in the panel — "10 is reasonable" (Stage 2a plan); the

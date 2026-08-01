@@ -1,5 +1,6 @@
 package com.openlog
 
+import com.openlog.model.Filter
 import com.openlog.model.MessageCompositionState
 import com.openlog.model.MessageTemplateHistogram
 import com.openlog.model.TemplateGranularity
@@ -39,8 +40,8 @@ class MessageCompositionTest {
         val emptyHistogram = MessageTemplateHistogram(emptyList(), TemplateGranularity.STRICT, 0, 0, false)
         val states: List<MessageCompositionState> = listOf(
             MessageCompositionState.NotComputed,
-            MessageCompositionState.Computing,
-            MessageCompositionState.Computed(emptyHistogram),
+            MessageCompositionState.Computing(Filter()),
+            MessageCompositionState.Computed(emptyHistogram, Filter()),
             MessageCompositionState.Failed("boom"),
         )
         for (i in states.indices) {
