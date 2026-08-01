@@ -2,6 +2,7 @@ package com.openlog.cases
 
 import com.openlog.model.AnnBlock
 import com.openlog.model.Annotations
+import com.openlog.model.Filter
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
 import com.openlog.ui.annotationsToken
@@ -21,6 +22,7 @@ internal fun writeCaseNote(
     sourcePath: String? = null,
     extraMdText: String = "",
     writeMd: Boolean = true,
+    filter: Filter? = null,
 ): Pair<File?, File> {
     val md = File(dir, "$baseName.md")
     if (writeMd) {
@@ -38,6 +40,6 @@ internal fun writeCaseNote(
         decisiveTags = decisiveTags,
     )
     val ann = File(dir, "$baseName.ann")
-    ann.writeText(annotations.annotationsToken(sourcePath))
+    ann.writeText(annotations.annotationsToken(sourcePath, filter))
     return (md.takeIf { writeMd }) to ann
 }

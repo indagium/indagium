@@ -2435,6 +2435,40 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun openingALoneAnnFileDoesNotPinAnAnnAsTheAutoExportTarget() {
+        // No paired .md — e.g. a hand-copied case note, or a case reopened via the Case Library
+        // whose record only had an .ann (record.mdPath null, falls back to annPath). Regression for
+        // the bug where openNoteFile pinned noteTargetName to the literal opened filename: the next
+        // keystroke's auto-export would then write rendered Markdown into "foo.ann", corrupting its
+        // token-encoded format and silently clobbering whatever the .ann actually held.
+        val dir = createTempDirectory("openlog-ann-only-pin").toFile()
+        val state = AppState(File(dir, "state.cache"))
+        state.tabs = listOf(mkTab("log", "test.log", emptyList()))
+        state.activeTabId = "log"
+        val ann = File(dir, "foo.ann").apply {
+            writeText(Annotations(blocks = listOf(AnnBlock.Note("n1", "hand-copied note"))).annotationsToken(null, null))
+        }
+
+        state.openNoteFile("log", ann)
+
+        assertEquals("foo.md", state.tab("log")?.noteTargetName)
+    }
+
+    @Test
+    fun openingAPlainMdFileStillPinsThatExactMdFilename() {
+        // The normal .md path must be unaffected by the .ann-pinning fix above.
+        val dir = createTempDirectory("openlog-md-pin").toFile()
+        val state = AppState(File(dir, "state.cache"))
+        state.tabs = listOf(mkTab("log", "test.log", emptyList()))
+        state.activeTabId = "log"
+        val md = File(dir, "sample_analysis_2.md").apply { writeText("# Sample\n\nbody") }
+
+        state.openNoteFile("log", md)
+
+        assertEquals("sample_analysis_2.md", state.tab("log")?.noteTargetName)
+    }
+
+    @Test
     fun recentNotesForTabOnlyReturnsNotesMatchingThatTabName() {
         val dir = createTempDirectory("openlog-recent-notes-tab").toFile()
         val sampleNote = File(dir, "sample_analysis.md").apply { writeText("sample") }

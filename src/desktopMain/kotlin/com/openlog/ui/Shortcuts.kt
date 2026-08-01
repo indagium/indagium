@@ -215,6 +215,7 @@ private fun shortcutSpecs(): List<ShortcutSpec> = listOf(
     ShortcutSpec("⌘ [", "Ctrl [", "Previous tab", KeyboardPanel.GLOBAL),
     ShortcutSpec("Ctrl Tab / Ctrl ⇧ Tab", "Ctrl Tab / Ctrl Shift Tab", "Next / previous tab", KeyboardPanel.GLOBAL),
     ShortcutSpec("⌘ W", "Ctrl W", "Close current tab", KeyboardPanel.GLOBAL),
+    ShortcutSpec("⌘ ⇧ O", "Ctrl Shift O", "Open Case Library", KeyboardPanel.GLOBAL),
     ShortcutSpec("⌘ /", "Ctrl /", "Show keyboard shortcuts", KeyboardPanel.GLOBAL),
     ShortcutSpec("F6", "F6", "Move focus to next panel", KeyboardPanel.PANEL_NAVIGATION),
     ShortcutSpec("⇧ F6", "Shift F6", "Move focus to previous panel", KeyboardPanel.PANEL_NAVIGATION),
