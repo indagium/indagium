@@ -1529,6 +1529,30 @@ internal fun FilterPanel(
                 delay(LOG_COMPOSITION_REFRESH_DEBOUNCE_MS)
                 logCompositionActions.onExpand()
             }
+            // Page bookkeeping lives HERE, not inside LogCompositionResults: that composable is
+            // called from two different when-branches, so a Computed -> Computing swap changes its
+            // call site and Compose remounts it, re-firing any LaunchedEffect inside. That is what
+            // sent the user back to page 1 on every Hide/Show only. At this level there is one call
+            // site whatever the state is.
+            //
+            // Switching tabs resets — a different log is a different question. A new result only
+            // clamps, so a live-tailing tab re-folding its histogram cannot yank the reader off the
+            // page they were on unless the list actually shrank past it.
+            val shownHistogram = when (val c = tab.messageComposition) {
+                is MessageCompositionState.Computed -> c.histogram
+                is MessageCompositionState.Computing -> c.previous
+                else -> null
+            }
+            LaunchedEffect(tab.id) { fpState.logCompositionPage = 0 }
+            LaunchedEffect(shownHistogram) {
+                val matches = logCompositionSearchMatches(
+                    shownHistogram?.templates.orEmpty(),
+                    fpState.logCompositionSearch,
+                )
+                // logCompositionClampPage takes a PAGE count, not an item count.
+                fpState.logCompositionPage =
+                    logCompositionClampPage(fpState.logCompositionPage, logCompositionPageCount(matches.size))
+            }
             when (val composition = tab.messageComposition) {
                 is MessageCompositionState.NotComputed ->
                     LogCompositionHint("◆", "Preparing to scan for repeated messages…", tc)
@@ -3311,13 +3335,6 @@ private fun LogCompositionResults(
     // were reading page 40. Clamp instead, which only moves them when the list
     // actually shrank past where they were standing. Searching resets too, inline
     // where the search text is set below.
-    LaunchedEffect(tab.id) { fpState.logCompositionPage = 0 }
-    LaunchedEffect(histogram) {
-        fpState.logCompositionPage = logCompositionClampPage(
-            fpState.logCompositionPage,
-            logCompositionSearchMatches(templates, fpState.logCompositionSearch).size,
-        )
-    }
     if (templates.isEmpty()) {
         LogCompositionHint("◆", "No repeated messages found", tc)
     } else {
@@ -3360,15 +3377,15 @@ private fun LogCompositionResults(
             BoundedScrollBox(minOf(shown.size, filterListRows), rowDp = LOG_COMPOSITION_ROW_DP) {
                 shown.forEach { t ->
                     val sample = tab.rmap[t.firstEntryId]?.msg ?: t.template
-                    val spec = messageRuleSpecForTemplate(t, sample)
+                    val spec = messageRuleSpecForTemplate(t)
                     LogCompositionRow(
                         entry = t,
                         sampleMessage = sample,
                         regexBacked = spec.regex,
                         showRuleActions = filter.mode == FilterMode.TAGS,
-                        hideApplied = matchingMessageRule(filter.messageRules, t, sample, include = false, filter.mode) != null,
-                        showOnlyApplied = matchingMessageRule(filter.messageRules, t, sample, include = true, filter.mode) != null,
-                        highlightApplied = matchingHighlighter(filter.highlighters, t, sample) != null,
+                        hideApplied = matchingMessageRule(filter.messageRules, t, include = false, filter.mode) != null,
+                        showOnlyApplied = matchingMessageRule(filter.messageRules, t, include = true, filter.mode) != null,
+                        highlightApplied = matchingHighlighter(filter.highlighters, t) != null,
                         tc = tc,
                         onHide = { actions.onHide(t) },
                         onShowOnly = { actions.onShowOnly(t) },

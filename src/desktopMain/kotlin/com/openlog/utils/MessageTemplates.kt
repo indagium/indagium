@@ -689,12 +689,6 @@ internal fun foldTemplates(histogram: MessageTemplateHistogram, granularity: Tem
  *  ([regex] = false) or regex ([regex] = true) MessageRule/Highlighter pattern. */
 internal data class TemplateRuleSpec(val pattern: String, val regex: Boolean)
 
-// Below this many literal characters, a prefix rule is more likely to hide/show unrelated lines
-// than the ones the user actually meant ("id=" or a single leading letter isn't a useful
-// discriminator) — picked, not measured; short/leading-mask templates fall through to a regex
-// rule instead, which can encode the mask position precisely.
-private const val MIN_DISCRIMINATING_LITERAL_PREFIX = 4
-
 private data class MaskRegexToken(val literal: String, val regexFragment: String)
 
 // One regex fragment per mask token (HEX_TOKEN/UUID_TOKEN/... above), used to reconstruct a regex
@@ -754,15 +748,21 @@ internal fun regexPatternForTemplate(template: String): String {
 //    template.template.substring(0, literalPrefixLength), which is whitespace-collapsed and can
 //    fail to contains-match the very raw line it came from (see MessageTemplatesTest).
 //  - otherwise (short or leading mask) -> a regex rule reconstructed from the template.
-internal fun messageRuleSpecForTemplate(template: MessageTemplate, sampleRawMessage: String): TemplateRuleSpec {
+internal fun messageRuleSpecForTemplate(template: MessageTemplate): TemplateRuleSpec {
+    // Fully literal templates ARE substrings of their own lines, so a literal rule is both exact
+    // and cheap. Everything else becomes a regex reconstructed from the template.
+    //
+    // The tempting middle path — a literal rule on the leading run before the first mask — is
+    // wrong, and visibly so. "Delivering touch to window Window{<n>ca7 u0 …" and every sibling
+    // variant share the prefix "Delivering touch to window Window{", so one such rule matches all
+    // of them: pressing Hide on a row counted 1x silently acted on 79 shapes, and every one of
+    // those rows then correctly reported itself applied. Honest, and useless. A row has to act on
+    // the shape it shows, so precision wins over the cheaper match here.
     val fullyLiteral = template.literalPrefixLength == template.template.length
-    return when {
-        fullyLiteral -> TemplateRuleSpec(template.template, regex = false)
-        template.literalPrefixLength >= MIN_DISCRIMINATING_LITERAL_PREFIX -> {
-            val rawPrefixLen = template.literalPrefixRawLength.coerceIn(0, sampleRawMessage.length)
-            TemplateRuleSpec(sampleRawMessage.substring(0, rawPrefixLen), regex = false)
-        }
-        else -> TemplateRuleSpec(regexPatternForTemplate(template.template), regex = true)
+    return if (fullyLiteral) {
+        TemplateRuleSpec(template.template, regex = false)
+    } else {
+        TemplateRuleSpec(regexPatternForTemplate(template.template), regex = true)
     }
 }
 
@@ -783,11 +783,10 @@ internal fun messageRuleSpecForTemplate(template: MessageTemplate, sampleRawMess
 internal fun matchingMessageRule(
     rules: List<MessageRule>,
     template: MessageTemplate,
-    sampleRawMessage: String,
     include: Boolean,
     mode: FilterMode,
 ): MessageRule? {
-    val spec = messageRuleSpecForTemplate(template, sampleRawMessage)
+    val spec = messageRuleSpecForTemplate(template)
     val candidate = MessageRule(
         id = "",
         include = include,
@@ -807,8 +806,7 @@ internal fun matchingMessageRule(
 internal fun matchingHighlighter(
     highlighters: List<Highlighter>,
     template: MessageTemplate,
-    sampleRawMessage: String,
 ): Highlighter? {
-    val spec = messageRuleSpecForTemplate(template, sampleRawMessage)
+    val spec = messageRuleSpecForTemplate(template)
     return highlighters.firstOrNull { it.pattern == spec.pattern && it.regex == spec.regex }
 }

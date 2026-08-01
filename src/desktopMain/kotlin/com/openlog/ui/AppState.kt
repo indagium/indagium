@@ -2163,24 +2163,24 @@ class AppState(
     // model.messageRulesSameShape — the same notion addMessageRule itself uses to dedupe/replace an
     // opposite-direction rule, so the panel's idea of "this row is applied" cannot drift from what
     // pressing the button actually creates.
-    fun toggleMessageRuleForTemplate(tabId: String, template: MessageTemplate, sampleRawMessage: String, include: Boolean) {
+    fun toggleMessageRuleForTemplate(tabId: String, template: MessageTemplate, include: Boolean) {
         val f = tab(tabId)?.filter ?: return
-        val existing = matchingMessageRule(f.messageRules, template, sampleRawMessage, include, f.mode)
+        val existing = matchingMessageRule(f.messageRules, template, include, f.mode)
         if (existing != null) {
             removeMessageRule(tabId, existing.id)
         } else {
-            val spec = messageRuleSpecForTemplate(template, sampleRawMessage)
+            val spec = messageRuleSpecForTemplate(template)
             addMessageRule(tabId, include = include, pattern = spec.pattern, regex = spec.regex, tag = template.tag, packagePrefix = null)
         }
     }
 
-    fun toggleHighlightForTemplate(tabId: String, template: MessageTemplate, sampleRawMessage: String) {
+    fun toggleHighlightForTemplate(tabId: String, template: MessageTemplate) {
         val f = tab(tabId)?.filter ?: return
-        val existing = matchingHighlighter(f.highlighters, template, sampleRawMessage)
+        val existing = matchingHighlighter(f.highlighters, template)
         if (existing != null) {
             removeHl(tabId, existing.id)
         } else {
-            val spec = messageRuleSpecForTemplate(template, sampleRawMessage)
+            val spec = messageRuleSpecForTemplate(template)
             addHl(tabId, spec.pattern, spec.regex, nextAvailableHighlighterColor(tabId))
         }
     }

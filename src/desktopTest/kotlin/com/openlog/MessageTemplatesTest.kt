@@ -413,31 +413,47 @@ class MessageTemplatesTest {
         val template = computeMessageTemplates(listOf(entry(1, "Svc", raw))).templates.single()
         assertEquals(raw, template.template, "sanity: nothing should have masked here")
 
-        val spec = messageRuleSpecForTemplate(template, raw)
+        val spec = messageRuleSpecForTemplate(template)
 
         assertFalse(spec.regex)
         assertEquals(raw, spec.pattern)
         assertTrue(raw.contains(spec.pattern))
     }
 
-    // The load-bearing case: the raw line has a three-space run the mask collapses to one space.
-    // A literal rule built from the (collapsed) template text would NOT contains-match this raw
-    // line — the rule must be sliced out of the raw sample using literalPrefixRawLength instead.
+    // The case that forced this design. Sibling shapes routinely share everything before their
+    // first masked field — every "Delivering touch to window Window{<n>…" variant begins
+    // identically — so a rule built from that leading literal matches all of them. Pressing Hide on
+    // a row counted 1x then acted on dozens of shapes, and every one of those rows honestly
+    // reported itself applied. A row must act on the shape it displays, so a masked template
+    // becomes a regex that matches its own lines and not its siblings'.
     @Test
-    fun aDiscriminatingLiteralPrefixProducesALiteralRuleBuiltFromTheRawSampleAcrossAWhitespaceCollapse() {
+    fun aMaskedTemplateProducesARuleThatMatchesItsOwnLinesButNotASiblingSharingItsPrefix() {
+        val mine = "Delivering touch to window Window{2c07 u0 app}"
+        val sibling = "Delivering touch to window Window{de5c u0 app} extra"
+        val template = computeMessageTemplates(listOf(entry(1, "Input", mine))).templates.single()
+
+        val spec = messageRuleSpecForTemplate(template)
+
+        assertTrue(spec.regex, "a masked template must not settle for a shared literal prefix")
+        val rule = Regex(spec.pattern)
+        assertTrue(rule.containsMatchIn(mine), "the rule must match the line it was built from")
+        assertFalse(rule.containsMatchIn(sibling), "it must NOT swallow a sibling shape sharing the prefix")
+    }
+
+    // Whitespace collapse means a rule can never be sliced out of the template text and expected to
+    // match the raw line — the template says "Start proc", the line says "Start   proc".
+    @Test
+    fun aMaskedTemplateWhoseRawLineHadCollapsedWhitespaceStillMatchesThatRawLine() {
         val raw = "Start   proc 42"
         val template = computeMessageTemplates(listOf(entry(1, "Proc", raw))).templates.single()
         assertEquals("Start proc <n>", template.template)
-        val collapsedTemplatePrefix = template.template.substring(0, template.literalPrefixLength)
 
-        val spec = messageRuleSpecForTemplate(template, raw)
+        val spec = messageRuleSpecForTemplate(template)
 
-        assertFalse(spec.regex)
-        assertEquals("Start   proc ", spec.pattern)
-        assertTrue(raw.contains(spec.pattern), "the produced rule must contains-match the raw line it came from")
-        assertFalse(
-            raw.contains(collapsedTemplatePrefix),
-            "sanity: a rule built from the collapsed template prefix would NOT have matched — that's the bug this guards against",
+        assertTrue(spec.regex)
+        assertTrue(
+            Regex(spec.pattern).containsMatchIn(raw),
+            "the produced rule must match the raw line it came from, collapsed run and all",
         )
     }
 
@@ -449,7 +465,7 @@ class MessageTemplatesTest {
         assertEquals("<n> things happened", template.template)
         assertEquals(0, template.literalPrefixLength, "sanity: the mask starts at index 0")
 
-        val spec = messageRuleSpecForTemplate(template, rawOne)
+        val spec = messageRuleSpecForTemplate(template)
 
         assertTrue(spec.regex)
         val compiled = Regex(spec.pattern, RegexOption.IGNORE_CASE)
@@ -464,7 +480,7 @@ class MessageTemplatesTest {
         assertEquals("id=<n> ok", template.template)
         assertTrue(template.literalPrefixLength < 4, "sanity: 'id=' is a 3-character prefix")
 
-        val spec = messageRuleSpecForTemplate(template, raw)
+        val spec = messageRuleSpecForTemplate(template)
 
         assertTrue(spec.regex)
         assertTrue(Regex(spec.pattern, RegexOption.IGNORE_CASE).containsMatchIn(raw))
