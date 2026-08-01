@@ -353,7 +353,7 @@ class MessageTemplatesTest {
         val tab = mkTab(tabId, "f.log", entries)
         val first = computeItems(tab, applyFilter = true)
 
-        val mutated = tab.copy(messageComposition = MessageCompositionState.Computed(computeMessageTemplates(entries)))
+        val mutated = tab.copy(messageComposition = MessageCompositionState.Computed(computeMessageTemplates(entries), tab.filter))
         val second = computeItems(mutated, applyFilter = true)
 
         assertEquals(first, second)

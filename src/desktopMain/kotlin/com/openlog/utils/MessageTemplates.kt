@@ -512,6 +512,12 @@ internal fun computeMessageTemplates(
     logData: List<LogEntry>,
     stackTraceGroups: List<StackTraceGroup> = emptyList(),
     cap: Int = MAX_DISTINCT_TEMPLATES,
+    // Polled every CANCELLATION_CHECK_INTERVAL entries, same shape and interval as computeItems'
+    // own hook (utils/Filter.kt) and for the same reason: this is a plain loop, not a suspend
+    // function, so cancelling the coroutine around it does nothing on its own. A filter change
+    // supersedes an in-flight scan, and on an unfiltered multi-GB view that scan is measured in
+    // seconds — long enough to be worth stopping rather than letting it run to completion.
+    cancellationCheck: CancellationCheck? = null,
 ): MessageTemplateHistogram {
     val stackMemberIds = stackMemberBits(stackTraceGroups)
     val byTag = HashMap<String, TemplateTable>()
@@ -520,7 +526,12 @@ internal fun computeMessageTemplates(
     var distinctCount = 0
     var overflowed = false
 
+    var sinceCancellationCheck = 0
     for (i in logData.indices) {
+        if (cancellationCheck != null && ++sinceCancellationCheck >= CANCELLATION_CHECK_INTERVAL) {
+            sinceCancellationCheck = 0
+            cancellationCheck()
+        }
         val entry = logData[i]
         if (stackMemberIds.get(entry.id)) continue
         // The allocation this scan used to pay ~once per line (sb.toString() inside mask(), even

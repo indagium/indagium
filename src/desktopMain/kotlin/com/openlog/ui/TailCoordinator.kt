@@ -3,10 +3,12 @@ package com.openlog.ui
 import com.openlog.debug.AppLogger
 import com.openlog.model.MessageCompositionState
 import com.openlog.utils.FileTailer
+import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.computeMessageTemplates
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.mergeMessageTemplates
 import com.openlog.utils.parseLogcatLines
+import com.openlog.utils.passesFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -118,13 +120,23 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                     // cross-batch trace-continuation scheme. buildLogAnalysis() itself no longer
                     // touches messageComposition (it lives outside `analysis` now), so that debounced
                     // replace can never discard what this merge just built.
+                    //
+                    // The batch is filtered by the SAME filter the existing histogram was built
+                    // for before merging. The composition describes what the current view is made
+                    // of, so folding in raw unfiltered lines would quietly mix filtered and
+                    // unfiltered counts into one number. forFilter carries through unchanged: this
+                    // merge extends an existing result, it does not answer a new question.
                     val existingComposition = cur.messageComposition
                     val nextComposition = if (existingComposition is MessageCompositionState.Computed) {
+                        val forFilter = existingComposition.forFilter
+                        val ctx = RegexEvaluationContext()
+                        val admitted = newEntries.filter { passesFilter(it, forFilter, ctx) }
                         MessageCompositionState.Computed(
                             mergeMessageTemplates(
                                 existingComposition.histogram,
-                                computeMessageTemplates(newEntries, computeStackTraceGroups(newEntries)),
+                                computeMessageTemplates(admitted, computeStackTraceGroups(admitted)),
                             ),
+                            forFilter,
                         )
                     } else {
                         existingComposition
