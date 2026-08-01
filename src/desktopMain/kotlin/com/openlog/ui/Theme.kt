@@ -232,7 +232,7 @@ val ROW_NUM_GAP = 8.dp   // gap between the optional row-number gutter and the r
 // pidFieldCharWidth (LogViewer.kt) caps a tab's computed pid-field width at, so one outlier-long
 // name can't blow the column out for the whole file. Package names routinely exceed this budget,
 // which is why the field truncates instead of growing to fit the longest name verbatim.
-const val PROCESS_NAME_MAX_CHARS = 20
+const val PROCESS_NAME_MAX_CHARS = 40
 
 // Approximate monospace digit advance as a fraction of font size, used to size the optional
 // row-number gutter (LogRow) and its "#" header cell (ColHeader) to their digit count, so short

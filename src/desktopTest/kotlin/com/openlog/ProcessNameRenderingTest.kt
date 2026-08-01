@@ -5,6 +5,7 @@ import com.openlog.model.Highlighter
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
 import com.openlog.model.ProcessNameMode
+import com.openlog.ui.PROCESS_NAME_MAX_CHARS
 import com.openlog.ui.buildFullLineAnnotation
 import com.openlog.ui.pidFieldCharWidth
 import com.openlog.ui.remapPidFieldRange
@@ -43,8 +44,18 @@ class ProcessNameRenderingTest {
 
     @Test
     fun allCapsAtProcessNameMaxCharsForAnOutlierLongName() {
+        // Asserted against the constant, not a literal: the cap is a tuning value (raised once
+        // already, when 20 was eliding names as ordinary as "com.usbmonitor.fixture"), and pinning
+        // the number here only makes the test fail on the next tune without catching a real defect.
         val width = pidFieldCharWidth(ProcessNameMode.ALL, mapOf(1 to "a".repeat(200)), emptySet())
-        assertEquals(20, width)
+        assertEquals(PROCESS_NAME_MAX_CHARS, width)
+    }
+
+    @Test
+    fun theCapLeavesOrdinaryPackageNamesUnelided() {
+        // The reason the cap moved: a name this shape is unremarkable and must render in full.
+        val name = "com.usbmonitor.fixture"
+        assertEquals(name.length, pidFieldCharWidth(ProcessNameMode.ALL, mapOf(1 to name), emptySet()))
     }
 
     // ALL is unaffected by manualPicks — every known name is a candidate regardless of picks, since

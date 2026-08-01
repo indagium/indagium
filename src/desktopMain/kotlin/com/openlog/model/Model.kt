@@ -520,8 +520,17 @@ data class LogTab(
     // this token later and reflexively including every LogTab field, this one is the deliberate
     // exception: do not add it there.
     val tidMap: TidMapState? = null,
+    // Whether this tab shows resolved process names in place of numeric pids, and for which pids.
+    // Both are PER-TAB: two tabs open side by side in compare mode are usually two different logs
+    // with two different sets of processes, so turning names on in one has no business changing the
+    // other. AppSettings.showProcessNamesInNewTabs decides only what a NEWLY opened tab starts at;
+    // every action afterwards (the toolbar toggle, the row context menu) touches one tab.
+    //
+    // Session-only, like tidMap/search/tailing above, for the same reason the pick set below is —
+    // see its doc. A restored tab starts from the setting again.
+    val processNameMode: ProcessNameMode = ProcessNameMode.OFF,
     // Which pids show a resolved process name (LogAnalysis.processNames) in MANUAL mode
-    // (AppSettings.processNameMode) — session-only, like tidMap/search/tailing above, and
+    // ([processNameMode]) — session-only, like tidMap/search/tailing above, and
     // deliberately absent from AutosaveCodec's persistedSnapshot()/tabToken()/tabShellFromToken().
     // Unlike those, this one is NOT just "not worth persisting" — it would be actively WRONG to
     // persist: pids are recycled by the OS and are not stable across process runs (or even across
@@ -859,14 +868,16 @@ data class AppSettings(
     val showVideoFollowReadout: Boolean = false,
     // Global message-only regex anchors shown alongside built-in crashes/ANRs in the Issues panel.
     val customIssueRules: List<CustomIssueRule> = emptyList(),
-    // Whether the PID cell shows a resolved process name (LogAnalysis.processNames) in place of the
-    // bare number — OFF by default, so a log with no reader-facing use for it (or a user who simply
-    // prefers numbers) renders exactly as before this feature existed. See ProcessNameMode's own
-    // doc for ALL/MANUAL. A stable, standing preference (unlike LogTab.manualProcessNamePicks,
-    // which is session-only for pid-instability reasons — see that field's doc) so it belongs here,
-    // in JSON form only (settingsJson/settingsFromJson) — never in the frozen legacy positional
-    // settingsFromToken decoder. Trailing with a default so old settings tokens still parse.
-    val processNameMode: ProcessNameMode = ProcessNameMode.OFF,
+    // What a NEWLY opened tab starts at: names on (ProcessNameMode.ALL) or off. Only the starting
+    // point — showing or hiding names afterwards is per-tab state (LogTab.processNameMode), because
+    // two tabs are usually two different logs with two different sets of processes.
+    //
+    // Off by default, so a log with no reader-facing use for names (or a user who simply prefers
+    // numbers) renders exactly as before this feature existed. A standing preference, unlike the
+    // per-tab mode and pick set, so it belongs here — in JSON form only (settingsJson/
+    // settingsFromJson), never in the frozen legacy positional settingsFromToken decoder. Trailing
+    // with a default so old settings tokens still parse.
+    val showProcessNamesInNewTabs: Boolean = false,
 )
 
 enum class ThemePreset(val label: String) {

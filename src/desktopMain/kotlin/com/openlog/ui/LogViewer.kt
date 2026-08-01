@@ -909,8 +909,8 @@ fun LogViewer(
     // rationale as hasPidTid's own totalCnt key above — and on manualProcessNamePicks too, since
     // MANUAL now sizes to only the picked pids (pidFieldCharWidth's own doc), so picking or hiding
     // one must recompute this the same way learning a new name does.
-    val pidFieldChars = remember(tab.id, tab.analysis.processNames, tab.manualProcessNamePicks, settings.processNameMode) {
-        pidFieldCharWidth(settings.processNameMode, tab.analysis.processNames, tab.manualProcessNamePicks)
+    val pidFieldChars = remember(tab.id, tab.analysis.processNames, tab.manualProcessNamePicks, tab.processNameMode) {
+        pidFieldCharWidth(tab.processNameMode, tab.analysis.processNames, tab.manualProcessNamePicks)
     }
     LaunchedEffect(computedItems) {
         if (!computedItems.loading) onVisibleItems?.invoke(computedItems.summary)
@@ -1036,7 +1036,7 @@ fun LogViewer(
                 ToolbarOptionsPopup(
                     showRowNumbers = settings.showRowNumbers,
                     showMinimap = settings.showMinimap,
-                    processNameMode = settings.processNameMode,
+                    processNameMode = tab.processNameMode,
                     onToggleRowNumbers = { toolbarContextMenuOpen = false; onToggleRowNumbers() },
                     onToggleMinimap = { toolbarContextMenuOpen = false; onToggleMinimap() },
                     onSetProcessNameMode = { mode -> toolbarContextMenuOpen = false; onSetProcessNameMode(mode) },
@@ -1406,7 +1406,7 @@ fun LogViewer(
                                             deltaSelectionAnchored = deltaAnchorEntryId != null,
                                             timeDeltaChars = timeDeltaChars,
                                             hasTidMap = effectiveTab.tidMap != null,
-                                            processNameMode = settings.processNameMode,
+                                            processNameMode = tab.processNameMode,
                                             pidFieldChars = pidFieldChars,
                                             searchHighlight = if (isSearchMatch) {
                                                 SearchHighlight(

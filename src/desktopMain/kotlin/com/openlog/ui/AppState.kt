@@ -173,10 +173,15 @@ fun mkTab(
     filename: String,
     logData: List<LogEntry>,
     analysis: LogAnalysis = buildLogAnalysis(logData),
+    // Defaults to OFF rather than reading AppSettings, because mkTab is a top-level function with
+    // no AppState in scope (and every test builds tabs through it). Production callers pass
+    // AppState.newTabProcessNameMode(); see AppSettings.showProcessNamesInNewTabs.
+    processNameMode: ProcessNameMode = ProcessNameMode.OFF,
 ) = LogTab(
     id = id, filename = filename, logData = logData, rmap = mkRmap(logData),
     annotations = Annotations(prefix = "From $filename"),
     analysis = analysis,
+    processNameMode = processNameMode,
 )
 
 fun emptyWorkspaceTab() = LogTab(
@@ -2992,18 +2997,35 @@ class AppState(
     }
 
     // ── Process-name display (utils/ProcessNames.kt, LogAnalysis.processNames) ──────────
-    // The standing preference (Settings → Appearance, the log toolbar's options popup) — persisted
-    // in AppSettings (JSON form only, see its own doc).
-    fun setProcessNameMode(mode: ProcessNameMode) = updateSettings { it.copy(processNameMode = mode) }
+    // What a newly opened (or restored) tab starts at — see AppSettings.showProcessNamesInNewTabs.
+    internal fun newTabProcessNameMode(): ProcessNameMode =
+        if (settings.showProcessNamesInNewTabs) ProcessNameMode.ALL else ProcessNameMode.OFF
+
+    // Per-tab, not a global preference: two tabs are usually two different logs with two different
+    // sets of processes (see LogTab.processNameMode's own doc). Takes an explicit tabId rather than
+    // reading activeTabId so compare mode drives the panel it belongs to — the same bug class the
+    // sequence mutators were fixed for.
+    fun setProcessNameMode(tabId: String, mode: ProcessNameMode) =
+        upTab(tabId) { it.copy(processNameMode = mode) }
 
     // Picking a pid to show by name always asserts MANUAL — the per-row context menu is
     // fundamentally a MANUAL-mode control ("show/hide THIS one"), so invoking it from OFF or ALL
     // must switch into the mode where that pick actually has an effect, per the product decision
-    // (see ProcessNameMode's own doc). manualProcessNamePicks lives on LogTab, not AppSettings — see
-    // that field's doc for why it's session-only (pid instability across runs).
+    // (see ProcessNameMode's own doc). manualProcessNamePicks is session-only — see that field's
+    // doc for why (pid instability across runs).
+    //
+    // Coming FROM OFF the pick set is whatever a previous MANUAL session left behind — OFF never
+    // reads it, and neither the toolbar toggle nor Settings clears it. Adding to that stale set
+    // would make "show THIS one" show every pid that happened to be picked earlier, which is
+    // exactly what "show all -> hide all -> show one" used to do. From OFF the set is therefore
+    // replaced outright, so the action means what it says. From MANUAL the existing set is the
+    // right base and this reduces to the old behavior. (ALL never offers Show — the name is
+    // already on screen — so it needs no case here.)
     fun showProcessNameForPid(tabId: String, pid: Int) {
-        upTab(tabId) { it.copy(manualProcessNamePicks = it.manualProcessNamePicks + pid) }
-        setProcessNameMode(ProcessNameMode.MANUAL)
+        upTab(tabId) { t ->
+            val picks = if (t.processNameMode == ProcessNameMode.OFF) setOf(pid) else t.manualProcessNamePicks + pid
+            t.copy(manualProcessNamePicks = picks, processNameMode = ProcessNameMode.MANUAL)
+        }
     }
 
     // The mirror action. Also asserts MANUAL — unpicking a pid while in ALL mode would otherwise be
@@ -3019,12 +3041,11 @@ class AppState(
     // Coming from MANUAL (or OFF, though the context menu never offers Hide from OFF since nothing
     // is shown to hide), the existing pick set is the right base and this reduces to the old behavior.
     fun hideProcessNameForPid(tabId: String, pid: Int) {
-        val seedFromAll = settings.processNameMode == ProcessNameMode.ALL
         upTab(tabId) { t ->
-            val basePicks = if (seedFromAll) t.analysis.processNames.keys else t.manualProcessNamePicks
-            t.copy(manualProcessNamePicks = basePicks - pid)
+            val basePicks =
+                if (t.processNameMode == ProcessNameMode.ALL) t.analysis.processNames.keys else t.manualProcessNamePicks
+            t.copy(manualProcessNamePicks = basePicks - pid, processNameMode = ProcessNameMode.MANUAL)
         }
-        setProcessNameMode(ProcessNameMode.MANUAL)
     }
 
     /** Reveals Original for the active tab without changing any already-visible panel. */
@@ -4457,7 +4478,7 @@ class AppState(
             try {
                 val merged = mergeLogs(sources)
                 ensureActive()
-                val t = mkTab("t$n", newTabName, merged, analysis = pendingAnalysis(merged))
+                val t = mkTab("t$n", newTabName, merged, analysis = pendingAnalysis(merged), processNameMode = newTabProcessNameMode())
                 synchronized(stateLock) {
                     ensureActive()
                     tabs = tabs + t
@@ -4617,7 +4638,7 @@ class AppState(
                 // Publish the tab as soon as parsing finishes — the stack/crash analysis costs
                 // as much as the parse on multi-GB files and fills in below, in the same job so
                 // closing the tab cancels it.
-                val t = mkTab(tabId, file.name, logData, analysis = pendingAnalysis(logData))
+                val t = mkTab(tabId, file.name, logData, analysis = pendingAnalysis(logData), processNameMode = newTabProcessNameMode())
                     .copy(
                         sourcePath = path,
                         annotations = Annotations(prefix = "$prefixLabel ${file.name}"),
@@ -4844,7 +4865,7 @@ class AppState(
                 // Archive-sourced tabs always get an archive-qualified prefix ("archive.zip/entry/
                 // path.log") — the bare display name alone doesn't say which archive it came from.
                 val prefixName = archiveQualifiedLabel(path) ?: candidate.displayName
-                val t = mkTab(tabId, candidate.displayName, logData, analysis = pendingAnalysis(logData))
+                val t = mkTab(tabId, candidate.displayName, logData, analysis = pendingAnalysis(logData), processNameMode = newTabProcessNameMode())
                     .copy(
                         sourcePath = path,
                         annotations = Annotations(prefix = "$prefixLabel $prefixName"),
@@ -4972,7 +4993,7 @@ class AppState(
             return
         }
         val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
-        val t = mkTab(tabId, file.name, logData, analysis = buildLogAnalysis(logData, settings.customIssueRules))
+        val t = mkTab(tabId, file.name, logData, analysis = buildLogAnalysis(logData, settings.customIssueRules), processNameMode = newTabProcessNameMode())
             .copy(
                 sourcePath = path,
                 annotations = Annotations(prefix = "$prefixLabel ${file.name}"),
@@ -6066,7 +6087,9 @@ class AppState(
     // above, so that invariant holds unconditionally rather than by construction-order accident.
     private fun restoreTabsFromAutosave(tabLines: List<String>) = synchronized(stateLock) {
         val shells = tabLines.mapNotNull { it.removePrefix("tab\t").tabShellFromToken() }
-        tabs = shells.map { it.tab }
+        // processNameMode is session-only (see LogTab.processNameMode) so the token carries none —
+        // a restored tab starts from the setting, exactly as a freshly opened one does.
+        tabs = shells.map { it.tab.copy(processNameMode = newTabProcessNameMode()) }
         if (tabs.none { it.id == activeTabId }) activeTabId = tabs.firstOrNull()?.id ?: ""
         if (tabs.none { it.id == compareTabId }) compareTabId =
             tabs.getOrNull(1)?.id ?: tabs.firstOrNull()?.id ?: ""
