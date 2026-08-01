@@ -75,6 +75,12 @@ class KeyboardNavigationTest {
         assertEquals(KeyboardTargetKind.FilterModeTags, targets[0].kind)
         assertEquals(KeyboardTargetKind.FilterModeRegex, targets[1].kind)
         assertEquals(KeyboardTargetKind.FilterTagInput, targets[2].kind)
+        assertTrue(targets.any { it.kind == KeyboardTargetKind.FilterSection && it.id == "filter-section-log-composition" })
+        assertTrue(
+            targets.indexOfFirst { it.id == "filter-section-log-composition" } <
+                targets.indexOfFirst { it.id == "filter-section-levels" },
+            "the Log composition section header comes before the Log level one, matching panel order",
+        )
         assertTrue(targets.any { it.kind == KeyboardTargetKind.FilterLogLevel && it.id == "level-0" })
         assertTrue(targets.any { it.kind == KeyboardTargetKind.FilterSequence && it.id == "sequence:seq-a" })
         assertTrue(targets.any { it.kind == KeyboardTargetKind.FilterManualCollapse && it.id == "manual:manual-a" })

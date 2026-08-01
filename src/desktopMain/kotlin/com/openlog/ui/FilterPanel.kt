@@ -52,10 +52,12 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.openlog.model.*
+import com.openlog.utils.MAX_DISTINCT_TEMPLATES
 import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.containsPattern
 import com.openlog.utils.firstRegexMatch
 import com.openlog.utils.issueSitesForCategory
+import com.openlog.utils.messageRuleSpecForTemplate
 import com.openlog.utils.passesFilter
 import java.io.File
 import java.net.URI
@@ -116,6 +118,23 @@ internal data class MessageRuleScopeOption(
     val isAll: Boolean get() = tag == null && packagePrefix == null
 }
 
+// The Log composition section's callbacks, grouped into one parameter instead of five more
+// lambdas on FilterPanel/BoundFilterPanel (~90 already) — see FileView.kt's BoundFilterPanel,
+// which builds one of these inside remember(state, tab.id) { … } so it stays == across
+// recompositions that don't change tab identity (a freshly allocated bag every time would defeat
+// FilterPanel's skippability the same way a fresh lambda would).
+internal data class LogCompositionActions(
+    // Called whenever the section becomes visible while expanded (first expand, or switching to
+    // a tab that hasn't been scanned yet). AppState.requestMessageComposition is itself the
+    // single-flight guard, so calling this more than once for an already-Computing/Computed tab
+    // is a harmless no-op.
+    val onExpand: () -> Unit,
+    val onHide: (MessageTemplate) -> Unit,
+    val onShowOnly: (MessageTemplate) -> Unit,
+    val onHighlight: (MessageTemplate) -> Unit,
+    val onGoToFirst: (MessageTemplate) -> Unit,
+)
+
 private const val LARGE_FILE_CANDIDATE_SCAN_LIMIT = 50_000
 private const val SEQUENCE_DRAG_SNAP_BIAS = 0.25f
 
@@ -174,6 +193,11 @@ class FilterPanelUiState {
     var incPillsExpanded    by mutableStateOf(true)
     var incMsgPillsExpanded by mutableStateOf(true)
     var excMsgPillsExpanded by mutableStateOf(true)
+
+    // Default collapsed (unlike the sections above): a new section in an already-long panel, and
+    // expanding it is what triggers AppState.requestMessageComposition's on-demand scan — see
+    // ui/FilterPanel.kt's "Log composition" section.
+    var logCompositionExpanded by mutableStateOf(false)
 
     // These are drafts for the two discovery fields, rather than filter state.  In particular a
     // tag query is not applied until the user chooses a candidate, and a message query can be
@@ -266,6 +290,7 @@ internal fun FilterPanel(
     onUnhandledFileDrop: (List<File>) -> Unit,
     onClearFilter: () -> Unit,
     onNavigateCrash: (IssueSite) -> Unit,
+    logCompositionActions: LogCompositionActions,
     onUiStateChanged: () -> Unit = {},
     mostUsedTagLimit: Int,
     filterListRows: Int,
@@ -453,6 +478,10 @@ internal fun FilterPanel(
             KeyboardTargetKind.FilterMessageInput -> runCatching { msgRuleFr.requestFocus() }
             KeyboardTargetKind.FilterHighlighterInput -> runCatching { hlFr.requestFocus() }
             KeyboardTargetKind.FilterSection -> when (target.id) {
+                "filter-section-log-composition" -> {
+                    fpState.logCompositionExpanded = !fpState.logCompositionExpanded
+                    onUiStateChanged()
+                }
                 "filter-section-levels" -> { fpState.lvlExpanded = !fpState.lvlExpanded; onUiStateChanged() }
                 "filter-section-sequences" -> { fpState.seqExpanded = !fpState.seqExpanded; onUiStateChanged() }
                 "filter-section-saved" -> { fpState.sfExpanded = !fpState.sfExpanded; onUiStateChanged() }
@@ -1452,6 +1481,92 @@ internal fun FilterPanel(
             }
             Divider()
         } // end TAGS-only MESSAGE RULES block
+
+        // ── Log composition ──────────────────────────────────────
+        // Ranked list of masked message templates (utils/MessageTemplates.kt) — turns "scroll
+        // until you spot a repeating line, hide it, repeat" into a ranked list you click down.
+        // Placed immediately after Message rules: its primary row actions (Hide/Show only) create
+        // message rules, so the adjacency is legible. Computed on demand — see
+        // AppState.requestMessageComposition — only while this section is expanded; Stage 1
+        // measured the scan at ~4s on a 10M-line file, too much to pay on every load for a panel
+        // most sessions never open.
+        SectionHeader(
+            "Log composition",
+            expanded = fpState.logCompositionExpanded,
+            onToggle = {
+                fpState.logCompositionExpanded = !fpState.logCompositionExpanded
+                onUiStateChanged()
+            },
+        )
+        if (fpState.logCompositionExpanded) {
+            // This block is only in composition while expanded, so remounting it (first expand,
+            // or a collapse->expand) re-fires this LaunchedEffect for the current tab.id; switching
+            // tabs while already expanded re-fires it for the newly-active tab, which is exactly
+            // when ITS on-demand scan needs to start. requestMessageComposition's own single-flight
+            // guard makes every one of those calls a no-op once a scan is already running or done.
+            LaunchedEffect(tab.id) { logCompositionActions.onExpand() }
+            when (val composition = tab.messageComposition) {
+                is MessageCompositionState.NotComputed ->
+                    LogCompositionHint("◆", "Preparing to scan for repeated messages…", tc)
+                is MessageCompositionState.Computing ->
+                    LogCompositionHint("◌", "Scanning for repeated messages…", tc)
+                is MessageCompositionState.Failed ->
+                    LogCompositionHint(
+                        "✕",
+                        composition.message.ifBlank { "Log composition scan failed" },
+                        tc,
+                        glyphColor = DANGER_RED,
+                    )
+                is MessageCompositionState.Computed -> {
+                    val templates = composition.histogram.templates
+                    if (templates.isEmpty()) {
+                        LogCompositionHint("◆", "No repeated messages found", tc)
+                    } else {
+                        if (composition.histogram.overflowed) {
+                            AppText(
+                                "Scan capped at $MAX_DISTINCT_TEMPLATES distinct messages — some rare ones may be missing",
+                                color = tc.td,
+                                fontSize = 9.sp,
+                                fontFamily = UI,
+                                maxLines = 2,
+                                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 4.dp),
+                            )
+                        }
+                        val shown = templates.take(LOG_COMPOSITION_TOP_N)
+                        BoundedScrollBox(minOf(shown.size, filterListRows), rowDp = LOG_COMPOSITION_ROW_DP) {
+                            shown.forEach { t ->
+                                val sample = tab.rmap[t.firstEntryId]?.msg ?: t.template
+                                val spec = messageRuleSpecForTemplate(t, sample)
+                                LogCompositionRow(
+                                    entry = t,
+                                    sampleMessage = sample,
+                                    regexBacked = spec.regex,
+                                    showRuleActions = filter.mode == FilterMode.TAGS,
+                                    tc = tc,
+                                    onHide = { logCompositionActions.onHide(t) },
+                                    onShowOnly = { logCompositionActions.onShowOnly(t) },
+                                    onHighlight = { logCompositionActions.onHighlight(t) },
+                                    onGoToFirst = { logCompositionActions.onGoToFirst(t) },
+                                )
+                            }
+                        }
+                        if (templates.size > shown.size) {
+                            // "Show all NNN…" affordance without the dialog behind it (Stage 2b's
+                            // job) — left inert rather than absent, so its presence signals more
+                            // data exists instead of silently truncating to N with no indication.
+                            AppText(
+                                "Show all ${templates.size}…",
+                                color = tc.td,
+                                fontSize = 10.sp,
+                                fontFamily = UI,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        Divider()
 
         // ── Highlighters ──────────────────────────────────────────
         // Trailing shows colored dots for each highlighter; clicking collapses/expands the list.
@@ -2822,6 +2937,18 @@ private fun BoundedScrollBox(
 // message at maxLines=2 (~16dp/line, ~32dp for two lines) = 2 + 12 + 15 + 3 + 32 = 64dp.
 private const val CRASH_ROW_DP = 64
 
+// Top N histogram rows shown directly in the panel — "10 is reasonable" (Stage 2a plan); the
+// "Show all NNN…" affordance below it is left inert rather than wired to a dialog, which is
+// Stage 2b's job.
+private const val LOG_COMPOSITION_TOP_N = 10
+
+// LogCompositionRow's real height, same derivation style as CRASH_ROW_DP above: border 1dp
+// top+bottom (2dp) + Column vertical padding 6dp top+bottom (12dp) + the header Row (10sp count +
+// 9sp tag, ~14dp tall) + 3dp spacer + the 11sp template at maxLines=2 (~16dp/line, 32dp) + 2dp
+// spacer + the 11sp sample line at maxLines=1 (~16dp) + 4dp spacer + the 18dp action-button row
+// = 2 + 12 + 14 + 3 + 32 + 2 + 16 + 4 + 18 = 103dp.
+private const val LOG_COMPOSITION_ROW_DP = 103
+
 private val NATIVE_CRASH_COLOR = Color(0xFF8957e5)
 
 private fun IssueSite.accentColor(): Color = when (this) {
@@ -2990,6 +3117,81 @@ private fun IssueSiteRow(
                 maxLines = 2, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 3.dp),
             )
+        }
+    }
+}
+
+// One of the four not-computed/computing/computed-and-empty/failed states for the Log
+// composition section — same centered glyph+text shape the Issues section uses for its own empty
+// state, inlined there rather than shared (see that section above).
+@Composable
+private fun LogCompositionHint(glyph: String, text: String, tc: ThemeColors, glyphColor: Color = tc.td.copy(.33f)) {
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        AppText(glyph, color = glyphColor, fontSize = 18.sp)
+        AppText(text, color = tc.td, fontSize = 10.sp, maxLines = 2)
+    }
+}
+
+// One histogram row: count + tag (the ranking), the masked template, and the real sample line
+// (tab.rmap[firstEntryId].msg — never a reconstruction, per the Stage 2a plan: it's how a user
+// notices the grouping is too coarse) followed by the row actions. [showRuleActions] hides
+// Hide/Show only in Regex filter mode, where message rules are ignored (utils/Filter.kt) and
+// would otherwise sit there as dead buttons — Highlight/First stay available since neither depends
+// on message rules.
+@Composable
+private fun LogCompositionRow(
+    entry: MessageTemplate,
+    sampleMessage: String,
+    regexBacked: Boolean,
+    showRuleActions: Boolean,
+    tc: ThemeColors,
+    onHide: () -> Unit,
+    onShowOnly: () -> Unit,
+    onHighlight: () -> Unit,
+    onGoToFirst: () -> Unit,
+) {
+    Column(
+        Modifier.fillMaxWidth()
+            .border(BorderStroke(1.dp, tc.br.copy(.4f)))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppText("${entry.count}×", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+            AppText(
+                entry.tag, color = tc.td, fontSize = 9.sp, fontFamily = MONO,
+                modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis,
+            )
+            // Mark regex-backed rows visibly — a hide/show/highlight built here silently became a
+            // regex rule (see utils/MessageTemplates.kt's messageRuleSpecForTemplate) and the user
+            // should never be surprised by that in the Message rules / Highlighters pill lists.
+            if (regexBacked) {
+                Box(
+                    Modifier.background(tc.ac.copy(.15f), CORNER_SM).border(1.dp, tc.ac.copy(.4f), CORNER_SM)
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                ) { AppText("regex", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold) }
+            }
+        }
+        AppText(
+            entry.template, color = tc.tx, fontSize = 11.sp, fontFamily = MONO,
+            maxLines = 2, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 3.dp),
+        )
+        AppText(
+            sampleMessage, color = tc.ts, fontSize = 11.sp, fontFamily = MONO,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (showRuleActions) {
+                LabelIconButton("Hide", 9.sp, onHide)
+                LabelIconButton("Show only", 9.sp, onShowOnly)
+            }
+            LabelIconButton("Highlight", 9.sp, onHighlight)
+            LabelIconButton("First", 9.sp, onGoToFirst)
         }
     }
 }

@@ -661,3 +661,91 @@ internal fun foldTemplates(histogram: MessageTemplateHistogram, granularity: Tem
     out.sortWith(compareByDescending<MessageTemplate> { it.count }.thenBy { it.firstEntryId })
     return out
 }
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Row-action pattern mapping (Stage 2a, ui/FilterPanel.kt's Log composition section). A masked
+// [MessageTemplate.template] is NOT a substring of any raw line, so a literal MessageRule built
+// straight from it matches zero entries and leaves a dead rule pill in the panel. This maps a
+// histogram row to what its Hide/Show only/Highlight row actions should actually create.
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** What a Log composition row action (Hide/Show only/Highlight) should build: a literal
+ *  ([regex] = false) or regex ([regex] = true) MessageRule/Highlighter pattern. */
+internal data class TemplateRuleSpec(val pattern: String, val regex: Boolean)
+
+// Below this many literal characters, a prefix rule is more likely to hide/show unrelated lines
+// than the ones the user actually meant ("id=" or a single leading letter isn't a useful
+// discriminator) — picked, not measured; short/leading-mask templates fall through to a regex
+// rule instead, which can encode the mask position precisely.
+private const val MIN_DISCRIMINATING_LITERAL_PREFIX = 4
+
+private data class MaskRegexToken(val literal: String, val regexFragment: String)
+
+// One regex fragment per mask token (HEX_TOKEN/UUID_TOKEN/... above), used to reconstruct a regex
+// from an already-masked template. Deliberately looser than the scanner's own match rules (e.g.
+// PATH_TOKEN's fragment doesn't require >=2 slashes) — this only has to match the raw line(s) that
+// produced the template, not re-implement maskMessage's exact grammar.
+private val MASK_REGEX_TOKENS = listOf(
+    MaskRegexToken(UUID_TOKEN, "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"),
+    MaskRegexToken(HEX_TOKEN, "(?:0[xX][0-9a-fA-F]+|[0-9a-fA-F]{$MIN_HEX_RUN_LENGTH,})"),
+    MaskRegexToken(NUMBER_TOKEN, "\\d+(?:\\.\\d+)*"),
+    MaskRegexToken(STRING_TOKEN, "\"[^\"\\n]*\""),
+    MaskRegexToken(PATH_TOKEN, "\\S*/\\S+"),
+)
+
+private val REGEX_METACHARS = ".^\$|?*+()[]{}\\".toSet()
+
+// A literal template run may contain a SINGLE space standing in for a raw run of one-or-more
+// whitespace characters (maskMessage's scan only collapses runs longer than one — see its own
+// doc) — mapped to `\s+` here rather than a literal space so the reconstructed regex matches
+// either shape, instead of reproducing the same whitespace-collapse mismatch a literal-prefix
+// rule built from the template (rather than the raw sample) would have.
+private fun escapeLiteralRunForRegex(text: String): String {
+    val sb = StringBuilder(text.length)
+    for (c in text) {
+        when {
+            c == ' ' -> sb.append("\\s+")
+            c in REGEX_METACHARS -> sb.append('\\').append(c)
+            else -> sb.append(c)
+        }
+    }
+    return sb.toString()
+}
+
+/** Reconstructs a regex that matches the raw line(s) an already-masked [template] came from,
+ *  substituting each mask token for a fragment that accepts what the scanner would have masked
+ *  there, and every literal run for its escaped (whitespace-tolerant) text. */
+internal fun regexPatternForTemplate(template: String): String {
+    val sb = StringBuilder()
+    var i = 0
+    while (i < template.length) {
+        val token = MASK_REGEX_TOKENS.firstOrNull { template.startsWith(it.literal, i) }
+        if (token != null) {
+            sb.append(token.regexFragment)
+            i += token.literal.length
+        } else {
+            sb.append(escapeLiteralRunForRegex(template[i].toString()))
+            i++
+        }
+    }
+    return sb.toString()
+}
+
+// The mapping described at the top of this section:
+//  - template is fully literal (no mask token anywhere) -> literal rule on the whole template.
+//  - a discriminating literal prefix exists -> literal rule on that prefix, sliced out of
+//    [sampleRawMessage] at [MessageTemplate.literalPrefixRawLength] — NOT
+//    template.template.substring(0, literalPrefixLength), which is whitespace-collapsed and can
+//    fail to contains-match the very raw line it came from (see MessageTemplatesTest).
+//  - otherwise (short or leading mask) -> a regex rule reconstructed from the template.
+internal fun messageRuleSpecForTemplate(template: MessageTemplate, sampleRawMessage: String): TemplateRuleSpec {
+    val fullyLiteral = template.literalPrefixLength == template.template.length
+    return when {
+        fullyLiteral -> TemplateRuleSpec(template.template, regex = false)
+        template.literalPrefixLength >= MIN_DISCRIMINATING_LITERAL_PREFIX -> {
+            val rawPrefixLen = template.literalPrefixRawLength.coerceIn(0, sampleRawMessage.length)
+            TemplateRuleSpec(sampleRawMessage.substring(0, rawPrefixLen), regex = false)
+        }
+        else -> TemplateRuleSpec(regexPatternForTemplate(template.template), regex = true)
+    }
+}

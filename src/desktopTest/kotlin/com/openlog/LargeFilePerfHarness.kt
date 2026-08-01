@@ -78,11 +78,11 @@ class LargeFilePerfHarness {
         timed("analysis.crashSites") { computeCrashSites(data, stackGroupsOnly) }
         timed("analysis.tagCounts") { data.groupingBy { it.tag }.eachCount() }
 
-        // The log-composition scan. This is the gate on the rest of that feature: it runs on every
-        // load, for a panel most sessions never open, so its cost has to be known rather than
-        // estimated before any UI is built on top of it. Heap is reported too — the histogram is
-        // retained on LogAnalysis for the tab's lifetime, unlike the timings above whose results
-        // are transient here.
+        // The log-composition scan. This measurement is what gated the rest of that feature
+        // (Stage 2a): the ~4s cost measured here is too much to pay on every load for a panel most
+        // sessions never open, which is why AppState.requestMessageComposition now runs this only
+        // on demand and stores the result on LogTab.messageComposition, not on every tab's
+        // LogAnalysis. Heap is reported too, unlike the transient timings above.
         val heapBeforeTemplates = heapUsedMb()
         val templates = timed("analysis.messageTemplates") { computeMessageTemplates(data, stackGroupsOnly) }
         println("PERF messageTemplates heap: ${heapUsedMb() - heapBeforeTemplates}MB")

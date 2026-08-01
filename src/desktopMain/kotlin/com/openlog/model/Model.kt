@@ -149,16 +149,40 @@ data class MessageTemplateHistogram(
     val overflowed: Boolean,
 )
 
+// Stage 2a: on-demand state for one tab's message-composition histogram (utils/MessageTemplates.kt),
+// held on LogTab.messageComposition rather than LogAnalysis — buildLogAnalysis (ui/AppState.kt) no
+// longer computes this eagerly (Stage 1 measured the scan at ~4s on a 10M-line file, too much to
+// pay on every load for a panel most sessions never open), so it needs its own field with its own
+// lifecycle instead of being wiped out from under the panel every time TailCoordinator rebuilds
+// LogAnalysis wholesale on its debounce.
+//
+// A sealed variant per state (not a nullable histogram + a separate "computing" boolean) so
+// "never computed" and "computed and genuinely empty" can never be confused — this codebase has a
+// documented scar from exactly that ambiguity for LogAnalysis.pending below; the same shape of bug
+// would recur here if [Computed] with an empty [MessageTemplateHistogram.templates] compared equal
+// (or was merely mistakable for) [NotComputed].
+sealed interface MessageCompositionState {
+    /** The "Log composition" filter-panel section has never been expanded for this tab (or the
+     *  tab was just opened/restored). No action has been taken and none is implied — expanding
+     *  the section is itself what triggers [Computing]. */
+    data object NotComputed : MessageCompositionState
+
+    /** A scan is running on AppState.ioScope right now (AppState.requestMessageComposition). */
+    data object Computing : MessageCompositionState
+
+    /** The scan completed. [histogram] may legitimately be empty — e.g. a file that is entirely
+     *  one excluded stack-trace dump — and that is a genuine, displayable result, not an error. */
+    data class Computed(val histogram: MessageTemplateHistogram) : MessageCompositionState
+
+    /** The scan threw. [message] is shown in the panel; the next expand retries from scratch. */
+    data class Failed(val message: String) : MessageCompositionState
+}
+
 data class LogAnalysis(
     val tagCounts: Map<String, Int> = emptyMap(),
     val stackTraceGroups: List<StackTraceGroup> = emptyList(),
     val crashSites: List<CrashSite> = emptyList(),
     val customIssueSites: List<CustomIssueSite> = emptyList(),
-    // Composition histogram (utils/MessageTemplates.kt) — display-only today (Stage 1: engine +
-    // measurement, no UI/MCP). Deliberately NOT a memo-cache/remember key anywhere (see that
-    // file's header) so it can never invalidate computeItems or LogViewer.
-    val messageTemplates: MessageTemplateHistogram =
-        MessageTemplateHistogram(emptyList(), TemplateGranularity.STRICT, 0, 0, false),
     // True while the stack-trace/crash analysis is still computing in the background after a
     // load — it costs as much as the parse itself on multi-GB files, and the initial render
     // doesn't need it. Rows render unfolded and the crash panel shows an "analyzing" hint until
@@ -568,6 +592,16 @@ data class LogTab(
     // the accepted residual risk is that a pre-existing same-named file in the NEW directory is then
     // overwritten without a prompt.
     val noteTargetName: String? = null,
+    // On-demand message-composition histogram (utils/MessageTemplates.kt), computed only when
+    // the filter panel's "Log composition" section (ui/FilterPanel.kt) is expanded — see
+    // MessageCompositionState's own doc for why this is a sealed variant rather than a nullable
+    // histogram. Session-only, like tidMap/search/tailing above: deliberately absent from
+    // persistedSnapshot()/tabToken()/tabShellFromToken() (AutosaveCodec.kt) — it is derived data,
+    // and a multi-second recompute on the next expand is cheaper than tying the autosave format
+    // to this histogram's shape. TailCoordinator folds newly tailed lines in only when this is
+    // already Computed for the tab (see appendTailedLines) — a tail flush never triggers the
+    // initial scan and never discards one.
+    val messageComposition: MessageCompositionState = MessageCompositionState.NotComputed,
 )
 
 /**

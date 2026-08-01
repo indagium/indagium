@@ -131,6 +131,12 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
 // hard stop against an unbounded loop.
 private const val MAX_NOTE_TARGET_SUFFIX = 1000
 
+// Stage 1 wired computeMessageTemplates() into this function (Stage 2a unwired it): the
+// ~4s-on-10M-lines scan is too much to pay on every load for a panel most sessions never open. It
+// now runs only on demand (requestMessageComposition, below on AppState), landing on
+// LogTab.messageComposition instead of this LogAnalysis — TailCoordinator replaces a tab's whole
+// `analysis` wholesale on its debounce, so a histogram stored here would be silently discarded by
+// the next tail flush.
 internal fun buildLogAnalysis(data: List<LogEntry>, customIssueRules: List<CustomIssueRule> = emptyList()): LogAnalysis {
     val stackGroups = computeStackTraceGroups(data)
     return LogAnalysis(
@@ -138,9 +144,6 @@ internal fun buildLogAnalysis(data: List<LogEntry>, customIssueRules: List<Custo
         stackTraceGroups = stackGroups,
         crashSites = computeCrashSites(data, stackGroups),
         customIssueSites = computeCustomIssueSites(data, customIssueRules),
-        // Stage 1: engine + measurement only, no UI reads this yet. Always computed at STRICT —
-        // display-time level switching (Stage 2) folds via foldTemplates() instead of rescanning.
-        messageTemplates = computeMessageTemplates(data, stackGroups),
         pending = false,
     )
 }
@@ -2068,6 +2071,46 @@ class AppState(
 
     fun removeMessageRule(tabId: String, id: String) = upFlt(tabId) { f ->
         f.copy(messageRules = f.messageRules.filterNot { it.id == id })
+    }
+
+    // ── Log composition (Stage 2a) ────────────────────────────────────
+    // On-demand message-composition histogram, requested only when the filter panel's "Log
+    // composition" section is expanded (ui/FilterPanel.kt) — see LogTab.messageComposition's own
+    // doc for why this isn't computed as part of buildLogAnalysis. Single-flight per tab: the
+    // NotComputed/Failed -> Computing transition happens synchronously inside upTab (itself
+    // synchronized on stateLock), so two calls arriving back-to-back — the section mounting twice
+    // from a fast collapse/expand, or a tab switch racing the header click — can never both see
+    // NotComputed/Failed and both launch a scan. Returns whether this call actually started a new
+    // scan (false when one was already running or the histogram already exists), which is what
+    // the guard-against-double-start test asserts on directly rather than inferring from timing.
+    fun requestMessageComposition(tabId: String): Boolean {
+        var started = false
+        upTab(tabId) { t ->
+            when (t.messageComposition) {
+                is MessageCompositionState.NotComputed, is MessageCompositionState.Failed -> {
+                    started = true
+                    t.copy(messageComposition = MessageCompositionState.Computing)
+                }
+                is MessageCompositionState.Computing, is MessageCompositionState.Computed -> t
+            }
+        }
+        if (!started) return false
+        ioScope.launch {
+            val snapshot = tab(tabId) ?: return@launch
+            val result = runCatching { computeMessageTemplates(snapshot.logData, snapshot.analysis.stackTraceGroups) }
+            upTab(tabId) { t ->
+                // Only land the result while still Computing — if the tab was closed and a new one
+                // reused the id (or some future path reset this field), this must not resurrect it.
+                if (t.messageComposition !is MessageCompositionState.Computing) return@upTab t
+                result.fold(
+                    onSuccess = { histogram -> t.copy(messageComposition = MessageCompositionState.Computed(histogram)) },
+                    onFailure = { e ->
+                        t.copy(messageComposition = MessageCompositionState.Failed(e.message ?: "Log composition scan failed"))
+                    },
+                )
+            }
+        }
+        return true
     }
 
     // ── Highlighters ────────────────────────────────────────────────
