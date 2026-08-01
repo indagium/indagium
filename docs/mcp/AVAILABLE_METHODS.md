@@ -13,6 +13,14 @@ version-controlled map of what an AI can do and how to prompt it. Most read meth
   independent of filters/folding.
 - `get_tags` and `get_packages` — discover exact tag or package-prefix values. `get_crash_sites`
   and `get_issue_description` — find high-signal failure anchors and the user-reported problem.
+- `get_log_composition` — rank the distinct masked message shapes in the tab's CURRENT FILTERED
+  VIEW (not the whole file), most frequent first by default. Narrow with `set_filter`, then call
+  this instead of scrolling for repeats. `order:rare` flips to least-frequent-first — the lens
+  that tends to find one-off defects rather than routine noise. A result cached for the tab's
+  exact current filter returns instantly; otherwise this scans synchronously and can take several
+  seconds on a large unfiltered tab, so filter first. Each row is compact (tag/template/count/
+  firstLineId) — follow up with `get_line_context` on `firstLineId` for real text. Check
+  `overflowed`: when true the rare lens is incomplete, not exhaustive.
 
 ## Filters, sequences, and navigation
 

@@ -10,6 +10,29 @@ import com.openlog.ui.SEQ_COLORS
 // base tag filter. Regex/Keyword mode is intentionally just kwText + kwRegex; persisted
 // KEYWORD-mode rules are ignored so hidden rules cannot silently affect results.
 // Negative rules and exclusions apply only when their owning feature is active.
+
+/**
+ * The part of a [Filter] that actually decides which entries are admitted — i.e. everything
+ * [passesFilter] reads. Highlighters, the keyword-highlight settings, and sequence folding are
+ * display concerns: they change how surviving rows LOOK, never which rows survive.
+ *
+ * Callers cache work keyed on "the current view" (the log-composition scan is the first) and must
+ * not redo it when the user merely recolours something. Adding a highlighter changes `Filter` and
+ * so would invalidate such a cache, which is why comparing whole Filters is wrong for that purpose.
+ *
+ * Deliberately written as a copy that BLANKS the display-only fields rather than as a projection
+ * listing the filtering ones: a field added to [Filter] later is then included by default, so the
+ * failure mode of forgetting to update this is an unnecessary recompute rather than a silently
+ * stale one. If a field added here turns out to be display-only, blank it explicitly.
+ */
+fun Filter.viewDefiningKey(): Filter = copy(
+    highlighters = emptyList(),
+    kwHighlightEnabled = false,
+    kwHighlightColor = DEFAULT_KEYWORD_HIGHLIGHT_COLOR,
+    seqOn = true,
+    sequences = emptyList(),
+)
+
 fun passesFilter(entry: LogEntry, filter: Filter): Boolean =
     passesFilter(entry, filter, RegexEvaluationContext())
 

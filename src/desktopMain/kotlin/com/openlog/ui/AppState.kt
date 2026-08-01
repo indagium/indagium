@@ -59,6 +59,7 @@ import com.openlog.utils.buildMd
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeCustomIssueSites
 import com.openlog.utils.computeItems
+import com.openlog.utils.computeMessageTemplates
 import com.openlog.utils.computeProcessNames
 import com.openlog.utils.computeSearchMatches
 import com.openlog.utils.computeStackTraceGroups
@@ -75,7 +76,10 @@ import com.openlog.utils.isLikelyTextFile
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.listArchiveVideoCandidates
+import com.openlog.utils.matchingHighlighter
+import com.openlog.utils.matchingMessageRule
 import com.openlog.utils.mergeLogs
+import com.openlog.utils.messageRuleSpecForTemplate
 import com.openlog.utils.newId
 import com.openlog.utils.openArchiveCandidateStream
 import com.openlog.utils.parseLogcat
@@ -87,6 +91,9 @@ import com.openlog.utils.requiresSplitPrompt
 import com.openlog.utils.splitFileToFiles
 import com.openlog.utils.splitStreamToFiles
 import com.openlog.utils.suggestedSplitPartCount
+import com.openlog.utils.truncateAtSeparator
+import com.openlog.utils.viewDefiningKey
+import com.openlog.utils.visibleEntries
 import com.openlog.video.FailedVideoPlayerController
 import com.openlog.video.VideoPlayerController
 import com.openlog.video.defaultVideoPlayerController
@@ -104,16 +111,12 @@ import java.util.concurrent.atomic.AtomicInteger
 
 internal fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = EntryIdMap(data)
 
-// Separators the "Hide/Show messages like this" (and "Add as sequence") flyout truncates a
-// message at — the same rough set a human skimming logcat output uses to separate a message's
-// stable/templated part from its variable tail, e.g. "Card stack expanded: stackId=stack_home"
-// truncates at ':' first ("Card stack expanded") then at '=' ("Card stack expanded: stackId").
-private val MESSAGE_RULE_SEPARATORS = charArrayOf('-', '/', '\\', ',', '.', ':', '=')
-
 // Scope + pattern for one "Hide/Show messages like this" choice. Kept outside AppState so the
 // message-rule search can offer exactly the same stable-prefix variants as the log-row flyout.
 data class MessageRuleVariant(val label: String, val pattern: String, val tag: String?)
 
+// Separator set and truncateAtSeparator are promoted to utils/MessageTemplates.kt (shared with the
+// message-template histogram's Normal/Loose granularity folding) — imported above.
 internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? = null): List<MessageRuleVariant> {
     val selected = selectedText?.trim().orEmpty()
     if (selected.isNotBlank()) {
@@ -123,18 +126,8 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
         )
     }
 
-    fun truncateAtSeparator(n: Int): String {
-        var count = 0
-        for (i in entry.msg.indices) {
-            if (entry.msg[i] in MESSAGE_RULE_SEPARATORS) {
-                count++
-                if (count == n) return entry.msg.substring(0, i).trimEnd()
-            }
-        }
-        return entry.msg
-    }
-    val toFirst = truncateAtSeparator(1)
-    val toSecond = truncateAtSeparator(2)
+    val toFirst = truncateAtSeparator(entry.msg, 1)
+    val toSecond = truncateAtSeparator(entry.msg, 2)
     return buildList {
         add(MessageRuleVariant("${entry.tag}: $toFirst", toFirst, entry.tag))
         if (toSecond != toFirst) add(MessageRuleVariant("${entry.tag}: $toSecond", toSecond, entry.tag))
@@ -148,6 +141,12 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
 // hard stop against an unbounded loop.
 private const val MAX_NOTE_TARGET_SUFFIX = 1000
 
+// Stage 1 wired computeMessageTemplates() into this function (Stage 2a unwired it): the
+// ~4s-on-10M-lines scan is too much to pay on every load for a panel most sessions never open. It
+// now runs only on demand (requestMessageComposition, below on AppState), landing on
+// LogTab.messageComposition instead of this LogAnalysis — TailCoordinator replaces a tab's whole
+// `analysis` wholesale on its debounce, so a histogram stored here would be silently discarded by
+// the next tail flush.
 internal fun buildLogAnalysis(data: List<LogEntry>, customIssueRules: List<CustomIssueRule> = emptyList()): LogAnalysis {
     val stackGroups = computeStackTraceGroups(data)
     return LogAnalysis(
@@ -2122,11 +2121,7 @@ class AppState(
                 target = target,
                 mode = f.mode,
             )
-            val sameShape: (MessageRule) -> Boolean = { existing ->
-                existing.pattern == rule.pattern && existing.regex == rule.regex &&
-                    existing.tag == rule.tag && existing.packagePrefix == rule.packagePrefix &&
-                    existing.target == rule.target && existing.mode == rule.mode
-            }
+            val sameShape: (MessageRule) -> Boolean = { existing -> messageRulesSameShape(existing, rule) }
             val withoutOpposite = f.messageRules.filterNot { sameShape(it) && it.include != include }
             f.copy(
                 messageRules = if (withoutOpposite.any { sameShape(it) && it.include == include }) {
@@ -2144,6 +2139,117 @@ class AppState(
 
     fun removeMessageRule(tabId: String, id: String) = upFlt(tabId) { f ->
         f.copy(messageRules = f.messageRules.filterNot { it.id == id })
+    }
+
+    // ── Log composition (Stage 2a) ────────────────────────────────────
+    // On-demand message-composition histogram, requested only when the filter panel's "Log
+    // composition" section is expanded (ui/FilterPanel.kt) — see LogTab.messageComposition's own
+    // doc for why this isn't computed as part of buildLogAnalysis. Single-flight per tab: the
+    // NotComputed/Failed -> Computing transition happens synchronously inside upTab (itself
+    // synchronized on stateLock), so two calls arriving back-to-back — the section mounting twice
+    // from a fast collapse/expand, or a tab switch racing the header click — can never both see
+    // NotComputed/Failed and both launch a scan. Returns whether this call actually started a new
+    // scan (false when one was already running or the histogram already exists), which is what
+    // the guard-against-double-start test asserts on directly rather than inferring from timing.
+    // In-flight composition scans, so a filter change can cancel the one it supersedes instead of
+    // leaving it to run to completion on a multi-GB view. Cancellation is an optimisation only —
+    // correctness comes from the forFilter check when the result lands, which holds even if a
+    // cancelled scan finishes anyway.
+    private val compositionJobs = ConcurrentHashMap<String, Job>()
+
+    /**
+     * Starts a composition scan for [tabId] over the tab's CURRENTLY VISIBLE entries, unless one is
+     * already running or finished for that exact filter. Returns whether a scan actually started —
+     * the single-flight guard is observable rather than something callers have to time.
+     */
+    fun requestMessageComposition(tabId: String): Boolean {
+        var target: Filter? = null
+        upTab(tabId) { t ->
+            val state = t.messageComposition
+            // Keyed on what actually defines the view, not the whole Filter: adding a highlighter
+            // changes `filter` but not one line of what is admitted, so it must not trigger a
+            // rescan (see Filter.viewDefiningKey).
+            val wanted = t.filter.viewDefiningKey()
+            val alreadyCurrent = when (state) {
+                is MessageCompositionState.Computing -> state.forFilter == wanted
+                is MessageCompositionState.Computed -> state.forFilter == wanted
+                else -> false
+            }
+            if (alreadyCurrent) {
+                t
+            } else {
+                target = wanted
+                // Carry the last good result through the rescan so the panel keeps showing it
+                // rather than blanking; hiding one shape is the common trigger and blanking there
+                // reads as a glitch.
+                val previous = (state as? MessageCompositionState.Computed)?.histogram
+                    ?: (state as? MessageCompositionState.Computing)?.previous
+                t.copy(messageComposition = MessageCompositionState.Computing(wanted, previous))
+            }
+        }
+        val startedFor = target ?: return false
+        compositionJobs.remove(tabId)?.cancel()
+        val job = ioScope.launch {
+            val snapshot = tab(tabId) ?: return@launch
+            val result = runCatching {
+                // The composition answers "what is this VIEW made of", so it scans what the filter
+                // admits, not the whole file. That is also what makes it cheap in the case that
+                // matters: narrowing to one package turns a multi-second whole-log scan into a scan
+                // of the handful of lines actually on screen.
+                val visible = visibleEntries(snapshot)
+                computeMessageTemplates(visible, snapshot.analysis.stackTraceGroups) { ensureActive() }
+            }
+            upTab(tabId) { t ->
+                // Land only if this scan is still the current one: a newer request replaced the
+                // state with its own Computing(forFilter), so a superseded scan finds a mismatch
+                // here and drops its result rather than overwriting fresher data.
+                val state = t.messageComposition
+                if (state !is MessageCompositionState.Computing || state.forFilter != startedFor) return@upTab t
+                result.fold(
+                    onSuccess = { histogram ->
+                        t.copy(messageComposition = MessageCompositionState.Computed(histogram, startedFor))
+                    },
+                    onFailure = { e ->
+                        if (e is CancellationException) throw e
+                        t.copy(messageComposition = MessageCompositionState.Failed(e.message ?: "Log composition scan failed"))
+                    },
+                )
+            }
+        }
+        compositionJobs[tabId] = job
+        job.invokeOnCompletion { compositionJobs.remove(tabId, job) }
+        return true
+    }
+
+    // ── Log composition row actions (Stage 2c) ─────────────────────────
+    // Hide/Show only/Highlight in the "Log composition" panel section (ui/FilterPanel.kt) toggle
+    // rather than fire once: a press on an already-applied row must undo exactly what the earlier
+    // press did, not add a duplicate. "Already applied" is answered by
+    // utils/MessageTemplates.matchingMessageRule / matchingHighlighter, which build the same
+    // candidate addMessageRule/addHl would from this (template, sample) pair and compare via
+    // model.messageRulesSameShape — the same notion addMessageRule itself uses to dedupe/replace an
+    // opposite-direction rule, so the panel's idea of "this row is applied" cannot drift from what
+    // pressing the button actually creates.
+    fun toggleMessageRuleForTemplate(tabId: String, template: MessageTemplate, include: Boolean) {
+        val f = tab(tabId)?.filter ?: return
+        val existing = matchingMessageRule(f.messageRules, template, include, f.mode)
+        if (existing != null) {
+            removeMessageRule(tabId, existing.id)
+        } else {
+            val spec = messageRuleSpecForTemplate(template)
+            addMessageRule(tabId, include = include, pattern = spec.pattern, regex = spec.regex, tag = template.tag, packagePrefix = null)
+        }
+    }
+
+    fun toggleHighlightForTemplate(tabId: String, template: MessageTemplate) {
+        val f = tab(tabId)?.filter ?: return
+        val existing = matchingHighlighter(f.highlighters, template)
+        if (existing != null) {
+            removeHl(tabId, existing.id)
+        } else {
+            val spec = messageRuleSpecForTemplate(template)
+            addHl(tabId, spec.pattern, spec.regex, nextAvailableHighlighterColor(tabId))
+        }
     }
 
     // ── Highlighters ────────────────────────────────────────────────

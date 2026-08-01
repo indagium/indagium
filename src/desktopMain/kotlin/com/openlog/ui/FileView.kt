@@ -38,6 +38,39 @@ internal fun BoundFilterPanel(
     onPanelFocusChanged: (Boolean) -> Unit = {},
 ) {
     if (!state.filterVisible) return
+    // Grouped into one data class rather than five more lambdas on this already-~90-parameter
+    // call (see LogCompositionActions' own doc) — remember(state, tab.id) so it stays == across
+    // recompositions that don't change tab identity, which is what keeps FilterPanel skippable.
+    // Each lambda re-reads state.tab(tab.id) itself rather than closing over the `tab` parameter
+    // above, since remember's keys (state, tab.id) don't capture a fresh `tab` on every
+    // recomposition — closing over it here would leave these lambdas holding a stale rmap/logData
+    // snapshot from whenever the bag was first built for this tab.id.
+    val logCompositionActions = remember(state, tab.id) {
+        fun sampleFor(template: MessageTemplate): String =
+            state.tab(tab.id)?.rmap?.get(template.firstEntryId)?.msg ?: template.template
+        // Hide/Show only/Highlight toggle (Stage 2c): each press either applies or removes the
+        // corresponding rule/highlighter for this row, decided by AppState.toggleMessageRuleForTemplate
+        // / toggleHighlightForTemplate — see those functions' doc for the shared "same shape" check
+        // that also drives the panel's active/inactive button rendering.
+        LogCompositionActions(
+            onExpand = { state.requestMessageComposition(tab.id) },
+            // Kick the rescan off immediately rather than letting the panel's debounced
+            // filter-watcher notice 400ms later: that debounce exists for typing in a message-rule
+            // box, and a button press is a discrete action that should not wait it out.
+            // requestMessageComposition is single-flight, so the debounced call that follows for
+            // the same filter is a no-op.
+            onHide = { template ->
+                state.toggleMessageRuleForTemplate(tab.id, template, include = false)
+                state.requestMessageComposition(tab.id)
+            },
+            onShowOnly = { template ->
+                state.toggleMessageRuleForTemplate(tab.id, template, include = true)
+                state.requestMessageComposition(tab.id)
+            },
+            onHighlight = { template -> state.toggleHighlightForTemplate(tab.id, template) },
+            onGoToFirst = { template -> state.requestLineNavigation(tab.id, template.firstEntryId) },
+        )
+    }
     FilterPanel(
         tab = tab, savedFilters = state.savedFiltersForTab(tab.id),
         savedFilterFolders = state.savedFilterFolders,
@@ -116,6 +149,7 @@ internal fun BoundFilterPanel(
         onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
         onClearFilter = { state.requestClearFilter(tab.id) },
         onNavigateCrash = { site -> state.requestLineNavigation(tab.id, site.entry.id) },
+        logCompositionActions = logCompositionActions,
         onUiStateChanged = { state.autosaveNow() },
         mostUsedTagLimit = state.settings.mostUsedTagLimit,
         filterListRows = state.settings.filterListRows,

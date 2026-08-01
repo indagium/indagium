@@ -138,6 +138,83 @@ sealed interface IssueCategorySelection {
     data class Custom(val ruleId: String) : IssueCategorySelection
 }
 
+// Truncation granularity for the message-template histogram (utils/MessageTemplates.kt). Masking
+// itself never varies with this — see that file's header comment for why that separation is the
+// whole point. STRICT is the untruncated masked template; NORMAL/LOOSE truncate it at the 2nd/1st
+// separator, mirroring the existing "Hide/Show messages like this" flyout variants.
+enum class TemplateGranularity { LOOSE, NORMAL, STRICT }
+
+// One row of the message-template histogram: [tag] + [template] (masked, and truncated per
+// [MessageTemplateHistogram.granularity]) identify the bucket; [count] is how many log entries
+// folded into it; [firstEntryId]/[lastEntryId] bound where it appears in the file.
+// [literalPrefixLength]/[literalPrefixRawLength] are the index into [template]/the original raw
+// message respectively at which the first mask token was emitted (or the full length if the
+// template is entirely literal) — see utils/MessageTemplates.kt's scan for why this can't be
+// recovered by re-parsing the template afterwards.
+data class MessageTemplate(
+    val tag: String,
+    val template: String,
+    val count: Int,
+    val firstEntryId: Int,
+    val lastEntryId: Int,
+    val literalPrefixLength: Int,
+    val literalPrefixRawLength: Int,
+)
+
+// The full result of one histogram scan (utils/MessageTemplates.computeMessageTemplates) or fold
+// (utils/MessageTemplates.foldTemplates). [templates] is sorted count-desc then firstEntryId-asc.
+// [totalEntries] is every entry seen (including stack-trace members skipped from counting and, if
+// [overflowed], distinct templates dropped past the cap); [countedEntries] is what actually landed
+// in [templates].
+data class MessageTemplateHistogram(
+    val templates: List<MessageTemplate>,
+    val granularity: TemplateGranularity,
+    val totalEntries: Int,
+    val countedEntries: Int,
+    val overflowed: Boolean,
+)
+
+// Stage 2a: on-demand state for one tab's message-composition histogram (utils/MessageTemplates.kt),
+// held on LogTab.messageComposition rather than LogAnalysis — buildLogAnalysis (ui/AppState.kt) no
+// longer computes this eagerly (Stage 1 measured the scan at ~4s on a 10M-line file, too much to
+// pay on every load for a panel most sessions never open), so it needs its own field with its own
+// lifecycle instead of being wiped out from under the panel every time TailCoordinator rebuilds
+// LogAnalysis wholesale on its debounce.
+//
+// A sealed variant per state (not a nullable histogram + a separate "computing" boolean) so
+// "never computed" and "computed and genuinely empty" can never be confused — this codebase has a
+// documented scar from exactly that ambiguity for LogAnalysis.pending below; the same shape of bug
+// would recur here if [Computed] with an empty [MessageTemplateHistogram.templates] compared equal
+// (or was merely mistakable for) [NotComputed].
+sealed interface MessageCompositionState {
+    /** The "Log composition" filter-panel section has never been expanded for this tab (or the
+     *  tab was just opened/restored). No action has been taken and none is implied — expanding
+     *  the section is itself what triggers [Computing]. */
+    data object NotComputed : MessageCompositionState
+
+    /** A scan is running on AppState.ioScope right now (AppState.requestMessageComposition).
+     *  [forFilter] is the filter it was started for — the composition describes what the CURRENT
+     *  VIEW is made of, not the whole file, so a result is only meaningful against the filter that
+     *  produced it. Carrying it here is also what makes a superseded scan harmless: a newer request
+     *  overwrites this state with its own [forFilter], so when the older scan finishes it no longer
+     *  matches and its result is dropped rather than clobbering the fresher one. */
+    data class Computing(val forFilter: Filter, val previous: MessageTemplateHistogram? = null) : MessageCompositionState
+
+    /** The scan completed for [forFilter]. [histogram] may legitimately be empty — e.g. a view that
+     *  is entirely one excluded stack-trace dump — and that is a genuine, displayable result, not
+     *  an error. When [forFilter] no longer equals the tab's filter the result is stale: still
+     *  worth showing (it is what the user was just looking at) but visibly so, while the recompute
+     *  runs.
+     *
+     *  [Computing.previous] carries the last completed histogram so a rescan can keep showing it
+     *  instead of blanking the list — a recompute triggered by hiding one shape would otherwise
+     *  flash the whole panel empty and back. */
+    data class Computed(val histogram: MessageTemplateHistogram, val forFilter: Filter) : MessageCompositionState
+
+    /** The scan threw. [message] is shown in the panel; the next expand retries from scratch. */
+    data class Failed(val message: String) : MessageCompositionState
+}
+
 data class LogAnalysis(
     val tagCounts: Map<String, Int> = emptyMap(),
     val stackTraceGroups: List<StackTraceGroup> = emptyList(),
@@ -237,6 +314,19 @@ data class MessageRule(
     // are preserved for compatibility with older autosave/filter data but are ignored by filtering.
     val mode: FilterMode = FilterMode.TAGS,
 )
+
+// Two rules describe "the same shape" when everything that determines what they match agrees —
+// pattern, regex, tag, packagePrefix, target, mode — regardless of id, enabled, or include. This
+// is the ONE definition of "same rule" in the app: AppState.addMessageRule uses it to replace an
+// opposite-direction rule for the same target instead of leaving two contradictory pills, and the
+// Log composition panel (utils/MessageTemplates.matchingMessageRule) uses it to decide whether a
+// row's Hide/Show-only button should render as already-applied. Keeping both call sites on one
+// function is deliberate: this codebase has already been bitten twice by two definitions of
+// "the same X" drifting apart (most recently a crash-grouping key duplicated between the panel and
+// the MCP response, which produced correct-looking rows silently reporting each other's counts).
+fun messageRulesSameShape(a: MessageRule, b: MessageRule): Boolean =
+    a.pattern == b.pattern && a.regex == b.regex && a.tag == b.tag &&
+        a.packagePrefix == b.packagePrefix && a.target == b.target && a.mode == b.mode
 
 // ── Annotations (block model) ──────────────────────────────────────
 sealed class AnnBlock {
@@ -590,6 +680,16 @@ data class LogTab(
     // the accepted residual risk is that a pre-existing same-named file in the NEW directory is then
     // overwritten without a prompt.
     val noteTargetName: String? = null,
+    // On-demand message-composition histogram (utils/MessageTemplates.kt), computed only when
+    // the filter panel's "Log composition" section (ui/FilterPanel.kt) is expanded — see
+    // MessageCompositionState's own doc for why this is a sealed variant rather than a nullable
+    // histogram. Session-only, like tidMap/search/tailing above: deliberately absent from
+    // persistedSnapshot()/tabToken()/tabShellFromToken() (AutosaveCodec.kt) — it is derived data,
+    // and a multi-second recompute on the next expand is cheaper than tying the autosave format
+    // to this histogram's shape. TailCoordinator folds newly tailed lines in only when this is
+    // already Computed for the tab (see appendTailedLines) — a tail flush never triggers the
+    // initial scan and never discards one.
+    val messageComposition: MessageCompositionState = MessageCompositionState.NotComputed,
 )
 
 /**
