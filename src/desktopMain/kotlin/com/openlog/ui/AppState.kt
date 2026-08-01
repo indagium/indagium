@@ -87,6 +87,7 @@ import com.openlog.utils.splitFileToFiles
 import com.openlog.utils.splitStreamToFiles
 import com.openlog.utils.suggestedSplitPartCount
 import com.openlog.utils.truncateAtSeparator
+import com.openlog.utils.viewDefiningKey
 import com.openlog.utils.visibleEntries
 import com.openlog.video.FailedVideoPlayerController
 import com.openlog.video.VideoPlayerController
@@ -2098,16 +2099,25 @@ class AppState(
         var target: Filter? = null
         upTab(tabId) { t ->
             val state = t.messageComposition
+            // Keyed on what actually defines the view, not the whole Filter: adding a highlighter
+            // changes `filter` but not one line of what is admitted, so it must not trigger a
+            // rescan (see Filter.viewDefiningKey).
+            val wanted = t.filter.viewDefiningKey()
             val alreadyCurrent = when (state) {
-                is MessageCompositionState.Computing -> state.forFilter == t.filter
-                is MessageCompositionState.Computed -> state.forFilter == t.filter
+                is MessageCompositionState.Computing -> state.forFilter == wanted
+                is MessageCompositionState.Computed -> state.forFilter == wanted
                 else -> false
             }
             if (alreadyCurrent) {
                 t
             } else {
-                target = t.filter
-                t.copy(messageComposition = MessageCompositionState.Computing(t.filter))
+                target = wanted
+                // Carry the last good result through the rescan so the panel keeps showing it
+                // rather than blanking; hiding one shape is the common trigger and blanking there
+                // reads as a glitch.
+                val previous = (state as? MessageCompositionState.Computed)?.histogram
+                    ?: (state as? MessageCompositionState.Computing)?.previous
+                t.copy(messageComposition = MessageCompositionState.Computing(wanted, previous))
             }
         }
         val startedFor = target ?: return false

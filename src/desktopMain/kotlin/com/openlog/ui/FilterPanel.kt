@@ -1533,7 +1533,23 @@ internal fun FilterPanel(
                 is MessageCompositionState.NotComputed ->
                     LogCompositionHint("◆", "Preparing to scan for repeated messages…", tc)
                 is MessageCompositionState.Computing ->
-                    LogCompositionHint("◌", "Scanning for repeated messages…", tc)
+                    // A rescan triggered by hiding a shape keeps the previous list on screen — the
+                    // rows are still what the user was reading, and blanking the panel for the
+                    // duration reads as a glitch rather than as progress.
+                    if (composition.previous != null) {
+                        LogCompositionResults(
+                            histogram = composition.previous,
+                            tab = tab,
+                            fpState = fpState,
+                            tc = tc,
+                            filter = filter,
+                            filterListRows = filterListRows,
+                            actions = logCompositionActions,
+                            refreshing = true,
+                        )
+                    } else {
+                        LogCompositionHint("◌", "Scanning for repeated messages…", tc)
+                    }
                 is MessageCompositionState.Failed ->
                     LogCompositionHint(
                         "✕",
@@ -1541,92 +1557,17 @@ internal fun FilterPanel(
                         tc,
                         glyphColor = DANGER_RED,
                     )
-                is MessageCompositionState.Computed -> {
-                    val templates = composition.histogram.templates
-                    // Switching tabs is a different question entirely, so the page resets. A new
-                    // scan result is not: a live-tailing tab re-folds its histogram every couple of
-                    // seconds, and resetting there would yank the user back to page 1 while they
-                    // were reading page 40. Clamp instead, which only moves them when the list
-                    // actually shrank past where they were standing. Searching resets too, inline
-                    // where the search text is set below.
-                    LaunchedEffect(tab.id) { fpState.logCompositionPage = 0 }
-                    LaunchedEffect(composition) {
-                        fpState.logCompositionPage = logCompositionClampPage(
-                            fpState.logCompositionPage,
-                            logCompositionSearchMatches(templates, fpState.logCompositionSearch).size,
-                        )
-                    }
-                    if (templates.isEmpty()) {
-                        LogCompositionHint("◆", "No repeated messages found", tc)
-                    } else {
-                        if (composition.histogram.overflowed) {
-                            AppText(
-                                "Scan capped at $MAX_DISTINCT_TEMPLATES distinct messages — some rare ones may be missing",
-                                color = tc.td,
-                                fontSize = 9.sp,
-                                fontFamily = UI,
-                                maxLines = 2,
-                                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 4.dp),
-                            )
-                        }
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            InlineField(
-                                value = fpState.logCompositionSearch,
-                                onValue = { v ->
-                                    fpState.logCompositionSearch = v
-                                    fpState.logCompositionPage = 0
-                                },
-                                placeholder = "search tag or message…",
-                                modifier = Modifier.weight(1f),
-                                fontSize = 11.sp,
-                                onClear = {
-                                    fpState.logCompositionSearch = ""
-                                    fpState.logCompositionPage = 0
-                                },
-                            )
-                        }
-                        val matched = logCompositionSearchMatches(templates, fpState.logCompositionSearch)
-                        if (matched.isEmpty()) {
-                            LogCompositionHint("◆", "No messages match “${fpState.logCompositionSearch.trim()}”", tc)
-                        } else {
-                            val pageCount = logCompositionPageCount(matched.size)
-                            val page = logCompositionClampPage(fpState.logCompositionPage, pageCount)
-                            val shown = logCompositionPageItems(matched, page)
-                            BoundedScrollBox(minOf(shown.size, filterListRows), rowDp = LOG_COMPOSITION_ROW_DP) {
-                                shown.forEach { t ->
-                                    val sample = tab.rmap[t.firstEntryId]?.msg ?: t.template
-                                    val spec = messageRuleSpecForTemplate(t, sample)
-                                    LogCompositionRow(
-                                        entry = t,
-                                        sampleMessage = sample,
-                                        regexBacked = spec.regex,
-                                        showRuleActions = filter.mode == FilterMode.TAGS,
-                                        hideApplied = matchingMessageRule(filter.messageRules, t, sample, include = false, filter.mode) != null,
-                                        showOnlyApplied = matchingMessageRule(filter.messageRules, t, sample, include = true, filter.mode) != null,
-                                        highlightApplied = matchingHighlighter(filter.highlighters, t, sample) != null,
-                                        tc = tc,
-                                        onHide = { logCompositionActions.onHide(t) },
-                                        onShowOnly = { logCompositionActions.onShowOnly(t) },
-                                        onHighlight = { logCompositionActions.onHighlight(t) },
-                                        onGoToFirst = { logCompositionActions.onGoToFirst(t) },
-                                    )
-                                }
-                            }
-                            LogCompositionPager(
-                                page = page,
-                                pageCount = pageCount,
-                                totalShapes = templates.size,
-                                matchedShapes = matched.size,
-                                searching = fpState.logCompositionSearch.isNotBlank(),
-                                tc = tc,
-                                onGoToPage = { fpState.logCompositionPage = it },
-                            )
-                        }
-                    }
-                }
+                is MessageCompositionState.Computed ->
+                    LogCompositionResults(
+                        histogram = composition.histogram,
+                        tab = tab,
+                        fpState = fpState,
+                        tc = tc,
+                        filter = filter,
+                        filterListRows = filterListRows,
+                        actions = logCompositionActions,
+                        refreshing = false,
+                    )
             }
         }
         Divider()
@@ -3349,6 +3290,115 @@ private fun LogCompositionRow(
     }
 }
 
+// Shared by the Computed branch and by Computing-with-a-previous-result, so a rescan keeps the
+// list the user was reading on screen instead of blanking it. [refreshing] says a newer scan is in
+// flight over these rows.
+@Composable
+private fun LogCompositionResults(
+    histogram: MessageTemplateHistogram,
+    tab: LogTab,
+    fpState: FilterPanelUiState,
+    tc: ThemeColors,
+    filter: Filter,
+    filterListRows: Int,
+    actions: LogCompositionActions,
+    refreshing: Boolean,
+) {
+    if (refreshing) {
+        AppText(
+            "Updating for the current filter…",
+            color = tc.td,
+            fontSize = 9.sp,
+            fontFamily = UI,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+        )
+    }
+    val templates = histogram.templates
+    // Switching tabs is a different question entirely, so the page resets. A new
+    // scan result is not: a live-tailing tab re-folds its histogram every couple of
+    // seconds, and resetting there would yank the user back to page 1 while they
+    // were reading page 40. Clamp instead, which only moves them when the list
+    // actually shrank past where they were standing. Searching resets too, inline
+    // where the search text is set below.
+    LaunchedEffect(tab.id) { fpState.logCompositionPage = 0 }
+    LaunchedEffect(histogram) {
+        fpState.logCompositionPage = logCompositionClampPage(
+            fpState.logCompositionPage,
+            logCompositionSearchMatches(templates, fpState.logCompositionSearch).size,
+        )
+    }
+    if (templates.isEmpty()) {
+        LogCompositionHint("◆", "No repeated messages found", tc)
+    } else {
+        if (histogram.overflowed) {
+            AppText(
+                "Scan capped at $MAX_DISTINCT_TEMPLATES distinct messages — some rare ones may be missing",
+                color = tc.td,
+                fontSize = 9.sp,
+                fontFamily = UI,
+                maxLines = 2,
+                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 4.dp),
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            InlineField(
+                value = fpState.logCompositionSearch,
+                onValue = { v ->
+                    fpState.logCompositionSearch = v
+                    fpState.logCompositionPage = 0
+                },
+                placeholder = "search tag or message…",
+                modifier = Modifier.weight(1f),
+                fontSize = 11.sp,
+                onClear = {
+                    fpState.logCompositionSearch = ""
+                    fpState.logCompositionPage = 0
+                },
+            )
+        }
+        val matched = logCompositionSearchMatches(templates, fpState.logCompositionSearch)
+        if (matched.isEmpty()) {
+            LogCompositionHint("◆", "No messages match “${fpState.logCompositionSearch.trim()}”", tc)
+        } else {
+            val pageCount = logCompositionPageCount(matched.size)
+            val page = logCompositionClampPage(fpState.logCompositionPage, pageCount)
+            val shown = logCompositionPageItems(matched, page)
+            BoundedScrollBox(minOf(shown.size, filterListRows), rowDp = LOG_COMPOSITION_ROW_DP) {
+                shown.forEach { t ->
+                    val sample = tab.rmap[t.firstEntryId]?.msg ?: t.template
+                    val spec = messageRuleSpecForTemplate(t, sample)
+                    LogCompositionRow(
+                        entry = t,
+                        sampleMessage = sample,
+                        regexBacked = spec.regex,
+                        showRuleActions = filter.mode == FilterMode.TAGS,
+                        hideApplied = matchingMessageRule(filter.messageRules, t, sample, include = false, filter.mode) != null,
+                        showOnlyApplied = matchingMessageRule(filter.messageRules, t, sample, include = true, filter.mode) != null,
+                        highlightApplied = matchingHighlighter(filter.highlighters, t, sample) != null,
+                        tc = tc,
+                        onHide = { actions.onHide(t) },
+                        onShowOnly = { actions.onShowOnly(t) },
+                        onHighlight = { actions.onHighlight(t) },
+                        onGoToFirst = { actions.onGoToFirst(t) },
+                    )
+                }
+            }
+            LogCompositionPager(
+                page = page,
+                pageCount = pageCount,
+                totalShapes = templates.size,
+                matchedShapes = matched.size,
+                searching = fpState.logCompositionSearch.isNotBlank(),
+                tc = tc,
+                onGoToPage = { fpState.logCompositionPage = it },
+            )
+        }
+    }
+}
+
 // Position/scale readout ("page X of Y", total shapes, how many the search matched — see this
 // feature's task doc) plus the fixed-width page switcher itself. Built from established atoms only:
 // SquareIconButton for prev/next (dimmed rather than removed when at an edge, so the control's
@@ -3377,7 +3427,11 @@ private fun LogCompositionPager(
             modifier = Modifier.padding(bottom = 4.dp),
         )
         if (pageCount > 1) {
-            Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 LogCompositionPagerArrow("‹", enabled = page > 0, tc = tc) { onGoToPage(page - 1) }
                 logCompositionPageWindow(page, pageCount).forEach { token ->
                     when (token) {

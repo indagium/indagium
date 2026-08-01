@@ -173,13 +173,17 @@ sealed interface MessageCompositionState {
      *  produced it. Carrying it here is also what makes a superseded scan harmless: a newer request
      *  overwrites this state with its own [forFilter], so when the older scan finishes it no longer
      *  matches and its result is dropped rather than clobbering the fresher one. */
-    data class Computing(val forFilter: Filter) : MessageCompositionState
+    data class Computing(val forFilter: Filter, val previous: MessageTemplateHistogram? = null) : MessageCompositionState
 
     /** The scan completed for [forFilter]. [histogram] may legitimately be empty — e.g. a view that
      *  is entirely one excluded stack-trace dump — and that is a genuine, displayable result, not
      *  an error. When [forFilter] no longer equals the tab's filter the result is stale: still
      *  worth showing (it is what the user was just looking at) but visibly so, while the recompute
-     *  runs. */
+     *  runs.
+     *
+     *  [Computing.previous] carries the last completed histogram so a rescan can keep showing it
+     *  instead of blanking the list — a recompute triggered by hiding one shape would otherwise
+     *  flash the whole panel empty and back. */
     data class Computed(val histogram: MessageTemplateHistogram, val forFilter: Filter) : MessageCompositionState
 
     /** The scan threw. [message] is shown in the panel; the next expand retries from scratch. */
