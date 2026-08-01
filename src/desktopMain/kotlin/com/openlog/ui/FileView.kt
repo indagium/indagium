@@ -200,6 +200,7 @@ internal fun FileView(
             onOpenSearch = { if (tab.search.active) state.closeSearch(tab.id) else state.openSearch(tab.id) },
             onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
             onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },
+            onSetProcessNameMode = { mode -> state.setProcessNameMode(tab.id, mode) },
             onSetTidMapHighlight = { colorKey -> state.setTidMapHighlight(tab.id, colorKey) },
             onExportTxt = { state.exportFilteredTxt(tab.id) },
             onExportCsv = { state.exportFilteredCsv(tab.id) },
