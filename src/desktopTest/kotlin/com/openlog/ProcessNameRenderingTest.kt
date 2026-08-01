@@ -8,11 +8,13 @@ import com.openlog.model.ProcessNameMode
 import com.openlog.ui.PROCESS_NAME_MAX_CHARS
 import com.openlog.ui.buildFullLineAnnotation
 import com.openlog.ui.pidFieldCharWidth
+import com.openlog.ui.processNamesVisible
 import com.openlog.ui.remapPidFieldRange
 import com.openlog.ui.toggledProcessNameMode
 import com.openlog.utils.visibleLogLineText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 // Change 3 (process-names rework): the pid FIELD (name-or-number) now renders inline, in a uniform
@@ -97,17 +99,33 @@ class ProcessNameRenderingTest {
 
     @Test
     fun offTogglesToAll() {
-        assertEquals(ProcessNameMode.ALL, toggledProcessNameMode(ProcessNameMode.OFF))
+        assertEquals(ProcessNameMode.ALL, toggledProcessNameMode(ProcessNameMode.OFF, emptySet()))
     }
 
     @Test
     fun allTogglesBackToOff() {
-        assertEquals(ProcessNameMode.OFF, toggledProcessNameMode(ProcessNameMode.ALL))
+        assertEquals(ProcessNameMode.OFF, toggledProcessNameMode(ProcessNameMode.ALL, emptySet()))
     }
 
     @Test
-    fun manualAlsoTogglesBackToOff() {
-        assertEquals(ProcessNameMode.OFF, toggledProcessNameMode(ProcessNameMode.MANUAL))
+    fun manualWithPicksTogglesBackToOff() {
+        assertEquals(ProcessNameMode.OFF, toggledProcessNameMode(ProcessNameMode.MANUAL, setOf(1234)))
+    }
+
+    @Test
+    fun manualWithNoPicksTogglesToAllBecauseNothingIsOnScreenToHide() {
+        // Reported from the UI: show one process from a row menu, hide it again, then open the
+        // toolbar popup — it offered "Hide process names" with no name anywhere on screen. MANUAL
+        // with an empty pick set renders nothing, so the only sensible action is to show.
+        assertEquals(ProcessNameMode.ALL, toggledProcessNameMode(ProcessNameMode.MANUAL, emptySet()))
+    }
+
+    @Test
+    fun processNamesVisibleTracksWhatIsActuallyRenderedNotJustTheMode() {
+        assertFalse(processNamesVisible(ProcessNameMode.OFF, setOf(1234)))
+        assertTrue(processNamesVisible(ProcessNameMode.ALL, emptySet()))
+        assertTrue(processNamesVisible(ProcessNameMode.MANUAL, setOf(1234)))
+        assertFalse(processNamesVisible(ProcessNameMode.MANUAL, emptySet()))
     }
 
     // ── remapPidFieldRange: the offset math directly ────────────────────────────────────
