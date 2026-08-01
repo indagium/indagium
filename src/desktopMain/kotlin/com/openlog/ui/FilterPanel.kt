@@ -57,6 +57,8 @@ import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.containsPattern
 import com.openlog.utils.firstRegexMatch
 import com.openlog.utils.issueSitesForCategory
+import com.openlog.utils.matchingHighlighter
+import com.openlog.utils.matchingMessageRule
 import com.openlog.utils.messageRuleSpecForTemplate
 import com.openlog.utils.passesFilter
 import kotlinx.coroutines.delay
@@ -199,6 +201,15 @@ class FilterPanelUiState {
     // expanding it is what triggers AppState.requestMessageComposition's on-demand scan — see
     // ui/FilterPanel.kt's "Log composition" section.
     var logCompositionExpanded by mutableStateOf(false)
+
+    // Search text and current page (0-based) for the Log composition list (Stage 2c). Deliberately
+    // NOT persisted (unlike logCompositionExpanded above): these are transient browsing position
+    // within a list that gets recomputed on every filter change, not a filter setting — the same
+    // reasoning that keeps tagQueryDrafts/messageQueryDrafts below out of autosave. Reset to page 0
+    // on tab switch, on a fresh scan result, and whenever the search text changes — see this file's
+    // "Log composition" section for where.
+    var logCompositionSearch by mutableStateOf("")
+    var logCompositionPage   by mutableStateOf(0)
 
     // These are drafts for the two discovery fields, rather than filter state.  In particular a
     // tag query is not applied until the user chooses a candidate, and a message query can be
@@ -1532,6 +1543,19 @@ internal fun FilterPanel(
                     )
                 is MessageCompositionState.Computed -> {
                     val templates = composition.histogram.templates
+                    // Switching tabs is a different question entirely, so the page resets. A new
+                    // scan result is not: a live-tailing tab re-folds its histogram every couple of
+                    // seconds, and resetting there would yank the user back to page 1 while they
+                    // were reading page 40. Clamp instead, which only moves them when the list
+                    // actually shrank past where they were standing. Searching resets too, inline
+                    // where the search text is set below.
+                    LaunchedEffect(tab.id) { fpState.logCompositionPage = 0 }
+                    LaunchedEffect(composition) {
+                        fpState.logCompositionPage = logCompositionClampPage(
+                            fpState.logCompositionPage,
+                            logCompositionSearchMatches(templates, fpState.logCompositionSearch).size,
+                        )
+                    }
                     if (templates.isEmpty()) {
                         LogCompositionHint("◆", "No repeated messages found", tc)
                     } else {
@@ -1545,34 +1569,60 @@ internal fun FilterPanel(
                                 modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 4.dp),
                             )
                         }
-                        val shown = templates.take(LOG_COMPOSITION_TOP_N)
-                        BoundedScrollBox(minOf(shown.size, filterListRows), rowDp = LOG_COMPOSITION_ROW_DP) {
-                            shown.forEach { t ->
-                                val sample = tab.rmap[t.firstEntryId]?.msg ?: t.template
-                                val spec = messageRuleSpecForTemplate(t, sample)
-                                LogCompositionRow(
-                                    entry = t,
-                                    sampleMessage = sample,
-                                    regexBacked = spec.regex,
-                                    showRuleActions = filter.mode == FilterMode.TAGS,
-                                    tc = tc,
-                                    onHide = { logCompositionActions.onHide(t) },
-                                    onShowOnly = { logCompositionActions.onShowOnly(t) },
-                                    onHighlight = { logCompositionActions.onHighlight(t) },
-                                    onGoToFirst = { logCompositionActions.onGoToFirst(t) },
-                                )
-                            }
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            InlineField(
+                                value = fpState.logCompositionSearch,
+                                onValue = { v ->
+                                    fpState.logCompositionSearch = v
+                                    fpState.logCompositionPage = 0
+                                },
+                                placeholder = "search tag or message…",
+                                modifier = Modifier.weight(1f),
+                                fontSize = 11.sp,
+                                onClear = {
+                                    fpState.logCompositionSearch = ""
+                                    fpState.logCompositionPage = 0
+                                },
+                            )
                         }
-                        if (templates.size > shown.size) {
-                            // "Show all NNN…" affordance without the dialog behind it (Stage 2b's
-                            // job) — left inert rather than absent, so its presence signals more
-                            // data exists instead of silently truncating to N with no indication.
-                            AppText(
-                                "Show all ${templates.size}…",
-                                color = tc.td,
-                                fontSize = 10.sp,
-                                fontFamily = UI,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        val matched = logCompositionSearchMatches(templates, fpState.logCompositionSearch)
+                        if (matched.isEmpty()) {
+                            LogCompositionHint("◆", "No messages match “${fpState.logCompositionSearch.trim()}”", tc)
+                        } else {
+                            val pageCount = logCompositionPageCount(matched.size)
+                            val page = logCompositionClampPage(fpState.logCompositionPage, pageCount)
+                            val shown = logCompositionPageItems(matched, page)
+                            BoundedScrollBox(minOf(shown.size, filterListRows), rowDp = LOG_COMPOSITION_ROW_DP) {
+                                shown.forEach { t ->
+                                    val sample = tab.rmap[t.firstEntryId]?.msg ?: t.template
+                                    val spec = messageRuleSpecForTemplate(t, sample)
+                                    LogCompositionRow(
+                                        entry = t,
+                                        sampleMessage = sample,
+                                        regexBacked = spec.regex,
+                                        showRuleActions = filter.mode == FilterMode.TAGS,
+                                        hideApplied = matchingMessageRule(filter.messageRules, t, sample, include = false, filter.mode) != null,
+                                        showOnlyApplied = matchingMessageRule(filter.messageRules, t, sample, include = true, filter.mode) != null,
+                                        highlightApplied = matchingHighlighter(filter.highlighters, t, sample) != null,
+                                        tc = tc,
+                                        onHide = { logCompositionActions.onHide(t) },
+                                        onShowOnly = { logCompositionActions.onShowOnly(t) },
+                                        onHighlight = { logCompositionActions.onHighlight(t) },
+                                        onGoToFirst = { logCompositionActions.onGoToFirst(t) },
+                                    )
+                                }
+                            }
+                            LogCompositionPager(
+                                page = page,
+                                pageCount = pageCount,
+                                totalShapes = templates.size,
+                                matchedShapes = matched.size,
+                                searching = fpState.logCompositionSearch.isNotBlank(),
+                                tc = tc,
+                                onGoToPage = { fpState.logCompositionPage = it },
                             )
                         }
                     }
@@ -2955,10 +3005,20 @@ private const val LOG_COMPOSITION_REFRESH_DEBOUNCE_MS = 400L
 
 private const val CRASH_ROW_DP = 64
 
-// Top N histogram rows shown directly in the panel — "10 is reasonable" (Stage 2a plan); the
-// "Show all NNN…" affordance below it is left inert rather than wired to a dialog, which is
-// Stage 2b's job.
-private const val LOG_COMPOSITION_TOP_N = 10
+// Rows per page in the Log composition list (Stage 2c paging). Each row is a rich card — masked
+// template + sample line + action row, ~103dp (LOG_COMPOSITION_ROW_DP below) — unlike the compact
+// single-line-ish rows filterListRows (model/Model.kt) sizes for: tag/highlighter/sequence pills at
+// 26-30dp. Coupling page size to that setting would make "how many pages" swing with a knob tuned
+// for a different kind of row, so paging keeps its own fixed size. 10 matches the pre-paging "top
+// 10" default (Stage 2a), so a session that never leaves page 1 looks exactly as before.
+// filterListRows continues to do what it already did: bound how many of the CURRENT page's rows
+// are visible before the BoundedScrollBox below starts scrolling, same as every other section here.
+private const val LOG_COMPOSITION_PAGE_SIZE = 10
+
+// How many page numbers the pager shows on each side of the current page — see
+// logCompositionPageWindow's own doc for why this keeps the control a fixed width even at 863
+// pages (the real-log case that motivated paging in the first place).
+private const val LOG_COMPOSITION_PAGE_WINDOW_RADIUS = 2
 
 // LogCompositionRow's real height, same derivation style as CRASH_ROW_DP above: border 1dp
 // top+bottom (2dp) + Column vertical padding 6dp top+bottom (12dp) + the header Row (10sp count +
@@ -2966,6 +3026,70 @@ private const val LOG_COMPOSITION_TOP_N = 10
 // spacer + the 11sp sample line at maxLines=1 (~16dp) + 4dp spacer + the 18dp action-button row
 // = 2 + 12 + 14 + 3 + 32 + 2 + 16 + 4 + 18 = 103dp.
 private const val LOG_COMPOSITION_ROW_DP = 103
+
+// ── Log composition paging/search (Stage 2c) ────────────────────────────────────────────────
+// Pure and Compose-free so the paging arithmetic and search matching are unit-testable without a
+// UI harness (this project has none — see CLAUDE.md's Tests section).
+
+/** How many pages [itemCount] items make at [pageSize] per page. 0 for an empty list — there is
+ *  no "page 1 of 0 items", just nothing to page through. */
+internal fun logCompositionPageCount(itemCount: Int, pageSize: Int = LOG_COMPOSITION_PAGE_SIZE): Int =
+    if (itemCount <= 0) 0 else (itemCount - 1) / pageSize + 1
+
+/** Clamps a possibly-stale 0-based page index into `[0, pageCount)` — the defensive counterpart to
+ *  the explicit page=0 resets above: even if some future caller forgets to reset, an index into a
+ *  list that shrank underneath it still renders the nearest real page instead of an empty one. */
+internal fun logCompositionClampPage(page: Int, pageCount: Int): Int =
+    if (pageCount <= 0) 0 else page.coerceIn(0, pageCount - 1)
+
+internal fun <T> logCompositionPageItems(items: List<T>, page: Int, pageSize: Int = LOG_COMPOSITION_PAGE_SIZE): List<T> {
+    if (items.isEmpty()) return emptyList()
+    val start = logCompositionClampPage(page, logCompositionPageCount(items.size, pageSize)) * pageSize
+    return items.subList(start, minOf(start + pageSize, items.size))
+}
+
+// Plain case-insensitive `contains`, deliberately NOT utils/TextMatch.kt's regex machinery: that
+// exists for user-authored patterns run with a deadline + LRU cache over millions of raw log rows,
+// while this filters an in-memory list of at most a few thousand already-computed histogram rows —
+// a regex engine (and its cache/deadline bookkeeping) is the wrong tool for a plain substring scan
+// at this size.
+internal fun logCompositionSearchMatches(templates: List<MessageTemplate>, query: String): List<MessageTemplate> {
+    val needle = query.trim()
+    if (needle.isEmpty()) return templates
+    return templates.filter { it.tag.contains(needle, ignoreCase = true) || it.template.contains(needle, ignoreCase = true) }
+}
+
+// One control in the page switcher: a clickable page (0-based [index]) or an ellipsis standing in
+// for a run of skipped pages. A distinct type rather than a bare Int? so page 0 — a real, legitimate
+// first page — can never be mistaken for "no page here".
+internal sealed interface LogCompositionPageToken {
+    data class Page(val index: Int) : LogCompositionPageToken
+
+    data object Ellipsis : LogCompositionPageToken
+}
+
+// Always first page + last page + a window of [radius] pages on each side of [currentPage],
+// connected by an ellipsis wherever there's a gap — never one control per page. Bounded width
+// regardless of [pageCount]: at most 2*radius+1 window pages plus first, last, and up to two
+// ellipses (9 tokens at the default radius=2), the same whether pageCount is 9 or 863.
+internal fun logCompositionPageWindow(
+    currentPage: Int,
+    pageCount: Int,
+    radius: Int = LOG_COMPOSITION_PAGE_WINDOW_RADIUS,
+): List<LogCompositionPageToken> {
+    if (pageCount <= 0) return emptyList()
+    val current = currentPage.coerceIn(0, pageCount - 1)
+    val pages = sortedSetOf(0, pageCount - 1)
+    for (p in (current - radius)..(current + radius)) if (p in 0 until pageCount) pages.add(p)
+    val tokens = mutableListOf<LogCompositionPageToken>()
+    var prev = -1
+    for (p in pages) {
+        if (prev >= 0 && p - prev > 1) tokens.add(LogCompositionPageToken.Ellipsis)
+        tokens.add(LogCompositionPageToken.Page(p))
+        prev = p
+    }
+    return tokens
+}
 
 private val NATIVE_CRASH_COLOR = Color(0xFF8957e5)
 
@@ -3160,12 +3284,23 @@ private fun LogCompositionHint(glyph: String, text: String, tc: ThemeColors, gly
 // Hide/Show only in Regex filter mode, where message rules are ignored (utils/Filter.kt) and
 // would otherwise sit there as dead buttons — Highlight/First stay available since neither depends
 // on message rules.
+//
+// Hide/Show only/Highlight (Stage 2c) reflect applied state via PillBtn's established active
+// treatment — same widget SequenceEditor's ".*" toggle uses, label held constant while only the
+// border/fill communicates state, per this panel's own convention (see the tag row's +/- boxes for
+// the same "label stays, only state changes" idea). [hideApplied]/[showOnlyApplied]/
+// [highlightApplied] are computed by the caller via utils/MessageTemplates.matchingMessageRule /
+// matchingHighlighter — see FilterPanel's call site and AppState.toggleMessageRuleForTemplate for
+// why that's the one place "applied" is decided.
 @Composable
 private fun LogCompositionRow(
     entry: MessageTemplate,
     sampleMessage: String,
     regexBacked: Boolean,
     showRuleActions: Boolean,
+    hideApplied: Boolean,
+    showOnlyApplied: Boolean,
+    highlightApplied: Boolean,
     tc: ThemeColors,
     onHide: () -> Unit,
     onShowOnly: () -> Unit,
@@ -3203,13 +3338,68 @@ private fun LogCompositionRow(
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(top = 2.dp),
         )
-        Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             if (showRuleActions) {
-                LabelIconButton("Hide", 9.sp, onHide)
-                LabelIconButton("Show only", 9.sp, onShowOnly)
+                PillBtn("Hide", active = hideApplied, onClick = onHide)
+                PillBtn("Show only", active = showOnlyApplied, onClick = onShowOnly)
             }
-            LabelIconButton("Highlight", 9.sp, onHighlight)
+            PillBtn("Highlight", active = highlightApplied, onClick = onHighlight)
             LabelIconButton("First", 9.sp, onGoToFirst)
+        }
+    }
+}
+
+// Position/scale readout ("page X of Y", total shapes, how many the search matched — see this
+// feature's task doc) plus the fixed-width page switcher itself. Built from established atoms only:
+// SquareIconButton for prev/next (dimmed rather than removed when at an edge, so the control's
+// width never jumps) and PillBtn for each page number, active = is-the-current-page — the same
+// active/inactive language PillBtn already carries everywhere else in this panel.
+@Composable
+private fun LogCompositionPager(
+    page: Int,
+    pageCount: Int,
+    totalShapes: Int,
+    matchedShapes: Int,
+    searching: Boolean,
+    tc: ThemeColors,
+    onGoToPage: (Int) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 2.dp)) {
+        AppText(
+            if (searching) {
+                "Page ${page + 1} of $pageCount · $matchedShapes of $totalShapes shapes matched"
+            } else {
+                "Page ${page + 1} of $pageCount · $totalShapes shapes"
+            },
+            color = tc.td,
+            fontSize = 10.sp,
+            fontFamily = UI,
+            modifier = Modifier.padding(bottom = 4.dp),
+        )
+        if (pageCount > 1) {
+            Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                LogCompositionPagerArrow("‹", enabled = page > 0, tc = tc) { onGoToPage(page - 1) }
+                logCompositionPageWindow(page, pageCount).forEach { token ->
+                    when (token) {
+                        is LogCompositionPageToken.Ellipsis ->
+                            AppText("…", color = tc.td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 2.dp))
+                        is LogCompositionPageToken.Page ->
+                            PillBtn((token.index + 1).toString(), active = token.index == page) { onGoToPage(token.index) }
+                    }
+                }
+                LogCompositionPagerArrow("›", enabled = page < pageCount - 1, tc = tc) { onGoToPage(page + 1) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LogCompositionPagerArrow(glyph: String, enabled: Boolean, tc: ThemeColors, onClick: () -> Unit) {
+    if (enabled) {
+        SquareIconButton(glyph, fontSize = 11.sp, onClick = onClick, size = 18.dp)
+    } else {
+        Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+            AppText(glyph, color = tc.td.copy(.3f), fontSize = 11.sp)
         }
     }
 }

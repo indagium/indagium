@@ -270,6 +270,19 @@ data class MessageRule(
     val mode: FilterMode = FilterMode.TAGS,
 )
 
+// Two rules describe "the same shape" when everything that determines what they match agrees —
+// pattern, regex, tag, packagePrefix, target, mode — regardless of id, enabled, or include. This
+// is the ONE definition of "same rule" in the app: AppState.addMessageRule uses it to replace an
+// opposite-direction rule for the same target instead of leaving two contradictory pills, and the
+// Log composition panel (utils/MessageTemplates.matchingMessageRule) uses it to decide whether a
+// row's Hide/Show-only button should render as already-applied. Keeping both call sites on one
+// function is deliberate: this codebase has already been bitten twice by two definitions of
+// "the same X" drifting apart (most recently a crash-grouping key duplicated between the panel and
+// the MCP response, which produced correct-looking rows silently reporting each other's counts).
+fun messageRulesSameShape(a: MessageRule, b: MessageRule): Boolean =
+    a.pattern == b.pattern && a.regex == b.regex && a.tag == b.tag &&
+        a.packagePrefix == b.packagePrefix && a.target == b.target && a.mode == b.mode
+
 // ── Annotations (block model) ──────────────────────────────────────
 sealed class AnnBlock {
     abstract val id: String
