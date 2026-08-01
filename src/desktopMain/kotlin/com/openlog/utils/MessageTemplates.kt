@@ -1,10 +1,15 @@
 package com.openlog.utils
 
+import com.openlog.model.FilterMode
+import com.openlog.model.Highlighter
 import com.openlog.model.LogEntry
+import com.openlog.model.MessageRule
 import com.openlog.model.MessageTemplate
 import com.openlog.model.MessageTemplateHistogram
+import com.openlog.model.RuleTarget
 import com.openlog.model.StackTraceGroup
 import com.openlog.model.TemplateGranularity
+import com.openlog.model.messageRulesSameShape
 import java.util.BitSet
 
 // ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -759,4 +764,51 @@ internal fun messageRuleSpecForTemplate(template: MessageTemplate, sampleRawMess
         }
         else -> TemplateRuleSpec(regexPatternForTemplate(template.template), regex = true)
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Row applied-state (Stage 2c, ui/FilterPanel.kt's Log composition Hide/Show only/Highlight
+// buttons). "Is this row's action already in effect" is answered by building EXACTLY the candidate
+// [addMessageRule]/[addHl] would build from this same (template, sample) pair via
+// [messageRuleSpecForTemplate], then comparing against the tab's real rules/highlighters with
+// [messageRulesSameShape] — the same notion addMessageRule itself uses to replace an
+// opposite-direction rule. One definition, called from AppState's toggle functions AND from the
+// panel's row rendering, so "applied" can never mean something subtly different in the two places.
+// A rule the user created by hand (the right-click flyout) that happens to match a template's
+// pattern is correctly reported as applied — it genuinely is in effect, not a false positive.
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The existing message rule (if any) that a Hide ([include]=false) or Show only ([include]=true)
+ *  press for [template] would remove — or null if pressing it would create a new one instead. */
+internal fun matchingMessageRule(
+    rules: List<MessageRule>,
+    template: MessageTemplate,
+    sampleRawMessage: String,
+    include: Boolean,
+    mode: FilterMode,
+): MessageRule? {
+    val spec = messageRuleSpecForTemplate(template, sampleRawMessage)
+    val candidate = MessageRule(
+        id = "",
+        include = include,
+        pattern = spec.pattern,
+        regex = spec.regex,
+        tag = template.tag.trim().takeIf { it.isNotBlank() },
+        packagePrefix = null,
+        target = RuleTarget.MESSAGE,
+        mode = mode,
+    )
+    return rules.firstOrNull { it.include == include && messageRulesSameShape(it, candidate) }
+}
+
+/** The existing highlighter (if any) that a Highlight press for [template] would remove — or null
+ *  if pressing it would create a new one instead. Highlighters carry no tag/scope, so the shape is
+ *  just pattern+regex, unlike [matchingMessageRule]. */
+internal fun matchingHighlighter(
+    highlighters: List<Highlighter>,
+    template: MessageTemplate,
+    sampleRawMessage: String,
+): Highlighter? {
+    val spec = messageRuleSpecForTemplate(template, sampleRawMessage)
+    return highlighters.firstOrNull { it.pattern == spec.pattern && it.regex == spec.regex }
 }

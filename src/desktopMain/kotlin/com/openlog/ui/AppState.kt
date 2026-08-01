@@ -71,7 +71,10 @@ import com.openlog.utils.isLikelyTextFile
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.listArchiveVideoCandidates
+import com.openlog.utils.matchingHighlighter
+import com.openlog.utils.matchingMessageRule
 import com.openlog.utils.mergeLogs
+import com.openlog.utils.messageRuleSpecForTemplate
 import com.openlog.utils.newId
 import com.openlog.utils.openArchiveCandidateStream
 import com.openlog.utils.parseLogcat
@@ -2050,11 +2053,7 @@ class AppState(
                 target = target,
                 mode = f.mode,
             )
-            val sameShape: (MessageRule) -> Boolean = { existing ->
-                existing.pattern == rule.pattern && existing.regex == rule.regex &&
-                    existing.tag == rule.tag && existing.packagePrefix == rule.packagePrefix &&
-                    existing.target == rule.target && existing.mode == rule.mode
-            }
+            val sameShape: (MessageRule) -> Boolean = { existing -> messageRulesSameShape(existing, rule) }
             val withoutOpposite = f.messageRules.filterNot { sameShape(it) && it.include != include }
             f.copy(
                 messageRules = if (withoutOpposite.any { sameShape(it) && it.include == include }) {
@@ -2143,6 +2142,37 @@ class AppState(
         compositionJobs[tabId] = job
         job.invokeOnCompletion { compositionJobs.remove(tabId, job) }
         return true
+    }
+
+    // ── Log composition row actions (Stage 2c) ─────────────────────────
+    // Hide/Show only/Highlight in the "Log composition" panel section (ui/FilterPanel.kt) toggle
+    // rather than fire once: a press on an already-applied row must undo exactly what the earlier
+    // press did, not add a duplicate. "Already applied" is answered by
+    // utils/MessageTemplates.matchingMessageRule / matchingHighlighter, which build the same
+    // candidate addMessageRule/addHl would from this (template, sample) pair and compare via
+    // model.messageRulesSameShape — the same notion addMessageRule itself uses to dedupe/replace an
+    // opposite-direction rule, so the panel's idea of "this row is applied" cannot drift from what
+    // pressing the button actually creates.
+    fun toggleMessageRuleForTemplate(tabId: String, template: MessageTemplate, sampleRawMessage: String, include: Boolean) {
+        val f = tab(tabId)?.filter ?: return
+        val existing = matchingMessageRule(f.messageRules, template, sampleRawMessage, include, f.mode)
+        if (existing != null) {
+            removeMessageRule(tabId, existing.id)
+        } else {
+            val spec = messageRuleSpecForTemplate(template, sampleRawMessage)
+            addMessageRule(tabId, include = include, pattern = spec.pattern, regex = spec.regex, tag = template.tag, packagePrefix = null)
+        }
+    }
+
+    fun toggleHighlightForTemplate(tabId: String, template: MessageTemplate, sampleRawMessage: String) {
+        val f = tab(tabId)?.filter ?: return
+        val existing = matchingHighlighter(f.highlighters, template, sampleRawMessage)
+        if (existing != null) {
+            removeHl(tabId, existing.id)
+        } else {
+            val spec = messageRuleSpecForTemplate(template, sampleRawMessage)
+            addHl(tabId, spec.pattern, spec.regex, nextAvailableHighlighterColor(tabId))
+        }
     }
 
     // ── Highlighters ────────────────────────────────────────────────

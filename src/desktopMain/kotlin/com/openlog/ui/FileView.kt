@@ -13,7 +13,6 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import com.openlog.model.*
-import com.openlog.utils.messageRuleSpecForTemplate
 
 internal data class FilterSearchRequest(
     val nonce: Long,
@@ -49,20 +48,15 @@ internal fun BoundFilterPanel(
     val logCompositionActions = remember(state, tab.id) {
         fun sampleFor(template: MessageTemplate): String =
             state.tab(tab.id)?.rmap?.get(template.firstEntryId)?.msg ?: template.template
+        // Hide/Show only/Highlight toggle (Stage 2c): each press either applies or removes the
+        // corresponding rule/highlighter for this row, decided by AppState.toggleMessageRuleForTemplate
+        // / toggleHighlightForTemplate — see those functions' doc for the shared "same shape" check
+        // that also drives the panel's active/inactive button rendering.
         LogCompositionActions(
             onExpand = { state.requestMessageComposition(tab.id) },
-            onHide = { template ->
-                val spec = messageRuleSpecForTemplate(template, sampleFor(template))
-                state.addMessageRule(tab.id, include = false, pattern = spec.pattern, regex = spec.regex, tag = template.tag, packagePrefix = null)
-            },
-            onShowOnly = { template ->
-                val spec = messageRuleSpecForTemplate(template, sampleFor(template))
-                state.addMessageRule(tab.id, include = true, pattern = spec.pattern, regex = spec.regex, tag = template.tag, packagePrefix = null)
-            },
-            onHighlight = { template ->
-                val spec = messageRuleSpecForTemplate(template, sampleFor(template))
-                state.addHl(tab.id, spec.pattern, spec.regex, state.nextAvailableHighlighterColor(tab.id))
-            },
+            onHide = { template -> state.toggleMessageRuleForTemplate(tab.id, template, sampleFor(template), include = false) },
+            onShowOnly = { template -> state.toggleMessageRuleForTemplate(tab.id, template, sampleFor(template), include = true) },
+            onHighlight = { template -> state.toggleHighlightForTemplate(tab.id, template, sampleFor(template)) },
             onGoToFirst = { template -> state.requestCrashNavigation(tab.id, template.firstEntryId) },
         )
     }
