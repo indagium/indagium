@@ -55,6 +55,7 @@ import com.openlog.utils.buildMd
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeCustomIssueSites
 import com.openlog.utils.computeItems
+import com.openlog.utils.computeMessageTemplates
 import com.openlog.utils.computeSearchMatches
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.computeTidMapColors
@@ -82,6 +83,7 @@ import com.openlog.utils.requiresSplitPrompt
 import com.openlog.utils.splitFileToFiles
 import com.openlog.utils.splitStreamToFiles
 import com.openlog.utils.suggestedSplitPartCount
+import com.openlog.utils.truncateAtSeparator
 import com.openlog.video.FailedVideoPlayerController
 import com.openlog.video.VideoPlayerController
 import com.openlog.video.defaultVideoPlayerController
@@ -99,16 +101,12 @@ import java.util.concurrent.atomic.AtomicInteger
 
 internal fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = EntryIdMap(data)
 
-// Separators the "Hide/Show messages like this" (and "Add as sequence") flyout truncates a
-// message at — the same rough set a human skimming logcat output uses to separate a message's
-// stable/templated part from its variable tail, e.g. "Card stack expanded: stackId=stack_home"
-// truncates at ':' first ("Card stack expanded") then at '=' ("Card stack expanded: stackId").
-private val MESSAGE_RULE_SEPARATORS = charArrayOf('-', '/', '\\', ',', '.', ':', '=')
-
 // Scope + pattern for one "Hide/Show messages like this" choice. Kept outside AppState so the
 // message-rule search can offer exactly the same stable-prefix variants as the log-row flyout.
 data class MessageRuleVariant(val label: String, val pattern: String, val tag: String?)
 
+// Separator set and truncateAtSeparator are promoted to utils/MessageTemplates.kt (shared with the
+// message-template histogram's Normal/Loose granularity folding) — imported above.
 internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? = null): List<MessageRuleVariant> {
     val selected = selectedText?.trim().orEmpty()
     if (selected.isNotBlank()) {
@@ -118,18 +116,8 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
         )
     }
 
-    fun truncateAtSeparator(n: Int): String {
-        var count = 0
-        for (i in entry.msg.indices) {
-            if (entry.msg[i] in MESSAGE_RULE_SEPARATORS) {
-                count++
-                if (count == n) return entry.msg.substring(0, i).trimEnd()
-            }
-        }
-        return entry.msg
-    }
-    val toFirst = truncateAtSeparator(1)
-    val toSecond = truncateAtSeparator(2)
+    val toFirst = truncateAtSeparator(entry.msg, 1)
+    val toSecond = truncateAtSeparator(entry.msg, 2)
     return buildList {
         add(MessageRuleVariant("${entry.tag}: $toFirst", toFirst, entry.tag))
         if (toSecond != toFirst) add(MessageRuleVariant("${entry.tag}: $toSecond", toSecond, entry.tag))
@@ -150,6 +138,9 @@ internal fun buildLogAnalysis(data: List<LogEntry>, customIssueRules: List<Custo
         stackTraceGroups = stackGroups,
         crashSites = computeCrashSites(data, stackGroups),
         customIssueSites = computeCustomIssueSites(data, customIssueRules),
+        // Stage 1: engine + measurement only, no UI reads this yet. Always computed at STRICT —
+        // display-time level switching (Stage 2) folds via foldTemplates() instead of rescanning.
+        messageTemplates = computeMessageTemplates(data, stackGroups),
         pending = false,
     )
 }

@@ -113,11 +113,52 @@ sealed interface IssueCategorySelection {
     data class Custom(val ruleId: String) : IssueCategorySelection
 }
 
+// Truncation granularity for the message-template histogram (utils/MessageTemplates.kt). Masking
+// itself never varies with this — see that file's header comment for why that separation is the
+// whole point. STRICT is the untruncated masked template; NORMAL/LOOSE truncate it at the 2nd/1st
+// separator, mirroring the existing "Hide/Show messages like this" flyout variants.
+enum class TemplateGranularity { LOOSE, NORMAL, STRICT }
+
+// One row of the message-template histogram: [tag] + [template] (masked, and truncated per
+// [MessageTemplateHistogram.granularity]) identify the bucket; [count] is how many log entries
+// folded into it; [firstEntryId]/[lastEntryId] bound where it appears in the file.
+// [literalPrefixLength]/[literalPrefixRawLength] are the index into [template]/the original raw
+// message respectively at which the first mask token was emitted (or the full length if the
+// template is entirely literal) — see utils/MessageTemplates.kt's scan for why this can't be
+// recovered by re-parsing the template afterwards.
+data class MessageTemplate(
+    val tag: String,
+    val template: String,
+    val count: Int,
+    val firstEntryId: Int,
+    val lastEntryId: Int,
+    val literalPrefixLength: Int,
+    val literalPrefixRawLength: Int,
+)
+
+// The full result of one histogram scan (utils/MessageTemplates.computeMessageTemplates) or fold
+// (utils/MessageTemplates.foldTemplates). [templates] is sorted count-desc then firstEntryId-asc.
+// [totalEntries] is every entry seen (including stack-trace members skipped from counting and, if
+// [overflowed], distinct templates dropped past the cap); [countedEntries] is what actually landed
+// in [templates].
+data class MessageTemplateHistogram(
+    val templates: List<MessageTemplate>,
+    val granularity: TemplateGranularity,
+    val totalEntries: Int,
+    val countedEntries: Int,
+    val overflowed: Boolean,
+)
+
 data class LogAnalysis(
     val tagCounts: Map<String, Int> = emptyMap(),
     val stackTraceGroups: List<StackTraceGroup> = emptyList(),
     val crashSites: List<CrashSite> = emptyList(),
     val customIssueSites: List<CustomIssueSite> = emptyList(),
+    // Composition histogram (utils/MessageTemplates.kt) — display-only today (Stage 1: engine +
+    // measurement, no UI/MCP). Deliberately NOT a memo-cache/remember key anywhere (see that
+    // file's header) so it can never invalidate computeItems or LogViewer.
+    val messageTemplates: MessageTemplateHistogram =
+        MessageTemplateHistogram(emptyList(), TemplateGranularity.STRICT, 0, 0, false),
     // True while the stack-trace/crash analysis is still computing in the background after a
     // load — it costs as much as the parse itself on multi-GB files, and the initial render
     // doesn't need it. Rows render unfolded and the crash panel shows an "analyzing" hint until

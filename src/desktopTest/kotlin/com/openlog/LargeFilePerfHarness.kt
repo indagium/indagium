@@ -3,11 +3,14 @@ package com.openlog
 import com.openlog.model.Filter
 import com.openlog.model.FilterMode
 import com.openlog.model.SequenceDef
+import com.openlog.model.TemplateGranularity
 import com.openlog.ui.mkTab
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeItems
+import com.openlog.utils.computeMessageTemplates
 import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.extractCandidate
+import com.openlog.utils.foldTemplates
 import com.openlog.utils.invalidateComputeCache
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.parseLogcat
@@ -74,6 +77,24 @@ class LargeFilePerfHarness {
         val stackGroupsOnly = timed("analysis.stackTraceGroups") { computeStackTraceGroups(data) }
         timed("analysis.crashSites") { computeCrashSites(data, stackGroupsOnly) }
         timed("analysis.tagCounts") { data.groupingBy { it.tag }.eachCount() }
+
+        // The log-composition scan. This is the gate on the rest of that feature: it runs on every
+        // load, for a panel most sessions never open, so its cost has to be known rather than
+        // estimated before any UI is built on top of it. Heap is reported too — the histogram is
+        // retained on LogAnalysis for the tab's lifetime, unlike the timings above whose results
+        // are transient here.
+        val heapBeforeTemplates = heapUsedMb()
+        val templates = timed("analysis.messageTemplates") { computeMessageTemplates(data, stackGroupsOnly) }
+        println("PERF messageTemplates heap: ${heapUsedMb() - heapBeforeTemplates}MB")
+        println(
+            "PERF messageTemplates: distinct=${templates.templates.size} " +
+                "counted=${templates.countedEntries}/${templates.totalEntries} overflowed=${templates.overflowed}",
+        )
+        // Level switching must be a fold over the distinct templates, never a rescan — the whole
+        // reason masking is level-independent. Timed separately so a regression that quietly
+        // reintroduced a rescan would show up here as a second full-file cost.
+        timed("messageTemplates fold->NORMAL") { foldTemplates(templates, TemplateGranularity.NORMAL) }
+        timed("messageTemplates fold->LOOSE") { foldTemplates(templates, TemplateGranularity.LOOSE) }
 
         val tab = timed("mkTab(rmap+analysis)") { mkTab("t1", "big.log", data) }
         println("PERF heapAfterTab: ${heapUsedMb() - baselineHeap}MB")
