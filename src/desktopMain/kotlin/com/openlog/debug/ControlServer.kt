@@ -825,9 +825,14 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
     ),
     McpTool(
         "get_crash_sites",
-        "List every detected exception (FATAL EXCEPTION / bare exception header) and ANR in a tab's " +
-            "full log file, each with the log id to jump to. Detected on the whole file regardless " +
-            "of the active filter.",
+        "List every detected exception (FATAL EXCEPTION / bare exception header), ANR, and native " +
+            "crash in a tab's full log file, each with the log id to jump to. Detected on the whole " +
+            "file regardless of the active filter. Every raw occurrence is listed (a retry loop " +
+            "throwing the same exception forty times returns forty sites) — but each site also " +
+            "carries `signature` (same exception class + call site, same ANR process, or same " +
+            "native-crash signal with the varying tid normalized out), `occurrenceCount` (how many " +
+            "sites share that signature), and `firstLogId` (the earliest one). Group by `signature` " +
+            "and skip past the first occurrence instead of re-reading duplicates one at a time.",
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(

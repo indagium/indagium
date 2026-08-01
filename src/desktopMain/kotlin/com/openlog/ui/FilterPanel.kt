@@ -52,9 +52,11 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.openlog.model.*
+import com.openlog.utils.IssueSiteGroup
 import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.containsPattern
 import com.openlog.utils.firstRegexMatch
+import com.openlog.utils.groupIssueSites
 import com.openlog.utils.issueSitesForCategory
 import com.openlog.utils.passesFilter
 import java.io.File
@@ -286,6 +288,10 @@ internal fun FilterPanel(
     // Once complete (pending == false), tab.analysis.crashSites is trusted directly, even when
     // empty — LogAnalysis.pending defaults to true precisely so "genuinely zero crash sites"
     // can never be mistaken for "not yet analyzed" here (see the field's doc in Model.kt / P-02).
+    // Note for tailing: analysis re-runs wholesale on a debounce rather than incrementally, so an
+    // occurrence count (and a group's ×N badge) jumps on each re-analysis instead of ticking up one
+    // at a time as new lines arrive. Acceptable — same tradeoff tagCounts and every other
+    // analysis-derived count in this panel already makes.
     val allCrashSites = remember(tab.id, tab.analysis.crashSites, tab.analysis.pending) {
         if (tab.analysis.pending) emptyList() else tab.analysis.crashSites
     }
@@ -1919,6 +1925,13 @@ internal fun FilterPanel(
         // ── Crashes & ANRs ────────────────────────────────────────
         // Same row-limit/collapse shape as Highlighters — always-on detection, not a user-defined
         // list, so there's nothing to add/remove here, only to browse and jump from.
+        // Header badge and the category dropdown's per-option counts (issueCategoryOptions below)
+        // both deliberately show raw occurrence counts, not group counts: issueSitesForCategory's
+        // ALL de-dupe is already per *line* (see its doc comment), so mixing in a second, signature
+        // based de-dupe here would make the same number mean two different things depending on
+        // category. "38 issues" also matches what the minimap marks (every occurrence), whereas the
+        // number of rows actually rendered below (one per signature) is visible directly from the
+        // rows themselves plus each group's own ×N badge.
         SectionHeader(
             "Issues",
             trailing = if (crashSites.isNotEmpty()) ({
@@ -1950,7 +1963,11 @@ internal fun FilterPanel(
                     },
                 )
             }
-            if (crashSites.isEmpty()) {
+            // Forty identical retries collapse to one row here; the flat crashSites list underneath
+            // (and the minimap/MCP consumers reading it) still sees every occurrence — see
+            // groupIssueSites' doc comment.
+            val crashGroups = remember(crashSites) { groupIssueSites(crashSites) }
+            if (crashGroups.isEmpty()) {
                 Column(
                     Modifier.fillMaxWidth().padding(vertical = 16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -1965,9 +1982,9 @@ internal fun FilterPanel(
                     )
                 }
             } else {
-                BoundedScrollBox(minOf(crashSites.size, filterListRows), rowDp = CRASH_ROW_DP) {
-                    crashSites.forEach { site ->
-                        IssueSiteRow(site, tc, onClick = { onNavigateCrash(site) })
+                BoundedScrollBox(minOf(crashGroups.size, filterListRows), rowDp = CRASH_ROW_DP) {
+                    crashGroups.forEach { group ->
+                        IssueSiteRow(group, tc, onNavigate = onNavigateCrash)
                     }
                 }
             }
@@ -2963,32 +2980,93 @@ private fun IssueCategoryDropdown(
     }
 }
 
+// Collapsed height must stay exactly what CRASH_ROW_DP's doc comment derives (border 1dp*2 + Column
+// padding 6dp*2 + header Row ~15dp + 3dp spacer + 2-line message ~32dp = 64dp) — the count badge
+// and expand chevron below are added INSIDE the existing header Row, matching the kind-label pill's
+// own 9sp/1dp-padding sizing exactly, so they never grow past that Row's already-governing height.
+// Expanding a group adds IssueOccurrenceRows below, which is exactly the "content sizes itself
+// under heightIn(max=...)" case BoundedScrollBox's own doc comment already accounts for — no
+// further recompute needed there either, only which count feeds rowLimit (group count, not
+// occurrence count; see the FilterPanel call site).
 @Composable
 private fun IssueSiteRow(
-    site: IssueSite,
+    group: IssueSiteGroup,
+    tc: ThemeColors,
+    onNavigate: (IssueSite) -> Unit,
+) {
+    val site = group.representative
+    val accent = site.accentColor()
+    val count = group.occurrences.size
+    // Ephemeral, per-row browsing state — deliberately not part of FilterPanelUiState/the autosave
+    // token (same reasoning as SequenceEditor's local seqColorPickerOpen): which crash groups are
+    // expanded isn't a filter setting worth persisting across restarts.
+    var expanded by remember(site.id) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth()) {
+        HoverBox(modifier = Modifier.fillMaxWidth(), onClick = { onNavigate(site) }) {
+            Column(
+                Modifier.fillMaxWidth()
+                    .border(BorderStroke(1.dp, tc.br.copy(.4f)))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Box(
+                        Modifier.background(accent.copy(.15f), CORNER_SM).border(1.dp, accent.copy(.4f), CORNER_SM)
+                            .padding(horizontal = 6.dp, vertical = 1.dp),
+                    ) { AppText(site.kindLabel(), color = accent, fontSize = 9.sp, fontWeight = FontWeight.SemiBold) }
+                    if (count > 1) {
+                        Box(
+                            Modifier.clip(CORNER_SM).clickable { expanded = !expanded }
+                                .background(tc.br.copy(.5f), CORNER_SM)
+                                .padding(horizontal = 6.dp, vertical = 1.dp),
+                        ) {
+                            AppText(
+                                "×$count ${if (expanded) "▾" else "▸"}",
+                                color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+                    AppText(site.entry.ts, color = tc.td, fontSize = 9.sp, fontFamily = MONO)
+                    AppText(site.entry.tag, color = tc.td, fontSize = 9.sp, fontFamily = MONO,
+                        modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                }
+                AppText(
+                    site.entry.msg, color = tc.tx, fontSize = 11.sp, fontFamily = MONO,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+            }
+        }
+        if (expanded && count > 1) {
+            // drop(1): the representative (occurrences[0]) is already the header row above —
+            // listing it again here would show the same occurrence twice.
+            group.occurrences.drop(1).forEach { occurrence ->
+                IssueOccurrenceRow(occurrence, tc, onClick = { onNavigate(occurrence) })
+            }
+        }
+    }
+}
+
+// Compact row for one occurrence inside an expanded crash group — timestamp + message only (the
+// group header already carries the kind badge and tag), indented to read as a child of it.
+@Composable
+private fun IssueOccurrenceRow(
+    occurrence: IssueSite,
     tc: ThemeColors,
     onClick: () -> Unit,
 ) {
-    val accent = site.accentColor()
     HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onClick) {
-        Column(
+        Row(
             Modifier.fillMaxWidth()
-                .border(BorderStroke(1.dp, tc.br.copy(.4f)))
-                .padding(horizontal = 10.dp, vertical = 6.dp),
+                .border(BorderStroke(1.dp, tc.br.copy(.25f)))
+                .padding(start = 20.dp, end = 10.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Box(
-                    Modifier.background(accent.copy(.15f), CORNER_SM).border(1.dp, accent.copy(.4f), CORNER_SM)
-                        .padding(horizontal = 6.dp, vertical = 1.dp),
-                ) { AppText(site.kindLabel(), color = accent, fontSize = 9.sp, fontWeight = FontWeight.SemiBold) }
-                AppText(site.entry.ts, color = tc.td, fontSize = 9.sp, fontFamily = MONO)
-                AppText(site.entry.tag, color = tc.td, fontSize = 9.sp, fontFamily = MONO,
-                    modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
-            }
+            AppText(occurrence.entry.ts, color = tc.td, fontSize = 9.sp, fontFamily = MONO)
             AppText(
-                site.entry.msg, color = tc.tx, fontSize = 11.sp, fontFamily = MONO,
-                maxLines = 2, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 3.dp),
+                occurrence.entry.msg, color = tc.tx, fontSize = 11.sp, fontFamily = MONO,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
         }
     }
