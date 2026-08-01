@@ -54,8 +54,19 @@ internal fun BoundFilterPanel(
         // that also drives the panel's active/inactive button rendering.
         LogCompositionActions(
             onExpand = { state.requestMessageComposition(tab.id) },
-            onHide = { template -> state.toggleMessageRuleForTemplate(tab.id, template, sampleFor(template), include = false) },
-            onShowOnly = { template -> state.toggleMessageRuleForTemplate(tab.id, template, sampleFor(template), include = true) },
+            // Kick the rescan off immediately rather than letting the panel's debounced
+            // filter-watcher notice 400ms later: that debounce exists for typing in a message-rule
+            // box, and a button press is a discrete action that should not wait it out.
+            // requestMessageComposition is single-flight, so the debounced call that follows for
+            // the same filter is a no-op.
+            onHide = { template ->
+                state.toggleMessageRuleForTemplate(tab.id, template, sampleFor(template), include = false)
+                state.requestMessageComposition(tab.id)
+            },
+            onShowOnly = { template ->
+                state.toggleMessageRuleForTemplate(tab.id, template, sampleFor(template), include = true)
+                state.requestMessageComposition(tab.id)
+            },
             onHighlight = { template -> state.toggleHighlightForTemplate(tab.id, template, sampleFor(template)) },
             onGoToFirst = { template -> state.requestCrashNavigation(tab.id, template.firstEntryId) },
         )
