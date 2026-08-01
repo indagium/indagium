@@ -261,16 +261,28 @@ fun timeDeltaColumnWidth(fontSizeSp: Float, charCount: Int): Dp =
     (charCount.coerceAtLeast(1) * fontSizeSp * MONO_DIGIT_EM).dp
 
 // Change 3 (process-names rework): ColHeader's own "PID" header box width when the pid FIELD
-// itself is widened to a uniform per-tab character count (LogViewer.kt's pidFieldCharWidth) —
-// same formula, same "count chars at the header's own smaller COL_HEADER_FONT_SP, not the row's
-// own configurable content font size" convention rowNumberColumnWidth/timeDeltaColumnWidth above
-// already use for the "#"/"Δt" header cells. That's fine here for the same reason it's fine there:
-// a header LABEL box only needs to roughly track the column below it, not pixel-lock to it, since
-// alignment is a monospace-text-inside-one-BasicTextField property below, not a Compose layout
-// constraint shared with the header Row. ColHeader only calls this when the field is actually
+// itself is widened to a uniform per-tab character count (LogViewer.kt's pidFieldCharWidth).
+//
+// Unlike the "#"/"Δt" gutters above, the pid field is NOT a separate composable in the row — it's
+// inline monospace text inside LogRow's single BasicTextField (see that field's own doc for why:
+// preserving whole-row drag-selection), rendered at the row's configurable content font size
+// (AppSettings.fontSize / LocalFontBase), not at COL_HEADER_FONT_SP. So this must be called with
+// that SAME content font size, threaded down from ColHeader's caller — calling it with
+// COL_HEADER_FONT_SP here (as the "#"/"Δt" cells correctly do, since those rows' gutters really are
+// drawn at that font) would undersize the box against the row's actual field width, shifting every
+// header after it (TID/LVL/TAG/MESSAGE) left. ColHeader only calls this when the field is actually
 // wider than the original 5 chars — the OFF case keeps its literal pre-feature 40.dp box untouched.
 fun pidFieldColumnWidth(fontSizeSp: Float, chars: Int): Dp =
     (chars.coerceAtLeast(1) * fontSizeSp * MONO_DIGIT_EM).dp
+
+// The PID header box width decision itself, pulled out as a pure function (like
+// pidFieldCharWidth/rowNumberColumnWidth above) so it's unit-testable without this project's
+// Compose-free test harness. [contentFontSizeSp] must be the SAME value the row renders the pid
+// field at (AppSettings.fontSize, threaded in by ColHeader's caller) — see pidFieldColumnWidth's
+// own doc for why. Mirrors ColHeader's own pidColWidth logic exactly; ColHeader calls this rather
+// than duplicating it.
+fun headerPidColumnWidth(pidFieldChars: Int, contentFontSizeSp: Float): Dp =
+    if (pidFieldChars > 5) pidFieldColumnWidth(contentFontSizeSp, pidFieldChars) else 40.dp
 
 // NOTE: there is deliberately no width helper here for the tid-map gutter (unlike
 // rowNumberColumnWidth/timeDeltaColumnWidth above) — it doesn't need one. Two earlier versions

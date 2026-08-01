@@ -285,6 +285,13 @@ fun ColHeader(
     // or this tab has no name over 5 chars. Only widens the "PID" box below the pre-feature fixed
     // 40.dp when this is actually > 5, so the OFF case's Compose tree is untouched.
     pidFieldChars: Int = 5,
+    // The row's own content font size (AppSettings.fontSize) — the pid field renders inline in the
+    // row's single BasicTextField at THIS font size, not at COL_HEADER_FONT_SP (see
+    // Theme.kt's pidFieldColumnWidth doc), so the header box below must be sized from it too or it
+    // drifts out of alignment with the row (and every header after it shifts left) whenever the
+    // field is actually widened. Defaults to AppSettings' own default (12) purely so existing call
+    // sites/tests that don't pass it keep compiling; every real call site threads settings.fontSize.
+    contentFontSizeSp: Int = 12,
 ) {
     val tc = tc()
     Row(
@@ -322,10 +329,18 @@ fun ColHeader(
         if (hasPidTid) {
             // pidFieldChars > 5 only when the process-name feature is on AND this tab has a known
             // name wider than 5 chars (pidFieldCharWidth) — every other case keeps the exact
-            // pre-feature 40.dp box, which is what makes mode OFF byte-identical to before.
-            val pidColWidth = if (pidFieldChars > 5) pidFieldColumnWidth(COL_HEADER_FONT_SP, pidFieldChars) else 40.dp
+            // pre-feature 40.dp box, which is what makes mode OFF byte-identical to before. Sized
+            // from contentFontSizeSp (the row's own font), not COL_HEADER_FONT_SP — see
+            // headerPidColumnWidth/pidFieldColumnWidth's own docs for why.
+            val pidColWidth = headerPidColumnWidth(pidFieldChars, contentFontSizeSp.toFloat())
             AppText("PID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(pidColWidth))
-            AppText("TID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(40.dp))
+            // TID is the same class of drift as PID above: entry.tid.toString().padStart(5) is a
+            // genuinely fixed 5-char field in the row (unlike TIMESTAMP/TAG below, which are
+            // unpadded free text with no fixed width to derive from), so it's sized the same way —
+            // safe across the whole font-size range (Settings caps it at 10..24sp; even at the
+            // floor, 5 content-font chars comfortably fit the 3-char "TID" label).
+            val tidColWidth = pidFieldColumnWidth(contentFontSizeSp.toFloat(), 5)
+            AppText("TID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(tidColWidth))
         }
         AppText("LVL", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(28.dp))
         AppText("TAG", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(100.dp))
