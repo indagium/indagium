@@ -8,8 +8,10 @@ import com.openlog.model.ProcessNameMode
 import com.openlog.ui.PROCESS_NAME_MAX_CHARS
 import com.openlog.ui.buildFullLineAnnotation
 import com.openlog.ui.pidFieldCharWidth
+import com.openlog.ui.pointerInsidePidFieldX
 import com.openlog.ui.processNamesVisible
 import com.openlog.ui.remapPidFieldRange
+import com.openlog.ui.shouldShowProcessNamePopup
 import com.openlog.ui.toggledProcessNameMode
 import com.openlog.utils.visibleLogLineText
 import kotlin.test.Test
@@ -54,10 +56,13 @@ class ProcessNameRenderingTest {
     }
 
     @Test
-    fun theCapLeavesOrdinaryPackageNamesUnelided() {
-        // The reason the cap moved: a name this shape is unremarkable and must render in full.
+    fun theCapAppliesEvenToOrdinaryPackageNamesLongerThanIt() {
+        // The column stays narrow on purpose (Theme.kt's own doc on PROCESS_NAME_MAX_CHARS) — a
+        // name this shape and length is unremarkable but still gets middle-ellipsised in the field;
+        // LogRow's hover popup (shouldShowProcessNamePopup), not a wider column, is what reveals it.
         val name = "com.usbmonitor.fixture"
-        assertEquals(name.length, pidFieldCharWidth(ProcessNameMode.ALL, mapOf(1 to name), emptySet()))
+        assertTrue(name.length > PROCESS_NAME_MAX_CHARS, "test name must actually exceed the cap")
+        assertEquals(PROCESS_NAME_MAX_CHARS, pidFieldCharWidth(ProcessNameMode.ALL, mapOf(1 to name), emptySet()))
     }
 
     // ALL is unaffected by manualPicks — every known name is a candidate regardless of picks, since
@@ -126,6 +131,53 @@ class ProcessNameRenderingTest {
         assertTrue(processNamesVisible(ProcessNameMode.ALL, emptySet()))
         assertTrue(processNamesVisible(ProcessNameMode.MANUAL, setOf(1234)))
         assertFalse(processNamesVisible(ProcessNameMode.MANUAL, emptySet()))
+    }
+
+    // ── shouldShowProcessNamePopup: whether LogRow's hover popup has anything to reveal ──────
+
+    @Test
+    fun popupNeverShowsWhenNoNameIsDisplayed() {
+        assertFalse(shouldShowProcessNamePopup(null, 20))
+    }
+
+    @Test
+    fun popupDoesNotShowWhenTheNameAlreadyFitsTheField() {
+        assertFalse(shouldShowProcessNamePopup("short", 20))
+    }
+
+    @Test
+    fun popupDoesNotShowWhenTheNameExactlyFillsTheFieldWithNoRoomLeft() {
+        // Exactly at the width is NOT elided — middleEllipsis (LogViewer.kt) is a no-op at
+        // text.length == maxChars, so there is nothing hidden for the popup to reveal.
+        assertFalse(shouldShowProcessNamePopup("twelve_chars", 12))
+    }
+
+    @Test
+    fun popupShowsWhenTheNameIsWiderThanTheFieldAndWasActuallyElided() {
+        assertTrue(shouldShowProcessNamePopup("a-name-longer-than-the-field", 12))
+    }
+
+    // ── pointerInsidePidFieldX: pointer-in-field hit testing for the hover popup ─────────────
+
+    @Test
+    fun pointerBeforeTheFieldIsOutside() {
+        assertFalse(pointerInsidePidFieldX(9f, fieldStartX = 10f, fieldEndX = 50f))
+    }
+
+    @Test
+    fun pointerAfterTheFieldIsOutside() {
+        assertFalse(pointerInsidePidFieldX(51f, fieldStartX = 10f, fieldEndX = 50f))
+    }
+
+    @Test
+    fun pointerAtEitherEdgeIsInside() {
+        assertTrue(pointerInsidePidFieldX(10f, fieldStartX = 10f, fieldEndX = 50f))
+        assertTrue(pointerInsidePidFieldX(50f, fieldStartX = 10f, fieldEndX = 50f))
+    }
+
+    @Test
+    fun pointerInsideTheFieldIsInside() {
+        assertTrue(pointerInsidePidFieldX(30f, fieldStartX = 10f, fieldEndX = 50f))
     }
 
     // ── remapPidFieldRange: the offset math directly ────────────────────────────────────
