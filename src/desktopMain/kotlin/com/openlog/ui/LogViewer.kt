@@ -1750,6 +1750,7 @@ fun LogViewer(
                         timeDeltaChars = originalTimeDeltaChars,
                         hasTidMap = tab.tidMap != null,
                         pidFieldChars = pidFieldChars,
+                        contentFontSizeSp = settings.fontSize,
                     )
                     ItemList(
                         listItems = allItems,
@@ -1808,6 +1809,7 @@ fun LogViewer(
                         timeDeltaChars = filteredTimeDeltaChars,
                         hasTidMap = tab.tidMap != null,
                         pidFieldChars = pidFieldChars,
+                        contentFontSizeSp = settings.fontSize,
                     )
                     ItemList(
                         listItems = items,
@@ -1916,6 +1918,7 @@ fun LogViewer(
                 timeDeltaChars = mainTimeDeltaChars,
                 hasTidMap = tab.tidMap != null,
                 pidFieldChars = pidFieldChars,
+                contentFontSizeSp = settings.fontSize,
             )
             ItemList(
                 items, computedItems.summary, rowBoundsAbs, boxPosY,
