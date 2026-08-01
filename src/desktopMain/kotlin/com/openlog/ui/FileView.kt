@@ -60,14 +60,14 @@ internal fun BoundFilterPanel(
             // requestMessageComposition is single-flight, so the debounced call that follows for
             // the same filter is a no-op.
             onHide = { template ->
-                state.toggleMessageRuleForTemplate(tab.id, template, sampleFor(template), include = false)
+                state.toggleMessageRuleForTemplate(tab.id, template, include = false)
                 state.requestMessageComposition(tab.id)
             },
             onShowOnly = { template ->
-                state.toggleMessageRuleForTemplate(tab.id, template, sampleFor(template), include = true)
+                state.toggleMessageRuleForTemplate(tab.id, template, include = true)
                 state.requestMessageComposition(tab.id)
             },
-            onHighlight = { template -> state.toggleHighlightForTemplate(tab.id, template, sampleFor(template)) },
+            onHighlight = { template -> state.toggleHighlightForTemplate(tab.id, template) },
             onGoToFirst = { template -> state.requestCrashNavigation(tab.id, template.firstEntryId) },
         )
     }

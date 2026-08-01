@@ -43,21 +43,20 @@ class LogCompositionRowActionsTest {
         val state = AppState()
         val template = openTabWithTemplate(state, "Net", "heartbeat")
         val id = tabId(state)
-        val sample = state.tabs.single().rmap.getValue(template.firstEntryId).msg
 
-        state.toggleMessageRuleForTemplate(id, template, sample, include = false)
+        state.toggleMessageRuleForTemplate(id, template, include = false)
         val afterHide = state.tabs.single().filter.messageRules
         assertEquals(1, afterHide.size)
         assertEquals(false, afterHide.single().include)
         assertTrue(
-            matchingMessageRule(afterHide, template, sample, include = false, FilterMode.TAGS) != null,
+            matchingMessageRule(afterHide, template, include = false, FilterMode.TAGS) != null,
             "the row must report Hide as applied once the rule exists",
         )
 
-        state.toggleMessageRuleForTemplate(id, template, sample, include = false)
+        state.toggleMessageRuleForTemplate(id, template, include = false)
         val afterSecondPress = state.tabs.single().filter.messageRules
         assertTrue(afterSecondPress.isEmpty(), "a second Hide press must remove the rule it created, not add a duplicate")
-        assertNull(matchingMessageRule(afterSecondPress, template, sample, include = false, FilterMode.TAGS))
+        assertNull(matchingMessageRule(afterSecondPress, template, include = false, FilterMode.TAGS))
     }
 
     // ── Show only toggles ────────────────────────────────────────────────────────────────────
@@ -67,15 +66,14 @@ class LogCompositionRowActionsTest {
         val state = AppState()
         val template = openTabWithTemplate(state, "Net", "heartbeat")
         val id = tabId(state)
-        val sample = state.tabs.single().rmap.getValue(template.firstEntryId).msg
 
-        state.toggleMessageRuleForTemplate(id, template, sample, include = true)
+        state.toggleMessageRuleForTemplate(id, template, include = true)
         val afterShowOnly = state.tabs.single().filter.messageRules
         assertEquals(1, afterShowOnly.size)
         assertEquals(true, afterShowOnly.single().include)
-        assertTrue(matchingMessageRule(afterShowOnly, template, sample, include = true, FilterMode.TAGS) != null)
+        assertTrue(matchingMessageRule(afterShowOnly, template, include = true, FilterMode.TAGS) != null)
 
-        state.toggleMessageRuleForTemplate(id, template, sample, include = true)
+        state.toggleMessageRuleForTemplate(id, template, include = true)
         assertTrue(state.tabs.single().filter.messageRules.isEmpty())
     }
 
@@ -86,17 +84,16 @@ class LogCompositionRowActionsTest {
         val state = AppState()
         val template = openTabWithTemplate(state, "Net", "heartbeat")
         val id = tabId(state)
-        val sample = state.tabs.single().rmap.getValue(template.firstEntryId).msg
 
-        state.toggleHighlightForTemplate(id, template, sample)
+        state.toggleHighlightForTemplate(id, template)
         val afterHighlight = state.tabs.single().filter.highlighters
         assertEquals(1, afterHighlight.size)
-        assertTrue(matchingHighlighter(afterHighlight, template, sample) != null)
+        assertTrue(matchingHighlighter(afterHighlight, template) != null)
 
-        state.toggleHighlightForTemplate(id, template, sample)
+        state.toggleHighlightForTemplate(id, template)
         val afterSecondPress = state.tabs.single().filter.highlighters
         assertTrue(afterSecondPress.isEmpty())
-        assertNull(matchingHighlighter(afterSecondPress, template, sample))
+        assertNull(matchingHighlighter(afterSecondPress, template))
     }
 
     // ── A hand-authored rule counts as applied too ──────────────────────────────────────────
@@ -106,8 +103,7 @@ class LogCompositionRowActionsTest {
         val state = AppState()
         val template = openTabWithTemplate(state, "Net", "heartbeat")
         val id = tabId(state)
-        val sample = state.tabs.single().rmap.getValue(template.firstEntryId).msg
-        val spec = messageRuleSpecForTemplate(template, sample)
+        val spec = messageRuleSpecForTemplate(template)
 
         // Built directly via addMessageRule (the right-click flyout's own path), never through the
         // Log composition panel's toggle — this is the "user made it by hand" scenario.
@@ -116,12 +112,12 @@ class LogCompositionRowActionsTest {
         val rules = state.tabs.single().filter.messageRules
         assertEquals(1, rules.size, "sanity: exactly the hand-authored rule exists")
         assertTrue(
-            matchingMessageRule(rules, template, sample, include = false, FilterMode.TAGS) != null,
+            matchingMessageRule(rules, template, include = false, FilterMode.TAGS) != null,
             "a hand-authored rule that matches the template's own pattern is genuinely applied, not a false positive",
         )
 
         // And pressing Hide now must recognize it and remove it, not add a second contradictory one.
-        state.toggleMessageRuleForTemplate(id, template, sample, include = false)
+        state.toggleMessageRuleForTemplate(id, template, include = false)
         assertTrue(state.tabs.single().filter.messageRules.isEmpty())
     }
 
@@ -138,15 +134,14 @@ class LogCompositionRowActionsTest {
         val state = AppState()
         val template = openTabWithTemplate(state, "Net", "heartbeat")
         val id = tabId(state)
-        val sample = state.tabs.single().rmap.getValue(template.firstEntryId).msg
 
-        state.toggleMessageRuleForTemplate(id, template, sample, include = false) // Hide
-        state.toggleMessageRuleForTemplate(id, template, sample, include = true) // Show only
+        state.toggleMessageRuleForTemplate(id, template, include = false) // Hide
+        state.toggleMessageRuleForTemplate(id, template, include = true) // Show only
 
         val rules = state.tabs.single().filter.messageRules
         assertEquals(1, rules.size, "Hide then Show-only must leave exactly one rule")
         assertEquals(true, rules.single().include, "the later action (Show-only) wins")
-        assertNull(matchingMessageRule(rules, template, sample, include = false, FilterMode.TAGS), "the Hide rule must be gone")
-        assertTrue(matchingMessageRule(rules, template, sample, include = true, FilterMode.TAGS) != null)
+        assertNull(matchingMessageRule(rules, template, include = false, FilterMode.TAGS), "the Hide rule must be gone")
+        assertTrue(matchingMessageRule(rules, template, include = true, FilterMode.TAGS) != null)
     }
 }
