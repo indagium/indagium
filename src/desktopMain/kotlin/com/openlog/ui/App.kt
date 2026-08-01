@@ -524,7 +524,7 @@ fun App(
                             // CollapseActions itself uses).
                             //
                             // Name: offered only when this row's OWN pid resolves to a known name;
-                            // Show/Hide always switch AppSettings.processNameMode to MANUAL (see
+                            // Show/Hide always switch THIS TAB's processNameMode to MANUAL (see
                             // AppState.showProcessNameForPid/hideProcessNameForPid's own doc) — this
                             // control is fundamentally a MANUAL-mode picker, so invoking it from OFF
                             // or ALL must switch into the mode where the pick actually matters.
@@ -539,7 +539,7 @@ fun App(
                                     ?.let { { state.toggleTidMap(ctx.tabId, entry.pid, entry.tid); state.ctx = null } }
                                 val onHideMap = activeTidMap?.let { { state.closeTidMap(ctx.tabId); state.ctx = null } }
                                 val processName = ctxTab.analysis.processNames[entry.pid]
-                                val currentlyShown = when (state.settings.processNameMode) {
+                                val currentlyShown = when (ctxTab.processNameMode) {
                                     ProcessNameMode.OFF -> false
                                     ProcessNameMode.ALL -> true
                                     ProcessNameMode.MANUAL -> entry.pid in ctxTab.manualProcessNamePicks

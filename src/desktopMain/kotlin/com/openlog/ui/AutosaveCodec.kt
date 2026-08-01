@@ -609,7 +609,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("showMinimap", showMinimap)
     put("showVideoFollowReadout", showVideoFollowReadout)
     put("customIssueRules", customIssueRulesJson(customIssueRules))
-    put("processNameMode", processNameMode.name)
+    put("showProcessNamesInNewTabs", showProcessNamesInNewTabs)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -881,10 +881,11 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         showMinimap = o.boolOrDefault("showMinimap", true),
         showVideoFollowReadout = o.boolOrDefault("showVideoFollowReadout", false),
         customIssueRules = o.customIssueRulesFromJson("customIssueRules"),
-        // Missing (legacy blob predating this field) or unparseable both fall back to OFF, the same
-        // default a fresh AppSettings() carries — see AppSettings.processNameMode's own doc.
-        processNameMode = o.stringOrNull("processNameMode")?.let { runCatching { ProcessNameMode.valueOf(it) }.getOrNull() }
-            ?: ProcessNameMode.OFF,
+        // Missing (a legacy blob predating this field, or one written while it was still the
+        // three-way "processNameMode" that has since moved onto LogTab) falls back to false, the
+        // same default a fresh AppSettings() carries — see showProcessNamesInNewTabs' own doc. An
+        // old blob's "processNameMode" key is simply ignored; nothing reads it any more.
+        showProcessNamesInNewTabs = o.boolOrDefault("showProcessNamesInNewTabs", false),
     )
 }.getOrNull()
 
