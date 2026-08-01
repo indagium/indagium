@@ -303,13 +303,32 @@ fun computeCrashSites(logData: List<LogEntry>, stackGroups: List<StackTraceGroup
     // Stamps occurrenceCount/firstLogId across the (small — one entry per detected crash line,
     // not per logData line) combined list. Same pass shape as the memoized "handful of rids" cost
     // class computeCrashSites already targets: grouping N crash sites, not the file's M log lines.
-    // combined is already sorted by entry.id, so the first site seen per signature is the earliest.
-    val occurrenceCounts = combined.groupingBy { it.signature }.eachCount()
-    val firstIdBySignature = LinkedHashMap<String, Int>()
-    combined.forEach { site -> firstIdBySignature.putIfAbsent(site.signature, site.entry.id) }
+    // combined is already sorted by entry.id, so the first site seen per group is the earliest.
+    // Keyed by issueGroupKey (not raw signature) so this stamping agrees with groupIssueSites about
+    // what a "group" is — see that function's doc comment for why a bare signature isn't enough.
+    val occurrenceCounts = combined.groupingBy { issueGroupKey(it) }.eachCount()
+    val firstIdByGroupKey = LinkedHashMap<String, Int>()
+    combined.forEach { site -> firstIdByGroupKey.putIfAbsent(issueGroupKey(site), site.entry.id) }
     return combined.map { site ->
-        site.copy(occurrenceCount = occurrenceCounts.getValue(site.signature), firstLogId = firstIdBySignature.getValue(site.signature))
+        val key = issueGroupKey(site)
+        site.copy(occurrenceCount = occurrenceCounts.getValue(key), firstLogId = firstIdByGroupKey.getValue(key))
     }
+}
+
+// Single source of truth for "what counts as one issue group" — used both to collapse the Issues
+// panel's rows (groupIssueSites) and to stamp occurrenceCount/firstLogId in computeCrashSites, so
+// the panel and the MCP get_crash_sites contract can never disagree about what a group is. Every
+// attribute that decides which category a site lands in (crashSitesForCategory) or how its row is
+// labelled (IssueSite.kindLabel/accentColor) must be part of this key — two sites that would render
+// differently must never share a group. `kind` is included explicitly rather than relying on the
+// signature's "EXC:"/"ANR:"/"NATIVE:" prefix, so a future signature format change can't silently
+// re-merge kinds; `isFatal` is what splits EXCEPTION into FATAL_EXCEPTIONS vs EXCEPTIONS and the
+// signature never carries it (see CrashCategory's doc and the module comment above on signature
+// capture). CustomIssueSite never groups (no signature concept for user-defined rules today), so
+// each becomes its own singleton group keyed by its own id.
+internal fun issueGroupKey(site: IssueSite): String = when (site) {
+    is CrashSite -> "crash:${site.kind}:${site.isFatal}:${site.signature}"
+    is CustomIssueSite -> "custom:${site.id}"
 }
 
 /** One row in the Issues panel's collapsed-by-signature view: the earliest occurrence plus every
@@ -324,11 +343,7 @@ data class IssueSiteGroup(val representative: IssueSite, val occurrences: List<I
 fun groupIssueSites(sites: List<IssueSite>): List<IssueSiteGroup> {
     val order = LinkedHashMap<String, MutableList<IssueSite>>()
     sites.forEach { site ->
-        val key = when (site) {
-            is CrashSite -> "crash:${site.signature}"
-            is CustomIssueSite -> "custom:${site.id}"
-        }
-        order.getOrPut(key) { mutableListOf() }.add(site)
+        order.getOrPut(issueGroupKey(site)) { mutableListOf() }.add(site)
     }
     // sites is expected to already be in document order (issueSitesForCategory sorts by entry.id),
     // so insertion order into `order` already IS first-occurrence document order; the inner sort

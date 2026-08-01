@@ -290,6 +290,110 @@ class CrashPanelDetectionTest {
     }
 
     @Test
+    fun fatalAndNonFatalExceptionsWithTheSameClassAndFrameStaySeparateGroupsUnderAll() {
+        // Fatal dump: "FATAL EXCEPTION: main" header, class name on the follow-up line, then the
+        // frame — a real device crash dump's shape.
+        val fatalLogs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 100),
+            LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "java.lang.NullPointerException: boom", pid = 100),
+            LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 100),
+        )
+        // Non-fatal: a bare "<Class>Exception: msg" header (no "fatal exception" substring), same
+        // class and same top frame, different pid so it opens its own trace.
+        val nonFatalLogs = listOf(
+            LogEntry(4, "10:00:01.000", LogLevel.W, "AndroidRuntime", "java.lang.NullPointerException: boom", pid = 200),
+            LogEntry(5, "10:00:01.100", LogLevel.W, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 200),
+        )
+        val logs = fatalLogs + nonFatalLogs
+
+        val sites = computeCrashSites(logs, computeStackTraceGroups(logs))
+        // Confirms the premise: same class + top frame really does produce the same signature, so
+        // this is exactly the merge risk groupIssueSites' key must guard against.
+        assertEquals(1, sites.map { it.signature }.toSet().size)
+        assertEquals(setOf(true, false), sites.map { it.isFatal }.toSet())
+
+        val all = issueSitesForCategory(sites, emptyList(), IssueCategorySelection.BuiltIn(CrashCategory.ALL))
+        val groups = groupIssueSites(all)
+
+        assertEquals(2, groups.size)
+        val fatalGroup = groups.single { (it.representative as CrashSite).isFatal }
+        val nonFatalGroup = groups.single { !(it.representative as CrashSite).isFatal }
+        assertEquals(listOf(1), fatalGroup.occurrences.map { it.entry.id })
+        assertEquals(listOf(4), nonFatalGroup.occurrences.map { it.entry.id })
+        assertTrue((fatalGroup.representative as CrashSite).isFatal)
+    }
+
+    @Test
+    fun issueCategoryCountsAddUpAndAllDoesNotDoubleCountASite() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 100),
+            LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "java.lang.NullPointerException: boom", pid = 100),
+            LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 100),
+            LogEntry(4, "10:00:01.000", LogLevel.W, "AndroidRuntime", "java.lang.NullPointerException: boom", pid = 200),
+            LogEntry(5, "10:00:01.100", LogLevel.W, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 200),
+            LogEntry(6, "10:00:02.000", LogLevel.E, "ActivityManager", "ANR in com.example.app", pid = 300),
+        )
+        val crashSites = computeCrashSites(logs, computeStackTraceGroups(logs))
+
+        val all = issueSitesForCategory(crashSites, emptyList(), IssueCategorySelection.BuiltIn(CrashCategory.ALL))
+        val fatal = issueSitesForCategory(crashSites, emptyList(), IssueCategorySelection.BuiltIn(CrashCategory.FATAL_EXCEPTIONS))
+        val nonFatal = issueSitesForCategory(crashSites, emptyList(), IssueCategorySelection.BuiltIn(CrashCategory.EXCEPTIONS))
+        val anrs = issueSitesForCategory(crashSites, emptyList(), IssueCategorySelection.BuiltIn(CrashCategory.ANRS))
+
+        assertEquals(3, all.size)
+        assertEquals(1, fatal.size)
+        assertEquals(1, nonFatal.size)
+        assertEquals(1, anrs.size)
+        // ALL isn't a second, independently-counted bucket: every site in it lands in exactly one
+        // specific category, so the specific-category counts must sum to ALL's — never double,
+        // never short.
+        assertEquals(all.size, fatal.size + nonFatal.size + anrs.size)
+        assertTrue(fatal.single() in all)
+        assertTrue(nonFatal.single() in all)
+        assertTrue(anrs.single() in all)
+    }
+
+    @Test
+    fun stampedOccurrenceCountAndFirstLogIdAgreeWithGroupIssueSitesForEveryGroup() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 100),
+            LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "java.lang.NullPointerException: boom", pid = 100),
+            LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 100),
+            // Non-fatal, same class + top frame as above -> same signature, different isFatal.
+            LogEntry(4, "10:00:01.000", LogLevel.W, "AndroidRuntime", "java.lang.NullPointerException: boom", pid = 200),
+            LogEntry(5, "10:00:01.100", LogLevel.W, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 200),
+            // A second fatal occurrence of the same signature, so the fatal group has size 2 while
+            // the non-fatal group (entry 4) has size 1 — the two groups must stay distinguishable
+            // by more than coincidence for this test to actually exercise the merge risk.
+            LogEntry(6, "10:00:02.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 300),
+            LogEntry(7, "10:00:02.100", LogLevel.E, "AndroidRuntime", "java.lang.NullPointerException: boom", pid = 300),
+            LogEntry(8, "10:00:02.200", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 300),
+        )
+
+        val crashSites = computeCrashSites(logs, computeStackTraceGroups(logs))
+        val all = issueSitesForCategory(crashSites, emptyList(), IssueCategorySelection.BuiltIn(CrashCategory.ALL))
+        val groups = groupIssueSites(all)
+
+        // Confirms the fixture actually distinguishes the two code paths: one signature, two
+        // differently-sized groups, so a divergence between computeCrashSites' stamping and
+        // groupIssueSites' grouping shows up as a mismatched count rather than passing by luck.
+        assertEquals(1, crashSites.map { it.signature }.toSet().size)
+        assertEquals(2, groups.size)
+
+        crashSites.forEach { site ->
+            val ownGroup = groups.single { group -> group.occurrences.any { it.entry.id == site.entry.id } }
+            assertEquals(
+                ownGroup.occurrences.size, site.occurrenceCount,
+                "site ${site.entry.id}'s stamped occurrenceCount should equal its groupIssueSites group size",
+            )
+            assertEquals(
+                ownGroup.representative.entry.id, site.firstLogId,
+                "site ${site.entry.id}'s stamped firstLogId should equal its groupIssueSites representative",
+            )
+        }
+    }
+
+    @Test
     fun groupIssueSitesCollapsesRepeatsButPreservesDocumentOrderOfFirstOccurrence() {
         val entryA1 = LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "boom")
         val entryB = LogEntry(2, "10:00:01.000", LogLevel.W, "Net", "timeout")
