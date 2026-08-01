@@ -92,9 +92,11 @@ sealed interface IssueSite {
 // every raw occurrence keeps its own CrashSite (crashSites stays flat: one entry per detected
 // crash line, not one per distinct signature), so the minimap's "mark every occurrence" BitSet
 // and the MCP get_crash_sites `sites[].logId` shape are both unaffected. A view layer (the Issues
-// panel, utils/groupIssueSites) collapses same-signature sites for display; this type itself never
+// panel, utils/groupIssueSites) collapses same-group sites for display; this type itself never
 // nests occurrences. occurrenceCount/firstLogId are the same value across every site sharing a
-// signature — computed once over the (small) sites list in computeCrashSites, not over logData.
+// group — computed once over the (small) sites list in computeCrashSites, not over logData, using
+// the same utils/issueGroupKey (kind + isFatal + signature) that groupIssueSites uses, so the two
+// never disagree about what "one group" means.
 data class CrashSite(
     override val id: String,
     override val entry: LogEntry,
