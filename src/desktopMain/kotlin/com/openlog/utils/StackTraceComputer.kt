@@ -13,6 +13,46 @@ import com.openlog.model.StackTraceGroup
 private val EXCEPTION_HEADER_RE = Regex("""^[\w.$]+(Exception|Error)(:.*)?$""")
 private val AT_FRAME_RE = Regex("""^\s*at\s+\S+""")
 
+// Crash-signature helpers (see computeStackTraceGroups' OpenTrace.signature doc). Extracts the
+// exception class (everything up to the first ':', or the whole trimmed line if there is none)
+// from a line already known to match EXCEPTION_HEADER_RE.
+private fun exceptionClassNameOf(headerLine: String): String = headerLine.trim().substringBefore(':').trim()
+
+// "at <token>" -> the token, e.g. "com.app.Main.onCreate(Main.java:10)" from
+// "    at com.app.Main.onCreate(Main.java:10)". Only called on lines AT_FRAME_RE already matched.
+private val FRAME_TOKEN_RE = Regex("""^\s*at\s+(\S+)""")
+
+// Packages a frame belongs to the Android/JVM runtime rather than the app's own code — used to
+// pick the first APP frame as the more identifying half of an exception's signature (many crashes
+// share the same top framework frame, e.g. every NPE goes through some java.lang.reflect.* call,
+// but the app frame that triggered it is what actually distinguishes one bug from another).
+private val FRAMEWORK_FRAME_PREFIXES = listOf(
+    "java.", "javax.", "jdk.", "sun.", "com.sun.",
+    "android.", "androidx.", "com.android.", "dalvik.", "libcore.",
+    "kotlin.", "kotlinx.",
+)
+
+private fun isFrameworkFrame(frameToken: String): Boolean {
+    val classAndMethod = frameToken.substringBefore('(')
+    return FRAMEWORK_FRAME_PREFIXES.any { classAndMethod.startsWith(it) }
+}
+
+// ANR signature: normalize to the named process only — "ANR in com.example.app (com.example.app/
+// .MainActivity)" and a later ANR against the same process (different activity/reason/timings)
+// both reduce to the same signature.
+private val ANR_PROCESS_RE = Regex("""ANR in\s+(\S+)""")
+
+private fun anrSignature(msg: String): String {
+    val proc = ANR_PROCESS_RE.find(msg)?.groupValues?.get(1) ?: msg.trim()
+    return "ANR:$proc"
+}
+
+// Native-crash signature: same tombstone line, tid normalized out — "Fatal signal 11 (SIGSEGV),
+// code 1, fault addr 0x0 in tid 1234" and "...in tid 5678" from a repeat crash must collapse.
+private val NATIVE_CRASH_TID_RE = Regex("""\bin tid\s+\d+\b""")
+
+private fun nativeCrashSignature(msg: String): String = "NATIVE:" + msg.trim().replace(NATIVE_CRASH_TID_RE, "in tid *")
+
 // "Caused by:" continuation needs no regex: on an already-trimmed line, the old
 // ^Caused by: containsMatchIn is exactly startsWith (see isUnconditionalContinuation).
 private val MORE_FRAMES_RE = Regex("""^\s*\.\.\.\s+\d+\s+more$""")
@@ -112,17 +152,56 @@ private fun isExceptionPrelude(scan: MsgScanner, msg: String): Boolean {
 //
 // v1 produces flat groups only (trigger + all continuation lines) — no nesting for "Caused by:"
 // chains, matching the single-header requirement and avoiding a second nesting model on day one.
-fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
-    // isFatal is decided once, at the moment the trace opens, from the trigger line's own scan —
-    // "FATAL EXCEPTION" headers set MsgScanner.fatalException directly; a generic
-    // <Class>Exception/Error header (no "fatal exception" substring) leaves it false. Metadata/
-    // classname lines folded in later via isHeaderFollowUp never open a new trace, so they can't
-    // change this once set.
-    class OpenTrace(val triggerIdx: Int, val isFatal: Boolean) {
-        val memberIds = mutableListOf<Int>()
-        var sawFrame = false
+//
+// isFatal is decided once, at the moment the trace opens, from the trigger line's own scan —
+// "FATAL EXCEPTION" headers set MsgScanner.fatalException directly; a generic <Class>Exception/
+// Error header (no "fatal exception" substring) leaves it false. Metadata/classname lines folded
+// in later via isHeaderFollowUp never open a new trace, so they can't change this once set.
+//
+// Pulled out of computeStackTraceGroups (rather than a local class there) purely to keep that
+// function's own cyclomatic complexity under detekt's threshold — it doesn't capture anything
+// from the enclosing scan, so nothing else about it depends on being local.
+private class OpenTrace(val triggerIdx: Int, val isFatal: Boolean) {
+    val memberIds = mutableListOf<Int>()
+    var sawFrame = false
+
+    // Populated as the scan progresses; see the module doc comment on signature capture.
+    var exceptionClassName: String? = null
+    var firstFrame: String? = null
+    var firstNonFrameworkFrame: String? = null
+
+    // "" only when neither a class name nor any frame was ever seen — an exception header with no
+    // useful body. Falling back to a per-rid string (rather than "") deliberately keeps two such
+    // threadbare traces from different places in the file from being treated as the same signature
+    // and wrongly grouped together.
+    fun computeSignature(rid: Int): String {
+        val cls = exceptionClassName
+        val frame = firstNonFrameworkFrame ?: firstFrame
+        return when {
+            cls != null || frame != null -> "EXC:${cls.orEmpty()}|${frame.orEmpty()}"
+            else -> "EXC:unresolved_$rid"
+        }
     }
 
+    // Captures the exception class name the first time a genuine "<Class>Exception: msg" shaped
+    // line is seen — either the line that opened this trace, or a header follow-up line folded in
+    // before any frame ("FATAL EXCEPTION: main" carries no class name itself; it arrives on the
+    // next line). First match wins; a later Caused-by header must not overwrite the outermost
+    // (and most identifying) exception.
+    fun noteIfClassNameLine(msg: String) {
+        if (exceptionClassName != null) return
+        val trimmed = msg.trim()
+        if (EXCEPTION_HEADER_RE.matches(trimmed)) exceptionClassName = exceptionClassNameOf(trimmed)
+    }
+
+    fun noteFrame(msg: String) {
+        val token = FRAME_TOKEN_RE.find(msg.trim())?.groupValues?.get(1) ?: return
+        if (firstFrame == null) firstFrame = token
+        if (firstNonFrameworkFrame == null && !isFrameworkFrame(token)) firstNonFrameworkFrame = token
+    }
+}
+
+fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
     val openByPid = HashMap<Int, OpenTrace>()
     val pendingPreludeByPid = HashMap<Int, Int>()
     val groups = mutableListOf<StackTraceGroup>()
@@ -131,7 +210,10 @@ fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
         val open = openByPid.remove(pid) ?: return
         if (open.memberIds.isNotEmpty()) {
             val rid = logData[open.triggerIdx].id
-            groups += StackTraceGroup(gid = "st_$rid", rid = rid, memberIds = open.memberIds.toList(), isFatal = open.isFatal)
+            groups += StackTraceGroup(
+                gid = "st_$rid", rid = rid, memberIds = open.memberIds.toList(), isFatal = open.isFatal,
+                signature = open.computeSignature(rid),
+            )
         }
     }
 
@@ -151,7 +233,15 @@ fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
             val isHeaderFollowUp = !open.sawFrame && trigger
             if (isUnconditionalContinuation(entry.msg) || isHeaderFollowUp) {
                 open.memberIds += entry.id
-                if (AT_FRAME_RE.containsMatchIn(entry.msg.trim())) open.sawFrame = true
+                if (AT_FRAME_RE.containsMatchIn(entry.msg.trim())) {
+                    open.sawFrame = true
+                    open.noteFrame(entry.msg)
+                } else if (isHeaderFollowUp) {
+                    // The class-name line ("java.lang.NullPointerException: ...") lands here for a
+                    // real "FATAL EXCEPTION" dump — folded in before any frame, same as the doc
+                    // comment above describes for metadata lines.
+                    open.noteIfClassNameLine(entry.msg)
+                }
                 continue
             }
             flush(entry.pid)
@@ -161,6 +251,10 @@ fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
                 ?.takeIf { it == i - 1 && logData[it].tag == entry.tag }
             openByPid[entry.pid] = OpenTrace(preludeIdx ?: i, isFatal = scanner.fatalException).also { trace ->
                 if (preludeIdx != null) trace.memberIds += entry.id
+                // Covers both shapes: a bare "<Class>Exception: msg" trigger opening its own
+                // trace, and a prelude-promoted trigger (this line IS the exception header even
+                // though the trace's rid points at the prelude line before it).
+                trace.noteIfClassNameLine(entry.msg)
             }
             pendingPreludeByPid.remove(entry.pid)
         } else if (isExceptionPrelude(scanner, entry.msg)) {
@@ -191,16 +285,74 @@ fun computeCrashSites(logData: List<LogEntry>, stackGroups: List<StackTraceGroup
     val byId = EntryIdMap(logData)
     val exceptionSites = stackGroups.mapNotNull { g ->
         byId[g.rid]?.let { entry ->
-            CrashSite(id = "crash_${g.rid}", entry = entry, kind = CrashKind.EXCEPTION, groupGid = g.gid, isFatal = g.isFatal)
+            CrashSite(id = "crash_${g.rid}", entry = entry, kind = CrashKind.EXCEPTION, groupGid = g.gid, isFatal = g.isFatal, signature = g.signature)
         }
     }
     val anrSites = logData
         .filter { it.tag == ANR_TAG && ANR_MSG_RE.containsMatchIn(it.msg) }
-        .map { CrashSite(id = "crash_${it.id}", entry = it, kind = CrashKind.ANR, groupGid = null) }
+        .map { CrashSite(id = "crash_${it.id}", entry = it, kind = CrashKind.ANR, groupGid = null, signature = anrSignature(it.msg)) }
     val nativeCrashSites = logData
         .filter { it.tag == NATIVE_CRASH_TAG && NATIVE_CRASH_MSG_RE.containsMatchIn(it.msg) }
-        .map { CrashSite(id = "crash_${it.id}", entry = it, kind = CrashKind.NATIVE_CRASH, groupGid = null, isFatal = true) }
-    return (exceptionSites + anrSites + nativeCrashSites).sortedBy { it.entry.id }
+        .map {
+            CrashSite(
+                id = "crash_${it.id}", entry = it, kind = CrashKind.NATIVE_CRASH, groupGid = null, isFatal = true,
+                signature = nativeCrashSignature(it.msg),
+            )
+        }
+    val combined = (exceptionSites + anrSites + nativeCrashSites).sortedBy { it.entry.id }
+    // Stamps occurrenceCount/firstLogId across the (small — one entry per detected crash line,
+    // not per logData line) combined list. Same pass shape as the memoized "handful of rids" cost
+    // class computeCrashSites already targets: grouping N crash sites, not the file's M log lines.
+    // combined is already sorted by entry.id, so the first site seen per group is the earliest.
+    // Keyed by issueGroupKey (not raw signature) so this stamping agrees with groupIssueSites about
+    // what a "group" is — see that function's doc comment for why a bare signature isn't enough.
+    val occurrenceCounts = combined.groupingBy { issueGroupKey(it) }.eachCount()
+    val firstIdByGroupKey = LinkedHashMap<String, Int>()
+    combined.forEach { site -> firstIdByGroupKey.putIfAbsent(issueGroupKey(site), site.entry.id) }
+    return combined.map { site ->
+        val key = issueGroupKey(site)
+        site.copy(occurrenceCount = occurrenceCounts.getValue(key), firstLogId = firstIdByGroupKey.getValue(key))
+    }
+}
+
+// Single source of truth for "what counts as one issue group" — used both to collapse the Issues
+// panel's rows (groupIssueSites) and to stamp occurrenceCount/firstLogId in computeCrashSites, so
+// the panel and the MCP get_crash_sites contract can never disagree about what a group is. Every
+// attribute that decides which category a site lands in (crashSitesForCategory) or how its row is
+// labelled (IssueSite.kindLabel/accentColor) must be part of this key — two sites that would render
+// differently must never share a group. `kind` is included explicitly rather than relying on the
+// signature's "EXC:"/"ANR:"/"NATIVE:" prefix, so a future signature format change can't silently
+// re-merge kinds; `isFatal` is what splits EXCEPTION into FATAL_EXCEPTIONS vs EXCEPTIONS and the
+// signature never carries it (see CrashCategory's doc and the module comment above on signature
+// capture). CustomIssueSite never groups (no signature concept for user-defined rules today), so
+// each becomes its own singleton group keyed by its own id.
+internal fun issueGroupKey(site: IssueSite): String = when (site) {
+    is CrashSite -> "crash:${site.kind}:${site.isFatal}:${site.signature}"
+    is CustomIssueSite -> "custom:${site.id}"
+}
+
+/** One row in the Issues panel's collapsed-by-signature view: the earliest occurrence plus every
+ * occurrence sharing its signature, in document order. Purely a display grouping over the flat
+ * `crashSites`/`customIssueSites` lists — the model itself never nests occurrences (see CrashSite's
+ * doc comment); every other consumer (minimap, MCP get_crash_sites) keeps reading the flat lists
+ * untouched. CustomIssueSite never groups (no signature concept for user-defined rules today), so
+ * each becomes its own singleton group.
+ */
+data class IssueSiteGroup(val representative: IssueSite, val occurrences: List<IssueSite>)
+
+fun groupIssueSites(sites: List<IssueSite>): List<IssueSiteGroup> {
+    val order = LinkedHashMap<String, MutableList<IssueSite>>()
+    sites.forEach { site ->
+        order.getOrPut(issueGroupKey(site)) { mutableListOf() }.add(site)
+    }
+    // sites is expected to already be in document order (issueSitesForCategory sorts by entry.id),
+    // so insertion order into `order` already IS first-occurrence document order; the inner sort
+    // only matters for which member becomes `representative` when a signature's occurrences aren't
+    // contiguous in the input.
+    return order.values.map { members ->
+        val ordered = members.sortedBy { it.entry.id }
+        IssueSiteGroup(representative = ordered.first(), occurrences = ordered)
+    }
 }
 
 /**

@@ -1526,9 +1526,10 @@ internal class OpenLogToolOperations(
     }
 
     private fun crashSiteToMap(site: CrashSite): Map<String, Any?> = mapOf(
-        "id" to site.id, "kind" to site.kind.name, "groupGid" to site.groupGid,
+        "id" to site.id, "kind" to site.kind.name, "groupGid" to site.groupGid, "isFatal" to site.isFatal,
         "logId" to site.entry.id, "ts" to site.entry.ts, "level" to site.entry.level.key.toString(),
         "tag" to site.entry.tag, "msg" to site.entry.msg,
+        "signature" to site.signature, "occurrenceCount" to site.occurrenceCount, "firstLogId" to site.firstLogId,
     )
 
     // id/ts/elapsedMs (or id/ts) only, matching FollowDiagnosticRow/RolloverDiagnosticEvent's own

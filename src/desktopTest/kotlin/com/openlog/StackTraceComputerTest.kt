@@ -181,4 +181,69 @@ class StackTraceComputerTest {
 
         assertTrue(groups.isEmpty())
     }
+
+    // ── Crash-signature capture ───────────────────────────────────────
+
+    @Test
+    fun signatureIsExtractedFromTheFollowUpClassNameLineNotTheFatalExceptionTriggerLine() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 100),
+            LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "java.lang.NullPointerException: boom", pid = 100),
+            LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 100),
+        )
+
+        val signature = computeStackTraceGroups(logs).single().signature
+
+        // "FATAL EXCEPTION: main" itself never matches the class-name shape, so if the signature
+        // were (wrongly) built from the trigger line alone it could never contain the class name.
+        assertTrue(signature.contains("java.lang.NullPointerException"))
+        assertTrue(signature.contains("com.app.Main.onCreate"))
+    }
+
+    @Test
+    fun signaturePrefersTheFirstNonFrameworkFrameOverAnEarlierFrameworkFrame() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 100),
+            LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "java.lang.NullPointerException: boom", pid = 100),
+            LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "    at java.lang.reflect.Method.invoke(Native Method)", pid = 100),
+            LogEntry(4, "10:00:00.300", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 100),
+        )
+
+        val signature = computeStackTraceGroups(logs).single().signature
+
+        assertTrue(signature.contains("com.app.Main.onCreate"))
+        assertTrue(!signature.contains("java.lang.reflect.Method"))
+    }
+
+    @Test
+    fun identicalRetriesFromDifferentPidsProduceTheSameSignature() {
+        fun dumpFor(pid: Int) = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = pid),
+            LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "java.lang.NullPointerException: boom", pid = pid),
+            LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = pid),
+        )
+
+        val signatureA = computeStackTraceGroups(dumpFor(pid = 100)).single().signature
+        val signatureB = computeStackTraceGroups(dumpFor(pid = 200)).single().signature
+
+        // Chosen deliberately: a crash signature identifies the code location, not the process
+        // instance that hit it, matching how crash-grouping tools (e.g. Crashlytics) group by
+        // stack trace regardless of session/pid. See CrashPanelDetectionTest for the
+        // computeCrashSites-level grouping test.
+        assertEquals(signatureA, signatureB)
+    }
+
+    @Test
+    fun aHeaderWithNoClassNameOrFrameGetsAUniquePerRidSignatureRatherThanCollidingWithAnother() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 100),
+            LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "Process: com.example.app, PID: 100", pid = 100),
+            LogEntry(3, "10:00:01.000", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 200),
+            LogEntry(4, "10:00:01.100", LogLevel.E, "AndroidRuntime", "Process: com.example.app, PID: 200", pid = 200),
+        )
+
+        val signatures = computeStackTraceGroups(logs).map { it.signature }
+
+        assertEquals(2, signatures.toSet().size)
+    }
 }

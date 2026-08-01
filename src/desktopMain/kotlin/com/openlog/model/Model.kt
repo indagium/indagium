@@ -63,7 +63,20 @@ data class SeqGroup(
     val endExclusive: Int,
 )
 
-data class StackTraceGroup(val gid: String, val rid: Int, val memberIds: List<Int>, val isFatal: Boolean = false)
+// signature is computed once, during computeStackTraceGroups()'s single scan of logData, from
+// the exception class name (which — for a "FATAL EXCEPTION" dump — only appears on a follow-up
+// line, never the trigger line itself) plus the first non-framework stack frame. Resolving it
+// afterwards from memberIds would mean an EntryIdMap lookup per member of every group, which is
+// exactly the O(members · log n) walk computeCrashSites' own doc comment says not to do — so it
+// travels with the group instead. Defaults to "" only for call sites (tests, VideoTimeMappingTest)
+// that construct a StackTraceGroup directly without going through the real scan.
+data class StackTraceGroup(
+    val gid: String,
+    val rid: Int,
+    val memberIds: List<Int>,
+    val isFatal: Boolean = false,
+    val signature: String = "",
+)
 
 enum class CrashKind { EXCEPTION, ANR, NATIVE_CRASH }
 
@@ -75,12 +88,24 @@ sealed interface IssueSite {
     val entry: LogEntry
 }
 
+// signature/occurrenceCount/firstLogId are purely additive, denormalized grouping metadata —
+// every raw occurrence keeps its own CrashSite (crashSites stays flat: one entry per detected
+// crash line, not one per distinct signature), so the minimap's "mark every occurrence" BitSet
+// and the MCP get_crash_sites `sites[].logId` shape are both unaffected. A view layer (the Issues
+// panel, utils/groupIssueSites) collapses same-group sites for display; this type itself never
+// nests occurrences. occurrenceCount/firstLogId are the same value across every site sharing a
+// group — computed once over the (small) sites list in computeCrashSites, not over logData, using
+// the same utils/issueGroupKey (kind + isFatal + signature) that groupIssueSites uses, so the two
+// never disagree about what "one group" means.
 data class CrashSite(
     override val id: String,
     override val entry: LogEntry,
     val kind: CrashKind,
     val groupGid: String?,
     val isFatal: Boolean = false,
+    val signature: String = "",
+    val occurrenceCount: Int = 1,
+    val firstLogId: Int = entry.id,
 ) : IssueSite
 
 /** A user-defined message-regex match shown as an Issues anchor; it never creates a foldable group. */

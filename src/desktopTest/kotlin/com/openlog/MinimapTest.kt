@@ -21,6 +21,8 @@ import com.openlog.ui.minimapScrollFraction
 import com.openlog.ui.minimapScrollOffsetPx
 import com.openlog.ui.minimapViewportBounds
 import com.openlog.ui.splitIntoWordBlocks
+import com.openlog.utils.computeCrashSites
+import com.openlog.utils.computeStackTraceGroups
 import com.openlog.utils.visibleLogLineText
 import java.util.BitSet
 import kotlin.test.Test
@@ -136,6 +138,31 @@ class MinimapTest {
         val bars = computeMinimapBars(items, crashIds, rowCount = 1, highlighters = listOf(hl("boom", Color.Yellow)), mutedColor = muted)
 
         assertEquals(CRASH_COLOR, bars[0].color)
+    }
+
+    @Test
+    fun everyOccurrenceOfARetryLoopExceptionIsMarkedNotJustOneRepresentativePerSignature() {
+        // Grouping (feat/crash-grouping) is an Issues-panel view concern; computeCrashSites itself
+        // must stay flat — one CrashSite per raw occurrence, sharing a signature — so the minimap's
+        // "where in the file are the crashes" strip still shows all three positions, not one.
+        fun dump(startId: Int, ts: String) = listOf(
+            LogEntry(startId, ts, LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 100),
+            LogEntry(startId + 1, ts, LogLevel.E, "AndroidRuntime", "java.lang.NullPointerException: boom", pid = 100),
+            LogEntry(startId + 2, ts, LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 100),
+        )
+        val logs = dump(1, "10:00:00.000") + dump(4, "10:00:01.000") + dump(7, "10:00:02.000")
+        val crashSites = computeCrashSites(logs, computeStackTraceGroups(logs))
+        assertEquals(1, crashSites.map { it.signature }.toSet().size) // sanity: they DO share a signature
+
+        // Same construction Minimap.kt's own LaunchedEffect uses: one BitSet.set(entry.id) per site.
+        val crashIds = BitSet().apply { crashSites.forEach { set(it.entry.id) } }
+        val items = logs.map { LogItem.Row(it, indent = 0) }
+
+        val bars = computeMinimapBars(items, crashIds, rowCount = items.size, highlighters = emptyList(), mutedColor = muted)
+
+        val crashBarIndices = bars.withIndex().filter { (_, bar) -> bar.color == CRASH_COLOR }.map { it.index }
+        // Trigger lines are ids 1, 4, 7 -> item indices 0, 3, 6.
+        assertEquals(listOf(0, 3, 6), crashBarIndices)
     }
 
     @Test
