@@ -227,6 +227,19 @@ val ROW_START_PAD = 11.dp   // base horizontal start padding before indent
 val ROW_V_PAD     =  3.dp   // vertical (top/bottom) padding for all log rows
 val ROW_NUM_GAP = 8.dp   // gap between the optional row-number gutter and the row content (Settings → Row number)
 
+// Character budget the process-name-in-place-of-pid field's middle-ellipsis truncation
+// (ui/LogViewer.kt's middleEllipsis, used from appendTsPidTid) targets — the upper bound
+// pidFieldCharWidth (LogViewer.kt) caps a tab's computed pid-field width at, so one outlier-long
+// name can't blow the column out for the whole file. Package names routinely exceed this budget,
+// which is why the field truncates instead of growing to fit the longest name verbatim.
+//
+// Deliberately narrow (was briefly raised to 40 to show names in full inline, which left large
+// empty gaps on every ordinary numeric-pid row — the column has to stay uniform width across a
+// whole tab, so widening it for one long name pads every other row). The fix for long names is
+// LogRow's hover popup (see its own doc), not a wider inline column, so this stays back at the
+// narrow width that keeps the PID/TID/LVL/TAG columns tight.
+const val PROCESS_NAME_MAX_CHARS = 20
+
 // Approximate monospace digit advance as a fraction of font size, used to size the optional
 // row-number gutter (LogRow) and its "#" header cell (ColHeader) to their digit count, so short
 // numbers hug the left edge instead of floating in a fixed-width cell. Shared by both so the header
@@ -246,6 +259,30 @@ fun rowNumberColumnWidth(fontSizeSp: Float, digitCount: Int): Dp =
 // the row gutter and its header cell in lockstep despite using different font sizes.
 fun timeDeltaColumnWidth(fontSizeSp: Float, charCount: Int): Dp =
     (charCount.coerceAtLeast(1) * fontSizeSp * MONO_DIGIT_EM).dp
+
+// Change 3 (process-names rework): ColHeader's own "PID" header box width when the pid FIELD
+// itself is widened to a uniform per-tab character count (LogViewer.kt's pidFieldCharWidth).
+//
+// Unlike the "#"/"Δt" gutters above, the pid field is NOT a separate composable in the row — it's
+// inline monospace text inside LogRow's single BasicTextField (see that field's own doc for why:
+// preserving whole-row drag-selection), rendered at the row's configurable content font size
+// (AppSettings.fontSize / LocalFontBase), not at COL_HEADER_FONT_SP. So this must be called with
+// that SAME content font size, threaded down from ColHeader's caller — calling it with
+// COL_HEADER_FONT_SP here (as the "#"/"Δt" cells correctly do, since those rows' gutters really are
+// drawn at that font) would undersize the box against the row's actual field width, shifting every
+// header after it (TID/LVL/TAG/MESSAGE) left. ColHeader only calls this when the field is actually
+// wider than the original 5 chars — the OFF case keeps its literal pre-feature 40.dp box untouched.
+fun pidFieldColumnWidth(fontSizeSp: Float, chars: Int): Dp =
+    (chars.coerceAtLeast(1) * fontSizeSp * MONO_DIGIT_EM).dp
+
+// The PID header box width decision itself, pulled out as a pure function (like
+// pidFieldCharWidth/rowNumberColumnWidth above) so it's unit-testable without this project's
+// Compose-free test harness. [contentFontSizeSp] must be the SAME value the row renders the pid
+// field at (AppSettings.fontSize, threaded in by ColHeader's caller) — see pidFieldColumnWidth's
+// own doc for why. Mirrors ColHeader's own pidColWidth logic exactly; ColHeader calls this rather
+// than duplicating it.
+fun headerPidColumnWidth(pidFieldChars: Int, contentFontSizeSp: Float): Dp =
+    if (pidFieldChars > 5) pidFieldColumnWidth(contentFontSizeSp, pidFieldChars) else 40.dp
 
 // NOTE: there is deliberately no width helper here for the tid-map gutter (unlike
 // rowNumberColumnWidth/timeDeltaColumnWidth above) — it doesn't need one. Two earlier versions

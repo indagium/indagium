@@ -753,6 +753,21 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
         )
     }
     CompactSettingWithTooltip(
+        label = "Process names in new tabs",
+        tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
+            "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
+            "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
+            "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
+            "different logs with two different sets of processes. Per-tab picks reset every session " +
+            "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
+        )
+    }
+    CompactSettingWithTooltip(
         label = "Video follow readout",
         tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
             "bar, explaining exactly what Follow is doing at the current playhead position.",

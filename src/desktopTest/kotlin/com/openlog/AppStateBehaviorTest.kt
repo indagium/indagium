@@ -27,6 +27,7 @@ import com.openlog.model.MAX_INTERFACE_SCALE_PERCENT
 import com.openlog.model.MIN_INTERFACE_SCALE_PERCENT
 import com.openlog.model.ManualCollapseBlock
 import com.openlog.model.ManualCollapseDirection
+import com.openlog.model.ProcessNameMode
 import com.openlog.model.SequenceDef
 import com.openlog.model.SourceFolderInfo
 import com.openlog.model.SourceLogConfiguration
@@ -69,6 +70,7 @@ import com.openlog.utils.buildMd
 import com.openlog.utils.computeItems
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.listArchiveVideoCandidates
+import com.openlog.utils.resolveProcessDisplayName
 import com.openlog.video.VideoPlayerController
 import kotlinx.coroutines.delay
 import java.io.File
@@ -3520,6 +3522,40 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun startTailingMergesProcessNamesAcrossBatchesInsteadOfReplacingThem() {
+        // TailCoordinator.appendTailedLines merges `cur.analysis.processNames +
+        // computeProcessNames(newEntries)` rather than recomputing from the whole (ever-growing)
+        // logData — pin that a name learned in an earlier batch survives a later batch that only
+        // ever mentions a DIFFERENT pid, while the later batch's own new name is still picked up.
+        val dir = createTempDirectory("openlog-tailing-procnames").toFile()
+        val file = File(dir, "tail.log").apply {
+            writeText(
+                "06-26 10:00:00.000  0  0 I ActivityManager: " +
+                    "Start proc 100:com.example.first/u0a1 for activity com.example.first/.Main\n",
+            )
+        }
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.openFile(file)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        val tabId = state.tabs.single().id
+        assertEquals(mapOf(100 to "com.example.first"), state.tab(tabId)!!.analysis.processNames)
+
+        state.startTailing(tabId)
+
+        file.appendText(
+            "06-26 10:00:01.000  0  0 I ActivityManager: " +
+                "Start proc 200:com.example.second/u0a2 for activity com.example.second/.Main\n",
+        )
+        waitUntil { state.tab(tabId)!!.logData.size == 2 }
+        assertEquals(
+            mapOf(100 to "com.example.first", 200 to "com.example.second"),
+            state.tab(tabId)!!.analysis.processNames,
+        )
+
+        state.stopTailing(tabId)
+    }
+
+    @Test
     fun tailedCrashDataStaysPendingDuringABurstThenResolvesOnceItSettles() {
         // P-04: appendTailedLines used to call buildLogAnalysis() — the full crash/stack-trace
         // scan — on every single tail batch. It's now debounced instead, reusing the same
@@ -4499,6 +4535,32 @@ class AppStateBehaviorTest {
         state.updateSettings { it.copy(ctrlFTarget = CtrlFTarget.FIND_BAR) }
         val json = state.settings.settingsJson()
         assertFalse(json.contains("inViewSearch"), "settingsJson must no longer emit the retired inViewSearch key: $json")
+    }
+
+    @Test
+    fun legacySettingsBlobPredatingTheNewTabProcessNameDefaultDecodesWithItOff() {
+        // A blob written before this field existed must read back as false, the same default a
+        // fresh AppSettings() carries — see AppSettings.showProcessNamesInNewTabs' own doc.
+        assertFalse(settingsFromJson("{}")!!.showProcessNamesInNewTabs)
+    }
+
+    @Test
+    fun aSettingsBlobCarryingTheRetiredGlobalProcessNameModeStillDecodes() {
+        // The three-way mode used to live in AppSettings before moving onto LogTab. An autosave
+        // written back then must still decode cleanly, with the replacement setting at its default
+        // rather than the decode failing outright.
+        val legacy = settingsFromJson("""{"processNameMode":"ALL","fontSize":13}""")
+
+        assertNotNull(legacy)
+        assertFalse(legacy.showProcessNamesInNewTabs)
+        assertEquals(13, legacy.fontSize)
+    }
+
+    @Test
+    fun theNewTabProcessNameDefaultRoundTripsThroughSettingsJson() {
+        val json = AppSettings(showProcessNamesInNewTabs = true).settingsJson()
+
+        assertTrue(settingsFromJson(json)!!.showProcessNamesInNewTabs)
     }
 
     // Once editorChoice is written explicitly (current format), it round-trips as-is rather than
@@ -5652,6 +5714,23 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun mkTabsBuildLogAnalysisResolvesProcessNamesFromProcStartLines() {
+        val tab = mkTab(
+            "t1",
+            "boot.log",
+            listOf(
+                LogEntry(
+                    1, "10:00:00.000", LogLevel.I, "ActivityManager",
+                    "Start proc 12345:com.example.app/u0a123 for activity com.example.app/.MainActivity", pid = 0,
+                ),
+                LogEntry(2, "10:00:00.001", LogLevel.I, "com.example.app", "hello from the new process", pid = 12345),
+            ),
+        )
+
+        assertEquals(mapOf(12345 to "com.example.app"), tab.analysis.processNames)
+    }
+
+    @Test
     fun openFilePublishesTabBeforeAnalysisThenFillsItIn() {
         val dir = createTempDirectory("openlog-deferred").toFile()
         val logFile = File(dir, "crash.log").apply {
@@ -5677,6 +5756,183 @@ class AppStateBehaviorTest {
         waitUntil { !state.tabs.single().analysis.pending }
         assertEquals(listOf(2), state.tabs.single().analysis.stackTraceGroups.map { it.rid })
         assertTrue(state.tabs.single().analysis.crashSites.isNotEmpty())
+    }
+
+    @Test
+    fun openFilePublishesTabWithProcessNamesAlreadyResolvedBeforeTheDeferredAnalysisLands() {
+        // processNames must be trusted directly from pendingAnalysis(), same as tagCounts — not
+        // gated on analysis.pending — otherwise the PID column would show bare numbers for seconds
+        // on a large file and then reflow once buildLogAnalysis() lands.
+        val dir = createTempDirectory("openlog-procnames-pending").toFile()
+        val logFile = File(dir, "boot.log").apply {
+            writeText(
+                "06-26 10:00:00.000  0  0 I ActivityManager: " +
+                    "Start proc 12345:com.example.app/u0a123 for activity com.example.app/.MainActivity\n" +
+                    "06-26 10:00:00.001  12345  12345 I com.example.app: hello\n",
+            )
+        }
+        val state = AppState(File(dir, "state.cache"))
+
+        state.openFile(logFile)
+        waitUntil { !state.isLoading && state.tabs.isNotEmpty() }
+
+        assertEquals(mapOf(12345 to "com.example.app"), state.tabs.single().analysis.processNames)
+    }
+
+    // ── Process-name display mode: per-tab, not global ─────
+
+    private fun procState(name: String) =
+        AppState(autosaveFile = File(createTempDirectory(name).toFile(), "state.cache"))
+
+    @Test
+    fun showProcessNameForPidSwitchesThatTabToManualAndAddsThePick() {
+        val state = procState("openlog-procname-show")
+        state.tabs = listOf(mkTab("t1", "app.log", emptyList()))
+
+        state.showProcessNameForPid("t1", 1234)
+
+        assertEquals(ProcessNameMode.MANUAL, state.tab("t1")!!.processNameMode)
+        assertEquals(setOf(1234), state.tab("t1")!!.manualProcessNamePicks)
+    }
+
+    @Test
+    fun showingOnePidAfterShowAllThenHideAllNamesOnlyThatPid() {
+        // Regression, reported from the UI: "show all names" -> "hide all names" -> pick one row's
+        // process showed EVERY name again. Hiding from ALL seeds the pick set with every known pid
+        // (so that "hide this one" hides exactly one), and toggling to OFF afterwards does not clear
+        // it — so a later "show this one" was adding to an already-full set. From OFF the set is now
+        // replaced outright. See AppState.showProcessNameForPid's own doc.
+        val state = procState("openlog-procname-stale")
+        val names = mapOf(111 to "alpha", 222 to "bravo", 333 to "charlie")
+        state.tabs = listOf(
+            mkTab("t1", "app.log", emptyList()).copy(analysis = LogAnalysis(processNames = names, pending = false)),
+        )
+
+        state.setProcessNameMode("t1", ProcessNameMode.ALL)
+        state.hideProcessNameForPid("t1", 222)
+        state.setProcessNameMode("t1", ProcessNameMode.OFF)
+        state.showProcessNameForPid("t1", 111)
+
+        val tab = state.tab("t1")!!
+        assertEquals(ProcessNameMode.MANUAL, tab.processNameMode)
+        assertEquals(setOf(111), tab.manualProcessNamePicks)
+        assertEquals(
+            listOf("alpha", null, null),
+            listOf(111, 222, 333).map {
+                resolveProcessDisplayName(tab.processNameMode, tab.analysis.processNames, tab.manualProcessNamePicks, it)
+            },
+        )
+    }
+
+    @Test
+    fun hideProcessNameForPidRemovesThePickAndStaysManual() {
+        val state = procState("openlog-procname-hide")
+        state.tabs = listOf(mkTab("t1", "app.log", emptyList()))
+        state.showProcessNameForPid("t1", 1234)
+        state.showProcessNameForPid("t1", 5678)
+
+        state.hideProcessNameForPid("t1", 1234)
+
+        assertEquals(ProcessNameMode.MANUAL, state.tab("t1")!!.processNameMode)
+        assertEquals(setOf(5678), state.tab("t1")!!.manualProcessNamePicks)
+    }
+
+    @Test
+    fun hideProcessNameForPidFromAllModeSeedsThePicksSoOnlyThatOnePidLosesItsName() {
+        // From ALL the pick set is empty (ALL never reads it), so subtracting just the hidden pid
+        // used to leave nothing picked — every OTHER process lost its name too.
+        val state = procState("openlog-procname-hide-all")
+        val names = mapOf(111 to "alpha", 222 to "bravo", 333 to "charlie")
+        state.tabs = listOf(
+            mkTab("t1", "app.log", emptyList()).copy(analysis = LogAnalysis(processNames = names, pending = false)),
+        )
+        state.setProcessNameMode("t1", ProcessNameMode.ALL)
+
+        state.hideProcessNameForPid("t1", 222)
+
+        val tab = state.tab("t1")!!
+        assertEquals(ProcessNameMode.MANUAL, tab.processNameMode)
+        assertEquals(setOf(111, 333), tab.manualProcessNamePicks)
+        assertEquals(
+            listOf("alpha", null, "charlie"),
+            listOf(111, 222, 333).map {
+                resolveProcessDisplayName(tab.processNameMode, tab.analysis.processNames, tab.manualProcessNamePicks, it)
+            },
+        )
+    }
+
+    @Test
+    fun processNameStateIsIndependentBetweenTabs() {
+        // Two tabs are usually two different logs with two different sets of processes, so neither
+        // the mode nor the picks may leak across — see LogTab.processNameMode's own doc.
+        val state = procState("openlog-procname-per-tab")
+        state.tabs = listOf(mkTab("a", "a.log", emptyList()), mkTab("b", "b.log", emptyList()))
+
+        state.setProcessNameMode("a", ProcessNameMode.ALL)
+        state.showProcessNameForPid("a", 1234)
+
+        assertEquals(ProcessNameMode.MANUAL, state.tab("a")!!.processNameMode)
+        assertEquals(setOf(1234), state.tab("a")!!.manualProcessNamePicks)
+        assertEquals(ProcessNameMode.OFF, state.tab("b")!!.processNameMode)
+        assertEquals(emptySet(), state.tab("b")!!.manualProcessNamePicks)
+    }
+
+    @Test
+    fun aNewlyOpenedTabStartsFromTheNewTabSetting() {
+        val dir = createTempDirectory("openlog-procname-new-tab").toFile()
+        val logFile = File(dir, "app.log").apply { writeText("06-26 10:00:00.000  1  1 I Tag: hello\n") }
+
+        val off = AppState(autosaveFile = File(dir, "off.cache"))
+        off.openFile(logFile)
+        waitUntil { !off.isLoading && off.tabs.isNotEmpty() }
+        assertEquals(ProcessNameMode.OFF, off.tabs.single().processNameMode)
+        off.close()
+
+        val on = AppState(autosaveFile = File(dir, "on.cache"))
+        on.updateSettings { it.copy(showProcessNamesInNewTabs = true) }
+        on.openFile(logFile)
+        waitUntil { !on.isLoading && on.tabs.isNotEmpty() }
+        assertEquals(ProcessNameMode.ALL, on.tabs.single().processNameMode)
+        on.close()
+    }
+
+    @Test
+    fun perTabProcessNameStateIsAbsentFromPersistedSnapshotAndDoesNotSurviveAnAutosaveRoundTrip() {
+        // Pids are recycled across process runs, so persisting a manual pick would risk silently
+        // naming the WRONG process next session. The mode goes with it: a restored tab starts from
+        // the setting, exactly as a freshly opened one does.
+        val base = mkTab("t1", "app.log", emptyList())
+        assertEquals(
+            base.persistedSnapshot(),
+            base.copy(manualProcessNamePicks = setOf(1234), processNameMode = ProcessNameMode.MANUAL).persistedSnapshot(),
+        )
+
+        val dir = createTempDirectory("openlog-procname-persist").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val logFile = File(dir, "app.log").apply {
+            writeText(
+                "06-26 10:00:00.000  0  0 I ActivityManager: " +
+                    "Start proc 1234:com.example.app/u0a1 for activity com.example.app/.MainActivity\n",
+            )
+        }
+        val state = AppState(autosaveFile = cacheFile)
+        state.openFile(logFile)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        val tabId = state.tabs.single().id
+        state.showProcessNameForPid(tabId, 1234)
+        assertEquals(setOf(1234), state.tab(tabId)!!.manualProcessNamePicks)
+
+        state.autosaveNow()
+        state.close()
+
+        val restored = AppState(autosaveFile = cacheFile, restoreOnCreate = true)
+        try {
+            waitUntil { restored.tabs.isNotEmpty() && !restored.isLoading }
+            assertEquals(ProcessNameMode.OFF, restored.tabs.single().processNameMode)
+            assertEquals(emptySet(), restored.tabs.single().manualProcessNamePicks)
+        } finally {
+            restored.close()
+        }
     }
 
     // ── Analysis completion is explicit, not inferred from emptiness (P-02) ─────
