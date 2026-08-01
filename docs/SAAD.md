@@ -286,7 +286,7 @@ flowchart TB
 
     subgraph automation["Automation — package debug"]
         server["ControlServer<br/>Ktor CIO, MCP + REST"]
-        gateway["OpenLogToolGateway<br/>55-tool contract"]
+        gateway["OpenLogToolGateway<br/>56-tool contract"]
         ops["OpenLogToolOperations<br/>55 handlers"]
     end
 
@@ -1247,13 +1247,13 @@ the log it came from.
 | Default port | 8991, clamped to 1..65535 | `model/Model.kt` `mcpControlPort`; `ui/AppState.kt:210-211` |
 | Enabled | **Off by default** | `model/Model.kt` `mcpControlEnabled = false` |
 | MCP transport | Streamable HTTP at `/mcp` | `debug/ControlServer.kt` `mcpStreamableHttp` |
-| REST | 50 routes | `debug/ControlServer.kt:1240` `REST_ROUTES` |
+| REST | 51 routes | `debug/ControlServer.kt:1240` `REST_ROUTES` |
 | Auth | `Authorization: Bearer <32 hex>`, constant-time compare | `debug/ControlServer.kt:126-173` |
 | CORS | Installed **only** when `mcpAllowBrowserClients` is on | `debug/ControlServer.kt:336-345` |
 
 **The single tool contract.** This is the structural idea worth understanding. There is one
-catalogue, `MCP_TOOLS` (`debug/ControlServer.kt:666`, 55 entries), and one handler map,
-`operationHandlers` (`debug/OpenLogToolOperations.kt:66-195`, 55 entries). `OpenLogToolGateway`
+catalogue, `MCP_TOOLS` (`debug/ControlServer.kt:666`, 56 entries), and one handler map,
+`operationHandlers` (`debug/OpenLogToolOperations.kt:66-195`, 56 entries). `OpenLogToolGateway`
 joins them and its `init` block **fails fast if they disagree** (`debug/OpenLogToolGateway.kt:22-25`).
 
 Four consumers are then derived from that single pair:
@@ -1265,7 +1265,7 @@ flowchart TB
     gw["OpenLogToolGateway<br/>init enforces parity"]
 
     mcp["Shared MCP Server<br/>external clients"]
-    rest["REST routes<br/>50 of 55 tools"]
+    rest["REST routes<br/>51 of 56 tools"]
     managed["Per-run managed MCP Server<br/>Codex / Claude Code"]
     fns["openAiFunctions()<br/>in-app agent, no HTTP"]
 
@@ -1284,8 +1284,8 @@ flowchart TB
 ```
 
 Five tools are MCP-only and have no REST route: `get_sequence_summary`, `get_project_info`,
-`search_similar_cases`, `get_case`, `reindex_cases`. This is a real gap, not a rounding — REST has 50
-routes against 55 tools.
+`search_similar_cases`, `get_case`, `reindex_cases`. This is a real gap, not a rounding — REST has 51
+routes against 56 tools.
 
 Because `openAiFunctions()` serialises the *same* `ToolSchema` into OpenAI function definitions
 (`debug/OpenLogToolGateway.kt:42-48`), there is no second hand-written tool catalogue anywhere. A

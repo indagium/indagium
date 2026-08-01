@@ -78,7 +78,7 @@ File → LogParser.parseLogcat()  ──→  List<LogEntry>          (sequential
 | `ui` | Compose UI **and** `AppState` + coordinators + persistence codecs. The biggest package by far. |
 | `source` | Source indexing and log→call-site resolution. Pure text/regex/brace-matching, no compiler dep. Own store at `appDataDir()/source-index` (`openLog2-source-index-v1`, schema v9). |
 | `cases` | Similarity index over previously written analysis notes; backs `search_similar_cases`. Store at `appDataDir()/case-index`. |
-| `debug` | `ControlServer` (Ktor CIO, loopback-only, MCP over Streamable HTTP + REST, off by default), the **55-tool** catalogue + handlers joined by `OpenLogToolGateway`, hand-rolled `Json`, `AppLogger`. |
+| `debug` | `ControlServer` (Ktor CIO, loopback-only, MCP over Streamable HTTP + REST, off by default), the **56-tool** catalogue + handlers joined by `OpenLogToolGateway`, hand-rolled `Json`, `AppLogger`. |
 | `ai` | `LlmProvider` (Anthropic + OpenAI-compatible over HTTP) and the subprocess account agents (Codex stdio JSON-RPC, Claude Code stream-json), `AiAgentRunner` loop, `AiToolExecutionCoordinator` (the single policy point: budget, tab pinning, confirmation gate). |
 | `video` | JavaCV/FFmpeg playback on a dedicated decode thread; per-tab controllers owned by `AppState`. |
 | `voice` | Dictation: Whisper JNI, Apple Speech (build-time-compiled JNI bridge), Windows Speech helper. |
