@@ -2166,6 +2166,31 @@ internal fun middleEllipsis(text: String, maxChars: Int): String {
     return text.take(head) + "…" + text.takeLast(tail)
 }
 
+// Whether LogRow's hover popup has anything to offer for this row. Only worth showing when a name
+// is actually being rendered ([processDisplay] non-null — OFF mode and pid<=0 rows never resolve
+// one) AND middleEllipsis (above) actually shortened it to fit [pidFieldWidth]: a name that already
+// renders in full has nothing left for the popup to reveal. Pulled out as a pure function (like
+// pidFieldCharWidth/middleEllipsis above) so it's unit-testable without the Compose harness this
+// codebase doesn't have — LogRow (below) uses it to skip the hover-tracking/layout-capture work
+// entirely on the common case of a short or absent name.
+internal fun shouldShowProcessNamePopup(processDisplay: String?, pidFieldWidth: Int): Boolean =
+    processDisplay != null && processDisplay.length > pidFieldWidth
+
+// Whether [pointerX] — a pointer position captured by LogRow's own hover pointerInput block, in the
+// same px coordinate space the row's BasicTextField measures in — falls inside [fieldStartX,
+// fieldEndX], the pid field's horizontal span for THIS row's actual rendered text layout.
+//
+// That span is deliberately supplied as already-measured pixel bounds rather than computed here:
+// ui/Theme.kt:269-275's NOTE records two earlier attempts to locate a position between the
+// timestamp and PID columns arithmetically (assuming "HH:MM:SS.mmm" is always 12 characters, then
+// measuring the row's own rendered text) that were both reverted as fragile, since timestamps are
+// absent entirely on some rows (brief format, or an empty LogEntry.ts). LogRow instead reads
+// TextLayoutResult.getBoundingBox for the field's first/last rendered character — the exact pixel
+// Rect Skia actually laid the text out at — and passes the resulting [fieldStartX, fieldEndX] in
+// here untouched.
+internal fun pointerInsidePidFieldX(pointerX: Float, fieldStartX: Float, fieldEndX: Float): Boolean =
+    pointerX in fieldStartX..fieldEndX
+
 @Composable
 private fun LogRow(
     item: LogItem.Row,
@@ -2245,6 +2270,24 @@ private fun LogRow(
     val processDisplay = resolveProcessDisplayName(
         processNameMode, tab.analysis.processNames, tab.manualProcessNamePicks, entry.pid,
     )
+
+    // Whether this row's name is truncated enough that a hover popup has something to reveal (see
+    // shouldShowProcessNamePopup's own doc). False for OFF, for every row without a name, and for
+    // the common case of a name that already fits — which is what keeps the pointer-tracking/layout
+    // capture below from doing any work on the vast majority of rows even when a mode is on.
+    val showsElidedName = shouldShowProcessNamePopup(processDisplay, pidFieldChars)
+    val latestShowsElidedName by rememberUpdatedState(showsElidedName)
+    // The pid field's exact horizontal pixel span in THIS row's own rendered text layout — written
+    // once by the BasicTextField's onTextLayout below via TextLayoutResult.getBoundingBox (see
+    // pointerInsidePidFieldX's own doc for why that, and not arithmetic, is what locates it). Only
+    // ever written when showsElidedName is true, so it stays null (and unread) on every other row.
+    var pidFieldXRange by remember { mutableStateOf<Pair<Float, Float>?>(null) }
+    // Last pointer x seen by the "hd" pointerInput block below, only tracked while showsElidedName
+    // is true.
+    var hoverPointerX by remember { mutableStateOf(0f) }
+    var popupAnchorHeightPx by remember { mutableStateOf(0) }
+    val showProcessNamePopup = hov && showsElidedName &&
+        pidFieldXRange?.let { (start, end) -> pointerInsidePidFieldX(hoverPointerX, start, end) } == true
 
     val isCrashGroupRow = isCrashGroupRow(item.groupColor, highlightEntireCrashGroup)
     val annoLine = remember(
@@ -2396,6 +2439,12 @@ private fun LogRow(
                         when (ev.type) {
                             PointerEventType.Enter -> hov = true
                             PointerEventType.Exit  -> hov = false
+                            // Only recorded when this row can actually show the popup — every other
+                            // row's Move events fall through to the else branch below, no state
+                            // write, no recomposition triggered by hovering it.
+                            PointerEventType.Move -> if (latestShowsElidedName) {
+                                ev.changes.firstOrNull()?.let { hoverPointerX = it.position.x }
+                            }
                             else -> {}
                         }
                     }
@@ -2499,29 +2548,82 @@ private fun LogRow(
         // width (appendTsPidTid/pidFieldCharWidth) — no separate composable, so drag-selection
         // spans the whole row again even on a row showing a name. This used to be two extra
         // composables here (a plain ts AppText plus a TooltipArea-wrapped name AppText) specifically
-        // to hang a hover tooltip off the name; that tooltip is gone (the full name is still
-        // available via the row's context menu header and the tid-map header — see Change 2/the
-        // "Process —" block in App.kt/Components.kt), which is what makes folding this back into
-        // one text field possible.
-        BasicTextField(
-            value = TextFieldValue(annotatedString = annoLine, selection = sel),
-            onValueChange = { new ->
-                sel = new.selection
-                val selectedText = if (!new.selection.collapsed) {
-                    runCatching {
-                        stripVisualWrapBreaks(annoLine.text.substring(new.selection.min, new.selection.max))
-                    }.getOrElse { "" }
-                } else {
-                    ""
+        // to hang a hover tooltip off the name; splitting the field out that way is exactly what
+        // broke whole-row drag-selection on named rows.
+        //
+        // The hover popup below (Change: process-name hover popup) restores a way to see the full
+        // name WITHOUT re-splitting the field: it reads this SAME BasicTextField's own
+        // TextLayoutResult (onTextLayout) to find the pid field's exact rendered pixel span via
+        // getBoundingBox, rather than computing an x-offset arithmetically (see
+        // pointerInsidePidFieldX's own doc, and ui/Theme.kt:269-275's NOTE, for why two earlier
+        // attempts at the latter were reverted). The wrapping Box below only exists so the Popup can
+        // sit alongside the field as a sibling — Popup has no content slot of its own on
+        // BasicTextField — and does not affect drag-selection, which is entirely a property of the
+        // single BasicTextField inside it.
+        Box(Modifier.weight(1f)) {
+            BasicTextField(
+                value = TextFieldValue(annotatedString = annoLine, selection = sel),
+                onValueChange = { new ->
+                    sel = new.selection
+                    val selectedText = if (!new.selection.collapsed) {
+                        runCatching {
+                            stripVisualWrapBreaks(annoLine.text.substring(new.selection.min, new.selection.max))
+                        }.getOrElse { "" }
+                    } else {
+                        ""
+                    }
+                    onSelectedTextChange(selectedText)
+                },
+                readOnly = true,
+                singleLine = false,
+                textStyle = TextStyle(color = tc.tx, fontFamily = mono, fontSize = fontSize, lineHeight = (fontSize.value + 4).sp),
+                cursorBrush = SolidColor(Color.Transparent),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 18.dp)
+                    .onSizeChanged { if (showsElidedName) popupAnchorHeightPx = it.height },
+                // Measuring bounding boxes only runs for a row that can actually show the popup —
+                // every other row (OFF, no name, or a name that already fits) skips this entirely,
+                // same as the pointer-tracking guard above. pidFieldStart mirrors
+                // buildFullLineAnnotation's own "entry.ts.length + 2" — the same formula against the
+                // same rendered text, since the field starts at the same offset in both.
+                onTextLayout = { layout ->
+                    if (showsElidedName) {
+                        val pidFieldStart = entry.ts.length + 2
+                        val pidFieldEnd = (pidFieldStart + pidFieldChars).coerceAtMost(layout.layoutInput.text.length)
+                        if (pidFieldEnd > pidFieldStart) {
+                            val left = layout.getBoundingBox(pidFieldStart).left
+                            val right = layout.getBoundingBox(pidFieldEnd - 1).right
+                            pidFieldXRange = left to right
+                        }
+                    }
+                },
+            )
+            val fieldRange = pidFieldXRange
+            if (showProcessNamePopup && fieldRange != null && processDisplay != null) {
+                // Same visual treatment and TopStart+measured-offset positioning as FilterPanel.kt's
+                // FullTextHint (the house precedent for a hover popup driven by layout information)
+                // — see its own doc for why a guessed constant offset flickers. x is the field's own
+                // measured left edge (fieldRange.first); y drops the popup below the row using this
+                // field's own measured height, exactly mirroring FullTextHint's anchorHeightPx.
+                val gapPx = (4f * density).roundToInt()
+                Popup(
+                    alignment = Alignment.TopStart,
+                    offset = IntOffset(fieldRange.first.roundToInt(), popupAnchorHeightPx + gapPx),
+                    properties = PopupProperties(focusable = false),
+                ) {
+                    Box(
+                        Modifier
+                            .background(tc.p, CORNER_SM)
+                            .border(1.dp, tc.br, CORNER_SM)
+                            .padding(horizontal = 8.dp, vertical = 5.dp),
+                    ) {
+                        AppText(
+                            processDisplay, color = tc.tx, fontSize = 11.sp, fontFamily = mono,
+                            maxLines = 1, overflow = TextOverflow.Clip,
+                        )
+                    }
                 }
-                onSelectedTextChange(selectedText)
-            },
-            readOnly = true,
-            singleLine = false,
-            textStyle = TextStyle(color = tc.tx, fontFamily = mono, fontSize = fontSize, lineHeight = (fontSize.value + 4).sp),
-            cursorBrush = SolidColor(Color.Transparent),
-            modifier = Modifier.weight(1f).heightIn(min = 18.dp),
-        )
+            }
+        }
     }
 }
 
