@@ -3304,15 +3304,6 @@ private fun LogCompositionResults(
     actions: LogCompositionActions,
     refreshing: Boolean,
 ) {
-    if (refreshing) {
-        AppText(
-            "Updating for the current filter…",
-            color = tc.td,
-            fontSize = 9.sp,
-            fontFamily = UI,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
-        )
-    }
     val templates = histogram.templates
     // Switching tabs is a different question entirely, so the page resets. A new
     // scan result is not: a live-tailing tab re-folds its histogram every couple of
@@ -3392,6 +3383,7 @@ private fun LogCompositionResults(
                 totalShapes = templates.size,
                 matchedShapes = matched.size,
                 searching = fpState.logCompositionSearch.isNotBlank(),
+                refreshing = refreshing,
                 tc = tc,
                 onGoToPage = { fpState.logCompositionPage = it },
             )
@@ -3411,15 +3403,19 @@ private fun LogCompositionPager(
     totalShapes: Int,
     matchedShapes: Int,
     searching: Boolean,
+    // A rescan is in flight over these rows. Shown by swapping the text of a line that is always
+    // present rather than adding one: inserting a status line and removing it again shifts
+    // everything below it twice per action, which is the flicker this is meant to avoid.
+    refreshing: Boolean,
     tc: ThemeColors,
     onGoToPage: (Int) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 2.dp)) {
         AppText(
-            if (searching) {
-                "Page ${page + 1} of $pageCount · $matchedShapes of $totalShapes shapes matched"
-            } else {
-                "Page ${page + 1} of $pageCount · $totalShapes shapes"
+            when {
+                refreshing -> "Page ${page + 1} of $pageCount · updating…"
+                searching -> "Page ${page + 1} of $pageCount · $matchedShapes of $totalShapes shapes matched"
+                else -> "Page ${page + 1} of $pageCount · $totalShapes shapes"
             },
             color = tc.td,
             fontSize = 10.sp,
