@@ -931,6 +931,10 @@ internal fun FilterPanelUiState.filterPanelToken(): String = tokenFields(
     crashCategory.token(),
     sfCollapsedFolderIds.sorted().joinToString(",") { it.b64() },
     sfFavoritesExpanded.toString(),
+    // Field index 11 (Stage 2a): the "Log composition" section's expand state — appended after
+    // sfFavoritesExpanded, same append-last discipline as every other field here. A legacy token
+    // written before this section existed has no field 11 and restores at the default (collapsed).
+    logCompositionExpanded.toString(),
 )
 
 internal fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
@@ -951,6 +955,7 @@ internal fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
         ?.toSet()
         ?: emptySet()
     sfFavoritesExpanded = p.getOrNull(10)?.toBooleanStrictOrNull() ?: sfFavoritesExpanded
+    logCompositionExpanded = p.getOrNull(11)?.toBooleanStrictOrNull() ?: logCompositionExpanded
 }
 
 private fun IssueCategorySelection.token(): String = when (this) {

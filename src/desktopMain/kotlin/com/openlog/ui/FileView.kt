@@ -13,6 +13,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import com.openlog.model.*
+import com.openlog.utils.messageRuleSpecForTemplate
 
 internal data class FilterSearchRequest(
     val nonce: Long,
@@ -38,6 +39,33 @@ internal fun BoundFilterPanel(
     onPanelFocusChanged: (Boolean) -> Unit = {},
 ) {
     if (!state.filterVisible) return
+    // Grouped into one data class rather than five more lambdas on this already-~90-parameter
+    // call (see LogCompositionActions' own doc) — remember(state, tab.id) so it stays == across
+    // recompositions that don't change tab identity, which is what keeps FilterPanel skippable.
+    // Each lambda re-reads state.tab(tab.id) itself rather than closing over the `tab` parameter
+    // above, since remember's keys (state, tab.id) don't capture a fresh `tab` on every
+    // recomposition — closing over it here would leave these lambdas holding a stale rmap/logData
+    // snapshot from whenever the bag was first built for this tab.id.
+    val logCompositionActions = remember(state, tab.id) {
+        fun sampleFor(template: MessageTemplate): String =
+            state.tab(tab.id)?.rmap?.get(template.firstEntryId)?.msg ?: template.template
+        LogCompositionActions(
+            onExpand = { state.requestMessageComposition(tab.id) },
+            onHide = { template ->
+                val spec = messageRuleSpecForTemplate(template, sampleFor(template))
+                state.addMessageRule(tab.id, include = false, pattern = spec.pattern, regex = spec.regex, tag = template.tag, packagePrefix = null)
+            },
+            onShowOnly = { template ->
+                val spec = messageRuleSpecForTemplate(template, sampleFor(template))
+                state.addMessageRule(tab.id, include = true, pattern = spec.pattern, regex = spec.regex, tag = template.tag, packagePrefix = null)
+            },
+            onHighlight = { template ->
+                val spec = messageRuleSpecForTemplate(template, sampleFor(template))
+                state.addHl(tab.id, spec.pattern, spec.regex, state.nextAvailableHighlighterColor(tab.id))
+            },
+            onGoToFirst = { template -> state.requestCrashNavigation(tab.id, template.firstEntryId) },
+        )
+    }
     FilterPanel(
         tab = tab, savedFilters = state.savedFiltersForTab(tab.id),
         savedFilterFolders = state.savedFilterFolders,
@@ -116,6 +144,7 @@ internal fun BoundFilterPanel(
         onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
         onClearFilter = { state.requestClearFilter(tab.id) },
         onNavigateCrash = { site -> state.requestCrashNavigation(tab.id, site.entry.id) },
+        logCompositionActions = logCompositionActions,
         onUiStateChanged = { state.autosaveNow() },
         mostUsedTagLimit = state.settings.mostUsedTagLimit,
         filterListRows = state.settings.filterListRows,

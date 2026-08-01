@@ -2,6 +2,7 @@ package com.openlog
 
 import com.openlog.model.LogEntry
 import com.openlog.model.LogLevel
+import com.openlog.model.MessageCompositionState
 import com.openlog.model.MessageTemplate
 import com.openlog.model.TemplateGranularity
 import com.openlog.ui.MessageRuleVariant
@@ -15,6 +16,8 @@ import com.openlog.utils.foldTemplates
 import com.openlog.utils.invalidateComputeCache
 import com.openlog.utils.maskMessage
 import com.openlog.utils.mergeMessageTemplates
+import com.openlog.utils.messageRuleSpecForTemplate
+import com.openlog.utils.regexPatternForTemplate
 import com.openlog.utils.truncateAtSeparator
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -332,14 +335,15 @@ class MessageTemplatesTest {
 
     // ── computeItems memo cache must not be affected ─────────────────────────────────────────
     // utils/Filter.kt's per-tab compute cache keys on the IDENTITY of logData/stackTraceGroups plus
-    // Filter equality (utils/Filter.kt:317-323) — messageTemplates is deliberately excluded, so
-    // mutating it must never trigger a different computation than the one already cached. computeItems
-    // itself has no "nothing changed" identity fast path outside the single-stack-toggle splice (that
-    // path always builds a fresh outer List), so the achievable and correct assertion here is content
-    // equality: the two calls must produce the exact same rows, proving the cached filtered/sequence
-    // work was reused rather than silently diverging because of the messageTemplates edit.
+    // Filter equality (utils/Filter.kt:317-323) — messageComposition lives on LogTab, not the memo
+    // key or LogAnalysis, so mutating it must never trigger a different computation than the one
+    // already cached. computeItems itself has no "nothing changed" identity fast path outside the
+    // single-stack-toggle splice (that path always builds a fresh outer List), so the achievable
+    // and correct assertion here is content equality: the two calls must produce the exact same
+    // rows, proving the cached filtered/sequence work was reused rather than silently diverging
+    // because of the messageComposition edit.
     @Test
-    fun computeItemsIsNotInvalidatedByAMessageTemplatesChange() {
+    fun computeItemsIsNotInvalidatedByAMessageCompositionChange() {
         val tabId = "mt-cache-test"
         invalidateComputeCache(tabId)
         val entries = listOf(
@@ -349,7 +353,7 @@ class MessageTemplatesTest {
         val tab = mkTab(tabId, "f.log", entries)
         val first = computeItems(tab, applyFilter = true)
 
-        val mutated = tab.copy(analysis = tab.analysis.copy(messageTemplates = computeMessageTemplates(entries)))
+        val mutated = tab.copy(messageComposition = MessageCompositionState.Computed(computeMessageTemplates(entries)))
         val second = computeItems(mutated, applyFilter = true)
 
         assertEquals(first, second)
@@ -396,5 +400,80 @@ class MessageTemplatesTest {
             ),
             variants,
         )
+    }
+
+    // ── Row-action pattern mapping (Stage 2a's Hide/Show only/Highlight) ────────────────────────
+    // Every produced rule must actually match the raw line(s) that produced the template — a
+    // masked template is not itself a substring of any raw line, so this is the property that
+    // matters, not merely which branch of the mapping fired.
+
+    @Test
+    fun aFullyLiteralTemplateProducesALiteralRuleOnTheWholeTemplate() {
+        val raw = "Started service alpha"
+        val template = computeMessageTemplates(listOf(entry(1, "Svc", raw))).templates.single()
+        assertEquals(raw, template.template, "sanity: nothing should have masked here")
+
+        val spec = messageRuleSpecForTemplate(template, raw)
+
+        assertFalse(spec.regex)
+        assertEquals(raw, spec.pattern)
+        assertTrue(raw.contains(spec.pattern))
+    }
+
+    // The load-bearing case: the raw line has a three-space run the mask collapses to one space.
+    // A literal rule built from the (collapsed) template text would NOT contains-match this raw
+    // line — the rule must be sliced out of the raw sample using literalPrefixRawLength instead.
+    @Test
+    fun aDiscriminatingLiteralPrefixProducesALiteralRuleBuiltFromTheRawSampleAcrossAWhitespaceCollapse() {
+        val raw = "Start   proc 42"
+        val template = computeMessageTemplates(listOf(entry(1, "Proc", raw))).templates.single()
+        assertEquals("Start proc <n>", template.template)
+        val collapsedTemplatePrefix = template.template.substring(0, template.literalPrefixLength)
+
+        val spec = messageRuleSpecForTemplate(template, raw)
+
+        assertFalse(spec.regex)
+        assertEquals("Start   proc ", spec.pattern)
+        assertTrue(raw.contains(spec.pattern), "the produced rule must contains-match the raw line it came from")
+        assertFalse(
+            raw.contains(collapsedTemplatePrefix),
+            "sanity: a rule built from the collapsed template prefix would NOT have matched — that's the bug this guards against",
+        )
+    }
+
+    @Test
+    fun aLeadingMaskProducesARegexRuleThatMatchesTheLinesItCameFrom() {
+        val rawOne = "42 things happened"
+        val rawTwo = "7 things happened"
+        val template = computeMessageTemplates(listOf(entry(1, "Boot", rawOne), entry(2, "Boot", rawTwo))).templates.single()
+        assertEquals("<n> things happened", template.template)
+        assertEquals(0, template.literalPrefixLength, "sanity: the mask starts at index 0")
+
+        val spec = messageRuleSpecForTemplate(template, rawOne)
+
+        assertTrue(spec.regex)
+        val compiled = Regex(spec.pattern, RegexOption.IGNORE_CASE)
+        assertTrue(compiled.containsMatchIn(rawOne))
+        assertTrue(compiled.containsMatchIn(rawTwo))
+    }
+
+    @Test
+    fun aShortLiteralPrefixBelowTheDiscriminatingThresholdAlsoFallsBackToRegex() {
+        val raw = "id=42 ok"
+        val template = computeMessageTemplates(listOf(entry(1, "Svc", raw))).templates.single()
+        assertEquals("id=<n> ok", template.template)
+        assertTrue(template.literalPrefixLength < 4, "sanity: 'id=' is a 3-character prefix")
+
+        val spec = messageRuleSpecForTemplate(template, raw)
+
+        assertTrue(spec.regex)
+        assertTrue(Regex(spec.pattern, RegexOption.IGNORE_CASE).containsMatchIn(raw))
+    }
+
+    @Test
+    fun regexPatternForTemplateEscapesRegexMetacharactersInLiteralRuns() {
+        val raw = "cost: \$4.50 (approx.)"
+        val pattern = regexPatternForTemplate(maskMessage(raw).template)
+        assertTrue(Regex(pattern, RegexOption.IGNORE_CASE).containsMatchIn(raw))
     }
 }
