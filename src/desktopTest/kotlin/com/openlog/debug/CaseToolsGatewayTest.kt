@@ -12,6 +12,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -124,6 +125,16 @@ class CaseToolsGatewayTest {
             mapOf("query" to "distinct keyword phrase here"),
         ) as Map<*, *>
         assertTrue((search["matches"] as List<*>).isNotEmpty())
+    }
+
+    @Test
+    fun theUiDialogAndThisToolOperationsInstanceShareOneCaseSearchNotTwo() {
+        // AppState.caseSearch is hoisted so the Case Library dialog and the search_similar_cases/
+        // get_case/reindex_cases MCP tools search, get, and reindex the exact same in-memory index
+        // — two CaseSearch instances would mean two independent locks writing the same case-index
+        // file and duplicated parse work. OpenLogToolOperations.caseSearch now just delegates to
+        // AppState's, so this should be reference-identical, not merely equal.
+        assertSame(state.caseSearch, operations.caseSearch)
     }
 
     @Test

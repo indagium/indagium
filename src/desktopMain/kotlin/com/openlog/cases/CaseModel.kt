@@ -2,6 +2,8 @@ package com.openlog.cases
 
 import com.openlog.model.AnnBlock
 import com.openlog.model.Annotations
+import com.openlog.model.Filter
+import com.openlog.model.LogLevel
 
 /** Bumped whenever [CaseRecord]'s shape changes in a way that makes a previously-persisted
  *  [CaseIndex] stale — mirrors [com.openlog.source.SOURCE_INDEX_VERSION]'s role for the source
@@ -45,6 +47,14 @@ data class CaseRecord(
     // The single file (.ann preferred, else .md) whose mtime/size drives staleness detection —
     // matches CaseIndex.fileMeta's key for this record.
     val backingPath: String,
+    // Human-readable rendering (see describeFilter) of the Filter active when this note was saved
+    // — Annotations.annotationsToken's field index 8, decoded via ui/AutosaveCodec.kt's
+    // filterFromAnnotationsToken (never through Annotations itself; mirrors sourcePath's own
+    // field-4 handling). Null means "no filter recorded" (absent field, or a note written before
+    // this field existed) — the Case Library preview must show that explicitly rather than a blank
+    // or a fabricated summary. Distinct from describeFilter's own "No filter constraints" string,
+    // which means a filter WAS recorded and it simply has no active constraints.
+    val filterSummary: String? = null,
 )
 
 data class CaseIndex(
@@ -109,12 +119,72 @@ fun reconstructAnnotationsText(annotations: Annotations): String = buildString {
 private val TOKEN_SPLIT_RE = Regex("[^A-Za-z0-9]+")
 private const val MIN_TOKEN_LEN = 2
 
-/** Shared normalization for both indexed note text and incoming search queries — lowercase,
- *  split on runs of non-alphanumeric characters, drop very short (noise) tokens. Deliberately
- *  simple (no stemming/stopwords): the corpus this feature targets is small, and the inverted
- *  index + tag boost in [CaseSearch] already do the heavy lifting for relevance. */
-fun tokenize(text: String): Set<String> =
-    TOKEN_SPLIT_RE.split(text.lowercase())
-        .asSequence()
-        .filter { it.length >= MIN_TOKEN_LEN }
-        .toSet()
+// Splits one alphanumeric run on camelCase/acronym and letter<->digit boundaries — applied on the
+// ORIGINAL (pre-lowercase) run, since case is exactly the signal these boundaries key off of:
+//   "DeviceManager" -> "Device" | "Manager"        (lower/digit -> upper)
+//   "HTTPServer"    -> "HTTP" | "Server"            (acronym run -> capitalized word)
+//   "Log2Cache"     -> "Log" | "2" | "Cache"         (letter <-> digit)
+// Each alternative is a zero-width lookaround, so String.split() drops nothing and inserts no
+// characters — it only chooses where to cut.
+private val SUBWORD_SPLIT_RE = Regex(
+    "(?<=[a-z0-9])(?=[A-Z])" +
+        "|(?<=[A-Z])(?=[A-Z][a-z])" +
+        "|(?<=[A-Za-z])(?=[0-9])" +
+        "|(?<=[0-9])(?=[A-Za-z])",
+)
+
+/** Shared normalization for both indexed note text and incoming search queries — lowercase, split
+ *  on runs of non-alphanumeric characters, then further split each run on camelCase/digit
+ *  boundaries. `"DeviceManager"` indexes as `"devicemanager"`, `"device"`, AND `"manager"` — the
+ *  whole (lowercased) token is always kept alongside its sub-tokens, never replaced, so a query for
+ *  either the compound word or either half still hits. Tokens shorter than [MIN_TOKEN_LEN] (noise)
+ *  are dropped either way. Deliberately simple otherwise (no stemming/stopwords): the corpus this
+ *  feature targets is small, and the inverted index + tiered exact/prefix/fuzzy matching + tag
+ *  boost in [CaseSearch] already do the heavy lifting for relevance. Applying this same function to
+ *  both indexed text and incoming queries is what makes a query like "device" (which alone never
+ *  appears verbatim in a note that only ever writes "DeviceManager") still match. */
+fun tokenize(text: String): Set<String> {
+    val out = HashSet<String>()
+    TOKEN_SPLIT_RE.split(text).forEach { run ->
+        if (run.isEmpty()) return@forEach
+        val whole = run.lowercase()
+        if (whole.length >= MIN_TOKEN_LEN) out += whole
+        if (run.length > MIN_TOKEN_LEN) {
+            SUBWORD_SPLIT_RE.split(run).forEach { sub ->
+                val s = sub.lowercase()
+                if (s.length >= MIN_TOKEN_LEN) out += s
+            }
+        }
+    }
+    return out
+}
+
+/** Human-readable one-line summary of a [Filter] for the Case Library preview's metadata header —
+ *  e.g. `"tag=DeviceManager, level≥W, 2 message rules"`. Pure/testable and display-only: CaseSearch
+ *  never filters by this, it only exists so a saved case's preview can show what was actually being
+ *  looked at when the note was written (see `Annotations.annotationsToken`'s field-8 doc comment in
+ *  ui/AutosaveCodec.kt for how/where this gets recorded). Never returns a blank string — an empty
+ *  [Filter] (every level, no tags/keywords/rules) reads as "No filter constraints", which callers
+ *  must tell apart from a genuinely unrecorded filter (null) themselves. */
+fun describeFilter(filter: Filter): String {
+    val parts = mutableListOf<String>()
+    if (filter.activeTags.isNotEmpty()) parts += "tag=" + filter.activeTags.sorted().joinToString(",")
+    if (filter.excludeTags.isNotEmpty()) parts += "excl-tag=" + filter.excludeTags.sorted().joinToString(",")
+    if (filter.levels.isNotEmpty() && filter.levels != LogLevel.entries.toSet()) {
+        val minOrdinal = filter.levels.minOf { it.ordinal }
+        val contiguousFromMin = LogLevel.entries.filter { it.ordinal >= minOrdinal }.toSet()
+        parts += if (filter.levels == contiguousFromMin) {
+            "level≥${LogLevel.entries[minOrdinal].key}"
+        } else {
+            "levels=" + filter.levels.sortedBy { it.ordinal }.joinToString(",") { it.key.toString() }
+        }
+    }
+    if (filter.kwText.isNotBlank()) parts += "kw=\"${filter.kwText}\""
+    if (filter.excludeKw.isNotBlank()) parts += "excl-kw=\"${filter.excludeKw}\""
+    if (filter.messageRules.isNotEmpty()) {
+        parts += "${filter.messageRules.size} message rule${if (filter.messageRules.size == 1) "" else "s"}"
+    }
+    if (filter.pidTidFilter.isNotBlank()) parts += "pid/tid=${filter.pidTidFilter}"
+    if (filter.sequences.isNotEmpty()) parts += "${filter.sequences.size} sequence${if (filter.sequences.size == 1) "" else "s"}"
+    return if (parts.isEmpty()) "No filter constraints" else parts.joinToString(", ")
+}

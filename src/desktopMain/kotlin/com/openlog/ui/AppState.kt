@@ -13,6 +13,10 @@ import com.openlog.ai.CustomAiCommand
 import com.openlog.ai.CustomAiCommandName
 import com.openlog.ai.normalizeAiProviderProfiles
 import com.openlog.ai.validateAiProviderProfile
+import com.openlog.cases.CaseIndexer
+import com.openlog.cases.CaseRecord
+import com.openlog.cases.CaseSearch
+import com.openlog.cases.CaseSummary
 import com.openlog.debug.AppLogger
 import com.openlog.debug.ControlServer
 import com.openlog.debug.OpenLogToolOperations
@@ -499,6 +503,10 @@ internal const val LARGE_FILE_MODE_BYTES = 64L * 1024L * 1024L
 // feels the same as typing into the filter's keyword field.
 internal const val SEARCH_RECOMPUTE_DEBOUNCE_MS = 150L
 
+// Debounce for the Case Library dialog's search box (AppState.updateCaseLibraryQuery) — per the
+// feature brief, typing shouldn't re-scan the notes corpus on every keystroke.
+internal const val CASE_LIBRARY_SEARCH_DEBOUNCE_MS = 200L
+
 // Bounds for attachFirstVideoCandidateAsync's wait on a just-triggered zip-entry tab load — same
 // bounded-poll shape as OpenLogToolOperations.awaitLoad, duplicated here (not shared) since that
 // class's constants are private and scoped to MCP/REST request handling, a different concern.
@@ -538,6 +546,44 @@ data class PendingFilterRename(val id: String, val currentName: String, val isDr
 // tab, targetPath (absolute) is what the dialog copy shows the user and what "Open existing notes"
 // loads.
 data class PendingNoteOverwrite(val tabId: String, val targetPath: String, val targetName: String)
+
+/** Read-only preview for one Case Library result — the rendered note text plus the metadata
+ *  `buildMd` deliberately never writes (issueDescription is private working context) and the
+ *  filter/source info needed to drive "Reopen investigation" (see AppState.reopenInvestigation).
+ *  [filterSummary] is always a real, non-blank string: either describeFilter's rendering of a
+ *  recorded Filter, or the literal "Filter not recorded" for a note saved before that field
+ *  existed — never blank, never a lie. [reopenDisabledReason] is null when "Reopen investigation"
+ *  is clickable, else the reason to show (no confirmation dialog needed any more — nothing this
+ *  action does is destructive, since it always opens a brand-new tab and only ever touches that
+ *  tab's own notes). */
+data class CaseLibraryPreview(
+    val id: String,
+    val title: String,
+    val text: String,
+    val issueDescription: String,
+    val sourceFilename: String?,
+    val appVersion: String,
+    val decisiveTags: List<String>,
+    val filterSummary: String,
+    val sourcePath: String?,
+    val reopenDisabledReason: String?,
+)
+
+// See AppState.copyCasePreview's doc comment: buildMd/reconstructAnnotationsText both omit
+// issueDescription, so preview.text alone never carries it — this is what makes Copy's output
+// whole. Mirrors the field order CasePreviewMetadata renders in CaseLibraryDialog.kt. Blank/empty
+// fields are skipped exactly like the metadata header skips them (a legacy note's blank appVersion,
+// no decisive tags, etc.), except filterSummary, which — like the header — is always a real,
+// non-blank string ("Filter not recorded" included).
+internal fun casePreviewCopyText(preview: CaseLibraryPreview): String = buildString {
+    if (preview.issueDescription.isNotBlank()) appendLine("Issue: ${preview.issueDescription}")
+    preview.sourceFilename?.let { appendLine("Source: $it") }
+    if (preview.appVersion.isNotBlank()) appendLine("App version: ${preview.appVersion}")
+    appendLine("Filter: ${preview.filterSummary}")
+    if (preview.decisiveTags.isNotEmpty()) appendLine("Decisive tags: ${preview.decisiveTags.joinToString(", ")}")
+    appendLine()
+    append(preview.text)
+}
 
 enum class ImportFilterAction { RENAME, REPLACE, SKIP, ADD }
 
@@ -5090,7 +5136,7 @@ class AppState(
             runCatching {
                 saved.writeText(buildMd(t, settings))
                 File(saved.parent, saved.nameWithoutExtension + ".ann")
-                    .writeText(t.annotations.withDetectedAppVersion(t.logData).annotationsToken(t.sourcePath))
+                    .writeText(t.annotations.withDetectedAppVersion(t.logData).annotationsToken(t.sourcePath, t.filter))
                 writeAnnotationFrameImages(t, saved)
                 rememberRecentNote(saved)
             }.fold(
@@ -5178,17 +5224,18 @@ class AppState(
         }
         rememberRecentNote(file)
         recentNotesMenuOpen = false
+        val pinName = noteExportTargetName(file)
         // Prefer .ann sidecar — restores exact blocks and structure
         val sidecar = File(file.parent, file.nameWithoutExtension + ".ann")
         if (sidecar.exists()) {
             val annotations = runCatching { sidecar.readText().annotationsFromToken() }.getOrNull()
             if (annotations != null) {
-                // Pins noteTargetName so this exact file (not the default "<base>_analysis.md")
+                // Pins noteTargetName so this file's .md pair (not the default "<base>_analysis.md")
                 // keeps receiving future auto-exports — fixes the adjacent latent bug where opening
                 // "foo_analysis_2.md" and editing it re-exported to the plain "foo_analysis.md".
                 // Uses upTab, not upAnn: opening a file is not itself an annotation edit, so this
                 // must not trigger an immediate (and here, redundant) re-export.
-                upTab(tabId) { t -> t.copy(annotations = annotations, noteTargetName = file.name) }
+                upTab(tabId) { t -> t.copy(annotations = annotations, noteTargetName = pinName) }
                 return
             }
         }
@@ -5196,9 +5243,18 @@ class AppState(
         val text = runCatching { file.readText() }.getOrElse { return }
         upTab(tabId) { t ->
             val block = AnnBlock.Note(newId("n"), text)
-            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block), noteTargetName = file.name)
+            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block), noteTargetName = pinName)
         }
     }
+
+    // autoExportAnnotations always writes Markdown, so the auto-export pin must always name a .md
+    // file — pinning the literal opened filename breaks when the user opens a lone .ann (no paired
+    // .md, e.g. a hand-copied case note): every keystroke would then write rendered Markdown into
+    // that .ann, corrupting its token-encoded format and clobbering whatever the Case Library (or a
+    // teammate) actually put there, while also skipping resolveNoteTarget's overwrite prompt. A
+    // plain .md open is unaffected (its own name already ends in .md).
+    private fun noteExportTargetName(file: File): String =
+        if (file.extension.equals("md", ignoreCase = true)) file.name else "${file.nameWithoutExtension}.md"
 
     fun openNoteFileAsync(tabId: String, file: File) {
         ioScope.launch { openNoteFile(tabId, file) }
@@ -5211,16 +5267,381 @@ class AppState(
 
     private fun activeNotesDir(): File = userNotesDir() ?: notesDir
 
-    // internal (not private): OpenLogToolOperations' CaseSearch instance (com.openlog.cases)
-    // reuses this exact directory set for search_similar_cases/reindex_cases, so "similar past
-    // issues" retrieval always looks in the same places notes actually get saved/loaded from —
-    // including in tests, where notesDir is injected away from the real ~/.openlog2-equivalent.
+    // internal (not private): the caseSearch instance below (com.openlog.cases) and
+    // OpenLogToolOperations' identical one reuse this exact directory set for
+    // search_similar_cases/reindex_cases/the Case Library dialog, so "similar past issues"
+    // retrieval always looks in the same places notes actually get saved/loaded from — including
+    // in tests, where notesDir is injected away from the real ~/.openlog2-equivalent.
     internal fun noteLookupDirs(): List<File> {
         return listOfNotNull(
             userNotesDir(),
             notesDir,
             DesktopStorage.legacyNotesDir(),
         ).distinctBy { it.absolutePath }
+    }
+
+    // ── Case library (cases/CaseSearch — corpus-wide "Case Library" dialog) ────────────
+    // Built lazily (not at construction) so hosts/tests that never open the Case Library or touch
+    // case-search MCP tools never pay for a CaseSearch instance. Hoisted here (rather than living
+    // only inside debug/OpenLogToolOperations, as it used to) so the UI dialog and the AI/MCP tool
+    // surface share exactly one instance/lock over <appDataDir>/case-index — two instances would
+    // mean two independent locks writing that one file and duplicated parse work. `internal` (not
+    // `private`) so OpenLogToolOperations and tests can reach it.
+    internal val caseSearch: CaseSearch by lazy {
+        CaseSearch(noteDirs = ::noteLookupDirs, indexFile = DesktopStorage.caseIndexFile())
+    }
+
+    /** Tab id the Case Library dialog is open for; null means closed. The search itself is
+     *  corpus-wide (not filtered to this tab), but the tab supplies the seeded query/tags (design
+     *  point 5) and is the "Load into this tab" destination. */
+    var caseLibraryTabId by mutableStateOf<String?>(null)
+        private set
+    var caseLibraryQuery by mutableStateOf("")
+        private set
+
+    // Captured once when the dialog opens (design point 5's "active tags") rather than tracked
+    // live against the tab's filter — the search box's own text is what the user edits from then
+    // on, matching the "seed, don't continuously resync" behavior of RecentNotesPopup/Open Note.
+    // mutableStateOf (not a plain var): read inside CaseLibraryDialog's composable body, and a
+    // plain var's writes are snapshot-invisible to Compose.
+    internal var caseLibraryTags by mutableStateOf<List<String>>(emptyList())
+        private set
+    private var caseLibraryExcludeSourcePath: String? = null
+
+    var caseLibraryResults by mutableStateOf<List<CaseSummary>>(emptyList())
+        private set
+    var caseLibrarySearching by mutableStateOf(false)
+        private set
+
+    // True once a search has completed against a corpus with zero indexed records at all — distinct
+    // from an ordinary "no matches for this query" (see CaseSearch.isEmpty's own doc comment).
+    var caseLibraryIndexEmpty by mutableStateOf(false)
+        private set
+    var caseLibraryIndexing by mutableStateOf(false)
+        private set
+
+    // Set when a debounced search (or a request/confirm load's index lookup) throws — surfaced by
+    // the dialog instead of leaving it stuck on "Searching…" forever (runCaseLibrarySearch has no
+    // suspend point after a genuine failure other than the ones we add ourselves).
+    var caseLibraryError by mutableStateOf<String?>(null)
+        private set
+
+    // Id of the case currently resolving CaseSearch.getCase() on ioScope inside
+    // [reopenInvestigation], or null when nothing is in flight — that call can itself trigger a
+    // full corpus rescan (missing/stale/version-bumped index), so it must never run on the Compose
+    // thread. Scoped to the in-flight case id (rather than a single dialog-wide flag) so the
+    // dialog can disable/relabel "Reopen investigation" for that one case without touching any
+    // other row mid-flight.
+    var caseLibraryLoadingId by mutableStateOf<String?>(null)
+        private set
+
+    // Same shape as [caseLibraryLoadingId] but for [openCaseNotesOnly], kept as its own field so
+    // clicking one action doesn't paint the OTHER button as busy too (they resolve independently).
+    var caseLibraryNotesOnlyLoadingId by mutableStateOf<String?>(null)
+        private set
+
+    var caseLibraryPreview by mutableStateOf<CaseLibraryPreview?>(null)
+        private set
+
+    private var caseLibrarySearchJob: Job? = null
+
+    // Bumped synchronously by every reopenInvestigation call and by closeCaseLibrary/
+    // dismissCasePreview. reopenInvestigation's own CaseSearch.getCase() lookup resolves on
+    // ioScope (see below), so without this a call already in flight when the dialog closes (or
+    // the preview is dismissed) would still land its tab-open + note-attach afterward — silently
+    // acting on a dialog the user already walked away from. A stale coroutine checks its own
+    // captured seq against the current one before touching any state.
+    private var caseReopenRequestSeq = 0
+
+    /** Opens the Case Library dialog, seeded from [tabId]'s current issue description and active
+     *  filter tags (design point 5), then runs an immediate first search — including with a blank
+     *  seed, so an empty corpus shows its "Index my notes" prompt right away rather than waiting
+     *  for the user to type something first. */
+    fun openCaseLibrary(tabId: String) {
+        val tab = tab(tabId)
+        caseLibraryTabId = tabId
+        caseLibraryQuery = tab?.annotations?.issueDescription.orEmpty()
+        caseLibraryTags = tab?.filter?.activeTags?.toList().orEmpty()
+        caseLibraryExcludeSourcePath = tab?.sourcePath
+        caseLibraryResults = emptyList()
+        // Reset synchronously, not left over from whatever the dialog last showed — otherwise
+        // every open flashes a stale "No notes indexed yet"/"No matching cases" for the ~200ms
+        // debounce before the first real search result lands.
+        caseLibraryIndexEmpty = false
+        caseLibraryError = null
+        caseLibrarySearching = true
+        caseLibraryPreview = null
+        runCaseLibrarySearch()
+    }
+
+    fun closeCaseLibrary() {
+        caseLibrarySearchJob?.cancel()
+        caseReopenRequestSeq++
+        caseLibraryTabId = null
+        caseLibraryPreview = null
+    }
+
+    /** Re-searches on every keystroke; see [runCaseLibrarySearch] for the debounce/cancellation
+     *  shape. Never runs on the Compose thread: CaseSearch.search does directory listing, stats,
+     *  and (for changed notes) a full parse, none of which belongs on the UI thread. */
+    fun updateCaseLibraryQuery(query: String) {
+        caseLibraryQuery = query
+        runCaseLibrarySearch()
+    }
+
+    /** Debounced 200ms, cancel-and-relaunch on ioScope, same shape as the Find bar's own search
+     *  debounce (see the other cancel-and-relaunch comment above searchJobs) — but `job.cancel()`
+     *  alone only takes effect at a suspension point. Once the delay clears, the body below is
+     *  straight-line blocking JVM code (directory listing, stats, parses) with no further suspend
+     *  call, so a job "cancelled" after that point would otherwise run to completion and still
+     *  publish results for a query the user has since replaced. The explicit `ensureActive()`
+     *  calls are what actually make cancellation (a newer keystroke, or the dialog closing) take
+     *  effect. */
+    private fun runCaseLibrarySearch() {
+        val query = caseLibraryQuery
+        val tags = caseLibraryTags
+        val excludeSourcePath = caseLibraryExcludeSourcePath
+        caseLibrarySearchJob?.cancel()
+        caseLibrarySearchJob = ioScope.launch {
+            delay(CASE_LIBRARY_SEARCH_DEBOUNCE_MS)
+            ensureActive()
+            caseLibrarySearching = true
+            caseLibraryError = null
+            // runCatching (not try/catch): its block below is plain blocking JVM code with no
+            // suspend point of its own, so it can never actually throw CancellationException —
+            // only our own explicit ensureActive() calls (outside this block) do that.
+            val outcome = runCatching {
+                val results = caseSearch.search(query, tags, excludeSourcePath)
+                // search() above already refreshed the index, so a query that matched anything
+                // proves the corpus isn't empty — only fall back to a second rescan (isEmpty) when
+                // this particular query matched nothing, to tell "nothing indexed yet" apart from
+                // an ordinary no-match. This is the common case (a query that matches something)
+                // paying for exactly one corpus scan, not two.
+                val empty = if (results.isEmpty()) caseSearch.isEmpty() else false
+                results to empty
+            }
+            // A newer keystroke, or the dialog closing, may have cancelled this job while the
+            // (possibly slow) scan above ran.
+            ensureActive()
+            outcome.fold(
+                onSuccess = { (results, empty) ->
+                    caseLibraryResults = results
+                    caseLibraryIndexEmpty = empty
+                },
+                onFailure = { e ->
+                    AppLogger.error("case-library", "Case Library search failed for query \"$query\"", e)
+                    caseLibraryError = e.message?.takeIf { it.isNotBlank() } ?: "Search failed."
+                },
+            )
+            ensureActive()
+            caseLibrarySearching = false
+        }
+    }
+
+    /** Rebuilds the case index from scratch (cases/CaseIndexer re-parses every note) — offered
+     *  only from the empty-index prompt, since this is the one genuinely slow CaseSearch path. */
+    fun reindexCaseLibrary() {
+        if (caseLibraryIndexing) return
+        // Set synchronously, not inside the launch below — CaseLibraryDialog's "enabled = !indexing"
+        // read this on the very next click, and a coroutine dispatch is not guaranteed to have run
+        // by then, so a fast double-click could otherwise queue two concurrent full reindexes.
+        caseLibraryIndexing = true
+        ioScope.launch {
+            runCatching { caseSearch.reindexAll() }
+                .onFailure { e -> AppLogger.error("case-library", "Case Library reindex failed", e) }
+            caseLibraryIndexing = false
+            runCaseLibrarySearch()
+        }
+    }
+
+    // "Original log not found" covers both a blank/absent sourcePath (never recorded, or a note
+    // hand-copied without one) and a recorded one that no longer resolves — a plain file that's
+    // been moved/deleted, or an archive-composite "<zip>!<entry>" (see splitSourceFromPath) whose
+    // zip is gone or no longer contains that entry. Reuses splitSourceFromPath itself (not a
+    // separate existence check) so "disabled or not" and "what reopenInvestigation will actually
+    // open" can never disagree.
+    private fun reopenDisabledReasonFor(sourcePath: String?): String? {
+        if (sourcePath.isNullOrBlank()) return "Original log not found"
+        return if (splitSourceFromPath(sourcePath, entryPath = null) == null) "Original log not found" else null
+    }
+
+    private fun sourceFilenameFor(sourcePath: String?): String? {
+        if (sourcePath.isNullOrBlank()) return null
+        return archiveQualifiedLabel(sourcePath) ?: File(sourcePath).name
+    }
+
+    /** Read-only preview (design point 4) — CaseIndexer.readCaseText plus the metadata buildMd
+     *  never writes (issueDescription) and the .ann-only fields (appVersion/decisiveTags/the
+     *  recorded filter). Never touches the target tab's annotations. Resolves on ioScope: getCase()
+     *  can trigger a full corpus rescan the same as [search], so it must never run on the Compose
+     *  thread either. */
+    fun previewCase(id: String) {
+        val openTabId = caseLibraryTabId
+        ioScope.launch {
+            val record = caseSearch.getCase(id)
+            val text = record?.let(CaseIndexer::readCaseText)
+            if (caseLibraryTabId != openTabId) return@launch // dialog closed/reopened meanwhile
+            if (record == null || text == null) {
+                // The row's backing file vanished on disk since the last search (deleted/moved
+                // outside the app). Re-run the search so the now-stale row drops out instead of
+                // the click silently doing nothing.
+                runCaseLibrarySearch()
+            } else {
+                caseLibraryPreview = CaseLibraryPreview(
+                    id = id,
+                    title = record.title,
+                    text = text,
+                    issueDescription = record.issueDescription,
+                    sourceFilename = sourceFilenameFor(record.sourcePath),
+                    appVersion = record.appVersion,
+                    decisiveTags = record.decisiveTags,
+                    filterSummary = record.filterSummary ?: "Filter not recorded",
+                    sourcePath = record.sourcePath,
+                    reopenDisabledReason = reopenDisabledReasonFor(record.sourcePath),
+                )
+            }
+        }
+    }
+
+    fun dismissCasePreview() {
+        caseReopenRequestSeq++
+        caseLibraryPreview = null
+    }
+
+    /** "Reopen investigation" — replaces the old destructive "Load into this tab". Opens the log
+     *  this case's notes were actually written against ([CaseRecord.sourcePath]) in a BRAND-NEW
+     *  tab — never the tab the Case Library was opened from, and never any other already-open tab's
+     *  notes get touched — then attaches the case's own notes to that new tab, so every log
+     *  reference in them resolves against the log they actually describe (LogParser restarts ids
+     *  at 1 per file, so ids from an unrelated log are meaningless — the bug this whole feature
+     *  replaces). No confirmation dialog: unlike the old load, nothing existing is ever mutated.
+     *  Resolves both a plain file sourcePath and an archive-composite "<zip>!<entry>" one via the
+     *  same [splitSourceFromPath] machinery [requestSplitForTab] already uses, so an archive entry
+     *  is reopened properly rather than handed to a naive `File(...)`. No-ops when the preview's
+     *  [CaseLibraryPreview.reopenDisabledReason] is set — the dialog should already have disabled
+     *  the button in that case, this is just the same guard enforced here too. */
+    fun reopenInvestigation(id: String) {
+        val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
+        if (preview.reopenDisabledReason != null) return
+        val sourcePath = preview.sourcePath ?: return
+        val seq = ++caseReopenRequestSeq
+        caseLibraryLoadingId = id
+        ioScope.launch {
+            val record = caseSearch.getCase(id)
+            val source = splitSourceFromPath(sourcePath, entryPath = null)
+            val noteFile = record?.mdPath?.let(::File) ?: record?.annPath?.let(::File)
+            if (seq != caseReopenRequestSeq) return@launch
+            if (record == null || source == null || noteFile == null) {
+                caseLibraryLoadingId = null
+                runCaseLibrarySearch()
+                return@launch
+            }
+            val newTabId = when (source) {
+                is SplitSource.RealFile -> openFileInternal(source.file, bypassSplitPrompt = true)
+                is SplitSource.ArchiveEntry -> openZipEntry(source.archiveFile, source.candidate, bypassSplitPrompt = true)
+            }
+            if (seq != caseReopenRequestSeq) return@launch
+            caseLibraryLoadingId = null
+            if (newTabId == null) return@launch
+            // The tab is allocated synchronously above but published asynchronously once parsing
+            // finishes (see openFileInternal/openZipEntry) — wait for it to actually land in `tabs`
+            // before attaching notes, or openNoteFile's upTab would silently no-op against a tab
+            // that doesn't exist yet (same race attachVideoToTabWhenAvailable already guards against).
+            val deadline = System.currentTimeMillis() + VIDEO_ATTACH_AWAIT_TIMEOUT_MS
+            while (isLoadInFlight(newTabId) && System.currentTimeMillis() < deadline) delay(VIDEO_ATTACH_AWAIT_POLL_MS)
+            if (seq != caseReopenRequestSeq) return@launch
+            openNoteFile(newTabId, noteFile)
+            closeCaseLibrary()
+        }
+    }
+
+    /** "Open notes only" — always available, regardless of whether [reopenInvestigation] would be
+     *  (sourcePath blank, or the log file/archive entry no longer resolves). The notes are the
+     *  durable artifact and are perfectly readable without the log they were written against, so a
+     *  gone/unrecorded log should never be the reason a saved analysis can't be opened at all.
+     *  Opens the case's notes in a brand-new, log-less tab — [emptyWorkspaceTab] is the app's own
+     *  startup state, so every panel (filter panel, minimap, log viewer, Notes) already renders a
+     *  log-less tab correctly, no special-casing needed. Never touches any existing tab. Named
+     *  after the case (not "Untitled workspace") so it's identifiable in the tab strip.
+     *
+     *  Caveat (surfaced to the user via the button's tooltip, not invented UI here): AnnBlock.LogRef
+     *  blocks still render fine from their stored sourceEntries, but clicking one navigates by
+     *  logIds against a tab with no rows — nothing to jump to. Honest, if a little inert. */
+    fun openCaseNotesOnly(id: String) {
+        val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
+        val seq = ++caseReopenRequestSeq
+        caseLibraryNotesOnlyLoadingId = id
+        ioScope.launch {
+            val record = caseSearch.getCase(id)
+            val noteFile = record?.mdPath?.let(::File) ?: record?.annPath?.let(::File)
+            if (seq != caseReopenRequestSeq) return@launch
+            if (record == null || noteFile == null) {
+                caseLibraryNotesOnlyLoadingId = null
+                runCaseLibrarySearch()
+                return@launch
+            }
+            val n = tabCounter.getAndIncrement()
+            val t = emptyWorkspaceTab().copy(id = "t$n", filename = preview.title)
+            synchronized(stateLock) {
+                tabs = tabs + t
+                activeTabId = t.id
+            }
+            caseLibraryNotesOnlyLoadingId = null
+            openNoteFile(t.id, noteFile)
+            closeCaseLibrary()
+        }
+    }
+
+    // Case Library preview's "Copy"/"Export" (design point: reuse the Notes panel's own copy/
+    // export primitives rather than reimplementing them). copyAnn/exportAnalysisTo are both tab-
+    // scoped (they build fresh Markdown via buildMd(tab, settings)), but a previewed case may not
+    // correspond to any currently-open tab at all — so these call the SAME underlying primitives
+    // (copyToClipboard, the masking maskWordForCopy already applies, and the same FileDialog+
+    // writeText shape saveAnalysis uses) directly against the preview's already-rendered text
+    // instead. "Copy" masks its output exactly like copyAnn — the case may contain the same
+    // sensitive content the Notes panel's own Copy button is careful about.
+    //
+    // buildMd (and reconstructAnnotationsText, the .ann-only equivalent CaseIndexer.readCaseText
+    // falls back to) both deliberately omit issueDescription — it's private working context, not
+    // meant for the exported note. That means preview.text alone NEVER carries it, on either path.
+    // The metadata header the dialog already shows (issue description, source, app version, filter,
+    // decisive tags) is prepended here so Copy is not a dead end for the one field the dialog's
+    // SelectionContainer used to leave unselectable too (see CaseLibraryDialog.kt).
+    fun copyCasePreview(id: String) {
+        val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
+        copyToClipboard(maskWordForCopy(casePreviewCopyText(preview), settings))
+    }
+
+    fun exportCasePreview(id: String) {
+        val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
+        val dlg = FileDialog(null as Frame?, "Export Case Note", FileDialog.SAVE).apply {
+            file = File(preview.id).name.ifBlank { "case_note.md" }
+            settings.defaultSaveDir?.let { directory = it }
+            isVisible = true
+        }
+        val path = dlg.file ?: return
+        val dir = dlg.directory ?: return
+        val target = File(dir, path)
+        ioScope.launch {
+            runCatching {
+                target.parentFile?.mkdirs()
+                // Same body Copy produces (issue description + provenance above the markdown),
+                // because buildMd deliberately omits issueDescription and exporting preview.text
+                // alone would silently drop it.
+                //
+                // Deliberately NOT run through maskWordForCopy, unlike copyCasePreview. Copy masking
+                // exists to stop a note's own words colliding with the destination's markup when it
+                // is pasted (the default rule rewrites "java" so Jira stops choking on it next to
+                // its {code:java} fences) — it is a per-user paste-time convenience, not a content
+                // transform. A file written to disk is the note itself, and every other file writer
+                // here agrees: exportAnalysisTo, saveAnalysis and autoExportAnnotations are all
+                // unmasked. Masking here would bake one user's Jira workaround into the artifact.
+                target.writeText(casePreviewCopyText(preview))
+            }.fold(
+                onSuccess = { AppLogger.info("case-library", "Exported case preview to ${target.absolutePath}") },
+                onFailure = { e -> AppLogger.error("case-library", "Failed to export case preview to ${target.absolutePath}", e) },
+            )
+        }
     }
 
     // Includes the plain-filename name alongside the (possibly archive-qualified) one so notes
@@ -5328,7 +5749,7 @@ class AppState(
                 // Sidecar stores full block state for restoration, plus the sourcePath
                 // fingerprint (5th token field) used to disambiguate same-named notes.
                 File(targetDir, "${mdFile.nameWithoutExtension}.ann")
-                    .writeText(tab.annotations.withDetectedAppVersion(tab.logData).annotationsToken(tab.sourcePath))
+                    .writeText(tab.annotations.withDetectedAppVersion(tab.logData).annotationsToken(tab.sourcePath, tab.filter))
                 legacySourceFingerprintFile(mdFile).delete()
                 writeAnnotationFrameImages(tab, mdFile)
                 rememberRecentNote(mdFile)

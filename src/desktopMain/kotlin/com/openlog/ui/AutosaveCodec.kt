@@ -1182,7 +1182,21 @@ private fun String.videoFrameFromToken(): VideoFrameReference? = runCatching {
     VideoFrameReference(source = source, sourceLabel = label, positionMs = positionMs)
 }.getOrNull()
 
-internal fun Annotations.annotationsToken(sourcePath: String? = null): String = tokenFields(
+// Wraps a bare Filter in a throwaway SavedFilter so annotationsToken can reuse the exact same
+// positional token savedFilterToken()/tabToken() already use for a single Filter, rather than
+// inventing a second encoding. id/name are never read back (decoded straight into a Filter via
+// toFilter(), which drops them) so any placeholder is fine.
+private fun Filter.asSavedFilterForToken(): SavedFilter = SavedFilter(
+    id = "f", name = "f",
+    levels = levels, activeTags = activeTags, kwText = kwText, kwRegex = kwRegex, mode = mode,
+    excludeTags = excludeTags, excludeKw = excludeKw, excludeKwRegex = excludeKwRegex,
+    highlighters = highlighters, seqOn = seqOn, kwInTag = kwInTag, kwInTagRegex = kwInTagRegex,
+    pkgPrefixes = pkgPrefixes, pidTidFilter = pidTidFilter, sequences = sequences,
+    messageRules = messageRules, excludePkgPrefixes = excludePkgPrefixes,
+    kwHighlightEnabled = kwHighlightEnabled, kwHighlightColor = kwHighlightColor,
+)
+
+internal fun Annotations.annotationsToken(sourcePath: String? = null, filter: Filter? = null): String = tokenFields(
     prefix,
     suffix,
     blocks.joinToString(",") { it.annBlockToken().b64() },
@@ -1192,7 +1206,28 @@ internal fun Annotations.annotationsToken(sourcePath: String? = null): String = 
     appVersion,
     decisiveTags.joinToString(","),
     frameStamp.orEmpty(),
+    // Appended — index 8: the Filter active when this note was saved. A nullable PARAMETER, not an
+    // Annotations field — Annotations itself gains nothing, mirroring how sourcePath (index 4) is
+    // also a parameter here rather than a field. Encoded via the same SavedFilter positional token
+    // as tabToken's own filter field, folded into this outer token as one atomic tokenFields()
+    // field so its inner "|" separators can't corrupt this one (tokenFields() b64-encodes whatever
+    // string it's given). Decoded separately by filterFromAnnotationsToken below — NEVER through
+    // annotationsFromToken — same split as sourcePath/readSourceFingerprint. Absent (null) or a
+    // legacy (<9-field) token both mean "no filter recorded".
+    filter?.asSavedFilterForToken()?.savedFilterToken().orEmpty(),
 )
+
+/** Decodes the Filter recorded at [annotationsToken]'s field index 8. Kept separate from
+ *  [annotationsFromToken] since the filter is not an [Annotations] field (see that function's own
+ *  field-8 doc comment) — mirrors how sourcePath at index 4 is read directly off the raw token
+ *  (AppState.readSourceFingerprint) rather than through Annotations. Absent/blank field, or an
+ *  unparseable inner token (a note written before this field existed — plain getOrNull(8) == null
+ *  on those), both mean "no filter recorded" -> null. */
+internal fun String.filterFromAnnotationsToken(): Filter? =
+    runCatching { tokenFields().getOrNull(8) }.getOrNull()
+        ?.takeIf { it.isNotBlank() }
+        ?.savedFilterFromToken()
+        ?.toFilter()
 
 internal fun String.annotationsFromToken(): Annotations? = runCatching {
     val p = tokenFields()

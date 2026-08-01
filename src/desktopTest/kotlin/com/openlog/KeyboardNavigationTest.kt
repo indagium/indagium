@@ -56,6 +56,7 @@ class KeyboardNavigationTest {
         assertTrue(labels.contains("Ctrl 1 / Ctrl 2 / Ctrl 3"))
         assertTrue(labels.contains("Ctrl Tab / Ctrl Shift Tab"))
         assertTrue(labels.contains("Ctrl /"))
+        assertTrue(labels.contains("Ctrl Shift O"))
         assertFalse(
             keyboardShortcutHelpGroups(mac = false)
                 .flatMap { it.rows }

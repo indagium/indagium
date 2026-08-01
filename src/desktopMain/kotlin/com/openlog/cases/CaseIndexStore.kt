@@ -6,8 +6,16 @@ import java.util.Base64
 
 private const val CASE_INDEX_MAGIC = "openLog2-case-index-v1"
 
-// Field count of one "record\t..." line (CaseRecord.toLine()'s 11 tab-separated fields).
+// Minimum field count of one "record\t..." line (CaseRecord.toLine()'s original 11 tab-separated
+// fields). filterSummary (index FILTER_SUMMARY_FIELD_INDEX) was appended later and is read via
+// getOrNull — a shorter, pre-existing cache line still parses, it just decodes filterSummary as
+// null ("not recorded"), same append-last discipline as the .ann token format (see
+// Annotations.annotationsToken).
 private const val RECORD_LINE_FIELD_COUNT = 11
+
+// Appended after the original 11 fields (indices 0..10) — see CaseRecord.filterSummary's doc
+// comment and RECORD_LINE_FIELD_COUNT above.
+private const val FILTER_SUMMARY_FIELD_INDEX = 11
 
 // Base64-url (no padding) round-trip for any field that could otherwise contain a tab or newline
 // (titles, issue descriptions, note text-derived tokens, file paths) — same scheme as
@@ -35,6 +43,9 @@ private fun CaseRecord.toLine(): String = listOf(
     mdPath.orEmpty().fieldToken(),
     annPath.orEmpty().fieldToken(),
     backingPath.fieldToken(),
+    // Appended — index 11. Old readers (parts.size check above stays at 11) never see this field;
+    // never reorder. See CaseRecord.filterSummary's own doc comment.
+    filterSummary.orEmpty().fieldToken(),
 ).joinToString("\t")
 
 private fun parseRecordLine(rest: String): CaseRecord? {
@@ -52,6 +63,7 @@ private fun parseRecordLine(rest: String): CaseRecord? {
         mdPath = parts[8].fieldValue().takeIf { it.isNotBlank() },
         annPath = parts[9].fieldValue().takeIf { it.isNotBlank() },
         backingPath = parts[10].fieldValue(),
+        filterSummary = parts.getOrNull(FILTER_SUMMARY_FIELD_INDEX)?.fieldValue()?.takeIf { it.isNotBlank() },
     )
 }
 

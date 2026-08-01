@@ -2,13 +2,18 @@ package com.openlog
 
 import com.openlog.model.AnnBlock
 import com.openlog.model.Annotations
+import com.openlog.model.Filter
+import com.openlog.model.FilterMode
+import com.openlog.model.LogLevel
 import com.openlog.model.VideoFrameReference
 import com.openlog.model.VideoSource
 import com.openlog.ui.annotationsFromToken
 import com.openlog.ui.annotationsToken
+import com.openlog.ui.filterFromAnnotationsToken
 import com.openlog.ui.tokenFields
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -156,11 +161,57 @@ class AnnotationsTokenTest {
         val token = Annotations(issueDescription = "desc", appVersion = "9.9.9", decisiveTags = listOf("X"))
             .annotationsToken("/some/source/path.log")
         val fields = token.tokenFields()
-        assertEquals(8, fields.size, "new token must carry exactly 8 fields (0..7)")
+        // 9 fields (0..8): the original 5 (0-4), appVersion/decisiveTags/frameStamp (5-7), and the
+        // filter (8, appended most recently) — present-but-empty here since no filter was passed.
+        assertEquals(9, fields.size, "new token must carry exactly 9 fields (0..8)")
         assertEquals("/some/source/path.log", fields.getOrNull(4))
         assertEquals("9.9.9", fields.getOrNull(5))
         assertEquals("X", fields.getOrNull(6))
         assertEquals("", fields.getOrNull(7), "no frameStamp was set, so field 7 is empty (not absent)")
+        assertEquals("", fields.getOrNull(8), "no filter was passed, so field 8 is empty (not absent)")
+    }
+
+    // ── Filter at field index 8 (Task 3b: "Record the filter going forward") ───────────────────
+
+    @Test
+    fun roundTripsTheFilterAtFieldIndexEight() {
+        val filter = Filter(
+            activeTags = setOf("DeviceManager"),
+            levels = setOf(LogLevel.W, LogLevel.E, LogLevel.A),
+            mode = FilterMode.TAGS,
+            kwText = "boot failure",
+        )
+        val original = Annotations(issueDescription = "App crashes on cold start")
+
+        val token = original.annotationsToken(sourcePath = "/path/to/source.log", filter = filter)
+
+        // The filter is NOT an Annotations field — annotationsFromToken must still round-trip
+        // Annotations exactly as before, unaffected by the appended field.
+        assertEquals(original, token.annotationsFromToken())
+        // Decoded separately, mirroring how sourcePath itself is read off the raw token.
+        val restoredFilter = token.filterFromAnnotationsToken()
+        assertEquals(filter, restoredFilter)
+    }
+
+    @Test
+    fun aTokenWrittenWithNoFilterDecodesTheFilterAsAbsent() {
+        val token = Annotations(issueDescription = "no filter here").annotationsToken(sourcePath = "/a/b.log")
+
+        assertNull(token.filterFromAnnotationsToken())
+    }
+
+    @Test
+    fun aLegacyEightFieldTokenWithNoFilterFieldAtAllStillDecodesWithTheFilterAbsent() {
+        val fullToken = Annotations(issueDescription = "legacy issue")
+            .annotationsToken(sourcePath = "/legacy/source.log", filter = Filter(activeTags = setOf("ShouldNotAppear")))
+        // Simulate a pre-existing .ann sidecar written before the filter field existed: exactly the
+        // first 8 "|"-separated fields (0..7), nothing appended.
+        val legacyToken = fullToken.split("|").take(8).joinToString("|")
+
+        assertNull(legacyToken.filterFromAnnotationsToken())
+        // Annotations itself still decodes fine — the truncation only affects the (non-Annotations)
+        // filter field.
+        assertEquals("legacy issue", legacyToken.annotationsFromToken()?.issueDescription)
     }
 
     @Test
