@@ -165,7 +165,7 @@ internal class AiToolExecutionCoordinator(
         val TAB_SCOPED_TOOL_NAMES = setOf(
             "close_tab", "get_filter", "set_filter", "get_visible_lines", "get_line_context",
             "select_lines", "get_selection", "toggle_group", "expand_all", "collapse_all",
-            "get_tags", "get_packages", "get_crash_sites", "get_issue_description",
+            "get_tags", "get_packages", "get_log_composition", "get_crash_sites", "get_issue_description",
             "get_annotation_sections", "get_annotation_blocks", "append_annotation_section", "set_annotation_section",
             "add_text_note", "add_log_note", "add_image_note", "update_note_block", "move_note_block",
             "delete_note_block", "clear_all_notes", "export_analysis", "export_filtered_log", "save_annotations",

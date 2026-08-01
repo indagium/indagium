@@ -1,9 +1,15 @@
 package com.openlog.ui
 
 import com.openlog.debug.AppLogger
+import com.openlog.model.MessageCompositionState
 import com.openlog.utils.FileTailer
+import com.openlog.utils.RegexEvaluationContext
+import com.openlog.utils.computeMessageTemplates
 import com.openlog.utils.computeProcessNames
+import com.openlog.utils.computeStackTraceGroups
+import com.openlog.utils.mergeMessageTemplates
 import com.openlog.utils.parseLogcatLines
+import com.openlog.utils.passesFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -102,9 +108,44 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                     // over the file's total line count. merge(..., Int::plus) adds the new
                     // batch's counts onto the running totals instead of the map `+` operator,
                     // which would overwrite rather than sum an existing tag's count.
+                    //
+                    // messageComposition is folded in the same way, but ONLY when a histogram
+                    // already exists for this tab (Computed) — a tail flush must never trigger the
+                    // on-demand initial scan (most sessions never open the panel) and must never
+                    // wipe an existing one out. When it does exist, masking depends only on the
+                    // individual line, so scanning just the new batch and unioning counts is exact.
+                    // computeStackTraceGroups runs on the batch alone (cheap — a batch is at most a
+                    // few hundred lines), so a trace straddling this batch boundary loses member-
+                    // exclusion for its tail half until the debounced full buildLogAnalysis() below
+                    // replaces `analysis` wholesale — bounded and self-healing, not worth a
+                    // cross-batch trace-continuation scheme. buildLogAnalysis() itself no longer
+                    // touches messageComposition (it lives outside `analysis` now), so that debounced
+                    // replace can never discard what this merge just built.
+                    //
+                    // The batch is filtered by the SAME filter the existing histogram was built
+                    // for before merging. The composition describes what the current view is made
+                    // of, so folding in raw unfiltered lines would quietly mix filtered and
+                    // unfiltered counts into one number. forFilter carries through unchanged: this
+                    // merge extends an existing result, it does not answer a new question.
+                    val existingComposition = cur.messageComposition
+                    val nextComposition = if (existingComposition is MessageCompositionState.Computed) {
+                        val forFilter = existingComposition.forFilter
+                        val ctx = RegexEvaluationContext()
+                        val admitted = newEntries.filter { passesFilter(it, forFilter, ctx) }
+                        MessageCompositionState.Computed(
+                            mergeMessageTemplates(
+                                existingComposition.histogram,
+                                computeMessageTemplates(admitted, computeStackTraceGroups(admitted)),
+                            ),
+                            forFilter,
+                        )
+                    } else {
+                        existingComposition
+                    }
                     cur.copy(
                         logData = nextData,
                         rmap = mkRmap(nextData),
+                        messageComposition = nextComposition,
                         analysis = cur.analysis.copy(
                             tagCounts = cur.analysis.tagCounts.toMutableMap().apply {
                                 newEntries.forEach { merge(it.tag, 1, Int::plus) }

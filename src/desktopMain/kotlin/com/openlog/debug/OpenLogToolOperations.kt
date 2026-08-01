@@ -12,10 +12,15 @@ import com.openlog.model.Highlighter
 import com.openlog.model.LogEntry
 import com.openlog.model.LogItem
 import com.openlog.model.LogLevel
+import com.openlog.model.LogTab
+import com.openlog.model.MessageCompositionState
 import com.openlog.model.MessageRule
+import com.openlog.model.MessageTemplate
+import com.openlog.model.MessageTemplateHistogram
 import com.openlog.model.RuleTarget
 import com.openlog.model.SavedFilter
 import com.openlog.model.SequenceDef
+import com.openlog.model.TemplateGranularity
 import com.openlog.source.SourceDeclaration
 import com.openlog.source.SourceFileSnapshot
 import com.openlog.source.SourceMatch
@@ -30,11 +35,15 @@ import com.openlog.ui.rotatedFramePng
 import com.openlog.utils.RegexEvaluationContext
 import com.openlog.utils.ZipLogCandidate
 import com.openlog.utils.computeItems
+import com.openlog.utils.computeMessageTemplates
 import com.openlog.utils.containsPattern
+import com.openlog.utils.foldTemplates
 import com.openlog.utils.indexOfEntryId
 import com.openlog.utils.isSupportedArchiveFile
 import com.openlog.utils.listArchiveLogCandidates
 import com.openlog.utils.newId
+import com.openlog.utils.viewDefiningKey
+import com.openlog.utils.visibleEntries
 import java.io.File
 import java.util.Base64
 import kotlin.math.roundToInt
@@ -52,6 +61,8 @@ private const val HEX_RADIX = 16
 private const val DEFAULT_CASE_SEARCH_LIMIT = 8
 private const val DEFAULT_SEQUENCE_OCCURRENCE_LIMIT = 100
 private const val MAX_SEQUENCE_OCCURRENCE_LIMIT = 500
+private const val DEFAULT_LOG_COMPOSITION_LIMIT = 50
+private const val MAX_LOG_COMPOSITION_LIMIT = 500
 
 /**
  * Transport-neutral AppState operations behind the openLog MCP catalog.
@@ -190,6 +201,17 @@ internal class OpenLogToolOperations(
         },
         "get_follow_diagnostics" to { a ->
             getFollowDiagnosticsRoute(a.str("tabId") ?: "", a.anyInt("videoMs")?.toLong() ?: 0L)
+        },
+        "get_log_composition" to { a ->
+            getLogComposition(
+                tabId = a.str("tabId") ?: "",
+                granularityParam = a.str("granularity"),
+                orderParam = a.str("order"),
+                tag = a.str("tag"),
+                search = a.str("search"),
+                offset = a.anyInt("offset") ?: 0,
+                limit = a.anyInt("limit") ?: DEFAULT_LOG_COMPOSITION_LIMIT,
+            )
         },
     )
 
@@ -1433,6 +1455,126 @@ internal class OpenLogToolOperations(
     // already report (hasAnchor: false, status: NO_ANCHOR), so this stays a thin pass-through.
     private fun getFollowDiagnosticsRoute(tabId: String, videoMs: Long): Map<String, Any?> =
         followDiagnosticsToMap(appState.followDiagnostics(tabId, videoMs))
+
+    // ── Log composition (Stage 3 automation tool) ──────────────────────
+    //
+    // Exposes utils/MessageTemplates.kt's histogram — the distinct masked message "shapes" in a
+    // tab's CURRENT FILTERED VIEW, ranked by count — as a read-only tool. This is deliberately
+    // NOT a thin wrapper around AppState.requestMessageComposition: that call is fire-and-forget
+    // on ioScope, and the only way for a synchronous handler to observe its result would be to
+    // poll AppState.tab(tabId).messageComposition in a Thread.sleep loop — exactly the awaitLoad
+    // anti-pattern SAAD's R4 already flags as a known risk (a Ktor request thread blocked by
+    // polling instead of doing anything). Computing the histogram directly on this thread instead
+    // is no faster, but it is honest about the cost and matches the shape getSequenceSummary
+    // already uses for its own full-log scan: real work on the calling thread, not a poll loop.
+    //
+    // A cached MessageCompositionState.Computed is reused when it already matches the tab's
+    // current view (see Filter.viewDefiningKey) — free in the common case where the filter panel
+    // is open or a previous call already primed it. Otherwise this scans synchronously and writes
+    // the result back into the same AppState.messageComposition slot the UI reads, so the two
+    // never disagree and a later call (from this tool or the panel) finds it cached. This also
+    // answers the "nothing computed yet" question directly rather than reporting an empty/pending
+    // result a model could mistake for "no repeated messages" (see MessageCompositionState's own
+    // doc on that exact trap) — the first call for a view simply pays the scan cost and returns
+    // real data.
+    private fun getLogComposition(
+        tabId: String,
+        granularityParam: String?,
+        orderParam: String?,
+        tag: String?,
+        search: String?,
+        offset: Int,
+        limit: Int,
+    ): Map<String, Any?> {
+        val t = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val granularity = parseTemplateGranularity(granularityParam)
+            ?: return mapOf("error" to "unknown granularity '$granularityParam'; valid: loose,normal,strict")
+        val order = parseCompositionOrder(orderParam)
+            ?: return mapOf("error" to "unknown order '$orderParam'; valid: frequent,rare")
+        val (histogram, cacheHit) = resolveMessageComposition(t)
+        return buildLogCompositionResponse(t.id, histogram, cacheHit, granularity, order, tag, search, offset, limit)
+    }
+
+    private fun parseTemplateGranularity(raw: String?): TemplateGranularity? = when (raw?.trim()?.lowercase()) {
+        null, "" -> TemplateGranularity.NORMAL
+        "loose" -> TemplateGranularity.LOOSE
+        "normal" -> TemplateGranularity.NORMAL
+        "strict" -> TemplateGranularity.STRICT
+        else -> null
+    }
+
+    private fun parseCompositionOrder(raw: String?): String? = when (raw?.trim()?.lowercase()) {
+        null, "" -> "frequent"
+        "frequent", "rare" -> raw.trim().lowercase()
+        else -> null
+    }
+
+    // Reuses tab.messageComposition when it is already Computed for the tab's current view
+    // (identical to how ui/FilterPanel.kt's panel decides whether AppState.requestMessageComposition
+    // needs to start a new scan). On a miss, scans visibleEntries(t) — the same source the filter
+    // panel scans — directly on this (Ktor request) thread; see this function's caller for why that
+    // beats polling. The fresh result is written back through appState.upTab, but only if the tab's
+    // filter still matches what was scanned — a concurrent filter change during the scan must not
+    // stamp a result that no longer describes the current view.
+    private fun resolveMessageComposition(t: LogTab): Pair<MessageTemplateHistogram, Boolean> {
+        val wanted = t.filter.viewDefiningKey()
+        val cached = t.messageComposition as? MessageCompositionState.Computed
+        if (cached != null && cached.forFilter == wanted) return cached.histogram to true
+        val histogram = computeMessageTemplates(visibleEntries(t), t.analysis.stackTraceGroups)
+        appState.upTab(t.id) { fresh ->
+            if (fresh.filter.viewDefiningKey() == wanted) {
+                fresh.copy(messageComposition = MessageCompositionState.Computed(histogram, wanted))
+            } else {
+                fresh
+            }
+        }
+        return histogram to false
+    }
+
+    private fun buildLogCompositionResponse(
+        tabId: String,
+        histogram: MessageTemplateHistogram,
+        cacheHit: Boolean,
+        granularity: TemplateGranularity,
+        order: String,
+        tag: String?,
+        search: String?,
+        offset: Int,
+        limit: Int,
+    ): Map<String, Any?> {
+        val folded = foldTemplates(histogram, granularity)
+        val cleanTag = tag?.trim()?.takeIf { it.isNotBlank() }
+        val needle = search?.trim().orEmpty()
+        var matches = folded
+        if (cleanTag != null) matches = matches.filter { it.tag == cleanTag }
+        if (needle.isNotEmpty()) matches = matches.filter { it.tag.contains(needle, true) || it.template.contains(needle, true) }
+        val ordered = if (order == "rare") matches.sortedBy { it.count } else matches
+        val safeOffset = offset.coerceAtLeast(0).coerceAtMost(ordered.size)
+        val safeLimit = limit.coerceIn(1, MAX_LOG_COMPOSITION_LIMIT)
+        return mapOf(
+            "tabId" to tabId,
+            "granularity" to granularity.name.lowercase(),
+            "order" to order,
+            "tag" to cleanTag,
+            "search" to needle.ifEmpty { null },
+            "offset" to safeOffset,
+            "limit" to safeLimit,
+            "totalCount" to ordered.size,
+            "shapeCount" to folded.size,
+            "cacheHit" to cacheHit,
+            "overflowed" to histogram.overflowed,
+            "totalEntries" to histogram.totalEntries,
+            "countedEntries" to histogram.countedEntries,
+            "templates" to ordered.drop(safeOffset).take(safeLimit).map { messageTemplateToMap(it) },
+        )
+    }
+
+    private fun messageTemplateToMap(t: MessageTemplate): Map<String, Any?> = mapOf(
+        "tag" to t.tag,
+        "template" to t.template,
+        "count" to t.count,
+        "firstLineId" to t.firstEntryId,
+    )
 
     // ── DTO helpers ───────────────────────────────────────────────────
 

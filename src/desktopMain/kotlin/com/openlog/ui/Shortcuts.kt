@@ -112,6 +112,7 @@ fun filterKeyboardTargets(
     add(KeyboardTarget("filter-tag-input", KeyboardTargetKind.FilterTagInput))
     add(KeyboardTarget("filter-message-input", KeyboardTargetKind.FilterMessageInput))
     add(KeyboardTarget("filter-highlighter-input", KeyboardTargetKind.FilterHighlighterInput))
+    add(KeyboardTarget("filter-section-log-composition", KeyboardTargetKind.FilterSection))
     add(KeyboardTarget("filter-section-levels", KeyboardTargetKind.FilterSection))
     repeat(levelCount) { idx -> add(KeyboardTarget("level-$idx", KeyboardTargetKind.FilterLogLevel)) }
     add(KeyboardTarget("filter-section-sequences", KeyboardTargetKind.FilterSection))
