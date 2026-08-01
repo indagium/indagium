@@ -2,6 +2,9 @@ package com.openlog.ui
 
 import com.openlog.debug.AppLogger
 import com.openlog.utils.FileTailer
+import com.openlog.utils.computeMessageTemplates
+import com.openlog.utils.computeStackTraceGroups
+import com.openlog.utils.mergeMessageTemplates
 import com.openlog.utils.parseLogcatLines
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -101,6 +104,14 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                     // over the file's total line count. merge(..., Int::plus) adds the new
                     // batch's counts onto the running totals instead of the map `+` operator,
                     // which would overwrite rather than sum an existing tag's count.
+                    //
+                    // messageTemplates is merged the same way: masking depends only on the
+                    // individual line, so scanning just the new batch and unioning counts is
+                    // exact. computeStackTraceGroups runs on the batch alone (cheap — a batch is
+                    // at most a few hundred lines), so a trace straddling this batch boundary
+                    // loses member-exclusion for its tail half until the debounced full
+                    // buildLogAnalysis() below replaces this merged result wholesale — bounded and
+                    // self-healing, not worth a cross-batch trace-continuation scheme.
                     cur.copy(
                         logData = nextData,
                         rmap = mkRmap(nextData),
@@ -108,6 +119,10 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                             tagCounts = cur.analysis.tagCounts.toMutableMap().apply {
                                 newEntries.forEach { merge(it.tag, 1, Int::plus) }
                             },
+                            messageTemplates = mergeMessageTemplates(
+                                cur.analysis.messageTemplates,
+                                computeMessageTemplates(newEntries, computeStackTraceGroups(newEntries)),
+                            ),
                             pending = true,
                         ),
                     )
