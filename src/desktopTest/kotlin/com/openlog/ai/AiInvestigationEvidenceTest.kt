@@ -105,6 +105,36 @@ class AiInvestigationEvidenceTest {
         assertTrue(AiEvidenceExtractor.from("add_text_note", mapOf("tabId" to "second")).isEmpty())
     }
 
+    // Crash grouping (CrashSite gaining signature/occurrenceCount/firstLogId) is purely additive —
+    // sites[].logId is still what crashRows keys off, so a get_crash_sites response with the new
+    // fields present alongside logId must extract evidence exactly as before. If logId ever moved
+    // into a nested "occurrences" array this would start returning empty evidence silently.
+    @Test
+    fun crashSiteEvidenceStillKeysOffLogIdAlongsideTheNewGroupingFields() {
+        val evidence = AiEvidenceExtractor.from(
+            "get_crash_sites",
+            mapOf(
+                "tabId" to "second",
+                "sites" to listOf(
+                    mapOf(
+                        "id" to "crash_5", "kind" to "EXCEPTION", "groupGid" to "st_5", "isFatal" to true,
+                        "logId" to 5, "ts" to "10:00:00.000", "level" to "E", "tag" to "AndroidRuntime", "msg" to "boom",
+                        "signature" to "EXC:java.lang.NullPointerException|com.app.Main.onCreate(Main.java:10)",
+                        "occurrenceCount" to 3, "firstLogId" to 5,
+                    ),
+                    mapOf(
+                        "id" to "crash_9", "kind" to "EXCEPTION", "groupGid" to "st_9", "isFatal" to true,
+                        "logId" to 9, "ts" to "10:00:01.000", "level" to "E", "tag" to "AndroidRuntime", "msg" to "boom",
+                        "signature" to "EXC:java.lang.NullPointerException|com.app.Main.onCreate(Main.java:10)",
+                        "occurrenceCount" to 3, "firstLogId" to 5,
+                    ),
+                ),
+            ),
+        ).single()
+
+        assertEquals(AiEvidence.LogRows("second", listOf(5, 9)), evidence)
+    }
+
     @Test
     fun evidenceNavigationUsesTheReturnedTarget() {
         val state = stateWithTabs()
