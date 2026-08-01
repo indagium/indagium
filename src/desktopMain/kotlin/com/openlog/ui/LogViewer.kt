@@ -644,14 +644,25 @@ internal fun pidFieldCharWidth(mode: ProcessNameMode, processNames: Map<Int, Str
     return longestName.coerceIn(5, PROCESS_NAME_MAX_CHARS)
 }
 
-// Change 1: the toolbar options popup's process-name entry is a plain two-state toggle (unlike
-// Settings' own three-way SegmentedControl) — OFF shows names (goes to ALL); ALL or MANUAL hides
-// them (goes back to OFF). MANUAL is never entered from here, only ever from a row's context menu
-// (Change 2/CtxProcessActions), so this only needs to represent "off" vs "some names showing."
+// Whether this tab is actually rendering any process name right now — which is NOT the same as
+// "the mode isn't OFF". MANUAL with an empty pick set displays nothing at all: reachable by showing
+// one process from a row menu and then hiding it again, and it is also where every restored tab
+// lands, since the picks are session-only (see LogTab.manualProcessNamePicks). Keying the toolbar
+// entry off the bare mode made it offer "Hide process names" in exactly that state, with no name on
+// screen to hide.
+internal fun processNamesVisible(mode: ProcessNameMode, manualPicks: Set<Int>): Boolean = when (mode) {
+    ProcessNameMode.OFF -> false
+    ProcessNameMode.ALL -> true
+    ProcessNameMode.MANUAL -> manualPicks.isNotEmpty()
+}
+
+// The toolbar options popup's process-name entry is a plain two-state toggle (unlike Settings' own
+// three-way control): showing anything means the action is "hide" (-> OFF), showing nothing means
+// it is "show" (-> ALL). MANUAL is never entered from here, only from a row's context menu.
 // Pulled out as a pure function, like pidFieldCharWidth/resolveProcessDisplayName above, so this
 // decision is unit-testable without a Compose harness (this codebase has none).
-internal fun toggledProcessNameMode(current: ProcessNameMode): ProcessNameMode =
-    if (current == ProcessNameMode.OFF) ProcessNameMode.ALL else ProcessNameMode.OFF
+internal fun toggledProcessNameMode(current: ProcessNameMode, manualPicks: Set<Int>): ProcessNameMode =
+    if (processNamesVisible(current, manualPicks)) ProcessNameMode.OFF else ProcessNameMode.ALL
 
 internal fun buildFullLineAnnotation(
     entry: LogEntry,
@@ -1037,6 +1048,7 @@ fun LogViewer(
                     showRowNumbers = settings.showRowNumbers,
                     showMinimap = settings.showMinimap,
                     processNameMode = tab.processNameMode,
+                    manualProcessNamePicks = tab.manualProcessNamePicks,
                     onToggleRowNumbers = { toolbarContextMenuOpen = false; onToggleRowNumbers() },
                     onToggleMinimap = { toolbarContextMenuOpen = false; onToggleMinimap() },
                     onSetProcessNameMode = { mode -> toolbarContextMenuOpen = false; onSetProcessNameMode(mode) },
@@ -2974,6 +2986,7 @@ private fun ToolbarOptionsPopup(
     showRowNumbers: Boolean,
     showMinimap: Boolean,
     processNameMode: ProcessNameMode,
+    manualProcessNamePicks: Set<Int>,
     onToggleRowNumbers: () -> Unit,
     onToggleMinimap: () -> Unit,
     onSetProcessNameMode: (ProcessNameMode) -> Unit,
@@ -3018,10 +3031,10 @@ private fun ToolbarOptionsPopup(
             // needs to represent "off" vs "some names showing," not the full three-way state.
             HoverBox(
                 modifier = Modifier.fillMaxWidth(),
-                onClick = { onSetProcessNameMode(toggledProcessNameMode(processNameMode)) },
+                onClick = { onSetProcessNameMode(toggledProcessNameMode(processNameMode, manualProcessNamePicks)) },
             ) {
                 AppText(
-                    if (processNameMode == ProcessNameMode.OFF) "Show process names" else "Hide process names",
+                    if (processNamesVisible(processNameMode, manualProcessNamePicks)) "Hide process names" else "Show process names",
                     color = tc.tx,
                     fontSize = 12.sp,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
