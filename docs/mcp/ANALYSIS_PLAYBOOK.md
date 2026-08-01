@@ -15,6 +15,11 @@ read second.
    block that looks relevant instead of guessing its contents.
 4. Only widen the filter (or drop it) if the crash sites don't explain the reported symptom.
 
+If a filtered view is still too big to read row by row, rank the noise, then hide it:
+`get_log_composition` groups the current view into its distinct message shapes by count. Use the
+default frequent-first order to spot what to filter out with `set_filter`/message rules, and
+`order:rare` to jump straight to the one-off lines most likely to be the actual defect.
+
 If a tab looks filtered but `activeTags`/levels seem empty, read `get_filter` in full:
 `messageRules` and `sequences` can hide or fold rows on their own. Clear a stale one with
 `set_filter` + `clearMessageRules` / `clearSequences`.

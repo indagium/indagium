@@ -824,6 +824,40 @@ internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(
+        "get_log_composition",
+        "Rank the distinct message SHAPES in a tab's CURRENTLY FILTERED VIEW — masked templates " +
+            "(numbers/hex/UUIDs/quoted strings/paths replaced with placeholders) grouped with a " +
+            "count, most frequent first by default. This describes what set_filter currently " +
+            "admits, not the whole file: narrow the filter first, then call this to see what is " +
+            "left, rather than paging through raw rows to spot repeats by eye. order:rare flips to " +
+            "least-frequent-first, the lens that tends to surface one-off defects hiding under the " +
+            "noise. A fresh result for the tab's exact current filter is reused instantly when one " +
+            "is already cached; otherwise this scans the filtered view synchronously and can take " +
+            "several seconds on a large, unfiltered tab, so narrow with set_filter first for a fast " +
+            "response. Response is compact by design: each row is only tag/template/count/" +
+            "firstLineId — pass firstLineId to get_line_context for the real surrounding text. " +
+            "Check `overflowed`: when true, this tab has more distinct shapes than the scan tracks " +
+            "and the rare/least-frequent lens is incomplete (missing shapes were folded into the " +
+            "count only, not given their own row) — do not treat a short list as proof nothing else " +
+            "repeats.",
+        schema(
+            "tabId" to "string", "granularity" to "string", "order" to "string",
+            "tag" to "string", "search" to "string", "offset" to "integer", "limit" to "integer",
+            required = listOf("tabId"),
+            enums = mapOf("granularity" to listOf("loose", "normal", "strict"), "order" to listOf("frequent", "rare")),
+            descriptions = mapOf(
+                "granularity" to "How aggressively to truncate each shape at its first punctuation-like " +
+                    "separators: loose (1), normal (2, default), strict (untruncated).",
+                "order" to "frequent (default, highest count first) or rare (lowest count first — the lens " +
+                    "most likely to surface a genuine defect rather than routine noise).",
+                "tag" to "Restrict to shapes from exactly this tag (optional).",
+                "search" to "Case-insensitive substring match over tag and template text (optional).",
+                "offset" to "Zero-based row offset into the ranked list (default 0).",
+                "limit" to "Maximum rows to return (default 50, capped at 500).",
+            ),
+        ),
+    ),
+    McpTool(
         "get_crash_sites",
         "List every detected exception (FATAL EXCEPTION / bare exception header) and ANR in a tab's " +
             "full log file, each with the log id to jump to. Detected on the whole file regardless " +
@@ -1254,6 +1288,7 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/collapse-all", "collapse_all"),
     Triple(HttpMethod.Get, "/tags", "get_tags"),
     Triple(HttpMethod.Get, "/packages", "get_packages"),
+    Triple(HttpMethod.Get, "/log-composition", "get_log_composition"),
     Triple(HttpMethod.Get, "/crashes", "get_crash_sites"),
     Triple(HttpMethod.Get, "/annotations/issue-description", "get_issue_description"),
     Triple(HttpMethod.Get, "/annotations/sections", "get_annotation_sections"),
