@@ -1226,6 +1226,12 @@ internal fun Annotations.annotationsToken(sourcePath: String? = null, filter: Fi
     // annotationsFromToken — same split as sourcePath/readSourceFingerprint. Absent (null) or a
     // legacy (<9-field) token both mean "no filter recorded".
     filter?.asSavedFilterForToken()?.savedFilterToken().orEmpty(),
+    // Appended — index 9: Annotations.fingerprint (see that field's own doc comment). Unlike
+    // sourcePath/filter above, this IS a plain Annotations field — round-trips through
+    // annotationsFromToken like appVersion/decisiveTags/frameStamp, decoded there via
+    // getOrNull(9). Absent (null) or a legacy (<10-field) token both mean "no fingerprint
+    // recorded", read by AppState's relink flow as "can't verify" rather than a mismatch.
+    fingerprint.orEmpty(),
 )
 
 /** Decodes the Filter recorded at [annotationsToken]'s field index 8. Kept separate from
@@ -1257,6 +1263,11 @@ internal fun String.annotationsFromToken(): Annotations? = runCatching {
         // "no stamp yet" -> null, which annotationImageFileName() treats as the legacy unstamped
         // "frame-01.jpg" naming.
         frameStamp = p.getOrNull(7)?.takeIf { it.isNotBlank() },
+        // Field index 9 (index 8 is the Filter, decoded separately — see
+        // filterFromAnnotationsToken's own doc comment above). Blank or absent (a token written
+        // before fingerprinting existed) both mean "unrecorded", never a mismatch — see
+        // Annotations.fingerprint's own doc comment.
+        fingerprint = p.getOrNull(9)?.takeIf { it.isNotBlank() },
     )
 }.getOrNull()
 

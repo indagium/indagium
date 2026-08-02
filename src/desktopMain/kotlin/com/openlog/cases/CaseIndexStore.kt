@@ -17,6 +17,11 @@ private const val RECORD_LINE_FIELD_COUNT = 11
 // comment and RECORD_LINE_FIELD_COUNT above.
 private const val FILTER_SUMMARY_FIELD_INDEX = 11
 
+// Appended after filterSummary — see CaseRecord.fingerprint's doc comment. Same append-last,
+// getOrNull-read discipline: an index-12-less cache line (written before this field existed)
+// still parses, decoding fingerprint as null ("not recorded").
+private const val FINGERPRINT_FIELD_INDEX = 12
+
 // Base64-url (no padding) round-trip for any field that could otherwise contain a tab or newline
 // (titles, issue descriptions, note text-derived tokens, file paths) — same scheme as
 // source/SourceIndexStore.kt and AppState's autosave format, duplicated here rather than shared
@@ -46,6 +51,8 @@ private fun CaseRecord.toLine(): String = listOf(
     // Appended — index 11. Old readers (parts.size check above stays at 11) never see this field;
     // never reorder. See CaseRecord.filterSummary's own doc comment.
     filterSummary.orEmpty().fieldToken(),
+    // Appended — index 12. See CaseRecord.fingerprint's own doc comment.
+    fingerprint.orEmpty().fieldToken(),
 ).joinToString("\t")
 
 private fun parseRecordLine(rest: String): CaseRecord? {
@@ -64,6 +71,7 @@ private fun parseRecordLine(rest: String): CaseRecord? {
         annPath = parts[9].fieldValue().takeIf { it.isNotBlank() },
         backingPath = parts[10].fieldValue(),
         filterSummary = parts.getOrNull(FILTER_SUMMARY_FIELD_INDEX)?.fieldValue()?.takeIf { it.isNotBlank() },
+        fingerprint = parts.getOrNull(FINGERPRINT_FIELD_INDEX)?.fieldValue()?.takeIf { it.isNotBlank() },
     )
 }
 

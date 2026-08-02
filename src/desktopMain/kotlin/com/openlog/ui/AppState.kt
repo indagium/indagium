@@ -59,6 +59,7 @@ import com.openlog.utils.buildMd
 import com.openlog.utils.computeCrashSites
 import com.openlog.utils.computeCustomIssueSites
 import com.openlog.utils.computeItems
+import com.openlog.utils.computeLogFingerprint
 import com.openlog.utils.computeMessageTemplates
 import com.openlog.utils.computeProcessNames
 import com.openlog.utils.computeSearchMatches
@@ -557,6 +558,26 @@ data class PendingFilterRename(val id: String, val currentName: String, val isDr
 // loads.
 data class PendingNoteOverwrite(val tabId: String, val targetPath: String, val targetName: String)
 
+/** How AppState.beginLogRelink ("Locate log…", Change 2b/2c) should finish attaching notes to the
+ *  tab it just opened, once verification clears it (immediately, or after the user confirms a
+ *  mismatch warning). Mirrors the two "Locate log…" entry points: [CaseLibraryNote] re-reads the
+ *  case's own note file off disk, the same way AppState.reopenInvestigation does;
+ *  [TabAnnotations] copies an ALREADY-OPEN log-less tab's in-memory annotations across instead, so
+ *  unsaved edits since the last save aren't silently dropped by re-reading whatever's on disk (or,
+ *  for a tab that's never been saved at all, reading nothing). */
+sealed class LogRelinkAttach {
+    data class CaseLibraryNote(val noteFile: File) : LogRelinkAttach()
+
+    data class TabAnnotations(val sourceTabId: String) : LogRelinkAttach()
+}
+
+/** Raised by AppState.beginLogRelink when the picked file's content fingerprint doesn't match the
+ *  note's recorded one. [newTabId] is already open (as a brand-new, ordinary tab) by the time this
+ *  exists — nothing has been attached to it yet. "Cancel" (AppState.cancelLogRelink) leaves it
+ *  exactly as that: a plain tab with no notes. "Open anyway" (AppState.confirmLogRelink) performs
+ *  the same attach the match/no-fingerprint paths take automatically. */
+data class PendingLogRelink(val newTabId: String, val fileName: String, val attach: LogRelinkAttach)
+
 /** Read-only preview for one Case Library result — the rendered note text plus the metadata
  *  `buildMd` deliberately never writes (issueDescription is private working context) and the
  *  filter/source info needed to drive "Reopen investigation" (see AppState.reopenInvestigation).
@@ -577,6 +598,11 @@ data class CaseLibraryPreview(
     val filterSummary: String,
     val sourcePath: String?,
     val reopenDisabledReason: String?,
+    // CaseRecord.fingerprint, carried straight through — the content fingerprint (relink-log
+    // Change 2a) this note's log was last saved against, used by "Locate log…" (AppState.
+    // locateLogForCase) to verify a user-picked file before attaching. null means unverifiable
+    // (a note saved before fingerprinting existed), not a mismatch.
+    val fingerprint: String?,
 )
 
 // See AppState.copyCasePreview's doc comment: buildMd/reconstructAnnotationsText both omit
@@ -5261,7 +5287,7 @@ class AppState(
         val t = tab(tabId) ?: return false
         return runCatching {
             file.parentFile?.mkdirs()
-            file.writeText(t.annotations.withDetectedAppVersion(t.logData).annotationsToken())
+            file.writeText(t.annotations.preparedForSave(t.logData, t.rmap).annotationsToken())
         }.isSuccess
     }
 
@@ -5271,6 +5297,57 @@ class AppState(
     // the AI via set_case_metadata); a scan that finds nothing simply leaves it "" as before.
     private fun Annotations.withDetectedAppVersion(logData: List<LogEntry>): Annotations =
         if (appVersion.isNotBlank()) this else copy(appVersion = extractAppVersionHeuristic(logData))
+
+    // Change 2a (relink-log): records the log-content fingerprint (utils/LogFingerprint.kt) this
+    // note was saved against. Only recomputed when this tab actually has log data THIS session —
+    // a tab with none (a Case Library "notes only" tab, or any other log-less tab) leaves whatever
+    // fingerprint the in-memory Annotations already carries untouched (restored from the sidecar
+    // by loadAnnotationsFrom/openNoteFile, or null if there never was one), rather than overwriting
+    // a real fingerprint from an earlier session with a bogus "empty log" one every time a note-only
+    // edit re-triggers a save.
+    private fun Annotations.withDetectedFingerprint(logData: List<LogEntry>): Annotations =
+        if (logData.isEmpty()) this else copy(fingerprint = computeLogFingerprint(logData))
+
+    // Change 1 (relink-log bugfix): fills in AnnBlock.LogRef.sourceEntries for every block that
+    // doesn't already have one, from this tab's OWN rmap, so the note written to disk is
+    // self-contained — reopening it into a log-less tab (Case Library's "Open notes only", or a
+    // log that's since gone missing) still renders the lines it describes, instead of the empty
+    // blocks AnnotationPanel.kt/utils/Filter.kt/utils/AnnotationHtml.kt's renderers show when both
+    // sourceEntries and the loading tab's rmap come up empty.
+    //
+    // Deliberately save-time ONLY, called from the three call sites that write a `.ann` sidecar —
+    // never from AnnotationManager.confirmAddAnn, and never folded into how blocks are held on the
+    // live tab. Annotations round-trips through autosave on every debounced edit (see
+    // AutosaveCodec.kt's tabToken/persistedSnapshot); inlining every referenced row into THAT path
+    // would bloat it for no benefit, since a live tab can always resolve logIds through its own
+    // rmap. A block that already carries sourceEntries (cross-file/compare-mode blocks — see
+    // AnnBlock.LogRef's own doc comment) is left exactly as-is.
+    private fun Annotations.materializeLogRefs(rmap: Map<Int, LogEntry>): Annotations {
+        if (rmap.isEmpty()) return this
+        var changed = false
+        val updatedBlocks = blocks.map { block ->
+            if (block is AnnBlock.LogRef && block.sourceEntries == null) {
+                val resolved = block.logIds.mapNotNull { rmap[it] }
+                if (resolved.isEmpty()) {
+                    block
+                } else {
+                    changed = true
+                    block.copy(sourceEntries = resolved)
+                }
+            } else {
+                block
+            }
+        }
+        return if (changed) copy(blocks = updatedBlocks) else this
+    }
+
+    // Shared prep for every place that writes a `.ann` sidecar (saveAnnotationsTo/saveAnalysis/
+    // autoExportAnnotations) — NOT used by the autosave tab-token path (AutosaveCodec.kt's
+    // tabToken), which serializes the tab's live Annotations completely unmodified. Order between
+    // the three doesn't matter: each touches a disjoint part of Annotations (appVersion/
+    // fingerprint/blocks respectively).
+    private fun Annotations.preparedForSave(logData: List<LogEntry>, rmap: Map<Int, LogEntry>): Annotations =
+        withDetectedAppVersion(logData).withDetectedFingerprint(logData).materializeLogRefs(rmap)
 
     fun loadAnnotationsFrom(tabId: String, file: File): Boolean {
         val annotations = runCatching { file.readText().annotationsFromToken() }.getOrNull() ?: return false
@@ -5305,7 +5382,7 @@ class AppState(
             runCatching {
                 saved.writeText(buildMd(t, settings))
                 File(saved.parent, saved.nameWithoutExtension + ".ann")
-                    .writeText(t.annotations.withDetectedAppVersion(t.logData).annotationsToken(t.sourcePath, t.filter))
+                    .writeText(t.annotations.preparedForSave(t.logData, t.rmap).annotationsToken(t.sourcePath, t.filter))
                 writeAnnotationFrameImages(t, saved)
                 rememberRecentNote(saved)
             }.fold(
@@ -5667,6 +5744,7 @@ class AppState(
                     filterSummary = record.filterSummary ?: "Filter not recorded",
                     sourcePath = record.sourcePath,
                     reopenDisabledReason = reopenDisabledReasonFor(record.sourcePath),
+                    fingerprint = record.fingerprint,
                 )
             }
         }
@@ -5759,6 +5837,111 @@ class AppState(
             openNoteFile(t.id, noteFile)
             closeCaseLibrary()
         }
+    }
+
+    // ── Relink log (Change 2b/2c) ──────────────────────────────────────
+    // "Locate log…" — reconnecting a note to its log after the log moved/was renamed, from either
+    // of the two places a note's log is missing: the Case Library preview (beside the disabled
+    // "Reopen investigation") and a log-less tab's own Notes panel. The hazard this whole flow
+    // exists for: AnnBlock.LogRef.logIds are positional PER FILE (LogParser restarts ids at 1 for
+    // every file), so attaching a note to the SAME capture under a new name is perfectly safe, but
+    // attaching it to a DIFFERENT capture of the same bug would silently make every log reference
+    // point at an unrelated row. A note only ever records sourcePath (a string), which can't tell
+    // those two apart by itself — hence Annotations.fingerprint (Change 2a) and the verify step
+    // below.
+
+    /** See [PendingLogRelink]'s doc comment. Non-null only while the mismatch-warning dialog is up. */
+    var pendingLogRelink by mutableStateOf<PendingLogRelink?>(null)
+
+    /** Set to the tab a "Locate log…" attach just landed on when its note's fingerprint couldn't
+     *  be checked at all (a note saved before Change 2a existed) — distinct from a confirmed
+     *  match, which is silent, and from a confirmed mismatch, which is [pendingLogRelink] instead.
+     *  The attach already happened by the time this is set — this is purely informational, never a
+     *  gate — see AnnotationPanel's own inline notice. */
+    var logRelinkUnverifiedTabId by mutableStateOf<String?>(null)
+
+    fun dismissLogRelinkUnverifiedNotice() {
+        logRelinkUnverifiedTabId = null
+    }
+
+    /** "Locate log…" from the Case Library preview (beside the disabled "Reopen investigation") —
+     *  opens [file] as a brand-new tab and verifies it against [id]'s recorded fingerprint before
+     *  attaching that case's own notes; see [beginLogRelink]. */
+    fun locateLogForCase(id: String, file: File) {
+        val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
+        val expectedFingerprint = preview.fingerprint
+        val seq = ++caseReopenRequestSeq
+        ioScope.launch {
+            val record = caseSearch.getCase(id)
+            val noteFile = record?.mdPath?.let(::File) ?: record?.annPath?.let(::File)
+            if (seq != caseReopenRequestSeq) return@launch
+            if (record == null || noteFile == null) {
+                runCaseLibrarySearch()
+                return@launch
+            }
+            beginLogRelink(file, expectedFingerprint, LogRelinkAttach.CaseLibraryNote(noteFile))
+            closeCaseLibrary()
+        }
+    }
+
+    /** "Locate log…" from a log-less tab's own Notes panel (any tab with an empty [LogTab.
+     *  logData] — opened via Case Library's "Open notes only," a blank new tab, or otherwise).
+     *  Unlike [locateLogForCase] there is no file to re-read: [tabId] already holds the notes in
+     *  memory, fingerprint included (restored by openNoteFile/loadAnnotationsFrom, or null if this
+     *  tab's notes predate fingerprinting), so [beginLogRelink] compares against that directly. */
+    fun locateLogForTab(tabId: String, file: File) {
+        val sourceTab = tab(tabId) ?: return
+        beginLogRelink(file, sourceTab.annotations.fingerprint, LogRelinkAttach.TabAnnotations(tabId))
+    }
+
+    /** Shared "Locate log…" core (Change 2b/2c). Opens [file] as a brand-new tab via the SAME
+     *  machinery [reopenInvestigation] uses (never the tab/dialog the action was triggered from),
+     *  waits for parsing to finish, then compares [expectedFingerprint] against the newly-opened
+     *  log's own content fingerprint (utils/LogFingerprint.kt):
+     *  - match, or [expectedFingerprint] null (unverifiable) → attach right away, via [attach].
+     *    A null expected fingerprint additionally raises [logRelinkUnverifiedTabId] so the UI can
+     *    say the match couldn't be checked — without implying a check happened, and without
+     *    holding up the attach itself.
+     *  - mismatch → attach is held back behind [pendingLogRelink] (Cancel / "Open anyway") instead
+     *    of silently pointing every LogRef block at an unrelated file's rows. */
+    private fun beginLogRelink(file: File, expectedFingerprint: String?, attach: LogRelinkAttach) {
+        val newTabId = openFileInternal(file, bypassSplitPrompt = true) ?: return
+        ioScope.launch {
+            val deadline = System.currentTimeMillis() + VIDEO_ATTACH_AWAIT_TIMEOUT_MS
+            while (isLoadInFlight(newTabId) && System.currentTimeMillis() < deadline) delay(VIDEO_ATTACH_AWAIT_POLL_MS)
+            val newTab = tab(newTabId) ?: return@launch
+            when {
+                expectedFingerprint == null -> {
+                    finishLogRelinkAttach(newTabId, attach)
+                    logRelinkUnverifiedTabId = newTabId
+                }
+                computeLogFingerprint(newTab.logData) == expectedFingerprint -> finishLogRelinkAttach(newTabId, attach)
+                else -> pendingLogRelink = PendingLogRelink(newTabId, file.name, attach)
+            }
+        }
+    }
+
+    private fun finishLogRelinkAttach(newTabId: String, attach: LogRelinkAttach) {
+        when (attach) {
+            is LogRelinkAttach.CaseLibraryNote -> openNoteFile(newTabId, attach.noteFile)
+            is LogRelinkAttach.TabAnnotations -> {
+                val source = tab(attach.sourceTabId) ?: return
+                upTab(newTabId) { it.copy(annotations = source.annotations, noteTargetName = source.noteTargetName) }
+            }
+        }
+    }
+
+    /** "Open anyway" on the mismatch-warning dialog raised by [beginLogRelink]. */
+    fun confirmLogRelink() {
+        val pending = pendingLogRelink ?: return
+        pendingLogRelink = null
+        finishLogRelinkAttach(pending.newTabId, pending.attach)
+    }
+
+    /** "Cancel" on the same dialog — see [PendingLogRelink]'s own doc comment: the newly-opened
+     *  tab is left exactly as it is, nothing gets attached. */
+    fun cancelLogRelink() {
+        pendingLogRelink = null
     }
 
     // Case Library preview's "Copy"/"Export" (design point: reuse the Notes panel's own copy/
@@ -5918,7 +6101,7 @@ class AppState(
                 // Sidecar stores full block state for restoration, plus the sourcePath
                 // fingerprint (5th token field) used to disambiguate same-named notes.
                 File(targetDir, "${mdFile.nameWithoutExtension}.ann")
-                    .writeText(tab.annotations.withDetectedAppVersion(tab.logData).annotationsToken(tab.sourcePath, tab.filter))
+                    .writeText(tab.annotations.preparedForSave(tab.logData, tab.rmap).annotationsToken(tab.sourcePath, tab.filter))
                 legacySourceFingerprintFile(mdFile).delete()
                 writeAnnotationFrameImages(tab, mdFile)
                 rememberRecentNote(mdFile)

@@ -430,6 +430,18 @@ data class Annotations(
     // unstamped "frame-01.jpg" naming. Formatted "yyyyMMdd-HHmmss" (local time). Persisted as token
     // field index 7, appended the same way as [decisiveTags] above.
     val frameStamp: String? = null,
+    // Content fingerprint (utils/LogFingerprint.kt's computeLogFingerprint) of the log this note
+    // was last saved against — recorded automatically at save time by AppState's
+    // withDetectedFingerprint, exactly like [appVersion] above. Lets "Locate log…" (relinking a
+    // note whose log was moved/renamed — AppState.locateLogForCase/locateLogForTab) tell a
+    // genuinely different capture of the same bug apart from the same file under a new name: since
+    // LogParser restarts entry ids at 1 for every file it parses, attaching this note to an
+    // unrelated capture would otherwise silently make every [AnnBlock.LogRef] point at the wrong
+    // rows instead of failing loudly. null both for a note saved before this field existed AND for
+    // one saved from a tab with no log data this session (e.g. a Case Library "notes only" tab) —
+    // either way, "can't verify," never treated as a mismatch. Persisted as token field index 9,
+    // appended the same way as [frameStamp] above.
+    val fingerprint: String? = null,
 )
 
 // ── In-view search (Ctrl/Cmd+F "Find" bar, ui/SearchBar.kt) ────────
