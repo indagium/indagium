@@ -78,6 +78,10 @@ private const val BLOCK_DRAG_SNAP_BIAS = 0.25f
 private const val AUTO_SCROLL_SPEED_FACTOR = 0.6f
 private const val STICK_TO_BOTTOM_THRESHOLD_DP = 24f
 
+// How long the "can't verify this log" notice (Change 2c's unverifiable-relink case) stays up
+// before auto-dismissing — long enough to read, short enough not to linger as stale chrome.
+private const val UNVERIFIED_RELINK_NOTICE_MS = 8_000L
+
 // Fixed thumbnail height for an AnnBlock.Image — shared between estimateBlockHeightPx (drag-
 // reorder offset math) and the actual ImageBlockView render, so the estimate never drifts from
 // what's really on screen the way a content-dependent guess (like textFieldDp for text) would.
@@ -138,6 +142,16 @@ fun AnnotationPanel(
     onSave: () -> Unit,
     onToggleRecentNotes: () -> Unit,
     onOpenNote: (File) -> Unit,
+    // "Locate log…" (Change 2b/2c) — only ever shown/wired up when this tab has no log
+    // (tab.logData.isEmpty()). Opens the picked file as a brand-new tab and verifies it against
+    // this tab's own notes before attaching them; see AppState.locateLogForTab.
+    onLocateLog: (File) -> Unit = {},
+    // True only right after a "Locate log…" attach landed on THIS tab and its note's fingerprint
+    // couldn't be checked at all (saved before Change 2a existed) — never true for a confirmed
+    // match (silent) or a confirmed mismatch (a separate blocking dialog, see App.kt's
+    // pendingLogRelink). Purely informational; the attach already happened.
+    showUnverifiedRelinkNotice: Boolean = false,
+    onDismissUnverifiedRelinkNotice: () -> Unit = {},
     onUpdatePrefix: (String) -> Unit,
     onUpdateSuffix: (String) -> Unit,
     onUpdateIssueDescription: (String) -> Unit,
@@ -287,6 +301,15 @@ fun AnnotationPanel(
         fd.setFilenameFilter { _, n -> n.endsWith(".md") || n.endsWith(".txt") || n.endsWith(".ann") }
         fd.isVisible = true
         fd.file?.let { onOpenNote(File(fd.directory, it)) }
+    }
+
+    // No extension filter, unlike openNotePicker above — this picks a LOG file, and platform
+    // pickers don't reliably invoke setFilenameFilter (see TabBar's own "Open Log File" picker's
+    // comment); AppState.locateLogForTab validates the pick itself.
+    fun openLocateLogPicker() {
+        val fd = FileDialog(null as Frame?, "Locate Log File", FileDialog.LOAD)
+        fd.isVisible = true
+        fd.file?.let { onLocateLog(File(fd.directory, it)) }
     }
 
     fun moveNoteFocus(delta: Int) {
@@ -450,6 +473,13 @@ fun AnnotationPanel(
                 AppButton("Copy", onClick = onCopy, modifier = headerButtonModifier)
                 AppButton("Save", onClick = onSave, modifier = headerButtonModifier)
                 AppButton("Open Note", onClick = { openNotePicker() }, modifier = headerButtonModifier)
+                // Only when this tab has no log at all (opened via Case Library's "Open notes
+                // only," a blank new tab, or its own log going missing) — the guided reconnect
+                // path for Change 2's "note opened without its log" hazard. See
+                // openLocateLogPicker/AppState.locateLogForTab.
+                if (tab.logData.isEmpty()) {
+                    AppButton("Locate log…", onClick = { openLocateLogPicker() }, modifier = headerButtonModifier)
+                }
                 Box {
                     AppButton(
                         "▾ ${recentNotes.size}",
@@ -466,6 +496,33 @@ fun AnnotationPanel(
                         )
                     }
                 }
+            }
+        }
+        // "Locate log…" landed on this tab but couldn't be checked against anything (Change 2c's
+        // "no fingerprint" case — a note saved before Change 2a existed). Purely informational: the
+        // attach already happened by the time this shows, unlike a confirmed MISMATCH, which is a
+        // separate blocking dialog (App.kt's pendingLogRelink) that gates the attach itself. Auto-
+        // dismisses so it doesn't linger as stale chrome once the user's moved on, but "×" also
+        // dismisses it immediately.
+        if (showUnverifiedRelinkNotice) {
+            LaunchedEffect(tab.id) {
+                kotlinx.coroutines.delay(UNVERIFIED_RELINK_NOTICE_MS)
+                onDismissUnverifiedRelinkNotice()
+            }
+            Row(
+                Modifier.fillMaxWidth().background(tc.abg).border(BorderStroke(1.dp, tc.br))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppText(
+                    "Log attached, but this note was saved before its log could be verified — clicking a " +
+                        "reference may jump to the wrong row.",
+                    color = tc.tx,
+                    fontSize = 10.sp,
+                    maxLines = 2,
+                    modifier = Modifier.weight(1f),
+                )
+                CloseButton(onClick = onDismissUnverifiedRelinkNotice)
             }
         }
         // Inline preview popup

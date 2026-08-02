@@ -55,6 +55,12 @@ data class CaseRecord(
     // or a fabricated summary. Distinct from describeFilter's own "No filter constraints" string,
     // which means a filter WAS recorded and it simply has no active constraints.
     val filterSummary: String? = null,
+    // Annotations.fingerprint, straight off the parsed .ann (`.ann` field index 9) — the content
+    // fingerprint of the log this note was saved against (utils/LogFingerprint.kt). Drives the
+    // Case Library preview's "Locate log…" verify-before-attach flow (AppState.locateLogForCase):
+    // null means "no fingerprint recorded" (a note saved before this existed), reported as
+    // unverifiable rather than a silent pass or a false mismatch.
+    val fingerprint: String? = null,
 )
 
 data class CaseIndex(

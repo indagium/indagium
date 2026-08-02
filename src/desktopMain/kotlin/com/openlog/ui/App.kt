@@ -1147,6 +1147,49 @@ fun App(
                 }
             }
 
+            // Change 2c's mismatch gate — see AppState.beginLogRelink/PendingLogRelink. The log
+            // named here is already open as its own plain tab; this only decides whether the
+            // note's blocks get attached to it. dismissOnClickOutside = false, same reasoning as
+            // pendingNoteOverwrite above: an accidental outside click must not silently pick
+            // "Cancel" for a decision this consequential.
+            state.pendingLogRelink?.let { pending ->
+                Dialog(
+                    onDismissRequest = { state.cancelLogRelink() },
+                    properties = DialogProperties(dismissOnClickOutside = false),
+                ) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(420.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText(
+                            "This might be a different capture",
+                            color = tc2.tx,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "\"${pending.fileName}\" doesn't match the log these notes were saved against — its " +
+                                "content looks different. The notes will still show their stored lines, but " +
+                                "clicking one may jump to an unrelated row in this file.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 5,
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            DialogActionButton("Open anyway", active = true, danger = true) { state.confirmLogRelink() }
+                            DialogActionButton("Cancel", active = false) { state.cancelLogRelink() }
+                        }
+                    }
+                }
+            }
+
             state.pendingFilterLoad?.takeIf { state.updateExistingPickerOpen }?.let { pending ->
                 val target = state.savedFilters.find { it.id == pending.targetFilterId }
                 Dialog(onDismissRequest = { state.cancelUpdateExistingPick() }) {

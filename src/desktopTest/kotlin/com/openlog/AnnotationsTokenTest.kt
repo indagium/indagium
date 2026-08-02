@@ -161,14 +161,16 @@ class AnnotationsTokenTest {
         val token = Annotations(issueDescription = "desc", appVersion = "9.9.9", decisiveTags = listOf("X"))
             .annotationsToken("/some/source/path.log")
         val fields = token.tokenFields()
-        // 9 fields (0..8): the original 5 (0-4), appVersion/decisiveTags/frameStamp (5-7), and the
-        // filter (8, appended most recently) — present-but-empty here since no filter was passed.
-        assertEquals(9, fields.size, "new token must carry exactly 9 fields (0..8)")
+        // 10 fields (0..9): the original 5 (0-4), appVersion/decisiveTags/frameStamp (5-7), the
+        // filter (8), and fingerprint (9, appended most recently) — present-but-empty here since
+        // neither a filter nor logData (hence no fingerprint) was passed.
+        assertEquals(10, fields.size, "new token must carry exactly 10 fields (0..9)")
         assertEquals("/some/source/path.log", fields.getOrNull(4))
         assertEquals("9.9.9", fields.getOrNull(5))
         assertEquals("X", fields.getOrNull(6))
         assertEquals("", fields.getOrNull(7), "no frameStamp was set, so field 7 is empty (not absent)")
         assertEquals("", fields.getOrNull(8), "no filter was passed, so field 8 is empty (not absent)")
+        assertEquals("", fields.getOrNull(9), "no fingerprint was set, so field 9 is empty (not absent)")
     }
 
     // ── Filter at field index 8 (Task 3b: "Record the filter going forward") ───────────────────
@@ -237,5 +239,44 @@ class AnnotationsTokenTest {
 
         assertEquals(original, restored)
         assertEquals(null, restored?.frameStamp)
+    }
+
+    // ── Fingerprint at field index 9 (relink-log Change 2a) ─────────────────────────────────────
+
+    @Test
+    fun roundTripsTheFingerprintAtFieldIndexNine() {
+        val original = Annotations(
+            blocks = listOf(AnnBlock.Note("n1", "root cause: race condition")),
+            issueDescription = "App crashes on cold start",
+            fingerprint = "42:abc123def4567890",
+        )
+        val restored = original.annotationsToken("/path/to/source.log").annotationsFromToken()
+
+        assertEquals(original, restored)
+        assertEquals("42:abc123def4567890", restored?.fingerprint)
+    }
+
+    @Test
+    fun fingerprintDefaultsToNullWhenNeverSet() {
+        val original = Annotations(blocks = listOf(AnnBlock.Note("n1", "no log this session")))
+        val restored = original.annotationsToken().annotationsFromToken()
+
+        assertEquals(original, restored)
+        assertEquals(null, restored?.fingerprint)
+    }
+
+    @Test
+    fun aLegacyTenFieldTokenWithNoFingerprintFieldAtAllStillDecodesWithFingerprintAbsent() {
+        val fullToken = Annotations(issueDescription = "legacy issue", fingerprint = "should-not-appear")
+            .annotationsToken(sourcePath = "/legacy/source.log")
+        // Simulate a pre-existing .ann sidecar written before the fingerprint field existed:
+        // exactly the first 9 "|"-separated fields (0..8), nothing appended.
+        val legacyToken = fullToken.split("|").take(9).joinToString("|")
+
+        val restored = legacyToken.annotationsFromToken()
+        assertTrue(restored != null, "a legacy 9-field token must still parse")
+        requireNotNull(restored)
+        assertEquals("legacy issue", restored.issueDescription)
+        assertEquals(null, restored.fingerprint, "a legacy token predating fingerprinting must decode it as absent")
     }
 }

@@ -27,6 +27,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.openlog.cases.CaseSummary
+import java.awt.FileDialog
+import java.awt.Frame
+import java.io.File
 
 private val CASE_LIBRARY_DIALOG_SHAPE = RoundedCornerShape(8.dp)
 private val CASE_LIBRARY_HEADER_SHAPE = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp)
@@ -149,6 +152,7 @@ internal fun CaseLibraryDialog(state: AppState, onDismiss: () -> Unit) {
                 notesOnlyLoading = state.caseLibraryNotesOnlyLoadingId == preview.id,
                 onReopen = { state.reopenInvestigation(preview.id) },
                 onOpenNotesOnly = { state.openCaseNotesOnly(preview.id) },
+                onLocateLog = { file -> state.locateLogForCase(preview.id, file) },
                 onCopy = { state.copyCasePreview(preview.id) },
                 onExport = { state.exportCasePreview(preview.id) },
                 onDismiss = { state.dismissCasePreview() },
@@ -352,6 +356,7 @@ private fun CasePreviewDialog(
     notesOnlyLoading: Boolean,
     onReopen: () -> Unit,
     onOpenNotesOnly: () -> Unit,
+    onLocateLog: (File) -> Unit,
     onCopy: () -> Unit,
     onExport: () -> Unit,
     onDismiss: () -> Unit,
@@ -380,6 +385,9 @@ private fun CasePreviewDialog(
             AppButton("Copy", onClick = onCopy, variant = ButtonVariant.Secondary, modifier = Modifier.height(28.dp))
             AppButton("Export", onClick = onExport, variant = ButtonVariant.Secondary, modifier = Modifier.height(28.dp))
             OpenNotesOnlyButton(loading = notesOnlyLoading, onClick = onOpenNotesOnly)
+            if (preview.reopenDisabledReason != null) {
+                LocateLogButton(onClick = onLocateLog)
+            }
             ReopenInvestigationButton(loading = loading, disabledReason = preview.reopenDisabledReason, onClick = onReopen)
             CloseButton(onClick = onDismiss)
         }
@@ -405,6 +413,37 @@ private fun CasePreviewDialog(
                 }
             }
         }
+    }
+}
+
+// Shown only when ReopenInvestigationButton is disabled (the original log can't be resolved) —
+// the guided path Change 2's feature brief asks for: reconnect the note to the log wherever it
+// actually ended up, instead of forcing "Open notes only" plus a manual "Open Note" in the log
+// panel with no verification at all. Picks a file (no extension filter — same reasoning as
+// TabBar's own "Open Log File" picker: platform pickers don't reliably invoke a filter, and
+// AppState.locateLogForCase validates the pick itself) and hands it to AppState, which opens it as
+// a brand-new tab and verifies its content fingerprint against this note's recorded one before
+// attaching — see AppState.locateLogForCase/beginLogRelink.
+@Composable
+private fun LocateLogButton(onClick: (File) -> Unit) {
+    TooltipArea(
+        tooltip = {
+            ToolbarTooltip(
+                "Pick the log file wherever it ended up. It's checked against this note before " +
+                    "attaching, so a different capture of the same bug won't silently mislabel every line.",
+            )
+        },
+    ) {
+        AppButton(
+            "Locate log…",
+            onClick = {
+                val fd = FileDialog(null as Frame?, "Locate Log File", FileDialog.LOAD)
+                fd.isVisible = true
+                fd.file?.let { onClick(File(fd.directory, it)) }
+            },
+            variant = ButtonVariant.Secondary,
+            modifier = Modifier.height(28.dp),
+        )
     }
 }
 

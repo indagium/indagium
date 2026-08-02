@@ -115,6 +115,7 @@ object CaseIndexer {
             annPath = annFile.takeIf { it.isFile }?.absolutePath,
             backingPath = backing.absolutePath,
             filterSummary = filterSummary,
+            fingerprint = annotations?.fingerprint,
         )
         return record to CaseFileMeta(mtime = backing.lastModified(), size = backing.length())
     }
