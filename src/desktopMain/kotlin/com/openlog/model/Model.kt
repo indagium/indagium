@@ -702,7 +702,31 @@ data class LogTab(
     // already Computed for the tab (see appendTailedLines) — a tail flush never triggers the
     // initial scan and never discards one.
     val messageComposition: MessageCompositionState = MessageCompositionState.NotComputed,
+    // Display-time fallback rows for LogRef blocks whose sourceEntries is null (an .ann saved
+    // before Change 2a's materializeLogRefs existed) AND whose ids aren't in rmap (no log
+    // attached, or a different log). Recovered by parsing the paired .md sibling file
+    // (utils/NoteMarkdownRecovery.kt) when AppState.openNoteFile restores the annotations, keyed
+    // by AnnBlock.LogRef.id. Deliberately transient: rebuilt fresh on every note open rather than
+    // persisted, so it is NOT written to AutosaveCodec in any form (no tabToken/tabShellFromToken/
+    // persistedSnapshot entry) — see AnnBlock.LogRef.resolveRows for the precedence this feeds.
+    val recoveredNoteRows: Map<String, List<LogEntry>> = emptyMap(),
 )
+
+/**
+ * The single, shared way to get the log rows a LogRef block should display. Was duplicated as
+ * `block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }` at four call sites (Filter.kt's
+ * appendLogRefBlock, AnnotationHtml.kt's appendLogRefHtml, and two spots in AnnotationPanel.kt) —
+ * collapsed here so the precedence only has to be right in one place. Order matters:
+ * 1. [AnnBlock.LogRef.sourceEntries] — baked in at save time (Annotations.materializeLogRefs), the
+ *    fastest and most trustworthy source when present.
+ * 2. The tab's live [LogTab.rmap] — resolves by id against whatever log is actually attached now,
+ *    so edits to that log stay reflected even if sourceEntries was never populated.
+ * 3. [LogTab.recoveredNoteRows] — a display-time fallback rebuilt by parsing the note's paired .md
+ *    (see utils/NoteMarkdownRecovery.kt) for old .ann files saved before sourceEntries existed,
+ *    opened into a tab with no matching log.
+ */
+fun AnnBlock.LogRef.resolveRows(tab: LogTab): List<LogEntry> =
+    sourceEntries ?: logIds.mapNotNull { tab.rmap[it] }.ifEmpty { tab.recoveredNoteRows[id].orEmpty() }
 
 /**
  * A single, non-nesting group in the saved-filter library.

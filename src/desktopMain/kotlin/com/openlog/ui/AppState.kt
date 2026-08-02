@@ -88,6 +88,7 @@ import com.openlog.utils.parseMillisOfDay
 import com.openlog.utils.passesFilter
 import com.openlog.utils.planSplitOutputs
 import com.openlog.utils.pruneUnreferencedArchiveVideos
+import com.openlog.utils.recoverLogRefRows
 import com.openlog.utils.requiresSplitPrompt
 import com.openlog.utils.splitFileToFiles
 import com.openlog.utils.splitStreamToFiles
@@ -5287,7 +5288,7 @@ class AppState(
         val t = tab(tabId) ?: return false
         return runCatching {
             file.parentFile?.mkdirs()
-            file.writeText(t.annotations.preparedForSave(t.logData, t.rmap).annotationsToken())
+            file.writeText(t.annotations.preparedForSave(t).annotationsToken())
         }.isSuccess
     }
 
@@ -5309,11 +5310,16 @@ class AppState(
         if (logData.isEmpty()) this else copy(fingerprint = computeLogFingerprint(logData))
 
     // Change 1 (relink-log bugfix): fills in AnnBlock.LogRef.sourceEntries for every block that
-    // doesn't already have one, from this tab's OWN rmap, so the note written to disk is
-    // self-contained — reopening it into a log-less tab (Case Library's "Open notes only", or a
-    // log that's since gone missing) still renders the lines it describes, instead of the empty
-    // blocks AnnotationPanel.kt/utils/Filter.kt/utils/AnnotationHtml.kt's renderers show when both
-    // sourceEntries and the loading tab's rmap come up empty.
+    // doesn't already have one, so the note written to disk is self-contained — reopening it into
+    // a log-less tab (Case Library's "Open notes only", or a log that's since gone missing) still
+    // renders the lines it describes, instead of the empty blocks AnnotationPanel.kt/utils/
+    // Filter.kt/utils/AnnotationHtml.kt's renderers show when both sourceEntries and the loading
+    // tab's rmap come up empty.
+    //
+    // Resolves each block through AnnBlock.LogRef.resolveRows (Model.kt) — the same rmap-then-
+    // recovered-rows precedence every renderer uses — rather than rmap alone, so Change 2's .md-
+    // recovered rows (tab.recoveredNoteRows, populated by openNoteFile) get baked into
+    // sourceEntries on the very next save instead of being silently dropped again.
     //
     // Deliberately save-time ONLY, called from the three call sites that write a `.ann` sidecar —
     // never from AnnotationManager.confirmAddAnn, and never folded into how blocks are held on the
@@ -5322,12 +5328,12 @@ class AppState(
     // would bloat it for no benefit, since a live tab can always resolve logIds through its own
     // rmap. A block that already carries sourceEntries (cross-file/compare-mode blocks — see
     // AnnBlock.LogRef's own doc comment) is left exactly as-is.
-    private fun Annotations.materializeLogRefs(rmap: Map<Int, LogEntry>): Annotations {
-        if (rmap.isEmpty()) return this
+    private fun Annotations.materializeLogRefs(tab: LogTab): Annotations {
+        if (tab.rmap.isEmpty() && tab.recoveredNoteRows.isEmpty()) return this
         var changed = false
         val updatedBlocks = blocks.map { block ->
             if (block is AnnBlock.LogRef && block.sourceEntries == null) {
-                val resolved = block.logIds.mapNotNull { rmap[it] }
+                val resolved = block.resolveRows(tab)
                 if (resolved.isEmpty()) {
                     block
                 } else {
@@ -5346,8 +5352,8 @@ class AppState(
     // tabToken), which serializes the tab's live Annotations completely unmodified. Order between
     // the three doesn't matter: each touches a disjoint part of Annotations (appVersion/
     // fingerprint/blocks respectively).
-    private fun Annotations.preparedForSave(logData: List<LogEntry>, rmap: Map<Int, LogEntry>): Annotations =
-        withDetectedAppVersion(logData).withDetectedFingerprint(logData).materializeLogRefs(rmap)
+    private fun Annotations.preparedForSave(tab: LogTab): Annotations =
+        withDetectedAppVersion(tab.logData).withDetectedFingerprint(tab.logData).materializeLogRefs(tab)
 
     fun loadAnnotationsFrom(tabId: String, file: File): Boolean {
         val annotations = runCatching { file.readText().annotationsFromToken() }.getOrNull() ?: return false
@@ -5382,7 +5388,7 @@ class AppState(
             runCatching {
                 saved.writeText(buildMd(t, settings))
                 File(saved.parent, saved.nameWithoutExtension + ".ann")
-                    .writeText(t.annotations.preparedForSave(t.logData, t.rmap).annotationsToken(t.sourcePath, t.filter))
+                    .writeText(t.annotations.preparedForSave(t).annotationsToken(t.sourcePath, t.filter))
                 writeAnnotationFrameImages(t, saved)
                 rememberRecentNote(saved)
             }.fold(
@@ -5476,12 +5482,19 @@ class AppState(
         if (sidecar.exists()) {
             val annotations = runCatching { sidecar.readText().annotationsFromToken() }.getOrNull()
             if (annotations != null) {
+                // Change 2 (relink-log bugfix): an .ann saved before Change 1's materializeLogRefs
+                // existed has LogRef.sourceEntries == null, so if this tab's own log doesn't cover
+                // those ids either (no log attached, or a different log), recover the rows from the
+                // paired .md instead — see recoveredNoteRowsFor/recoverLogRefRows.
+                val recovered = recoveredNoteRowsFor(file, annotations)
                 // Pins noteTargetName so this file's .md pair (not the default "<base>_analysis.md")
                 // keeps receiving future auto-exports — fixes the adjacent latent bug where opening
                 // "foo_analysis_2.md" and editing it re-exported to the plain "foo_analysis.md".
                 // Uses upTab, not upAnn: opening a file is not itself an annotation edit, so this
                 // must not trigger an immediate (and here, redundant) re-export.
-                upTab(tabId) { t -> t.copy(annotations = annotations, noteTargetName = pinName) }
+                upTab(tabId) { t ->
+                    t.copy(annotations = annotations, noteTargetName = pinName, recoveredNoteRows = recovered)
+                }
                 return
             }
         }
@@ -5501,6 +5514,24 @@ class AppState(
     // plain .md open is unaffected (its own name already ends in .md).
     private fun noteExportTargetName(file: File): String =
         if (file.extension.equals("md", ignoreCase = true)) file.name else "${file.nameWithoutExtension}.md"
+
+    // Change 2 (relink-log bugfix) helpers, split out of openNoteFile to keep it under detekt's
+    // LongMethod gate. The .md pair for a note is either [file] itself (opened a plain .md with no
+    // sidecar's own .md — not this branch's case, but the same naming rule) or its sibling
+    // "<nameWithoutExtension>.md" next to the .ann that was just restored.
+    private fun pairedMdFileFor(file: File): File =
+        if (file.extension.equals("md", ignoreCase = true)) file else File(file.parent, "${file.nameWithoutExtension}.md")
+
+    // Skips the file read entirely once every LogRef already carries sourceEntries — the common
+    // case for any note saved after Change 1 landed. A missing/unreadable .md just means no
+    // recovery (runCatching), not a load failure for the note itself.
+    private fun recoveredNoteRowsFor(file: File, annotations: Annotations): Map<String, List<LogEntry>> {
+        val logRefBlocks = annotations.blocks.filterIsInstance<AnnBlock.LogRef>()
+        if (logRefBlocks.none { it.sourceEntries == null }) return emptyMap()
+        val markdown = runCatching { pairedMdFileFor(file).takeIf { it.exists() }?.readText() }.getOrNull()
+            ?: return emptyMap()
+        return recoverLogRefRows(markdown, logRefBlocks)
+    }
 
     fun openNoteFileAsync(tabId: String, file: File) {
         ioScope.launch { openNoteFile(tabId, file) }
@@ -6101,7 +6132,7 @@ class AppState(
                 // Sidecar stores full block state for restoration, plus the sourcePath
                 // fingerprint (5th token field) used to disambiguate same-named notes.
                 File(targetDir, "${mdFile.nameWithoutExtension}.ann")
-                    .writeText(tab.annotations.preparedForSave(tab.logData, tab.rmap).annotationsToken(tab.sourcePath, tab.filter))
+                    .writeText(tab.annotations.preparedForSave(tab).annotationsToken(tab.sourcePath, tab.filter))
                 legacySourceFingerprintFile(mdFile).delete()
                 writeAnnotationFrameImages(tab, mdFile)
                 rememberRecentNote(mdFile)
