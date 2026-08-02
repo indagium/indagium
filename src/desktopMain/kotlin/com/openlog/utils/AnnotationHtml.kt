@@ -54,7 +54,7 @@ private fun StringBuilder.appendLogRefHtml(tab: LogTab, block: AnnBlock.LogRef, 
     if (block.sourceFilename != null) {
         append("<p><i>").append(escapeHtml("From ${block.sourceFilename}")).append("</i></p>")
     }
-    val rows = block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }
+    val rows = block.resolveRows(tab)
     append("<pre>")
     rows.forEach { row -> appendLine(escapeHtml("${row.ts}  ${row.level.key}/${row.tag}  ${row.msg}")) }
     append("</pre>")

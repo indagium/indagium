@@ -742,7 +742,7 @@ private fun StringBuilder.appendLogRefBlock(tab: LogTab, settings: AppSettings, 
         appendLine()
     }
     if (block.sourceFilename != null) appendLine("${sourcePrefixLabel(settings)} ${block.sourceFilename}")
-    val rows = block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }
+    val rows = block.resolveRows(tab)
     when (settings.annotationLogBlockStyle) {
         AnnotationLogBlockStyle.INDENTED ->
             rows.forEach { r -> appendLine("    ${r.ts}  ${r.level.key}/${r.tag}  ${r.msg}") }

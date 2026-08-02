@@ -66,6 +66,7 @@ import com.openlog.model.AnnBlock
 import com.openlog.model.AppSettings
 import com.openlog.model.LogTab
 import com.openlog.model.VideoFrameReference
+import com.openlog.model.resolveRows
 import java.awt.FileDialog
 import java.awt.Frame
 import java.awt.Toolkit
@@ -249,7 +250,7 @@ fun AnnotationPanel(
             is AnnBlock.Note -> controlsDp + textFieldDp(block.text, 20.7f, 60f) + outerChromeDp
             is AnnBlock.LogRef -> {
                 val captionDp = textFieldDp(block.caption, 20.7f, 52f)
-                val rowCount = block.sourceEntries?.size ?: block.logIds.size
+                val rowCount = block.resolveRows(tab).size
                 val rowsDp = rowCount * 15f + 12f
                 val filenameBadgeDp = if (block.sourceFilename != null) 21f else 0f
                 controlsDp + filenameBadgeDp + captionDp + 6f + rowsDp + outerChromeDp
@@ -457,16 +458,18 @@ fun AnnotationPanel(
                 }
             },
     ) {
-        // These five controls fit within the panel's minimum width, so keep the established
-        // workflow visible rather than making note opening/history discoverable only through a
-        // responsive overflow menu. Rich HTML copying belongs with the rendered Preview below.
+        // These controls (up to six, depending on whether a "Locate log…" reconnect is showing)
+        // keep the established workflow visible rather than making note opening/history
+        // discoverable only through a responsive overflow menu. Rich HTML copying belongs with
+        // the rendered Preview below. FlowRow wraps to a second line at narrow panel widths
+        // instead of clipping/overflowing the header (see the "Locate log…" clipping report).
         Box(
-            Modifier.fillMaxWidth().height(36.dp).background(tc.p2)
-                .border(BorderStroke(1.dp, tc.br)).padding(horizontal = 12.dp),
+            Modifier.fillMaxWidth().heightIn(min = 36.dp).background(tc.p2)
+                .border(BorderStroke(1.dp, tc.br)).padding(horizontal = 12.dp, vertical = 4.dp),
         ) {
-            Row(
+            FlowRow(
                 Modifier.align(Alignment.Center),
-                verticalAlignment = Alignment.CenterVertically,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
             ) {
                 AppButton("Preview", onClick = onToggleMd, enabled = hasAnnotationBlocks, modifier = headerButtonModifier)
@@ -1065,7 +1068,7 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                 }
 
                 is AnnBlock.LogRef -> {
-                    val rows = block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }
+                    val rows = block.resolveRows(tab)
                     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (block.caption.isNotBlank() || settings.numberAnnotationBlocks) {
                             AnnotationMarkdownText(
@@ -1244,7 +1247,7 @@ private fun LogRefBlock(
     onNavigate: () -> Unit,
     dragHandleModifier: Modifier = Modifier,
 ) {
-    val rows = block.sourceEntries ?: block.logIds.mapNotNull { tab.rmap[it] }
+    val rows = block.resolveRows(tab)
     val borderColor = rows.firstOrNull()?.level?.defaultColor ?: tc.ac
 
     Column(
