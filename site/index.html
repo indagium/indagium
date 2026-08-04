@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Indagium is a focused desktop log viewer for investigating Android logcat files." />
+    <meta name="theme-color" content="#f7f7f2" />
+    <title>Indagium — See the signal in your Android logs</title>
+    <link rel="preconnect" href="https://raw.githubusercontent.com" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Indagium home">
+        <img src="https://raw.githubusercontent.com/indagium/indagium/main/src/desktopMain/resources/icons/indagium.png" alt="" />
+        <span>indagium</span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="#features">Features</a>
+        <a href="#workflow">Workflow</a>
+        <a href="https://github.com/indagium/indagium" target="_blank" rel="noreferrer">GitHub</a>
+      </nav>
+      <a class="button button-small" href="https://github.com/indagium/indagium/releases/latest">Download</a>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">Android logcat, made legible</p>
+          <h1 id="hero-title">Find the story hiding in your logs.</h1>
+          <p class="hero-lede">Indagium is a fast, native desktop workspace for exploring Android logcat files — from the first strange line to a clear, shareable explanation.</p>
+          <div class="actions">
+            <a class="button" href="https://github.com/indagium/indagium/releases/latest">Download Indagium <span aria-hidden="true">↗</span></a>
+            <a class="text-link" href="https://github.com/indagium/indagium#readme">Read the guide <span aria-hidden="true">→</span></a>
+          </div>
+          <ul class="platforms" aria-label="Supported platforms">
+            <li>macOS</li>
+            <li>Windows</li>
+            <li>Linux</li>
+          </ul>
+        </div>
+        <div class="hero-art" aria-label="Indagium application window">
+          <div class="orb orb-one"></div>
+          <div class="orb orb-two"></div>
+          <div class="window">
+            <div class="window-bar"><span></span><span></span><span></span><b>Indagium</b></div>
+            <div class="window-body">
+              <aside><i></i><i></i><i></i><i></i><i></i></aside>
+              <div class="log-lines" aria-hidden="true">
+                <p><em>12:47:18.481</em> <strong> ActivityTaskManager</strong> Displayed app/.MainActivity</p>
+                <p><em>12:47:18.513</em> <span> Renderer</span> Frame complete <b>· 18 ms</b></p>
+                <p><em>12:47:18.529</em> <strong> Network</strong> <mark>Request timed out after 5,000 ms</mark></p>
+                <p><em>12:47:18.530</em> <span> RetryPolicy</span> Scheduling retry #1</p>
+                <p><em>12:47:20.109</em> <strong> ActivityManager</strong> Process still responsive</p>
+                <p><em>12:47:23.534</em> <span> Network</span> <mark>Request timed out after 5,000 ms</mark></p>
+                <div class="sequence"><small>2 repeated network events</small><div></div><div></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="proof" aria-label="Indagium benefits">
+        <p>Built for the moment when a log file is too large, too noisy, or too important to read line by line.</p>
+        <div><span>20</span> built-in themes</div>
+        <div><span>Multi-GB</span> log support</div>
+        <div><span>One place</span> to investigate</div>
+      </section>
+
+      <section class="feature-intro" id="features" aria-labelledby="features-title">
+        <p class="eyebrow">Make complexity navigable</p>
+        <div>
+          <h2 id="features-title">Turn a flood of events into a map of what happened.</h2>
+          <p>Indagium keeps the raw evidence intact while giving you the tools to isolate patterns, correlate context, and retain the insight.</p>
+        </div>
+      </section>
+
+      <section class="feature-grid">
+        <article class="feature-card featured">
+          <div class="feature-number">01</div>
+          <h3>Filter without losing the plot</h3>
+          <p>Combine log levels, tags, packages, message rules, and saved presets. Focus the view without changing the source file.</p>
+          <div class="filter-demo" aria-hidden="true"><span>level: error</span><span>tag: Network</span><span>package: app</span></div>
+        </article>
+        <article class="feature-card accent-a">
+          <div class="feature-number">02</div>
+          <h3>Fold repetition into meaning</h3>
+          <p>Group recurring sequences, collapse known noise, and let crashes and ANRs surface automatically.</p>
+          <div class="fold-demo" aria-hidden="true"><i></i><i></i><i></i><b>24 repeated events</b></div>
+        </article>
+        <article class="feature-card accent-b">
+          <div class="feature-number">03</div>
+          <h3>Follow the evidence</h3>
+          <p>Link video to a log line, jump into source code, compare sessions, and trace activity across threads.</p>
+          <div class="trace-demo" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+        </article>
+        <article class="feature-card dark-card">
+          <div class="feature-number">04</div>
+          <h3>Leave a useful record</h3>
+          <p>Annotate selections with notes, images, or frames, then export your filtered log and findings in the format your team uses.</p>
+          <div class="note-demo" aria-hidden="true">Root cause:<br /><b>retry loop blocks initialization</b></div>
+        </article>
+      </section>
+
+      <section class="showcase" id="workflow" aria-labelledby="workflow-title">
+        <div class="showcase-image">
+          <img src="https://raw.githubusercontent.com/indagium/indagium/main/docs/images/shot-02-window-overview.png" alt="The Indagium desktop application showing a structured log view." loading="lazy" />
+        </div>
+        <div class="showcase-copy">
+          <p class="eyebrow">From symptom to explanation</p>
+          <h2 id="workflow-title">A workspace designed for investigations, not just viewing.</h2>
+          <ol>
+            <li><span>1</span><div><b>Open the evidence</b><p>Load logcat, bug-report archives, or several related logs.</p></div></li>
+            <li><span>2</span><div><b>Build the signal</b><p>Filter, search, fold sequences, and use time deltas to find the decisive moments.</p></div></li>
+            <li><span>3</span><div><b>Share the result</b><p>Add notes and context, then export a log others can immediately understand.</p></div></li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="ai-section" aria-labelledby="ai-title">
+        <div>
+          <p class="eyebrow">Optional, on your terms</p>
+          <h2 id="ai-title">Bring an AI investigator into the workspace.</h2>
+        </div>
+        <p>Ask questions of the active log with your choice of local or hosted provider — including LM Studio, OpenAI, Anthropic, Codex, and Claude Code. Every file-changing action waits for your approval.</p>
+        <a class="text-link" href="https://github.com/indagium/indagium#in-app-ai-assistant">Explore the AI assistant <span aria-hidden="true">→</span></a>
+      </section>
+
+      <section class="final-cta" aria-labelledby="cta-title">
+        <div class="cta-orb"></div>
+        <p class="eyebrow">Ready when the next log arrives</p>
+        <h2 id="cta-title">Spend less time parsing.<br />Learn more from every trace.</h2>
+        <a class="button button-light" href="https://github.com/indagium/indagium/releases/latest">Get Indagium <span aria-hidden="true">↗</span></a>
+      </section>
+    </main>
+
+    <footer>
+      <a class="brand" href="#top"><img src="https://raw.githubusercontent.com/indagium/indagium/main/src/desktopMain/resources/icons/indagium.png" alt="" /><span>indagium</span></a>
+      <p>Android logcat investigation for macOS, Windows, and Linux.</p>
+      <div><a href="https://github.com/indagium/indagium">Source</a><a href="https://github.com/indagium/indagium/issues">Support</a><a href="https://github.com/indagium/indagium/blob/main/LICENSE">License</a></div>
+    </footer>
+  </body>
+</html>
