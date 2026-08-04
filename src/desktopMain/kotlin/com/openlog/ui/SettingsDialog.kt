@@ -303,7 +303,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
 private fun openProjectRepository() {
     runCatching {
         if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
-            Desktop.getDesktop().browse(URI("https://github.com/rarnaut-dev/openLog2"))
+            Desktop.getDesktop().browse(URI("https://github.com/indagium/indagium"))
         }
     }
 }

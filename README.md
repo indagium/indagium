@@ -234,7 +234,7 @@ The macOS build is unsigned (no Apple Developer certificate in CI) — see the I
 
 ### GitLab mirror
 
-The repo is also mirrored to GitLab (`gitlab.com/rarnaut-dev-group/openlog2`), which runs [.gitlab-ci.yml](.gitlab-ci.yml) on GitLab's shared runners — a separate compute/storage pool from GitHub Actions, useful if GitHub's Actions quota is exhausted. The mirror is manual, not automatic: after pushing to `origin`, run:
+The repo is also mirrored to GitLab (`gitlab.com/rarnaut-dev-group/indagium`), which runs [.gitlab-ci.yml](.gitlab-ci.yml) on GitLab's shared runners — a separate compute/storage pool from GitHub Actions, useful if GitHub's Actions quota is exhausted. The mirror is manual, not automatic: after pushing to `origin`, run:
 
 ```bash
 ./scripts/push-gitlab-mirror.sh
