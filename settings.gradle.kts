@@ -1,4 +1,4 @@
-rootProject.name = "openLog"
+rootProject.name = "Indagium"
 
 pluginManagement {
     repositories {

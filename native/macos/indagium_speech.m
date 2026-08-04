@@ -23,7 +23,7 @@ static NSString *availabilityMessage(NSString *localeIdentifier) {
     if (![recognizer supportsOnDeviceRecognition]) return @"Apple does not have an on-device speech model for this language. Choose Whisper instead.";
     switch ([SFSpeechRecognizer authorizationStatus]) {
         case SFSpeechRecognizerAuthorizationStatusAuthorized: return nil;
-        case SFSpeechRecognizerAuthorizationStatusDenied: return @"Speech Recognition permission is denied for openLog. Enable it in macOS Privacy & Security.";
+        case SFSpeechRecognizerAuthorizationStatusDenied: return @"Speech Recognition permission is denied for Indagium. Enable it in macOS Privacy & Security.";
         case SFSpeechRecognizerAuthorizationStatusRestricted: return @"Speech Recognition is restricted by this Mac's policy.";
         case SFSpeechRecognizerAuthorizationStatusNotDetermined: return @"Speech Recognition permission is required.";
     }

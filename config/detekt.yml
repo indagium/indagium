@@ -1,4 +1,4 @@
-# Detekt configuration for openLog2 — Compose Multiplatform Desktop
+# Detekt configuration for Indagium — Compose Multiplatform Desktop
 # buildUponDefaultConfig = true, so all rules not listed here use detekt defaults.
 
 # ── Naming ──────────────────────────────────────────────────────────────────

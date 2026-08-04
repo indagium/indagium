@@ -1,0 +1,12 @@
+Indagium icon pack v6 CLEAN EDGE
+
+- Removed all outer drop shadow.
+- Removed bottom horizontal shadow artifact.
+- Removed heavier right-side shadow.
+- Kept a single subtle inner border.
+- Preserved approved ORBIT foreground geometry.
+
+Files:
+- indagium.png: 1024x1024 RGBA
+- indagium.ico: 16, 24, 32, 48, 64, 128, 256 px
+- indagium.icns: ic10 1024x1024 + info chunk

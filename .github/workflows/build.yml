@@ -62,12 +62,12 @@ jobs:
           - os: ubuntu-latest
             task: packageDeb
             artifact_path: build/compose/binaries/main/deb
-            artifact_name: openLog-linux-x64
+            artifact_name: Indagium-linux-x64
 
           - os: windows-latest
             task: packageMsi
             artifact_path: build/compose/binaries/main/msi
-            artifact_name: openLog-windows-x64
+            artifact_name: Indagium-windows-x64
 
           # macOS runner is Apple Silicon (arm64); unsigned (no Apple Developer cert in CI), so
           # Gatekeeper will show an "unidentified developer" warning on first launch — same as
@@ -75,17 +75,17 @@ jobs:
           - os: macos-latest
             task: packageDmg
             artifact_path: build/compose/binaries/main/dmg
-            artifact_name: openLog-macos-arm64
+            artifact_name: Indagium-macos-arm64
 
           # ubuntu-24.04-arm is GitHub's hosted Linux arm64 runner, free for public repos like this
           # one. jpackage derives the .deb filename's arch segment from `dpkg --print-architecture`
-          # on the machine that builds it, so this job emits openlog_<ver>-1_arm64.deb — a distinct
-          # filename from the amd64 job's openlog_<ver>-1_amd64.deb — which is why the release job
+          # on the machine that builds it, so this job emits indagium_<ver>-1_arm64.deb — a distinct
+          # filename from the amd64 job's indagium_<ver>-1_amd64.deb — which is why the release job
           # below needs no rename step to avoid the two colliding as GitHub Release assets.
           - os: ubuntu-24.04-arm
             task: packageDeb
             artifact_path: build/compose/binaries/main/deb
-            artifact_name: openLog-linux-arm64
+            artifact_name: Indagium-linux-arm64
 
     runs-on: ${{ matrix.os }}
     # windows-latest defaults `run:` steps to PowerShell, where `chmod`/`./gradlew` don't work.
@@ -165,12 +165,12 @@ jobs:
       # Three further defects in the same generated artifacts, per the Desktop Entry Spec
       # (https://specifications.freedesktop.org/desktop-entry/latest/exec-variables.html): an
       # entry that declares MimeType must carry a field code in Exec or it can never receive a
-      # file at all — jpackage emits Exec with none, so "Open With openLog" silently no-ops.
+      # file at all — jpackage emits Exec with none, so "Open With Indagium" silently no-ops.
       # Append %F (not %f: Main.kt/AppState.openPaths takes a List<File>, and the single-instance
       # handoff wants to forward every path from one launch in one shot). Second, jpackage repeats
       # MimeType=text/plain once per fileAssociation() call — dedupe preserving first-seen order.
       # Third, replace the generated MimeInfo XML (duplicate text/plain blocks, each overriding
-      # the system's own <comment>) with the hand-authored packaging/linux/openlog-mimeinfo.xml,
+      # the system's own <comment>) with the hand-authored packaging/linux/indagium-mimeinfo.xml,
       # which only declares globs for extensions the system doesn't already type.
       - name: Add StartupWMClass and desktop-database refresh to Linux .desktop/postinst
         if: startsWith(matrix.os, 'ubuntu')
@@ -203,7 +203,7 @@ jobs:
           fi
           mimeinfo_file=$(find "$workdir/opt" -name '*-MimeInfo.xml')
           if [ -n "$mimeinfo_file" ]; then
-            cp packaging/linux/openlog-mimeinfo.xml "$mimeinfo_file"
+            cp packaging/linux/indagium-mimeinfo.xml "$mimeinfo_file"
           fi
           dpkg-deb -b "$workdir" "$deb"
           rm -rf "$workdir"
@@ -264,10 +264,10 @@ jobs:
 
             | Your system | Download |
             |---|---|
-            | Linux — Intel/AMD 64-bit (`dpkg --print-architecture` prints `amd64`) | `openlog_*_amd64.deb` |
-            | Linux — ARM 64-bit (prints `arm64`) | `openlog_*_arm64.deb` |
-            | Windows | `openLog-*.msi` |
-            | macOS — Apple Silicon | `openLog-*.dmg` |
+            | Linux — Intel/AMD 64-bit (`dpkg --print-architecture` prints `amd64`) | `indagium_*_amd64.deb` |
+            | Linux — ARM 64-bit (prints `arm64`) | `indagium_*_arm64.deb` |
+            | Windows | `Indagium-*.msi` |
+            | macOS — Apple Silicon | `Indagium-*.dmg` |
 
             Install on Linux with `sudo dpkg -i <file>`. The macOS build is unsigned, so Gatekeeper
             warns on first launch — see the README's Installation section for the workaround.
