@@ -43,7 +43,7 @@ class UpdateCheckerTest {
         val result = UpdateChecker(httpClient = client).fetchLatest(currentVersion = "1.4.0")
 
         val request = requireNotNull(capturedRequest)
-        assertEquals("/repos/rarnaut-dev/openLog2/releases/latest", request.url.encodedPath)
+        assertEquals("/repos/indagium/indagium/releases/latest", request.url.encodedPath)
 
         val available = assertIs<UpdateCheckResult.Available>(result)
         assertEquals("1.5.0", available.release.version)
@@ -92,6 +92,25 @@ class UpdateCheckerTest {
         assertEquals(assets[1], assetForCurrentOs(assets, osName = "Linux", osArch = "amd64"))
         assertEquals(assets[2], assetForCurrentOs(assets, osName = "Linux", osArch = "aarch64"))
         assertEquals(assets[2], assetForCurrentOs(assets, osName = "Linux", osArch = "arm64"))
+    }
+
+    @Test
+    fun assetForCurrentOsPicksTheRenamedIndagiumAssetsRegardlessOfProductName() {
+        // Selection matches on file extension (and, for Linux, an arch token) — never on product
+        // name. This pins that property against a release published under the post-rename artifact
+        // names, so a later change that starts matching on "openLog"/"Indagium" in the filename
+        // fails loudly here instead of silently breaking updates for renamed builds.
+        val assets = listOf(
+            ReleaseAsset("Indagium-1.8.0-arm64.dmg", "https://example.test/dmg", 1L),
+            ReleaseAsset("Indagium-1.8.0.msi", "https://example.test/msi", 2L),
+            ReleaseAsset("indagium_1.8.0-1_amd64.deb", "https://example.test/amd64-deb", 3L),
+            ReleaseAsset("indagium_1.8.0-1_arm64.deb", "https://example.test/arm64-deb", 4L),
+        )
+
+        assertEquals(assets[0], assetForCurrentOs(assets, osName = "Mac OS X"))
+        assertEquals(assets[1], assetForCurrentOs(assets, osName = "Windows 11"))
+        assertEquals(assets[2], assetForCurrentOs(assets, osName = "Linux", osArch = "amd64"))
+        assertEquals(assets[3], assetForCurrentOs(assets, osName = "Linux", osArch = "aarch64"))
     }
 
     @Test
@@ -194,7 +213,7 @@ class UpdateCheckerTest {
         val RELEASE_JSON = """
             {
               "tag_name": "v1.5.0",
-              "html_url": "https://github.com/rarnaut-dev/openLog2/releases/tag/v1.5.0",
+              "html_url": "https://github.com/indagium/indagium/releases/tag/v1.5.0",
               "body": "## What's new\n- Update checker",
               "assets": [
                 {"name": "openLog-1.5.0.dmg", "browser_download_url": "https://example.test/openLog-1.5.0.dmg", "size": 111},

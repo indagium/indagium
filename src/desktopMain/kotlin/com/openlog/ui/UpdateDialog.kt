@@ -46,7 +46,7 @@ internal fun UpdateDialog(state: AppState) {
         ) {
             AppText("Update available", color = colors.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             AppText(
-                "openLog ${BuildInfo.APP_VERSION} → ${release.version}",
+                "Indagium ${BuildInfo.APP_VERSION} → ${release.version}",
                 color = colors.td,
                 fontSize = 11.sp,
                 fontFamily = MONO,

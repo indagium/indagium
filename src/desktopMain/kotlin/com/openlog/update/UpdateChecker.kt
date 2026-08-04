@@ -30,7 +30,7 @@ import java.nio.file.StandardCopyOption
 import kotlin.coroutines.coroutineContext
 
 /** GitHub repo backing the in-app "Check for updates" flow (releases API + asset downloads). */
-const val UPDATE_REPO = "rarnaut-dev/openLog2"
+const val UPDATE_REPO = "indagium/indagium"
 
 data class ReleaseAsset(val name: String, val downloadUrl: String, val size: Long)
 
