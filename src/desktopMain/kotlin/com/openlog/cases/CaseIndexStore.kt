@@ -4,7 +4,15 @@ import com.openlog.utils.writeFileAtomically
 import java.io.File
 import java.util.Base64
 
-private const val CASE_INDEX_MAGIC = "openLog2-case-index-v1"
+// CASE_INDEX_MAGIC_CURRENT is what save() writes; CASE_INDEX_MAGIC_ACCEPTED (built from it, plus
+// the pre-rename openLog2 marker already sitting in every shipped-1.7.9 user's index file) is what
+// load() accepts. Defining the accepted set in terms of the written constant makes "the write
+// value is a member of the accepted set" true by construction — same shape as
+// source/SourceIndexStore.kt and AppState's autosave magic constants, duplicated here since this
+// store is independent of both.
+private const val CASE_INDEX_MAGIC_CURRENT = "indagium-case-index-v1"
+private const val CASE_INDEX_MAGIC_LEGACY_OPENLOG2 = "openLog2-case-index-v1"
+private val CASE_INDEX_MAGIC_ACCEPTED = setOf(CASE_INDEX_MAGIC_CURRENT, CASE_INDEX_MAGIC_LEGACY_OPENLOG2)
 
 // Minimum field count of one "record\t..." line (CaseRecord.toLine()'s original 11 tab-separated
 // fields). filterSummary (index FILTER_SUMMARY_FIELD_INDEX) was appended later and is read via
@@ -103,7 +111,7 @@ private fun ParseState.applyLine(line: String) {
 }
 
 private fun parseCaseIndexLines(lines: List<String>): CaseIndex? {
-    if (lines.isEmpty() || lines.first() != CASE_INDEX_MAGIC) return null
+    if (lines.isEmpty() || lines.first() !in CASE_INDEX_MAGIC_ACCEPTED) return null
     val state = ParseState()
     lines.drop(1).forEach { line -> runCatching { state.applyLine(line) } }
     val version = state.version ?: return null
@@ -119,7 +127,7 @@ private fun parseCaseIndexLines(lines: List<String>): CaseIndex? {
 object CaseIndexStore {
     fun save(index: CaseIndex, file: File) {
         writeFileAtomically(file) { writer ->
-            writer.appendLine(CASE_INDEX_MAGIC)
+            writer.appendLine(CASE_INDEX_MAGIC_CURRENT)
             writer.appendLine("version\t${index.version}")
             writer.appendLine("builtAt\t${index.builtAt}")
             index.fileMeta.forEach { (path, meta) ->

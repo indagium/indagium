@@ -33,6 +33,7 @@ import com.openlog.model.SourceFolderInfo
 import com.openlog.model.SourceLogConfiguration
 import com.openlog.model.SourceWrapperRule
 import com.openlog.model.ThemePreset
+import com.openlog.ui.AUTOSAVE_MAGIC_CURRENT
 import com.openlog.ui.AppState
 import com.openlog.ui.DesktopStorage
 import com.openlog.ui.FilterSearchRequest
@@ -5615,6 +5616,67 @@ class AppStateBehaviorTest {
         val state = AppState(cacheFile, restoreOnCreate = true)
 
         assertTrue(state.tabs.isEmpty())
+    }
+
+    // (indagium rename, Stage 2) Same coverage as autosaveWithWrongVersionHeaderIsIgnored above,
+    // for the new post-rename magic — an unrecognised version suffix must still be rejected
+    // regardless of which brand prefix precedes it.
+    @Test
+    fun autosaveWithNewMagicWrongVersionHeaderIsIgnored() {
+        val dir = createTempDirectory("openlog-badver-indagium").toFile()
+        val cacheFile = File(dir, "state.cache").apply { writeText("indagium-cache-v99\nsome data\n") }
+
+        val state = AppState(cacheFile, restoreOnCreate = true)
+
+        assertTrue(state.tabs.isEmpty())
+    }
+
+    // (indagium rename, Stage 2) Pins the literal value autosaveNow() writes — a hand-written
+    // literal here, not AUTOSAVE_MAGIC_CURRENT, so a wrong constant value can't make this test
+    // tautologically pass.
+    @Test
+    fun autosaveNowWritesTheNewMagicHeader() {
+        val dir = createTempDirectory("openlog-magic-write").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+
+        state.autosaveNow()
+
+        assertEquals("indagium-cache-v1", cacheFile.readLines().first())
+    }
+
+    // (indagium rename, Stage 2) The read side must be a strict bridge: a cache written with the
+    // new "indagium-cache-v1" magic and the same cache re-tagged with the old "openLog2-cache-v1"
+    // magic must restore identically — settings, tabs, and recent files alike. This is the
+    // regression test for the accept-both contract described on AUTOSAVE_MAGIC_ACCEPTED.
+    @Test
+    fun autosaveWithNewMagicRestoresEquivalentlyToLegacyMagic() {
+        val dir = createTempDirectory("openlog-magic-equiv").toFile()
+        val logFile = File(dir, "test.log").apply { writeText("06-26 10:00:00.000  1  1 I App: hello\n") }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.updateSettings { it.copy(editorChoice = "vscode", fontSize = 22) }
+        state.tabs = listOf(mkTab("log", "test.log", emptyList()).copy(sourcePath = logFile.absolutePath))
+        state.activeTabId = "log"
+        state.recentFiles = listOf(logFile.absolutePath)
+        state.autosaveNow()
+
+        val written = cacheFile.readText()
+        assertTrue(written.startsWith("$AUTOSAVE_MAGIC_CURRENT\n"))
+        val legacyCacheFile = File(dir, "legacy.cache").apply {
+            writeText(written.replaceFirst(AUTOSAVE_MAGIC_CURRENT, "openLog2-cache-v1"))
+        }
+
+        val restoredCurrent = AppState(cacheFile, restoreOnCreate = true)
+        val restoredLegacy = AppState(legacyCacheFile, restoreOnCreate = true)
+
+        assertEquals(restoredCurrent.settings, restoredLegacy.settings)
+        assertEquals(restoredCurrent.recentFiles, restoredLegacy.recentFiles)
+        assertEquals(1, restoredCurrent.tabs.size)
+        assertEquals(
+            restoredCurrent.tabs.map { it.id to it.sourcePath },
+            restoredLegacy.tabs.map { it.id to it.sourcePath },
+        )
     }
 
     @Test

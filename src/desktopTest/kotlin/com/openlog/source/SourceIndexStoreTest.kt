@@ -83,6 +83,61 @@ class SourceIndexStoreTest {
         assertNull(SourceIndexStore.load(file))
     }
 
+    // (indagium rename, Stage 2) save() now writes the "indagium-source-index-v1" magic, but an
+    // index a shipped 1.7.9 build wrote under the old "openLog2-source-index-v1" magic must still
+    // load without triggering a rebuild — a full re-index walks the user's whole source tree.
+    @Test
+    fun loadWithLegacyOpenLogMagicStillLoads() {
+        val dir = createTempDirectory("openlog-src-store-legacy-magic").toFile()
+        val file = File(dir, "source-index").apply {
+            writeText(
+                buildString {
+                    appendLine("openLog2-source-index-v1")
+                    appendLine("version\t$SOURCE_INDEX_VERSION")
+                    appendLine("builtAt\t1000")
+                    appendLine("root\t${java.util.Base64.getUrlEncoder().withoutPadding().encodeToString("/tmp/src".toByteArray())}")
+                },
+            )
+        }
+
+        val loaded = SourceIndexStore.load(file)
+
+        assertTrue(loaded != null)
+        assertEquals(listOf("/tmp/src"), loaded.roots)
+    }
+
+    @Test
+    fun loadWithCurrentIndagiumMagicLoads() {
+        val dir = createTempDirectory("openlog-src-store-new-magic").toFile()
+        val file = File(dir, "source-index").apply {
+            writeText(
+                buildString {
+                    appendLine("indagium-source-index-v1")
+                    appendLine("version\t$SOURCE_INDEX_VERSION")
+                    appendLine("builtAt\t1000")
+                    appendLine("root\t${java.util.Base64.getUrlEncoder().withoutPadding().encodeToString("/tmp/src".toByteArray())}")
+                },
+            )
+        }
+
+        val loaded = SourceIndexStore.load(file)
+
+        assertTrue(loaded != null)
+        assertEquals(listOf("/tmp/src"), loaded.roots)
+    }
+
+    @Test
+    fun saveWritesTheCurrentIndagiumMagic() {
+        val dir = createTempDirectory("openlog-src-store-write-magic").toFile()
+        val srcDir = createTempDirectory("openlog-src-store-write-magic-src")
+        val index = sampleIndex(srcDir)
+        val file = File(dir, "source-index")
+
+        SourceIndexStore.save(index, file)
+
+        assertEquals("indagium-source-index-v1", file.readLines().first())
+    }
+
     @Test
     fun loadWithMismatchedVersionReturnsNull() {
         val dir = createTempDirectory("openlog-src-store-version").toFile()
