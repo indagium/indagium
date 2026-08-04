@@ -842,6 +842,7 @@ private fun RolloverDiagnosticEvent.format(): String = "id=$id ts=$ts"
  */
 fun formatFollowDiagnostics(d: FollowDiagnostics): String = buildString {
     appendLine("openLog Follow diagnostics — tab ${d.tabId}")
+    appendLine("app-data migration: ${migrationOutcomeSummary(DesktopStorage.lastMigrationOutcome)}")
     appendLine("has anchor: ${d.hasAnchor}")
     if (d.anchor != null) appendLine("anchor: ${d.anchor.format()} videoMs=${d.anchorVideoMs}")
     appendLine("playhead videoMs: ${d.playheadVideoMs}")

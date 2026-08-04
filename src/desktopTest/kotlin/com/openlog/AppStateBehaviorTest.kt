@@ -3151,9 +3151,9 @@ class AppStateBehaviorTest {
             if (key == "XDG_STATE_HOME") "/home/me/.local/state" else null
         }
 
-        assertEquals(File("/Users/me/Library/Application Support/openLog2"), mac)
-        assertEquals(File("C:/Users/me/AppData/Roaming", "openLog2"), windows)
-        assertEquals(File("/home/me/.local/state", "openLog2"), linux)
+        assertEquals(File("/Users/me/Library/Application Support/Indagium"), mac)
+        assertEquals(File("C:/Users/me/AppData/Roaming", "Indagium"), windows)
+        assertEquals(File("/home/me/.local/state", "Indagium"), linux)
     }
 
     @Test
