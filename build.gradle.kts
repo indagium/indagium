@@ -115,10 +115,7 @@ val generateLicenseResources by tasks.registering {
         val agreement = licenseDocuments.joinToString(separator = "\n\n---\n\n") { path ->
             file(path).readText().trimEnd()
         }
-        // NOTE: the header text itself ("# openLog License Agreement") intentionally stays as-is —
-        // it moves together with LICENSE/NOTICE in Stage 8, only the generated resource filename
-        // (and the dialog's lookup of it) is renamed here so the runtime path stays in lockstep.
-        outputFile.writeText("# openLog License Agreement\n\nTerms version: $licenseVersion\n\n---\n\n$agreement\n")
+        outputFile.writeText("# Indagium License Agreement\n\nTerms version: $licenseVersion\n\n---\n\n$agreement\n")
     }
 }
 
