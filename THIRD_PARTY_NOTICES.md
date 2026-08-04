@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-openLog includes third-party components. Their licenses apply to those components independently of the license for openLog itself.
+Indagium includes third-party components. Their licenses apply to those components independently of the license for Indagium itself.
 
 | Component | License |
 | --- | --- |

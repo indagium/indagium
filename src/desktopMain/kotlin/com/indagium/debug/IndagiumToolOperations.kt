@@ -65,7 +65,7 @@ private const val DEFAULT_LOG_COMPOSITION_LIMIT = 50
 private const val MAX_LOG_COMPOSITION_LIMIT = 500
 
 /**
- * Transport-neutral AppState operations behind the openLog MCP catalog.
+ * Transport-neutral AppState operations behind the Indagium MCP catalog.
  *
  * This is deliberately constructible without a server so the in-app AI runner can execute the
  * exact same contract directly. ControlServer is only an HTTP/MCP adapter over [toolGateway].

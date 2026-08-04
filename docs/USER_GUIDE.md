@@ -1,6 +1,6 @@
-# openLog — User Guide
+# Indagium — User Guide
 
-openLog turns a logcat capture into an answer. You open a log — or a whole Android bug report —
+Indagium turns a logcat capture into an answer. You open a log — or a whole Android bug report —
 filter it down, fold away the noise, mark what matters, and export a write-up you can paste straight
 into a ticket.
 
@@ -40,10 +40,10 @@ Download the build for your platform from the [Releases](../../../releases) page
 
 | Platform | File |
 |---|---|
-| Linux (x86-64) | `openLog_x.y.z_amd64.deb` |
-| Linux (arm64) | `openLog_x.y.z_arm64.deb` |
-| Windows | `openLog-x.y.z.msi` |
-| macOS (Apple Silicon) | `openLog-x.y.z.dmg` |
+| Linux (x86-64) | `indagium_x.y.z-1_amd64.deb` |
+| Linux (arm64) | `indagium_x.y.z-1_arm64.deb` |
+| Windows | `Indagium-x.y.z.msi` |
+| macOS (Apple Silicon) | `Indagium-x.y.z.dmg` |
 
 ### macOS: "could not verify… free of malware"
 
@@ -51,23 +51,23 @@ The macOS build is not signed with an Apple Developer ID, so Gatekeeper blocks a
 through a browser. Either:
 
 ```bash
-xattr -cr /Applications/openLog.app
+xattr -cr /Applications/Indagium.app
 ```
 
-or open **System Settings → Privacy & Security**, scroll to the "openLog was blocked" notice, and
+or open **System Settings → Privacy & Security**, scroll to the "Indagium was blocked" notice, and
 click **Open Anyway**.
 
 ### Linux
 
 ```bash
-sudo dpkg -i openLog_x.y.z_amd64.deb
+sudo dpkg -i indagium_x.y.z-1_amd64.deb
 ```
 
-The package registers openLog as a *candidate* handler for `.log`, `.txt`, `.logcat`, `.trace`, and
+The package registers Indagium as a *candidate* handler for `.log`, `.txt`, `.logcat`, `.trace`, and
 `.out` — it does not make itself the default. To opt in:
 
 ```bash
-xdg-mime default openlog-openLog.desktop text/plain text/x-log
+xdg-mime default indagium-Indagium.desktop text/plain text/x-log
 ```
 
 ---
@@ -96,7 +96,7 @@ Five minutes, start to finished ticket.
 
 <!-- SHOT-02 · Annotated window · static screenshot · full window with one log open,
      filter panel + notes panel visible, a sequence collapsed, minimap on the right -->
-![The openLog window with its main regions labelled](images/shot-02-window-overview.png)
+![The Indagium window with its main regions labelled](images/shot-02-window-overview.png)
 
 **Toolbar** (top, left to right):
 
@@ -132,15 +132,15 @@ between the log and the sidebar to resize.
 | Toolbar | **Open** → file dialog |
 | Drag and drop | Drop one or more files anywhere on the window |
 | Recent files | **▾** beside Open — the last 30 files |
-| Command line | `openlog path/to/file.log` |
+| Command line | `indagium path/to/file.log` |
 | OS integration | "Open with" from your file manager; on macOS also via the Dock |
 
-Opening a file while openLog is already running reuses the running instance rather than starting a
+Opening a file while Indagium is already running reuses the running instance rather than starting a
 second one (except on macOS, where the system handles it).
 
 ### Bug-report archives
 
-Drop a `.zip` or `.7z` Android bug report and openLog scans it for log candidates — logcat dumps, ANR
+Drop a `.zip` or `.7z` Android bug report and Indagium scans it for log candidates — logcat dumps, ANR
 traces — and offers a picker. You can open several at once, each in its own tab. If the archive also
 contains a screen recording, you can attach it to the tab in the same step (see
 [§20](#20-video-sync)).
@@ -151,7 +151,7 @@ contains a screen recording, you can attach it to the tab in the same step (see
 
 ### Very large files
 
-Above a size threshold openLog offers to **split** the file into parts before opening
+Above a size threshold Indagium offers to **split** the file into parts before opening
 ([§18](#18-merging-and-splitting)). You can decline and open it whole — the log view switches into
 *large file mode*, shown in the row-count label, which computes the visible rows in the background
 and stays responsive while you filter.
@@ -188,7 +188,7 @@ Toggle **V / D / I / W / E / A** individually. (`A` is Assert — Android's high
 
 ### Tags and packages
 
-Click a tag to include it; there is a separate exclude list. openLog also groups tags by package
+Click a tag to include it; there is a separate exclude list. Indagium also groups tags by package
 prefix, so you can include or exclude `com.example.network.*` in one action. The panel shows the most
 frequent tags first; the count is configurable in Settings.
 
@@ -290,7 +290,7 @@ unfiltered split automatically when you press it.
 levels, highlighted rows, and issue sites so you can see where the interesting parts are before
 scrolling to them. Right-click the minimap (or the log toolbar) to hide it.
 
-**Thread map.** Right-click a row → **Threads: Show map**. openLog colours every thread inside that
+**Thread map.** Right-click a row → **Threads: Show map**. Indagium colours every thread inside that
 row's process and draws a branch gutter beside the log, so interleaved thread activity becomes
 readable. Colours are assigned once from the tab's full data, so they do not shift as you filter.
 Hide it from the same menu.
@@ -299,7 +299,7 @@ Hide it from the same menu.
 
 ## 12. Crashes, ANRs and custom issues
 
-Stack traces are folded **automatically** — no configuration. openLog recognises exception headers,
+Stack traces are folded **automatically** — no configuration. Indagium recognises exception headers,
 `at …` frames, `… N more`, and the process lines around them, and tracks one open trace per process
 so interleaved crashes do not corrupt each other.
 
@@ -332,7 +332,7 @@ A filter you built is worth keeping.
 | Import | Import a library — a review dialog shows each incoming filter and lets you skip, rename, add, or replace |
 
 Editing a loaded preset turns it into a **draft** for that tab rather than silently modifying the
-saved copy. openLog also writes automatic backups of your filter library, so a bad import is
+saved copy. Indagium also writes automatic backups of your filter library, so a bad import is
 recoverable.
 
 ---
@@ -345,7 +345,7 @@ Two different features share the word "compare":
 panel and its own scroll position. A toggle mirrors the left tab's filter onto the right one, which
 is what you want when comparing a working run against a failing one — same filter, two logs.
 
-Note this is a side-by-side view, not a textual diff: openLog does not compute line-level
+Note this is a side-by-side view, not a textual diff: Indagium does not compute line-level
 differences.
 
 **Original / Filtered split** (the **Unfiltered** button in the log toolbar) splits **one tab**
@@ -406,10 +406,10 @@ numbering, a custom prefix label, and auto-export on every edit.
 
 ## 16. Show in code
 
-Register your project's source folders and openLog will tell you which line of code printed a given
+Register your project's source folders and Indagium will tell you which line of code printed a given
 log line.
 
-**Setup.** Settings → Source code → add one or more folders. openLog scans `.kt` and `.java` files
+**Setup.** Settings → Source code → add one or more folders. Indagium scans `.kt` and `.java` files
 for `Log.*` and `Timber.*` calls, extracts the message template, resolves the `TAG` constant, and
 records the enclosing method. Indexing is incremental — only changed files are re-read.
 
@@ -422,7 +422,7 @@ Settings → Source code lets you define wrapper rules: the owner type, the meth
 argument positions hold the tag, the message, and the throwable. There is also an auto-discovery
 option that infers wrappers from the code.
 
-When a message is too generic to identify uniquely (a bare `"done"`), openLog says so rather than
+When a message is too generic to identify uniquely (a bare `"done"`), Indagium says so rather than
 guessing — matches below a specificity threshold are suppressed when any specific match exists, and
 capped in confidence when none does.
 
@@ -434,7 +434,7 @@ capped in confidence when none does.
 
 ## 17. Live tailing
 
-Right-click a tab → **Start Live Watching**. openLog polls the file and appends new lines as they
+Right-click a tab → **Start Live Watching**. Indagium polls the file and appends new lines as they
 arrive, with your filter still applied. Crash re-detection re-runs periodically rather than on every
 line, so a fast-writing log stays smooth.
 
@@ -455,7 +455,7 @@ with each row badged by the file it came from. Use it to interleave a main log w
 
 **Split** (tab right-click → **Split…**, or accept the prompt when opening a very large file).
 Divides the file into N parts on line boundaries. Concatenating the parts reproduces the original
-byte for byte, and openLog can open the parts as tabs immediately.
+byte for byte, and Indagium can open the parts as tabs immediately.
 
 ---
 
@@ -531,7 +531,7 @@ Settings → AI providers. Five kinds:
 | **LM Studio / OpenAI-compatible** | API key (often none for local) | Default profile points at `http://127.0.0.1:1234/v1` |
 | **OpenAI API** | API key | |
 | **Anthropic API** | API key | Supports extended thinking on capable models |
-| **Codex account** | Your signed-in Codex CLI | No API key — openLog drives the CLI |
+| **Codex account** | Your signed-in Codex CLI | No API key — Indagium drives the CLI |
 | **Claude Code account** | Your signed-in Claude Code CLI | No API key |
 
 API keys are held **in memory for the current launch only**. They are never written to the autosave,
@@ -572,7 +572,7 @@ points at something real.
 
 Account-based agents (Codex, Claude Code) get a fresh empty temporary workspace and a private,
 short-lived tool endpoint that is revoked when the run ends. They receive no source-folder or
-application-workspace access — all evidence reaches them through openLog's tools.
+application-workspace access — all evidence reaches them through Indagium's tools.
 
 <!-- GIF-10 · AI assistant · 20s · right-click a crash line → Ask AI → Find root cause →
      Investigation section streams tool calls → confirmation card appears → Allow →
@@ -583,7 +583,7 @@ application-workspace access — all evidence reaches them through openLog's too
 
 ## 23. External MCP clients
 
-openLog has a Model Context Protocol server **built into the app**. Any MCP client — LM Studio,
+Indagium has a Model Context Protocol server **built into the app**. Any MCP client — LM Studio,
 Claude Code, Codex, or your own tooling — can drive it over a URL, with nothing to install.
 
 It is **off by default**. Turn it on in Settings → Automation, then click **Connection info…** for
@@ -610,7 +610,7 @@ Prompt patterns: [mcp/ANALYSIS_PLAYBOOK.md](mcp/ANALYSIS_PLAYBOOK.md).
 | **Issues** | Custom issue rules (name + regex) |
 
 Also here: **clear temporary data** (archive cache and similar) and **reset all app data**, which
-returns openLog to a first-run state.
+returns Indagium to a first-run state.
 
 ---
 
@@ -689,13 +689,13 @@ Press `⌘/` / `Ctrl+/` in the app for this list. `⌘` on macOS, `Ctrl` elsewhe
 
 ## 26. Where your data lives
 
-One directory holds everything openLog stores:
+One directory holds everything Indagium stores:
 
 | OS | Directory |
 |---|---|
-| macOS | `~/Library/Application Support/openLog2` |
-| Windows | `%APPDATA%\openLog2` |
-| Linux | `$XDG_STATE_HOME/openLog2`, or `~/.local/state/openLog2` |
+| macOS | `~/Library/Application Support/Indagium` |
+| Windows | `%APPDATA%\Indagium` |
+| Linux | `$XDG_STATE_HOME/Indagium`, or `~/.local/state/Indagium` |
 
 | File or folder | What it is |
 |---|---|
@@ -708,10 +708,15 @@ One directory holds everything openLog stores:
 | `voice-models/` | Downloaded Whisper models |
 | `archive-cache/` | Videos extracted from bug-report archives |
 | `control-token` | Bearer token for the MCP control server |
-| `openlog-debug.log` | Diagnostic log — only when you turn it on |
+| `indagium-debug.log` | Diagnostic log — only when you turn it on |
 
 **What is never stored:** AI API keys (memory only, for one launch), AI conversations (cleared on
 restart), voice recordings and transcripts.
+
+**Upgrading from openLog?** The first launch after upgrading copies your session, notes, custom AI
+commands, filter backups, and source/case indexes across from the old `openLog2`-named directory
+into the new `Indagium` one, once. Your old directory is left untouched — nothing is deleted or
+moved — so it is always safe to remove by hand later if you no longer need it.
 
 Your session is saved automatically, a fraction of a second after each change, and restored on next
 launch. Restoring shows the window immediately and streams the log bodies in behind it, so a session
@@ -721,12 +726,12 @@ with several huge files still opens fast.
 
 ## 27. Troubleshooting
 
-**A file is taking forever to open.** After a while openLog offers a dialog with *Cancel loading*,
+**A file is taking forever to open.** After a while Indagium offers a dialog with *Cancel loading*,
 *Close all tabs*, *Clear cache*, and *Keep waiting*. For genuinely huge files, accept the split
 prompt when opening instead.
 
 **"Port already in use" when enabling the MCP server.** Change the port in Settings → Automation.
-If the server fails to start from a saved setting, openLog turns the toggle back off rather than
+If the server fails to start from a saved setting, Indagium turns the toggle back off rather than
 retrying on every launch.
 
 **AI provider unreachable.** Use **Test connection** in Settings → AI providers. Check the endpoint
@@ -758,7 +763,7 @@ interrupt you. Check the app-data directory is writable and has space.
 
 ## 28. Recipes
 
-The workflows openLog was built for.
+The workflows Indagium was built for.
 
 ### Triage a crash from a bug report in under a minute
 

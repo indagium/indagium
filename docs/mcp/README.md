@@ -1,6 +1,6 @@
-# Driving openLog with an MCP client
+# Driving Indagium with an MCP client
 
-openLog has a Model Context Protocol server **built into the app** — it speaks MCP over
+Indagium has a Model Context Protocol server **built into the app** — it speaks MCP over
 Streamable HTTP, so any MCP client (LM Studio, Claude Code, Codex, or your own tooling) connects
 with just a URL. There is nothing to install: no Node.js, no `npm`, no repo checkout.
 
@@ -10,19 +10,20 @@ The server is off by default and never runs in a packaged build unless you turn 
 
 - **Installed app:** Settings → Automation → *MCP control server* → **On**. The default port is
   8991 (configurable). Click *Connection info…* for the exact URL and a copyable client config.
-- **Dev run:** `OPENLOG_DEBUG_CONTROL=8991 ./gradlew desktopRun` (or `-Dopenlog.debugControl=8991`).
+- **Dev run:** `INDAGIUM_DEBUG_CONTROL=8991 ./gradlew desktopRun` (or `-Dindagium.debugControl=8991`;
+  the legacy `OPENLOG_DEBUG_CONTROL` / `-Dopenlog.debugControl` spelling still works too).
 
 ## Connect a client
 
 The endpoint is `http://127.0.0.1:8991/mcp` (swap the port if you changed it). Every request
-also requires the bearer token shown by **Connection info…** in openLog Settings.
+also requires the bearer token shown by **Connection info…** in Indagium Settings.
 
 **LM Studio / Cursor-style `mcp.json`** (e.g. `~/.lmstudio/mcp.json`):
 
 ```json
 {
   "mcpServers": {
-    "openlog-control": {
+    "indagium-control": {
       "url": "http://127.0.0.1:8991/mcp",
       "headers": {
         "Authorization": "Bearer PASTE_THE_TOKEN_FROM_CONNECTION_INFO"
@@ -35,7 +36,7 @@ also requires the bearer token shown by **Connection info…** in openLog Settin
 **Claude Code:**
 
 ```bash
-claude mcp add --transport http openlog http://127.0.0.1:8991/mcp
+claude mcp add --transport http indagium http://127.0.0.1:8991/mcp
 ```
 
 **Codex** (`~/.codex/config.toml`): add a streamable-HTTP MCP server pointed at the same URL.

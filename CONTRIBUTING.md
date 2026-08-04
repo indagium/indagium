@@ -1,4 +1,4 @@
-# Contributing to openLog
+# Contributing to Indagium
 
 Pull requests are welcome, but they are optional and may be declined or left unmerged at the maintainer's discretion. Bug reports and feature requests are also welcome through GitHub Issues and Discussions.
 
@@ -8,6 +8,6 @@ By submitting code, documentation, tests, or other copyrightable material in a p
 
 You retain ownership of your Contribution. You grant Roman Arnaut and any successor or assignee a perpetual, worldwide, irrevocable, non-exclusive, royalty-free, fully paid-up, transferable, sublicensable licence to use, copy, modify, create derivative works of, distribute, publicly perform, publicly display, and relicense the Contribution, in any form and under any terms, including proprietary and commercial terms.
 
-This grant allows Contributions accepted into openLog to be used with the project's current licence and in future openLog editions, including proprietary or commercial editions.
+This grant allows Contributions accepted into Indagium to be used with the project's current licence and in future Indagium editions, including proprietary or commercial editions.
 
 Do not submit third-party material unless you have the right to grant this licence. Identify all third-party material and its licence in the pull request description.

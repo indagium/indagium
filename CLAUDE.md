@@ -39,14 +39,14 @@ Skipping this leaves the README showing a stale version after a release ships, w
 ./gradlew packageMsi        # Windows .msi (run on Windows)
 
 # Release (triggers GitHub Actions → builds Linux x86-64 + Linux arm64 + Windows + macOS → creates GitHub Release)
-git tag v1.7.9 && git push --tags
+git tag v1.8.0 && git push --tags
 ```
 
 Source sets are `desktopMain` and `desktopTest` (Kotlin Multiplatform with a single `jvm("desktop")` target).
 
 ## Architecture
 
-openLog is a Compose Multiplatform Desktop log viewer for Android logcat files. All code lives under `src/desktopMain/kotlin/com/indagium/` — ~47k lines across 11 packages.
+Indagium is a Compose Multiplatform Desktop log viewer for Android logcat files. All code lives under `src/desktopMain/kotlin/com/indagium/` — ~47k lines across 11 packages.
 
 > **`docs/SAAD.md` is the authoritative architecture document.** It covers module boundaries, the
 > threading model, persistence formats, security posture, and known risks, with file:line citations.
@@ -76,9 +76,9 @@ File → LogParser.parseLogcat()  ──→  List<LogEntry>          (sequential
 | `model` | All domain types (`Model.kt`, one file): `LogEntry`, `LogTab`, `Filter`, `Annotations`/`AnnBlock`, `LogAnalysis`, `LogItem`, `AppSettings`, `ThemePreset`. No behaviour. |
 | `utils` | The log engine, UI-free: `LogParser`, `Filter` (`passesFilter`/`computeItems`/`buildMd`), `SeqComputer`, `StackTraceComputer`, `TextMatch` (regex cache + backtracking budget), `EntryIdMap`, `LogTime`, `LogMerge`, `LogSplitter`, `FileTailer`, `BugReportZip`, `AtomicFileWrite`, export helpers. |
 | `ui` | Compose UI **and** `AppState` + coordinators + persistence codecs. The biggest package by far. |
-| `source` | Source indexing and log→call-site resolution. Pure text/regex/brace-matching, no compiler dep. Own store at `appDataDir()/source-index` (`openLog2-source-index-v1`, schema v9). |
-| `cases` | Similarity index over previously written analysis notes; backs `search_similar_cases`. Store at `appDataDir()/case-index`. |
-| `debug` | `ControlServer` (Ktor CIO, loopback-only, MCP over Streamable HTTP + REST, off by default), the **56-tool** catalogue + handlers joined by `OpenLogToolGateway`, hand-rolled `Json`, `AppLogger`. |
+| `source` | Source indexing and log→call-site resolution. Pure text/regex/brace-matching, no compiler dep. Own store at `appDataDir()/source-index` (`indagium-source-index-v1`, schema v9; also accepts the legacy `openLog2-source-index-v1` magic). |
+| `cases` | Similarity index over previously written analysis notes; backs `search_similar_cases`. Store at `appDataDir()/case-index` (`indagium-case-index-v1`; also accepts the legacy `openLog2-case-index-v1` magic). |
+| `debug` | `ControlServer` (Ktor CIO, loopback-only, MCP over Streamable HTTP + REST, off by default), the **56-tool** catalogue + handlers joined by `IndagiumToolGateway`, hand-rolled `Json`, `AppLogger`. |
 | `ai` | `LlmProvider` (Anthropic + OpenAI-compatible over HTTP) and the subprocess account agents (Codex stdio JSON-RPC, Claude Code stream-json), `AiAgentRunner` loop, `AiToolExecutionCoordinator` (the single policy point: budget, tab pinning, confirmation gate). |
 | `video` | JavaCV/FFmpeg playback on a dedicated decode thread; per-tab controllers owned by `AppState`. |
 | `voice` | Dictation: Whisper JNI, Apple Speech (build-time-compiled JNI bridge), Windows Speech helper. |
@@ -95,7 +95,7 @@ File → LogParser.parseLogcat()  ──→  List<LogEntry>          (sequential
 | `ui/FilterPanel.kt` | Left sidebar; bound to `AppState` by `BoundFilterPanel` in `ui/FileView.kt` |
 | `ui/AnnotationPanel.kt` + `ui/AnnotationManager.kt` | Notes UI and its block-model mutations |
 | `ui/AutosaveCodec.kt` | The on-disk format. **Append new token fields last** — see the versioning note below |
-| `debug/ControlServer.kt` + `debug/OpenLogToolOperations.kt` | Tool catalogue and handlers. Names must match or `OpenLogToolGateway`'s `init` throws |
+| `debug/ControlServer.kt` + `debug/IndagiumToolOperations.kt` | Tool catalogue and handlers. Names must match or `IndagiumToolGateway`'s `init` throws |
 | `ui/Components.kt` / `ui/Theme.kt` | Shared widgets; `ThemeColors`, `themeColors()`, `HL_COLORS`, `SEQ_COLORS` |
 
 ### Two invariants worth knowing before editing
@@ -114,7 +114,7 @@ fun upFlt(tabId: String, fn: (Filter) -> Filter) = upTab(tabId) { it.copy(filter
 
 File loading uses `ioScope` (`Dispatchers.IO`). Compose `mutableStateOf` is snapshot-safe to write from any thread — **no `withContext(Dispatchers.Main)` needed or used**.
 
-Autosave triggers via `LaunchedEffect` with a 400ms debounce on tab/filter/settings changes, writing to `~/.openlog2/autosave.cache` in a line-oriented token format (`openLog2-cache-v1`).
+Autosave triggers via `LaunchedEffect` with a 400ms debounce on tab/filter/settings changes, writing to `<appDataDir>/autosave.cache` in a line-oriented token format (`indagium-cache-v1`; a load also accepts the legacy `openLog2-cache-v1` magic). `appDataDir()` is platform-specific — see `ui/DesktopStorage.kt` — e.g. `~/Library/Application Support/Indagium` on macOS, `%APPDATA%\Indagium` on Windows, `$XDG_STATE_HOME/Indagium` (fallback `~/.local/state/Indagium`) on Linux.
 
 ### LogItem sealed class
 

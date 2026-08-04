@@ -6763,7 +6763,7 @@ class AppState(
         resetAppDataError = null
     }
 
-    /** Deletes only openLog's managed app-data root; callers exit immediately after success. */
+    /** Deletes only Indagium's managed app-data root; callers exit immediately after success. */
     fun deleteAllAppData(): Boolean {
         val root = File(appCachePath)
         val deleted = runCatching { !root.exists() || root.deleteRecursively() }.getOrElse { false }

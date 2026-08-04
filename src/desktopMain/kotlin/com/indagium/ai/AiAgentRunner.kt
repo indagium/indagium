@@ -213,7 +213,7 @@ internal data class AiToolConfirmation(
 /**
  * A bounded, provider-neutral model -> tool -> model loop.
  *
- * It never routes through openLog's HTTP MCP server: [toolGateway] directly invokes the same
+ * It never routes through Indagium's HTTP MCP server: [toolGateway] directly invokes the same
  * transport-neutral operations used by the MCP adapter. Tools classified as destructive pause
  * before the gateway is touched, and a UI must explicitly resolve that pause.
  */

@@ -326,14 +326,14 @@ class ClaudeCodeClient(
             // --print mode it cannot actually prompt, so it gives up and describes the request in
             // plain text instead of a tool call - that text then surfaces as a normal assistant
             // reply asking the user to "grant permissions", never reaching real investigation.
-            // --strict-mcp-config: load only the managed `openlog` server passed below, ignoring
+            // --strict-mcp-config: load only the managed `indagium` server passed below, ignoring
             // any other MCP servers configured on this machine (parallels the Codex account path's
             // codexDisableUserServersConfig).
             // --tools "": disable every built-in tool (Bash, Read, Write, Edit, ...) - this class's
             // whole design is that the agent only ever touches evidence through its managed MCP
             // endpoint, never the filesystem directly.
             // --permission-mode bypassPermissions: with the two restrictions above, the only tools
-            // left to call are the managed openlog ones, and openLog already gates sensitive
+            // left to call are the managed indagium ones, and Indagium already gates sensitive
             // actions itself via AiToolExecutionCoordinator - so auto-approving Claude Code's side
             // of that handshake is correct, exactly like decideCodexElicitation does for Codex.
             add("--strict-mcp-config")

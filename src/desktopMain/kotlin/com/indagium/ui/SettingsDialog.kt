@@ -2432,7 +2432,7 @@ internal fun sourceIndexAgeLabel(builtAt: Long): String {
 // (./gradlew desktopRun sets the JVM's working directory there). The control server can also be
 // turned on from Settings in a normal installed .dmg/.deb/.msi — that's the common case, not a
 // dev-only path — and there user.dir is whatever the OS handed the launched app (often "/" for a
-// openLog serves MCP natively over Streamable HTTP at /mcp — any MCP client (LM Studio, Claude
+// Indagium serves MCP natively over Streamable HTTP at /mcp — any MCP client (LM Studio, Claude
 // Code, Codex) connects with just this URL, no Node bridge / npm / repo checkout to install. The
 // snippet is the standard mcpServers-with-url form those clients accept. `token` is required on
 // every request (see debug/ControlServer.kt's start()); it rides along as a `headers` block the

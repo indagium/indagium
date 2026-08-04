@@ -3,7 +3,7 @@ package com.indagium.utils
 import com.indagium.model.LogEntry
 import com.indagium.model.ProcessNameMode
 
-// Logcat never gives openLog a pid -> process-name map directly, but the framework itself logs
+// Logcat never gives Indagium a pid -> process-name map directly, but the framework itself logs
 // process starts in a couple of well-known shapes. This scans for those and builds one — the
 // side map LogAnalysis.processNames carries (see model/Model.kt's own doc for why it's a side
 // map, never a LogEntry field).
