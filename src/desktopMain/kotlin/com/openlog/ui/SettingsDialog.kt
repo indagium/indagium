@@ -2441,7 +2441,7 @@ internal fun mcpConfigSnippet(port: Int, token: String): String =
     """
     {
       "mcpServers": {
-        "openlog-control": {
+        "indagium-control": {
           "url": "${mcpUrl(port)}",
           "headers": {
             "Authorization": "Bearer $token"
@@ -2453,11 +2453,11 @@ internal fun mcpConfigSnippet(port: Int, token: String): String =
 
 internal fun codexMcpConfigSnippet(port: Int, token: String): String =
     """
-    [mcp_servers.openlog]
+    [mcp_servers.indagium]
     url = "${mcpUrl(port)}"
     http_headers = { Authorization = "Bearer $token" }
 
-    [mcp_servers.openlog.tools.list_tabs]
+    [mcp_servers.indagium.tools.list_tabs]
     approval_mode = "approve"
     """.trimIndent()
 

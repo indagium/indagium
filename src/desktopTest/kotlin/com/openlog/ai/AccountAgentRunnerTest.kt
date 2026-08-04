@@ -55,46 +55,67 @@ class AccountAgentRunnerTest {
     fun codexManagedMcpConfigKeepsTheTemporaryBearerTokenOutOfCommandArguments() {
         assertEquals(
             listOf(
-                "--config", "mcp_servers.openlog.url=\"http://127.0.0.1:41723/mcp\"",
-                "--config", "mcp_servers.openlog.bearer_token_env_var=\"OPENLOG_MCP_TOKEN\"",
-                "--config", "mcp_servers.openlog.approval_mode=\"never\"",
+                "--config", "mcp_servers.indagium.url=\"http://127.0.0.1:41723/mcp\"",
+                "--config", "mcp_servers.indagium.bearer_token_env_var=\"INDAGIUM_MCP_TOKEN\"",
+                "--config", "mcp_servers.indagium.approval_mode=\"never\"",
             ),
             codexManagedMcpConfig("http://127.0.0.1:41723/mcp"),
         )
-        assertEquals(mapOf("OPENLOG_MCP_TOKEN" to "temporary-token"), codexManagedMcpEnvironment("temporary-token"))
+        assertEquals(mapOf("INDAGIUM_MCP_TOKEN" to "temporary-token"), codexManagedMcpEnvironment("temporary-token"))
+    }
+
+    // Regression guard for the "one shared constant" invariant described on MANAGED_MCP_SERVER_NAME
+    // and decideCodexElicitation: this derives the server name from the actual config the runner
+    // builds for Codex, rather than hardcoding "indagium" on both sides, so an edit that renames
+    // one call site without the other fails here instead of silently hiding behind the
+    // `|| approvalKind == "mcp_tool_call"` fallback (that's why _meta is omitted below).
+    @Test
+    fun theServerNameConfiguredForCodexIsTheSameOneDecideCodexElicitationAccepts() {
+        val config = codexManagedMcpConfig("http://127.0.0.1:41723/mcp")
+        val configuredServerName = Regex("""mcp_servers\.([A-Za-z0-9_-]+)\.url=""")
+            .find(config.joinToString(" "))
+            ?.groupValues
+            ?.get(1)
+            ?: error("codexManagedMcpConfig did not produce an mcp_servers.<name>.url entry:\n$config")
+
+        val params = Json.parseToJsonElement("""{"serverName":"$configuredServerName","mode":"form"}""").jsonObject
+        val decision = decideCodexElicitation(params)
+
+        assertTrue(decision.isManagedServerApproval)
+        assertEquals("accept", decision.response["action"]?.jsonPrimitive?.content)
     }
 
     // decideCodexElicitation covers the mcpServer/elicitation/request handshake: it is a tool-call
-    // approval, not OAuth, and only requests for the managed openlog server should be auto-accepted.
+    // approval, not OAuth, and only requests for the managed indagium server should be auto-accepted.
 
     @Test
-    fun openLogToolCallApprovalIsAccepted() {
+    fun managedServerToolCallApprovalIsAccepted() {
         val params = Json.parseToJsonElement(
             """
-            {"threadId":"t1","turnId":"turn1","serverName":"openlog","mode":"form",
+            {"threadId":"t1","turnId":"turn1","serverName":"indagium","mode":"form",
               "_meta":{"codex_approval_kind":"mcp_tool_call","persist":["session","always"],
                 "tool_description":"List open tabs","tool_params":{}},
-              "message":"Allow the openlog MCP server to run tool \"list_tabs\"?",
+              "message":"Allow the indagium MCP server to run tool \"list_tabs\"?",
               "requestedSchema":{"type":"object","properties":{}}}
             """.trimIndent(),
         ).jsonObject
 
         val decision = decideCodexElicitation(params)
 
-        assertTrue(decision.isOpenLogToolApproval)
+        assertTrue(decision.isManagedServerApproval)
         assertEquals("accept", decision.response["action"]?.jsonPrimitive?.content)
         assertTrue(decision.response["content"]!!.jsonObject.isEmpty())
     }
 
     @Test
-    fun openLogApprovalIsRecognizedByApprovalKindAloneWhenServerNameIsMissing() {
+    fun managedServerApprovalIsRecognizedByApprovalKindAloneWhenServerNameIsMissing() {
         val params = Json.parseToJsonElement(
             """{"_meta":{"codex_approval_kind":"mcp_tool_call"},"message":"Allow tool?"}""",
         ).jsonObject
 
         val decision = decideCodexElicitation(params)
 
-        assertTrue(decision.isOpenLogToolApproval)
+        assertTrue(decision.isManagedServerApproval)
         assertEquals("accept", decision.response["action"]?.jsonPrimitive?.content)
     }
 
@@ -107,17 +128,17 @@ class AccountAgentRunnerTest {
 
         val decision = decideCodexElicitation(params)
 
-        assertTrue(!decision.isOpenLogToolApproval)
+        assertTrue(!decision.isManagedServerApproval)
         assertEquals("decline", decision.response["action"]?.jsonPrimitive?.content)
     }
 
     @Test
-    fun elicitationWithNoIdentifyingFieldsIsTreatedAsNotOpenLog() {
+    fun elicitationWithNoIdentifyingFieldsIsTreatedAsNotManaged() {
         val params = Json.parseToJsonElement("""{"message":"Authorization required"}""").jsonObject
 
         val decision = decideCodexElicitation(params)
 
-        assertTrue(!decision.isOpenLogToolApproval)
+        assertTrue(!decision.isManagedServerApproval)
         assertEquals("decline", decision.response["action"]?.jsonPrimitive?.content)
     }
 
@@ -148,9 +169,9 @@ class AccountAgentRunnerTest {
     }
 
     @Test
-    fun theManagedOpenLogServerIsNeverDisabled() {
-        // A user could conceivably have their own [mcp_servers.openlog]; it must not be turned off.
-        assertEquals(emptySet(), codexUserMcpServerNames("[mcp_servers.openlog]\nurl = \"x\""))
+    fun theManagedServerIsNeverDisabled() {
+        // A user could conceivably have their own [mcp_servers.indagium]; it must not be turned off.
+        assertEquals(emptySet(), codexUserMcpServerNames("[mcp_servers.indagium]\nurl = \"x\""))
     }
 
     @Test

@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "openlog-control": {
+    "indagium-control": {
       "url": "http://127.0.0.1:8991/mcp"
     }
   }

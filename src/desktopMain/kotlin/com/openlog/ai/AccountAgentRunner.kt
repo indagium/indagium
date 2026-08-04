@@ -19,6 +19,16 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 /**
+ * The one name under which the app's managed MCP server is registered with both Claude Code (as an
+ * `mcpServers` key, see [AccountAgentRunner.runClaude]) and Codex (as `mcp_servers.<name>`, see
+ * [codexManagedMcpConfig]). [decideCodexElicitation] compares an incoming elicitation's
+ * `serverName` against this same constant to decide whether to auto-approve it - if a caller ever
+ * renames one side without the other, that comparison silently stops matching by name (see that
+ * function's doc for why the bug then hides behind its `_meta.codex_approval_kind` fallback).
+ */
+internal const val MANAGED_MCP_SERVER_NAME = "indagium"
+
+/**
  * Runs a locally authenticated coding agent in an empty temporary workspace. The agent receives
  * log evidence only through its per-run managed MCP endpoint; it never receives app paths or a
  * source-folder mount.
@@ -128,7 +138,7 @@ internal class AccountAgentRunner(
                             }
                         }
                         is CodexAppServerEvent.McpServerStartupStatus -> {
-                            if (event.serverName == "openlog") {
+                            if (event.serverName == MANAGED_MCP_SERVER_NAME) {
                                 val detail = event.message ?: event.status ?: "updated"
                                 if (event.status.equals("failed", ignoreCase = true) || event.status.equals("error", ignoreCase = true)) {
                                     terminal.completeExceptionally(IllegalStateException("openLog MCP could not start: $detail"))
@@ -141,7 +151,7 @@ internal class AccountAgentRunner(
                             "mcpServer/elicitation/request" -> {
                                 val decision = decideCodexElicitation(event.params)
                                 client.resolveServerRequest(event.id, decision.response)
-                                if (!decision.isOpenLogToolApproval) {
+                                if (!decision.isManagedServerApproval) {
                                     // Some other MCP server configured in the user's Codex profile (e.g. an
                                     // OAuth-backed integration) is asking for approval. Decline it gracefully
                                     // instead of aborting; that server just stays unavailable for this run.
@@ -224,7 +234,9 @@ internal class AccountAgentRunner(
         ClaudeCodeClient(executable = LocalAccountCli.executable(profile.kind, profile.executablePath)).stream(
             ClaudeCodeRequest(
                 prompt = accountPrompt(run, systemPrompt, prompt),
-                mcpServers = mapOf("openlog" to ClaudeCodeMcpServer(lease.url, mapOf("Authorization" to "Bearer ${lease.token}"))),
+                mcpServers = mapOf(
+                    MANAGED_MCP_SERVER_NAME to ClaudeCodeMcpServer(lease.url, mapOf("Authorization" to "Bearer ${lease.token}")),
+                ),
                 // Resumes the same tab's prior Claude Code session (if any) so a follow-up like "are
                 // you sure?" is answered from real conversation memory instead of a blank session
                 // that has to either re-investigate from scratch or admit it has no context.
@@ -272,7 +284,8 @@ internal class AccountAgentRunner(
     }
 
     private fun accountPrompt(run: AiRun, systemPrompt: String, prompt: String): String =
-        "$systemPrompt\n\n${run.toolCallBudget.initialGuidance()}\n\nYou have one MCP server named openlog. Use only its tools for log, source, filter, " +
+        "$systemPrompt\n\n${run.toolCallBudget.initialGuidance()}\n\nYou have one MCP server named " +
+            "$MANAGED_MCP_SERVER_NAME. Use only its tools for log, source, filter, " +
             "tab, or note evidence and actions. Do not inspect the local workspace; it is intentionally empty." +
             "\n\nUser request:\n$prompt"
 
@@ -294,9 +307,9 @@ internal class AccountAgentRunner(
  */
 internal fun resolveAccountAgentWorkspace(session: AiSession, kind: AiProviderKind): Path =
     if (kind == AiProviderKind.CLAUDE_CODE_ACCOUNT) {
-        session.claudeCodeWorkspace ?: Files.createTempDirectory("openlog-agent-").also { session.claudeCodeWorkspace = it }
+        session.claudeCodeWorkspace ?: Files.createTempDirectory("indagium-agent-").also { session.claudeCodeWorkspace = it }
     } else {
-        Files.createTempDirectory("openlog-agent-")
+        Files.createTempDirectory("indagium-agent-")
     }
 
 /**
@@ -305,28 +318,29 @@ internal fun resolveAccountAgentWorkspace(session: AiSession, kind: AiProviderKi
  * arguments, so a quoted `Bearer <token>` header can be split and mistaken for a subcommand.
  */
 internal fun codexManagedMcpConfig(url: String): List<String> = listOf(
-    "--config", "mcp_servers.openlog.url=\"$url\"",
-    "--config", "mcp_servers.openlog.bearer_token_env_var=\"$CODEX_OPENLOG_MCP_TOKEN_ENV\"",
+    "--config", "mcp_servers.$MANAGED_MCP_SERVER_NAME.url=\"$url\"",
+    "--config", "mcp_servers.$MANAGED_MCP_SERVER_NAME.bearer_token_env_var=\"$CODEX_INDAGIUM_MCP_TOKEN_ENV\"",
     // `approval_mode` is not a key Codex's app-server recognizes; in app-server mode Codex always
     // delegates tool-call approval to the host via `mcpServer/elicitation/request`; see
     // [decideCodexElicitation]. openLog itself routes sensitive actions through
     // AiToolExecutionCoordinator, so auto-approving Codex's side of that handshake is correct.
-    "--config", "mcp_servers.openlog.approval_mode=\"never\"",
+    "--config", "mcp_servers.$MANAGED_MCP_SERVER_NAME.approval_mode=\"never\"",
 )
 
 internal fun codexManagedMcpEnvironment(token: String): Map<String, String> =
-    mapOf(CODEX_OPENLOG_MCP_TOKEN_ENV to token)
+    mapOf(CODEX_INDAGIUM_MCP_TOKEN_ENV to token)
 
-private const val CODEX_OPENLOG_MCP_TOKEN_ENV = "OPENLOG_MCP_TOKEN"
+private const val CODEX_INDAGIUM_MCP_TOKEN_ENV = "INDAGIUM_MCP_TOKEN"
 
 /**
  * `--config mcp_servers.<name>.enabled=false` for every MCP server in the user's Codex config
- * except the per-run `openlog` endpoint. Codex loads every server from `~/.codex/config.toml` for
- * any run it starts, and an OAuth-backed one (Figma, Xcode, ...) that cannot authenticate in this
- * non-interactive launch quits with an `Auth(AuthorizationRequired)` transport error printed to
- * stderr — harmless to the analysis, but alarming in the console. The panel agent only needs
- * `openlog`, so the rest are disabled for the launch while the real config home (and its model /
- * account settings) is left untouched. Returns empty when the config is missing or unreadable.
+ * except the per-run [MANAGED_MCP_SERVER_NAME] endpoint. Codex loads every server from
+ * `~/.codex/config.toml` for any run it starts, and an OAuth-backed one (Figma, Xcode, ...) that
+ * cannot authenticate in this non-interactive launch quits with an `Auth(AuthorizationRequired)`
+ * transport error printed to stderr — harmless to the analysis, but alarming in the console. The
+ * panel agent only needs [MANAGED_MCP_SERVER_NAME], so the rest are disabled for the launch while
+ * the real config home (and its model / account settings) is left untouched. Returns empty when
+ * the config is missing or unreadable.
  */
 internal fun codexDisableUserServersConfig(
     configFile: Path? = codexConfigFile(),
@@ -336,12 +350,12 @@ internal fun codexDisableUserServersConfig(
     return codexUserMcpServerNames(configText).flatMap { listOf("--config", "mcp_servers.$it.enabled=false") }
 }
 
-/** Distinct MCP server names declared in a Codex `config.toml`, excluding the managed `openlog`. */
+/** Distinct MCP server names declared in a Codex `config.toml`, excluding the managed [MANAGED_MCP_SERVER_NAME]. */
 internal fun codexUserMcpServerNames(configText: String): Set<String> =
     Regex("""(?m)^\s*\[?mcp_servers\.([A-Za-z0-9_-]+)""")
         .findAll(configText)
         .map { it.groupValues[1] }
-        .filter { it != "openlog" }
+        .filter { it != MANAGED_MCP_SERVER_NAME }
         .toSet()
 
 private fun codexConfigFile(): Path? {
@@ -352,7 +366,7 @@ private fun codexConfigFile(): Path? {
 
 /** The reply to send back for a Codex `mcpServer/elicitation/request`, and what it means. */
 internal data class CodexElicitationDecision(
-    val isOpenLogToolApproval: Boolean,
+    val isManagedServerApproval: Boolean,
     val response: JsonObject,
 )
 
@@ -360,25 +374,33 @@ internal data class CodexElicitationDecision(
  * Decides how to answer a Codex app-server `mcpServer/elicitation/request`. Captured params from a
  * real run look like:
  * ```
- * {"threadId":"...","turnId":"...","serverName":"openlog","mode":"form",
+ * {"threadId":"...","turnId":"...","serverName":"indagium","mode":"form",
  *   "_meta":{"codex_approval_kind":"mcp_tool_call", ...},
- *   "message":"Allow the openlog MCP server to run tool \"list_tabs\"?", ...}
+ *   "message":"Allow the indagium MCP server to run tool \"list_tabs\"?", ...}
  * ```
- * This is a tool-call approval, not an OAuth prompt. When it is for the managed `openlog` server
- * (identified by `serverName` or `_meta.codex_approval_kind`), accept it and let the tool run —
- * openLog already gates destructive tools itself via [AiToolExecutionCoordinator]. Any other server
- * (e.g. an OAuth-backed integration from the user's own `~/.codex/config.toml`) is declined; that
- * server simply stays unavailable for this run instead of aborting it.
+ * This is a tool-call approval, not an OAuth prompt. When it is for the managed
+ * [MANAGED_MCP_SERVER_NAME] server (identified by `serverName` or `_meta.codex_approval_kind`),
+ * accept it and let the tool run — openLog already gates destructive tools itself via
+ * [AiToolExecutionCoordinator]. Any other server (e.g. an OAuth-backed integration from the user's
+ * own `~/.codex/config.toml`) is declined; that server simply stays unavailable for this run
+ * instead of aborting it.
+ *
+ * `serverName` alone is not a safe gate here: the `||` against `approvalKind` below means that if
+ * [MANAGED_MCP_SERVER_NAME] and the config sites that register it under that name (Claude Code's
+ * `mcpServers` key, Codex's `mcp_servers.<name>`) ever drift apart, this keeps returning true for
+ * most elicitations anyway — the drift would only surface for ones that arrive without
+ * `_meta.codex_approval_kind`. That is why the name lives in one shared constant instead of being
+ * typed out at each call site.
  */
 internal fun decideCodexElicitation(params: JsonObject): CodexElicitationDecision {
     val serverName = params.stringOrNull("serverName")
     val approvalKind = (params["_meta"] as? JsonObject)?.stringOrNull("codex_approval_kind")
-    val isOpenLogToolApproval = serverName == "openlog" || approvalKind == "mcp_tool_call"
+    val isManagedServerApproval = serverName == MANAGED_MCP_SERVER_NAME || approvalKind == "mcp_tool_call"
     val response = buildJsonObject {
-        put("action", if (isOpenLogToolApproval) "accept" else "decline")
+        put("action", if (isManagedServerApproval) "accept" else "decline")
         put("content", buildJsonObject { })
     }
-    return CodexElicitationDecision(isOpenLogToolApproval, response)
+    return CodexElicitationDecision(isManagedServerApproval, response)
 }
 
 private fun JsonObject.stringOrNull(name: String): String? = this[name]?.jsonPrimitive?.contentOrNull

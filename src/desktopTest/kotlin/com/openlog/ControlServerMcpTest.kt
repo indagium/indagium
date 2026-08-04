@@ -128,7 +128,7 @@ class ControlServerMcpTest {
     @Test
     fun initializeReturnsServerInfo() {
         val init = mcp(INITIALIZE_REQUEST)
-        assertTrue(init.body().contains("openlog-control"), "missing serverInfo:\n${init.body()}")
+        assertTrue(init.body().contains("indagium-control"), "missing serverInfo:\n${init.body()}")
     }
 
     @Test
