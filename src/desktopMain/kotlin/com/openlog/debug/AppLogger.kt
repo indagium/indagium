@@ -12,13 +12,13 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * Opt-in, self-viewable diagnostic logging for openLog itself.  Its output intentionally uses
- * Android's threadtime grammar, so the file can be opened in openLog just like a device log.
+ * Opt-in, self-viewable diagnostic logging for Indagium itself.  Its output intentionally uses
+ * Android's threadtime grammar, so the file can be opened in Indagium just like a device log.
  * Messages are a small operational vocabulary, never user log rows, AI content, credentials, or
  * absolute paths.  This is a best-effort diagnostic aid: a write failure never affects the app.
  */
 internal object AppLogger {
-    private const val LOG_TAG = "openLog"
+    private const val LOG_TAG = "Indagium"
     private const val MAX_MESSAGE_CHARS = 2_000
     private val lock = ReentrantLock()
     private val timestampFormat = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss.SSS", Locale.ROOT)

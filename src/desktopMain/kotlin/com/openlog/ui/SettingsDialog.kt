@@ -576,7 +576,7 @@ private fun AppearanceSettingsSection(state: AppState) {
             TooltipArea(
                 tooltip = {
                     StorageInfoTooltip(
-                        "Everything openLog stores in this folder: temporary data, settings, current session/autosave, " +
+                        "Everything Indagium stores in this folder: temporary data, settings, current session/autosave, " +
                             "saved filters, source and case indexes, diagnostics, and integration data.",
                     )
                 },
@@ -1137,7 +1137,7 @@ private fun SourceCodeSettingsSection(state: AppState) {
                     .padding(horizontal = 8.dp, vertical = 4.dp),
             ) {
                 AppText(
-                    "Point openLog at your project's source folder(s), then right-click a log line → " +
+                    "Point Indagium at your project's source folder(s), then right-click a log line → " +
                         "\"Show in code\" to see the code that logged it.",
                     color = tc.tx,
                     fontSize = 11.sp,
@@ -1892,7 +1892,7 @@ private fun VoiceInputSettingsSection(state: AppState) {
             AppText(
                 when {
                     checkingModel -> "Checking local model…"
-                    installed -> "Status: installed at openLog application data/voice-models."
+                    installed -> "Status: installed at Indagium application data/voice-models."
                     else -> "Status: not installed."
                 },
                 color = if (installed) tc.ac else tc.td,
@@ -1943,11 +1943,11 @@ private fun VoiceInputSettingsSection(state: AppState) {
             AppText(
                 if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.APPLE_SPEECH) {
                     "At first use macOS asks for Speech Recognition permission. If the selected " +
-                        "language has no on-device Apple model, openLog refuses to send audio and " +
+                        "language has no on-device Apple model, Indagium refuses to send audio and " +
                         "you can switch back to Whisper."
                 } else {
                     "Windows Speech uses a matching installed legacy recognizer. Language availability is narrower than Whisper; " +
-                        "if there is no recognizer for the selected language, openLog shows the reason and you can switch back to Whisper."
+                        "if there is no recognizer for the selected language, Indagium shows the reason and you can switch back to Whisper."
                 },
                 color = tc.tx,
                 fontSize = 12.sp,

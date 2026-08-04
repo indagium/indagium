@@ -218,7 +218,8 @@ data class McpSessionInfo(val id: String, val name: String, val version: String?
  *    ControlServerTest suite.
  * Both dispatch into the same gateway handlers, which read/mutate real app state. See Main.kt for
  * startup gating: this must never start in packaged builds unless the user enables it in Settings
- * (or OPENLOG_DEBUG_CONTROL / -Dopenlog.debugControl is set).
+ * (or INDAGIUM_DEBUG_CONTROL / -Dindagium.debugControl is set — the legacy OPENLOG_DEBUG_CONTROL /
+ * -Dopenlog.debugControl spelling still works too).
  *
  * AppState's mutableStateOf fields are documented as snapshot-safe to read/write from any thread,
  * so Ktor's request-handling coroutines can call AppState directly. Public API

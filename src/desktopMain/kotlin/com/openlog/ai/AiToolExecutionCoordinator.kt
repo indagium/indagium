@@ -202,7 +202,7 @@ internal data class AiToolExecutionResult(
             return if (rendered.length <= maxChars) {
                 AiToolExecutionResult(rendered, rendered, truncated = false, evidence = evidence, raw = value)
             } else {
-                val notice = "\n\n[Tool result truncated to $maxChars characters by openLog.]"
+                val notice = "\n\n[Tool result truncated to $maxChars characters by Indagium.]"
                 val bounded = rendered.take((maxChars - notice.length).coerceAtLeast(0)) + notice
                 AiToolExecutionResult(bounded, bounded, truncated = true, evidence = evidence, raw = value)
             }

@@ -297,7 +297,7 @@ internal class AiSidebarRuntime(
 
     private fun systemPrompt(context: AiInvestigationContext): String =
         """
-        You are openLog's in-app log investigation assistant. The pinned log tab for this request is `${context.tabId}`.
+        You are Indagium's in-app log investigation assistant. The pinned log tab for this request is `${context.tabId}`.
         ${when {
             context.lineIds.isNotEmpty() ->
                 "The selected log-line context is `${context.lineIds.joinToString(", ")}`. " +

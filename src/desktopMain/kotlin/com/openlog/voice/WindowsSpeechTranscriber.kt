@@ -23,7 +23,7 @@ class WindowsSpeechTranscriber : VoiceTranscriber {
         return try {
             val builder = ProcessBuilder("powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_SCRIPT)
                 .redirectErrorStream(true)
-            builder.environment()["OPENLOG_SPEECH_LOCALE"] = language
+            builder.environment()["INDAGIUM_SPEECH_LOCALE"] = language
             val process = builder.start()
             BufferedWriter(OutputStreamWriter(process.outputStream, Charsets.UTF_8)).use { out ->
                 out.write(Base64.getEncoder().encodeToString(audio.toWavBytes()))
@@ -63,7 +63,7 @@ class WindowsSpeechTranscriber : VoiceTranscriber {
     }
 
     companion object {
-        private const val LANGUAGE_UNAVAILABLE_MARKER = "OPENLOG_SPEECH_LANGUAGE_UNAVAILABLE"
+        private const val LANGUAGE_UNAVAILABLE_MARKER = "INDAGIUM_SPEECH_LANGUAGE_UNAVAILABLE"
 
         internal fun failureMessage(output: String, language: String): String = when {
             output.contains(LANGUAGE_UNAVAILABLE_MARKER) -> {
@@ -81,12 +81,12 @@ class WindowsSpeechTranscriber : VoiceTranscriber {
 Add-Type -AssemblyName System.Speech
 ${'$'}bytes = [Convert]::FromBase64String([Console]::In.ReadToEnd())
 ${'$'}stream = New-Object System.IO.MemoryStream(,${'$'}bytes)
-${'$'}culture = [System.Globalization.CultureInfo]::GetCultureInfo(${ '$' }env:OPENLOG_SPEECH_LOCALE)
+${'$'}culture = [System.Globalization.CultureInfo]::GetCultureInfo(${ '$' }env:INDAGIUM_SPEECH_LOCALE)
 ${'$'}recognizerInfo = [System.Speech.Recognition.SpeechRecognitionEngine]::InstalledRecognizers() |
     Where-Object { ${'$'}_.Culture.Name -eq ${'$'}culture.Name } |
     Select-Object -First 1
 if (${ '$' }null -eq ${'$'}recognizerInfo) {
-    [Console]::Error.Write("OPENLOG_SPEECH_LANGUAGE_UNAVAILABLE")
+    [Console]::Error.Write("INDAGIUM_SPEECH_LANGUAGE_UNAVAILABLE")
     exit 2
 }
 ${'$'}recognizer = New-Object System.Speech.Recognition.SpeechRecognitionEngine(${ '$' }recognizerInfo)

@@ -189,7 +189,7 @@ class SingleInstanceHandle internal constructor(
                 // sender can never kill the accept loop for subsequent, well-formed callers.
                 runCatching { handleConnection(conn, onOpenFiles, onRaise) }
             }
-        }, "openlog-single-instance-accept").apply {
+        }, "indagium-single-instance-accept").apply {
             isDaemon = true
             start()
         }

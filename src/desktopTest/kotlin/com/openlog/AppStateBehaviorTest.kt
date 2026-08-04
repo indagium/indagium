@@ -1641,7 +1641,7 @@ class AppStateBehaviorTest {
 
         val whileEnabled = debugLogFile.readText()
         assertTrue(whileEnabled.contains("Diagnostic logging enabled"))
-        assertTrue(whileEnabled.contains("openLog.open: [INFO][open] Opened app.log (1 entries)"))
+        assertTrue(whileEnabled.contains("Indagium.open: [INFO][open] Opened app.log (1 entries)"))
         assertTrue(whileEnabled.contains("Could not open file"))
 
         // The app's own diagnostic file is a regular structured Logcat source, not a RAW-text
@@ -1650,8 +1650,8 @@ class AppStateBehaviorTest {
         waitUntil { state.tabs.size == 2 && !state.isLoading }
         val diagnosticTab = state.tabs.single { it.sourcePath == debugLogFile.absolutePath }
         assertTrue(diagnosticTab.logData.isNotEmpty())
-        assertTrue(diagnosticTab.logData.all { it.tag.startsWith("openLog.") })
-        assertTrue(diagnosticTab.logData.any { it.level == LogLevel.E && it.tag == "openLog.open" })
+        assertTrue(diagnosticTab.logData.all { it.tag.startsWith("Indagium.") })
+        assertTrue(diagnosticTab.logData.any { it.level == LogLevel.E && it.tag == "Indagium.open" })
 
         state.setDebugLoggingEnabled(false)
         assertFalse(state.settings.debugLoggingEnabled)

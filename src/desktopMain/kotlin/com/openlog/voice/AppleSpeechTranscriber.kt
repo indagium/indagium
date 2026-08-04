@@ -72,7 +72,7 @@ object AppleSpeechNative {
         if (loadFailure != null || !VoiceRecognitionEngines.isMac()) return false
         return try {
             AppleSpeechNative::class.java.getResourceAsStream(RESOURCE_PATH)?.use { source ->
-                val file = Files.createTempFile("openlog-speech-", ".dylib").toFile()
+                val file = Files.createTempFile("indagium-speech-", ".dylib").toFile()
                 file.deleteOnExit()
                 file.outputStream().use { output -> source.copyTo(output) }
                 System.load(file.absolutePath)

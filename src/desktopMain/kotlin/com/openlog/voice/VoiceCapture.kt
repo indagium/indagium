@@ -55,7 +55,7 @@ class JavaSoundVoiceCapture(
             line.start()
             VoiceCaptureStartResult.Started(JavaSoundVoiceCaptureSession(line, maxDurationMillis))
         } catch (error: SecurityException) {
-            VoiceCaptureStartResult.Failure("Microphone access was denied. Allow openLog to use the microphone and try again.", error)
+            VoiceCaptureStartResult.Failure("Microphone access was denied. Allow Indagium to use the microphone and try again.", error)
         } catch (error: Exception) {
             VoiceCaptureStartResult.Failure("No usable microphone is available. Check the input device and try again.", error)
         }
@@ -85,7 +85,7 @@ private class JavaSoundVoiceCaptureSession(
 
     @Volatile private var readFailure: Throwable? = null
 
-    private val reader = Thread({ readSamples() }, "openLog-voice-capture").apply {
+    private val reader = Thread({ readSamples() }, "indagium-voice-capture").apply {
         isDaemon = true
         start()
     }

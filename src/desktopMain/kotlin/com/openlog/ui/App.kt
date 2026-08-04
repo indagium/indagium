@@ -2037,7 +2037,7 @@ fun App(
                         AppText(
                             "Deletes cached archive data and app-managed notes. Keeps settings, the current " +
                                 "session/autosave, saved filters, source and case indexes, diagnostics, and " +
-                                "integration data. It does not reset openLog.",
+                                "integration data. It does not reset Indagium.",
                             color = tc2.td,
                             fontSize = 11.sp,
                             maxLines = 6,
@@ -2070,7 +2070,7 @@ fun App(
                         AppText("Reset app data?", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(6.dp))
                         AppText(
-                            "Permanently deletes all data stored by openLog in \"${state.appCachePath}\" and then closes " +
+                            "Permanently deletes all data stored by Indagium in \"${state.appCachePath}\" and then closes " +
                                 "the app. Your logs, source folders, exports, and Default save folder are kept.",
                             color = tc2.td,
                             fontSize = 11.sp,
