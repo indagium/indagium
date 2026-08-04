@@ -1,0 +1,3 @@
+# Keep high-resolution recordings as local source material. The optimized MP4
+# copies in web/ are the files the public website loads.
+*.mov

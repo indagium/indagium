@@ -28,10 +28,14 @@ jobs:
         uses: actions/checkout@v4
       - name: Configure Pages
         uses: actions/configure-pages@v5
+      - name: Prepare website artifact
+        run: |
+          mkdir -p _site
+          rsync -a --exclude='*.mov' site/ _site/
       - name: Upload website
         uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: _site
       - name: Deploy website
         id: deployment
         uses: actions/deploy-pages@v4
