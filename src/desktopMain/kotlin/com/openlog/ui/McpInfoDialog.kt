@@ -75,7 +75,7 @@ internal fun McpInfoDialog(state: AppState, port: Int, token: String, onDismiss:
         AppText("MCP Connection Info", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(10.dp))
         AppText(
-            "openLog speaks MCP directly. Point any MCP client (LM Studio, Claude Code, Codex) at " +
+            "Indagium speaks MCP directly. Point any MCP client (LM Studio, Claude Code, Codex) at " +
                 "this URL — nothing to install:",
             color = tc.td,
             fontSize = 11.sp,
@@ -130,7 +130,7 @@ internal fun McpInfoDialog(state: AppState, port: Int, token: String, onDismiss:
         Spacer(Modifier.height(10.dp))
         AppText(
             "Paste the copied JSON into your client's MCP config (e.g. ~/.lmstudio/mcp.json), or " +
-                "add the URL directly (Claude Code: claude mcp add --transport http openlog " +
+                "add the URL directly (Claude Code: claude mcp add --transport http indagium " +
                 "${mcpUrl(port)}).",
             color = tc.td,
             fontSize = 11.sp,

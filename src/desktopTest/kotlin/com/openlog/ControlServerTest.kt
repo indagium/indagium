@@ -114,14 +114,17 @@ class ControlServerTest {
         return indexed
     }
 
-    private fun getAsClient(path: String, clientId: String, clientName: String): HttpResponse<String> {
-        val req = HttpRequest.newBuilder(URI.create(base() + path))
+    private fun getAsClient(path: String, clientId: String, clientName: String): HttpResponse<String> =
+        getAsClientWithHeaders(path, mapOf("X-Indagium-Client-Id" to clientId, "X-Indagium-Client-Name" to clientName))
+
+    // Lets a test send an arbitrary combination of the current and legacy X-*-Client-* header
+    // spellings on one request — including both spellings at once — to check ControlServer's
+    // fallback/precedence behavior.
+    private fun getAsClientWithHeaders(path: String, headers: Map<String, String>): HttpResponse<String> {
+        var builder = HttpRequest.newBuilder(URI.create(base() + path))
             .header("Authorization", "Bearer ${server.token}")
-            .header("X-OpenLog-Client-Id", clientId)
-            .header("X-OpenLog-Client-Name", clientName)
-            .GET()
-            .build()
-        return client.send(req, HttpResponse.BodyHandlers.ofString())
+        headers.forEach { (name, value) -> builder = builder.header(name, value) }
+        return client.send(builder.GET().build(), HttpResponse.BodyHandlers.ofString())
     }
 
     @Test
@@ -776,6 +779,39 @@ class ControlServerTest {
         assertEquals("client-1", clients.single().id)
         assertEquals("My Tool", clients.single().name)
         assertTrue(!clients.single().blocked)
+    }
+
+    // The pre-rename header spelling is genuinely third-party surface: a caller's own script sends
+    // it, and nothing server-side can migrate that for them. It must keep working unchanged.
+    @Test
+    fun legacyOpenLogClientHeadersAreStillAccepted() {
+        getAsClientWithHeaders(
+            "/tabs",
+            mapOf("X-OpenLog-Client-Id" to "legacy-client", "X-OpenLog-Client-Name" to "Legacy Tool"),
+        )
+        val clients = server.connectedClients()
+        assertEquals(1, clients.size)
+        assertEquals("legacy-client", clients.single().id)
+        assertEquals("Legacy Tool", clients.single().name)
+    }
+
+    // A caller that (unusually) sends both spellings on the same request should be resolved by the
+    // current spelling, not the legacy one.
+    @Test
+    fun currentClientHeaderSpellingWinsWhenBothAreSent() {
+        getAsClientWithHeaders(
+            "/tabs",
+            mapOf(
+                "X-Indagium-Client-Id" to "current-client",
+                "X-Indagium-Client-Name" to "Current Tool",
+                "X-OpenLog-Client-Id" to "legacy-client",
+                "X-OpenLog-Client-Name" to "Legacy Tool",
+            ),
+        )
+        val clients = server.connectedClients()
+        assertEquals(1, clients.size)
+        assertEquals("current-client", clients.single().id)
+        assertEquals("Current Tool", clients.single().name)
     }
 
     @Test

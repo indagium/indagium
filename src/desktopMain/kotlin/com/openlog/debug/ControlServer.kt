@@ -9,6 +9,7 @@ import com.openlog.model.FilterMode
 import com.openlog.model.LogLevel
 import com.openlog.model.RuleTarget
 import com.openlog.ui.AppState
+import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -112,9 +113,18 @@ internal fun isEmptyOrZero(v: Any?): Boolean = when (v) {
 internal const val OPEN_FILE_TIMEOUT_MS = 120_000L
 internal const val OPEN_FILE_POLL_INTERVAL_MS = 20L
 private const val CLIENT_STALE_MS = 5 * 60_000L
-private const val CLIENT_ID_HEADER = "X-OpenLog-Client-Id"
-private const val CLIENT_NAME_HEADER = "X-OpenLog-Client-Name"
+
+// A caller's own script or client may already be sending the pre-rename header spelling, and
+// nothing server-side can migrate that for them - so both are accepted, with the new spelling
+// preferred when a caller (unusually) sends both. See clientHeader() below.
+private const val CLIENT_ID_HEADER = "X-Indagium-Client-Id"
+private const val CLIENT_ID_HEADER_LEGACY = "X-OpenLog-Client-Id"
+private const val CLIENT_NAME_HEADER = "X-Indagium-Client-Name"
+private const val CLIENT_NAME_HEADER_LEGACY = "X-OpenLog-Client-Name"
 private const val DEFAULT_CLIENT_NAME = "MCP client"
+
+/** Reads a client-identity header, preferring the current spelling over the legacy one. */
+private fun Headers.clientHeader(current: String, legacy: String): String? = this[current] ?: this[legacy]
 
 // Every request (REST and native MCP alike) must present this exact token, or the server is
 // reachable by any local process/web page that can hit 127.0.0.1:<port> — see the "intercept"
@@ -405,8 +415,9 @@ class ControlServer(
     // ── REST transport (curl escape hatch + ControlServerTest) ─────────────
     // Each op is registered on its original path/method; GET reads query params, POST reads a
     // JSON body — merged into the same Map<String, Any?> gateway expects. Client-identity tracking
-    // and blocking (X-OpenLog-Client-* headers) apply here exactly as before; native MCP callers
-    // go through /mcp and are tracked separately via mcpSessions()/disconnectMcpSession().
+    // and blocking (X-Indagium-Client-* headers, falling back to the legacy X-OpenLog-Client-*
+    // spelling — see clientHeader()) apply here exactly as before; native MCP callers go through
+    // /mcp and are tracked separately via mcpSessions()/disconnectMcpSession().
     private fun io.ktor.server.routing.Routing.registerRestRoutes() {
         REST_ROUTES.forEach { (method, path, op) ->
             when (method) {
@@ -424,13 +435,15 @@ class ControlServer(
             return
         }
         val headers = call.request.headers
-        val clientId = headers[CLIENT_ID_HEADER]
+        val clientId = headers.clientHeader(CLIENT_ID_HEADER, CLIENT_ID_HEADER_LEGACY)
         if (clientId != null && clientId in blockedIds) {
             respondJson(HttpStatusCode.Forbidden, mapOf("error" to "this client is blocked"))
             return
         }
         if (clientId != null) {
-            clients[clientId] = ClientRecord(headers[CLIENT_NAME_HEADER]?.takeIf { it.isNotBlank() } ?: DEFAULT_CLIENT_NAME, System.currentTimeMillis())
+            val clientName = headers.clientHeader(CLIENT_NAME_HEADER, CLIENT_NAME_HEADER_LEGACY)?.takeIf { it.isNotBlank() }
+                ?: DEFAULT_CLIENT_NAME
+            clients[clientId] = ClientRecord(clientName, System.currentTimeMillis())
         }
         val args = buildMap<String, Any?> {
             call.request.queryParameters.entries().forEach { (k, v) -> put(k, v.firstOrNull()) }
@@ -454,7 +467,7 @@ class ControlServer(
     // ── Native MCP server ──────────────────────────────────────────────────
     private fun buildMcpServer(): Server {
         val server = Server(
-            serverInfo = Implementation(name = "openlog-control", version = "1.0.0"),
+            serverInfo = Implementation(name = "indagium-control", version = "1.0.0"),
             options = ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false))),
         )
         toolGateway.tools.forEach { tool ->
@@ -470,7 +483,7 @@ class ControlServer(
     private fun managedMcpServer(managed: ManagedMcpRun): Server =
         managedMcpServers.computeIfAbsent(managed.access.token) {
             Server(
-                serverInfo = Implementation(name = "openlog-managed-agent", version = "1.0.0"),
+                serverInfo = Implementation(name = "indagium-managed-agent", version = "1.0.0"),
                 options = ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false))),
             ).also { server ->
                 toolGateway.tools.forEach { tool ->
@@ -666,7 +679,7 @@ internal val LEVEL_KEYS: List<String> = LogLevel.entries.map { it.key.toString()
 internal val MCP_TOOLS: List<OpenLogToolDescriptor> = listOf(
     OpenLogToolDescriptor(
         "list_tabs",
-        "List every tab currently open in the running openLog app. Multiple tabs can share the " +
+        "List every tab currently open in the running Indagium app. Multiple tabs can share the " +
             "same filename (e.g. the same log opened twice, or two files with identical names from " +
             "different folders) — sourcePath is the full absolute path and is the reliable way to " +
             "tell them apart; fall back to id, never assume filename alone is unique.",
