@@ -1,0 +1,15 @@
+package com.indagium
+
+import com.indagium.ui.HL_COLORS
+import com.indagium.ui.SEQ_COLORS
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+
+class PaletteTest {
+    @Test
+    fun palettesOfferMoreThanTheInitialSmallSet() {
+        assertTrue(SEQ_COLORS.size >= 20)
+        assertEquals(25, HL_COLORS.size)
+    }
+}

@@ -25,10 +25,10 @@ Skipping this leaves the README showing a stale version after a release ships, w
 ./gradlew desktopTest
 
 # Run a single test class
-./gradlew desktopTest --tests "com.openlog.LogParserTest"
+./gradlew desktopTest --tests "com.indagium.LogParserTest"
 
 # Run a single test method
-./gradlew desktopTest --tests "com.openlog.AppStateBehaviorTest.startsWithNoOpenTabs"
+./gradlew desktopTest --tests "com.indagium.AppStateBehaviorTest.startsWithNoOpenTabs"
 
 # Build (compile + test)
 ./gradlew build
@@ -46,7 +46,7 @@ Source sets are `desktopMain` and `desktopTest` (Kotlin Multiplatform with a sin
 
 ## Architecture
 
-openLog is a Compose Multiplatform Desktop log viewer for Android logcat files. All code lives under `src/desktopMain/kotlin/com/openlog/` — ~47k lines across 11 packages.
+openLog is a Compose Multiplatform Desktop log viewer for Android logcat files. All code lives under `src/desktopMain/kotlin/com/indagium/` — ~47k lines across 11 packages.
 
 > **`docs/SAAD.md` is the authoritative architecture document.** It covers module boundaries, the
 > threading model, persistence formats, security posture, and known risks, with file:line citations.

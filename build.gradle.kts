@@ -87,11 +87,11 @@ val generateBuildInfo by tasks.registering {
     inputs.property("licenseVersion", licenseVersion)
     outputs.dir(generatedBuildInfoDir)
     doLast {
-        val outputFile = generatedBuildInfoDir.get().file("com/openlog/generated/BuildInfo.kt").asFile
+        val outputFile = generatedBuildInfoDir.get().file("com/indagium/generated/BuildInfo.kt").asFile
         outputFile.parentFile.mkdirs()
         outputFile.writeText(
             """
-            package com.openlog.generated
+            package com.indagium.generated
 
             object BuildInfo {
                 const val APP_VERSION: String = "$appVersion"
@@ -462,13 +462,12 @@ kover {
                 // AppState and cannot be meaningfully unit-tested without a Compose harness.
                 annotatedBy("androidx.compose.runtime.Composable")
                 classes(
-                    "com.openlog.ui.App*",
-                    "com.openlog.ui.LogViewer*",
-                    "com.openlog.ui.FilterPanel*",
-                    "com.openlog.ui.AnnotationPanel*",
-                    "com.openlog.ui.Components*",
-                    "com.openlog.ui.Theme*",
-                    "com.openlog.ui.MainKt",
+                    "com.indagium.ui.App*",
+                    "com.indagium.ui.LogViewer*",
+                    "com.indagium.ui.FilterPanel*",
+                    "com.indagium.ui.AnnotationPanel*",
+                    "com.indagium.ui.Components*",
+                    "com.indagium.ui.Theme*",
                 )
             }
         }

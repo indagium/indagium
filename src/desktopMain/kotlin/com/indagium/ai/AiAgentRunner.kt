@@ -1,0 +1,382 @@
+package com.indagium.ai
+
+import com.indagium.debug.IndagiumToolGateway
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * Session-only transcript for one log tab. It intentionally is not part of [com.indagium.model.LogTab]
+ * or [com.indagium.ui.AppState], so neither autosave nor note export can retain an AI conversation.
+ */
+internal class AiSession internal constructor(val tabId: String) {
+    internal val messages = mutableListOf<LlmMessage>()
+    internal var activeRun: AiRun? = null
+    internal var lastPrompt: String? = null
+    internal var lastContext: AiInvestigationContext = AiInvestigationContext(tabId)
+
+    /**
+     * The Claude Code CLI's own session id for this tab, so a follow-up request in the same tab
+     * resumes the prior conversation (`--resume`) instead of starting a blank one with no memory
+     * of what was already investigated. Independent of [messages], which only the HTTP-endpoint
+     * provider path uses; unaffected by switching to a different provider and back.
+     */
+    internal var claudeCodeSessionId: String? = null
+
+    /**
+     * Workspace directory backing [claudeCodeSessionId]. Claude Code's `--resume` looks up a
+     * session by *project directory* (its own on-disk session store is keyed by cwd), not by id
+     * alone - resuming from a different directory than the session was created in fails with "No
+     * conversation found". So unlike Codex (a fresh, immediately-deleted temp dir per call is
+     * fine), this one has to survive and be reused across follow-ups in the same tab. Deleted by
+     * [AiSessionRegistry] once this session itself is discarded (tab closed, or app shutdown).
+     */
+    internal var claudeCodeWorkspace: Path? = null
+
+    internal fun deleteClaudeCodeWorkspace() {
+        val workspace = claudeCodeWorkspace ?: return
+        claudeCodeWorkspace = null
+        runCatching {
+            Files.walk(workspace).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } }
+        }
+    }
+
+    private val _runs = ArrayDeque<AiRun>()
+
+    /** Completed, failed, cancelled, and active requests for this tab during the current launch. */
+    val runs: List<AiRun>
+        get() = _runs.toList()
+
+    internal fun retain(run: AiRun) {
+        _runs += run
+        while (_runs.size > MAX_RETAINED_RUNS) _runs.removeFirst()
+    }
+
+    /**
+     * Removes the last attempted exchange so Retry sends the same prompt once, rather than
+     * appending a duplicate user message to an incomplete or failed conversation.
+     */
+    internal fun prepareRetry(): String? {
+        val userIndex = messages.indexOfLast { it.role == LlmRole.USER }
+        val prompt = messages.getOrNull(userIndex)?.content ?: lastPrompt
+        if (userIndex >= 0) {
+            while (messages.size > userIndex) messages.removeLast()
+        }
+        return prompt?.takeIf { it.isNotBlank() }
+    }
+
+    private companion object {
+        // This bounds the session-only transcript by requests while preserving every event for each
+        // retained run. A user can still clear the registry explicitly when closing a tab.
+        const val MAX_RETAINED_RUNS = 50
+    }
+}
+
+/** Holds the current-launch, tab-scoped sessions. This registry owns no persisted state. */
+internal class AiSessionRegistry {
+    private val sessions = ConcurrentHashMap<String, AiSession>()
+
+    fun sessionFor(tabId: String): AiSession = sessions.computeIfAbsent(tabId, ::AiSession)
+
+    fun remove(tabId: String) {
+        sessions.remove(tabId)?.let { session ->
+            session.activeRun?.cancel()
+            session.deleteClaudeCodeWorkspace()
+        }
+    }
+
+    fun clear() {
+        sessions.values.forEach {
+            it.activeRun?.cancel()
+            it.deleteClaudeCodeWorkspace()
+        }
+        sessions.clear()
+    }
+}
+
+/** One ephemeral user request running inside an [AiSession]. */
+internal class AiRun internal constructor(
+    val id: String = UUID.randomUUID().toString(),
+    val tabId: String,
+    val userPrompt: String = "",
+    val context: AiInvestigationContext = AiInvestigationContext(tabId),
+    maxToolCalls: Int = com.indagium.model.DEFAULT_AI_MAX_TOOL_ROUNDS,
+    val sentAt: Long = System.currentTimeMillis(),
+) {
+    private val _events = MutableSharedFlow<AiRunEvent>(replay = EVENT_REPLAY, extraBufferCapacity = EVENT_BUFFER)
+    private val _history = mutableListOf<AiRunEvent>()
+    internal val confirmations = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+    internal val toolCallBudget = AiToolCallBudget(maxToolCalls)
+    internal var job: Job? = null
+
+    /** Wall-clock time of the first model-originated event (a reply or a tool call), if any yet. */
+    var firstResponseAt: Long? = null
+        private set
+
+    /** Wall-clock time this run reached a terminal state (done, error, or cancelled), if any yet. */
+    var completedAt: Long? = null
+        private set
+
+    val events: SharedFlow<AiRunEvent> = _events.asSharedFlow()
+
+    /** Full event history for this retained, current-launch run; not limited by SharedFlow replay. */
+    val history: List<AiRunEvent>
+        get() = synchronized(_history) { _history.toList() }
+
+    /** The number of user decisions still blocking this run. */
+    val pendingConfirmationCount: Int get() = confirmations.size
+
+    fun isConfirmationPending(confirmationId: String): Boolean = confirmations.containsKey(confirmationId)
+
+    internal suspend fun emit(event: AiRunEvent) {
+        synchronized(_history) { _history += event }
+        if (firstResponseAt == null && (
+                event is AiRunEvent.AssistantDelta || event is AiRunEvent.AgentProgress || event is AiRunEvent.ToolRequested
+            )
+        ) {
+            firstResponseAt = System.currentTimeMillis()
+        }
+        if (completedAt == null && (event is AiRunEvent.Done || event is AiRunEvent.Error || event == AiRunEvent.Cancelled)) {
+            completedAt = System.currentTimeMillis()
+        }
+        _events.emit(event)
+    }
+
+    fun cancel() {
+        confirmations.values.forEach { confirmation -> confirmation.cancel() }
+        confirmations.clear()
+        job?.cancel()
+    }
+
+    private companion object {
+        const val EVENT_REPLAY = 32
+        const val EVENT_BUFFER = 64
+    }
+}
+
+/** UI-neutral trace of an agent request. Task 05 renders these events in the sidebar. */
+internal sealed interface AiRunEvent {
+    data class Status(val text: String) : AiRunEvent
+
+    /** A user-visible agent update emitted before the final response; rendered in Investigation. */
+    data class AgentProgress(val text: String) : AiRunEvent
+
+    data class AssistantDelta(val text: String) : AiRunEvent
+
+    data class ToolRequested(val call: LlmToolCall) : AiRunEvent
+
+    data class ToolCompleted(
+        val call: LlmToolCall,
+        val resultPreview: String,
+        val resultTruncated: Boolean,
+        val evidence: List<AiEvidence> = emptyList(),
+        val budget: AiToolBudgetSnapshot,
+        val resultChars: Int,
+    ) : AiRunEvent
+
+    data class ConfirmationRequired(val confirmation: AiToolConfirmation) : AiRunEvent
+
+    /** Forwarded from the active provider when it reports usage. */
+    data class Usage(
+        val inputTokens: Int,
+        val outputTokens: Int,
+        val totalTokens: Int,
+        val cachedInputTokens: Int? = null,
+        val cachedInputIncludedInInput: Boolean = true,
+        val reasoningOutputTokens: Int? = null,
+    ) : AiRunEvent
+
+    data class Error(val message: String) : AiRunEvent
+
+    data object Cancelled : AiRunEvent
+
+    data object Done : AiRunEvent
+}
+
+internal data class AiToolConfirmation(
+    val id: String,
+    val call: LlmToolCall,
+    val description: String,
+)
+
+/**
+ * A bounded, provider-neutral model -> tool -> model loop.
+ *
+ * It never routes through openLog's HTTP MCP server: [toolGateway] directly invokes the same
+ * transport-neutral operations used by the MCP adapter. Tools classified as destructive pause
+ * before the gateway is touched, and a UI must explicitly resolve that pause.
+ */
+internal class AiAgentRunner(
+    private val provider: LlmProvider,
+    private val toolGateway: IndagiumToolGateway,
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob()),
+    private val maxToolRounds: Int = MAX_TOOL_ROUNDS,
+    private val maxToolResultChars: Int = MAX_TOOL_RESULT_CHARS,
+) : AutoCloseable {
+    init {
+        require(maxToolRounds > 0) { "maxToolRounds must be positive" }
+        require(maxToolResultChars > 0) { "maxToolResultChars must be positive" }
+    }
+
+    private val toolExecutor = AiToolExecutionCoordinator(toolGateway, maxToolResultChars)
+
+    fun start(
+        session: AiSession,
+        model: String,
+        prompt: String,
+        systemPrompt: String? = null,
+        context: AiInvestigationContext = AiInvestigationContext(session.tabId),
+        reasoningEffort: String? = null,
+    ): AiRun {
+        require(prompt.isNotBlank()) { "AI prompt must not be blank" }
+        require(context.tabId == session.tabId) { "AI context must belong to the session tab." }
+        session.activeRun?.cancel()
+        val run = AiRun(tabId = session.tabId, userPrompt = prompt, context = context, maxToolCalls = maxToolRounds)
+        session.lastPrompt = prompt
+        session.lastContext = context
+        session.activeRun = run
+        session.retain(run)
+        run.job = scope.launch {
+            try {
+                runLoop(session, run, model, prompt, systemPrompt, reasoningEffort)
+            } catch (_: CancellationException) {
+                run.emit(AiRunEvent.Cancelled)
+            } finally {
+                run.confirmations.values.forEach { it.cancel() }
+                run.confirmations.clear()
+                if (session.activeRun === run) session.activeRun = null
+            }
+        }
+        return run
+    }
+
+    /** Returns false if the run ended/cancelled, or if this confirmation is no longer pending. */
+    fun resolveConfirmation(run: AiRun, confirmationId: String, accepted: Boolean): Boolean {
+        val deferred = run.confirmations.remove(confirmationId) ?: return false
+        return deferred.complete(accepted)
+    }
+
+    fun cancel(run: AiRun) = run.cancel()
+
+    override fun close() {
+        scope.cancel()
+    }
+
+    @Suppress("CyclomaticComplexMethod")
+    private suspend fun runLoop(
+        session: AiSession,
+        run: AiRun,
+        model: String,
+        prompt: String,
+        systemPrompt: String?,
+        reasoningEffort: String?,
+    ) {
+        val conversation = session.messages.toMutableList()
+        val initialMessageCount = session.messages.size
+        if (conversation.isEmpty() && !systemPrompt.isNullOrBlank()) {
+            conversation += LlmMessage(LlmRole.SYSTEM, systemPrompt)
+        }
+        // This is independent of the caller's provider: managed Codex/Claude MCP calls consume
+        // the same per-run budget in AiToolExecutionCoordinator.
+        conversation += LlmMessage(LlmRole.SYSTEM, run.toolCallBudget.initialGuidance())
+        conversation += LlmMessage(LlmRole.USER, prompt)
+
+        try {
+            while (true) {
+                run.emit(AiRunEvent.Status(if (run.toolCallBudget.snapshot().totalUsed == 0) "Generating response…" else "Continuing investigation…"))
+                val assistantText = StringBuilder()
+                val toolCalls = mutableListOf<LlmToolCall>()
+                val reasoning = mutableListOf<LlmReasoning>()
+                var completed = false
+                var failed = false
+                var assistantRecorded = false
+
+                fun recordAssistantMessage() {
+                    if (!assistantRecorded && (assistantText.isNotEmpty() || toolCalls.isNotEmpty() || reasoning.isNotEmpty())) {
+                        conversation += LlmMessage(
+                            role = LlmRole.ASSISTANT,
+                            content = assistantText.toString().ifBlank { null },
+                            toolCalls = toolCalls,
+                            reasoning = reasoning.toList(),
+                        )
+                        assistantRecorded = true
+                    }
+                }
+
+                try {
+                    provider.streamChat(
+                        LlmRequest(
+                            model = model,
+                            messages = conversation,
+                            tools = toolGateway.openAiFunctions(),
+                            reasoningEffort = reasoningEffort?.takeIf(String::isNotBlank),
+                        ),
+                    ).collect { event ->
+                        when (event) {
+                            is LlmStreamEvent.TextDelta -> {
+                                assistantText.append(event.text)
+                                run.emit(AiRunEvent.AssistantDelta(event.text))
+                            }
+
+                            is LlmStreamEvent.ToolCall -> toolCalls += event.call
+                            is LlmStreamEvent.ReasoningComplete -> reasoning += event.block
+                            is LlmStreamEvent.Error -> {
+                                failed = true
+                                run.emit(AiRunEvent.Error(event.message))
+                            }
+
+                            is LlmStreamEvent.Warning -> run.emit(AiRunEvent.Status(event.message))
+                            LlmStreamEvent.Completed -> completed = true
+                            is LlmStreamEvent.ToolCallDelta -> Unit // Provider-level detail is represented by ToolRequested below.
+                            is LlmStreamEvent.Usage -> run.emit(
+                                AiRunEvent.Usage(
+                                    inputTokens = event.promptTokens,
+                                    outputTokens = event.completionTokens,
+                                    totalTokens = event.totalTokens,
+                                ),
+                            )
+                        }
+                    }
+                } catch (cancelled: CancellationException) {
+                    recordAssistantMessage()
+                    throw cancelled
+                }
+
+                recordAssistantMessage()
+                if (failed) return
+                if (!completed) {
+                    run.emit(AiRunEvent.Error("Model stream ended before completion."))
+                    return
+                }
+
+                if (toolCalls.isEmpty()) {
+                    run.emit(AiRunEvent.Done)
+                    return
+                }
+
+                toolCalls.forEach { call ->
+                    val result = toolExecutor.execute(run, call)
+                    conversation += LlmMessage(LlmRole.TOOL, content = result.content, toolCallId = call.id)
+                }
+            }
+        } finally {
+            session.messages += conversation.drop(initialMessageCount)
+        }
+    }
+
+    private companion object {
+        const val MAX_TOOL_ROUNDS = com.indagium.model.DEFAULT_AI_MAX_TOOL_ROUNDS
+        const val MAX_TOOL_RESULT_CHARS = 12_000
+    }
+}
