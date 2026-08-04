@@ -31,6 +31,15 @@ import java.awt.event.MouseEvent
 import java.io.File
 
 fun main(args: Array<String>) {
+    // MUST be the very first statement: it is the one-time openLog2 -> Indagium app-data copy
+    // (see DesktopStorage.migrateAppDataDir), and it must run before anything creates the new
+    // app-data dir on disk. In particular it must precede SingleInstance.acquire below, whose
+    // baseDir.mkdirs() would otherwise make the new dir exist-but-unmarked on Linux/Windows,
+    // causing the migration to be skipped or half-merged on the *next* launch while the user's
+    // real data sits unreachable under the old directory. It must also precede AppState's
+    // construction, since AppState's constructor reads autosave.cache synchronously.
+    DesktopStorage.migrateAppDataDirIfNeeded()
+
     configureSwingGlobalsForCompose()
 
     // On Linux, AWT/X11 derives the window's WM_CLASS from the *bottom stack frame's class name*
