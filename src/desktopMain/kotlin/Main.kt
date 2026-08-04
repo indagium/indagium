@@ -228,7 +228,7 @@ private fun debugControlPort(): Int? =
         ?: (System.getProperty("indagium.debugControl") ?: System.getProperty("openlog.debugControl"))?.toIntOrNull()
 
 // On macOS, a JFrame's per-window icon becomes the miniaturized window's Dock image. Leaving it
-// unset lets AppKit render the normal live window miniature; the packaged bundle's openLog.icns
+// unset lets AppKit render the normal live window miniature; the packaged bundle's indagium.icns
 // remains the application icon. Windows and Linux still need this image for their taskbar/window
 // representation. Keeping the platform branch out of main() also keeps its lifecycle code simple.
 @Composable
@@ -236,9 +236,9 @@ private fun platformWindowIcon() = if (isMacOs) null else painterResource(platfo
 
 private fun platformIconResourceName(): String =
     if (System.getProperty("os.name").orEmpty().contains("windows", ignoreCase = true)) {
-        "icons/openlog-windows.png"
+        "icons/indagium-windows.png"
     } else {
-        "icons/openlog.png"
+        "icons/indagium.png"
     }
 
 // GNOME/Mutter routinely ignores a bare toFront() under focus-stealing prevention; the brief

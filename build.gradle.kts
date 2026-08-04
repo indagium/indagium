@@ -53,9 +53,9 @@ val bytedecoPlatform: String = run {
 val appVersion: String = providers.gradleProperty("app.version").get()
 val appAuthor = "Roman Arnaut"
 val licenseVersion = "2026-07-19"
-val generatedBuildInfoDir = layout.buildDirectory.dir("generated/openlogBuildInfo/desktopMain/kotlin")
-val generatedLicenseResourcesDir = layout.buildDirectory.dir("generated/openlogLicenseResources/desktopMain/resources")
-val generatedNativeResourcesDir = layout.buildDirectory.dir("generated/openlogNativeResources/desktopMain/resources")
+val generatedBuildInfoDir = layout.buildDirectory.dir("generated/indagiumBuildInfo/desktopMain/kotlin")
+val generatedLicenseResourcesDir = layout.buildDirectory.dir("generated/indagiumLicenseResources/desktopMain/resources")
+val generatedNativeResourcesDir = layout.buildDirectory.dir("generated/indagiumNativeResources/desktopMain/resources")
 val isMacHost = org.gradle.internal.os.OperatingSystem.current().isMacOsX
 val isWindowsHost = org.gradle.internal.os.OperatingSystem.current().isWindows
 
@@ -64,8 +64,8 @@ val isWindowsHost = org.gradle.internal.os.OperatingSystem.current().isWindows
 // lets macOS code-signing/notarization sign the exact dylib produced for the release.
 val compileAppleSpeechNative by tasks.registering(Exec::class) {
     onlyIf { isMacHost }
-    val output = generatedNativeResourcesDir.get().file("native/macos/libopenlog_speech.dylib").asFile
-    inputs.file("native/macos/openlog_speech.m")
+    val output = generatedNativeResourcesDir.get().file("native/macos/libindagium_speech.dylib").asFile
+    inputs.file("native/macos/indagium_speech.m")
     outputs.file(output)
     doFirst {
         output.parentFile.mkdirs()
@@ -76,7 +76,7 @@ val compileAppleSpeechNative by tasks.registering(Exec::class) {
             "clang", "-dynamiclib", "-fobjc-arc", "-fblocks",
             "-I$javaHome/include", "-I$javaHome/include/darwin",
             "-framework", "Foundation", "-framework", "Speech", "-framework", "AVFoundation",
-            "native/macos/openlog_speech.m", "-o", output.absolutePath,
+            "native/macos/indagium_speech.m", "-o", output.absolutePath,
         )
     }
 }
@@ -110,11 +110,14 @@ val generateLicenseResources by tasks.registering {
     inputs.files(licenseDocuments.map(::file))
     outputs.dir(generatedLicenseResourcesDir)
     doLast {
-        val outputFile = generatedLicenseResourcesDir.get().file("licenses/openlog-license-agreement.md").asFile
+        val outputFile = generatedLicenseResourcesDir.get().file("licenses/indagium-license-agreement.md").asFile
         outputFile.parentFile.mkdirs()
         val agreement = licenseDocuments.joinToString(separator = "\n\n---\n\n") { path ->
             file(path).readText().trimEnd()
         }
+        // NOTE: the header text itself ("# openLog License Agreement") intentionally stays as-is —
+        // it moves together with LICENSE/NOTICE in Stage 8, only the generated resource filename
+        // (and the dialog's lookup of it) is renamed here so the runtime path stays in lockstep.
         outputFile.writeText("# openLog License Agreement\n\nTerms version: $licenseVersion\n\n---\n\n$agreement\n")
     }
 }
@@ -231,7 +234,7 @@ compose.desktop {
 
         // Linux only (jpackage builds for the host OS, so host OS == target OS here): lets
         // Main.kt overwrite sun.awt.X11.XToolkit.awtAppClassName so the window's WM_CLASS is
-        // "openLog" instead of "MainKt" — required for docks/taskbars to match the running
+        // "Indagium" instead of "MainKt" — required for docks/taskbars to match the running
         // window to the .desktop entry (StartupWMClass) and show the right name and icon.
         if (org.gradle.internal.os.OperatingSystem.current().isLinux) {
             jvmArgs("--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED")
@@ -239,7 +242,7 @@ compose.desktop {
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
-            packageName = "openLog"
+            packageName = "Indagium"
             packageVersion = appVersion
             description = "Android logcat analysis tool"
             vendor = appAuthor
@@ -271,31 +274,31 @@ compose.desktop {
             // Keep it Windows-only: the module does not exist in macOS/Linux JDKs.
             if (isWindowsHost) modules("jdk.crypto.mscapi")
             macOS {
-                bundleID = "com.romanarnaut.openlog"
-                iconFile.set(project.file("icons/openlog.icns"))
+                bundleID = "com.indagium.desktop"
+                iconFile.set(project.file("icons/indagium.icns"))
                 // jpackage's defaults cover JVM JIT, but microphone access from its hardened
                 // launcher also needs the explicit audio-input entitlement. Keep the same file
                 // on the bundled runtime so a release signing/notarization pass preserves it.
-                entitlementsFile.set(project.file("macos/openLog.entitlements"))
-                runtimeEntitlementsFile.set(project.file("macos/openLog.entitlements"))
+                entitlementsFile.set(project.file("macos/Indagium.entitlements"))
+                runtimeEntitlementsFile.set(project.file("macos/Indagium.entitlements"))
                 // macOS rejects microphone access from a bundled app without this purpose string.
                 infoPlist {
                     extraKeysRawXml = """
                         <key>NSMicrophoneUsageDescription</key>
-                        <string>openLog uses the microphone only to turn your AI question into local text on this device.</string>
+                        <string>Indagium uses the microphone only to turn your AI question into local text on this device.</string>
                         <key>NSSpeechRecognitionUsageDescription</key>
-                        <string>openLog uses Apple Speech only to turn your recorded AI question into text on this device.</string>
+                        <string>Indagium uses Apple Speech only to turn your recorded AI question into text on this device.</string>
                     """.trimIndent()
                 }
             }
             windows {
-                iconFile.set(project.file("icons/openlog.ico"))
+                iconFile.set(project.file("icons/indagium.ico"))
             }
             linux {
                 shortcut = true
                 appCategory = "Development"
                 menuGroup = "Development"
-                iconFile.set(project.file("icons/openlog.png"))
+                iconFile.set(project.file("icons/indagium.png"))
             }
         }
     }

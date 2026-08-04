@@ -86,7 +86,7 @@ verify:
     - |
       mimeinfo_file=$(find "$workdir/opt" -name '*-MimeInfo.xml')
       if [ -n "$mimeinfo_file" ]; then
-        cp packaging/linux/openlog-mimeinfo.xml "$mimeinfo_file"
+        cp packaging/linux/indagium-mimeinfo.xml "$mimeinfo_file"
       fi
     - dpkg-deb -b "$workdir" "$deb"
     - desktop-file-validate "$desktop_file"
@@ -103,7 +103,7 @@ package-linux-deb:
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
   artifacts:
-    name: "openLog-linux-x64-$CI_COMMIT_TAG"
+    name: "Indagium-linux-x64-$CI_COMMIT_TAG"
 
 # GitHub Actions has no Linux arm64 runner, so this is the only way to get an arm64 build.
 # Runs automatically in a "Run pipeline" (web) pipeline on any branch and is manual on tags:
@@ -122,7 +122,7 @@ package-linux-arm64-deb:
       allow_failure: true
     - if: '$CI_PIPELINE_SOURCE == "web"'
   artifacts:
-    name: "openLog-linux-arm64-$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
+    name: "Indagium-linux-arm64-$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
 
 # Optional, triggered manually from the pipeline view (the "play" button on this job) — not
 # part of the automatic tag pipeline.
@@ -141,7 +141,7 @@ package-windows-msi:
   script:
     - .\gradlew.bat packageMsi
   artifacts:
-    name: "openLog-windows-x64-$CI_COMMIT_TAG"
+    name: "Indagium-windows-x64-$CI_COMMIT_TAG"
     paths:
       - build/compose/binaries/main/msi/*.msi
     expire_in: 90 days
@@ -165,7 +165,7 @@ package-macos-dmg:
     - chmod +x gradlew
     - ./gradlew packageDmg
   artifacts:
-    name: "openLog-macos-arm64-$CI_COMMIT_TAG"
+    name: "Indagium-macos-arm64-$CI_COMMIT_TAG"
     paths:
       - build/compose/binaries/main/dmg/*.dmg
     expire_in: 90 days

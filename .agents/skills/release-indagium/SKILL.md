@@ -1,9 +1,9 @@
 ---
-name: release-openlog
-description: Prepare, publish, and verify a versioned openLog desktop release. Use when asked to bump an openLog version, create a release commit/tag, merge it to master, push GitHub and GitLab, trigger the GitHub four-platform build, or verify published release assets.
+name: release-indagium
+description: Prepare, publish, and verify a versioned Indagium desktop release. Use when asked to bump an Indagium version, create a release commit/tag, merge it to master, push GitHub and GitLab, trigger the GitHub four-platform build, or verify published release assets.
 ---
 
-# Release openLog
+# Release Indagium
 
 Follow this workflow for a release. Treat pushes, tags, and release publication as external state changes: obtain explicit user authorization before performing them.
 

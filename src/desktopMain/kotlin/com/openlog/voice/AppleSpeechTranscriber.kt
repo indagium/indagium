@@ -43,10 +43,10 @@ class AppleSpeechTranscriber : VoiceTranscriber {
 }
 
 /** Loader is deliberately internal: the dylib is bundled with macOS distributions, extracted into
- * the OS temporary directory, then loaded into the signed JVM process where TCC sees openLog's
+ * the OS temporary directory, then loaded into the signed JVM process where TCC sees Indagium's
  * Info.plist usage descriptions. */
 object AppleSpeechNative {
-    private const val RESOURCE_PATH = "/native/macos/libopenlog_speech.dylib"
+    private const val RESOURCE_PATH = "/native/macos/libindagium_speech.dylib"
     private var loaded = false
     private var loadFailure: String? = null
 

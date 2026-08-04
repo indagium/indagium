@@ -1,4 +1,0 @@
-interface:
-  display_name: "Release openLog"
-  short_description: "Prepare, publish, and verify an openLog release"
-  default_prompt: "Use $release-openlog to synchronize the version, validate, publish, and verify an openLog release."

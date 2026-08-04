@@ -24,7 +24,7 @@ internal val LICENSE_VERSION: String = BuildInfo.LICENSE_VERSION
 
 internal fun loadLicenseAgreement(): String =
     Thread.currentThread().contextClassLoader
-        .getResourceAsStream("licenses/openlog-license-agreement.md")
+        .getResourceAsStream("licenses/indagium-license-agreement.md")
         ?.bufferedReader()
         ?.use { it.readText() }
         ?: "The openLog license agreement could not be loaded. Please reinstall openLog."

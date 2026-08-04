@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release Indagium"
+  short_description: "Prepare, publish, and verify an Indagium release"
+  default_prompt: "Use $release-indagium to synchronize the version, validate, publish, and verify an Indagium release."

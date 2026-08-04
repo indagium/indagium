@@ -48,6 +48,6 @@ class AppBuildInfoTest {
         val workflowFile = File(".github/workflows/build.yml").readText()
 
         assertContains(workflowFile, """sed -i 's|^\(Exec=.*\)$|\1 %F|' "${'$'}desktop_file"""")
-        assertContains(workflowFile, """cp packaging/linux/openlog-mimeinfo.xml "${'$'}mimeinfo_file"""")
+        assertContains(workflowFile, """cp packaging/linux/indagium-mimeinfo.xml "${'$'}mimeinfo_file"""")
     }
 }
