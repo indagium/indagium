@@ -21,7 +21,7 @@ plugins {
 // it exposes the mcpStreamableHttp {} Ktor helper the older 0.8.x line lacked.
 val ktorVersion = "3.4.3"
 
-// bytedeco/javacv 1.5.13 (com.openlog.video.VideoPlayerController) — FFmpeg natives ship INSIDE
+// bytedeco/javacv 1.5.13 (com.indagium.video.VideoPlayerController) — FFmpeg natives ship INSIDE
 // the jar (no user install), decode every phone recording format incl. HEVC/.mov/WebM, and stay
 // license-clean (Apache wrapper + LGPL FFmpeg build) — see the plan doc's "Decisions taken" for
 // why this beat VLCJ (GPLv3), JavaFX Media (no HEVC/.mov), and GStreamer/libVLC-direct (both need
@@ -338,7 +338,7 @@ tasks.matching { it.name == "createRuntimeImage" }.configureEach {
 // two optional -D properties from the Gradle command line into the app JVM (Gradle doesn't do
 // this by itself): indagium.debugControl to enable the MCP control server (see Main.kt), and
 // indagium.run.home to point user.home at a throwaway dir so automated/smoke runs don't touch
-// the real ~/.openlog2 session state.
+// the real ~/Library/Application Support/Indagium (or platform equivalent) session state.
 tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
     jvmArgs("-XX:MaxRAMPercentage=50")
     if (org.gradle.internal.os.OperatingSystem.current().isLinux) {
@@ -354,7 +354,7 @@ tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
 // Sandbox every test run's `user.home` to a throwaway dir under build/ — unconditionally, unlike
 // desktopRun's opt-in indagium.run.home. Dozens of tests construct AppState() with no autosaveFile
 // override, which otherwise resolves DesktopStorage.appDataDir() to the REAL
-// ~/Library/Application Support/openLog2 (or platform equivalent): a test that calls
+// ~/Library/Application Support/Indagium (or platform equivalent): a test that calls
 // autosaveNow() (directly, or via any state-mutating call — updateSettings, closeTab, etc.) then
 // silently overwrites the developer's actual saved tabs/session/settings. Confirmed happening via
 // AppStateBehaviorTest's autoExportNotes-toggle tests, which wiped a real autosave.cache.

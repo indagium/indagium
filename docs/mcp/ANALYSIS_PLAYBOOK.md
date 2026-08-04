@@ -1,6 +1,6 @@
-# openLog analysis playbook
+# Indagium analysis playbook
 
-You are investigating an Android logcat/bug-report open in openLog. The file may be
+You are investigating an Android logcat/bug-report open in Indagium. The file may be
 huge — never assume you can read it in full. Work like a human would: narrow first,
 read second.
 

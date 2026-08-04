@@ -1,8 +1,8 @@
-# openLog
+# Indagium
 
 A desktop log viewer for Android logcat files, built with Kotlin and Compose Multiplatform.
 
-![Version](https://img.shields.io/badge/version-1.7.9-blue)
+![Version](https://img.shields.io/badge/version-1.8.0-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
 ![Folding a repeating region into a collapsible sequence](docs/images/gif-05-sequences.gif)
@@ -45,7 +45,7 @@ A desktop log viewer for Android logcat files, built with Kotlin and Compose Mul
 
 - **In-app AI assistant** — use LM Studio, OpenAI, Anthropic, Codex, Claude Code, or another compatible provider to investigate the active log tab with the same log, filter, source, and notes tools exposed through MCP; on-device voice dictation inserts editable text into the composer
 - **Video sync** — attach a screen recording, anchor it to a log line, and scrub either from the other
-- **MCP control server** — drive openLog from any MCP client over a local URL (off by default)
+- **MCP control server** — drive Indagium from any MCP client over a local URL (off by default)
 - **Themes** — 20 built-in themes (light, dark, and paper variants)
 - **Autosave** — session is fully restored on next launch
 - **Update checker** — optional in-app check against GitHub Releases
@@ -70,10 +70,10 @@ Download the latest release for your platform from the [Releases](../../releases
 
 | Platform | File |
 |---|---|
-| Linux (x86-64) | `openLog_x.y.z_amd64.deb` |
-| Linux (arm64) | `openLog_x.y.z_arm64.deb` |
-| Windows | `openLog-x.y.z.msi` |
-| macOS (Apple Silicon) | `openLog-x.y.z.dmg` |
+| Linux (x86-64) | `indagium_x.y.z-1_amd64.deb` |
+| Linux (arm64) | `indagium_x.y.z-1_arm64.deb` |
+| Windows | `Indagium-x.y.z.msi` |
+| macOS (Apple Silicon) | `Indagium-x.y.z.dmg` |
 
 ### macOS: "could not verify... free of malware"
 
@@ -81,23 +81,23 @@ The macOS build isn't signed with an Apple Developer ID or notarized, so Gatekee
 once the `.dmg` has been downloaded through a browser (locally built copies aren't affected —
 they never get the quarantine flag a browser download adds). To open it anyway, either:
 
-- Terminal: `xattr -cr /Applications/openLog.app`, or
-- System Settings → Privacy & Security → scroll to the "openLog was blocked" notice → **Open Anyway**
+- Terminal: `xattr -cr /Applications/Indagium.app`, or
+- System Settings → Privacy & Security → scroll to the "Indagium was blocked" notice → **Open Anyway**
 
 ### Linux
 
-Install with `sudo dpkg -i openLog_x.y.z_amd64.deb` (substitute `arm64` for `amd64` if that's the
-package you downloaded, or use your package manager's equivalent). The
-package registers openLog as a candidate handler for `.log`/`.txt`/`.logcat`/`.trace`/`.out`
+Install with `sudo dpkg -i indagium_x.y.z-1_amd64.deb` (substitute `arm64` for `amd64` if that's
+the package you downloaded, or use your package manager's equivalent). The
+package registers Indagium as a candidate handler for `.log`/`.txt`/`.logcat`/`.trace`/`.out`
 files, but does **not** make itself the system default — a package has no business silently
-rewriting another user's `mimeapps.list`. To open `.log`/`.txt` files with openLog by default,
+rewriting another user's `mimeapps.list`. To open `.log`/`.txt` files with Indagium by default,
 opt in yourself:
 
 ```bash
-xdg-mime default openlog-openLog.desktop text/plain text/x-log
+xdg-mime default indagium-Indagium.desktop text/plain text/x-log
 ```
 
-or right-click a file in your file manager → **Open With** → **openLog** → set as default.
+or right-click a file in your file manager → **Open With** → **Indagium** → set as default.
 
 ## In-app AI assistant
 
@@ -108,7 +108,7 @@ and runs only when you send a request. Its first provider is an OpenAI-compatibl
 endpoint, so the default profile works with a local LM Studio server:
 
 1. In LM Studio, load a tool-capable model and start its local API server.
-2. Open a log tab in openLog, turn on **AI** in the toolbar, and choose the loaded model from the
+2. Open a log tab in Indagium, turn on **AI** in the toolbar, and choose the loaded model from the
    dropdown (click it to browse discovered models, or type an id manually at the bottom of the
    list). If discovery is unavailable, manual entry still works.
 3. Ask a question or use a quick action such as **Check error**, **Find root cause**, **Build
@@ -131,9 +131,9 @@ its existing signed-in account instead of an API key. Settings can detect a comm
 or let you browse to the executable. On macOS, Codex can use the `codex` binary bundled inside
 ChatGPT; a desktop app bundle itself is not enough. Claude requires the Claude Code CLI. Each request gets a fresh empty temporary
 workspace plus a private, short-lived managed MCP endpoint. That endpoint exposes the same
-openLog tools and confirmation rules as the LM Studio panel path, pins requests to the active log
+Indagium tools and confirmation rules as the LM Studio panel path, pins requests to the active log
 tab, and is revoked when the run ends. The account agents do not receive source-folder or app
-workspace access; log and source evidence is available only through openLog tools.
+workspace access; log and source evidence is available only through Indagium tools.
 
 ### Local voice dictation
 
@@ -143,7 +143,7 @@ choices are **Automatic**, **Ukrainian**, and **English**; Settings can add othe
 The `EN` control beside the microphone switches local English translation on or off. Nothing is
 sent and a request is never started until you edit or accept the text and press **Send** yourself.
 
-On first use, openLog asks before downloading the selected multilingual Whisper model: Base
+On first use, Indagium asks before downloading the selected multilingual Whisper model: Base
 (~142 MiB, faster) or Small (~465 MiB, more accurate for short non-English dictation). After that
 one-time model download, recording and transcription work offline and independently of the
 selected chat provider on macOS, Windows, and Linux. **Settings → Voice input** also offers an
@@ -170,7 +170,7 @@ Clickable evidence cards are created only from actual tool results, never from l
 paths invented in the model's prose.
 
 Each conversation is scoped to one log tab and exists only for the current launch. Switching tabs
-shows that tab's separate session; relaunching openLog clears all AI sessions. Use **Stop** (or
+shows that tab's separate session; relaunching Indagium clears all AI sessions. Use **Stop** (or
 Escape while a run is active) to cancel the active request. **Retry** resends the last request in
 that tab after a provider error or cancellation.
 
@@ -227,7 +227,7 @@ the [available methods and prompt guide](docs/mcp/AVAILABLE_METHODS.md).
 Push a version tag to trigger the GitHub Actions build, which produces Linux (x86-64 and arm64), Windows, and macOS packages and creates a GitHub Release automatically:
 
 ```bash
-git tag v1.7.9 && git push --tags
+git tag v1.8.0 && git push --tags
 ```
 
 The macOS build is unsigned (no Apple Developer certificate in CI) — see the Installation section above for the Gatekeeper workaround.
@@ -244,8 +244,8 @@ Pushing a `v*.*.*` tag there builds the Linux `.deb` automatically; Windows `.ms
 
 ## License
 
-openLog is source-available under the [PolyForm Perimeter License 1.0.0](LICENSE). It is free to use for commercial and non-commercial purposes.
+Indagium is source-available under the [PolyForm Perimeter License 1.0.0](LICENSE). It is free to use for commercial and non-commercial purposes.
 
-You may not provide a product that competes with openLog, including a free or paid substitute distributed under different branding. See the [license](LICENSE) for the complete terms.
+You may not provide a product that competes with Indagium, including a free or paid substitute distributed under different branding. See the [license](LICENSE) for the complete terms.
 
-The openLog name, logo, icon, and branding are reserved; see [NOTICE](NOTICE). Third-party component notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The Indagium name, logo, icon, and branding are reserved; see [NOTICE](NOTICE). Third-party component notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

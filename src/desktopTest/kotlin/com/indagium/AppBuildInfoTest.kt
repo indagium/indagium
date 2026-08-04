@@ -34,7 +34,7 @@ class AppBuildInfoTest {
     @Test
     fun packagedBuildDeclaresTextXLogFileAssociation() {
         // .log is text/x-log in shared-mime-info, not text/plain — without this association
-        // "Open With" never lists openLog as a candidate for the app's primary file type.
+        // "Open With" never lists Indagium as a candidate for the app's primary file type.
         val gradleFile = File("build.gradle.kts").readText()
         assertContains(gradleFile, """fileAssociation("text/x-log", "log"""")
     }

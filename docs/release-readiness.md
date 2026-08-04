@@ -1,4 +1,4 @@
-# openLog Release Readiness
+# Indagium Release Readiness
 
 This app is packaged with Compose Desktop native distributions:
 

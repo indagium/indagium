@@ -9,7 +9,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 
 /**
- * Transport-neutral entry point for openLog's tool contract.
+ * Transport-neutral entry point for Indagium's tool contract.
  *
  * The HTTP/MCP server and the future in-app agent both call this class instead of maintaining
  * their own lists of operations.  [executor] deliberately receives only plain Kotlin values:

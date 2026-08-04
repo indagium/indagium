@@ -1,6 +1,6 @@
-# openLog — Software Architecture & Design Document (SAAD)
+# Indagium — Software Architecture & Design Document (SAAD)
 
-> **Status:** reverse-engineered from the source tree at app version **1.7.9**.
+> **Status:** reverse-engineered from the source tree at app version **1.8.0**.
 > Every structural claim below is followed by the file (and where useful the line) that supports it.
 
 ---
@@ -9,7 +9,7 @@
 
 ### 1.1 Purpose
 
-This document describes the architecture of openLog **as it actually exists in the code**, not as it
+This document describes the architecture of Indagium **as it actually exists in the code**, not as it
 was originally designed. It is written for someone who has to change the system: a maintainer adding
 a feature, a reviewer judging a pull request, or a contributor deciding which package a new file
 belongs in.
@@ -25,8 +25,8 @@ have to change.
 ### 1.3 How to read the citations
 
 A citation like `utils/Filter.kt:301` means "line 301 of
-`src/desktopMain/kotlin/com/openlog/utils/Filter.kt`". Paths are relative to
-`src/desktopMain/kotlin/com/openlog/` unless they begin with `src/`, `docs/`, or a repository-root
+`src/desktopMain/kotlin/com/indagium/utils/Filter.kt`". Paths are relative to
+`src/desktopMain/kotlin/com/indagium/` unless they begin with `src/`, `docs/`, or a repository-root
 filename such as `build.gradle.kts`.
 
 Line numbers were correct at the time of writing and will drift. Names — of classes, functions, and
@@ -73,7 +73,7 @@ constants — are the stable part of a citation; treat the line number as a hint
 
 ## 2. System overview
 
-openLog is a **desktop log viewer for Android logcat files**. It opens logcat captures — including
+Indagium is a **desktop log viewer for Android logcat files**. It opens logcat captures — including
 multi-gigabyte ones and Android bug-report archives — and gives an engineer the tools to reduce them
 to the handful of lines that explain a defect: filters, pattern-based folding, crash detection,
 annotations that export as a ticket-ready Markdown document, and an optional AI assistant that can
@@ -81,7 +81,7 @@ drive all of those tools itself.
 
 ### 2.1 Runtime shape
 
-openLog is **one process**. There is no server component, no database, no user account, and no
+Indagium is **one process**. There is no server component, no database, no user account, and no
 network dependency for any core function.
 
 | Property | Value | Evidence |
@@ -188,7 +188,7 @@ build-time compilation of the macOS dylib, and the dependency-locking exclusions
 
 ### D6 — Source-available licensing
 
-openLog ships under the PolyForm Perimeter License. This is why there is a build-generated license
+Indagium ships under the PolyForm Perimeter License. This is why there is a build-generated license
 resource and a mandatory in-app acceptance gate (`ui/LicenseAgreementDialog.kt`, `AppState.needsLicenseAcceptance`).
 
 ---
@@ -200,7 +200,7 @@ flowchart TB
     user(["Engineer"])
 
     subgraph host["User's machine"]
-        app["openLog<br/>single JVM process"]
+        app["Indagium<br/>single JVM process"]
         fs[("Log files, bug-report archives,<br/>video recordings, project source")]
         appdata[("App data dir<br/>autosave, indexes, notes, token")]
         codexcli["Codex CLI<br/>subprocess"]
@@ -241,7 +241,7 @@ action — none is contacted at startup except the GitHub release check, and onl
 `autoCheckUpdates` is on in a packaged build (`Main.kt:206-208`).
 
 Note the two inbound arrows at the bottom: when the user runs a **Codex account** or **Claude Code
-account** AI profile, openLog starts the CLI as a subprocess *and* stands up a private, run-scoped
+account** AI profile, Indagium starts the CLI as a subprocess *and* stands up a private, run-scoped
 MCP endpoint that the CLI connects back into. That loop is described in [§14.1](#141-control-server-mcp-and-rest)
 and [§15.2](#152-ai-investigation-round-trip).
 
@@ -286,8 +286,8 @@ flowchart TB
 
     subgraph automation["Automation — package debug"]
         server["ControlServer<br/>Ktor CIO, MCP + REST"]
-        gateway["OpenLogToolGateway<br/>56-tool contract"]
-        ops["OpenLogToolOperations<br/>55 handlers"]
+        gateway["IndagiumToolGateway<br/>56-tool contract"]
+        ops["IndagiumToolOperations<br/>55 handlers"]
     end
 
     subgraph ai["AI runtime — package ai"]
@@ -326,14 +326,14 @@ flowchart TB
 ```
 
 **Key.** Solid arrows are compile-time dependencies or direct calls. The single dashed arrow is a
-network hop: account-based AI agents are separate OS processes, so they reach openLog's tools over
+network hop: account-based AI agents are separate OS processes, so they reach Indagium's tools over
 HTTP rather than in-process.
 
 Three things in this diagram are the load-bearing structural decisions:
 
 1. **`AppState` is the hub.** Everything the user can change lives there, and every subsystem either
    reads it or is owned by it. There is no second source of truth.
-2. **`OpenLogToolGateway` is a chokepoint.** MCP clients, REST clients, the in-app AI agent, and
+2. **`IndagiumToolGateway` is a chokepoint.** MCP clients, REST clients, the in-app AI agent, and
    subprocess agents all reach application behaviour through the same 55-entry catalogue. See
    [§14.1](#141-control-server-mcp-and-rest).
 3. **`AiToolExecutionCoordinator` sits below the model loop, not beside it.** Both the direct-API
@@ -371,8 +371,8 @@ observed in the code and enforced by convention and review rather than by toolin
   (`cases/CaseIndexer.kt:9-13`). `CaseSearch` takes its note directories as a **supplier lambda**
   rather than a value, so a settings change is picked up without reconstructing the object
   (`cases/CaseSearch.kt:38-44`).
-- **`debug/OpenLogToolOperations` is constructible without a server.** It takes an `AppState` and
-  nothing else (`debug/OpenLogToolOperations.kt:63`), which is precisely why the in-app AI agent can
+- **`debug/IndagiumToolOperations` is constructible without a server.** It takes an `AppState` and
+  nothing else (`debug/IndagiumToolOperations.kt:63`), which is precisely why the in-app AI agent can
   reuse the identical tool contract without any HTTP involved.
 - **UI leaf panels do not receive `AppState`.** `FilterPanel`, `LogViewer`, `AnnotationPanel`,
   `SearchBar`, `Minimap`, and `TidMapOverlay` take plain data plus callback lambdas. The binding is
@@ -430,8 +430,8 @@ flowchart TB
 **Key.** Arrows point from dependant to dependency.
 
 **The one cycle.** `ui ↔ ai` and `ui ↔ debug` are genuine bidirectional dependencies, not diagram
-artifacts. `debug/OpenLogToolOperations` holds an `AppState`, and `AppState` constructs
-`OpenLogToolOperations(this).toolGateway` to hand to the AI runtime (`ui/AppState.kt:970-981`). This
+artifacts. `debug/IndagiumToolOperations` holds an `AppState`, and `AppState` constructs
+`IndagiumToolOperations(this).toolGateway` to hand to the AI runtime (`ui/AppState.kt:970-981`). This
 is deliberate: the tools *are* "things the user can do", so they must reach the state that models
 what the user can do. It is the main reason a Gradle module split has not been attempted — the cycle
 would have to be broken with an interface extraction first. See
@@ -805,10 +805,10 @@ It is never persisted and never leaves the process.
 | File | Role |
 |---|---|
 | `ControlServer.kt` | Ktor CIO server; the 55-entry `MCP_TOOLS` catalogue (`:666`); 50 `REST_ROUTES` (`:1240`); auth, CORS, session reaping |
-| `OpenLogToolGateway.kt` | Joins catalogue to handlers, enforces parity, defines the confirmation policy, derives OpenAI function definitions |
-| `OpenLogToolOperations.kt` | The 55 handler lambdas (`:66-195`) — the actual behaviour behind every tool |
+| `IndagiumToolGateway.kt` | Joins catalogue to handlers, enforces parity, defines the confirmation policy, derives OpenAI function definitions |
+| `IndagiumToolOperations.kt` | The 55 handler lambdas (`:66-195`) — the actual behaviour behind every tool |
 | `Json.kt` | Hand-rolled JSON encode/decode for flat DTOs |
-| `AppLogger.kt` | Opt-in diagnostic log, written in Android threadtime grammar so openLog can open its own log |
+| `AppLogger.kt` | Opt-in diagnostic log, written in Android threadtime grammar so Indagium can open its own log |
 
 ### 9.5 `ai`
 
@@ -831,7 +831,7 @@ It is never persisted and never leaves the process.
 |---|---|
 | `source/SourceIndexer.kt` | Builds the call-site index by text scanning and brace matching — no compiler, no parser dependency |
 | `source/LogSourceResolver.kt` | Maps `(tag, msg)` back to call sites with confidence ranking |
-| `source/SourceIndexStore.kt` | On-disk index, format `openLog2-source-index-v1`, schema version 9 |
+| `source/SourceIndexStore.kt` | On-disk index, format `indagium-source-index-v1` (a load also accepts the legacy `openLog2-source-index-v1` magic), schema version 9 |
 | `source/SourceStructureParser.kt` | Declaration scanner for the read-only source-navigation tools |
 | `cases/CaseIndexer.kt` / `CaseSearch.kt` / `CaseIndexStore.kt` | Similarity index over previously written notes; idf-lite scoring with tag boost and stale-version penalty |
 | `video/VideoPlayerController.kt` | FFmpeg decode loop on a dedicated thread, audio via `javax.sound.sampled` |
@@ -1020,8 +1020,8 @@ native or IO calls:
 
 | Thread | Where | Why |
 |---|---|---|
-| `openlog-video-decode` | `video/VideoPlayerController.kt:442` | FFmpeg decode loop with frame pacing |
-| `openLog-voice-capture` | `voice/VoiceCapture.kt:88` | Blocking `TargetDataLine` reads |
+| `indagium-video-decode` | `video/VideoPlayerController.kt:442` | FFmpeg decode loop with frame pacing |
+| `indagium-voice-capture` | `voice/VoiceCapture.kt:88` | Blocking `TargetDataLine` reads |
 | Single-instance accept loop | `singleinstance/SingleInstance.kt:178` | Blocking `ServerSocket.accept()` |
 
 There are no `Executors` and no `kotlinx.coroutines.sync.Mutex` anywhere in `desktopMain`.
@@ -1145,32 +1145,68 @@ thread, which is why no `withContext(Dispatchers.Main)` appears anywhere in the 
 ### 13.1 Storage layout
 
 Everything is a plain file under one app-data directory, resolved per OS by
-`DesktopStorage.appDataDir` (`ui/DesktopStorage.kt:8-22`):
+`DesktopStorage.appDataDir` (`ui/DesktopStorage.kt:241-257`):
 
 | OS | Directory |
 |---|---|
-| macOS | `~/Library/Application Support/openLog2` |
-| Windows | `%APPDATA%\openLog2` (fallback `~/AppData/Roaming/openLog2`) |
-| Other | `$XDG_STATE_HOME/openLog2` (fallback `~/.local/state/openLog2`) |
+| macOS | `~/Library/Application Support/Indagium` |
+| Windows | `%APPDATA%\Indagium` (fallback `~/AppData/Roaming/Indagium`) |
+| Other | `$XDG_STATE_HOME/Indagium` (fallback `~/.local/state/Indagium`) |
 
 | Path | Contents | Format |
 |---|---|---|
-| `autosave.cache` | Session: tabs, filters, settings, saved filters, recents | `openLog2-cache-v1`, line-oriented |
-| `source-index` | Indexed `Log.*`/Timber call sites | `openLog2-source-index-v1`, schema v9 |
-| `case-index` | Similarity index over past analysis notes | `openLog2-case-index-v1`, schema v1 |
+| `autosave.cache` | Session: tabs, filters, settings, saved filters, recents | `indagium-cache-v1`, line-oriented (a load also accepts the legacy `openLog2-cache-v1` magic) |
+| `source-index` | Indexed `Log.*`/Timber call sites | `indagium-source-index-v1`, schema v9 (a load also accepts the legacy `openLog2-source-index-v1` magic) |
+| `case-index` | Similarity index over past analysis notes | `indagium-case-index-v1`, schema v1 (a load also accepts the legacy `openLog2-case-index-v1` magic) |
 | `control-token` | Bearer token for the control server | 32 hex chars, plaintext |
 | `notes/` | Saved analyses: `<base>_analysis.md` + `.ann` sidecar | Markdown + token format |
 | `custom-ai-commands/` | User-defined AI slash commands | One `.md` per command |
 | `voice-models/` | Downloaded Whisper models | GGML binary |
 | `filter-backups/` | Automatic saved-filter backups | Filter-library JSON |
 | `archive-cache/` | Videos extracted from bug-report archives | Raw media, budget-enforced |
-| `openlog-debug.log` | Opt-in diagnostic log | Android threadtime text |
+| `indagium-debug.log` | Opt-in diagnostic log | Android threadtime text |
+
+#### 13.1.1 The pre-rename directory and the one-time migration
+
+Before the app was renamed from openLog to Indagium, `appDataDir` produced a differently-named
+directory on each OS — `DesktopStorage.legacyAppDataDir` (`ui/DesktopStorage.kt:260-264`) still knows
+how to compute it, purely so the migration below can find it:
+
+| OS | Legacy directory |
+|---|---|
+| macOS | `~/Library/Application Support/openLog2` |
+| Windows | `%APPDATA%\openLog2` (fallback `~/AppData/Roaming/openLog2`) |
+| Other | `$XDG_STATE_HOME/openLog2` (fallback `~/.local/state/openLog2`) |
+
+`DesktopStorage.migrateAppDataDirIfNeeded` (`ui/DesktopStorage.kt:290-293`) runs in `Main.kt` before
+`AppState` is constructed — and therefore before autosave restore — so a renamed build never starts
+with an existing user's session invisible to it. `migrateAppDataDir` (`ui/DesktopStorage.kt:300-333`)
+does the actual work, gated by a `.migrated-from-openLog2` marker file written into the *new* dir once
+the run completes (or immediately if there was no legacy dir to copy from), which makes every
+subsequent launch a no-op (`MigrationOutcome.AlreadyDone`):
+
+| Entry | Copy mode | Why |
+|---|---|---|
+| `autosave.cache`, `notes/`, `custom-ai-commands/`, `filter-backups/`, `source-index`, `case-index` | Byte copy | User data and durable indexes worth preserving |
+| `voice-models/` | Hardlink (same volume), falling back to a byte copy on any failure | Large, content-addressable, no-op for disk usage when linkable |
+| `archive-cache/`, `control-token`, `single-instance.{lock,port}` | **Not migrated** | Derived/rebuildable cache, a per-install secret, and process-local coordination files, respectively — none of them is user data worth carrying forward |
+| `openlog-debug.log` | **Not migrated** | Renamed away (now `indagium-debug.log`); an old diagnostic log has no continuing value |
+
+Byte-copied data (not hardlinks) is capped at `MIGRATION_MAX_BYTES` = 2 GiB total
+(`ui/DesktopStorage.kt:48`) so a pathological amount of legacy data cannot block startup; entries that
+would push the running total over the cap are skipped individually (not partially copied) and the
+rest of the migration still completes and still writes the marker. The old directory is never
+written to, moved, or deleted by any part of this — the migration is copy-only and one-way, so it is
+always safe to delete by hand.
 
 ### 13.2 The autosave format
 
 `autosave.cache` is line-oriented `key\tvalue`, where each value is base64-url-encoded without
-padding. The first line is the magic string `openLog2-cache-v1`; a mismatch aborts the whole restore
-(`ui/AppState.kt:5964`, written at `:6119`).
+padding. The first line is a magic string: a write always emits `indagium-cache-v1`, but a read also
+accepts the legacy `openLog2-cache-v1` (`AUTOSAVE_MAGIC_CURRENT`/`AUTOSAVE_MAGIC_LEGACY_OPENLOG2`,
+`ui/AppState.kt:552-553`) — needed because the one-time migration in §13.1.1 copies a legacy user's
+`autosave.cache` forward byte-for-byte, magic string and all, so it must still load. Any other first
+line aborts the whole restore (`ui/AppState.kt:5964`, written at `:6119`).
 
 Keys are written in a fixed order — `settings`, `active`, `compare`, `saved`, `activeFilters`,
 `drafts`, `transientRegex`, `recent`, `recentNotes`, `filterPanel` — followed by a bare `tabs` marker
@@ -1238,7 +1274,7 @@ the log it came from.
 
 ### 14.1 Control server: MCP and REST
 
-`debug/ControlServer.kt` exposes openLog's functionality to external programs.
+`debug/ControlServer.kt` exposes Indagium's functionality to external programs.
 
 | Property | Value | Evidence |
 |---|---|---|
@@ -1253,8 +1289,8 @@ the log it came from.
 
 **The single tool contract.** This is the structural idea worth understanding. There is one
 catalogue, `MCP_TOOLS` (`debug/ControlServer.kt:666`, 56 entries), and one handler map,
-`operationHandlers` (`debug/OpenLogToolOperations.kt:66-195`, 56 entries). `OpenLogToolGateway`
-joins them and its `init` block **fails fast if they disagree** (`debug/OpenLogToolGateway.kt:22-25`).
+`operationHandlers` (`debug/IndagiumToolOperations.kt:66-195`, 56 entries). `IndagiumToolGateway`
+joins them and its `init` block **fails fast if they disagree** (`debug/IndagiumToolGateway.kt:22-25`).
 
 Four consumers are then derived from that single pair:
 
@@ -1262,7 +1298,7 @@ Four consumers are then derived from that single pair:
 flowchart TB
     catalog["MCP_TOOLS<br/>55 descriptors + JSON schemas"]
     handlers["operationHandlers<br/>55 lambdas"]
-    gw["OpenLogToolGateway<br/>init enforces parity"]
+    gw["IndagiumToolGateway<br/>init enforces parity"]
 
     mcp["Shared MCP Server<br/>external clients"]
     rest["REST routes<br/>51 of 56 tools"]
@@ -1288,11 +1324,11 @@ Five tools are MCP-only and have no REST route: `get_sequence_summary`, `get_pro
 routes against 56 tools.
 
 Because `openAiFunctions()` serialises the *same* `ToolSchema` into OpenAI function definitions
-(`debug/OpenLogToolGateway.kt:42-48`), there is no second hand-written tool catalogue anywhere. A
+(`debug/IndagiumToolGateway.kt:42-48`), there is no second hand-written tool catalogue anywhere. A
 tool added in one place is available to every consumer, or the build fails.
 
 **Confirmation policy** lives on the gateway, not in the UI: thirteen tools that touch files or tab
-lifecycle are marked `CONFIRMATION_REQUIRED` (`debug/OpenLogToolGateway.kt:53-61`) — `open_log_file`,
+lifecycle are marked `CONFIRMATION_REQUIRED` (`debug/IndagiumToolGateway.kt:53-61`) — `open_log_file`,
 `split_log_file`, `close_tab`, `export_analysis`, `export_filtered_log`, `save_annotations`,
 `load_annotations`, `merge_tabs`, `start_tailing`, `stop_tailing`, `clear_all_notes`,
 `reindex_sources`, `save_filter_preset`.
@@ -1323,13 +1359,13 @@ which can legitimately take minutes.
 | `ClaudeCodeClient` | Newline-delimited JSON on stdout | `claude --print --output-format stream-json --verbose --include-partial-messages` |
 | `CodexAppServerClient` | stdio JSON-RPC (JSONL), numeric request ids | `codex app-server --stdio` |
 
-Both are driven by `AccountAgentRunner`. openLog holds **no credential** for these — authentication
+Both are driven by `AccountAgentRunner`. Indagium holds **no credential** for these — authentication
 lives in the user's own CLI installation.
 
-**How a subprocess agent reaches openLog's tools.** It cannot call in-process, so
+**How a subprocess agent reaches Indagium's tools.** It cannot call in-process, so
 `ManagedMcpServerLease` starts a *second* `ControlServer` on port 0 (OS-assigned) with a run-scoped
 bearer token registered in `ManagedMcpRunRegistry`. Codex receives the token via the
-`OPENLOG_MCP_TOKEN` environment variable — deliberately not on the command line, where it would be
+`INDAGIUM_MCP_TOKEN` environment variable — deliberately not on the command line, where it would be
 visible in `ps`. Claude Code receives it in an `Authorization` header inside its `--mcp-config` JSON.
 The lease is revoked when the run ends.
 
@@ -1352,7 +1388,7 @@ Three transcription backends, selected per OS by `voice/VoiceRecognitionEngines.
 | Backend | Mechanism | Notes |
 |---|---|---|
 | Whisper | `whisper-jni` with a downloaded GGML model | The only engine supporting local translation to English |
-| Apple Speech | Objective-C JNI bridge, **compiled at build time** from `native/macos/openlog_speech.m` | Keeping it generated rather than committed makes the native code reviewable and lets notarisation sign the exact dylib built for the release |
+| Apple Speech | Objective-C JNI bridge, **compiled at build time** from `native/macos/indagium_speech.m` | Keeping it generated rather than committed makes the native code reviewable and lets notarisation sign the exact dylib built for the release |
 | Windows Speech | Out-of-process helper, base64 PCM over the pipe | Requires an installed offline language pack |
 
 The Whisper model is downloaded only after explicit consent, verified by SHA-256, and stored in
@@ -1453,7 +1489,7 @@ sequenceDiagram
     participant Provider as LlmProvider
     participant Policy as AiToolExecutionCoordinator
     participant Budget as AiToolCallBudget
-    participant Gateway as OpenLogToolGateway
+    participant Gateway as IndagiumToolGateway
     participant State as AppState
 
     User->>Sidebar: Ask a question / quick action
@@ -1515,8 +1551,8 @@ sequenceDiagram
     participant Ktor as Ktor CIO
     participant Gate as Auth interceptor
     participant MCP as MCP Server (SDK)
-    participant Gateway as OpenLogToolGateway
-    participant Ops as OpenLogToolOperations
+    participant Gateway as IndagiumToolGateway
+    participant Ops as IndagiumToolOperations
     participant State as AppState
 
     Client->>Ktor: POST /mcp (Host, Authorization: Bearer)
@@ -1552,7 +1588,7 @@ defeats DNS rebinding — a malicious page resolving its own hostname to 127.0.0
 explicitly **rejected** for REST (`debug/ControlServer.kt:420-422`).
 
 Handlers return errors as data — a `Map` with a single `"error"` key — rather than throwing. There
-are 117 such returns in `OpenLogToolOperations.kt` against 8 lines containing `try`/`catch`.
+are 117 such returns in `IndagiumToolOperations.kt` against 8 lines containing `try`/`catch`.
 
 ### 15.4 Autosave and session restore
 
@@ -1722,7 +1758,7 @@ Every on-disk index degrades to "rebuild" rather than failing:
 
 ## 18. Security considerations
 
-openLog processes files that frequently contain production data, and it optionally opens a local
+Indagium processes files that frequently contain production data, and it optionally opens a local
 network port and runs external programs. This section states each control **and its residual risk**.
 
 ### 18.1 Trust boundaries
@@ -1730,7 +1766,7 @@ network port and runs external programs. This section states each control **and 
 ```mermaid
 flowchart TB
     subgraph trusted["Trusted — same user, same machine"]
-        app["openLog process"]
+        app["Indagium process"]
         files[("Log files, source, notes")]
     end
 
@@ -1766,7 +1802,7 @@ flowchart TB
 | Session reaping | 120 s ping, 5 s timeout | Bounded resource leak, not eliminated |
 
 **Deliberate non-control: there is no path sandbox.** `invalidPath` rejects only blank paths and
-paths containing NUL (`debug/ControlServer.kt:175-179`). An authenticated client can ask openLog to
+paths containing NUL (`debug/ControlServer.kt:175-179`). An authenticated client can ask Indagium to
 open any file the user can read. This is documented as intentional — opening arbitrary local log
 files is the tool's entire purpose — but it means **the bearer token is the only thing standing
 between a local process and a file-read primitive**. Treat the token as a credential.
@@ -1807,19 +1843,19 @@ Keys are cleared on profile delete and on `AppState.close()`. They are lost on r
 | Codex user MCP servers disabled | Generated config disables servers from `~/.codex/config.toml` per launch |
 | Codex sandbox | `approvalPolicy = "never"`, `sandbox = "read-only"`, `ephemeral = true` |
 | Fresh workspace | Each run gets a temp directory, deleted afterwards |
-| Token off the command line | Passed via `OPENLOG_MCP_TOKEN` env var, not argv where `ps` would show it |
-| Elicitation filtering | Only `openlog`-server elicitations and MCP tool-call approvals are accepted; everything else is declined |
+| Token off the command line | Passed via `INDAGIUM_MCP_TOKEN` env var, not argv where `ps` would show it |
+| Elicitation filtering | Only `indagium`-server elicitations and MCP tool-call approvals are accepted; everything else is declined |
 | stderr redaction | `ProcessDiagnosticTail` strips `bearer …` and `api_key|token|secret|password|authorization = …` before any diagnostic surface can show it |
 
 The account agents receive no source-folder access and no application workspace access; all log and
-source evidence reaches them only through openLog tools.
+source evidence reaches them only through Indagium tools.
 
 ### 18.6 Log redaction
 
 `AppLogger.safeText` (`debug/AppLogger.kt:108-116`) strips CR/LF/TAB, replaces
 `api_key|token|secret|password|authorization` values with `[REDACTED]`, replaces Windows `C:\…` and
 POSIX `/…` paths with `[PATH]`, and truncates at 2,000 characters. Diagnostic logging is off by
-default. The log is written in Android threadtime grammar so it can be opened in openLog itself —
+default. The log is written in Android threadtime grammar so it can be opened in Indagium itself —
 a small but genuinely useful design touch.
 
 ### 18.7 Archive handling
@@ -1893,7 +1929,7 @@ Three generated inputs are produced at build time rather than committed:
 |---|---|---|
 | Build info Kotlin source | `generateBuildInfo` | Version and build metadata available to the app |
 | License resources | `generateLicenseResources` | The in-app licence dialog text derives from `LICENSE` + `NOTICE`, so they cannot drift |
-| `libopenlog_speech.dylib` | `compileAppleSpeechNative` (macOS only) | Keeps the Objective-C reviewable in-tree and lets notarisation sign the exact dylib built for the release |
+| `libindagium_speech.dylib` | `compileAppleSpeechNative` (macOS only) | Keeps the Objective-C reviewable in-tree and lets notarisation sign the exact dylib built for the release |
 
 Note `kotlin.daemon.jvmargs=-Xmx4096m` in `gradle.properties`: the Compose compiler's IR-to-bytecode
 transform runs the Kotlin daemon out of its default heap on `SettingsDialog.kt`'s single large
@@ -1969,7 +2005,7 @@ checker, then exercises real application logic with no UI, no disk of consequenc
 | Autosave scheduling, debouncing, and write ordering | `AutosaveSchedulerTest` |
 | Tailer offset capture, rotation, partial lines | `FileTailerTest` |
 | Video frame-drop policy | `FrameDropPolicyTest` |
-| MCP and REST contract behaviour | `ControlServerTest`, `ControlServerMcpTest`, `OpenLogToolGatewayTest` |
+| MCP and REST contract behaviour | `ControlServerTest`, `ControlServerMcpTest`, `IndagiumToolGatewayTest` |
 | Every AI provider's stream parsing | `AnthropicMessagesProviderTest`, `OpenAiCompatibleProviderTest`, `ClaudeCodeClientTest`, `CodexAppServerClientTest` |
 
 `AutosaveGoldenV1Test` is the interesting one architecturally: it is a **frozen fixture** that pins
@@ -1997,10 +2033,10 @@ Concrete recipes for the five changes most likely to be needed.
    the type tokens: `"array"` means array-of-string, `"array<integer>"` means array-of-number, and
    the distinction measurably changes model behaviour (`debug/ControlServer.kt:530-539`).
 2. Add a handler with the **same name** to `operationHandlers`
-   (`debug/OpenLogToolOperations.kt:66`). If the names disagree, `OpenLogToolGateway`'s `init`
+   (`debug/IndagiumToolOperations.kt:66`). If the names disagree, `IndagiumToolGateway`'s `init`
    throws at construction — you will find out immediately.
 3. If the tool touches files or tab lifecycle, add it to `CONFIRMATION_REQUIRED_TOOLS`
-   (`debug/OpenLogToolGateway.kt:53`).
+   (`debug/IndagiumToolGateway.kt:53`).
 4. If it should be tab-scoped for AI runs, add it to `TAB_SCOPED_TOOL_NAMES`
    (`ai/AiToolExecutionCoordinator.kt:165`) so the pinned `tabId` is injected.
 5. Optionally add a REST route to `REST_ROUTES` (`debug/ControlServer.kt:1240`).
@@ -2084,7 +2120,7 @@ is already on the classpath for the update checker.
 
 ### R4 — `awaitLoad()` blocks a Ktor request thread for up to 120 seconds
 
-`OpenLogToolOperations.awaitLoad` (`:361`, `:371`) uses `Thread.sleep(20)` in a poll loop with a
+`IndagiumToolOperations.awaitLoad` (`:361`, `:371`) uses `Thread.sleep(20)` in a poll loop with a
 120-second timeout, executed on the Ktor CIO request coroutine's thread. Several concurrent
 `open_log_file` calls against large files can starve the server's thread pool.
 
@@ -2095,7 +2131,7 @@ handlers suspend and use `withTimeout` + a completion signal instead of polling.
 
 By design there is no path sandbox ([§18.2](#182-control-server-exposure)). The token is stored in
 plaintext with best-effort permissions that are a no-op on Windows. Any local process running as the
-user can read it and then ask openLog to read any file the user can read.
+user can read it and then ask Indagium to read any file the user can read.
 
 **Impact:** medium, bounded by "local process already running as you" — but worth stating explicitly
 because the current documentation does not. **Mitigation:** an optional approved-roots allowlist for
@@ -2118,7 +2154,7 @@ Described in [§7](#7-package-dependency-graph). It blocks a Gradle module split
 next step for enforcing the boundaries in §6 mechanically rather than by convention.
 
 **Impact:** low now, blocking later. **Mitigation:** extract the `AppState` surface the tools actually
-use into an interface in a lower package; `OpenLogToolOperations` would depend on the interface, not
+use into an interface in a lower package; `IndagiumToolOperations` would depend on the interface, not
 on `ui`.
 
 ### R8 — Panel binding adapters are large and hand-maintained
@@ -2174,14 +2210,14 @@ habit. **Mitigation:** an Apple Developer certificate in CI.
 | **Confirmation-required tool** | One of thirteen automation tools that pauses for explicit user approval before executing. |
 | **Highlighter** | A pattern that colours matching lines without filtering them out. |
 | **Large-file mode** | A per-tab flag set above a size threshold that routes item computation onto the cancellable async path. |
-| **Managed MCP lease** | A short-lived, run-scoped MCP endpoint on an OS-assigned port, created so a subprocess AI agent can call openLog's tools. |
+| **Managed MCP lease** | A short-lived, run-scoped MCP endpoint on an OS-assigned port, created so a subprocess AI agent can call Indagium's tools. |
 | **Manual collapse block** | A user-created folded range: to start, to end, or an explicit range. |
 | **Message rule** | An include or exclude rule matching a line's message or PID/TID, optionally scoped to a tag or package. |
 | **RAW** | The tag given to a line that matched none of the four logcat formats. Such lines are kept, never dropped. |
 | **Sequence** | A user-defined start (and optional end) pattern that folds a recurring region of the log into a collapsible group. |
 | **Session-only state** | State intentionally excluded from the autosave: selection, tailing, search, TID map, video-follow, and all AI conversations. |
 | **Splice fast path** | An optimisation that mutates a cached item list in place for a single stack-group expand/collapse instead of rebuilding it. |
-| **Threadtime** | The default Android logcat format: `MM-DD HH:MM:SS.mmm PID TID L Tag: message`. Also the format openLog writes its own diagnostic log in. |
+| **Threadtime** | The default Android logcat format: `MM-DD HH:MM:SS.mmm PID TID L Tag: message`. Also the format Indagium writes its own diagnostic log in. |
 | **TID map** | A gutter overlay colouring rows by thread id within a chosen process. |
 
 ---
@@ -2206,7 +2242,7 @@ Where to read about a given source file.
 | `ui/AutosaveCodec.kt`, `AutosaveScheduler.kt`, `DesktopStorage.kt` | [13](#13-persistence-architecture), [15.4](#154-autosave-and-session-restore), [22.4](#224-add-a-persisted-setting) |
 | `ui/ControlServerManager.kt`, `TailCoordinator.kt`, `AnnotationManager.kt` | [11.3](#113-delegation-to-coordinators) |
 | `ui/Shortcuts.kt`, `Theme.kt` | [9.3](#93-ui), [22.5](#225-add-a-theme) |
-| `debug/ControlServer.kt`, `OpenLogToolGateway.kt`, `OpenLogToolOperations.kt` | [14.1](#141-control-server-mcp-and-rest), [15.3](#153-external-mcp-client-invoking-a-tool), [18.2](#182-control-server-exposure), [22.1](#221-add-an-mcp--automation-tool) |
+| `debug/ControlServer.kt`, `IndagiumToolGateway.kt`, `IndagiumToolOperations.kt` | [14.1](#141-control-server-mcp-and-rest), [15.3](#153-external-mcp-client-invoking-a-tool), [18.2](#182-control-server-exposure), [22.1](#221-add-an-mcp--automation-tool) |
 | `debug/Json.kt` | [R3](#r3--hand-rolled-json-that-does-not-report-malformed-input) |
 | `debug/AppLogger.kt` | [17](#17-error-handling-and-resilience), [18.6](#186-log-redaction) |
 | `ai/` (all) | [14.2](#142-ai-providers), [15.2](#152-ai-investigation-round-trip), [16](#16-ai-run-lifecycle), [18.4](#184-ai-provider-credentials), [18.5](#185-subprocess-agent-containment), [22.2](#222-add-an-ai-provider) |
@@ -2222,7 +2258,7 @@ Where to read about a given source file.
 
 ## Related documents
 
-- [USER_GUIDE.md](USER_GUIDE.md) — how to use openLog.
+- [USER_GUIDE.md](USER_GUIDE.md) — how to use Indagium.
 - [mcp/README.md](mcp/README.md) — connecting an external MCP client.
 - [mcp/AVAILABLE_METHODS.md](mcp/AVAILABLE_METHODS.md) — the tool reference.
 - [mcp/ANALYSIS_PLAYBOOK.md](mcp/ANALYSIS_PLAYBOOK.md) — prompt patterns for log analysis.

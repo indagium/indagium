@@ -4,7 +4,7 @@ Date: 2026-07-03 · Branch: `feat/fixes_02_07_26`
 
 ## Problem
 
-Opening and filtering Android logcat files larger than ~1GB freezes and stalls openLog badly;
+Opening and filtering Android logcat files larger than ~1GB freezes and stalls Indagium badly;
 klogg handles the same files smoothly.
 
 ## What the code actually does today (verified)
@@ -57,7 +57,7 @@ for files *under* 512MB. The >1GB freezes come from what's left:
 
 klogg never materializes parsed line objects: it indexes byte offsets in the background, keeps
 the file on disk, realizes text only for the visible viewport/search, and its "filter" is a
-single regex. openLog's model is fundamentally richer: id-based selection/annotations,
+single regex. Indagium's model is fundamentally richer: id-based selection/annotations,
 tag/level/PID parsed-field filters, user sequences, stack-trace folding, manual collapse —
 all assuming random access to parsed `LogEntry`s. Porting klogg's index model means rewriting
 the data model, every filter, autosave and annotations. **Not worth the risk for the 1–2GB
@@ -108,8 +108,8 @@ Fixture: synthetic threadtime logcat, 1492MB / 10,606,636 lines, ~48 tags, 265 e
 blocks + 11 ANRs. Harness: `LargeFilePerfHarness` —
 
 ```bash
-./gradlew desktopTest --tests "com.openlog.LargeFilePerfHarness" \
-    -Dopenlog.perf.file=/path/to/fixture.log -Dopenlog.perf.dense=1
+./gradlew desktopTest --tests "com.indagium.LargeFilePerfHarness" \
+    -Dindagium.perf.file=/path/to/fixture.log -Dindagium.perf.dense=1
 ```
 
 | Measurement | Before | After |
@@ -131,8 +131,8 @@ Equally important, the passes that used to run on the UI thread no longer do:
   synchronously;
 - files ≥64MB (was ≥512MB) get the async computeItems path.
 
-End-to-end smoke test: app launched via `./gradlew desktopRun -Dopenlog.debugControl=8991
--Dopenlog.run.home=<tmp>`, fixture opened through the MCP control server — 10.6M entries
+End-to-end smoke test: app launched via `./gradlew desktopRun -Dindagium.debugControl=8991
+-Dindagium.run.home=<tmp>`, fixture opened through the MCP control server — 10.6M entries
 loaded, keyword filter returned 529,635 rows, 276 crash sites detected, tab closed cleanly.
 
 ## Round 2: load speed + expand/collapse latency (2026-07-03)
