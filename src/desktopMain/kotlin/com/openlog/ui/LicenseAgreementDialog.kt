@@ -27,7 +27,7 @@ internal fun loadLicenseAgreement(): String =
         .getResourceAsStream("licenses/indagium-license-agreement.md")
         ?.bufferedReader()
         ?.use { it.readText() }
-        ?: "The openLog license agreement could not be loaded. Please reinstall openLog."
+        ?: "The Indagium license agreement could not be loaded. Please reinstall Indagium."
 
 @Composable
 internal fun LicenseAgreementDialog(
@@ -57,7 +57,7 @@ internal fun LicenseAgreementDialog(
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            AppText("openLog License Agreement", color = colors.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            AppText("Indagium License Agreement", color = colors.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             AppText("Terms version $LICENSE_VERSION", color = colors.td, fontSize = 10.sp, fontFamily = MONO)
             Box(Modifier.weight(1f).fillMaxWidth().border(1.dp, colors.br, shape)) {
                 SelectionContainer {
@@ -87,7 +87,7 @@ internal fun LicenseAgreementDialog(
                             checkmarkColor = colors.p,
                         ),
                     )
-                    AppText("I have read and accept the openLog license agreement.", color = colors.tx, fontSize = 11.sp)
+                    AppText("I have read and accept the Indagium license agreement.", color = colors.tx, fontSize = 11.sp)
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {

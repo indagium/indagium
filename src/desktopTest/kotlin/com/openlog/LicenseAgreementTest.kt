@@ -56,7 +56,7 @@ class LicenseAgreementTest {
         assertContains(agreement, "PolyForm Perimeter License 1.0.0")
         assertContains(agreement, "Any purpose is a permitted purpose, except for providing to others any product that competes with the software.")
         assertContains(agreement, "Required Notice: Copyright 2026 Roman Arnaut")
-        assertContains(agreement, "The openLog name, logo, icon, and branding")
+        assertContains(agreement, "The Indagium name, logo, icon, and branding")
         assertFalse(agreement.contains("PolyForm Noncommercial License"))
         assertFalse(agreement.contains("separate written commercial license"))
     }
