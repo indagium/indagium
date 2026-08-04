@@ -30,7 +30,7 @@ static NSString *availabilityMessage(NSString *localeIdentifier) {
     return @"Apple Speech is unavailable.";
 }
 
-JNIEXPORT jboolean JNICALL Java_com_openlog_voice_AppleSpeechNative_nativeEnsureReady
+JNIEXPORT jboolean JNICALL Java_com_indagium_voice_AppleSpeechNative_nativeEnsureReady
   (JNIEnv *env, jclass clazz, jstring language) {
     const char *chars = (*env)->GetStringUTFChars(env, language, NULL);
     NSString *locale = [NSString stringWithUTF8String:chars];
@@ -48,7 +48,7 @@ JNIEXPORT jboolean JNICALL Java_com_openlog_voice_AppleSpeechNative_nativeEnsure
     return status == SFSpeechRecognizerAuthorizationStatusAuthorized && availabilityMessage(locale) == nil ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT jstring JNICALL Java_com_openlog_voice_AppleSpeechNative_nativeAvailabilityMessage
+JNIEXPORT jstring JNICALL Java_com_indagium_voice_AppleSpeechNative_nativeAvailabilityMessage
   (JNIEnv *env, jclass clazz, jstring language) {
     const char *chars = (*env)->GetStringUTFChars(env, language, NULL);
     NSString *locale = [NSString stringWithUTF8String:chars];
@@ -56,7 +56,7 @@ JNIEXPORT jstring JNICALL Java_com_openlog_voice_AppleSpeechNative_nativeAvailab
     return javaString(env, availabilityMessage(locale) ?: @"Apple Speech is ready for on-device recognition.");
 }
 
-JNIEXPORT jstring JNICALL Java_com_openlog_voice_AppleSpeechNative_nativeTranscribe
+JNIEXPORT jstring JNICALL Java_com_indagium_voice_AppleSpeechNative_nativeTranscribe
   (JNIEnv *env, jclass clazz, jbyteArray pcm, jstring language) {
     const char *chars = (*env)->GetStringUTFChars(env, language, NULL);
     NSString *locale = [NSString stringWithUTF8String:chars];

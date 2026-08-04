@@ -1,0 +1,3843 @@
+package com.indagium.ui
+
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.*
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.DragData
+import androidx.compose.ui.draganddrop.dragData
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.zIndex
+import com.indagium.model.*
+import com.indagium.utils.IssueSiteGroup
+import com.indagium.utils.MAX_DISTINCT_TEMPLATES
+import com.indagium.utils.RegexEvaluationContext
+import com.indagium.utils.containsPattern
+import com.indagium.utils.firstRegexMatch
+import com.indagium.utils.groupIssueSites
+import com.indagium.utils.issueSitesForCategory
+import com.indagium.utils.matchesPidTidTokens
+import com.indagium.utils.matchingHighlighter
+import com.indagium.utils.matchingMessageRule
+import com.indagium.utils.messageRuleSpecForTemplate
+import com.indagium.utils.passesFilter
+import com.indagium.utils.resolvePidTidTokens
+import kotlinx.coroutines.delay
+import java.io.File
+import java.net.URI
+import kotlin.math.roundToInt
+
+// A message-rule search suggestion. inScope marks whether it's within the currently active
+// tag/package filter — out-of-scope candidates are shown after in-scope ones and dimmed, so
+// matches unrelated to the active filter are still discoverable instead of vanishing.
+private data class MsgCandidate(
+    val pattern: String,
+    val target: RuleTarget,
+    val inScope: Boolean,
+    val label: String = pattern,
+    val tag: String? = null,
+    val addsImmediately: Boolean = false,
+)
+
+internal data class ContextualMessageRuleCandidate(
+    val label: String,
+    val pattern: String,
+    val tag: String?,
+)
+
+// A tag-qualified query must not replace normal message-only suggestions. It supplements them
+// only when the query matches the tag/message boundary but not the message on its own.
+internal fun contextualMessageRuleCandidates(
+    entries: List<LogEntry>,
+    query: String,
+    regex: Boolean,
+    regexContext: RegexEvaluationContext = RegexEvaluationContext(),
+): List<ContextualMessageRuleCandidate> = entries.asSequence()
+    .filter { entry ->
+        val matchesTagAndMessage =
+            containsPattern("${entry.tag}: ${entry.msg}", query, regex, regexContext = regexContext) ||
+                containsPattern("${entry.tag} : ${entry.msg}", query, regex, regexContext = regexContext)
+        !containsPattern(entry.msg, query, regex, regexContext = regexContext) && matchesTagAndMessage
+    }
+    .flatMap { entry ->
+        messageRuleVariantsForEntry(entry).asSequence().map { variant ->
+            ContextualMessageRuleCandidate(variant.label, variant.pattern, variant.tag)
+        }
+    }
+    .distinctBy { candidate -> Triple(candidate.label, candidate.pattern, candidate.tag) }
+    .toList()
+
+internal data class PendingMessageRuleDraft(
+    val include: Boolean,
+    val pattern: String,
+    val regex: Boolean,
+    val target: RuleTarget,
+)
+
+internal data class MessageRuleScopeOption(
+    val label: String,
+    val tag: String? = null,
+    val packagePrefix: String? = null,
+) {
+    val isAll: Boolean get() = tag == null && packagePrefix == null
+}
+
+// The Log composition section's callbacks, grouped into one parameter instead of five more
+// lambdas on FilterPanel/BoundFilterPanel (~90 already) — see FileView.kt's BoundFilterPanel,
+// which builds one of these inside remember(state, tab.id) { … } so it stays == across
+// recompositions that don't change tab identity (a freshly allocated bag every time would defeat
+// FilterPanel's skippability the same way a fresh lambda would).
+internal data class LogCompositionActions(
+    // Called whenever the section becomes visible while expanded (first expand, or switching to
+    // a tab that hasn't been scanned yet). AppState.requestMessageComposition is itself the
+    // single-flight guard, so calling this more than once for an already-Computing/Computed tab
+    // is a harmless no-op.
+    val onExpand: () -> Unit,
+    val onHide: (MessageTemplate) -> Unit,
+    val onShowOnly: (MessageTemplate) -> Unit,
+    val onHighlight: (MessageTemplate) -> Unit,
+    val onGoToFirst: (MessageTemplate) -> Unit,
+)
+
+private const val LARGE_FILE_CANDIDATE_SCAN_LIMIT = 50_000
+private const val SEQUENCE_DRAG_SNAP_BIAS = 0.25f
+
+internal fun sequenceOrderDuringDrag(
+    visibleIds: List<String>,
+    draggedId: String?,
+    dragStartIndex: Int,
+    dragOffsetY: Float,
+    rowHeight: Float,
+): List<String> {
+    val dragged = draggedId?.takeIf { it in visibleIds } ?: return visibleIds
+    if (rowHeight <= 0f || dragStartIndex !in visibleIds.indices) return visibleIds
+    val sensitivityBias = rowHeight * SEQUENCE_DRAG_SNAP_BIAS * dragOffsetY.compareTo(0f)
+    val draggedCenter = dragStartIndex * rowHeight + rowHeight / 2f + dragOffsetY + sensitivityBias
+    val without = visibleIds.filter { it != dragged }
+    val insertAt = without.indexOfFirst { id ->
+        val center = visibleIds.indexOf(id) * rowHeight + rowHeight / 2f
+        draggedCenter < center
+    }.takeIf { it >= 0 } ?: without.size
+    return without.take(insertAt) + dragged + without.drop(insertAt)
+}
+
+internal fun sequenceRenderY(
+    isDragging: Boolean,
+    isJustReleased: Boolean,
+    pointerY: Float,
+    targetY: Float,
+    animatedY: Float,
+): Float = when {
+    isDragging -> pointerY
+    isJustReleased -> targetY
+    else -> animatedY
+}
+
+internal fun sequenceRowBaseBackground(isDragging: Boolean, enabled: Boolean, theme: ThemeColors): Color = when {
+    isDragging -> theme.p
+    !enabled -> theme.hv
+    else -> Color.Transparent
+}
+
+internal fun shouldSyncSequenceVisualOrder(dragId: String?, justReleasedSequenceId: String?): Boolean =
+    dragId == null && justReleasedSequenceId == null
+
+// Collapse/expand state for the filter panel. Held outside the composable so it survives
+// the panel being hidden and re-shown (FilterPanel is removed from the tree when invisible).
+class FilterPanelUiState {
+    var hlListExpanded      by mutableStateOf(true)
+    var lvlExpanded         by mutableStateOf(true)
+    var seqExpanded         by mutableStateOf(true)
+    var crashExpanded       by mutableStateOf(true)
+    var crashCategory       by mutableStateOf<IssueCategorySelection>(IssueCategorySelection.BuiltIn(CrashCategory.ALL))
+    var sfExpanded          by mutableStateOf(true)
+    var sfFavoritesExpanded by mutableStateOf(true)
+    var sfSearch            by mutableStateOf("")
+    var sfCollapsedFolderIds by mutableStateOf<Set<String>>(emptySet())
+    var incPillsExpanded    by mutableStateOf(true)
+    var incMsgPillsExpanded by mutableStateOf(true)
+    var excMsgPillsExpanded by mutableStateOf(true)
+
+    // Default collapsed (unlike the sections above): a new section in an already-long panel, and
+    // expanding it is what triggers AppState.requestMessageComposition's on-demand scan — see
+    // ui/FilterPanel.kt's "Log composition" section.
+    var logCompositionExpanded by mutableStateOf(false)
+
+    // Search text and current page (0-based) for the Log composition list (Stage 2c). Deliberately
+    // NOT persisted (unlike logCompositionExpanded above): these are transient browsing position
+    // within a list that gets recomputed on every filter change, not a filter setting — the same
+    // reasoning that keeps tagQueryDrafts/messageQueryDrafts below out of autosave. Reset to page 0
+    // on tab switch, on a fresh scan result, and whenever the search text changes — see this file's
+    // "Log composition" section for where.
+    var logCompositionSearch by mutableStateOf("")
+    var logCompositionPage   by mutableStateOf(0)
+
+    // These are drafts for the two discovery fields, rather than filter state.  In particular a
+    // tag query is not applied until the user chooses a candidate, and a message query can be
+    // hidden while its debounce is still pending.  Keep them per tab so collapsing/reopening the
+    // panel (which removes this composable from the tree) cannot discard what was being typed or
+    // leak it into another tab.
+    val tagQueryDrafts = mutableStateMapOf<String, String>()
+    val messageQueryDrafts = mutableStateMapOf<String, String>()
+}
+
+@OptIn(
+    ExperimentalLayoutApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+)
+@Composable
+internal fun FilterPanel(
+    tab: LogTab,
+    fpState: FilterPanelUiState,
+    savedFilters: List<SavedFilter>,
+    savedFilterFolders: List<SavedFilterFolder>,
+    activeFilterItemId: String?,
+    tagUsage: Map<String, Int>,
+    newHlPat: String, newHlRx: Boolean, newHlColor: Color,
+    newSeqText: String,
+    newSeqRegex: Boolean,
+    newSeqEndText: String,
+    newSeqEndRegex: Boolean,
+    newSeqStartTag: String,
+    newSeqEndTag: String,
+    newSeqColor: Color,
+    onToggleLevel: (LogLevel) -> Unit,
+    onSetFilterMode: (FilterMode) -> Unit,
+    onToggleTag: (String) -> Unit,
+    onToggleExcludeTag: (String) -> Unit,
+    onSetKw: (String) -> Unit,
+    onStartRegexSearch: () -> Unit,
+    onSetKwHighlightEnabled: (Boolean) -> Unit,
+    onSetKwHighlightColor: (Color) -> Unit,
+    onToggleSeq: () -> Unit,
+    onAddSeq: (String, Boolean, Color, String?, String?, Boolean, String?) -> Unit,
+    onRemoveSeq: (String) -> Unit,
+    onToggleSeqEnabled: (String) -> Unit,
+    onSetSeqColor: (String, Color) -> Unit,
+    onUpdateSeq: (String, String, Boolean, String?, String?, Boolean, String?) -> Unit,
+    onToggleManualCollapse: (String) -> Unit,
+    onRemoveManualCollapse: (String) -> Unit,
+    onSetManualBlockColor: (String, Color) -> Unit,
+    onAddMessageRule: (Boolean, String, Boolean, String?, String?, RuleTarget) -> Unit,
+    onRemoveMessageRule: (String) -> Unit,
+    onToggleMessageRuleRegex: () -> Unit,
+    onMoveSeqUp: (String) -> Unit,
+    onMoveSeqDown: (String) -> Unit,
+    onReorderSeq: (String, Int) -> Unit,
+    onSetNewSeqText: (String) -> Unit,
+    onSetNewSeqRx: (Boolean) -> Unit,
+    onSetNewSeqEndText: (String) -> Unit,
+    onSetNewSeqEndRx: (Boolean) -> Unit,
+    onSetNewSeqStartTag: (String) -> Unit,
+    onSetNewSeqEndTag: (String) -> Unit,
+    onSetNewSeqColor: (Color) -> Unit,
+    onAddHl: (String, Boolean, Color) -> Unit,
+    onRemoveHl: (String) -> Unit,
+    onToggleHl: (String) -> Unit,
+    onSetHlColor: (String, Color) -> Unit,
+    onSetNewHlPat: (String) -> Unit,
+    onSetNewHlRx: (Boolean) -> Unit,
+    onSetNewHlColor: (Color) -> Unit,
+    onLoadFilter: (SavedFilter) -> Unit,
+    onDeleteSF: (String) -> Unit,
+    onRenameSF: (String) -> Unit,
+    onToggleSFFavorite: (String) -> Unit,
+    onMoveSFToFolder: (String, String?) -> Unit,
+    onReorderSFWithinFolder: (String, Int) -> Unit,
+    onReorderSFFolder: (String, Int) -> Unit,
+    onCreateSFFolder: (String) -> Unit,
+    onRenameSFFolder: (String, String) -> Unit,
+    onDeleteSFFolder: (String) -> Unit,
+    onOpenSFDialog: () -> Unit,
+    onSetKwInTag: (String) -> Unit,
+    onAddPkgPrefix: (String) -> Unit,
+    onRemovePkgPrefix: (String) -> Unit,
+    onAddExcludePkgPrefix: (String) -> Unit,
+    onRemoveExcludePkgPrefix: (String) -> Unit,
+    onExportFilters: () -> Unit,
+    onImportFilters: () -> Unit,
+    onImportFiltersFromFiles: (List<File>) -> Unit,
+    // Anything dropped here that isn't a filter .json — a log, a video — is handed back to the
+    // app-wide drop routing instead of being swallowed by this panel's own target.
+    onUnhandledFileDrop: (List<File>) -> Unit,
+    onClearFilter: () -> Unit,
+    onNavigateCrash: (IssueSite) -> Unit,
+    logCompositionActions: LogCompositionActions,
+    onUiStateChanged: () -> Unit = {},
+    mostUsedTagLimit: Int,
+    filterListRows: Int,
+    customIssueRules: List<CustomIssueRule>,
+    width: Float,
+    focusRequester: FocusRequester? = null,
+    filterSearchRequest: FilterSearchRequest? = null,
+    onFilterSearchRequestConsumed: (FilterSearchRequest) -> Unit = {},
+    onPanelFocusChanged: (Boolean) -> Unit = {},
+    keyboardFocusVisible: Boolean = false,
+) {
+    val tc = tc()
+    val filter = tab.filter
+    var panelFocused by remember { mutableStateOf(false) }
+
+    // While the background analysis is pending this must NOT fall through to the synchronous
+    // computation — that's a multi-second full-file scan and this runs during composition.
+    // Once complete (pending == false), tab.analysis.crashSites is trusted directly, even when
+    // empty — LogAnalysis.pending defaults to true precisely so "genuinely zero crash sites"
+    // can never be mistaken for "not yet analyzed" here (see the field's doc in Model.kt / P-02).
+    // Note for tailing: analysis re-runs wholesale on a debounce rather than incrementally, so an
+    // occurrence count (and a group's ×N badge) jumps on each re-analysis instead of ticking up one
+    // at a time as new lines arrive. Acceptable — same tradeoff tagCounts and every other
+    // analysis-derived count in this panel already makes.
+    val allCrashSites = remember(tab.id, tab.analysis.crashSites, tab.analysis.pending) {
+        if (tab.analysis.pending) emptyList() else tab.analysis.crashSites
+    }
+    val customIssueSites = remember(tab.id, tab.analysis.customIssueSites, tab.analysis.pending) {
+        if (tab.analysis.pending) emptyList() else tab.analysis.customIssueSites
+    }
+    val crashSites = remember(allCrashSites, customIssueSites, fpState.crashCategory) {
+        issueSitesForCategory(allCrashSites, customIssueSites, fpState.crashCategory)
+    }
+
+    // Tags sorted by frequency in log data. tagCounts is populated by both pendingAnalysis() and
+    // buildLogAnalysis() (cheap, computed immediately either way), so it's trusted directly.
+    val tagCounts = remember(tab.id, tab.analysis.tagCounts) { tab.analysis.tagCounts }
+    val sortedTags = remember(tab.id, tagCounts) { tagCounts.entries.sortedByDescending { it.value }.map { it.key } }
+
+    val tagFr = remember { FocusRequester() }
+    val kwFr = remember { FocusRequester() }
+    val msgRuleFr = remember { FocusRequester() }
+    val msgRuleScopeFr = remember { FocusRequester() }
+    val hlFr = remember { FocusRequester() }
+
+    var tagInput by remember(tab.id) { mutableStateOf(fpState.tagQueryDrafts[tab.id].orEmpty()) }
+    var tagSearch by remember(tab.id) { mutableStateOf("") }
+    var tagFieldFocused by remember { mutableStateOf(false) }
+    var tagCandidatesHovered by remember { mutableStateOf(false) }
+    var showTagCandidates by remember { mutableStateOf(false) }
+    var tagSelectedIdx by remember { mutableStateOf(-1) }
+    var tagSelectedAction by remember { mutableStateOf(0) } // 0 = include, 1 = exclude
+    var colorPickerSeqId by remember { mutableStateOf<String?>(null) }
+    var colorPickerHlId by remember { mutableStateOf<String?>(null) }
+    var kwHighlightColorPickerOpen by remember { mutableStateOf(false) }
+    var regexEditorOpen by remember { mutableStateOf(false) }
+    var regexEditorText by remember { mutableStateOf("") }
+    var colorPickerManualId by remember { mutableStateOf<String?>(null) }
+    var editingSeqId by remember { mutableStateOf<String?>(null) }
+    var createSavedFilterFolderOpen by remember { mutableStateOf(false) }
+    var renameSavedFilterFolderId by remember { mutableStateOf<String?>(null) }
+    var savedFilterFolderNameDraft by remember { mutableStateOf("") }
+
+    LaunchedEffect(tagInput) {
+        fpState.tagQueryDrafts[tab.id] = tagInput
+        kotlinx.coroutines.delay(120)
+        tagSearch = tagInput
+    }
+    LaunchedEffect(tagFieldFocused, tagCandidatesHovered) {
+        if (tagFieldFocused || tagCandidatesHovered) {
+            showTagCandidates = true
+        } else { kotlinx.coroutines.delay(100); if (!tagFieldFocused && !tagCandidatesHovered) showTagCandidates = false }
+    }
+
+    // Combined candidates: pkg-prefix matches first (only when search has input), then tag matches.
+    // Each entry is (value, isPkg): isPkg=true → add as package prefix; false → include/exclude as tag.
+    val combinedTagCandidates = remember(
+        sortedTags,
+        tagSearch,
+        filter.pkgPrefixes,
+        filter.excludePkgPrefixes,
+        tagUsage,
+        mostUsedTagLimit,
+    ) {
+        val pkgs = packagePrefixCandidates(sortedTags, tagSearch, limit = 4).map { it to true }
+        val tags = tagCandidates(
+            sortedTags = sortedTags,
+            search = tagSearch,
+            selectedTags = emptySet(),
+            packagePrefixes = filter.pkgPrefixes,
+            tagUsage = tagUsage,
+            mostUsedLimit = mostUsedTagLimit,
+        ).map { it to false }
+        pkgs + tags
+    }
+
+    // Debounced keyword state — display updates immediately, filter applies after 150ms pause.
+    // kwLastSent tracks the last value we pushed so we don't sync our own debounce back as an external change.
+    var kwDisplay by remember(tab.id) { mutableStateOf(filter.kwText) }
+    var kwLastSent by remember(tab.id) { mutableStateOf(filter.kwText) }
+    var kwFieldFocused by remember { mutableStateOf(false) }
+    LaunchedEffect(kwDisplay) {
+        val snap = kwDisplay
+        kotlinx.coroutines.delay(if (tab.largeFileMode) 350 else 150)
+        if (snap == kwDisplay) { kwLastSent = kwDisplay; onSetKw(kwDisplay) }
+    }
+    LaunchedEffect(filter.kwText) { if (filter.kwText != kwLastSent) kwDisplay = filter.kwText }
+
+    var msgRuleInput by remember(tab.id) {
+        mutableStateOf(fpState.messageQueryDrafts[tab.id] ?: filter.kwInTag)
+    }
+    var msgRuleLastSent by remember(tab.id) { mutableStateOf(filter.kwInTag) }
+    var msgRuleSearch by remember(tab.id) { mutableStateOf("") }
+    var msgRuleFieldFocused by remember { mutableStateOf(false) }
+    var showMsgRuleCandidates by remember { mutableStateOf(false) }
+    var msgCandidatesHovered by remember { mutableStateOf(false) }
+    var msgRuleSelectedIdx by remember { mutableStateOf(-1) }
+    var msgRuleSelectedAction by remember { mutableStateOf(0) } // 0 = include, 1 = exclude
+    var msgRuleScopeOpen by remember(tab.id) { mutableStateOf(false) }
+    var msgRuleScopeSearch by remember(tab.id) { mutableStateOf("") }
+    var msgRuleScopeFieldFocused by remember { mutableStateOf(false) }
+    var msgRuleScopeSelectedIdx by remember(tab.id) { mutableStateOf(0) }
+    var pendingMessageRule by remember(tab.id) { mutableStateOf<PendingMessageRuleDraft?>(null) }
+    var pendingSearchFocusTarget by remember { mutableStateOf<CtrlFTarget?>(null) }
+    LaunchedEffect(msgRuleInput) {
+        fpState.messageQueryDrafts[tab.id] = msgRuleInput
+        val snap = msgRuleInput
+        kotlinx.coroutines.delay(if (tab.largeFileMode) 350 else 120)
+        if (snap == msgRuleInput) {
+            msgRuleSearch = msgRuleInput
+            msgRuleLastSent = msgRuleInput
+            // kwInTag is a Tags-mode-only secondary filter (see Filter.kt). The message-rule field
+            // is not rendered in Regex mode, so typing here should only ever update Tags-mode state.
+            if (filter.mode == FilterMode.TAGS) onSetKwInTag(msgRuleInput)
+        }
+    }
+    LaunchedEffect(filter.kwInTag) {
+        if (filter.kwInTag != msgRuleLastSent) {
+            msgRuleInput = filter.kwInTag
+            fpState.messageQueryDrafts[tab.id] = filter.kwInTag
+        }
+    }
+    LaunchedEffect(msgRuleFieldFocused, msgCandidatesHovered) {
+        if (msgRuleFieldFocused || msgCandidatesHovered) {
+            showMsgRuleCandidates = true
+        } else { kotlinx.coroutines.delay(100); if (!msgRuleFieldFocused && !msgCandidatesHovered) showMsgRuleCandidates = false }
+    }
+    var hlColorPickerOpen   by remember { mutableStateOf(false) }
+    var hlFieldFocused by remember { mutableStateOf(false) }
+    var seqAddOpen          by remember { mutableStateOf(false) }
+    var seqColorPickerOpen  by remember { mutableStateOf(false) }
+    var navIndex by remember(tab.id) { mutableStateOf(0) }
+
+    val navTargets = remember(
+        tab.filter,
+        tab.manualBlocks,
+        savedFilters,
+    ) {
+        filterKeyboardTargets(
+            levelCount = LogLevel.entries.size,
+            sequenceIds = tab.filter.sequences.map { it.id },
+            manualCollapseIds = tab.manualBlocks.map { it.id },
+            savedFilterIds = savedFilters.map { it.id },
+        )
+    }
+
+    fun moveFilterFocus(delta: Int) {
+        navIndex = rovingMove(navTargets.map { it.asRovingItem() }, navIndex, delta)
+    }
+
+    fun focusCurrentTarget() {
+        when (navTargets.getOrNull(navIndex)?.kind) {
+            KeyboardTargetKind.FilterTagInput -> runCatching { tagFr.requestFocus() }
+            KeyboardTargetKind.FilterMessageInput -> runCatching { msgRuleFr.requestFocus() }
+            KeyboardTargetKind.FilterHighlighterInput -> runCatching { hlFr.requestFocus() }
+            else -> runCatching { focusRequester?.requestFocus() }
+        }
+    }
+
+    fun activateFilterTarget(spaceActivation: Boolean = false) {
+        val target = navTargets.getOrNull(navIndex) ?: return
+        when (target.kind) {
+            KeyboardTargetKind.FilterModeTags -> onSetFilterMode(FilterMode.TAGS)
+            KeyboardTargetKind.FilterModeRegex -> {
+                onStartRegexSearch()
+                runCatching { kwFr.requestFocus() }
+            }
+            KeyboardTargetKind.FilterTagInput -> runCatching { tagFr.requestFocus() }
+            KeyboardTargetKind.FilterMessageInput -> runCatching { msgRuleFr.requestFocus() }
+            KeyboardTargetKind.FilterHighlighterInput -> runCatching { hlFr.requestFocus() }
+            KeyboardTargetKind.FilterSection -> when (target.id) {
+                "filter-section-log-composition" -> {
+                    fpState.logCompositionExpanded = !fpState.logCompositionExpanded
+                    onUiStateChanged()
+                }
+                "filter-section-levels" -> { fpState.lvlExpanded = !fpState.lvlExpanded; onUiStateChanged() }
+                "filter-section-sequences" -> { fpState.seqExpanded = !fpState.seqExpanded; onUiStateChanged() }
+                "filter-section-saved" -> { fpState.sfExpanded = !fpState.sfExpanded; onUiStateChanged() }
+            }
+            KeyboardTargetKind.FilterLogLevel -> target.id.removePrefix("level-").toIntOrNull()
+                ?.let { idx -> LogLevel.entries.getOrNull(idx)?.let(onToggleLevel) }
+            KeyboardTargetKind.FilterSequence -> {
+                val id = target.id.removePrefix("sequence:")
+                if (spaceActivation) onToggleSeqEnabled(id) else editingSeqId = if (editingSeqId == id) null else id
+            }
+            KeyboardTargetKind.FilterManualCollapse -> onToggleManualCollapse(target.id.removePrefix("manual:"))
+            KeyboardTargetKind.FilterNewSequence -> seqAddOpen = !seqAddOpen
+            KeyboardTargetKind.FilterSavedFilter -> savedFilters
+                .firstOrNull { it.id == target.id.removePrefix("saved:") }
+                ?.let(onLoadFilter)
+            KeyboardTargetKind.FilterSaveCurrent -> onOpenSFDialog()
+            KeyboardTargetKind.FilterClearFilters -> onClearFilter()
+            KeyboardTargetKind.FilterExportFilters -> onExportFilters()
+            KeyboardTargetKind.FilterImportFilters -> onImportFilters()
+            else -> {}
+        }
+    }
+
+    fun deleteFilterTarget(): Boolean {
+        val target = navTargets.getOrNull(navIndex) ?: return false
+        return when (target.kind) {
+            KeyboardTargetKind.FilterSequence -> {
+                onRemoveSeq(target.id.removePrefix("sequence:")); true
+            }
+            KeyboardTargetKind.FilterManualCollapse -> {
+                onRemoveManualCollapse(target.id.removePrefix("manual:")); true
+            }
+            KeyboardTargetKind.FilterSavedFilter -> {
+                onDeleteSF(target.id.removePrefix("saved:")); true
+            }
+            else -> false
+        }
+    }
+
+    fun moveSequenceTarget(delta: Int): Boolean {
+        val target = navTargets.getOrNull(navIndex) ?: return false
+        if (target.kind != KeyboardTargetKind.FilterSequence) return false
+        val id = target.id.removePrefix("sequence:")
+        if (delta < 0) onMoveSeqUp(id) else onMoveSeqDown(id)
+        return true
+    }
+
+    fun moveSavedFilterTarget(delta: Int): Boolean {
+        if (fpState.sfSearch.isNotBlank()) return false
+        val target = navTargets.getOrNull(navIndex) ?: return false
+        if (target.kind != KeyboardTargetKind.FilterSavedFilter) return false
+        val id = target.id.removePrefix("saved:")
+        val item = savedFilters.firstOrNull { it.id == id } ?: return false
+        if (item.id.startsWith("draft_")) return false
+        val siblings = savedFilters.filter { !it.id.startsWith("draft_") && it.folderId == item.folderId }
+        val fromIndex = siblings.indexOfFirst { it.id == id }
+        val toIndex = (fromIndex + delta).coerceIn(0, siblings.lastIndex)
+        if (fromIndex >= 0 && fromIndex != toIndex) onReorderSFWithinFolder(id, toIndex)
+        return true
+    }
+
+    LaunchedEffect(filterSearchRequest?.nonce, tab.id) {
+        val request = filterSearchRequest ?: return@LaunchedEffect
+        when (filterSearchTargetForTab(request, tab.id) ?: return@LaunchedEffect) {
+            CtrlFTarget.TAGS -> {
+                if (filter.mode != FilterMode.TAGS) {
+                    pendingSearchFocusTarget = CtrlFTarget.TAGS
+                    onSetFilterMode(FilterMode.TAGS)
+                } else {
+                    runCatching { tagFr.requestFocus() }
+                }
+            }
+            CtrlFTarget.KEYWORD_REGEX -> {
+                if (filter.mode != FilterMode.KEYWORD) {
+                    pendingSearchFocusTarget = CtrlFTarget.KEYWORD_REGEX
+                    onStartRegexSearch()
+                } else {
+                    runCatching { kwFr.requestFocus() }
+                }
+            }
+            CtrlFTarget.MESSAGE_RULE -> {
+                if (filter.mode != FilterMode.TAGS) {
+                    pendingSearchFocusTarget = CtrlFTarget.MESSAGE_RULE
+                    onSetFilterMode(FilterMode.TAGS)
+                } else {
+                    runCatching { msgRuleFr.requestFocus() }
+                }
+            }
+            // Never actually routed here — App.kt's onFocusFilterSearch branches FIND_BAR off to
+            // AppState.openSearch before a FilterSearchRequest is ever built (see
+            // filterSearchTargetForTab/FilterSearchRequest.target). Only present so this `when`
+            // stays exhaustive over the full CtrlFTarget enum.
+            CtrlFTarget.FIND_BAR -> Unit
+        }
+        onFilterSearchRequestConsumed(request)
+    }
+    LaunchedEffect(filter.mode, pendingSearchFocusTarget) {
+        when (pendingSearchFocusTarget) {
+            CtrlFTarget.TAGS -> if (filter.mode == FilterMode.TAGS) {
+                runCatching { tagFr.requestFocus() }
+                pendingSearchFocusTarget = null
+            }
+            CtrlFTarget.KEYWORD_REGEX -> if (filter.mode == FilterMode.KEYWORD) {
+                runCatching { kwFr.requestFocus() }
+                pendingSearchFocusTarget = null
+            }
+            CtrlFTarget.MESSAGE_RULE -> if (filter.mode == FilterMode.TAGS) {
+                runCatching { msgRuleFr.requestFocus() }
+                pendingSearchFocusTarget = null
+            }
+            // Never actually assigned to pendingSearchFocusTarget — see the FIND_BAR branch above.
+            CtrlFTarget.FIND_BAR -> Unit
+            null -> Unit
+        }
+    }
+
+    // Unified candidates: contextual tag/message variants first, then the existing PID and
+    // message-only suggestions. In-scope results come before out-of-scope ones, while the latter
+    // still respect level/exclude filters so unrelated matches remain discoverable.
+    val unifiedCandidates = remember(tab.id, tab.largeFileMode, filter, msgRuleSearch) {
+        if (msgRuleSearch.isBlank()) {
+            emptyList()
+        } else {
+            val regexContext = RegexEvaluationContext()
+            val candidateEntries = if (tab.largeFileMode) {
+                tab.logData.asSequence().take(LARGE_FILE_CANDIDATE_SCAN_LIMIT).toList()
+            } else {
+                tab.logData
+            }
+            val baseFilter = filter.copy(kwInTag = "", messageRules = emptyList(), pidTidFilter = "")
+            val relaxedFilter = baseFilter.copy(activeTags = emptySet(), pkgPrefixes = emptySet())
+
+            fun contextualCandidatesOf(entries: List<LogEntry>, inScope: Boolean) =
+                contextualMessageRuleCandidates(entries, msgRuleSearch, filter.kwInTagRegex, regexContext)
+                    .map { candidate ->
+                        MsgCandidate(
+                            pattern = candidate.pattern,
+                            target = RuleTarget.MESSAGE,
+                            inScope = inScope,
+                            label = candidate.label,
+                            tag = candidate.tag,
+                            addsImmediately = true,
+                        )
+                    }
+
+            val inScopeContextual = contextualCandidatesOf(
+                candidateEntries.filter { passesFilter(it, baseFilter, regexContext) },
+                inScope = true,
+            )
+            val contextualKeys = inScopeContextual.map { Triple(it.label, it.pattern, it.tag) }.toSet()
+            val outOfScopeContextual = contextualCandidatesOf(
+                candidateEntries.filter {
+                    !passesFilter(it, baseFilter, regexContext) && passesFilter(it, relaxedFilter, regexContext)
+                },
+                inScope = false,
+            ).filter { Triple(it.label, it.pattern, it.tag) !in contextualKeys }
+            val contextualCandidates = (inScopeContextual + outOfScopeContextual).take(8)
+
+            // PIDs only when the search looks like a number
+            val pidCandidates = if (msgRuleSearch.any { it.isDigit() })
+                candidateEntries
+                    .filter { entry -> passesFilter(entry, relaxedFilter, regexContext) && entry.pid != 0 }
+                    .map { it.pid.toString() }.distinct()
+                    .filter { it.contains(msgRuleSearch) }
+                    .take(3)
+                    .map { pid ->
+                        // The stored rule pattern stays the bare pid (matching still keys off the
+                        // number — a process can be renamed/recycled), but the suggestion itself
+                        // shows the resolved name when known, so picking from the list doesn't
+                        // require already knowing which pid belongs to which process.
+                        val name = tab.analysis.processNames[pid.toIntOrNull()]
+                        val label = if (name != null) "$pid · $name" else pid
+                        MsgCandidate(pid, RuleTarget.PID_TID, inScope = true, label = label)
+                    }
+            else emptyList()
+
+            fun matchingMsgsOf(entries: List<LogEntry>) = entries
+                .filter {
+                    containsPattern(it.msg, msgRuleSearch, regex = filter.kwInTagRegex, regexContext = regexContext)
+                }
+                .map { it.msg }
+
+            val inScopeMsgs = matchingMsgsOf(candidateEntries.filter { passesFilter(it, baseFilter, regexContext) })
+            val outOfScopeMsgs = matchingMsgsOf(
+                candidateEntries.filter {
+                    !passesFilter(it, baseFilter, regexContext) && passesFilter(it, relaxedFilter, regexContext)
+                },
+            )
+
+            // In regex mode, lead with what the pattern actually matched (e.g. "avc.*denied"
+            // against "avc: denied : word 1 word 2" proposes "avc: denied" first) instead of
+            // the plain-text stem heuristic, which only makes sense for non-regex prefix search.
+            fun stemsAndFulls(msgs: List<String>): List<String> {
+                val leads = if (filter.kwInTagRegex) {
+                    msgs.mapNotNull { msg -> firstRegexMatch(msg, msgRuleSearch, regexContext = regexContext)?.take(80) }
+                        .distinct()
+                } else {
+                    msgs.map { msg ->
+                        val sepIdx = msg.indexOfFirst { it == ':' || it == '(' }
+                        if (sepIdx > 0) msg.substring(0, sepIdx).trim().takeIf { it.isNotBlank() } ?: msg.take(80)
+                        else msg.take(80)
+                    }.distinct()
+                }
+                val fulls = msgs.map { it.take(80) }.distinct().filter { it !in leads }
+                return leads + fulls
+            }
+
+            val inScopeCandidates = stemsAndFulls(inScopeMsgs).map { MsgCandidate(it, RuleTarget.MESSAGE, inScope = true) }
+            val inScopePatterns = inScopeCandidates.map { it.pattern }.toSet()
+            val outOfScopeCandidates = stemsAndFulls(outOfScopeMsgs)
+                .filter { it !in inScopePatterns }
+                .map { MsgCandidate(it, RuleTarget.MESSAGE, inScope = false) }
+            val remainingSlots = (8 - contextualCandidates.size).coerceAtLeast(0)
+            val visiblePidCandidates = pidCandidates.take(remainingSlots)
+            val msgCandidates = (inScopeCandidates + outOfScopeCandidates)
+                .take((remainingSlots - visiblePidCandidates.size).coerceAtLeast(0))
+            contextualCandidates + visiblePidCandidates + msgCandidates
+        }
+    }
+    // Tags/prefixes the scope picker offers are narrowed to ones the pending rule's pattern
+    // actually occurs under — an "All" rule for "timeout" shouldn't list every tag in the file,
+    // only ones that have ever logged something matching "timeout". Falls back to the full tag
+    // list if nothing matched (e.g. scan-limit truncation on a huge file) so the picker never
+    // goes empty.
+    val relevantScopeTags = remember(tab.id, tab.largeFileMode, pendingMessageRule) {
+        val pending = pendingMessageRule
+        if (pending == null) {
+            null
+        } else {
+            val regexContext = RegexEvaluationContext()
+            val candidateEntries = if (tab.largeFileMode) {
+                tab.logData.asSequence().take(LARGE_FILE_CANDIDATE_SCAN_LIMIT).toList()
+            } else {
+                tab.logData
+            }
+            if (pending.target == RuleTarget.PID_TID) {
+                // Shares resolvePidTidTokens/matchesPidTidTokens with Filter.kt's own
+                // matchesPidTidFilter/matchesRule so a package-name pattern resolves identically
+                // here (which tags does this rule end up scoped to) and in the actual filter
+                // (which rows does this rule actually hide/show) — see those functions' doc.
+                val tokens = resolvePidTidTokens(pending.pattern, tab.analysis.processNames)
+                candidateEntries.asSequence()
+                    .filter { entry -> matchesPidTidTokens(entry, tokens) }
+                    .map { it.tag }.toSet()
+            } else {
+                candidateEntries.asSequence()
+                    .filter { entry ->
+                        containsPattern(entry.msg, pending.pattern, pending.regex, regexContext = regexContext)
+                    }
+                    .map { it.tag }.toSet()
+            }
+        }
+    }
+    val scopeOptionTags = remember(sortedTags, relevantScopeTags) {
+        if (relevantScopeTags.isNullOrEmpty()) sortedTags else sortedTags.filter { it in relevantScopeTags }
+    }
+    val msgRuleScopeOptions = remember(scopeOptionTags, msgRuleScopeSearch) {
+        messageRuleScopeOptions(scopeOptionTags, msgRuleScopeSearch)
+    }
+    val searchedMsgRuleScopeOptions = remember(msgRuleScopeOptions) { msgRuleScopeOptions.drop(1) }
+
+    fun openMessageRuleScopeChooser(include: Boolean, pattern: String, regex: Boolean, target: RuleTarget) {
+        pendingMessageRule = PendingMessageRuleDraft(include, pattern, regex, target)
+        msgRuleScopeOpen = true
+        msgRuleScopeSearch = ""
+        msgRuleScopeSelectedIdx = 0
+        showMsgRuleCandidates = false
+    }
+
+    fun cancelPendingMessageRule() {
+        pendingMessageRule = null
+        msgRuleScopeOpen = false
+        msgRuleScopeSearch = ""
+        msgRuleScopeSelectedIdx = 0
+        msgRuleInput = ""
+        // Clear the debounced search value synchronously too — otherwise it still holds the old
+        // query for the debounce delay after refocusing, and unifiedCandidates (keyed on it)
+        // briefly renders the stale dropdown before the debounce catches up and clears it.
+        msgRuleSearch = ""
+        msgRuleSelectedIdx = -1
+        msgRuleSelectedAction = 0
+        onSetKwInTag("")
+        runCatching { msgRuleFr.requestFocus() }
+    }
+
+    fun commitPendingMessageRule(scope: MessageRuleScopeOption) {
+        val pending = pendingMessageRule ?: return
+        onAddMessageRule(pending.include, pending.pattern, pending.regex, scope.tag, scope.packagePrefix, pending.target)
+        pendingMessageRule = null
+        msgRuleScopeOpen = false
+        msgRuleScopeSearch = ""
+        msgRuleScopeSelectedIdx = 0
+        // Keep the discovery query in place after adding a rule so closely named rules can be
+        // added one after another. Escape/the clear button remain the explicit discard actions.
+        msgRuleSelectedIdx = -1
+        msgRuleSelectedAction = 0
+        runCatching { msgRuleFr.requestFocus() }
+    }
+
+    fun commitContextualMessageRule(include: Boolean, candidate: MsgCandidate) {
+        onAddMessageRule(include, candidate.pattern, false, candidate.tag, null, candidate.target)
+        msgRuleSelectedIdx = -1
+        msgRuleSelectedAction = 0
+        runCatching { msgRuleFr.requestFocus() }
+    }
+
+    fun addMessageRuleCandidate(include: Boolean, candidate: MsgCandidate) {
+        if (candidate.addsImmediately) commitContextualMessageRule(include, candidate)
+        else openMessageRuleScopeChooser(include, candidate.pattern, regex = false, candidate.target)
+    }
+
+    fun clearTagSearch() {
+        tagInput = inputValueAfterEscape(tagInput, escapePressed = true)
+        tagSearch = ""
+        tagSelectedIdx = -1
+        showTagCandidates = false
+    }
+    LaunchedEffect(msgRuleScopeOpen) {
+        if (msgRuleScopeOpen) runCatching { msgRuleScopeFr.requestFocus() }
+    }
+    val scroll = rememberScrollState()
+    val filterDropTarget = remember(onImportFiltersFromFiles, onUnhandledFileDrop) {
+        object : DragAndDropTarget {
+            override fun onDrop(event: DragAndDropEvent): Boolean {
+                val dropped = runCatching { (event.dragData() as DragData.FilesList).readFiles() }.getOrElse { return false }
+                    .mapNotNull { uri -> runCatching { File(URI.create(uri)) }.getOrNull() }
+                val filterFiles = dropped.filter { it.exists() && it.extension.equals("json", ignoreCase = true) }
+                // Compose hands a drop to the innermost target that accepted the drag and does NOT
+                // retry the ancestor when this returns false — so without an explicit hand-off, a
+                // log or video dropped on this sidebar would vanish with no feedback at all.
+                if (filterFiles.isEmpty()) {
+                    if (dropped.isEmpty()) return false
+                    onUnhandledFileDrop(dropped)
+                    return true
+                }
+                onImportFiltersFromFiles(filterFiles)
+                return true
+            }
+        }
+    }
+    Column(
+        Modifier.width(width.dp).fillMaxHeight().background(tc.p)
+            .border(BorderStroke(1.dp, if (panelFocused && keyboardFocusVisible) tc.ac else tc.br))
+            .dragAndDropTarget(
+                shouldStartDragAndDrop = { event ->
+                    runCatching { event.dragData() is DragData.FilesList }.getOrElse { false }
+                },
+                target = filterDropTarget,
+            )
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .focusGroup()
+            .focusable()
+            .onFocusChanged { panelFocused = it.hasFocus; onPanelFocusChanged(it.hasFocus) }
+            .onPreviewKeyEvent { ev ->
+                if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                val fieldFocused = tagFieldFocused || msgRuleFieldFocused || msgRuleScopeFieldFocused || hlFieldFocused || kwFieldFocused
+                if (fieldFocused) {
+                    if (ev.key == Key.Escape) {
+                        if (tagFieldFocused) {
+                            clearTagSearch()
+                        } else if (msgRuleFieldFocused || msgRuleScopeFieldFocused) {
+                            cancelPendingMessageRule()
+                        } else if (kwFieldFocused) {
+                            kwDisplay = ""; onSetKw("")
+                        } else if (hlFieldFocused) {
+                            onSetNewHlPat("")
+                        } else {
+                            runCatching { focusRequester?.requestFocus() }
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    when {
+                        ev.isAltPressed && ev.key == Key.DirectionUp ->
+                            moveSavedFilterTarget(-1) || moveSequenceTarget(-1)
+                        ev.isAltPressed && ev.key == Key.DirectionDown ->
+                            moveSavedFilterTarget(+1) || moveSequenceTarget(+1)
+                        ev.key == Key.DirectionUp -> { moveFilterFocus(-1); true }
+                        ev.key == Key.DirectionDown -> { moveFilterFocus(+1); true }
+                        ev.key == Key.DirectionLeft -> { moveFilterFocus(-1); true }
+                        ev.key == Key.DirectionRight -> { moveFilterFocus(+1); true }
+                        ev.key == Key.Enter || ev.key == Key.NumPadEnter -> { activateFilterTarget(); true }
+                        ev.key == Key.Spacebar -> { activateFilterTarget(spaceActivation = true); true }
+                        ev.key == Key.Delete || ev.key == Key.Backspace -> deleteFilterTarget()
+                        ev.key == Key.Escape -> {
+                            colorPickerSeqId = null
+                            colorPickerHlId = null
+                            colorPickerManualId = null
+                            hlColorPickerOpen = false
+                            seqColorPickerOpen = false
+                            editingSeqId = null
+                            true
+                        }
+                        else -> false
+                    }
+                }
+            }
+            .verticalScroll(scroll),
+    ) {
+        // ── Filter mode tabs ──────────────────────────────────────
+        Row(Modifier.fillMaxWidth()) {
+            listOf("Tags" to FilterMode.TAGS, "Regex" to FilterMode.KEYWORD).forEach { (label, mode) ->
+                val active = filter.mode == mode
+                Column(
+                    Modifier.weight(1f).clickable {
+                        if (mode == FilterMode.KEYWORD) onStartRegexSearch() else onSetFilterMode(mode)
+                    },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    AppText(
+                        label,
+                        color = if (active) tc.ac else tc.td,
+                        fontSize = 11.sp,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
+                    Box(Modifier.fillMaxWidth().height(2.dp).background(if (active) tc.ac else tc.br))
+                }
+            }
+        }
+
+        // ── Positive: Tags ────────────────────────────────────────
+        if (filter.mode == FilterMode.TAGS) {
+            val pkgColor = PKG_CYAN
+            val exNeg = DANGER_RED
+            val totalActive = filter.pkgPrefixes.size + filter.excludePkgPrefixes.size + filter.activeTags.size + filter.excludeTags.size
+            // ── unified TAGS section header with combined pill count ──
+            SectionHeader(
+                "Tags",
+                trailing = if (totalActive > 0) ({
+                    Row(
+                        Modifier.hoverPill().clickable {
+                            fpState.incPillsExpanded = !fpState.incPillsExpanded
+                            onUiStateChanged()
+                        }
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    ) {
+                        if (filter.pkgPrefixes.isNotEmpty())
+                            AppText("${filter.pkgPrefixes.size} pkg", color = pkgColor, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                        if (filter.excludePkgPrefixes.isNotEmpty())
+                            AppText("${filter.excludePkgPrefixes.size} pkg−",
+                                color = exNeg, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                        if (filter.activeTags.isNotEmpty())
+                            AppText("${filter.activeTags.size}+", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                        if (filter.excludeTags.isNotEmpty())
+                            AppText("${filter.excludeTags.size}−", color = exNeg, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                        AppText(if (fpState.incPillsExpanded) "▾" else "▸", color = tc.ts, fontSize = 10.sp)
+                    }
+                }) else null,
+            )
+            // Combined pills for pkg prefixes + included/excluded tags
+            if (totalActive > 0 && fpState.incPillsExpanded) {
+                BoundedScrollBox(minOf(totalActive, filterListRows)) {
+                    FlowRow(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        filter.pkgPrefixes.forEach { pfx -> TagPill(pfx, pkgColor) { onRemovePkgPrefix(pfx) } }
+                        filter.excludePkgPrefixes.forEach { pfx -> TagPill(pfx, exNeg) { onRemoveExcludePkgPrefix(pfx) } }
+                        filter.activeTags.forEach { tag ->
+                            TagPill(displayTagForPrefix(tag, filter.pkgPrefixes).first, tc.ac) { onToggleTag(tag) }
+                        }
+                        filter.excludeTags.forEach { tag ->
+                            TagPill(displayTagForPrefix(tag, filter.pkgPrefixes).first, exNeg) { onToggleExcludeTag(tag) }
+                        }
+                    }
+                }
+            }
+            // ── Unified package prefix / tag search ───────────────
+            // Typing a dotted name adds a pkg prefix; typing a tag name adds an include/exclude tag.
+            // ←/→ keys switch include vs exclude for tag candidates; Enter with no selection uses the
+            // typed text directly (dotted → pkg prefix, plain → include tag).
+            InlineField(
+                tagInput,
+                { tagInput = it; tagSelectedIdx = -1 },
+                "pkg prefix or tag…",
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                    .focusRequester(tagFr)
+                    .onFocusChanged { tagFieldFocused = it.isFocused }
+                    .onPreviewKeyEvent { ev ->
+                        if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        when (ev.key) {
+                            Key.Tab -> { runCatching { msgRuleFr.requestFocus() }; true }
+                            Key.DirectionDown -> { tagSelectedIdx = (tagSelectedIdx + 1).coerceAtMost(combinedTagCandidates.lastIndex); true }
+                            Key.DirectionUp -> { tagSelectedIdx = (tagSelectedIdx - 1).coerceAtLeast(-1); true }
+                            Key.Escape -> { clearTagSearch(); true }
+                            Key.DirectionRight -> {
+                                val c = combinedTagCandidates.getOrNull(tagSelectedIdx)
+                                if (c != null) { tagSelectedAction = 1; true } else {
+                                    false
+                                }
+                            }
+                            Key.DirectionLeft -> {
+                                val c = combinedTagCandidates.getOrNull(tagSelectedIdx)
+                                if (c != null) { tagSelectedAction = 0; true } else {
+                                    false
+                                }
+                            }
+                            Key.Enter -> {
+                                val c = combinedTagCandidates.getOrNull(tagSelectedIdx)
+                                if (c != null) {
+                                    if (c.second) {
+                                        if (tagSelectedAction == 0) onAddPkgPrefix(c.first) else onAddExcludePkgPrefix(c.first)
+                                    } else if (tagSelectedAction == 0) {
+                                        onToggleTag(c.first)
+                                    } else {
+                                        onToggleExcludeTag(c.first)
+                                    }
+                                } else if (tagInput.isNotBlank()) {
+                                    if (tagInput.contains('.')) onAddPkgPrefix(tagInput) else onToggleTag(tagInput)
+                                } else {
+                                    return@onPreviewKeyEvent false
+                                }
+                                // Keep the query so the user can make a small edit and add the
+                                // next similarly named tag or prefix without typing from scratch.
+                                tagSelectedIdx = -1; tagSelectedAction = 0
+                                true
+                            }
+                            else -> false
+                        }
+                    },
+                onClear = { tagInput = ""; tagSelectedIdx = -1 },
+            )
+            if (showTagCandidates && combinedTagCandidates.isNotEmpty()) {
+                ScrollableItems(combinedTagCandidates.size, maxDp = 220, scrollToIndex = tagSelectedIdx,
+                    modifier = Modifier
+                        .onPointerEvent(PointerEventType.Enter) { tagCandidatesHovered = true }
+                        .onPointerEvent(PointerEventType.Exit)  { tagCandidatesHovered = false }
+                ) {
+                    combinedTagCandidates.forEachIndexed { idx, (value, isPkg) ->
+                        val isRowSelected = idx == tagSelectedIdx
+                        if (isPkg) {
+                            val isIncluded = value in filter.pkgPrefixes
+                            val isExcluded = value in filter.excludePkgPrefixes
+                            HoverBox(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                                baseBg = if (isRowSelected) tc.abg else Color.Transparent,
+                                hoverBg = tc.hv,
+                                onClick = { onAddPkgPrefix(value); tagSelectedIdx = -1; tagSelectedAction = 0 },
+                            ) {
+                                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    AppText("pkg", color = when {
+                                        isExcluded -> exNeg.copy(.8f)
+                                        isIncluded -> pkgColor.copy(.8f)
+                                        else -> pkgColor.copy(.7f)
+                                    }, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.width(26.dp))
+                                    FullTextHint(value, modifier = Modifier.weight(1f), forceShow = isRowSelected) { onTextLayout ->
+                                        AppText(value, color = when {
+                                            isExcluded -> exNeg.copy(.85f)
+                                            isRowSelected || isIncluded -> tc.tx
+                                            else -> tc.ts
+                                        }, fontSize = 11.sp, fontFamily = MONO,
+                                            modifier = Modifier.fillMaxWidth(), overflow = TextOverflow.Ellipsis, maxLines = 1,
+                                            onTextLayout = onTextLayout)
+                                    }
+                                    Spacer(Modifier.width(26.dp))
+                                    val incKbd = isRowSelected && tagSelectedAction == 0
+                                    Box(
+                                        Modifier.size(20.dp)
+                                            .background(
+                                                if (isIncluded) pkgColor.copy(.2f) else if (incKbd) pkgColor.copy(.1f)
+                                                else Color.Transparent, CORNER_SM)
+                                            .border(1.dp, if (isIncluded || incKbd) pkgColor else tc.br, CORNER_SM)
+                                            .clickable { onAddPkgPrefix(value); tagSelectedIdx = -1; tagSelectedAction = 0 },
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        AppText("+", color = if (isIncluded || incKbd) pkgColor else tc.ts,
+                                            fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                    }
+                                    val exKbd = isRowSelected && tagSelectedAction == 1
+                                    Box(
+                                        Modifier.size(20.dp)
+                                            .background(if (isExcluded) exNeg.copy(.2f) else if (exKbd) exNeg.copy(.1f) else Color.Transparent, CORNER_SM)
+                                            .border(1.dp, if (isExcluded || exKbd) exNeg else tc.br, CORNER_SM)
+                                            .clickable { onAddExcludePkgPrefix(value); tagSelectedIdx = -1; tagSelectedAction = 0 },
+                                        contentAlignment = Alignment.Center,
+                                    ) { AppText("−", color = if (isExcluded || exKbd) exNeg else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+                                }
+                            }
+                        } else {
+                            val tag = value
+                            val isIncluded = tag in filter.activeTags
+                            val isExcluded = tag in filter.excludeTags
+                            val (label, packageLabel) = displayTagForPrefix(tag, filter.pkgPrefixes)
+                            HoverBox(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                                baseBg = if (isRowSelected) tc.abg else Color.Transparent,
+                                hoverBg = tc.hv,
+                            ) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Box(Modifier.width(26.dp), contentAlignment = Alignment.CenterStart) {
+                                        Box(Modifier.size(5.dp).background(when {
+                                            isIncluded -> tc.ac
+                                            isExcluded -> exNeg
+                                            else -> tc.td
+                                        }, RoundedCornerShape(50)))
+                                    }
+                                    Column(Modifier.weight(1f)) {
+                                        FullTextHint(tag, modifier = Modifier.fillMaxWidth(), forceShow = isRowSelected) { onTextLayout ->
+                                            AppText(label, color = when {
+                                                isIncluded -> tc.tx
+                                                isExcluded -> exNeg.copy(.8f)
+                                                else -> tc.ts
+                                            }, fontSize = 11.sp, fontFamily = MONO,
+                                                modifier = Modifier.fillMaxWidth(), overflow = TextOverflow.Ellipsis, maxLines = 1,
+                                                onTextLayout = onTextLayout)
+                                        }
+                                        if (packageLabel != null)
+                                            AppText(packageLabel, color = tc.td, fontSize = 9.sp,
+                                                fontFamily = MONO, overflow = TextOverflow.Ellipsis, maxLines = 1)
+                                    }
+                                    AppText((tagCounts[tag] ?: 0).toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO,
+                                        modifier = Modifier.width(26.dp), overflow = TextOverflow.Clip)
+                                    val incHighlight = isIncluded
+                                    val incKbd = isRowSelected && tagSelectedAction == 0
+                                    Box(
+                                        Modifier.size(20.dp)
+                                            .background(if (incHighlight) tc.ac.copy(.2f) else if (incKbd) tc.ac.copy(.1f) else Color.Transparent, CORNER_SM)
+                                            .border(1.dp, if (incHighlight || incKbd) tc.ac else tc.br, CORNER_SM)
+                                            .clickable { onToggleTag(tag) },
+                                        contentAlignment = Alignment.Center,
+                                    ) { AppText("+", color = if (incHighlight || incKbd) tc.ac else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+                                    val exHighlight = isExcluded
+                                    val exKbd = isRowSelected && tagSelectedAction == 1
+                                    Box(
+                                        Modifier.size(20.dp)
+                                            .background(if (exHighlight) exNeg.copy(.2f) else if (exKbd) exNeg.copy(.1f) else Color.Transparent, CORNER_SM)
+                                            .border(1.dp, if (exHighlight || exKbd) exNeg else tc.br, CORNER_SM)
+                                            .clickable { onToggleExcludeTag(tag) },
+                                        contentAlignment = Alignment.Center,
+                                    ) { AppText("−", color = if (exHighlight || exKbd) exNeg else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Divider()
+        }
+
+        // ── Regex mode — single pattern field ─────────────────────────
+        if (filter.mode == FilterMode.KEYWORD) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                InlineField(
+                    kwDisplay,
+                    { kwDisplay = it },
+                    "visible log row regex…",
+                    Modifier.weight(1f)
+                        .focusRequester(kwFr)
+                        .onFocusChanged { kwFieldFocused = it.isFocused },
+                )
+                SquareIconButton(
+                    "⤢",
+                    fontSize = 12.sp,
+                    onClick = {
+                        regexEditorText = kwDisplay
+                        regexEditorOpen = true
+                    },
+                    size = 16.dp,
+                )
+                if (kwDisplay.isNotBlank())
+                    SquareIconButton("×", fontSize = 12.sp, onClick = { kwDisplay = ""; onSetKw("") }, size = 16.dp)
+            }
+            Divider()
+        }
+
+        if (filter.mode == FilterMode.TAGS) {
+            // ── Message Rules (combined search + include/exclude) ─────────────
+            // Message Rules are a Tags-mode tool. Regex mode is deliberately just the single
+            // kwText/kwRegex field above; persisted KEYWORD-mode rules are hidden and inert.
+            val msgExNeg = DANGER_RED
+            val msgInc = filter.messageRules.filter { it.include && it.mode == FilterMode.TAGS }
+            val msgExc = filter.messageRules.filter { !it.include && it.mode == FilterMode.TAGS }
+            SectionHeader(
+                "Message rules",
+                trailing = if (msgInc.isNotEmpty() || msgExc.isNotEmpty()) ({
+                    if (msgInc.isNotEmpty()) {
+                        Row(
+                            Modifier.hoverPill().clickable {
+                                fpState.incMsgPillsExpanded = !fpState.incMsgPillsExpanded
+                                if (fpState.incMsgPillsExpanded) fpState.excMsgPillsExpanded = false
+                                onUiStateChanged()
+                            }.padding(horizontal = 4.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            AppText("${msgInc.size} included", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                            AppText(if (fpState.incMsgPillsExpanded) "▾" else "▸", color = tc.ac, fontSize = 10.sp)
+                        }
+                    }
+                    if (msgExc.isNotEmpty()) {
+                        Row(
+                            Modifier.hoverPill().clickable {
+                                fpState.excMsgPillsExpanded = !fpState.excMsgPillsExpanded
+                                if (fpState.excMsgPillsExpanded) fpState.incMsgPillsExpanded = false
+                                onUiStateChanged()
+                            }.padding(horizontal = 4.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                        ) {
+                            AppText("${msgExc.size} excluded", color = msgExNeg, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                            AppText(if (fpState.excMsgPillsExpanded) "▾" else "▸", color = msgExNeg, fontSize = 10.sp)
+                        }
+                    }
+                }) else null,
+            )
+            if (msgInc.isNotEmpty() && fpState.incMsgPillsExpanded) {
+                BoundedScrollBox(minOf(msgInc.size, filterListRows)) {
+                    FlowRow(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        msgInc.forEach { rule ->
+                            TagPill(messageRulePillLabel(rule), tc.ac) { onRemoveMessageRule(rule.id) }
+                        }
+                    }
+                }
+            }
+            if (msgExc.isNotEmpty() && fpState.excMsgPillsExpanded) {
+                BoundedScrollBox(minOf(msgExc.size, filterListRows)) {
+                    FlowRow(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        msgExc.forEach { rule ->
+                            TagPill(messageRulePillLabel(rule), msgExNeg) { onRemoveMessageRule(rule.id) }
+                        }
+                    }
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                InlineField(
+                    msgRuleInput,
+                    { msgRuleInput = it; msgRuleSelectedIdx = -1 },
+                    if (filter.kwInTagRegex) "/pattern/…" else "search in messages…",
+                    Modifier.weight(1f)
+                        .focusRequester(msgRuleFr)
+                        .onFocusChanged { msgRuleFieldFocused = it.isFocused }
+                        .onPreviewKeyEvent { ev ->
+                            if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                            val hasActionCandidate = unifiedCandidates.getOrNull(msgRuleSelectedIdx) != null
+                            if (!messageRuleInputConsumesKey(ev.key, hasActionCandidate)) return@onPreviewKeyEvent false
+                            when (ev.key) {
+                                Key.Tab -> { runCatching { hlFr.requestFocus() }; true }
+                                Key.DirectionDown -> { msgRuleSelectedIdx = (msgRuleSelectedIdx + 1).coerceAtMost(unifiedCandidates.lastIndex); true }
+                                Key.DirectionUp -> { msgRuleSelectedIdx = (msgRuleSelectedIdx - 1).coerceAtLeast(-1); true }
+                                Key.DirectionLeft -> { msgRuleSelectedAction = 0; true }
+                                Key.DirectionRight -> { msgRuleSelectedAction = 1; true }
+                                Key.Escape -> { cancelPendingMessageRule(); true }
+                                Key.Enter, Key.NumPadEnter -> {
+                                    val c = unifiedCandidates.getOrNull(msgRuleSelectedIdx)
+                                    if (c != null) {
+                                        addMessageRuleCandidate(msgRuleSelectedAction == 0, c)
+                                    } else if (msgRuleInput.isNotBlank()) {
+                                        // No candidate selected — add typed text directly.
+                                        // All-digit input → PID/TID rule; anything else → message rule.
+                                        val spec = messageRuleInputSpec(msgRuleInput, regexMode = filter.kwInTagRegex)
+                                        openMessageRuleScopeChooser(msgRuleSelectedAction == 0, spec.pattern, spec.regex, spec.target)
+                                    } else {
+                                        return@onPreviewKeyEvent false
+                                    }
+                                    true
+                                }
+                                else -> false
+                            }
+                        },
+                    onClear = { msgRuleInput = ""; onSetKwInTag("") },
+                )
+                PillBtn(".*", active = filter.kwInTagRegex, onClick = onToggleMessageRuleRegex)
+            }
+            if (msgRuleScopeOpen) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        AppText(
+                            messageRuleScopePrompt(pendingMessageRule?.include ?: true),
+                            color = if (pendingMessageRule?.include == false) msgExNeg else tc.ac,
+                            fontSize = 10.sp,
+                            fontFamily = UI,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f),
+                        )
+                        SquareIconButton("×", fontSize = 12.sp, onClick = {
+                            cancelPendingMessageRule()
+                        })
+                    }
+                    pendingMessageRule?.let { pending ->
+                        FullTextHint(pendingMessageRulePatternLabel(pending)) { onTextLayout ->
+                            AppText(
+                                pendingMessageRulePatternLabel(pending),
+                                color = tc.tx,
+                                fontSize = 11.sp,
+                                fontFamily = MONO,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.fillMaxWidth(),
+                                onTextLayout = onTextLayout,
+                            )
+                        }
+                    }
+                    HoverBox(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                        baseBg = if (msgRuleScopeSelectedIdx == 0) tc.abg else Color.Transparent,
+                        hoverBg = tc.hv,
+                        onClick = { commitPendingMessageRule(messageRuleAllScope()) },
+                    ) {
+                        Box(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            AppText(
+                                "All",
+                                color = if (msgRuleScopeSelectedIdx == 0) tc.tx else tc.ts,
+                                fontSize = 11.sp,
+                                fontFamily = MONO,
+                            )
+                        }
+                    }
+                    InlineField(
+                        msgRuleScopeSearch,
+                        { msgRuleScopeSearch = it; msgRuleScopeSelectedIdx = 0 },
+                        "scope tag or prefix…",
+                        Modifier.fillMaxWidth()
+                            .focusRequester(msgRuleScopeFr)
+                            .onFocusChanged { msgRuleScopeFieldFocused = it.isFocused }
+                            .onPreviewKeyEvent { ev ->
+                                if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                when (ev.key) {
+                                    Key.DirectionDown -> {
+                                        msgRuleScopeSelectedIdx =
+                                            (msgRuleScopeSelectedIdx + 1).coerceAtMost(msgRuleScopeOptions.lastIndex)
+                                        true
+                                    }
+                                    Key.DirectionUp -> {
+                                        msgRuleScopeSelectedIdx =
+                                            (msgRuleScopeSelectedIdx - 1).coerceAtLeast(0)
+                                        true
+                                    }
+                                    Key.Enter, Key.NumPadEnter -> {
+                                        msgRuleScopeOptions.getOrNull(msgRuleScopeSelectedIdx)?.let { commitPendingMessageRule(it) }
+                                        true
+                                    }
+                                    Key.Escape -> { cancelPendingMessageRule(); true }
+                                    else -> false
+                                }
+                            },
+                        onClear = { msgRuleScopeSearch = ""; msgRuleScopeSelectedIdx = 0 },
+                    )
+                    ScrollableItems(searchedMsgRuleScopeOptions.size, maxDp = 140, scrollToIndex = msgRuleScopeSelectedIdx - 1) {
+                        searchedMsgRuleScopeOptions.forEachIndexed { idx, scope ->
+                            val optionIndex = idx + 1
+                            HoverBox(
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                                baseBg = if (msgRuleScopeSelectedIdx == optionIndex) tc.abg else Color.Transparent,
+                                hoverBg = tc.hv,
+                                onClick = { commitPendingMessageRule(scope) },
+                            ) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    AppText(
+                                        when {
+                                            scope.isAll -> "all"
+                                            scope.packagePrefix != null -> "pkg"
+                                            else -> "tag"
+                                        },
+                                        color = tc.td,
+                                        fontSize = 9.sp,
+                                        fontFamily = UI,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.width(26.dp),
+                                    )
+                                    FullTextHint(
+                                        scope.label,
+                                        modifier = Modifier.weight(1f),
+                                        forceShow = msgRuleScopeSelectedIdx == optionIndex,
+                                    ) { onTextLayout ->
+                                        AppText(
+                                            scope.label,
+                                            color = if (msgRuleScopeSelectedIdx == optionIndex) tc.tx else tc.ts,
+                                            fontSize = 11.sp,
+                                            fontFamily = MONO,
+                                            modifier = Modifier.fillMaxWidth(),
+                                            overflow = TextOverflow.Ellipsis,
+                                            maxLines = 1,
+                                            onTextLayout = onTextLayout,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (!msgRuleScopeOpen && showMsgRuleCandidates && unifiedCandidates.isNotEmpty()) {
+                ScrollableItems(unifiedCandidates.size, maxDp = 220, scrollToIndex = msgRuleSelectedIdx,
+                    modifier = Modifier
+                        .onPointerEvent(PointerEventType.Enter) { msgCandidatesHovered = true }
+                        .onPointerEvent(PointerEventType.Exit)  { msgCandidatesHovered = false }
+                ) {
+                    unifiedCandidates.forEachIndexed { idx, cand ->
+                        val pattern = cand.pattern
+                        val target = cand.target
+                        val inScope = cand.inScope
+                        val isPid = target == RuleTarget.PID_TID
+                        val isIncluded = if (isPid) {
+                            msgInc.any { it.target == RuleTarget.PID_TID && it.pattern == pattern }
+                        } else {
+                            msgInc.any { rule ->
+                                rule.target == RuleTarget.MESSAGE && rule.pattern == pattern && !rule.regex &&
+                                    (!cand.addsImmediately || rule.tag == cand.tag)
+                            }
+                        }
+                        val isExcluded = if (isPid) {
+                            msgExc.any { it.target == RuleTarget.PID_TID && it.pattern == pattern }
+                        } else {
+                            msgExc.any { rule ->
+                                rule.target == RuleTarget.MESSAGE && rule.pattern == pattern && !rule.regex &&
+                                    (!cand.addsImmediately || rule.tag == cand.tag)
+                            }
+                        }
+                        val isRowSelected = idx == msgRuleSelectedIdx
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                            baseBg = if (isRowSelected) tc.abg else Color.Transparent,
+                            hoverBg = tc.hv,
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 3.dp, bottom = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Box(Modifier.size(5.dp).background(when {
+                                    isIncluded -> tc.ac
+                                    isExcluded -> msgExNeg
+                                    else -> tc.td
+                                }, RoundedCornerShape(50)))
+                                if (isPid) {
+                                    AppText("pid", color = tc.td.copy(.7f), fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(end = 2.dp))
+                                }
+                                if (!inScope) {
+                                    AppText("other", color = tc.td.copy(.7f), fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(end = 2.dp))
+                                }
+                                FullTextHint(cand.label, modifier = Modifier.weight(1f), forceShow = isRowSelected) { onTextLayout ->
+                                    AppText(
+                                        cand.label,
+                                        color = when {
+                                            isIncluded -> tc.tx
+                                            isExcluded -> msgExNeg.copy(.8f)
+                                            !inScope -> tc.td
+                                            else -> tc.ts
+                                        },
+                                        fontSize = 11.sp,
+                                        fontFamily = MONO,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        overflow = TextOverflow.Ellipsis,
+                                        onTextLayout = onTextLayout,
+                                    )
+                                }
+                                val incHighlight = isIncluded
+                                val incKbd = isRowSelected && msgRuleSelectedAction == 0
+                                Box(
+                                    Modifier.size(20.dp)
+                                        .background(if (incHighlight) tc.ac.copy(.2f) else if (incKbd) tc.ac.copy(.1f) else Color.Transparent, CORNER_SM)
+                                        .border(1.dp, if (incHighlight || incKbd) tc.ac else tc.br, CORNER_SM)
+                                        .clickable { addMessageRuleCandidate(true, cand) },
+                                    contentAlignment = Alignment.Center,
+                                ) { AppText("+", color = if (incHighlight || incKbd) tc.ac else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+                                val exHighlight = isExcluded
+                                val exKbd = isRowSelected && msgRuleSelectedAction == 1
+                                Box(
+                                    Modifier.size(20.dp)
+                                        .background(if (exHighlight) msgExNeg.copy(.2f) else if (exKbd) msgExNeg.copy(.1f) else Color.Transparent, CORNER_SM)
+                                        .border(1.dp, if (exHighlight || exKbd) msgExNeg else tc.br, CORNER_SM)
+                                        .clickable { addMessageRuleCandidate(false, cand) },
+                                    contentAlignment = Alignment.Center,
+                                ) { AppText("−", color = if (exHighlight || exKbd) msgExNeg else tc.ts, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+                            }
+                        }
+                    }
+                }
+            }
+            Divider()
+        } // end TAGS-only MESSAGE RULES block
+
+        // ── Log composition ──────────────────────────────────────
+        // Ranked list of masked message templates (utils/MessageTemplates.kt) — turns "scroll
+        // until you spot a repeating line, hide it, repeat" into a ranked list you click down.
+        // Placed immediately after Message rules: its primary row actions (Hide/Show only) create
+        // message rules, so the adjacency is legible. Computed on demand — see
+        // AppState.requestMessageComposition — only while this section is expanded; Stage 1
+        // measured the scan at ~4s on a 10M-line file, too much to pay on every load for a panel
+        // most sessions never open.
+        SectionHeader(
+            "Log composition",
+            expanded = fpState.logCompositionExpanded,
+            onToggle = {
+                fpState.logCompositionExpanded = !fpState.logCompositionExpanded
+                onUiStateChanged()
+            },
+        )
+        if (fpState.logCompositionExpanded) {
+            // This block is only in composition while expanded, so remounting it (first expand,
+            // or a collapse->expand) re-fires this LaunchedEffect for the current tab.id; switching
+            // tabs while already expanded re-fires it for the newly-active tab, which is exactly
+            // when ITS on-demand scan needs to start. requestMessageComposition's own single-flight
+            // guard makes every one of those calls a no-op once a scan is already running or done.
+            //
+            // Keyed on the filter too, because the composition describes what the CURRENT VIEW is
+            // made of: narrowing to a package must re-answer the question for that package. The
+            // delay debounces it — `filter` changes on every keystroke in a message-rule box, and
+            // each change would otherwise start a scan. 400ms matches App.kt's content-autosave
+            // debounce rather than the 150ms search one: this is the expensive end of the scale,
+            // not a keystroke-latency path. Changing the filter again inside the window cancels
+            // this effect before it fires, and once it has fired the in-flight scan is cancelled by
+            // requestMessageComposition itself.
+            LaunchedEffect(tab.id, tab.filter) {
+                delay(LOG_COMPOSITION_REFRESH_DEBOUNCE_MS)
+                logCompositionActions.onExpand()
+            }
+            // Page bookkeeping lives HERE, not inside LogCompositionResults: that composable is
+            // called from two different when-branches, so a Computed -> Computing swap changes its
+            // call site and Compose remounts it, re-firing any LaunchedEffect inside. That is what
+            // sent the user back to page 1 on every Hide/Show only. At this level there is one call
+            // site whatever the state is.
+            //
+            // Switching tabs resets — a different log is a different question. A new result only
+            // clamps, so a live-tailing tab re-folding its histogram cannot yank the reader off the
+            // page they were on unless the list actually shrank past it.
+            val shownHistogram = when (val c = tab.messageComposition) {
+                is MessageCompositionState.Computed -> c.histogram
+                is MessageCompositionState.Computing -> c.previous
+                else -> null
+            }
+            LaunchedEffect(tab.id) { fpState.logCompositionPage = 0 }
+            LaunchedEffect(shownHistogram) {
+                val matches = logCompositionSearchMatches(
+                    shownHistogram?.templates.orEmpty(),
+                    fpState.logCompositionSearch,
+                )
+                // logCompositionClampPage takes a PAGE count, not an item count.
+                fpState.logCompositionPage =
+                    logCompositionClampPage(fpState.logCompositionPage, logCompositionPageCount(matches.size))
+            }
+            when (val composition = tab.messageComposition) {
+                is MessageCompositionState.NotComputed ->
+                    LogCompositionHint("◆", "Preparing to scan for repeated messages…", tc)
+                is MessageCompositionState.Computing ->
+                    // A rescan triggered by hiding a shape keeps the previous list on screen — the
+                    // rows are still what the user was reading, and blanking the panel for the
+                    // duration reads as a glitch rather than as progress.
+                    if (composition.previous != null) {
+                        LogCompositionResults(
+                            histogram = composition.previous,
+                            tab = tab,
+                            fpState = fpState,
+                            tc = tc,
+                            filter = filter,
+                            filterListRows = filterListRows,
+                            actions = logCompositionActions,
+                            refreshing = true,
+                        )
+                    } else {
+                        LogCompositionHint("◌", "Scanning for repeated messages…", tc)
+                    }
+                is MessageCompositionState.Failed ->
+                    LogCompositionHint(
+                        "✕",
+                        composition.message.ifBlank { "Log composition scan failed" },
+                        tc,
+                        glyphColor = DANGER_RED,
+                    )
+                is MessageCompositionState.Computed ->
+                    LogCompositionResults(
+                        histogram = composition.histogram,
+                        tab = tab,
+                        fpState = fpState,
+                        tc = tc,
+                        filter = filter,
+                        filterListRows = filterListRows,
+                        actions = logCompositionActions,
+                        refreshing = false,
+                    )
+            }
+        }
+        Divider()
+
+        // ── Highlighters ──────────────────────────────────────────
+        // Trailing shows colored dots for each highlighter; clicking collapses/expands the list.
+        // The add form is always visible, matching the TAGS section pattern.
+        val regexHighlightAvailable =
+            filter.mode == FilterMode.KEYWORD && filter.kwRegex && filter.kwText.isNotBlank()
+        val displayedHighlighterCount = filter.highlighters.size + if (regexHighlightAvailable) 1 else 0
+        val enabledHighlighterCount = filter.highlighters.count { it.on } +
+            if (regexHighlightAvailable && filter.kwHighlightEnabled) 1 else 0
+        SectionHeader(
+            "Highlighters",
+            trailing = if (displayedHighlighterCount > 0) ({
+                Row(
+                    Modifier.hoverPill().clickable {
+                        fpState.hlListExpanded = !fpState.hlListExpanded
+                        onUiStateChanged()
+                    }
+                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    if (enabledHighlighterCount > 0)
+                        AppText("$enabledHighlighterCount active", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+                    val offCount = displayedHighlighterCount - enabledHighlighterCount
+                    if (offCount > 0)
+                        AppText("$offCount off", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                    AppText(if (fpState.hlListExpanded) "▾" else "▸", color = tc.ts, fontSize = 10.sp)
+                }
+            }) else null,
+        )
+        if (displayedHighlighterCount > 0 && fpState.hlListExpanded) {
+            BoundedScrollBox(minOf(displayedHighlighterCount, filterListRows), rowDp = 30) {
+                if (regexHighlightAvailable) {
+                    Column {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            ColorPickerSwatch(
+                                color = filter.kwHighlightColor,
+                                pickerOpen = kwHighlightColorPickerOpen,
+                                onClick = { kwHighlightColorPickerOpen = !kwHighlightColorPickerOpen },
+                            )
+                            AppText(
+                                "/${filter.kwText}/i",
+                                color = if (filter.kwHighlightEnabled) tc.tx else tc.td,
+                                fontSize = 11.sp,
+                                fontFamily = MONO,
+                                modifier = Modifier.weight(1f),
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            RoundIndicator(
+                                active = filter.kwHighlightEnabled,
+                                color = filter.kwHighlightColor,
+                                onClick = { onSetKwHighlightEnabled(!filter.kwHighlightEnabled) },
+                            )
+                        }
+                        if (kwHighlightColorPickerOpen) {
+                            FlowRow(
+                                Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp),
+                            ) {
+                                HL_COLORS.forEach { color ->
+                                    ColorSwatch(color, color == filter.kwHighlightColor) {
+                                        onSetKwHighlightColor(color)
+                                        kwHighlightColorPickerOpen = false
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                filter.highlighters.forEach { hl ->
+                    Column {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            ColorPickerSwatch(
+                                color = hl.color, pickerOpen = colorPickerHlId == hl.id,
+                                onClick = { colorPickerHlId = if (colorPickerHlId == hl.id) null else hl.id },
+                            )
+                            AppText((if (hl.regex) "/" else "") + hl.pattern + (if (hl.regex) "/i" else ""),
+                                color = if (hl.on) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO,
+                                modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                            RoundIndicator(active = hl.on, color = hl.color, onClick = { onToggleHl(hl.id) })
+                            SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveHl(hl.id) })
+                        }
+                        if (colorPickerHlId == hl.id) {
+                            FlowRow(
+                                Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                verticalArrangement = Arrangement.spacedBy(3.dp),
+                            ) {
+                                HL_COLORS.forEach { c -> ColorSwatch(c, c == hl.color) { onSetHlColor(hl.id, c); colorPickerHlId = null } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            val doAddHl = {
+                if (newHlPat.isNotBlank()) {
+                    onAddHl(newHlPat, newHlRx, newHlColor)
+                    onSetNewHlPat("")
+                    val usedColors = (filter.highlighters.map { it.color } + newHlColor).toSet()
+                    val idx = HL_COLORS.indexOf(newHlColor)
+                    val next = (HL_COLORS.drop(idx + 1) + HL_COLORS).firstOrNull { it !in usedColors }
+                        ?: HL_COLORS[(idx + 1) % HL_COLORS.size]
+                    onSetNewHlColor(next)
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(20.dp)
+                        .background(newHlColor, CORNER_SM)
+                        .border(1.dp, if (hlColorPickerOpen) tc.tx else tc.br, CORNER_SM)
+                        .clickable { hlColorPickerOpen = !hlColorPickerOpen },
+                )
+                InlineField(
+                    newHlPat, onSetNewHlPat, "text or /regex/…",
+                    Modifier.weight(1f)
+                        .focusRequester(hlFr)
+                        .onFocusChanged { hlFieldFocused = it.isFocused }
+                        .onPreviewKeyEvent { ev ->
+                            if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                            when (ev.key) {
+                                Key.Enter -> { doAddHl(); true }
+                                Key.Tab -> { runCatching { tagFr.requestFocus() }; true }
+                                else -> false
+                            }
+                        },
+                    onClear = { onSetNewHlPat("") },
+                )
+                PillBtn(".*", active = newHlRx, onClick = { onSetNewHlRx(!newHlRx) })
+                AppButton("+ Add", onClick = doAddHl, variant = ButtonVariant.Ghost, enabled = newHlPat.isNotBlank())
+            }
+            if (hlColorPickerOpen) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    HL_COLORS.forEach { c ->
+                        ColorSwatch(c, c == newHlColor) { onSetNewHlColor(c); hlColorPickerOpen = false }
+                    }
+                }
+            }
+        }
+        Divider()
+
+        // ── Log Level ─────────────────────────────────────────────
+        SectionHeader("Log level", expanded = fpState.lvlExpanded, onToggle = {
+            fpState.lvlExpanded = !fpState.lvlExpanded
+            onUiStateChanged()
+        })
+        if (fpState.lvlExpanded) {
+            val levels = LogLevel.entries
+            SegmentedControl(
+                options = levels.map { it.key.toString() },
+                selectedIndices = filter.levels.map { levels.indexOf(it) }.toSet(),
+                onToggle = { idx -> onToggleLevel(levels[idx]) },
+                selectedColors = levels.map { it.defaultColor },
+                fillWidth = true,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            )
+        }
+        Divider()
+
+        // ── Sequences ─────────────────────────────────────────────
+        SectionHeader("Sequences", expanded = fpState.seqExpanded, onToggle = {
+            fpState.seqExpanded = !fpState.seqExpanded
+            onUiStateChanged()
+        })
+        if (fpState.seqExpanded) {
+            CheckRow(filter.seqOn, { onToggleSeq() }) {
+                AppText("Group sequences", color = tc.ts, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            }
+            if (tab.filter.sequences.isNotEmpty()) {
+                var dragId by remember { mutableStateOf<String?>(null) }
+                var dragStartIndex by remember { mutableStateOf(-1) }
+                var dragStartTopY by remember { mutableStateOf(0f) }
+                var dragOffsetY by remember { mutableStateOf(0f) }
+                var justReleasedSequenceId by remember { mutableStateOf<String?>(null) }
+                var liveVisualSequenceIds by remember { mutableStateOf(emptyList<String>()) }
+                val density = LocalDensity.current.density
+                val sequenceIds = tab.filter.sequences.map { it.id }
+                LaunchedEffect(sequenceIds, dragId, justReleasedSequenceId) {
+                    if (shouldSyncSequenceVisualOrder(dragId, justReleasedSequenceId)) {
+                        liveVisualSequenceIds = sequenceIds
+                    }
+                }
+                LaunchedEffect(justReleasedSequenceId) {
+                    if (justReleasedSequenceId != null) {
+                        kotlinx.coroutines.delay(120)
+                        justReleasedSequenceId = null
+                    }
+                }
+                val visualSequenceIds =
+                    liveVisualSequenceIds.takeIf { it.toSet() == sequenceIds.toSet() && it.size == sequenceIds.size }
+                        ?: sequenceIds
+                val currentVisualSequenceIds = rememberUpdatedState(visualSequenceIds)
+                val currentDragId = rememberUpdatedState(dragId)
+                val rowHeightPx = 28f * density
+                val rowHeightDp = (rowHeightPx / density).dp
+                Box(
+                    Modifier.fillMaxWidth()
+                        .height(rowHeightDp * sequenceIds.size)
+                        .pointerInput(sequenceIds, rowHeightPx) {
+                            var downPos = Offset.Zero
+                            var downId: String? = null
+                            var dragging = false
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                    val ch = ev.changes.firstOrNull() ?: continue
+                                    when (ev.type) {
+                                        PointerEventType.Press -> {
+                                            downPos = ch.position
+                                            dragging = false
+                                            val idx = (ch.position.y / rowHeightPx).toInt()
+                                                .coerceIn(0, sequenceIds.lastIndex.coerceAtLeast(0))
+                                            downId = sequenceIds.getOrNull(idx)
+                                        }
+
+                                        PointerEventType.Move -> {
+                                            if (downId != null && !dragging && (ch.position - downPos).getDistance() > 8f) {
+                                                val id = downId ?: continue
+                                                dragging = true
+                                                dragId = id
+                                                dragStartIndex = sequenceIds.indexOf(id)
+                                                dragStartTopY = dragStartIndex * rowHeightPx
+                                                dragOffsetY = 0f
+                                                justReleasedSequenceId = null
+                                                liveVisualSequenceIds = sequenceIds
+                                            }
+                                            if (dragging && dragId != null) {
+                                                ch.consume()
+                                                dragOffsetY = ch.position.y - downPos.y
+                                                liveVisualSequenceIds = sequenceOrderDuringDrag(
+                                                    visibleIds = sequenceIds,
+                                                    draggedId = dragId,
+                                                    dragStartIndex = dragStartIndex,
+                                                    dragOffsetY = dragOffsetY,
+                                                    rowHeight = rowHeightPx,
+                                                )
+                                            }
+                                        }
+
+                                        PointerEventType.Release -> {
+                                            if (dragging && dragId != null) {
+                                                val releasedId = currentDragId.value ?: dragId
+                                                val releasedOrder = currentVisualSequenceIds.value
+                                                val targetIdx = releasedOrder.indexOf(releasedId)
+                                                if (releasedId != null && targetIdx >= 0 && targetIdx != sequenceIds.indexOf(releasedId)) {
+                                                    liveVisualSequenceIds = releasedOrder
+                                                    onReorderSeq(releasedId, targetIdx)
+                                                }
+                                                justReleasedSequenceId = releasedId
+                                            }
+                                            dragId = null
+                                            dragStartIndex = -1
+                                            dragStartTopY = 0f
+                                            dragOffsetY = 0f
+                                            downId = null
+                                            dragging = false
+                                        }
+
+                                        else -> {}
+                                    }
+                                }
+                            }
+                        }
+                ) {
+                    tab.filter.sequences.forEach { def ->
+                        key(def.id) {
+                            val isDragging = dragId == def.id
+                            val targetIndex = visualSequenceIds.indexOf(def.id).takeIf { it >= 0 }
+                                ?: tab.filter.sequences.indexOf(def)
+                            val targetY = targetIndex * rowHeightPx
+                            val animatedY by animateFloatAsState(
+                                targetValue = targetY,
+                                animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
+                                label = "sequence-y-${def.id}",
+                            )
+                            val sequenceY = sequenceRenderY(
+                                isDragging = isDragging,
+                                isJustReleased = justReleasedSequenceId == def.id,
+                                pointerY = dragStartTopY + dragOffsetY,
+                                targetY = targetY,
+                                animatedY = animatedY,
+                            )
+                            Column(
+                                Modifier.fillMaxWidth()
+                                    .height(rowHeightDp)
+                                    .offset { IntOffset(0, sequenceY.roundToInt()) }
+                                    .zIndex(if (isDragging) 1f else 0f)
+                                    .graphicsLayer {
+                                        if (isDragging) {
+                                            scaleX = 1.02f
+                                            scaleY = 1.02f
+                                        }
+                                    }
+                            ) {
+                                Row(
+                                    Modifier.fillMaxWidth()
+                                        .fillMaxHeight()
+                                        .background(sequenceRowBaseBackground(isDragging, def.enabled, tc))
+                                        .background(if (isDragging) tc.ac.copy(.12f) else Color.Transparent)
+                                        .padding(horizontal = 12.dp, vertical = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                ) {
+                                    AppText("⠿", color = tc.td, fontSize = 12.sp)
+                                    AppText("${targetIndex + 1}", color = tc.td, fontSize = 9.sp, fontFamily = MONO, modifier = Modifier.width(12.dp))
+                                    ColorPickerSwatch(
+                                        color = if (def.enabled) def.color else tc.br, size = 10.dp,
+                                        pickerOpen = colorPickerSeqId == def.id,
+                                        onClick = { colorPickerSeqId = if (colorPickerSeqId == def.id) null else def.id },
+                                    )
+                                    AppText(
+                                        sequenceLabel(def),
+                                        color = if (def.enabled) tc.tx else tc.td,
+                                        fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis,
+                                    )
+                                    SquareIconButton("✎", fontSize = 11.sp, onClick = {
+                                        editingSeqId = if (editingSeqId == def.id) null else def.id
+                                    })
+                                    RoundIndicator(active = def.enabled, color = def.color, onClick = { onToggleSeqEnabled(def.id) })
+                                    SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveSeq(def.id) })
+                                }
+                            }
+                        }
+                    }
+                }
+                tab.filter.sequences.firstOrNull { it.id == editingSeqId }?.let { def ->
+                    SequenceEditor(def, onUpdateSeq, onCancel = { editingSeqId = null })
+                }
+                tab.filter.sequences.firstOrNull { it.id == colorPickerSeqId }?.let { def ->
+                    FlowRow(
+                        Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        SEQ_COLORS.forEach { c ->
+                            Box(
+                                Modifier.size(14.dp).background(c, CORNER_SM)
+                                    .border(2.dp, if (c == def.color) tc.tx else Color.Transparent, CORNER_SM)
+                                    .clickable { onSetSeqColor(def.id, c); colorPickerSeqId = null },
+                            )
+                        }
+                    }
+                }
+            }
+            if (tab.manualBlocks.isNotEmpty()) {
+                AppText("Collapsed ranges", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
+                ScrollableItems(tab.manualBlocks.size) {
+                    tab.manualBlocks.forEach { block ->
+                        val entry = tab.rmap[block.anchorId]
+                        Row(
+                            Modifier.fillMaxWidth()
+                                .background(if (block.enabled) Color.Transparent else tc.hv)
+                                .padding(horizontal = 12.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            ColorPickerSwatch(
+                                color = if (block.enabled) block.color else tc.br, size = 10.dp,
+                                pickerOpen = colorPickerManualId == block.id,
+                                onClick = { colorPickerManualId = if (colorPickerManualId == block.id) null else block.id },
+                            )
+                            val direction = when (block.direction) {
+                                ManualCollapseDirection.TO_START -> "to start"
+                                ManualCollapseDirection.TO_END -> "to end"
+                                ManualCollapseDirection.RANGE -> "selection"
+                            }
+                            Column(Modifier.weight(1f)) {
+                                AppText(direction, color = if (block.enabled) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO)
+                                AppText(
+                                    listOfNotNull(entry?.tag, entry?.msg).joinToString(": "),
+                                    color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            RoundIndicator(active = block.enabled, color = block.color, onClick = { onToggleManualCollapse(block.id) })
+                            SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveManualCollapse(block.id) })
+                        }
+                    }
+                }
+                tab.manualBlocks.firstOrNull { it.id == colorPickerManualId }?.let { block ->
+                    FlowRow(
+                        Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        SEQ_COLORS.forEach { c ->
+                            Box(
+                                Modifier.size(14.dp).background(c, CORNER_SM)
+                                    .border(2.dp, if (c == block.color) tc.tx else Color.Transparent, CORNER_SM)
+                                    .clickable { onSetManualBlockColor(block.id, c); colorPickerManualId = null },
+                            )
+                        }
+                    }
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth()
+                    .clickable { seqAddOpen = !seqAddOpen }
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                AppText(
+                    "+ New sequence…",
+                    color = if (seqAddOpen) tc.ac else tc.td,
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f),
+                )
+                AppText(if (seqAddOpen) "▾" else "▸", color = tc.ts, fontSize = 10.sp)
+            }
+            if (seqAddOpen) {
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        InlineField(newSeqText, onSetNewSeqText, "start message…", Modifier.weight(1f))
+                        PillBtn(".*", active = newSeqRegex) { onSetNewSeqRx(!newSeqRegex) }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        InlineField(newSeqEndText, onSetNewSeqEndText, "end message (optional)…", Modifier.weight(1f))
+                        PillBtn(".*", active = newSeqEndRegex) { onSetNewSeqEndRx(!newSeqEndRegex) }
+                    }
+                    InlineField(newSeqStartTag, onSetNewSeqStartTag, "start tag (optional)…", Modifier.fillMaxWidth())
+                    InlineField(newSeqEndTag, onSetNewSeqEndTag, "end tag (optional)…", Modifier.fillMaxWidth())
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Bottom) {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            AppText("Color", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                            Box(
+                                Modifier.size(20.dp)
+                                    .border(0.5.dp, if (seqColorPickerOpen) tc.tx else tc.br, CORNER_SM)
+                                    .background(newSeqColor, CORNER_SM)
+                                    .clickable { seqColorPickerOpen = !seqColorPickerOpen },
+                            )
+                        }
+                        AppButton("+ Add", onClick = {
+                            onAddSeq(newSeqText, newSeqRegex, newSeqColor, newSeqStartTag, newSeqEndText, newSeqEndRegex, newSeqEndTag)
+                            seqAddOpen = false
+                            seqColorPickerOpen = false
+                        }, variant = ButtonVariant.Ghost, enabled = newSeqText.isNotBlank())
+                    }
+                    if (seqColorPickerOpen) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            SEQ_COLORS.forEach { c ->
+                                ColorSwatch(c, c == newSeqColor) { onSetNewSeqColor(c); seqColorPickerOpen = false }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Divider()
+
+        // ── Crashes & ANRs ────────────────────────────────────────
+        // Same row-limit/collapse shape as Highlighters — always-on detection, not a user-defined
+        // list, so there's nothing to add/remove here, only to browse and jump from.
+        // Header badge and the category dropdown's per-option counts (issueCategoryOptions below)
+        // both deliberately show raw occurrence counts, not group counts: issueSitesForCategory's
+        // ALL de-dupe is already per *line* (see its doc comment), so mixing in a second, signature
+        // based de-dupe here would make the same number mean two different things depending on
+        // category. "38 issues" also matches what the minimap marks (every occurrence), whereas the
+        // number of rows actually rendered below (one per signature) is visible directly from the
+        // rows themselves plus each group's own ×N badge.
+        SectionHeader(
+            "Issues",
+            trailing = if (crashSites.isNotEmpty()) ({
+                AppText("${crashSites.size}", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            }) else null,
+            expanded = fpState.crashExpanded,
+            onToggle = {
+                fpState.crashExpanded = !fpState.crashExpanded
+                onUiStateChanged()
+            },
+        )
+        if (fpState.crashExpanded) {
+            val issueCategoryOptions = remember(allCrashSites, customIssueSites, customIssueRules) {
+                issueCategoryOptions(allCrashSites, customIssueSites, customIssueRules)
+            }
+            LaunchedEffect(issueCategoryOptions, fpState.crashCategory) {
+                if (issueCategoryOptions.none { it.selection == fpState.crashCategory }) {
+                    fpState.crashCategory = IssueCategorySelection.BuiltIn(CrashCategory.ALL)
+                    onUiStateChanged()
+                }
+            }
+            Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                IssueCategoryDropdown(
+                    category = fpState.crashCategory,
+                    options = issueCategoryOptions,
+                    onSelect = { category ->
+                        fpState.crashCategory = category
+                        onUiStateChanged()
+                    },
+                )
+            }
+            // Forty identical retries collapse to one row here; the flat crashSites list underneath
+            // (and the minimap/MCP consumers reading it) still sees every occurrence — see
+            // groupIssueSites' doc comment.
+            val crashGroups = remember(crashSites) { groupIssueSites(crashSites) }
+            // Which groups are expanded is ephemeral browsing state, not a filter setting — it is
+            // deliberately NOT part of FilterPanelUiState/the autosave token (same reasoning as
+            // SequenceEditor's local seqColorPickerOpen used to have, before this state was hoisted
+            // here so the container below could size itself from it). Keyed on tab.id and the
+            // selected category so switching either resets which groups are expanded rather than
+            // carrying stale ids from a now-unrelated group list.
+            var expandedGroupIds by remember(tab.id, fpState.crashCategory) { mutableStateOf(emptySet<String>()) }
+            if (crashGroups.isEmpty()) {
+                Column(
+                    Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    AppText("◆", color = tc.td.copy(.33f), fontSize = 18.sp)
+                    AppText(
+                        if (tab.analysis.pending) "Analyzing crashes…" else "None found in this category",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        maxLines = 2,
+                    )
+                }
+            } else {
+                // Sized from what's actually rendered (collapsed groups at CRASH_ROW_DP, expanded
+                // groups at their real height), not from crashGroups.size at collapsed height — see
+                // issuesBoxHeightDp's doc comment for why minOf(crashGroups.size, filterListRows) *
+                // CRASH_ROW_DP stopped being correct once a group could expand.
+                val boxHeightDp = remember(crashGroups, expandedGroupIds, filterListRows) {
+                    issuesBoxHeightDp(crashGroups, expandedGroupIds, filterListRows)
+                }
+                BoundedScrollBoxDp(boxHeightDp) {
+                    crashGroups.forEach { group ->
+                        val gid = group.representative.id
+                        IssueSiteRow(
+                            group, tc,
+                            expanded = gid in expandedGroupIds,
+                            onToggleExpand = {
+                                expandedGroupIds = if (gid in expandedGroupIds) {
+                                    expandedGroupIds - gid
+                                } else {
+                                    expandedGroupIds + gid
+                                }
+                            },
+                            onNavigate = onNavigateCrash,
+                        )
+                    }
+                }
+            }
+        }
+        Divider()
+
+        // ── Saved Filters ─────────────────────────────────────────
+        SectionHeader("Saved filters", expanded = fpState.sfExpanded, onToggle = {
+            fpState.sfExpanded = !fpState.sfExpanded
+            onUiStateChanged()
+        })
+        if (fpState.sfExpanded) {
+            SavedFilterLibrary(
+                savedFilters = savedFilters,
+                folders = savedFilterFolders,
+                activeFilterItemId = activeFilterItemId,
+                search = fpState.sfSearch,
+                favoritesExpanded = fpState.sfFavoritesExpanded,
+                collapsedFolderIds = fpState.sfCollapsedFolderIds,
+                filterListRows = filterListRows,
+                onSearchChanged = { fpState.sfSearch = it },
+                onToggleFavorites = {
+                    fpState.sfFavoritesExpanded = !fpState.sfFavoritesExpanded
+                    onUiStateChanged()
+                },
+                onToggleFolder = { id ->
+                    fpState.sfCollapsedFolderIds = if (id in fpState.sfCollapsedFolderIds) {
+                        fpState.sfCollapsedFolderIds - id
+                    } else {
+                        fpState.sfCollapsedFolderIds + id
+                    }
+                    onUiStateChanged()
+                },
+                onLoad = onLoadFilter,
+                onClearActive = onClearFilter,
+                onToggleFavorite = onToggleSFFavorite,
+                onMoveToFolder = onMoveSFToFolder,
+                onReorderWithinFolder = onReorderSFWithinFolder,
+                onReorderFolder = onReorderSFFolder,
+                onRename = onRenameSF,
+                onDelete = onDeleteSF,
+                onBeginRenameFolder = { folder ->
+                    renameSavedFilterFolderId = folder.id
+                    savedFilterFolderNameDraft = folder.name
+                },
+                onDeleteFolder = onDeleteSFFolder,
+            )
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                AppButton("+ Save current filter…", onClick = onOpenSFDialog, variant = ButtonVariant.Ghost, modifier = Modifier.fillMaxWidth())
+                AppButton(
+                    "+ New folder…",
+                    onClick = {
+                        savedFilterFolderNameDraft = ""
+                        createSavedFilterFolderOpen = true
+                    },
+                    variant = ButtonVariant.Ghost,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                AppButton("Clear filters", onClick = onClearFilter, variant = ButtonVariant.Secondary, isDanger = true, modifier = Modifier.fillMaxWidth())
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
+                    AppButton("Export", onClick = onExportFilters)
+                    AppButton("Import", onClick = onImportFilters)
+                }
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    AppText("Drop filter .json here to import", color = tc.td, fontSize = 10.sp)
+                }
+            }
+        }
+    }
+
+    if (regexEditorOpen) {
+        Dialog(onDismissRequest = { regexEditorOpen = false }) {
+            val dialogTheme = tc()
+            Column(
+                Modifier.width(640.dp)
+                    .background(dialogTheme.p, RoundedCornerShape(8.dp))
+                    .border(1.dp, dialogTheme.br, RoundedCornerShape(8.dp))
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                AppText("Edit regex search", color = dialogTheme.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                AppText(
+                    "Searches the exact text shown in a log row. Apply keeps this as a transient search; save it manually from Saved filters when needed.",
+                    color = dialogTheme.td,
+                    fontSize = 11.sp,
+                    maxLines = 2,
+                )
+                InlineField(
+                    value = regexEditorText,
+                    onValue = { regexEditorText = it },
+                    placeholder = "regex…",
+                    modifier = Modifier.fillMaxWidth().height(220.dp),
+                    fontSize = 12.sp,
+                    singleLine = false,
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                ) {
+                    AppButton("Apply", onClick = {
+                        kwDisplay = regexEditorText
+                        onSetKw(regexEditorText)
+                        regexEditorOpen = false
+                    }, variant = ButtonVariant.Primary)
+                    AppButton("Cancel", onClick = { regexEditorOpen = false }, variant = ButtonVariant.Secondary)
+                }
+            }
+        }
+    }
+
+    if (createSavedFilterFolderOpen || renameSavedFilterFolderId != null) {
+        val renameId = renameSavedFilterFolderId
+        SavedFilterFolderNameDialog(
+            title = if (renameId == null) "New filter folder" else "Rename filter folder",
+            value = savedFilterFolderNameDraft,
+            onValueChange = { savedFilterFolderNameDraft = it },
+            onConfirm = {
+                val name = savedFilterFolderNameDraft.trim()
+                if (name.isNotEmpty()) {
+                    if (renameId == null) onCreateSFFolder(name) else onRenameSFFolder(renameId, name)
+                    createSavedFilterFolderOpen = false
+                    renameSavedFilterFolderId = null
+                    savedFilterFolderNameDraft = ""
+                }
+            },
+            onDismiss = {
+                createSavedFilterFolderOpen = false
+                renameSavedFilterFolderId = null
+                savedFilterFolderNameDraft = ""
+            },
+        )
+    }
+}
+
+@Composable
+private fun SavedFilterLibrary(
+    savedFilters: List<SavedFilter>,
+    folders: List<SavedFilterFolder>,
+    activeFilterItemId: String?,
+    search: String,
+    favoritesExpanded: Boolean,
+    collapsedFolderIds: Set<String>,
+    filterListRows: Int,
+    onSearchChanged: (String) -> Unit,
+    onToggleFavorites: () -> Unit,
+    onToggleFolder: (String) -> Unit,
+    onLoad: (SavedFilter) -> Unit,
+    onClearActive: () -> Unit,
+    onToggleFavorite: (String) -> Unit,
+    onMoveToFolder: (String, String?) -> Unit,
+    onReorderWithinFolder: (String, Int) -> Unit,
+    onReorderFolder: (String, Int) -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onBeginRenameFolder: (SavedFilterFolder) -> Unit,
+    onDeleteFolder: (String) -> Unit,
+) {
+    val tc = tc()
+    val query = search.trim()
+    val folderById = remember(folders) { folders.associateBy { it.id } }
+    val searchResults = remember(savedFilters, folders, query) {
+        if (query.isEmpty()) emptyList() else savedFilters.filter { filter ->
+            filter.name.contains(query, ignoreCase = true) ||
+                folderById[filter.folderId]?.name?.contains(query, ignoreCase = true) == true
+        }
+    }
+    Column(Modifier.fillMaxWidth()) {
+        InlineField(
+            value = search,
+            onValue = onSearchChanged,
+            placeholder = "Search all saved filters…",
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            fontSize = 11.sp,
+            onClear = { onSearchChanged("") },
+        )
+
+        if (query.isNotEmpty()) {
+            SavedFilterGroupHeader(
+                title = "Search results",
+                count = searchResults.size,
+                expanded = true,
+                collapsible = false,
+            )
+            if (searchResults.isEmpty()) {
+                AppText(
+                    "No saved filters match “$query”",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                    maxLines = 2,
+                )
+            } else {
+                ScrollableItems(
+                    itemCount = searchResults.size,
+                    rowDp = 30,
+                    maxDp = filterListRows.coerceAtLeast(1) * 30,
+                ) {
+                    searchResults.forEach { filter ->
+                        SavedFilterLibraryRow(
+                            filter = filter,
+                            folders = folders,
+                            folderLabel = null,
+                            active = activeFilterItemId == filter.id,
+                            isProjection = true,
+                            onLoad = onLoad,
+                            onClearActive = onClearActive,
+                            onToggleFavorite = onToggleFavorite,
+                            onMoveToFolder = onMoveToFolder,
+                            onRename = onRename,
+                            onDelete = onDelete,
+                        )
+                    }
+                }
+            }
+            return@Column
+        }
+
+        val favorites = savedFilters.filter { it.favorite }
+        if (favorites.isNotEmpty()) {
+            SavedFilterGroupHeader(
+                title = "Favorites",
+                icon = Icons.Outlined.StarBorder,
+                count = favorites.size,
+                expanded = favoritesExpanded,
+                onToggle = onToggleFavorites,
+            )
+            if (favoritesExpanded) {
+                ScrollableItems(
+                    itemCount = favorites.size,
+                    rowDp = 30,
+                    maxDp = filterListRows.coerceAtLeast(1) * 30,
+                ) {
+                    favorites.forEach { filter ->
+                        SavedFilterLibraryRow(
+                            filter = filter,
+                            folders = folders,
+                            folderLabel = null,
+                            active = activeFilterItemId == filter.id,
+                            isProjection = true,
+                            onLoad = onLoad,
+                            onClearActive = onClearActive,
+                            onToggleFavorite = onToggleFavorite,
+                            onMoveToFolder = onMoveToFolder,
+                            onRename = onRename,
+                            onDelete = onDelete,
+                        )
+                    }
+                }
+            }
+        }
+
+        folders.forEachIndexed { folderIndex, folder ->
+            val items = savedFilters.filter { it.folderId == folder.id }
+            val expanded = folder.id !in collapsedFolderIds
+            SavedFilterGroupHeader(
+                title = folder.name,
+                icon = Icons.Outlined.Folder,
+                count = items.size,
+                expanded = expanded,
+                onToggle = { onToggleFolder(folder.id) },
+                onRename = { onBeginRenameFolder(folder) },
+                onDelete = { onDeleteFolder(folder.id) },
+                canMoveUp = folderIndex > 0,
+                canMoveDown = folderIndex < folders.lastIndex,
+                onMoveUp = { onReorderFolder(folder.id, folderIndex - 1) },
+                onMoveDown = { onReorderFolder(folder.id, folderIndex + 1) },
+            )
+            if (expanded) {
+                SavedFilterCanonicalList(
+                    filters = items,
+                    folders = folders,
+                    activeFilterItemId = activeFilterItemId,
+                    maxRows = filterListRows,
+                    onLoad = onLoad,
+                    onClearActive = onClearActive,
+                    onToggleFavorite = onToggleFavorite,
+                    onMoveToFolder = onMoveToFolder,
+                    onReorderWithinFolder = onReorderWithinFolder,
+                    onRename = onRename,
+                    onDelete = onDelete,
+                )
+            }
+        }
+
+        val ungrouped = savedFilters.filter { it.folderId == null || it.folderId !in folderById }
+        val ungroupedKey = "__ungrouped__"
+        val ungroupedExpanded = ungroupedKey !in collapsedFolderIds
+        SavedFilterGroupHeader(
+            title = "Ungrouped",
+            icon = Icons.Outlined.Folder,
+            count = ungrouped.size,
+            expanded = ungroupedExpanded,
+            onToggle = { onToggleFolder(ungroupedKey) },
+        )
+        if (ungroupedExpanded) {
+            SavedFilterCanonicalList(
+                filters = ungrouped,
+                folders = folders,
+                activeFilterItemId = activeFilterItemId,
+                maxRows = filterListRows,
+                onLoad = onLoad,
+                onClearActive = onClearActive,
+                onToggleFavorite = onToggleFavorite,
+                onMoveToFolder = onMoveToFolder,
+                onReorderWithinFolder = onReorderWithinFolder,
+                onRename = onRename,
+                onDelete = onDelete,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterGroupHeader(
+    title: String,
+    count: Int,
+    expanded: Boolean,
+    icon: ImageVector? = null,
+    collapsible: Boolean = true,
+    onToggle: () -> Unit = {},
+    onRename: (() -> Unit)? = null,
+    onDelete: (() -> Unit)? = null,
+    canMoveUp: Boolean = false,
+    canMoveDown: Boolean = false,
+    onMoveUp: (() -> Unit)? = null,
+    onMoveDown: (() -> Unit)? = null,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onToggle.takeIf { collapsible },
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            AppText(
+                if (!collapsible) "⌕" else if (expanded) "▾" else "▸",
+                color = tc.td,
+                fontSize = if (!collapsible) 15.sp else 10.sp,
+            )
+            icon?.let {
+                Icon(it, contentDescription = null, tint = tc.td, modifier = Modifier.size(14.dp))
+            }
+            AppText(
+                title,
+                color = tc.ts,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+                overflow = TextOverflow.Ellipsis,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.width(18.dp), contentAlignment = Alignment.CenterEnd) {
+                    AppText(count.toString(), color = tc.td, fontSize = 9.sp)
+                }
+                // Always reserve the same trailing action slot, including Favorites/Ungrouped.
+                // That keeps every count and every overflow button on one shared right edge.
+                Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                    if (onRename != null && onDelete != null) {
+                        SavedFilterFolderOptionsMenu(
+                            canMoveUp = canMoveUp,
+                            canMoveDown = canMoveDown,
+                            onMoveUp = onMoveUp,
+                            onMoveDown = onMoveDown,
+                            onRename = onRename,
+                            onDelete = onDelete,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterCanonicalList(
+    filters: List<SavedFilter>,
+    folders: List<SavedFilterFolder>,
+    activeFilterItemId: String?,
+    maxRows: Int,
+    onLoad: (SavedFilter) -> Unit,
+    onClearActive: () -> Unit,
+    onToggleFavorite: (String) -> Unit,
+    onMoveToFolder: (String, String?) -> Unit,
+    onReorderWithinFolder: (String, Int) -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    if (filters.isEmpty()) return
+    val reorderable = filters.filterNot { it.id.startsWith("draft_") }
+    val rowHeightDp = 30.dp
+    val density = LocalDensity.current.density
+    val rowHeightPx = 30f * density
+    var dragId by remember { mutableStateOf<String?>(null) }
+    var dragStartIndex by remember { mutableStateOf(-1) }
+    var dragOffsetY by remember { mutableStateOf(0f) }
+    var justReleasedSavedFilterId by remember { mutableStateOf<String?>(null) }
+    var visualIds by remember { mutableStateOf(filters.map { it.id }) }
+    val canonicalIds = filters.map { it.id }
+    LaunchedEffect(canonicalIds, dragId, justReleasedSavedFilterId) {
+        if (dragId == null && justReleasedSavedFilterId == null) {
+            visualIds = canonicalIds
+        }
+    }
+    LaunchedEffect(justReleasedSavedFilterId) {
+        if (justReleasedSavedFilterId != null) {
+            kotlinx.coroutines.delay(120)
+            justReleasedSavedFilterId = null
+        }
+    }
+    val currentVisualIds = rememberUpdatedState(visualIds)
+    val currentDragId = rememberUpdatedState(dragId)
+    ScrollableItems(
+        itemCount = filters.size,
+        rowDp = 30,
+        maxDp = maxRows.coerceAtLeast(1) * 30,
+    ) {
+        Box(
+            Modifier.fillMaxWidth().height(rowHeightDp * filters.size)
+                .pointerInput(canonicalIds, rowHeightPx) {
+                    var down = Offset.Zero
+                    var downId: String? = null
+                    var dragging = false
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val change = event.changes.firstOrNull() ?: continue
+                            when (event.type) {
+                                PointerEventType.Press -> {
+                                    down = change.position
+                                    downId = canonicalIds.getOrNull((change.position.y / rowHeightPx).toInt())
+                                        ?.takeIf { id -> reorderable.any { it.id == id } }
+                                    dragging = false
+                                }
+                                PointerEventType.Move -> {
+                                    if (!dragging && downId != null && (change.position - down).getDistance() > 8f) {
+                                        dragging = true
+                                        dragId = downId
+                                        dragStartIndex = canonicalIds.indexOf(downId)
+                                        dragOffsetY = 0f
+                                        justReleasedSavedFilterId = null
+                                        visualIds = canonicalIds
+                                    }
+                                    if (dragging && dragId != null) {
+                                        change.consume()
+                                        dragOffsetY = change.position.y - down.y
+                                        visualIds = sequenceOrderDuringDrag(
+                                            visibleIds = canonicalIds,
+                                            draggedId = dragId,
+                                            dragStartIndex = dragStartIndex,
+                                            dragOffsetY = dragOffsetY,
+                                            rowHeight = rowHeightPx,
+                                        )
+                                    }
+                                }
+                                PointerEventType.Release -> {
+                                    if (dragging && dragId != null) {
+                                        val id = currentDragId.value ?: dragId
+                                        val releasedOrder = currentVisualIds.value
+                                        val toIndex = releasedOrder.filterNot { it.startsWith("draft_") }.indexOf(id)
+                                        val fromIndex = canonicalIds
+                                            .filterNot { it.startsWith("draft_") }
+                                            .indexOf(id)
+                                        if (id != null && toIndex >= 0 && toIndex != fromIndex) {
+                                            visualIds = releasedOrder
+                                            onReorderWithinFolder(id, toIndex)
+                                        }
+                                        justReleasedSavedFilterId = id
+                                    }
+                                    dragId = null
+                                    dragStartIndex = -1
+                                    dragOffsetY = 0f
+                                    downId = null
+                                    dragging = false
+                                }
+                                else -> Unit
+                            }
+                        }
+                    }
+                },
+        ) {
+            filters.forEach { filter ->
+                key(filter.id) {
+                    val isDragging = dragId == filter.id
+                    val targetIndex = visualIds.indexOf(filter.id).takeIf { it >= 0 } ?: filters.indexOf(filter)
+                    val targetY = targetIndex * rowHeightPx
+                    val animatedY by animateFloatAsState(
+                        targetValue = targetY,
+                        animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
+                        label = "saved-filter-y-${filter.id}",
+                    )
+                    val y = sequenceRenderY(
+                        isDragging = isDragging,
+                        isJustReleased = justReleasedSavedFilterId == filter.id,
+                        pointerY = dragStartIndex * rowHeightPx + dragOffsetY,
+                        targetY = targetY,
+                        animatedY = animatedY,
+                    )
+                    Box(
+                        Modifier.fillMaxWidth().height(rowHeightDp)
+                            .offset { IntOffset(0, y.roundToInt()) }
+                            .zIndex(if (isDragging) 1f else 0f)
+                            .graphicsLayer {
+                                if (isDragging) {
+                                    scaleX = 1.02f
+                                    scaleY = 1.02f
+                                }
+                            }
+                            .shadow(if (isDragging) 5.dp else 0.dp),
+                    ) {
+                        SavedFilterLibraryRow(
+                            filter = filter,
+                            folders = folders,
+                            folderLabel = null,
+                            active = activeFilterItemId == filter.id,
+                            isProjection = false,
+                            dragging = isDragging,
+                            dragSuppressHover = dragId != null,
+                            onLoad = onLoad,
+                            onClearActive = onClearActive,
+                            onToggleFavorite = onToggleFavorite,
+                            onMoveToFolder = onMoveToFolder,
+                            onRename = onRename,
+                            onDelete = onDelete,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun SavedFilterLibraryRow(
+    filter: SavedFilter,
+    folders: List<SavedFilterFolder>,
+    folderLabel: String?,
+    active: Boolean,
+    isProjection: Boolean,
+    dragging: Boolean = false,
+    dragSuppressHover: Boolean = false,
+    onLoad: (SavedFilter) -> Unit,
+    onClearActive: () -> Unit,
+    onToggleFavorite: (String) -> Unit,
+    onMoveToFolder: (String, String?) -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    val tc = tc()
+    val isDraft = filter.id.startsWith("draft_")
+    HoverBox(
+        modifier = Modifier.fillMaxWidth().height(30.dp),
+        baseBg = when {
+            dragging -> tc.p
+            active -> tc.abg
+            else -> Color.Transparent
+        },
+        hoverEnabled = !dragSuppressHover,
+    ) {
+        Row(
+            Modifier.fillMaxSize()
+                .background(if (dragging) tc.ac.copy(.12f) else Color.Transparent)
+                .clickable { onLoad(filter) }.padding(start = 28.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (!isProjection && !isDraft) AppText("⠿", color = tc.td, fontSize = 12.sp)
+            RoundIndicator(
+                active = active,
+                color = tc.ac,
+                onClick = { if (active) onClearActive() else onLoad(filter) },
+            )
+            TooltipArea(
+                tooltip = {
+                    Box(
+                        Modifier.background(tc.p2, RoundedCornerShape(4.dp))
+                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        AppText(
+                            if (folderLabel == null) filter.name else "${filter.name} · $folderLabel",
+                            color = tc.tx,
+                            fontSize = 11.sp,
+                        )
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    AppText(
+                        filter.name,
+                        color = if (active) tc.tx else tc.ts,
+                        fontSize = 11.sp,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (folderLabel != null) {
+                        AppText("  $folderLabel", color = tc.td, fontSize = 9.sp, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            if (!isDraft) {
+                SavedFilterOptionsMenu(
+                    filter = filter,
+                    folders = folders,
+                    onToggleFavorite = onToggleFavorite,
+                    onMoveToFolder = onMoveToFolder,
+                    onRename = onRename,
+                    onDelete = onDelete,
+                )
+            } else {
+                SquareIconButton("✎", 11.sp, { onRename(filter.id) })
+                SquareIconButton("×", 13.sp, { onDelete(filter.id) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterOptionsMenu(
+    filter: SavedFilter,
+    folders: List<SavedFilterFolder>,
+    onToggleFavorite: (String) -> Unit,
+    onMoveToFolder: (String, String?) -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: (String) -> Unit,
+) {
+    val tc = tc()
+    var open by remember(filter.id) { mutableStateOf(false) }
+    Box {
+        SquareIconButton("⋮", 14.sp, { open = !open })
+        if (open) {
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, 20),
+                onDismissRequest = { open = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.widthIn(min = 140.dp, max = 220.dp)
+                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                ) {
+                    SavedFilterOption(
+                        label = if (filter.favorite) "Remove from Favorites" else "Add to Favorites",
+                        onClick = {
+                            open = false
+                            onToggleFavorite(filter.id)
+                        },
+                    )
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                    (listOf<SavedFilterFolder?>(null) + folders).forEach { folder ->
+                        val folderId = folder?.id
+                        val selected = filter.folderId == folderId
+                        SavedFilterOption(
+                            label = "Move to ${folder?.name ?: "Ungrouped"}",
+                            selected = selected,
+                            enabled = !selected,
+                            onClick = {
+                                open = false
+                                onMoveToFolder(filter.id, folderId)
+                            },
+                        )
+                    }
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                    SavedFilterOption("Rename", onClick = { open = false; onRename(filter.id) })
+                    SavedFilterOption("Delete", danger = true, onClick = { open = false; onDelete(filter.id) })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterOption(
+    label: String,
+    selected: Boolean = false,
+    enabled: Boolean = true,
+    danger: Boolean = false,
+    onClick: () -> Unit,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+        baseBg = if (selected) tc.abg else Color.Transparent,
+        onClick = onClick.takeIf { enabled },
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            AppText(if (selected) "✓" else "", color = tc.ac, fontSize = 10.sp, modifier = Modifier.width(10.dp))
+            AppText(label, color = if (danger) DANGER_RED else if (enabled) tc.tx else tc.td, fontSize = 10.sp, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterFolderOptionsMenu(
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    onMoveUp: (() -> Unit)?,
+    onMoveDown: (() -> Unit)?,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val tc = tc()
+    var open by remember { mutableStateOf(false) }
+    Box {
+        SquareIconButton("⋮", 14.sp, { open = !open }, size = 18.dp)
+        if (open) {
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, 18),
+                onDismissRequest = { open = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.widthIn(min = 140.dp, max = 200.dp)
+                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                ) {
+                    SavedFilterOption("Move up", enabled = canMoveUp, onClick = { open = false; onMoveUp?.invoke() })
+                    SavedFilterOption("Move down", enabled = canMoveDown, onClick = { open = false; onMoveDown?.invoke() })
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                    SavedFilterOption("Rename", onClick = { open = false; onRename() })
+                    SavedFilterOption("Delete", danger = true, onClick = { open = false; onDelete() })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SavedFilterFolderNameDialog(
+    title: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        val tc = tc()
+        Column(
+            Modifier.width(340.dp).background(tc.p, RoundedCornerShape(8.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(20.dp),
+        ) {
+            AppText(title, color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(12.dp))
+            InlineField(
+                value = value,
+                onValue = onValueChange,
+                placeholder = "Folder name…",
+                modifier = Modifier.fillMaxWidth(),
+                fontSize = 13.sp,
+                onSubmit = onConfirm,
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            ) {
+                DialogActionButton(if (title.startsWith("New")) "Create" else "Rename", active = value.isNotBlank()) {
+                    onConfirm()
+                }
+                DialogActionButton("Cancel", active = false) { onDismiss() }
+            }
+        }
+    }
+}
+
+// Bounded scrollable list that works inside a verticalScroll parent.
+// heightIn(max=X) breaks inside an unbounded parent; height(X) is reliable.
+@Composable
+private fun ScrollableItems(
+    itemCount: Int,
+    rowDp: Int = 28,
+    maxDp: Int = 150,
+    scrollToIndex: Int = -1,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    if (itemCount == 0) return
+    val h = (itemCount * rowDp).coerceAtMost(maxDp).dp
+    val scrollState = rememberScrollState()
+    val density = LocalDensity.current.density
+    LaunchedEffect(scrollToIndex) {
+        if (scrollToIndex >= 0) {
+            val rowPx = (rowDp * density).roundToInt()
+            val itemTop = scrollToIndex * rowPx
+            val itemBot = itemTop + rowPx
+            val viewTop = scrollState.value
+            val viewBot = viewTop + (maxDp * density).roundToInt()
+            when {
+                itemTop < viewTop -> scrollState.animateScrollTo(itemTop)
+                itemBot > viewBot -> scrollState.animateScrollTo(itemBot - (maxDp * density).roundToInt())
+            }
+        }
+    }
+    Box(modifier.fillMaxWidth().height(h)) {
+        Column(Modifier.fillMaxSize().verticalScroll(scrollState), content = content)
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scrollState),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+            style = appScrollbarStyle(tc()),
+        )
+    }
+}
+
+@Composable
+private fun BoundedScrollBox(
+    rowLimit: Int,
+    rowDp: Int = 28,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) = BoundedScrollBoxDp(rowLimit * rowDp, modifier, content)
+
+// Same box as BoundedScrollBox, parameterized directly by the cap in dp rather than a row
+// count/row-height pair — for sections like Issues where rows aren't uniform height (a collapsed
+// group vs. an expanded one) and the caller has already reduced that down to a single dp figure
+// (see issuesBoxHeightDp).
+@Composable
+private fun BoundedScrollBoxDp(
+    maxHeightDp: Int,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    // heightIn(max) rather than height(): maxHeightDp is only ever a guessed/derived content
+    // height, and a fixed height clips real content that's taller than the guess (e.g. a wrapping
+    // message line). heightIn(max) makes it a cap for many rows while letting fewer/shorter rows
+    // size to their own content instead of being stretched-then-clipped to it.
+    val h = maxHeightDp.dp
+    val scrollState = rememberScrollState()
+    Box(modifier.fillMaxWidth().heightIn(max = h)) {
+        // fillMaxWidth, not fillMaxSize: fillMaxSize would claim the full `h` cap regardless of
+        // actual content height, forcing the Box back to a fixed size and defeating heightIn above.
+        Column(Modifier.fillMaxWidth().verticalScroll(scrollState), content = content)
+        // The scrollbar sits inside a matchParentSize() Box (same pattern as UpdateDialog) so its
+        // fillMaxHeight() doesn't participate in sizing the outer Box — a plain fillMaxHeight child
+        // measures at the full `h` cap and would pin the Box to it, defeating heightIn above.
+        Box(Modifier.matchParentSize()) {
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(scrollState),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+                style = appScrollbarStyle(tc()),
+            )
+        }
+    }
+}
+
+// CrashSiteRow's real height, used as the per-collapsed-row unit for the Issues section's bounding
+// box (44dp was a stale single-line guess and clipped the two-line message). Derived from the
+// composable's own paddings: border 1dp top+bottom (2dp) + Column vertical padding 6dp top+bottom
+// (12dp) + the header Row (9sp pill with 1dp top+bottom padding, ~15dp tall) + 3dp spacer above the
+// message + the 11sp message at maxLines=2 (~16dp/line, ~32dp for two lines) = 2 + 12 + 15 + 3 + 32
+// = 64dp.
+private const val CRASH_ROW_DP = 64
+
+// IssueOccurrenceRow's real height, added once per extra occurrence when a group is expanded (see
+// issuesBoxHeightDp). Distinct from CRASH_ROW_DP: it's a single-line row (maxLines=1) with tighter
+// padding, not a bordered Column with a header + two-line message. border 1dp top+bottom (2dp) +
+// Row padding 4dp top+bottom (8dp) + the 11sp message at maxLines=1 (~16dp/line) = 2 + 8 + 16 = 26dp.
+private const val CRASH_OCCURRENCE_ROW_DP = 26
+
+// Pure function so the arithmetic can be pinned by a test without a Compose layout harness (the
+// Issues section itself has none). Sums the ACTUAL rendered content height rather than assuming
+// every group is collapsed: a collapsed (or single-occurrence) group contributes one CRASH_ROW_DP
+// row, and an expanded multi-occurrence group additionally contributes one CRASH_OCCURRENCE_ROW_DP
+// per occurrence beyond the first (the representative is rendered inside the header row itself, not
+// as a separate sub-row — see IssueSiteRow's drop(1)). The total is still capped in terms of
+// CRASH_ROW_DP-sized rows via rowCap (filterListRows, the user's row-count setting) so the section
+// can't grow unbounded and swallow the panel even with everything expanded.
+internal fun issuesBoxHeightDp(groups: List<IssueSiteGroup>, expandedIds: Set<String>, rowCap: Int): Int {
+    val contentDp = groups.sumOf { group ->
+        val extraOccurrences = group.occurrences.size - 1
+        if (extraOccurrences > 0 && group.representative.id in expandedIds) {
+            CRASH_ROW_DP + extraOccurrences * CRASH_OCCURRENCE_ROW_DP
+        } else {
+            CRASH_ROW_DP
+        }
+    }
+    val capDp = rowCap.coerceAtLeast(1) * CRASH_ROW_DP
+    return minOf(contentDp, capDp)
+}
+
+// Debounce before a filter change re-triggers the log-composition scan. Matches App.kt's 400ms
+// content-autosave debounce rather than the 150ms in-view-search one: a scan over the visible set
+// is the expensive end of the debounce inventory (SAAD 12.5), not a keystroke-latency path.
+private const val LOG_COMPOSITION_REFRESH_DEBOUNCE_MS = 400L
+
+// Rows per page in the Log composition list (Stage 2c paging). Each row is a rich card — masked
+// template + sample line + action row, ~103dp (LOG_COMPOSITION_ROW_DP below) — unlike the compact
+// single-line-ish rows filterListRows (model/Model.kt) sizes for: tag/highlighter/sequence pills at
+// 26-30dp. Coupling page size to that setting would make "how many pages" swing with a knob tuned
+// for a different kind of row, so paging keeps its own fixed size. 10 matches the pre-paging "top
+// 10" default (Stage 2a), so a session that never leaves page 1 looks exactly as before.
+// filterListRows continues to do what it already did: bound how many of the CURRENT page's rows
+// are visible before the BoundedScrollBox below starts scrolling, same as every other section here.
+private const val LOG_COMPOSITION_PAGE_SIZE = 10
+
+// How many page numbers the pager shows on each side of the current page — see
+// logCompositionPageWindow's own doc for why this keeps the control a fixed width even at 863
+// pages (the real-log case that motivated paging in the first place).
+private const val LOG_COMPOSITION_PAGE_WINDOW_RADIUS = 2
+
+// LogCompositionRow's real height, same derivation style as CRASH_ROW_DP above: border 1dp
+// top+bottom (2dp) + Column vertical padding 6dp top+bottom (12dp) + the header Row (10sp count +
+// 9sp tag, ~14dp tall) + 3dp spacer + the 11sp template at maxLines=2 (~16dp/line, 32dp) + 2dp
+// spacer + the 11sp sample line at maxLines=1 (~16dp) + 4dp spacer + the 18dp action-button row
+// = 2 + 12 + 14 + 3 + 32 + 2 + 16 + 4 + 18 = 103dp.
+private const val LOG_COMPOSITION_ROW_DP = 103
+
+// ── Log composition paging/search (Stage 2c) ────────────────────────────────────────────────
+// Pure and Compose-free so the paging arithmetic and search matching are unit-testable without a
+// UI harness (this project has none — see CLAUDE.md's Tests section).
+
+/** How many pages [itemCount] items make at [pageSize] per page. 0 for an empty list — there is
+ *  no "page 1 of 0 items", just nothing to page through. */
+internal fun logCompositionPageCount(itemCount: Int, pageSize: Int = LOG_COMPOSITION_PAGE_SIZE): Int =
+    if (itemCount <= 0) 0 else (itemCount - 1) / pageSize + 1
+
+/** Clamps a possibly-stale 0-based page index into `[0, pageCount)` — the defensive counterpart to
+ *  the explicit page=0 resets above: even if some future caller forgets to reset, an index into a
+ *  list that shrank underneath it still renders the nearest real page instead of an empty one. */
+internal fun logCompositionClampPage(page: Int, pageCount: Int): Int =
+    if (pageCount <= 0) 0 else page.coerceIn(0, pageCount - 1)
+
+internal fun <T> logCompositionPageItems(items: List<T>, page: Int, pageSize: Int = LOG_COMPOSITION_PAGE_SIZE): List<T> {
+    if (items.isEmpty()) return emptyList()
+    val start = logCompositionClampPage(page, logCompositionPageCount(items.size, pageSize)) * pageSize
+    return items.subList(start, minOf(start + pageSize, items.size))
+}
+
+// Plain case-insensitive `contains`, deliberately NOT utils/TextMatch.kt's regex machinery: that
+// exists for user-authored patterns run with a deadline + LRU cache over millions of raw log rows,
+// while this filters an in-memory list of at most a few thousand already-computed histogram rows —
+// a regex engine (and its cache/deadline bookkeeping) is the wrong tool for a plain substring scan
+// at this size.
+internal fun logCompositionSearchMatches(templates: List<MessageTemplate>, query: String): List<MessageTemplate> {
+    val needle = query.trim()
+    if (needle.isEmpty()) return templates
+    return templates.filter { it.tag.contains(needle, ignoreCase = true) || it.template.contains(needle, ignoreCase = true) }
+}
+
+// One control in the page switcher: a clickable page (0-based [index]) or an ellipsis standing in
+// for a run of skipped pages. A distinct type rather than a bare Int? so page 0 — a real, legitimate
+// first page — can never be mistaken for "no page here".
+internal sealed interface LogCompositionPageToken {
+    data class Page(val index: Int) : LogCompositionPageToken
+
+    data object Ellipsis : LogCompositionPageToken
+}
+
+// Always first page + last page + a window of [radius] pages on each side of [currentPage],
+// connected by an ellipsis wherever there's a gap — never one control per page. Bounded width
+// regardless of [pageCount]: at most 2*radius+1 window pages plus first, last, and up to two
+// ellipses (9 tokens at the default radius=2), the same whether pageCount is 9 or 863.
+internal fun logCompositionPageWindow(
+    currentPage: Int,
+    pageCount: Int,
+    radius: Int = LOG_COMPOSITION_PAGE_WINDOW_RADIUS,
+): List<LogCompositionPageToken> {
+    if (pageCount <= 0) return emptyList()
+    val current = currentPage.coerceIn(0, pageCount - 1)
+    val pages = sortedSetOf(0, pageCount - 1)
+    for (p in (current - radius)..(current + radius)) if (p in 0 until pageCount) pages.add(p)
+    val tokens = mutableListOf<LogCompositionPageToken>()
+    var prev = -1
+    for (p in pages) {
+        if (prev >= 0 && p - prev > 1) tokens.add(LogCompositionPageToken.Ellipsis)
+        tokens.add(LogCompositionPageToken.Page(p))
+        prev = p
+    }
+    return tokens
+}
+
+private val NATIVE_CRASH_COLOR = Color(0xFF8957e5)
+
+private fun IssueSite.accentColor(): Color = when (this) {
+    is CustomIssueSite -> LogLevel.I.defaultColor
+    is CrashSite -> when {
+        kind == CrashKind.NATIVE_CRASH -> NATIVE_CRASH_COLOR
+        kind == CrashKind.ANR -> LogLevel.W.defaultColor
+        isFatal -> DANGER_RED
+        else -> LogLevel.D.defaultColor
+    }
+}
+
+private fun IssueSite.kindLabel(): String = when (this) {
+    is CustomIssueSite -> categoryName
+    is CrashSite -> when {
+        kind == CrashKind.NATIVE_CRASH -> "Native crash"
+        kind == CrashKind.ANR -> "ANR"
+        isFatal -> "Fatal exception"
+        else -> "Exception"
+    }
+}
+
+private fun CrashCategory.label(): String = when (this) {
+    CrashCategory.ALL -> "All"
+    CrashCategory.CRASHES -> "Crashes"
+    CrashCategory.ANRS -> "ANRs"
+    CrashCategory.FATAL_EXCEPTIONS -> "Fatal Exceptions"
+    CrashCategory.EXCEPTIONS -> "Exceptions"
+    CrashCategory.OTHERS -> "Others"
+}
+
+// Hand-rolled dropdown (matching this file's/App.kt's convention of custom-styled Popups rather
+// than Material's default DropdownMenu chrome) — a clickable field showing the current category
+// that opens a themed option list on click. The popup's width is measured from the field itself
+// (rather than a fixed guess) so it never leaves a gap at the edge showing the crash list behind it.
+private data class IssueCategoryOption(
+    val selection: IssueCategorySelection,
+    val label: String,
+    val count: Int,
+)
+
+private fun issueCategoryOptions(
+    crashSites: List<CrashSite>,
+    customSites: List<CustomIssueSite>,
+    rules: List<CustomIssueRule>,
+): List<IssueCategoryOption> = buildList {
+    CrashCategory.entries.forEach { category ->
+        val selection = IssueCategorySelection.BuiltIn(category)
+        add(IssueCategoryOption(selection, category.label(), issueSitesForCategory(crashSites, customSites, selection).size))
+    }
+    rules.filter { it.enabled }.forEach { rule ->
+        val selection = IssueCategorySelection.Custom(rule.id)
+        add(IssueCategoryOption(selection, rule.name, issueSitesForCategory(crashSites, customSites, selection).size))
+    }
+}
+
+@Composable
+private fun IssueCategoryDropdown(
+    category: IssueCategorySelection,
+    options: List<IssueCategoryOption>,
+    onSelect: (IssueCategorySelection) -> Unit,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var open by remember { mutableStateOf(false) }
+    var fieldWidth by remember { mutableStateOf(0.dp) }
+    // The Popup's own dismissOnClickOutside also fires for a click back on the field itself (it's
+    // "outside" the popup's bounds) — without this guard, that dismiss (closing it) and the
+    // field's own onClick (toggling it) can both fire for the same press, netting out to "stayed
+    // open" instead of the intended close. Suppressing the toggle for a moment after a dismiss
+    // makes a click on the field while open reliably close it instead of racing back open.
+    var suppressToggleUntilMs by remember { mutableStateOf(0L) }
+    Box(
+        Modifier.fillMaxWidth().onGloballyPositioned { coords ->
+            fieldWidth = with(density) { coords.size.width.toDp() }
+        },
+    ) {
+        HoverBox(
+            modifier = Modifier.fillMaxWidth().height(26.dp)
+                .clip(CORNER_SM)
+                .background(tc.p2, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM),
+            onClick = {
+                if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open
+            },
+        ) {
+            Row(
+                Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                AppText(options.firstOrNull { it.selection == category }?.label ?: "All", color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
+            }
+        }
+        if (open) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
+                onDismissRequest = {
+                    open = false
+                    suppressToggleUntilMs = System.currentTimeMillis() + 200
+                },
+                properties = PopupProperties(focusable = false),
+            ) {
+                Column(
+                    Modifier.width(fieldWidth)
+                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    options.forEach { option ->
+                        val active = option.selection == category
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                            baseBg = if (active) tc.abg else Color.Transparent,
+                            onClick = { open = false; onSelect(option.selection) },
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                AppText(
+                                    option.label,
+                                    color = if (active) tc.ac else tc.tx,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                )
+                                AppText("${option.count}", color = if (active) tc.ac else tc.td, fontSize = 10.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Collapsed height must stay exactly what CRASH_ROW_DP's doc comment derives (border 1dp*2 + Column
+// padding 6dp*2 + header Row ~15dp + 3dp spacer + 2-line message ~32dp = 64dp) — the count badge
+// and expand chevron below are added INSIDE the existing header Row, matching the kind-label pill's
+// own 9sp/1dp-padding sizing exactly, so they never grow past that Row's already-governing height.
+// Expanding a group adds IssueOccurrenceRows below at CRASH_OCCURRENCE_ROW_DP each — that content
+// does size itself fine under BoundedScrollBoxDp's heightIn(max=...), but the max itself used to be
+// derived from crashGroups.size at collapsed height and never grew to admit the extra rows, so they
+// just scrolled inside a box sized for collapsed content. The parent now recomputes the cap from
+// which groups are actually expanded (issuesBoxHeightDp) — `expanded` is hoisted out of this
+// composable so that recompute can see it.
+@Composable
+private fun IssueSiteRow(
+    group: IssueSiteGroup,
+    tc: ThemeColors,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
+    onNavigate: (IssueSite) -> Unit,
+) {
+    val site = group.representative
+    val accent = site.accentColor()
+    val count = group.occurrences.size
+    Column(Modifier.fillMaxWidth()) {
+        HoverBox(modifier = Modifier.fillMaxWidth(), onClick = { onNavigate(site) }) {
+            Column(
+                Modifier.fillMaxWidth()
+                    .border(BorderStroke(1.dp, tc.br.copy(.4f)))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Box(
+                        Modifier.background(accent.copy(.15f), CORNER_SM).border(1.dp, accent.copy(.4f), CORNER_SM)
+                            .padding(horizontal = 6.dp, vertical = 1.dp),
+                    ) { AppText(site.kindLabel(), color = accent, fontSize = 9.sp, fontWeight = FontWeight.SemiBold) }
+                    if (count > 1) {
+                        Box(
+                            Modifier.clip(CORNER_SM).clickable(onClick = onToggleExpand)
+                                .background(tc.br.copy(.5f), CORNER_SM)
+                                .padding(horizontal = 6.dp, vertical = 1.dp),
+                        ) {
+                            AppText(
+                                "×$count ${if (expanded) "▾" else "▸"}",
+                                color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+                    AppText(site.entry.ts, color = tc.td, fontSize = 9.sp, fontFamily = MONO)
+                    AppText(site.entry.tag, color = tc.td, fontSize = 9.sp, fontFamily = MONO,
+                        modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
+                }
+                AppText(
+                    site.entry.msg, color = tc.tx, fontSize = 11.sp, fontFamily = MONO,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+            }
+        }
+        if (expanded && count > 1) {
+            // drop(1): the representative (occurrences[0]) is already the header row above —
+            // listing it again here would show the same occurrence twice.
+            group.occurrences.drop(1).forEach { occurrence ->
+                IssueOccurrenceRow(occurrence, tc, onClick = { onNavigate(occurrence) })
+            }
+        }
+    }
+}
+
+// Compact row for one occurrence inside an expanded crash group — timestamp + message only (the
+// group header already carries the kind badge and tag), indented to read as a child of it.
+@Composable
+private fun IssueOccurrenceRow(
+    occurrence: IssueSite,
+    tc: ThemeColors,
+    onClick: () -> Unit,
+) {
+    HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onClick) {
+        Row(
+            Modifier.fillMaxWidth()
+                .border(BorderStroke(1.dp, tc.br.copy(.25f)))
+                .padding(start = 20.dp, end = 10.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            AppText(occurrence.entry.ts, color = tc.td, fontSize = 9.sp, fontFamily = MONO)
+            AppText(
+                occurrence.entry.msg, color = tc.tx, fontSize = 11.sp, fontFamily = MONO,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+// One of the four not-computed/computing/computed-and-empty/failed states for the Log
+// composition section — same centered glyph+text shape the Issues section uses for its own empty
+// state, inlined there rather than shared (see that section above).
+@Composable
+private fun LogCompositionHint(glyph: String, text: String, tc: ThemeColors, glyphColor: Color = tc.td.copy(.33f)) {
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        AppText(glyph, color = glyphColor, fontSize = 18.sp)
+        AppText(text, color = tc.td, fontSize = 10.sp, maxLines = 2)
+    }
+}
+
+// One histogram row: count + tag (the ranking), the masked template, and the real sample line
+// (tab.rmap[firstEntryId].msg — never a reconstruction, per the Stage 2a plan: it's how a user
+// notices the grouping is too coarse) followed by the row actions. [showRuleActions] hides
+// Hide/Show only in Regex filter mode, where message rules are ignored (utils/Filter.kt) and
+// would otherwise sit there as dead buttons — Highlight/First stay available since neither depends
+// on message rules.
+//
+// Hide/Show only/Highlight (Stage 2c) reflect applied state via PillBtn's established active
+// treatment — same widget SequenceEditor's ".*" toggle uses, label held constant while only the
+// border/fill communicates state, per this panel's own convention (see the tag row's +/- boxes for
+// the same "label stays, only state changes" idea). [hideApplied]/[showOnlyApplied]/
+// [highlightApplied] are computed by the caller via utils/MessageTemplates.matchingMessageRule /
+// matchingHighlighter — see FilterPanel's call site and AppState.toggleMessageRuleForTemplate for
+// why that's the one place "applied" is decided.
+@Composable
+private fun LogCompositionRow(
+    entry: MessageTemplate,
+    sampleMessage: String,
+    regexBacked: Boolean,
+    showRuleActions: Boolean,
+    hideApplied: Boolean,
+    showOnlyApplied: Boolean,
+    highlightApplied: Boolean,
+    tc: ThemeColors,
+    onHide: () -> Unit,
+    onShowOnly: () -> Unit,
+    onHighlight: () -> Unit,
+    onGoToFirst: () -> Unit,
+) {
+    Column(
+        Modifier.fillMaxWidth()
+            .border(BorderStroke(1.dp, tc.br.copy(.4f)))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppText("${entry.count}×", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+            AppText(
+                entry.tag, color = tc.td, fontSize = 9.sp, fontFamily = MONO,
+                modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis,
+            )
+            // Mark regex-backed rows visibly — a hide/show/highlight built here silently became a
+            // regex rule (see utils/MessageTemplates.kt's messageRuleSpecForTemplate) and the user
+            // should never be surprised by that in the Message rules / Highlighters pill lists.
+            if (regexBacked) {
+                Box(
+                    Modifier.background(tc.ac.copy(.15f), CORNER_SM).border(1.dp, tc.ac.copy(.4f), CORNER_SM)
+                        .padding(horizontal = 5.dp, vertical = 1.dp),
+                ) { AppText("regex", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold) }
+            }
+        }
+        AppText(
+            entry.template, color = tc.tx, fontSize = 11.sp, fontFamily = MONO,
+            maxLines = 2, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 3.dp),
+        )
+        AppText(
+            sampleMessage, color = tc.ts, fontSize = 11.sp, fontFamily = MONO,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (showRuleActions) {
+                PillBtn("Hide", active = hideApplied, onClick = onHide)
+                PillBtn("Show only", active = showOnlyApplied, onClick = onShowOnly)
+            }
+            PillBtn("Highlight", active = highlightApplied, onClick = onHighlight)
+            LabelIconButton("First", 9.sp, onGoToFirst)
+        }
+    }
+}
+
+// Shared by the Computed branch and by Computing-with-a-previous-result, so a rescan keeps the
+// list the user was reading on screen instead of blanking it. [refreshing] says a newer scan is in
+// flight over these rows.
+@Composable
+private fun LogCompositionResults(
+    histogram: MessageTemplateHistogram,
+    tab: LogTab,
+    fpState: FilterPanelUiState,
+    tc: ThemeColors,
+    filter: Filter,
+    filterListRows: Int,
+    actions: LogCompositionActions,
+    refreshing: Boolean,
+) {
+    val templates = histogram.templates
+    // Switching tabs is a different question entirely, so the page resets. A new
+    // scan result is not: a live-tailing tab re-folds its histogram every couple of
+    // seconds, and resetting there would yank the user back to page 1 while they
+    // were reading page 40. Clamp instead, which only moves them when the list
+    // actually shrank past where they were standing. Searching resets too, inline
+    // where the search text is set below.
+    if (templates.isEmpty()) {
+        LogCompositionHint("◆", "No repeated messages found", tc)
+    } else {
+        if (histogram.overflowed) {
+            AppText(
+                "Scan capped at $MAX_DISTINCT_TEMPLATES distinct messages — some rare ones may be missing",
+                color = tc.td,
+                fontSize = 9.sp,
+                fontFamily = UI,
+                maxLines = 2,
+                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 4.dp),
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            InlineField(
+                value = fpState.logCompositionSearch,
+                onValue = { v ->
+                    fpState.logCompositionSearch = v
+                    fpState.logCompositionPage = 0
+                },
+                placeholder = "search tag or message…",
+                modifier = Modifier.weight(1f),
+                fontSize = 11.sp,
+                onClear = {
+                    fpState.logCompositionSearch = ""
+                    fpState.logCompositionPage = 0
+                },
+            )
+        }
+        val matched = logCompositionSearchMatches(templates, fpState.logCompositionSearch)
+        if (matched.isEmpty()) {
+            LogCompositionHint("◆", "No messages match “${fpState.logCompositionSearch.trim()}”", tc)
+        } else {
+            val pageCount = logCompositionPageCount(matched.size)
+            val page = logCompositionClampPage(fpState.logCompositionPage, pageCount)
+            val shown = logCompositionPageItems(matched, page)
+            BoundedScrollBox(minOf(shown.size, filterListRows), rowDp = LOG_COMPOSITION_ROW_DP) {
+                shown.forEach { t ->
+                    val sample = tab.rmap[t.firstEntryId]?.msg ?: t.template
+                    val spec = messageRuleSpecForTemplate(t)
+                    LogCompositionRow(
+                        entry = t,
+                        sampleMessage = sample,
+                        regexBacked = spec.regex,
+                        showRuleActions = filter.mode == FilterMode.TAGS,
+                        hideApplied = matchingMessageRule(filter.messageRules, t, include = false, filter.mode) != null,
+                        showOnlyApplied = matchingMessageRule(filter.messageRules, t, include = true, filter.mode) != null,
+                        highlightApplied = matchingHighlighter(filter.highlighters, t) != null,
+                        tc = tc,
+                        onHide = { actions.onHide(t) },
+                        onShowOnly = { actions.onShowOnly(t) },
+                        onHighlight = { actions.onHighlight(t) },
+                        onGoToFirst = { actions.onGoToFirst(t) },
+                    )
+                }
+            }
+            LogCompositionPager(
+                page = page,
+                pageCount = pageCount,
+                totalShapes = templates.size,
+                matchedShapes = matched.size,
+                searching = fpState.logCompositionSearch.isNotBlank(),
+                refreshing = refreshing,
+                tc = tc,
+                onGoToPage = { fpState.logCompositionPage = it },
+            )
+        }
+    }
+}
+
+// Position/scale readout ("page X of Y", total shapes, how many the search matched — see this
+// feature's task doc) plus the fixed-width page switcher itself. Built from established atoms only:
+// SquareIconButton for prev/next (dimmed rather than removed when at an edge, so the control's
+// width never jumps) and PillBtn for each page number, active = is-the-current-page — the same
+// active/inactive language PillBtn already carries everywhere else in this panel.
+@Composable
+private fun LogCompositionPager(
+    page: Int,
+    pageCount: Int,
+    totalShapes: Int,
+    matchedShapes: Int,
+    searching: Boolean,
+    // A rescan is in flight over these rows. Shown by swapping the text of a line that is always
+    // present rather than adding one: inserting a status line and removing it again shifts
+    // everything below it twice per action, which is the flicker this is meant to avoid.
+    refreshing: Boolean,
+    tc: ThemeColors,
+    onGoToPage: (Int) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 2.dp)) {
+        AppText(
+            when {
+                refreshing -> "Page ${page + 1} of $pageCount · updating…"
+                searching -> "Page ${page + 1} of $pageCount · $matchedShapes of $totalShapes shapes matched"
+                else -> "Page ${page + 1} of $pageCount · $totalShapes shapes"
+            },
+            color = tc.td,
+            fontSize = 10.sp,
+            fontFamily = UI,
+            modifier = Modifier.padding(bottom = 4.dp),
+        )
+        if (pageCount > 1) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                LogCompositionPagerArrow("‹", enabled = page > 0, tc = tc) { onGoToPage(page - 1) }
+                logCompositionPageWindow(page, pageCount).forEach { token ->
+                    when (token) {
+                        is LogCompositionPageToken.Ellipsis ->
+                            AppText("…", color = tc.td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 2.dp))
+                        is LogCompositionPageToken.Page ->
+                            PillBtn((token.index + 1).toString(), active = token.index == page) { onGoToPage(token.index) }
+                    }
+                }
+                LogCompositionPagerArrow("›", enabled = page < pageCount - 1, tc = tc) { onGoToPage(page + 1) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LogCompositionPagerArrow(glyph: String, enabled: Boolean, tc: ThemeColors, onClick: () -> Unit) {
+    if (enabled) {
+        SquareIconButton(glyph, fontSize = 11.sp, onClick = onClick, size = 18.dp)
+    } else {
+        Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+            AppText(glyph, color = tc.td.copy(.3f), fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+private fun FullTextHint(
+    text: String,
+    modifier: Modifier = Modifier,
+    forceShow: Boolean = false,
+    content: @Composable BoxScope.((TextLayoutResult) -> Unit) -> Unit,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var hovered by remember { mutableStateOf(false) }
+    var isOverflowing by remember(text) { mutableStateOf(false) }
+    var anchorHeightPx by remember { mutableStateOf(0) }
+    Box(
+        modifier
+            .onSizeChanged { anchorHeightPx = it.height }
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
+    ) {
+        content { result -> isOverflowing = result.hasVisualOverflow }
+        if ((hovered || forceShow) && isOverflowing) {
+            // Popup(alignment, offset) aligns matching corners of anchor and popup — TopStart
+            // means "popup's top-left = anchor's top-left", NOT "popup below anchor". Placing it
+            // below requires shifting by the anchor's own *measured* height (device px, matching
+            // offset's unit) plus a gap; a guessed constant (the previous approach, and an even
+            // more wrong alignment=BottomStart before that) either overlaps the anchor on some
+            // densities/text sizes or — with BottomStart — aligns the popup's own bottom-left to
+            // the anchor's bottom-left, making the popup extend upward and fully cover the anchor.
+            // Either overlap makes the popup the topmost hit-test target at the cursor, which
+            // fires Exit on the anchor, hides the popup, then Enter fires again — rapid flicker.
+            val gapPx = with(density) { 4.dp.roundToPx() }
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, anchorHeightPx + gapPx),
+                properties = PopupProperties(focusable = false),
+            ) {
+                Box(
+                    Modifier.widthIn(max = 520.dp)
+                        .background(tc.p, RoundedCornerShape(5.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(5.dp))
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                ) {
+                    AppText(text, color = tc.tx, fontSize = 11.sp, fontFamily = MONO, maxLines = 3, overflow = TextOverflow.Clip)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SequenceEditor(
+    def: SequenceDef,
+    onUpdateSeq: (String, String, Boolean, String?, String?, Boolean, String?) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var startText by remember(def.id) { mutableStateOf(def.matchText) }
+    var startRegex by remember(def.id) { mutableStateOf(def.isRegex) }
+    var startTag by remember(def.id) { mutableStateOf(def.tag ?: "") }
+    var endText by remember(def.id) { mutableStateOf(def.endMatchText ?: "") }
+    var endRegex by remember(def.id) { mutableStateOf(def.endIsRegex) }
+    var endTag by remember(def.id) { mutableStateOf(def.endTag ?: "") }
+
+    Column(
+        Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            InlineField(startText, { startText = it }, "start message…", Modifier.weight(1f))
+            PillBtn(".*", active = startRegex) { startRegex = !startRegex }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            InlineField(endText, { endText = it }, "end message…", Modifier.weight(1f))
+            PillBtn(".*", active = endRegex) { endRegex = !endRegex }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            InlineField(startTag, { startTag = it }, "start tag…", Modifier.weight(1f))
+            InlineField(endTag, { endTag = it }, "end tag…", Modifier.weight(1f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Spacer(Modifier.weight(1f))
+            PillBtn("Save", active = startText.isNotBlank()) {
+                onUpdateSeq(def.id, startText, startRegex, startTag, endText, endRegex, endTag)
+                onCancel()
+            }
+            PillBtn("Cancel", active = false, onClick = onCancel)
+        }
+    }
+}
+
+private fun sequenceLabel(def: SequenceDef): String {
+    val start = scopedSequencePart(def.tag, def.matchText, def.isRegex)
+    val endText = def.endMatchText?.takeIf { it.isNotBlank() } ?: return start
+    return "$start -> ${scopedSequencePart(def.endTag, endText, def.endIsRegex)}"
+}
+
+private fun scopedSequencePart(tag: String?, text: String, isRegex: Boolean): String {
+    val pattern = if (isRegex) "/$text/" else text
+    return (tag?.let { "$it: " } ?: "") + pattern
+}
+
+internal fun messageRuleAllScope(): MessageRuleScopeOption = MessageRuleScopeOption("All")
+
+internal fun messageRuleScopeLabel(tag: String?, packagePrefix: String?): String = when {
+    !tag.isNullOrBlank() -> tag
+    !packagePrefix.isNullOrBlank() -> "$packagePrefix.*"
+    else -> "All"
+}
+
+internal fun messageRuleScopeOptions(
+    sortedTags: List<String>,
+    search: String,
+    limit: Int = 8,
+): List<MessageRuleScopeOption> {
+    val needle = search.trim()
+    val prefixes = if (needle.isBlank()) emptyList() else packagePrefixCandidates(sortedTags, needle, limit = 4)
+    val tags = sortedTags.asSequence()
+        .filter { tag -> needle.isBlank() || tag.contains(needle, ignoreCase = true) }
+        .filter { tag -> tag !in prefixes }
+        .take(limit.coerceAtLeast(0))
+        .map { tag -> MessageRuleScopeOption(label = tag, tag = tag) }
+        .toList()
+    return listOf(messageRuleAllScope()) +
+        prefixes.map { prefix -> MessageRuleScopeOption(label = "$prefix.*", packagePrefix = prefix) } +
+        tags
+}
+
+private fun ruleTargetPatternLabel(pattern: String, regex: Boolean, target: RuleTarget): String = when (target) {
+    RuleTarget.PID_TID -> "pid:$pattern"
+    RuleTarget.MESSAGE -> if (regex) "/$pattern/" else pattern
+}
+
+internal fun messageRulePillLabel(rule: MessageRule): String {
+    val pattern = ruleTargetPatternLabel(rule.pattern, rule.regex, rule.target)
+    val scope = messageRuleScopeLabel(rule.tag, rule.packagePrefix)
+    // "→" rather than ".*" as the scope/pattern separator — a package-prefix scope label already
+    // ends in ".*" (e.g. "com.app.*"), so using ".*" again here made scoped-prefix pills read as
+    // "com.app.* .* pattern", two unrelated ".*" tokens back to back with no visual distinction.
+    return if (scope == "All") pattern else "$scope → $pattern"
+}
+
+internal fun pendingMessageRulePatternLabel(pending: PendingMessageRuleDraft): String =
+    ruleTargetPatternLabel(pending.pattern, pending.regex, pending.target)
+
+internal fun messageRuleScopePrompt(include: Boolean): String =
+    if (include) "Add + rule to" else "Add - rule to"
+
+internal fun inputValueAfterEscape(value: String, escapePressed: Boolean): String =
+    if (escapePressed) "" else value
+
+data class MessageRuleInputSpec(
+    val pattern: String,
+    val regex: Boolean,
+    val target: RuleTarget,
+)
+
+fun messageRuleInputSpec(input: String, regexMode: Boolean): MessageRuleInputSpec {
+    val trimmed = input.trim()
+    if (trimmed.isNotEmpty() && trimmed.all { it.isDigit() }) {
+        return MessageRuleInputSpec(trimmed, regex = false, target = RuleTarget.PID_TID)
+    }
+    slashWrappedRegex(trimmed)?.let { pattern ->
+        return MessageRuleInputSpec(pattern, regex = true, target = RuleTarget.MESSAGE)
+    }
+    return MessageRuleInputSpec(trimmed, regex = regexMode, target = RuleTarget.MESSAGE)
+}
+
+internal fun messageRuleInputConsumesKey(key: Key, hasActionCandidate: Boolean = false): Boolean =
+    key == Key.Tab ||
+        key == Key.DirectionDown ||
+        key == Key.DirectionUp ||
+        (hasActionCandidate && (key == Key.DirectionLeft || key == Key.DirectionRight)) ||
+        key == Key.Escape ||
+        key == Key.Enter ||
+        key == Key.NumPadEnter
+
+private fun slashWrappedRegex(input: String): String? {
+    if (!input.startsWith("/") || input.length < 2) return null
+    val end = input.lastIndexOf('/')
+    if (end <= 0) return null
+    val suffix = input.substring(end + 1)
+    if (suffix.isNotEmpty() && suffix != "i") return null
+    return input.substring(1, end).takeIf { it.isNotBlank() }
+}
+
+@Composable
+internal fun TagPill(tag: String, color: Color, onRemove: () -> Unit) {
+    BoxWithConstraints {
+        // Cap the text to the pill's actual available width (from the enclosing FlowRow), not a
+        // guessed constant — the filter panel can be resized down to 140dp (FILTER_PANEL_MIN_WIDTH),
+        // narrower than a fixed 260dp cap, which let the trailing × render past the panel's own
+        // edge and get clipped instead of the text truncating to make room for it.
+        val textCap = (maxWidth - 32.dp).coerceAtLeast(40.dp)
+        Box(
+            Modifier.background(color.copy(.13f), CORNER_SM)
+                .border(1.dp, color.copy(.27f), CORNER_SM)
+                .clip(CORNER_SM)
+                .clickable(onClick = onRemove)
+                .padding(start = 7.dp, end = 4.dp, top = 1.dp, bottom = 1.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                FullTextHint(tag) { onTextLayout ->
+                    AppText(
+                        tag, color = color, fontSize = 11.sp, fontFamily = MONO,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = textCap),
+                        onTextLayout = onTextLayout,
+                    )
+                }
+                AppText("×", color = color.copy(.7f), fontSize = 14.sp)
+            }
+        }
+    }
+}

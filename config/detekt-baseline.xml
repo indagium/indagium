@@ -39,8 +39,8 @@
     <ID>MagicNumber:VideoPanel.kt$360</ID>
     <ID>MagicNumber:VideoPanel.kt$90</ID>
     <ID>ReturnCount:AiSidebarRuntime.kt$AiSidebarRuntime$@Suppress("TooGenericExceptionCaught") fun start( tabId: String, profile: AiProviderProfile, apiKey: String, prompt: String, context: AiInvestigationContext = AiInvestigationContext(tabId), ): AiStartResult</ID>
-    <ID>ReturnCount:OpenLogToolOperations.kt$OpenLogToolOperations$private fun addImageNoteRoute( tabId: String, imageBase64: String?, imagePath: String?, videoMs: Long?, caption: String, afterId: String?, ): Map&lt;String, Any?&gt;</ID>
-    <ID>ReturnCount:OpenLogToolOperations.kt$OpenLogToolOperations$private fun getVideoFrameRoute(tabId: String, lineId: Int?, videoMs: Long?): Map&lt;String, Any?&gt;</ID>
+    <ID>ReturnCount:IndagiumToolOperations.kt$IndagiumToolOperations$private fun addImageNoteRoute( tabId: String, imageBase64: String?, imagePath: String?, videoMs: Long?, caption: String, afterId: String?, ): Map&lt;String, Any?&gt;</ID>
+    <ID>ReturnCount:IndagiumToolOperations.kt$IndagiumToolOperations$private fun getVideoFrameRoute(tabId: String, lineId: Int?, videoMs: Long?): Map&lt;String, Any?&gt;</ID>
     <ID>ThrowsCount:UpdateChecker.kt$UpdateChecker$suspend fun downloadAsset( asset: ReleaseAsset, destination: File, onProgress: (bytesRead: Long, total: Long) -&gt; Unit = { _, _ -&gt; }, ): File</ID>
     <ID>TooGenericExceptionCaught:AccountAgentRunner.kt$AccountAgentRunner$error: Exception</ID>
     <ID>TooGenericExceptionCaught:AccountCliCheck.kt$error: Exception</ID>

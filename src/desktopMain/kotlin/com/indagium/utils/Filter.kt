@@ -1,0 +1,809 @@
+package com.indagium.utils
+
+import androidx.compose.ui.graphics.Color
+import com.indagium.model.*
+import com.indagium.ui.DANGER_RED
+import com.indagium.ui.SEQ_COLORS
+
+// Tags-mode message/PID rules and the kwInTag live-search add matches on top of the base tag
+// filter rather than replacing it — an entry passes if it satisfies a positive selector OR the
+// base tag filter. Regex/Keyword mode is intentionally just kwText + kwRegex; persisted
+// KEYWORD-mode rules are ignored so hidden rules cannot silently affect results.
+// Negative rules and exclusions apply only when their owning feature is active.
+
+/**
+ * The part of a [Filter] that actually decides which entries are admitted — i.e. everything
+ * [passesFilter] reads. Highlighters, the keyword-highlight settings, and sequence folding are
+ * display concerns: they change how surviving rows LOOK, never which rows survive.
+ *
+ * Callers cache work keyed on "the current view" (the log-composition scan is the first) and must
+ * not redo it when the user merely recolours something. Adding a highlighter changes `Filter` and
+ * so would invalidate such a cache, which is why comparing whole Filters is wrong for that purpose.
+ *
+ * Deliberately written as a copy that BLANKS the display-only fields rather than as a projection
+ * listing the filtering ones: a field added to [Filter] later is then included by default, so the
+ * failure mode of forgetting to update this is an unnecessary recompute rather than a silently
+ * stale one. If a field added here turns out to be display-only, blank it explicitly.
+ */
+fun Filter.viewDefiningKey(): Filter = copy(
+    highlighters = emptyList(),
+    kwHighlightEnabled = false,
+    kwHighlightColor = DEFAULT_KEYWORD_HIGHLIGHT_COLOR,
+    seqOn = true,
+    sequences = emptyList(),
+)
+
+fun passesFilter(entry: LogEntry, filter: Filter): Boolean =
+    passesFilter(entry, filter, RegexEvaluationContext())
+
+internal fun passesFilter(entry: LogEntry, filter: Filter, regexContext: RegexEvaluationContext): Boolean =
+    passesFilter(entry, filter, emptyMap(), regexContext)
+
+// processNames resolves pid -> process name for PID/TID selectors that accept a package name
+// instead of a bare number (pidTidFilter and RuleTarget.PID_TID message rules — see
+// resolvePidTidTokens). Defaults to emptyMap() so every pre-existing 2-/3-arg caller (the whole
+// test suite, FilterPanel's candidate scans that already zero out pidTidFilter) keeps exactly its
+// prior behavior; only visibleEntries(tab, ...) — the one caller with a LogAnalysis to read the
+// map from — passes a populated one.
+internal fun passesFilter(
+    entry: LogEntry,
+    filter: Filter,
+    processNames: Map<Int, String>,
+    regexContext: RegexEvaluationContext,
+): Boolean {
+    val enabledRules = if (filter.mode == FilterMode.TAGS) {
+        filter.messageRules.filter { it.enabled && it.pattern.isNotBlank() && it.mode == FilterMode.TAGS }
+    } else {
+        emptyList()
+    }
+    if (!passesExclusions(entry, filter, enabledRules.filter { !it.include }, processNames, regexContext)) return false
+    val posRules = enabledRules.filter { it.include }
+    val hasKwInTag = filter.mode == FilterMode.TAGS && filter.kwInTag.isNotBlank()
+    val hasPosPidTid = filter.pidTidFilter.isNotBlank()
+    if (posRules.isNotEmpty() || hasKwInTag || hasPosPidTid) {
+        return matchesPositiveSelectors(entry, posRules, hasKwInTag, hasPosPidTid, filter, processNames, regexContext)
+    }
+    return passesTagOrKeywordFilter(entry, filter, regexContext)
+}
+
+private fun passesExclusions(
+    entry: LogEntry,
+    filter: Filter,
+    negativeRules: List<MessageRule>,
+    processNames: Map<Int, String>,
+    regexContext: RegexEvaluationContext,
+): Boolean {
+    if (entry.level !in filter.levels) return false
+    // Tag/package exclusion is a Tags-mode-flavored concept — kept out of Regex/Keyword mode so
+    // it can't silently narrow results there, matching the same independence as message rules.
+    if (filter.mode == FilterMode.TAGS) {
+        if (entry.tag in filter.excludeTags) return false
+        if (filter.excludePkgPrefixes.any { pfx -> tagMatchesPrefix(entry.tag, pfx) }) return false
+    }
+    if (filter.excludeKw.isNotBlank() &&
+        tagMsgContainsPattern(entry.tag, entry.msg, filter.excludeKw, filter.excludeKwRegex, regexContext = regexContext)) return false
+    return negativeRules.none { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule, processNames, regexContext) }
+}
+
+private fun matchesPositiveSelectors(
+    entry: LogEntry,
+    posRules: List<MessageRule>,
+    hasKwInTag: Boolean,
+    hasPosPidTid: Boolean,
+    filter: Filter,
+    processNames: Map<Int, String>,
+    regexContext: RegexEvaluationContext,
+): Boolean {
+    // ruleScopeMatches is a no-op (always true) for unscoped rules, so this covers both.
+    if (posRules.any { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule, processNames, regexContext) }) return true
+    if (hasKwInTag && containsPattern(entry.msg, filter.kwInTag, filter.kwInTagRegex, regexContext = regexContext)) return true
+    if (hasPosPidTid && matchesPidTidFilter(entry, filter.pidTidFilter, processNames)) return true
+    return hasActiveBaseFilter(filter) && passesTagOrKeywordFilter(entry, filter, regexContext)
+}
+
+private fun hasActiveBaseFilter(filter: Filter): Boolean = when (filter.mode) {
+    FilterMode.TAGS -> filter.activeTags.isNotEmpty() || filter.pkgPrefixes.isNotEmpty()
+    FilterMode.KEYWORD -> filter.kwText.isNotBlank()
+}
+
+// A pid/tid selector token is either numeric (matched against BOTH entry.pid and entry.tid, the
+// pre-existing behavior — a raw number could mean either) or a process name, resolved via
+// LogAnalysis.processNames and matched only against entry.pid: a name can't collide with an
+// unrelated tid the way two small integers coincidentally can. Shared by pidTidFilter
+// (matchesPidTidFilter, below) and MessageRule's PID_TID target (matchesRule's own branch, and
+// ui/FilterPanel.kt's relevantScopeTags candidate scan) so the two UI entry points — the filter
+// itself and the scope-tag picker for a pending PID_TID rule — can never resolve a name
+// differently from each other.
+internal data class PidTidTokens(val rawTokens: Set<String>, val namedPids: Set<Int>)
+
+internal fun resolvePidTidTokens(pattern: String, processNames: Map<Int, String>): PidTidTokens {
+    val tokens = pattern.split(',', ' ').map { it.trim() }.filter { it.isNotEmpty() }
+    val raw = LinkedHashSet<String>()
+    val namedPids = LinkedHashSet<Int>()
+    for (token in tokens) {
+        if (token.toIntOrNull() != null) {
+            raw += token
+        } else if (processNames.isNotEmpty()) {
+            for ((pid, name) in processNames) if (name == token) namedPids += pid
+        }
+    }
+    return PidTidTokens(raw, namedPids)
+}
+
+internal fun matchesPidTidTokens(entry: LogEntry, tokens: PidTidTokens): Boolean =
+    tokens.rawTokens.any { it == entry.pid.toString() || it == entry.tid.toString() } || entry.pid in tokens.namedPids
+
+private fun matchesPidTidFilter(entry: LogEntry, pidTidFilter: String, processNames: Map<Int, String>): Boolean =
+    matchesPidTidTokens(entry, resolvePidTidTokens(pidTidFilter, processNames))
+
+private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter, regexContext: RegexEvaluationContext): Boolean =
+    when (filter.mode) {
+        FilterMode.TAGS -> {
+            if (filter.activeTags.isEmpty() && filter.pkgPrefixes.isEmpty()) {
+                true
+            } else {
+                val selectedExactTagPass = entry.tag in filter.activeTags
+                if (selectedExactTagPass) {
+                    true
+                } else {
+                    filter.pkgPrefixes
+                        .filter { pfx -> tagMatchesPrefix(entry.tag, pfx) }
+                        .any { pfx ->
+                            val scopedActiveTags = filter.activeTags.filter { tag -> tagMatchesPrefix(tag, pfx) }
+                            scopedActiveTags.isEmpty()
+                        }
+                }
+            }
+        }
+
+        FilterMode.KEYWORD -> {
+            if (filter.kwText.isBlank()) {
+                true
+            } else if (filter.kwRegex) {
+                containsPattern(visibleLogLineText(entry), filter.kwText, regex = true, regexContext = regexContext)
+            } else {
+                tagMsgContainsPattern(entry.tag, entry.msg, filter.kwText, filter.kwRegex, regexContext = regexContext)
+            }
+        }
+    }
+
+private fun tagMatchesPrefix(tag: String, prefix: String): Boolean =
+    tag == prefix || tag.startsWith("$prefix.")
+
+private fun matchesRule(
+    entry: LogEntry,
+    rule: MessageRule,
+    processNames: Map<Int, String>,
+    regexContext: RegexEvaluationContext,
+): Boolean = when (rule.target) {
+    RuleTarget.PID_TID -> matchesPidTidFilter(entry, rule.pattern, processNames)
+    RuleTarget.MESSAGE -> rulePatternMatches(entry, rule, regexContext)
+}
+
+private fun ruleScopeMatches(entry: LogEntry, rule: MessageRule): Boolean {
+    val exact = rule.tag?.takeIf { it.isNotBlank() }
+    val prefix = rule.packagePrefix?.takeIf { it.isNotBlank() }
+    if (exact != null && entry.tag != exact) return false
+    if (prefix != null && entry.tag != prefix && !entry.tag.startsWith("$prefix.")) return false
+    return true
+}
+
+private fun rulePatternMatches(entry: LogEntry, rule: MessageRule, regexContext: RegexEvaluationContext): Boolean =
+    containsPattern(entry.msg, rule.pattern, rule.regex, regexContext = regexContext)
+
+// Single source of truth for "what counts as currently visible" — used by both computeItems()
+// (applyFilter = true, the normal rendering path) and log export, so a filtered export always
+// matches exactly what computeItems() would show before any collapse/expand folding.
+fun visibleEntries(tab: LogTab, applyFilter: Boolean = true): List<LogEntry> =
+    visibleEntries(tab, applyFilter, RegexEvaluationContext())
+
+internal fun visibleEntries(
+    tab: LogTab,
+    applyFilter: Boolean,
+    regexContext: RegexEvaluationContext,
+): List<LogEntry> =
+    if (applyFilter) {
+        tab.logData.filter { passesFilter(it, tab.filter, tab.analysis.processNames, regexContext) }
+    } else {
+        tab.logData
+    }
+
+// Ids are strictly increasing within a tab (parser, merge, and tailing all guarantee it) and
+// dense enough that a BitSet id-set is ~1 bit/entry — the boxed HashSet<Int> equivalents these
+// replace cost ~50 bytes/entry and dominated computeItems' GC churn on multi-million-line files.
+private fun idBitSet(entries: List<LogEntry>): java.util.BitSet {
+    val bits = java.util.BitSet((entries.lastOrNull()?.id ?: 0) + 1)
+    entries.forEach { bits.set(it.id) }
+    return bits
+}
+
+// Memo of the filter/sequence work from a tab's last computeItems call. An expand/collapse
+// click changes only tab.expanded — but used to re-run the full-file filter pass (~4s at 10M
+// lines with a keyword filter) and the sequence scan (seconds more with sequence defs enabled)
+// just to splice different children into the item list. Everything here is invariant under
+// `expanded`, so those clicks now reuse it and only rebuild the item list itself.
+// Keyed per (tab, applyFilter) since the split "Original" panel computes applyFilter=false
+// alongside the main panel's true. Invalidated by identity checks (logData/analysis are
+// replaced wholesale on reload/tailing) plus Filter equality, and dropped on tab close.
+private class TabComputeCache(
+    val logData: List<LogEntry>,
+    val stackGroupsRef: List<StackTraceGroup>,
+    val filter: Filter,
+    val visible: List<LogEntry>,
+    val seqGroups: List<SeqGroup>?,
+    val filteredStackGroups: List<StackTraceGroup>?,
+    // Derived from seqGroups only, but linear in total swallowed lines — a sequence def without
+    // an end pattern can swallow most of a 10M-line file, making these worth memoizing too.
+    val seqOwnerBySwallowed: Map<Int, String>?,
+    val seqChildBits: java.util.BitSet?,
+    // The full result of the last compute, kept so a single stack-group toggle can splice member
+    // rows in/out instead of re-materializing millions of LogItems (see spliceStackToggle).
+    val items: List<LogItem>?,
+    val expanded: Set<String>,
+    val manualBlocks: List<ManualCollapseBlock>,
+)
+
+private val computeCacheByTab = java.util.concurrent.ConcurrentHashMap<String, TabComputeCache>()
+
+fun invalidateComputeCache(tabId: String) {
+    computeCacheByTab.remove("$tabId#true")
+    computeCacheByTab.remove("$tabId#false")
+}
+
+// Fast path for the single most common expand/collapse: toggling one stack-trace ("crash")
+// block. Its rendered footprint is strictly local — the header flips its `expanded` flag and the
+// member rows appear/disappear immediately after it; nothing else in the item list changes
+// (top-level filtering by owner-sequence expansion, skipIds, and nested placement all depend on
+// sequence/manual gids, never on a stack gid). So instead of re-materializing millions of
+// LogItems (~0.5s at 10M rows, the remaining expand latency after memoization), copy the cached
+// list and splice. Any condition this can't prove — different toggle kind, multi-gid change,
+// header not currently visible, unexpected neighborhood — returns null and the caller does the
+// full rebuild, so the fallback is exactly the previous behavior.
+@Suppress("ReturnCount")
+private fun spliceStackToggle(tab: LogTab, prior: TabComputeCache): List<LogItem>? {
+    val priorItems = prior.items ?: return null
+    if (prior.manualBlocks != tab.manualBlocks) return null
+    val added = tab.expanded - prior.expanded
+    val removed = prior.expanded - tab.expanded
+    if (added.size + removed.size != 1) return null
+    val gid = added.firstOrNull() ?: removed.first()
+    val expanding = added.isNotEmpty()
+    val groups = prior.filteredStackGroups ?: tab.analysis.stackTraceGroups
+    val group = groups.firstOrNull { it.gid == gid } ?: return null
+    val idx = priorItems.indexOfFirst { it is LogItem.StackTraceHeader && it.gid == gid }
+    if (idx < 0) return null
+    val header = priorItems[idx] as LogItem.StackTraceHeader
+    if (header.expanded == expanding) return null
+
+    val result = ArrayList<LogItem>(priorItems.size + if (expanding) group.memberIds.size else 0)
+    result.addAll(priorItems.subList(0, idx))
+    result.add(header.copy(expanded = expanding))
+    if (expanding) {
+        group.memberIds.forEach { id ->
+            tab.rmap[id]?.let { result.add(LogItem.Row(it, header.indent + 1, DANGER_RED)) }
+        }
+        result.addAll(priorItems.subList(idx + 1, priorItems.size))
+    } else {
+        val end = idx + 1 + group.memberIds.size
+        if (end > priorItems.size) return null
+        for (k in idx + 1 until end) if (priorItems[k] !is LogItem.Row) return null
+        result.addAll(priorItems.subList(end, priorItems.size))
+    }
+    return result
+}
+
+// A child container to render within some range of `data`: either a top-level auto-detected
+// sequence, a nested sub-sequence within one, or a user-created manual collapse range. All three
+// resolve to an index range into `data`, which is what makes it possible to nest a manual block
+// inside a sequence (or vice versa) without ever re-running sequence detection on a sub-list —
+// see the long comment above the hosting-resolution block in computeItems for why that matters.
+private sealed class ChildRef {
+    abstract val start: Int
+
+    // Upper bound used both to advance past this child in the parent's pointer walk and, when
+    // this child is expanded, as the jump target after rendering it in full. For a manual range
+    // that hosts a "crossing" sequence extending past its own declared end, this is that
+    // sequence's endExclusive, not the manual block's own range — see ManualC.declaredEnd for the
+    // manual block's own (unextended) bound, used when it's collapsed rather than expanded.
+    abstract val end: Int
+
+    data class SeqC(val sg: SeqGroup, override val start: Int) : ChildRef() {
+        override val end get() = sg.endExclusive
+    }
+
+    data class NestedC(val ng: NestedSeqGroup, override val start: Int) : ChildRef() {
+        override val end get() = ng.endExclusive
+    }
+
+    data class ManualC(val mr: ManualRange, val declaredEnd: Int, override val end: Int) : ChildRef() {
+        override val start get() = mr.range.first
+    }
+}
+
+private data class ManualRange(val block: ManualCollapseBlock, val range: IntRange)
+
+// Reproduces, exactly, the selection rule the old per-index walk used: scanning left to right,
+// the first (widest, per the sort below) range starting at each index wins; any other range whose
+// start falls inside an already-selected range is silently dropped. `ranges` must already be
+// sorted by `range.first` ascending, `range.last` descending, so the first entry recorded per
+// start index in `byStart` is the widest one — matching the old `firstOrNull` tie-break. This is a
+// pre-existing, out-of-scope limitation (overlapping manual blocks aren't reconciled) — preserved
+// unchanged, just computed in O(n + m) instead of the old O(n * m).
+private fun selectTopLevelManualRanges(dataSize: Int, ranges: List<ManualRange>): List<ManualRange> {
+    val byStart = HashMap<Int, ManualRange>()
+    for (r in ranges) byStart.putIfAbsent(r.range.first, r)
+    val result = mutableListOf<ManualRange>()
+    var i = 0
+    while (i < dataSize) {
+        val r = byStart[i]
+        if (r == null) {
+            i += 1
+        } else { result += r; i = r.range.last + 1 }
+    }
+    return result
+}
+
+// Cooperative-cancellation hook for computeItems/computeSeqGroups (P-01). Both are plain,
+// non-suspend functions called from several contexts with no CoroutineScope at all — the
+// synchronous small-file render path, ControlServer.kt's get_visible_lines route, and every
+// existing test — so cancellation can't just be a suspend-function/ensureActive() call baked in
+// directly. Instead the caller that actually runs on a cancellable coroutine (LogViewer.kt's
+// large-file async path) supplies a check; everyone else uses the no-op default, so this changes
+// nothing for any call site that doesn't opt in. Invoked periodically (not every loop iteration)
+// from the hot loops below so the no-op case stays negligible overhead.
+fun interface CancellationCheck {
+    operator fun invoke()
+}
+
+private val NoCancellationCheck = CancellationCheck {}
+
+// How often (in loop iterations) the hot loops below — and SeqComputer.kt's own scan — poll the
+// cancellation check — frequent enough that a cancelled computation stops promptly, infrequent
+// enough that the check call itself (a no-op in the common case, ensureActive() in the
+// cancellable case) never shows up as measurable overhead. internal, not private: SeqComputer.kt
+// is a different file in the same package, and Kotlin's top-level `private` is file-scoped, not
+// package-scoped.
+internal const val CANCELLATION_CHECK_INTERVAL = 4096
+
+// Complexity is inherent: sequence detection, manual-collapse interleaving, and recursive
+// container rendering are all coupled — splitting them would require passing shared mutable state.
+fun computeItems(tab: LogTab, applyFilter: Boolean, cancellationCheck: CancellationCheck = NoCancellationCheck): List<LogItem> =
+    computeItems(tab, applyFilter, cancellationCheck, RegexEvaluationContext())
+
+internal fun computeItems(
+    tab: LogTab,
+    applyFilter: Boolean,
+    regexContext: RegexEvaluationContext,
+): List<LogItem> = computeItems(tab, applyFilter, NoCancellationCheck, regexContext)
+
+@Suppress("CyclomaticComplexMethod", "LongMethod")
+internal fun computeItems(
+    tab: LogTab,
+    applyFilter: Boolean,
+    cancellationCheck: CancellationCheck,
+    regexContext: RegexEvaluationContext,
+): List<LogItem> {
+    val sequences = tab.filter.sequences
+    val cacheKey = "${tab.id}#$applyFilter"
+    val prior = computeCacheByTab[cacheKey]?.takeIf {
+        it.logData === tab.logData &&
+            it.stackGroupsRef === tab.analysis.stackTraceGroups &&
+            it.filter == tab.filter
+    }
+    val data = prior?.visible ?: visibleEntries(tab, applyFilter, regexContext)
+    var fullSeqGroups: List<SeqGroup>? = prior?.seqGroups
+    var fullFilteredStackGroups: List<StackTraceGroup>? = prior?.filteredStackGroups
+    var fullSeqOwner: Map<Int, String>? = prior?.seqOwnerBySwallowed
+    var fullSeqChildBits: java.util.BitSet? = prior?.seqChildBits
+
+    fun storeCache(items: List<LogItem>) {
+        if (regexContext.hasTimedOut) {
+            computeCacheByTab.remove(cacheKey)
+            return
+        }
+        computeCacheByTab[cacheKey] = TabComputeCache(
+            logData = tab.logData,
+            stackGroupsRef = tab.analysis.stackTraceGroups,
+            filter = tab.filter,
+            visible = data,
+            seqGroups = fullSeqGroups,
+            filteredStackGroups = fullFilteredStackGroups,
+            seqOwnerBySwallowed = fullSeqOwner,
+            seqChildBits = fullSeqChildBits,
+            items = items,
+            expanded = tab.expanded,
+            manualBlocks = tab.manualBlocks,
+        )
+    }
+
+    if (prior != null) {
+        spliceStackToggle(tab, prior)?.let { spliced ->
+            storeCache(spliced)
+            return spliced
+        }
+    }
+
+    // Sequence groups are always computed exactly once, against the full filtered `data` — never
+    // against a manual-collapse sub-range. A manual block's boundary must never truncate or split
+    // an auto-detected sequence that spans across it; manual-block interleaving is handled purely
+    // as a rendering/nesting concern below, layered on top of this single ground-truth pass.
+    val seqGroups: List<SeqGroup> = if (tab.filter.seqOn && sequences.any { it.enabled }) {
+        fullSeqGroups ?: computeSeqGroups(data, sequences, cancellationCheck, regexContext).also { fullSeqGroups = it }
+    } else {
+        emptyList()
+    }
+
+    // Stack-trace folding is always-on, independent of user-defined sequences and of manual
+    // blocks. Also always computed against the full `data` now, for the same reason as seqGroups
+    // above — this incidentally fixes the same class of truncation bug for a stack trace that
+    // straddles a manual-block boundary.
+    val allStackGroups: List<StackTraceGroup> = run {
+        val cached = tab.analysis.stackTraceGroups
+        when {
+            // Analysis still computing in the background after a load: render unfolded rather
+            // than blocking this compute on a full multi-second stack-trace scan. When the
+            // analysis lands, tab.analysis is replaced and the item list recomputes with folding.
+            tab.analysis.pending -> emptyList()
+            // Analysis is complete — cached is trusted as ground truth even when empty. P-02: a
+            // completed analysis that genuinely found no stack traces used to be indistinguishable
+            // from "never analyzed," so this branch used to recompute from `data` unconditionally
+            // every time cached happened to be empty, on every composition.
+            data.size == tab.logData.size -> cached
+            else -> fullFilteredStackGroups ?: run {
+                val dataIdBits = idBitSet(data)
+                cached.mapNotNull { group ->
+                    if (!dataIdBits.get(group.rid)) {
+                        null
+                    } else {
+                        val visibleMembers = group.memberIds.filter { dataIdBits.get(it) }
+                        group.copy(memberIds = visibleMembers).takeIf { visibleMembers.isNotEmpty() }
+                    }
+                }.also { fullFilteredStackGroups = it }
+            }
+        }
+    }
+
+    val manualBlocksEnabled = tab.manualBlocks.filter { it.enabled }
+    if (seqGroups.isEmpty() && allStackGroups.isEmpty() && manualBlocksEnabled.isEmpty()) {
+        return data.map { LogItem.Row(it, 0) }.also { storeCache(it) }
+    }
+
+    val defMap = sequences.associateBy { it.id }
+
+    // A sequence with no explicit end pattern can swallow everything up to the next start match
+    // (or end-of-log) as unstructured "plain" children — including an exception/ANR block that has
+    // nothing to do with the sequence. Render it nested one level inside the sequence's plain
+    // children *only while that sequence is already expanded* (a nice "this crash happened during
+    // X" grouping); otherwise render it as its own independent, always-visible collapsible block —
+    // crash navigation never has to search for or blindly expand a group to find it.
+    val seqOwnerGidBySwallowedId = fullSeqOwner ?: buildMap<Int, String> {
+        seqGroups.forEach { sg -> sg.plain.forEach { id -> put(id, sg.gid) } }
+    }.also { fullSeqOwner = it }
+    val stackGroups = allStackGroups.filter { g ->
+        val ownerGid = seqOwnerGidBySwallowedId[g.rid]
+        ownerGid == null || ownerGid !in tab.expanded
+    }
+    val stackGroupByRid = stackGroups.associateBy { it.rid }
+    val nestedStackGroupByRid = (allStackGroups - stackGroups.toSet()).associateBy { it.rid }
+    val stackClaimedIds = java.util.BitSet().also { bits ->
+        allStackGroups.forEach { g ->
+            bits.set(g.rid)
+            g.memberIds.forEach(bits::set)
+        }
+    }
+
+    // Kept in the memoization cache for TabComputeCache's shape/downstream tooling, though the
+    // recursive renderer below no longer needs a global "is this id swallowed by some sequence"
+    // bitset — coverage is resolved per recursion level instead (see renderRange), which correctly
+    // distinguishes "covered by the sequence I'm currently rendering" from "covered by some other
+    // sequence entirely," something a single global bitset could not.
+    if (fullSeqChildBits == null) {
+        fullSeqChildBits = java.util.BitSet().also { bits ->
+            seqGroups.forEach { g ->
+                g.plain.forEach(bits::set)
+                g.nested.forEach { ng ->
+                    bits.set(ng.rid)
+                    ng.ch.forEach(bits::set)
+                }
+            }
+        }
+    }
+
+    // Ids ascend within data, so id->index lookup is a binary search instead of a boxed map.
+    val dataIds = IntArray(data.size) { data[it].id }
+
+    fun indexOfId(id: Int): Int? = java.util.Arrays.binarySearch(dataIds, id).takeIf { it >= 0 }
+
+    fun rootIdxOf(rid: Int): Int = indexOfId(rid) ?: -1
+
+    val allManualRanges = manualBlocksEnabled.mapNotNull { block ->
+        val anchor = indexOfId(block.anchorId) ?: return@mapNotNull null
+        val range = when (block.direction) {
+            ManualCollapseDirection.TO_START -> 0..anchor
+            ManualCollapseDirection.TO_END -> anchor..data.lastIndex
+            ManualCollapseDirection.RANGE -> {
+                val end = block.endId?.let(::indexOfId) ?: return@mapNotNull null
+                minOf(anchor, end)..maxOf(anchor, end)
+            }
+        }
+        ManualRange(block, range)
+    }.sortedWith(compareBy<ManualRange> { it.range.first }.thenByDescending { it.range.last })
+
+    val topLevelManualCandidates = selectTopLevelManualRanges(data.size, allManualRanges)
+
+    // ── Resolve sequence-vs-manual-block hosting ──────────────────────────────────────────────
+    // Top-level SeqGroups never contain one another (SeqComputer only exposes roots at this
+    // level), and topLevelManualCandidates never overlap each other (by construction above) — so
+    // the only containment/crossing relationships left to resolve are sequence-vs-manual pairs, at
+    // two possible depths: directly under a top-level SeqGroup's own plain area, or one level
+    // deeper under one of its NestedSeqGroups. On a straddling ("crossing") pair — neither fully
+    // contains the other — whichever starts first hosts the other's full extent, nested one level
+    // in even past the host's own declared end; on an exact range tie, the manual block hosts (a
+    // manual block deliberately wrapping a whole sequence reads as "sequence lives inside my
+    // selection," matching pre-existing behavior for that case). This never changes either side's
+    // own reported header count, it only changes where its content renders.
+    val seqHostsManualDirect = HashMap<String, MutableList<ManualRange>>()
+    val nestedHostsManual = HashMap<String, MutableList<ManualRange>>()
+    val manualHostsSeq = HashMap<String, MutableList<SeqGroup>>()
+    val seqHostedByManualGid = HashSet<String>()
+    val manualHostedGid = HashSet<String>()
+
+    for (m in topLevelManualCandidates) {
+        val m0 = m.range.first
+        val m1 = m.range.last + 1
+        for (sg in seqGroups) {
+            val s0 = rootIdxOf(sg.rid)
+            val s1 = sg.endExclusive
+            if (s1 <= m0 || m1 <= s0) continue
+            when {
+                m0 <= s0 && s1 <= m1 -> {
+                    manualHostsSeq.getOrPut(m.block.id) { mutableListOf() } += sg
+                    seqHostedByManualGid += sg.gid
+                }
+
+                s0 <= m0 && m1 <= s1 -> {
+                    val ng = sg.nested.firstOrNull { n -> val n0 = rootIdxOf(n.rid); n0 <= m0 && m1 <= n.endExclusive }
+                    if (ng != null) nestedHostsManual.getOrPut(ng.gid) { mutableListOf() } += m
+                    else seqHostsManualDirect.getOrPut(sg.gid) { mutableListOf() } += m
+                    manualHostedGid += m.block.id
+                }
+
+                m0 < s0 -> {
+                    manualHostsSeq.getOrPut(m.block.id) { mutableListOf() } += sg
+                    seqHostedByManualGid += sg.gid
+                }
+
+                else -> {
+                    seqHostsManualDirect.getOrPut(sg.gid) { mutableListOf() } += m
+                    manualHostedGid += m.block.id
+                }
+            }
+        }
+    }
+
+    val topLevelManual = topLevelManualCandidates.filterNot { it.block.id in manualHostedGid }
+    val topLevelSeqGroups = seqGroups.filterNot { it.gid in seqHostedByManualGid }
+
+    fun seqEffectiveEnd(sg: SeqGroup): Int =
+        maxOf(sg.endExclusive, seqHostsManualDirect[sg.gid]?.maxOfOrNull { it.range.last + 1 } ?: 0)
+
+    fun manualEffectiveEnd(m: ManualRange): Int =
+        maxOf(m.range.last + 1, manualHostsSeq[m.block.id]?.maxOfOrNull { it.endExclusive } ?: 0)
+
+    // ── Unified recursive renderer ────────────────────────────────────────────────────────────
+    // Walks index range [lo, hi) into `data`, rendering `children` (sorted by start, non-
+    // overlapping at this level) wherever their start position falls, and plain/stack-header rows
+    // everywhere else. `hi` is a soft bound: if an expanded child's own true end extends past it
+    // (the crossing case resolved above), that child is still rendered in full via recursion and
+    // the cursor simply jumps to its true end, which is >= hi — the `while (idx < hi)` loop then
+    // exits on its own next check, no special-casing needed.
+    //
+    // A collapsed SeqHeader/NestedSeqHeader still walks its interior position-by-position (does
+    // NOT jump) so an escaped stack-trace header inside it can still surface, matching pre-existing
+    // sequence behavior. A collapsed ManualHeader, by contrast, always jumps straight to its own
+    // declared end — manual blocks are a deliberate, harder collapse than sequences and already
+    // fully hid their interior (including any escaped stack trace within it) before this change;
+    // preserved as-is rather than changed as a side effect of this fix.
+    fun renderRange(lo: Int, hi: Int, indent: Int, ambientColor: Color?, children: List<ChildRef>): List<LogItem> {
+        val items = ArrayList<LogItem>(hi - lo)
+        var childPtr = 0
+        var idx = lo
+        var sinceCancellationCheck = 0
+        while (idx < hi) {
+            // The dominant hot loop in computeItems (P-01) — periodically give a cancelled caller
+            // a chance to stop instead of running this whole range (potentially the whole file)
+            // to completion on a superseded computation. Re-entered per recursion level, so a
+            // deeply nested render still gets checked, just against each level's own local count.
+            if (++sinceCancellationCheck >= CANCELLATION_CHECK_INTERVAL) {
+                sinceCancellationCheck = 0
+                cancellationCheck()
+            }
+            while (childPtr < children.size && children[childPtr].end <= idx) childPtr++
+            val child = children.getOrNull(childPtr)?.takeIf { it.start == idx }
+            val entry = data[idx]
+            when {
+                child is ChildRef.SeqC -> {
+                    val sg = child.sg
+                    val exp = sg.gid in tab.expanded
+                    val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
+                    val color = defMap[sg.defId]?.color ?: SEQ_COLORS.first()
+                    items += LogItem.SeqHeader(entry, sg.gid, indent, exp, totalCh, color)
+                    if (exp) {
+                        val kids = (
+                            sg.nested.map { ng -> ChildRef.NestedC(ng, rootIdxOf(ng.rid)) } +
+                                (seqHostsManualDirect[sg.gid].orEmpty()).map { m ->
+                                    ChildRef.ManualC(m, m.range.last + 1, manualEffectiveEnd(m))
+                                }
+                        ).sortedBy { it.start }
+                        items += renderRange(idx + 1, sg.endExclusive, indent + 1, color, kids)
+                        idx = seqEffectiveEnd(sg)
+                    } else {
+                        idx += 1
+                    }
+                }
+
+                child is ChildRef.NestedC -> {
+                    val ng = child.ng
+                    val exp = ng.gid in tab.expanded
+                    val color = defMap[ng.defId]?.color ?: ambientColor ?: SEQ_COLORS.first()
+                    items += LogItem.SeqHeader(entry, ng.gid, indent, exp, ng.ch.size, color)
+                    if (exp) {
+                        val kids = nestedHostsManual[ng.gid].orEmpty()
+                            .map { m -> ChildRef.ManualC(m, m.range.last + 1, m.range.last + 1) }
+                            .sortedBy { it.start }
+                        items += renderRange(idx + 1, ng.endExclusive, indent + 1, color, kids)
+                        idx = ng.endExclusive
+                    } else {
+                        idx += 1
+                    }
+                }
+
+                child is ChildRef.ManualC -> {
+                    val mr = child.mr
+                    val block = mr.block
+                    val exp = block.id in tab.expanded
+                    // The anchor entry (what the header displays) isn't necessarily at
+                    // range.first — TO_END and some RANGE blocks anchor at the other end.
+                    val headerEntry = indexOfId(block.anchorId)?.let { data[it] } ?: entry
+                    items += LogItem.ManualHeader(headerEntry, block.id, block.direction, exp, mr.range.count(), block.color)
+                    if (exp) {
+                        val kids = manualHostsSeq[block.id].orEmpty()
+                            .map { sg -> ChildRef.SeqC(sg, rootIdxOf(sg.rid)) }
+                            .sortedBy { it.start }
+                        // Render the manual block's full range (the anchor entry may sit at
+                        // either end of it — TO_START/TO_END/RANGE all place it differently) and
+                        // filter the anchor's own row out afterward, matching the header, which
+                        // already displays that entry.
+                        val inner = renderRange(mr.range.first, mr.range.last + 1, indent + 1, block.color, kids)
+                        items += inner.filterNot { it is LogItem.Row && it.entry.id == block.anchorId }
+                        idx = child.declaredEnd
+                    } else {
+                        idx = child.declaredEnd
+                    }
+                }
+
+                stackGroupByRid[entry.id] != null -> {
+                    val stg = stackGroupByRid.getValue(entry.id)
+                    val exp = stg.gid in tab.expanded
+                    items += LogItem.StackTraceHeader(entry, stg.gid, indent, exp, stg.memberIds.size)
+                    if (exp) {
+                        stg.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, indent + 1, DANGER_RED) } }
+                    }
+                    idx += 1
+                }
+
+                nestedStackGroupByRid[entry.id] != null -> {
+                    val stg = nestedStackGroupByRid.getValue(entry.id)
+                    val exp = stg.gid in tab.expanded
+                    items += LogItem.StackTraceHeader(entry, stg.gid, indent, exp, stg.memberIds.size)
+                    if (exp) {
+                        stg.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, indent + 1, DANGER_RED) } }
+                    }
+                    idx += 1
+                }
+
+                childPtr < children.size && idx >= children[childPtr].start && idx < children[childPtr].end -> {
+                    idx += 1 // covered by the current child's interior (collapsed, not yet reached its end)
+                }
+
+                stackClaimedIds.get(entry.id) -> idx += 1 // stack-trace member row, shown only under its header
+
+                else -> {
+                    items += LogItem.Row(entry, indent, ambientColor)
+                    idx += 1
+                }
+            }
+        }
+        return items
+    }
+
+    val topChildren = (
+        topLevelSeqGroups.map { sg -> ChildRef.SeqC(sg, rootIdxOf(sg.rid)) } +
+            topLevelManual.map { m -> ChildRef.ManualC(m, m.range.last + 1, manualEffectiveEnd(m)) }
+    ).sortedBy { it.start }
+
+    val result = renderRange(0, data.size, indent = 0, ambientColor = null, children = topChildren)
+    storeCache(result)
+    return result
+}
+
+private fun sourcePrefixLabel(settings: AppSettings): String =
+    settings.annotationPrefixLabel.trim().ifBlank { "From" }
+
+// Extracted out of buildMd() purely to keep that function's cyclomatic complexity under the
+// detekt gate — same behavior as when it was inlined in the AnnBlock.LogRef branch. Returns the
+// next block number (only advanced when numbering is on, mirroring the original inline
+// `blockNumber++` which was itself gated on settings.numberAnnotationBlocks).
+private fun StringBuilder.appendLogRefBlock(tab: LogTab, settings: AppSettings, block: AnnBlock.LogRef, blockNumber: Int): Int {
+    if (settings.numberAnnotationBlocks) append("$blockNumber. ")
+    if (block.caption.isNotBlank()) {
+        appendLine(block.caption); appendLine()
+    } else if (settings.numberAnnotationBlocks) {
+        appendLine()
+    }
+    if (block.sourceFilename != null) appendLine("${sourcePrefixLabel(settings)} ${block.sourceFilename}")
+    val rows = block.resolveRows(tab)
+    when (settings.annotationLogBlockStyle) {
+        AnnotationLogBlockStyle.INDENTED ->
+            rows.forEach { r -> appendLine("    ${r.ts}  ${r.level.key}/${r.tag}  ${r.msg}") }
+
+        AnnotationLogBlockStyle.JIRA_JAVA -> {
+            appendLine("{code:java}")
+            rows.forEach { r -> appendLine("${r.ts}  ${r.level.key}/${r.tag}  ${r.msg}") }
+            appendLine("{code}")
+        }
+    }
+    appendLine()
+    return if (settings.numberAnnotationBlocks) blockNumber + 1 else blockNumber
+}
+
+// No Markdown/data-URI image is ever embedded here — it won't render in Jira plain text, and a
+// bare clipboard paste can only carry one image at a time anyway. Two-step workflow instead:
+// "Export frames" (AppState.exportAnnotationFrames) writes each image as frame-0N.jpg next to a
+// sibling .md of this exact text, then the user pastes the text and attaches the files. Under
+// JIRA_JAVA style, the marker line below is a `!frame-0N.jpg!` wiki anchor Jira Server/DC renders
+// inline once the same-named file is attached — a bare Copy without exporting first yields anchors
+// with no attachment behind them yet. JIRA_JAVA is the only style shown these anchors (Jira Cloud
+// users on Indented would otherwise see broken `!filename!` syntax); INDENTED keeps the older
+// plain-text `[screenshot]` marker.
+fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildString {
+    if (tab.annotations.prefix.isNotBlank()) {
+        appendLine(tab.annotations.prefix); appendLine()
+    }
+    var blockNumber = 1
+    // Counts AnnBlock.Image blocks only, independent of blockNumber above (which also counts
+    // Note/LogRef blocks and is gated on numberAnnotationBlocks) — must match the ordinal (and the
+    // same tab.annotations.frameStamp) AppState.writeAnnotationFrameImages()/exportAnnotationFrames()
+    // assign the same images, via the shared annotationImageFileName() helper, or the anchors below
+    // would reference files that don't exist (or exist under a different, unstamped/stamped name).
+    var imageOrdinal = 0
+    for (block in tab.annotations.blocks) {
+        when (block) {
+            is AnnBlock.Note -> {
+                if (block.text.isNotBlank()) {
+                    if (settings.numberAnnotationBlocks) append("${blockNumber++}. ")
+                    appendLine(block.text)
+                    appendLine()
+                }
+            }
+
+            is AnnBlock.LogRef -> blockNumber = appendLogRefBlock(tab, settings, block, blockNumber)
+
+            is AnnBlock.Image -> {
+                imageOrdinal += 1
+                if (settings.numberAnnotationBlocks) append("${blockNumber++}. ")
+                if (block.caption.isNotBlank()) appendLine(block.caption)
+                block.displayProvenance?.let { appendLine(it) }
+                when (settings.annotationLogBlockStyle) {
+                    AnnotationLogBlockStyle.JIRA_JAVA ->
+                        appendLine("!${annotationImageFileName(imageOrdinal, block.format, tab.annotations.frameStamp)}!")
+                    AnnotationLogBlockStyle.INDENTED -> appendLine("[screenshot]")
+                }
+                appendLine()
+            }
+        }
+    }
+    if (tab.annotations.suffix.isNotBlank()) {
+        appendLine("---"); appendLine(); append(tab.annotations.suffix)
+    }
+}
