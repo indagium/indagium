@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 // windowing toolkit Main.kt boots afterward.
 //
 // Protocol (UTF-8, \n-framed):
-//   OPENLOG-SI 1 <token>\n
+//   INDAGIUM-SI 1 <token>\n
 //   <abs-path>\n
 //   …
 //   \n                       ← blank line ends the list (zero paths is valid: raise, don't open)
@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 // readable by this user. Low impact (content only renders on the victim's own screen), but real
 // cross-user injection that a 128-bit random closes for free. Defense in depth, not a boundary
 // against the user themselves.
-private const val PROTOCOL_MAGIC = "OPENLOG-SI"
+private const val PROTOCOL_MAGIC = "INDAGIUM-SI"
 private const val PROTOCOL_VERSION = "1"
 private const val LOCK_FILE_NAME = "single-instance.lock"
 private const val PORT_FILE_NAME = "single-instance.port"

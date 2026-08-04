@@ -24,7 +24,7 @@ import kotlinx.serialization.json.jsonPrimitive
 // it's tightly coupled to upFlt/tab()/~15 pieces of dialog state and isn't a mechanical win to
 // move; see the plan's Task 12 slice notes.
 
-private const val FILTER_LIBRARY_FORMAT = "openlog-saved-filter-library"
+private const val FILTER_LIBRARY_FORMAT = "indagium-saved-filter-library"
 private const val FILTER_LIBRARY_VERSION = 2
 
 internal data class DecodedFilterLibrary(

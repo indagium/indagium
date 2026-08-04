@@ -4,7 +4,14 @@ import com.openlog.utils.writeFileAtomically
 import java.io.File
 import java.util.Base64
 
-private const val SOURCE_INDEX_MAGIC = "openLog2-source-index-v1"
+// SOURCE_INDEX_MAGIC_CURRENT is what save() writes; SOURCE_INDEX_MAGIC_ACCEPTED (built from it,
+// plus the pre-rename openLog2 marker already sitting in every shipped-1.7.9 user's index file) is
+// what load() accepts. Defining the accepted set in terms of the written constant makes "the write
+// value is a member of the accepted set" true by construction — see AppState's autosave magic
+// constants for the same shape, duplicated here since this store is independent of AppState.
+private const val SOURCE_INDEX_MAGIC_CURRENT = "indagium-source-index-v1"
+private const val SOURCE_INDEX_MAGIC_LEGACY_OPENLOG2 = "openLog2-source-index-v1"
+private val SOURCE_INDEX_MAGIC_ACCEPTED = setOf(SOURCE_INDEX_MAGIC_CURRENT, SOURCE_INDEX_MAGIC_LEGACY_OPENLOG2)
 
 // Base64-url (no padding) round-trip for any field that could otherwise contain a tab or newline
 // (file paths, matcher regex patterns, method names) — same scheme as AppState's autosave format
@@ -90,7 +97,7 @@ private fun ParseState.applyLine(line: String) {
 }
 
 private fun parseSourceIndexLines(lines: List<String>): SourceIndex? {
-    if (lines.isEmpty() || lines.first() != SOURCE_INDEX_MAGIC) return null
+    if (lines.isEmpty() || lines.first() !in SOURCE_INDEX_MAGIC_ACCEPTED) return null
     val state = ParseState()
     lines.drop(1).forEach { line -> runCatching { state.applyLine(line) } }
     val version = state.version ?: return null
@@ -107,15 +114,17 @@ private fun parseSourceIndexLines(lines: List<String>): SourceIndex? {
 }
 
 /** Disk persistence for a [SourceIndex] — a line-oriented, tab-separated text format mirroring the
- *  style of the app's `openLog2-cache-v1` autosave format: a magic header line, then typed
- *  `record\tfield...` lines (`root`, `meta`, `site`) making up the roots/fileMeta/sites sections.
- *  Free-text fields that could contain a tab or newline (file paths, matcher patterns, method
- *  names) are base64-url-encoded via [String.fieldToken] so they can never corrupt the line
- *  structure. */
+ *  style of the app's autosave format: a magic header line, then typed `record\tfield...` lines
+ *  (`root`, `meta`, `site`) making up the roots/fileMeta/sites sections. The header line is
+ *  written as [SOURCE_INDEX_MAGIC_CURRENT] but a load also accepts the pre-rename
+ *  `openLog2-source-index-v1` marker ([SOURCE_INDEX_MAGIC_ACCEPTED]) so an index built by a
+ *  shipped 1.7.9 build still loads instead of forcing a full re-index. Free-text fields that could
+ *  contain a tab or newline (file paths, matcher patterns, method names) are base64-url-encoded
+ *  via [String.fieldToken] so they can never corrupt the line structure. */
 object SourceIndexStore {
     fun save(index: SourceIndex, file: File) {
         writeFileAtomically(file) { writer ->
-            writer.appendLine(SOURCE_INDEX_MAGIC)
+            writer.appendLine(SOURCE_INDEX_MAGIC_CURRENT)
             writer.appendLine("version\t${index.version}")
             writer.appendLine("builtAt\t${index.builtAt}")
             index.roots.forEach { root -> writer.appendLine("root\t${root.fieldToken()}") }

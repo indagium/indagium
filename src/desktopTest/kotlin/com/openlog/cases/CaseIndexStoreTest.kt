@@ -53,6 +53,44 @@ class CaseIndexStoreTest {
         assertNull(CaseIndexStore.load(file))
     }
 
+    // (indagium rename, Stage 2) save() now writes the "indagium-case-index-v1" magic, but an
+    // index a shipped 1.7.9 build wrote under the old "openLog2-case-index-v1" magic must still
+    // load without triggering a rebuild.
+    @Test
+    fun loadWithLegacyOpenLogMagicStillLoads() {
+        val dir = createTempDirectory("openlog-case-store-legacy-magic").toFile()
+        val file = File(dir, "case-index").apply {
+            writeText("openLog2-case-index-v1\nversion\t$CASE_INDEX_VERSION\nbuiltAt\t1000\n")
+        }
+
+        val loaded = CaseIndexStore.load(file)
+
+        assertEquals(CASE_INDEX_VERSION, loaded?.version)
+    }
+
+    @Test
+    fun loadWithCurrentIndagiumMagicLoads() {
+        val dir = createTempDirectory("openlog-case-store-new-magic").toFile()
+        val file = File(dir, "case-index").apply {
+            writeText("indagium-case-index-v1\nversion\t$CASE_INDEX_VERSION\nbuiltAt\t1000\n")
+        }
+
+        val loaded = CaseIndexStore.load(file)
+
+        assertEquals(CASE_INDEX_VERSION, loaded?.version)
+    }
+
+    @Test
+    fun saveWritesTheCurrentIndagiumMagic() {
+        val dir = createTempDirectory("openlog-case-store-write-magic").toFile()
+        val index = sampleIndex(dir)
+        val file = File(createTempDirectory("openlog-case-store-write-magic-out").toFile(), "case-index")
+
+        CaseIndexStore.save(index, file)
+
+        assertEquals("indagium-case-index-v1", file.readLines().first())
+    }
+
     @Test
     fun loadWithMismatchedVersionReturnsNull() {
         val dir = createTempDirectory("openlog-case-store-version").toFile()

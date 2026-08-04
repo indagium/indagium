@@ -543,6 +543,16 @@ private const val ROLLOVER_LOOKAHEAD_SCAN_CAP = 200
 // hold point (e.g. a corrupted +24h jump shows up immediately in the first one or two).
 private const val FOLLOW_DIAGNOSTIC_CANDIDATE_COUNT = 3
 
+// The magic header line identifying an autosave cache. AUTOSAVE_MAGIC_CURRENT is what
+// serializeAutosave() writes; AUTOSAVE_MAGIC_ACCEPTED (built from it, plus the pre-rename
+// openLog2 marker still sitting in every shipped-1.7.9 user's cache file) is what
+// restoreAutosave() accepts. Defining the accepted set in terms of the written constant makes
+// "the write value is a member of the accepted set" true by construction rather than by two
+// independent literals that have to be kept in sync by hand.
+internal const val AUTOSAVE_MAGIC_CURRENT = "indagium-cache-v1"
+private const val AUTOSAVE_MAGIC_LEGACY_OPENLOG2 = "openLog2-cache-v1"
+private val AUTOSAVE_MAGIC_ACCEPTED = setOf(AUTOSAVE_MAGIC_CURRENT, AUTOSAVE_MAGIC_LEGACY_OPENLOG2)
+
 data class PendingSequenceStart(val text: String, val tag: String)
 
 data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val currentFilterId: String?)
@@ -6653,7 +6663,7 @@ class AppState(
 
     fun exportFiltersToFile(selectedIds: Set<String>? = null) {
         val dlg = FileDialog(null as Frame?, "Export Filters", FileDialog.SAVE).apply {
-            file = "openlog_filters.json"; isVisible = true
+            file = "indagium_filters.json"; isVisible = true
         }
         val path = dlg.file ?: return
         val dir = dlg.directory ?: return
@@ -6781,7 +6791,7 @@ class AppState(
         if (!autosaveFile.exists()) return
         runCatching {
             val lines = autosaveFile.readLines()
-            if (lines.firstOrNull() != "openLog2-cache-v1") return
+            if (lines.firstOrNull() !in AUTOSAVE_MAGIC_ACCEPTED) return
             val (keyLines, tabLines) = splitAutosaveLines(lines.drop(1))
             keyLines.forEach { line ->
                 val key = line.substringBefore('\t')
@@ -6938,7 +6948,7 @@ class AppState(
     }
 
     private fun serializeAutosave(): String = buildString {
-        appendLine("openLog2-cache-v1")
+        appendLine(AUTOSAVE_MAGIC_CURRENT)
         // (ARCH-2) settings is the only blob on this line encoded as keyed JSON rather than the
         // positional pipe format every other autosave key still uses — see settingsJson()/
         // settingsFromJson() below for why, and restoreAutosaveKey()'s "settings" branch for the
