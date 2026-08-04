@@ -17,7 +17,24 @@ static jstring javaString(JNIEnv *env, NSString *value) {
     return (*env)->NewStringUTF(env, (value ?: @"").UTF8String);
 }
 
+// A `desktopRun`/IntelliJ launch runs the bare `java` binary, which has no Info.plist at all —
+// jpackage is what stamps NSSpeechRecognitionUsageDescription in, and only for a packaged bundle
+// (see build.gradle.kts's macOS infoPlist.extraKeysRawXml). Touching SFSpeechRecognizer without
+// that key present has macOS's TCC hard-kill the process (Namespace TCC, Code 0) instead of
+// raising a normal error, so this must be checked before *any* Speech framework call, not just
+// before the obvious `SFSpeechRecognizer` construction.
+static BOOL hasSpeechUsageDescription(void) {
+    id description = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"NSSpeechRecognitionUsageDescription"];
+    return [description isKindOfClass:[NSString class]] && [(NSString *)description length] > 0;
+}
+
+static NSString *const kMissingUsageDescriptionMessage =
+    @"Apple Speech needs a packaged Indagium build. A development run has no Info.plist usage "
+    @"description, and macOS kills any process that asks without one. Choose Whisper instead, or "
+    @"run a packaged build.";
+
 static NSString *availabilityMessage(NSString *localeIdentifier) {
+    if (!hasSpeechUsageDescription()) return kMissingUsageDescriptionMessage;
     SFSpeechRecognizer *recognizer = [[SFSpeechRecognizer alloc] initWithLocale:[[NSLocale alloc] initWithLocaleIdentifier:localeIdentifier]];
     if (recognizer == nil) return @"Apple Speech does not recognize this language on this Mac. Choose Whisper instead.";
     if (![recognizer supportsOnDeviceRecognition]) return @"Apple does not have an on-device speech model for this language. Choose Whisper instead.";
@@ -32,6 +49,7 @@ static NSString *availabilityMessage(NSString *localeIdentifier) {
 
 JNIEXPORT jboolean JNICALL Java_com_indagium_voice_AppleSpeechNative_nativeEnsureReady
   (JNIEnv *env, jclass clazz, jstring language) {
+    if (!hasSpeechUsageDescription()) return JNI_FALSE;
     const char *chars = (*env)->GetStringUTFChars(env, language, NULL);
     NSString *locale = [NSString stringWithUTF8String:chars];
     (*env)->ReleaseStringUTFChars(env, language, chars);
@@ -50,6 +68,7 @@ JNIEXPORT jboolean JNICALL Java_com_indagium_voice_AppleSpeechNative_nativeEnsur
 
 JNIEXPORT jstring JNICALL Java_com_indagium_voice_AppleSpeechNative_nativeAvailabilityMessage
   (JNIEnv *env, jclass clazz, jstring language) {
+    if (!hasSpeechUsageDescription()) return javaString(env, kMissingUsageDescriptionMessage);
     const char *chars = (*env)->GetStringUTFChars(env, language, NULL);
     NSString *locale = [NSString stringWithUTF8String:chars];
     (*env)->ReleaseStringUTFChars(env, language, chars);
@@ -58,6 +77,7 @@ JNIEXPORT jstring JNICALL Java_com_indagium_voice_AppleSpeechNative_nativeAvaila
 
 JNIEXPORT jstring JNICALL Java_com_indagium_voice_AppleSpeechNative_nativeTranscribe
   (JNIEnv *env, jclass clazz, jbyteArray pcm, jstring language) {
+    if (!hasSpeechUsageDescription()) return javaString(env, jsonResult(@"failure", nil, kMissingUsageDescriptionMessage));
     const char *chars = (*env)->GetStringUTFChars(env, language, NULL);
     NSString *locale = [NSString stringWithUTF8String:chars];
     (*env)->ReleaseStringUTFChars(env, language, chars);
