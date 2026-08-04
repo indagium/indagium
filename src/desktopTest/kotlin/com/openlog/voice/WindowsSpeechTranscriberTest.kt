@@ -9,7 +9,7 @@ class WindowsSpeechTranscriberTest {
         assertEquals(
             "Windows Speech has no installed offline recognizer for Ukrainian. " +
                 "Choose Local Whisper, or install Basic or Enhanced speech recognition for a supported Windows language.",
-            WindowsSpeechTranscriber.failureMessage("OPENLOG_SPEECH_LANGUAGE_UNAVAILABLE", "uk-UA"),
+            WindowsSpeechTranscriber.failureMessage("INDAGIUM_SPEECH_LANGUAGE_UNAVAILABLE", "uk-UA"),
         )
     }
 }

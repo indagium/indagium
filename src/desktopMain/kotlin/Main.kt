@@ -58,7 +58,7 @@ fun main(args: Array<String>) {
             val toolkitClass = Class.forName("sun.awt.X11.XToolkit")
             val field = toolkitClass.getDeclaredField("awtAppClassName")
             field.isAccessible = true
-            field.set(null, "openLog")
+            field.set(null, "Indagium")
         }
     }
 
@@ -78,19 +78,19 @@ fun main(args: Array<String>) {
         }
     }
 
-    // OPENLOG_DEBUG_INPUT=1 diagnostic: prints every AWT mouse event's id/button/modifiersEx.
+    // INDAGIUM_DEBUG_INPUT=1 diagnostic: prints every AWT mouse event's id/button/modifiersEx.
     // Exists to answer one open question empirically — which Java button number(s) X11 delivers
     // horizontal-scroll (core buttons 6/7) as, since XToolkit skips wheel buttons 4/5 when
     // numbering extra buttons and there's no X11 machine to measure this from directly. Run with
-    // OPENLOG_DEBUG_INPUT=1 ./gradlew desktopRun on a real Linux desktop, two-finger swipe
+    // INDAGIUM_DEBUG_INPUT=1 ./gradlew desktopRun on a real Linux desktop, two-finger swipe
     // horizontally, and read off `button` — that's the constant to set in
     // ui/LinuxHorizontalScroll.kt's HSCROLL_BUTTONS. Left OS-unconditional (not Linux-gated) since
     // it's opt-in via env var and harmless noise anywhere else.
-    if (System.getenv("OPENLOG_DEBUG_INPUT") == "1") {
+    if (debugInputEnabled()) {
         Toolkit.getDefaultToolkit().addAWTEventListener(
             { event ->
                 if (event is MouseEvent) {
-                    println("[OPENLOG_DEBUG_INPUT] id=${event.id} button=${event.button} modifiersEx=${event.modifiersEx}")
+                    println("[INDAGIUM_DEBUG_INPUT] id=${event.id} button=${event.button} modifiersEx=${event.modifiersEx}")
                 }
             },
             AWTEvent.MOUSE_EVENT_MASK,
@@ -140,13 +140,13 @@ fun main(args: Array<String>) {
         // Localhost-only automation control server for MCP/dev use (see debug/ControlServer.kt).
         // AppState owns the actual server instance (see setMcpControlEnabled /
         // startControlServerForThisSessionOnly) — this effect only decides the starting state:
-        // OPENLOG_DEBUG_CONTROL / -Dopenlog.debugControl, if set, wins and force-enables for this
-        // run only, without persisting; otherwise the restored/default Settings toggle applies.
+        // INDAGIUM_DEBUG_CONTROL / -Dindagium.debugControl (or the legacy OPENLOG_DEBUG_CONTROL /
+        // -Dopenlog.debugControl spelling), if set, wins and force-enables for this run only,
+        // without persisting; otherwise the restored/default Settings toggle applies.
         // Packaged builds (packageDmg/packageDeb/packageMsi) set neither and default the setting
         // off, so end users never have this listener running unless they explicitly enable it.
         DisposableEffect(Unit) {
-            val envPort = System.getenv("OPENLOG_DEBUG_CONTROL")?.toIntOrNull()
-                ?: System.getProperty("openlog.debugControl")?.toIntOrNull()
+            val envPort = debugControlPort()
             when {
                 envPort != null -> appState.startControlServerForThisSessionOnly(envPort)
                 appState.settings.mcpControlEnabled -> appState.setMcpControlEnabled(true, appState.settings.mcpControlPort)
@@ -169,7 +169,7 @@ fun main(args: Array<String>) {
                 appState.close()
                 exitApplication()
             },
-            title = "openLog",
+            title = "Indagium",
             icon = platformWindowIcon(),
             state = windowState,
         ) {
@@ -216,6 +216,17 @@ private fun maybeAutoCheckForUpdates(appState: AppState, isPackaged: Boolean) {
     if (isPackaged && appState.settings.autoCheckUpdates) appState.checkForUpdates(manual = false)
 }
 
+// New spelling first, legacy OPENLOG_DEBUG_INPUT kept working for shells/run-configs that still
+// set it. Split out from main() to keep it under detekt's cyclomatic-complexity threshold.
+private fun debugInputEnabled(): Boolean =
+    (System.getenv("INDAGIUM_DEBUG_INPUT") ?: System.getenv("OPENLOG_DEBUG_INPUT")) == "1"
+
+// Same dual-read rule as debugInputEnabled above, for the MCP control server's port override.
+// Split out from main() to keep it under detekt's cyclomatic-complexity threshold.
+private fun debugControlPort(): Int? =
+    (System.getenv("INDAGIUM_DEBUG_CONTROL") ?: System.getenv("OPENLOG_DEBUG_CONTROL"))?.toIntOrNull()
+        ?: (System.getProperty("indagium.debugControl") ?: System.getProperty("openlog.debugControl"))?.toIntOrNull()
+
 // On macOS, a JFrame's per-window icon becomes the miniaturized window's Dock image. Leaving it
 // unset lets AppKit render the normal live window miniature; the packaged bundle's openLog.icns
 // remains the application icon. Windows and Linux still need this image for their taskbar/window
@@ -244,7 +255,7 @@ private fun raiseWindow(window: ComposeWindow) {
 }
 
 // Scroll step per detected button-6/7 press — a reasonable guess at "one wheel-notch equivalent,"
-// not measured against a real X11 session. Tune once OPENLOG_DEBUG_INPUT confirms the actual
+// not measured against a real X11 session. Tune once INDAGIUM_DEBUG_INPUT confirms the actual
 // button numbers and event cadence (a single press vs. a press-per-tick repeat while swiping).
 private const val HSCROLL_STEP_PX = 60f
 

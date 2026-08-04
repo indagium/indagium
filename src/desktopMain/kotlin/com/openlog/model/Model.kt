@@ -919,7 +919,7 @@ data class AppSettings(
     val logRowWrapLimitChars: Int = 480,
     val autoLogRowWrap: Boolean = true,
     // MCP/debug control server (see debug/ControlServer.kt). Settings-driven on/off — separate
-    // from the ephemeral OPENLOG_DEBUG_CONTROL env var / -Dopenlog.debugControl override, which
+    // from the ephemeral INDAGIUM_DEBUG_CONTROL env var / -Dindagium.debugControl override, which
     // never persists into this setting (see AppState.startControlServerForThisSessionOnly).
     val mcpControlEnabled: Boolean = false,
     val mcpControlPort: Int = 8991,

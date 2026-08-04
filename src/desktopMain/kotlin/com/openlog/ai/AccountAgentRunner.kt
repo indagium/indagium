@@ -141,9 +141,9 @@ internal class AccountAgentRunner(
                             if (event.serverName == MANAGED_MCP_SERVER_NAME) {
                                 val detail = event.message ?: event.status ?: "updated"
                                 if (event.status.equals("failed", ignoreCase = true) || event.status.equals("error", ignoreCase = true)) {
-                                    terminal.completeExceptionally(IllegalStateException("openLog MCP could not start: $detail"))
+                                    terminal.completeExceptionally(IllegalStateException("Indagium MCP could not start: $detail"))
                                 } else {
-                                    run.emit(AiRunEvent.Status("openLog MCP: $detail"))
+                                    run.emit(AiRunEvent.Status("Indagium MCP: $detail"))
                                 }
                             }
                         }
@@ -163,7 +163,7 @@ internal class AccountAgentRunner(
                                 }
                             }
                             else -> {
-                                client.rejectServerRequest(event.id, "openLog does not support this app-server request.")
+                                client.rejectServerRequest(event.id, "Indagium does not support this app-server request.")
                                 terminal.completeExceptionally(
                                     IllegalStateException("Codex requested unsupported host action: ${event.method}"),
                                 )
@@ -322,7 +322,7 @@ internal fun codexManagedMcpConfig(url: String): List<String> = listOf(
     "--config", "mcp_servers.$MANAGED_MCP_SERVER_NAME.bearer_token_env_var=\"$CODEX_INDAGIUM_MCP_TOKEN_ENV\"",
     // `approval_mode` is not a key Codex's app-server recognizes; in app-server mode Codex always
     // delegates tool-call approval to the host via `mcpServer/elicitation/request`; see
-    // [decideCodexElicitation]. openLog itself routes sensitive actions through
+    // [decideCodexElicitation]. Indagium itself routes sensitive actions through
     // AiToolExecutionCoordinator, so auto-approving Codex's side of that handshake is correct.
     "--config", "mcp_servers.$MANAGED_MCP_SERVER_NAME.approval_mode=\"never\"",
 )
@@ -380,7 +380,7 @@ internal data class CodexElicitationDecision(
  * ```
  * This is a tool-call approval, not an OAuth prompt. When it is for the managed
  * [MANAGED_MCP_SERVER_NAME] server (identified by `serverName` or `_meta.codex_approval_kind`),
- * accept it and let the tool run — openLog already gates destructive tools itself via
+ * accept it and let the tool run — Indagium already gates destructive tools itself via
  * [AiToolExecutionCoordinator]. Any other server (e.g. an OAuth-backed integration from the user's
  * own `~/.codex/config.toml`) is declined; that server simply stays unavailable for this run
  * instead of aborting it.

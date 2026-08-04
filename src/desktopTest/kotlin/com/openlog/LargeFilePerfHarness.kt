@@ -32,7 +32,8 @@ private const val NANOS_PER_MILLI = 1_000_000L
 // uncancelled run measured just above it.
 private const val CANCEL_AFTER_MS = 5L
 
-// Manual performance harness — skipped unless -Dopenlog.perf.file=<path> points at a fixture
+// Manual performance harness — skipped unless -Dindagium.perf.file=<path> (or the legacy
+// -Dopenlog.perf.file spelling) points at a fixture
 // (see docs/perf-large-files.md for how the ~1.5GB fixture is generated). Deliberately not part
 // of the normal suite: it needs a multi-GB heap and minutes of wall time.
 class LargeFilePerfHarness {
@@ -62,7 +63,7 @@ class LargeFilePerfHarness {
 
     @Test
     fun largeFileBenchmark() {
-        val path = System.getProperty("openlog.perf.file").orEmpty()
+        val path = (System.getProperty("indagium.perf.file") ?: System.getProperty("openlog.perf.file")).orEmpty()
         if (path.isBlank()) return
         val file = File(path)
         check(file.isFile) { "fixture not found: $path" }
@@ -143,8 +144,8 @@ class LargeFilePerfHarness {
             computeItems(rareSeqTab.copy(expanded = setOf(firstSeqGid)), applyFilter = true)
         }
         // A sequence pattern matching ~5% of lines: quadratic in candidate count before the
-        // SeqComputer fix, so only run when explicitly asked for (-Dopenlog.perf.dense=1).
-        if (System.getProperty("openlog.perf.dense").orEmpty() == "1") {
+        // SeqComputer fix, so only run when explicitly asked for (-Dindagium.perf.dense=1).
+        if ((System.getProperty("indagium.perf.dense") ?: System.getProperty("openlog.perf.dense")).orEmpty() == "1") {
             val denseSeqTab = tab.copy(filter = tab.filter.copy(sequences = listOf(seqDef("Skipped frames"))))
             timed("computeItems denseSequenceDef") { computeItems(denseSeqTab, applyFilter = true) }
         }
@@ -159,8 +160,8 @@ class LargeFilePerfHarness {
         println("PERF splitPartSizes: ${splitOutputs.map { it.length() / BYTES_PER_MB }}MB")
         splitOutputs.forEach { it.delete() }
 
-        // Archive path: -Dopenlog.perf.archive=<path to zip containing a large log>.
-        val archivePath = System.getProperty("openlog.perf.archive").orEmpty()
+        // Archive path: -Dindagium.perf.archive=<path to zip containing a large log>.
+        val archivePath = (System.getProperty("indagium.perf.archive") ?: System.getProperty("openlog.perf.archive")).orEmpty()
         if (archivePath.isNotBlank()) {
             val archive = File(archivePath)
             check(archive.isFile) { "archive fixture not found: $archivePath" }

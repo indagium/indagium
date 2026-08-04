@@ -9,7 +9,7 @@ package com.openlog.ui
 // The Java button *numbers* those X buttons surface as are UNVERIFIED from this machine (no X11
 // available) — XToolkit skips wheel buttons 4/5 when numbering extra buttons, so X 6/7 most likely
 // land as Java 4/5, but X 8/9 (mouse back/forward) land as Java 6/7, and the true mapping can only
-// be read off with OPENLOG_DEBUG_INPUT=1 on a real Linux desktop (see Main.kt). Keep the numbers —
+// be read off with INDAGIUM_DEBUG_INPUT=1 on a real Linux desktop (see Main.kt). Keep the numbers —
 // and which one is "left" vs "right" — in this one array so a wrong guess is a one-line fix.
 private val HSCROLL_BUTTONS = intArrayOf(4, 5) // [left, right] java.awt.event.MouseEvent.getButton()
 
@@ -21,7 +21,7 @@ private val HSCROLL_BUTTONS = intArrayOf(4, 5) // [left, right] java.awt.event.M
  *
  * Sign is also unverified: this assumes "left" scrolls the view left (negative delta, same
  * direction as ScrollState.dispatchRawDelta) and "right" scrolls it right (positive). Flip the
- * signs here if OPENLOG_DEBUG_INPUT observation shows it backwards.
+ * signs here if INDAGIUM_DEBUG_INPUT observation shows it backwards.
  */
 fun horizontalScrollDelta(button: Int, stepPx: Float): Float? = when (button) {
     HSCROLL_BUTTONS[0] -> -stepPx

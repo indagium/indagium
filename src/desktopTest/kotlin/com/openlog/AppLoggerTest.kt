@@ -41,11 +41,11 @@ class AppLoggerTest {
         val content = logFile.readText()
         val entries = parseLogcat(logFile)
         assertTrue(entries.size >= 6) // message rows plus one header for every stack-trace line
-        assertTrue(entries.all { it.tag.startsWith("openLog.") })
-        assertTrue(entries.any { it.level.name == "D" && it.tag == "openLog.open" })
+        assertTrue(entries.all { it.tag.startsWith("Indagium.") })
+        assertTrue(entries.any { it.level.name == "D" && it.tag == "Indagium.open" })
         assertTrue(entries.any { it.level.name == "W" })
         assertTrue(entries.any { it.level.name == "E" && it.msg.contains("IllegalStateException: disk full") })
-        val threadtime = Regex("^\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d+\\s+\\d+\\s+\\d+ [DIWE] openLog\\.[^:]+: .+")
+        val threadtime = Regex("^\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d+\\s+\\d+\\s+\\d+ [DIWE] Indagium\\.[^:]+: .+")
         assertTrue(content.lines().filter { it.isNotBlank() }.all { it.matches(threadtime) })
     }
 

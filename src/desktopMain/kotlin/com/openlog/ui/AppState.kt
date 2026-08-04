@@ -851,7 +851,7 @@ private fun RolloverDiagnosticEvent.format(): String = "id=$id ts=$ts"
  * function (not a method) since it has no AppState dependency of its own — pure DTO formatting.
  */
 fun formatFollowDiagnostics(d: FollowDiagnostics): String = buildString {
-    appendLine("openLog Follow diagnostics — tab ${d.tabId}")
+    appendLine("Indagium Follow diagnostics — tab ${d.tabId}")
     appendLine("app-data migration: ${migrationOutcomeSummary(DesktopStorage.lastMigrationOutcome)}")
     appendLine("has anchor: ${d.hasAnchor}")
     if (d.anchor != null) appendLine("anchor: ${d.anchor.format()} videoMs=${d.anchorVideoMs}")
@@ -1570,14 +1570,14 @@ class AppState(
         loadCustomAiCommands()
         AppLogger.setFailureReporter { reason -> debugLoggingError = reason }
         debugLoggingError = AppLogger.configure(settings.debugLoggingEnabled, settings.debugLogFilePath)
-        AppLogger.info("app", "openLog started (v${BuildInfo.APP_VERSION})")
+        AppLogger.info("app", "Indagium started (v${BuildInfo.APP_VERSION})")
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
 
     fun close(forAppDataReset: Boolean = false) {
         if (!closed.compareAndSet(false, true)) return
-        if (!forAppDataReset) AppLogger.info("app", "openLog shutting down")
+        if (!forAppDataReset) AppLogger.info("app", "Indagium shutting down")
         autosaveScheduler.cancelPending()
         aiProviderApiKeys.clear()
         aiSidebarRuntime.close()
@@ -1618,7 +1618,7 @@ class AppState(
     // ControlServerManager.setMcpAllowBrowserClients for why this needs to force a restart.
     fun setMcpAllowBrowserClients(enabled: Boolean) = controlServerManager.setMcpAllowBrowserClients(enabled)
 
-    // Main.kt's OPENLOG_DEBUG_CONTROL/-Dopenlog.debugControl path: an ephemeral dev/CI override
+    // Main.kt's INDAGIUM_DEBUG_CONTROL/-Dindagium.debugControl path: an ephemeral dev/CI override
     // for this run only — deliberately never touches persisted settings, so a one-off env-var
     // launch doesn't silently turn the server on for every future normal launch.
     fun startControlServerForThisSessionOnly(port: Int) =

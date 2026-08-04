@@ -53,7 +53,7 @@ internal class AiToolCallBudget(totalCalls: Int) {
 
     fun resultFooter(snapshot: AiToolBudgetSnapshot): String? =
         if (snapshot.totalRemaining in RESULT_FOOTER_REMAINING) {
-            "\n\n[openLog MCP budget: ${snapshot.evidenceUsed}/${snapshot.evidenceBudget} analysis/operations; " +
+            "\n\n[Indagium MCP budget: ${snapshot.evidenceUsed}/${snapshot.evidenceBudget} analysis/operations; " +
                 "Notes writes unlimited (${snapshot.notesWritesUsed} used); annotation reads unlimited; " +
                 "${snapshot.totalRemaining} analysis/operational call(s) remaining.]"
         } else {

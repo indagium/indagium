@@ -537,8 +537,8 @@ class CodexAppServerClient(
         )
 
         val DEFAULT_CLIENT_INFO = CodexClientInfo(
-            name = "openlog2",
-            title = "openLog2",
+            name = "indagium",
+            title = "Indagium",
             version = "0.0.0",
         )
 

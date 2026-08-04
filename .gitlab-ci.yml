@@ -55,10 +55,10 @@ verify:
     - dpkg-deb -R "$deb" "$workdir"
     - desktop_file=$(find "$workdir/opt" -maxdepth 3 -type f -name '*.desktop')
     # StartupWMClass: jpackage never emits it, so docks/taskbars can't match the running
-    # window (WM_CLASS "openLog", set in Main.kt) back to this launcher entry.
+    # window (WM_CLASS "Indagium", set in Main.kt) back to this launcher entry.
     - |
       if ! grep -q '^StartupWMClass=' "$desktop_file"; then
-        echo "StartupWMClass=openLog" >> "$desktop_file"
+        echo "StartupWMClass=Indagium" >> "$desktop_file"
       fi
     # Rebuild the desktop/MIME cache post-install as a safety net alongside xdg-desktop-menu.
     - |

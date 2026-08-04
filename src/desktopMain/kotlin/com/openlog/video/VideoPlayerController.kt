@@ -439,7 +439,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     // every time a frame is actually shown. See shouldDropLateFrame's KDoc for why this is bounded.
     private var consecutiveDrops = 0
 
-    private val decodeThread = Thread({ runLoop() }, "openlog-video-decode").apply {
+    private val decodeThread = Thread({ runLoop() }, "indagium-video-decode").apply {
         isDaemon = true
     }
 
@@ -625,7 +625,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
             if (!closed && recoveredMs != null && recoveredMs > 0L) {
                 _durationMs = growDurationIfNeeded(_durationMs, recoveredMs)
             }
-        }, "openlog-video-duration-scan").apply { isDaemon = true }.start()
+        }, "indagium-video-duration-scan").apply { isDaemon = true }.start()
     }
 
     /**

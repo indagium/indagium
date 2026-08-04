@@ -54,7 +54,7 @@ data class VoiceTranscriptionOptions(
     companion object {
         // Keep this to product and technical proper nouns. A full English phrase biases short
         // Ukrainian/Russian utterances toward English before Whisper has enough context.
-        const val DEFAULT_INITIAL_PROMPT = "openLog, logcat, Android, Kotlin, Gradle"
+        const val DEFAULT_INITIAL_PROMPT = "Indagium, openLog, logcat, Android, Kotlin, Gradle"
 
         fun technicalPrompt(language: String): String = when (language) {
             "uk" -> "$DEFAULT_INITIAL_PROMPT, стек викликів, помилка"

@@ -336,23 +336,23 @@ tasks.matching { it.name == "createRuntimeImage" }.configureEach {
 
 // Same heap headroom for dev runs (./gradlew desktopRun) as for the packaged app. Also forwards
 // two optional -D properties from the Gradle command line into the app JVM (Gradle doesn't do
-// this by itself): openlog.debugControl to enable the MCP control server (see Main.kt), and
-// openlog.run.home to point user.home at a throwaway dir so automated/smoke runs don't touch
+// this by itself): indagium.debugControl to enable the MCP control server (see Main.kt), and
+// indagium.run.home to point user.home at a throwaway dir so automated/smoke runs don't touch
 // the real ~/.openlog2 session state.
 tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
     jvmArgs("-XX:MaxRAMPercentage=50")
     if (org.gradle.internal.os.OperatingSystem.current().isLinux) {
         jvmArgs("--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED")
     }
-    System.getProperty("openlog.debugControl")?.let { systemProperty("openlog.debugControl", it) }
-    System.getProperty("openlog.run.home")?.let { systemProperty("user.home", it) }
+    System.getProperty("indagium.debugControl")?.let { systemProperty("indagium.debugControl", it) }
+    System.getProperty("indagium.run.home")?.let { systemProperty("user.home", it) }
 }
 
 // Manual large-file perf harness (LargeFilePerfHarness.kt) — activated by passing
-// -Dopenlog.perf.file=<fixture path> to Gradle; needs a multi-GB heap for the ~1.5GB fixture.
+// -Dindagium.perf.file=<fixture path> to Gradle; needs a multi-GB heap for the ~1.5GB fixture.
 // Normal test runs are unaffected (the property is blank and the harness returns immediately).
 // Sandbox every test run's `user.home` to a throwaway dir under build/ — unconditionally, unlike
-// desktopRun's opt-in openlog.run.home. Dozens of tests construct AppState() with no autosaveFile
+// desktopRun's opt-in indagium.run.home. Dozens of tests construct AppState() with no autosaveFile
 // override, which otherwise resolves DesktopStorage.appDataDir() to the REAL
 // ~/Library/Application Support/openLog2 (or platform equivalent): a test that calls
 // autosaveNow() (directly, or via any state-mutating call — updateSettings, closeTab, etc.) then
@@ -364,13 +364,13 @@ tasks.withType<Test>().configureEach {
     systemProperty("user.home", testHomeDir.absolutePath)
 }
 
-val perfFixture: String? = System.getProperty("openlog.perf.file")
+val perfFixture: String? = System.getProperty("indagium.perf.file")
 tasks.withType<Test>().configureEach {
     if (perfFixture != null) {
         maxHeapSize = "14g"
-        systemProperty("openlog.perf.file", perfFixture)
-        System.getProperty("openlog.perf.dense")?.let { systemProperty("openlog.perf.dense", it) }
-        System.getProperty("openlog.perf.archive")?.let { systemProperty("openlog.perf.archive", it) }
+        systemProperty("indagium.perf.file", perfFixture)
+        System.getProperty("indagium.perf.dense")?.let { systemProperty("indagium.perf.dense", it) }
+        System.getProperty("indagium.perf.archive")?.let { systemProperty("indagium.perf.archive", it) }
     }
 }
 
