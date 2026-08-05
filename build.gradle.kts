@@ -392,9 +392,10 @@ tasks.register<Exec>("packageFlatpak") {
         "packaging/linux/com.indagium.desktop.yml",
         "packaging/linux/com.indagium.desktop.desktop",
         "packaging/linux/com.indagium.desktop.metainfo.xml",
+        "packaging/linux/com.indagium.desktop.png",
         "packaging/linux/flatpak-launcher.sh",
         "packaging/linux/indagium-mimeinfo.xml",
-        "icons/indagium.png",
+        "packaging/linux/validate-flatpak-icon.py",
     )
     outputs.file(flatpakOutput)
     workingDir(projectDir)

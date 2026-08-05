@@ -63,15 +63,18 @@ repo_dir=$(mktemp -d "${TMPDIR:-/tmp}/indagium-flatpak-repo.XXXXXX")
 trap 'rm -rf "$staging" "$builder_dir" "$repo_dir"' EXIT
 
 cp -a "$input" "$staging/app"
-mkdir -p "$staging/packaging/linux" "$staging/icons"
+mkdir -p "$staging/packaging/linux"
 cp "$metadata_dir/$APP_ID.yml" "$staging/$APP_ID.yml"
-cp "$metadata_dir/$APP_ID.desktop" "$staging/packaging/linux/$APP_ID.desktop"
-cp "$metadata_dir/$APP_ID.metainfo.xml" "$staging/packaging/linux/$APP_ID.metainfo.xml"
-cp "$metadata_dir/flatpak-launcher.sh" "$staging/packaging/linux/flatpak-launcher.sh"
-cp "$metadata_dir/indagium-mimeinfo.xml" "$staging/packaging/linux/indagium-mimeinfo.xml"
-cp "$project_dir/icons/indagium.png" "$staging/icons/indagium.png"
+# The manifest uses a directory source, so its file references must remain valid relative to
+# the staging root.  Copy the complete metadata directory instead of maintaining a second,
+# error-prone list of the files the manifest happens to install.
+cp -a "$metadata_dir/." "$staging/packaging/linux/"
 sed "s/@VERSION@/$version/g" "$staging/packaging/linux/$APP_ID.metainfo.xml" > "$staging/packaging/linux/$APP_ID.metainfo.xml.tmp"
 mv "$staging/packaging/linux/$APP_ID.metainfo.xml.tmp" "$staging/packaging/linux/$APP_ID.metainfo.xml"
+
+# Check the assembled source tree, not only files in the checkout, before starting the costly
+# Flatpak build.  This catches a manifest file that was omitted from staging with a direct error.
+python3 "$metadata_dir/validate-flatpak-icon.py" --staging "$staging"
 
 flatpak-builder --force-clean --default-branch=stable --arch="$arch" --repo="$repo_dir" "$builder_dir" "$staging/$APP_ID.yml"
 rm -f "$output"
