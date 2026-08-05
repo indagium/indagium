@@ -1,6 +1,7 @@
 @file:OptIn(org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class)
 
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import org.gradle.api.tasks.Exec
 
 plugins {
     // Kotlin/Compose bumped 2.1.0 -> 2.4.0 so the app can consume the official Kotlin MCP SDK
@@ -58,6 +59,25 @@ val generatedLicenseResourcesDir = layout.buildDirectory.dir("generated/indagium
 val generatedNativeResourcesDir = layout.buildDirectory.dir("generated/indagiumNativeResources/desktopMain/resources")
 val isMacHost = org.gradle.internal.os.OperatingSystem.current().isMacOsX
 val isWindowsHost = org.gradle.internal.os.OperatingSystem.current().isWindows
+val isLinuxHost = org.gradle.internal.os.OperatingSystem.current().isLinux
+
+// Compose Desktop's native distribution plugin delegates Linux installers to jpackage, which
+// supports .deb but not portable AppImage or sandboxed Flatpak bundles.  These wrappers both use
+// the same createDistributable output as jpackage, so all three Linux formats ship the identical
+// app jars and jlink runtime.  AppImage/Flatpak architecture spellings follow their respective
+// ecosystems (x86_64/aarch64 rather than Debian's amd64/arm64).
+val linuxBundleArchitecture = when (System.getProperty("os.arch").lowercase()) {
+    "amd64", "x86_64" -> "x86_64"
+    "aarch64", "arm64" -> "aarch64"
+    else -> "unsupported"
+}
+val composeAppDirectory = layout.buildDirectory.dir("compose/binaries/main/app/Indagium")
+val appImageOutput = layout.buildDirectory.file(
+    "compose/binaries/main/appimage/Indagium-$appVersion-$linuxBundleArchitecture.AppImage",
+)
+val flatpakOutput = layout.buildDirectory.file(
+    "compose/binaries/main/flatpak/Indagium-$appVersion-$linuxBundleArchitecture.flatpak",
+)
 
 // Apple Speech is called inside the JVM process through a very small Objective-C JNI bridge.
 // Keeping it generated rather than committed as a binary makes the native code reviewable and
@@ -332,6 +352,60 @@ tasks.matching { it.name == "createRuntimeImage" }.configureEach {
                 "JAVA_HOME=\$(/usr/libexec/java_home -v 21) ./gradlew packageDistributionForCurrentOS"
         }
     }
+}
+
+// Linux portable packages.  Both scripts deliberately run outside Gradle's configuration phase:
+// they download/build only when their task is explicitly requested, and they keep generated
+// staging trees under build/ so a clean checkout contains only auditable source metadata.
+tasks.register<Exec>("packageAppImage") {
+    group = "distribution"
+    description = "Packages the Linux Compose distributable as an AppImage (x86_64 or aarch64)."
+    dependsOn("createDistributable")
+    onlyIf("AppImage can only be built on Linux") { isLinuxHost }
+    inputs.dir(composeAppDirectory)
+    inputs.files(
+        "scripts/package-appimage.sh",
+        "packaging/linux/com.indagium.desktop.desktop",
+        "packaging/linux/indagium-mimeinfo.xml",
+        "icons/indagium.png",
+    )
+    outputs.file(appImageOutput)
+    workingDir(projectDir)
+    commandLine(
+        "bash",
+        file("scripts/package-appimage.sh").absolutePath,
+        "--input", composeAppDirectory.get().asFile.absolutePath,
+        "--output", appImageOutput.get().asFile.absolutePath,
+        "--version", appVersion,
+        "--arch", linuxBundleArchitecture,
+    )
+}
+
+tasks.register<Exec>("packageFlatpak") {
+    group = "distribution"
+    description = "Packages the Linux Compose distributable as a Flatpak bundle (x86_64 or aarch64)."
+    dependsOn("createDistributable")
+    onlyIf("Flatpak can only be built on Linux") { isLinuxHost }
+    inputs.dir(composeAppDirectory)
+    inputs.files(
+        "scripts/package-flatpak.sh",
+        "packaging/linux/com.indagium.desktop.yml",
+        "packaging/linux/com.indagium.desktop.desktop",
+        "packaging/linux/com.indagium.desktop.metainfo.xml",
+        "packaging/linux/flatpak-launcher.sh",
+        "packaging/linux/indagium-mimeinfo.xml",
+        "icons/indagium.png",
+    )
+    outputs.file(flatpakOutput)
+    workingDir(projectDir)
+    commandLine(
+        "bash",
+        file("scripts/package-flatpak.sh").absolutePath,
+        "--input", composeAppDirectory.get().asFile.absolutePath,
+        "--output", flatpakOutput.get().asFile.absolutePath,
+        "--version", appVersion,
+        "--arch", linuxBundleArchitecture,
+    )
 }
 
 // Same heap headroom for dev runs (./gradlew desktopRun) as for the packaged app. Also forwards

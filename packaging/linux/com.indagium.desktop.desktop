@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.5
+Type=Application
+Name=Indagium
+GenericName=Android logcat analysis tool
+Comment=Analyze Android logcat files
+Exec=Indagium %F
+Icon=com.indagium.desktop
+Terminal=false
+Categories=Development;Utility;
+MimeType=text/x-log;text/plain;
+StartupWMClass=Indagium

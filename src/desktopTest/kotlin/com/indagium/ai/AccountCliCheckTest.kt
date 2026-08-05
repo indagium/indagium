@@ -3,6 +3,7 @@ package com.indagium.ai
 import com.indagium.model.AiProviderKind
 import com.indagium.model.defaultClaudeCodeAccountProfile
 import com.indagium.model.defaultCodexAccountProfile
+import com.indagium.update.RuntimePackage
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -11,6 +12,26 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class AccountCliCheckTest {
+    @Test
+    fun flatpakReportsThatAccountCliProfilesCannotAccessTheHost() {
+        var commandWasRun = false
+        val check = checkAccountCli(
+            profile = defaultCodexAccountProfile(),
+            commandRunner = {
+                commandWasRun = true
+                LocalCliCommandResult(0, "Logged in using ChatGPT")
+            },
+            runtimePackage = RuntimePackage.FLATPAK,
+        )
+
+        assertFalse(check.isReady)
+        assertTrue(check.message.contains("host CLI access"))
+        assertTrue(check.message.contains("network-backed API provider"))
+        assertFalse(commandWasRun)
+        assertEquals(null, accountCliRuntimeUnavailableMessage(RuntimePackage.NATIVE))
+        assertEquals(null, accountCliRuntimeUnavailableMessage(RuntimePackage.APP_IMAGE))
+    }
+
     @Test
     fun codexCheckAcceptsChatGptLoginStatus() {
         var command: List<String>? = null

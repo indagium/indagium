@@ -15,7 +15,10 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.indagium.generated.BuildInfo
+import com.indagium.update.FLATPAK_UPDATE_COMMAND
+import com.indagium.update.RuntimePackage
 import com.indagium.update.assetForCurrentOs
+import com.indagium.update.runtimePackageForCurrentProcess
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
@@ -32,6 +35,7 @@ internal fun UpdateDialog(state: AppState) {
     val scroll = rememberScrollState()
     val shape = RoundedCornerShape(8.dp)
     val download = state.updateDownload
+    val runtimePackage = runtimePackageForCurrentProcess()
 
     Dialog(
         onDismissRequest = { state.dismissUpdateForNow() },
@@ -69,6 +73,15 @@ internal fun UpdateDialog(state: AppState) {
                     }
                 }
             }
+            if (runtimePackage == RuntimePackage.FLATPAK) {
+                AppText("Update with Flatpak", color = colors.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                AppText(
+                    "Run this command in a terminal:",
+                    color = colors.td,
+                    fontSize = 11.sp,
+                )
+                AppText(FLATPAK_UPDATE_COMMAND, color = colors.tx, fontSize = 11.sp, fontFamily = MONO)
+            }
             when (download) {
                 is UpdateDownloadState.InProgress -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     AppText("Downloading… ${(download.fraction * 100).toInt()}%", color = colors.td, fontSize = 11.sp)
@@ -91,7 +104,12 @@ internal fun UpdateDialog(state: AppState) {
                 when {
                     download is UpdateDownloadState.Done ->
                         AppButton("Close", onClick = { state.dismissUpdateForNow() }, variant = ButtonVariant.Primary)
-                    assetForCurrentOs(release.assets) != null -> AppButton(
+                    runtimePackage == RuntimePackage.FLATPAK -> AppButton(
+                        "Copy update command",
+                        onClick = { state.copyToClipboard(FLATPAK_UPDATE_COMMAND) },
+                        variant = ButtonVariant.Primary,
+                    )
+                    assetForCurrentOs(release.assets, runtimePackage = runtimePackage) != null -> AppButton(
                         "Download",
                         onClick = { state.downloadUpdate() },
                         variant = ButtonVariant.Primary,

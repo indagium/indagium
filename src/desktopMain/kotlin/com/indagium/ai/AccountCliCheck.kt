@@ -2,6 +2,8 @@ package com.indagium.ai
 
 import com.indagium.model.AiProviderKind
 import com.indagium.model.AiProviderProfile
+import com.indagium.update.RuntimePackage
+import com.indagium.update.runtimePackageForCurrentProcess
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -153,16 +155,32 @@ internal fun accountCliSearchDirs(
  */
 internal fun checkAccountCli(
     kind: AiProviderKind,
+    runtimePackage: RuntimePackage = runtimePackageForCurrentProcess(),
     commandRunner: LocalCliCommandRunner = SystemLocalCliCommandRunner,
-): AccountCliCheck = checkAccountCli(defaultProfileFor(kind), commandRunner)
+): AccountCliCheck = checkAccountCli(defaultProfileFor(kind), runtimePackage, commandRunner)
 
 internal fun checkAccountCli(
     profile: AiProviderProfile,
+    runtimePackage: RuntimePackage = runtimePackageForCurrentProcess(),
     commandRunner: LocalCliCommandRunner = SystemLocalCliCommandRunner,
-): AccountCliCheck = when (profile.kind) {
+): AccountCliCheck = accountCliRuntimeUnavailableMessage(runtimePackage)?.let { AccountCliCheck(false, it) } ?: when (profile.kind) {
     AiProviderKind.CODEX_ACCOUNT -> checkCodex(profile, commandRunner)
     AiProviderKind.CLAUDE_CODE_ACCOUNT -> checkClaudeCode(profile, commandRunner)
     else -> AccountCliCheck(false, "This provider does not use a local account CLI.")
+}
+
+/**
+ * Account agents launch a host-installed Codex or Claude Code executable. Flatpak intentionally
+ * has no host process access, so fail before searching for or starting an executable; API-backed
+ * providers are unaffected because they communicate over the permitted network instead.
+ */
+internal fun accountCliRuntimeUnavailableMessage(
+    runtimePackage: RuntimePackage = runtimePackageForCurrentProcess(),
+): String? = if (runtimePackage == RuntimePackage.FLATPAK) {
+    "Codex and Claude Code account profiles need host CLI access, which is unavailable in the Flatpak sandbox. " +
+        "Use a network-backed API provider instead."
+} else {
+    null
 }
 
 private fun checkCodex(profile: AiProviderProfile, commandRunner: LocalCliCommandRunner): AccountCliCheck = try {
@@ -209,13 +227,16 @@ private fun checkClaudeCode(profile: AiProviderProfile, commandRunner: LocalCliC
 /** Returns models exposed by the signed-in local Codex catalog without running a model turn. */
 internal fun discoverAccountModels(
     kind: AiProviderKind,
+    runtimePackage: RuntimePackage = runtimePackageForCurrentProcess(),
     commandRunner: LocalCliCommandRunner = SystemLocalCliCommandRunner,
-): ModelDiscoveryResult = discoverAccountModels(defaultProfileFor(kind), commandRunner)
+): ModelDiscoveryResult = discoverAccountModels(defaultProfileFor(kind), runtimePackage, commandRunner)
 
 internal fun discoverAccountModels(
     profile: AiProviderProfile,
+    runtimePackage: RuntimePackage = runtimePackageForCurrentProcess(),
     commandRunner: LocalCliCommandRunner = SystemLocalCliCommandRunner,
 ): ModelDiscoveryResult {
+    accountCliRuntimeUnavailableMessage(runtimePackage)?.let { return ModelDiscoveryResult.Unavailable(it) }
     if (profile.kind != AiProviderKind.CODEX_ACCOUNT) {
         // Claude Code exposes documented session aliases but no entitlement-aware model-list
         // command. These are useful choices, not a claim that either is enabled for this account.
