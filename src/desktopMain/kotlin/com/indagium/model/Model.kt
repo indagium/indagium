@@ -1067,6 +1067,12 @@ data class AppSettings(
     // Linux only: controls AWT's sun.awt.disableGtkFileDialogs startup property. It is persisted
     // in keyed JSON (not the frozen legacy positional token) so switching modes survives restart.
     val linuxFilePickerMode: LinuxFilePickerMode = LinuxFilePickerMode.AUTOMATIC,
+    // Options for copying selected log rows. They live in keyed JSON only so historic positional
+    // autosaves remain readable without altering their field layout.
+    val copyPidTid: Boolean = false,
+    val copyPidAsName: Boolean = false,
+    val copyRowNumber: Boolean = false,
+    val copyTimeDelta: Boolean = false,
 )
 
 enum class ThemePreset(val label: String) {

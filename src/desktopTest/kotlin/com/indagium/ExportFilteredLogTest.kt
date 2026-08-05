@@ -66,8 +66,8 @@ class ExportFilteredLogTest {
         val csv = buildFilteredCsv(tab(logs))
         val lines = csv.trim().lines()
 
-        assertEquals("ts,level,tag,pid,tid,msg", lines[0])
-        assertEquals("10:00:00.000,I,App,10,20,hello", lines[1])
+        assertEquals("ts,level,tag,msg", lines[0])
+        assertEquals("10:00:00.000,I,App,hello", lines[1])
     }
 
     @Test

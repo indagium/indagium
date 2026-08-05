@@ -612,6 +612,10 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("customIssueRules", customIssueRulesJson(customIssueRules))
     put("showProcessNamesInNewTabs", showProcessNamesInNewTabs)
     put("linuxFilePickerMode", linuxFilePickerMode.name)
+    put("copyPidTid", copyPidTid)
+    put("copyPidAsName", copyPidAsName)
+    put("copyRowNumber", copyRowNumber)
+    put("copyTimeDelta", copyTimeDelta)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -895,6 +899,10 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         linuxFilePickerMode = o.stringOrNull("linuxFilePickerMode")
             ?.let { raw -> runCatching { LinuxFilePickerMode.valueOf(raw) }.getOrNull() }
             ?: LinuxFilePickerMode.AUTOMATIC,
+        copyPidTid = o.boolOrDefault("copyPidTid", false),
+        copyPidAsName = o.boolOrDefault("copyPidAsName", false),
+        copyRowNumber = o.boolOrDefault("copyRowNumber", false),
+        copyTimeDelta = o.boolOrDefault("copyTimeDelta", false),
     )
 }.getOrNull()
 

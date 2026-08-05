@@ -772,6 +772,7 @@ fun SegmentedControl(
     modifier: Modifier = Modifier,
     selectedColors: List<Color>? = null,
     fillWidth: Boolean = false,
+    enabled: Boolean = true,
 ) {
     val tc = tc()
     Row(
@@ -786,13 +787,13 @@ fun SegmentedControl(
                 contentAlignment = Alignment.Center,
                 modifier = (if (fillWidth) Modifier.weight(1f) else Modifier.defaultMinSize(minWidth = 36.dp))
                     .height(28.dp)
-                    .background(if (selected) selColor.copy(.2f) else Color.Transparent)
-                    .clickable { onToggle(index) }
+                    .background(if (selected && enabled) selColor.copy(.2f) else Color.Transparent)
+                    .clickable(enabled = enabled) { onToggle(index) }
                     .padding(horizontal = 10.dp),
             ) {
                 AppText(
                     text = label,
-                    color = if (selected) selColor else tc.ts,
+                    color = if (!enabled) tc.td.copy(.5f) else if (selected) selColor else tc.ts,
                     fontSize = 12.sp,
                     fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
                 )

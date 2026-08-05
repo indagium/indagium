@@ -62,6 +62,9 @@ import com.indagium.model.AppSettings
 import com.indagium.model.LogTab
 import com.indagium.model.VideoFrameReference
 import com.indagium.model.resolveRows
+import com.indagium.utils.LogLinePresentationContext
+import com.indagium.utils.presentLogLine
+import com.indagium.utils.visibleEntries
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
@@ -656,7 +659,7 @@ fun AnnotationPanel(
                             dragHandleModifier = dragHandleModifier,
                         )
                         is AnnBlock.LogRef -> LogRefBlock(
-                            block = block, tab = tab, mono = mono, tc = tc,
+                            block = block, tab = tab, settings = settings, mono = mono, tc = tc,
                             isFirst = isFirst, isLast = isLast,
                             focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}" || highlightedBlockId == block.id,
                             fieldFocusRequester = blockFieldRequesters[block.id],
@@ -1069,6 +1072,8 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
 
                 is AnnBlock.LogRef -> {
                     val rows = block.resolveRows(tab)
+                    val localSource = block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
+                    val context = rememberAnnotationLogLineContext(tab, settings, localSource)
                     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (block.caption.isNotBlank() || settings.numberAnnotationBlocks) {
                             AnnotationMarkdownText(
@@ -1089,7 +1094,7 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                         ) {
                             rows.forEach { row ->
                                 AppText(
-                                    "${row.ts}  ${row.level.key}/${row.tag}  ${row.msg}",
+                                    presentLogLine(tab, row, settings, context, allowProcessName = localSource),
                                     color = tc.ts,
                                     fontSize = 12.sp,
                                     fontFamily = mono,
@@ -1130,6 +1135,23 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
             Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
             AnnotationMarkdownText(tab.annotations.suffix, tc)
         }
+    }
+}
+
+/**
+ * Keeps the two on-screen annotation surfaces in lockstep with buildMd()/rich copy. A
+ * persisted or cross-tab block has no safe relationship to this tab's visible-row baseline or
+ * process-name map, so it deliberately omits Δt and falls back to a numeric PID.
+ */
+@Composable
+private fun rememberAnnotationLogLineContext(
+    tab: LogTab,
+    settings: AppSettings,
+    localSource: Boolean,
+): LogLinePresentationContext? {
+    if (!localSource || !settings.copyTimeDelta || !tab.showTimeDelta) return null
+    return remember(tab.id, tab.logData, tab.filter, tab.selected, settings) {
+        LogLinePresentationContext(tab, settings, visibleEntries(tab))
     }
 }
 
@@ -1234,6 +1256,7 @@ private fun NoteBlock(
 private fun LogRefBlock(
     block: AnnBlock.LogRef,
     tab: LogTab,
+    settings: AppSettings,
     mono: FontFamily,
     tc: ThemeColors,
     isFirst: Boolean, isLast: Boolean,
@@ -1248,6 +1271,8 @@ private fun LogRefBlock(
     dragHandleModifier: Modifier = Modifier,
 ) {
     val rows = block.resolveRows(tab)
+    val localSource = block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
+    val context = rememberAnnotationLogLineContext(tab, settings, localSource)
     val borderColor = rows.firstOrNull()?.level?.defaultColor ?: tc.ac
 
     Column(
@@ -1295,18 +1320,14 @@ private fun LogRefBlock(
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             rows.forEach { r ->
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    AppText(r.ts, color = tc.td, fontSize = 9.sp, fontFamily = mono, modifier = Modifier.width(75.dp))
-                    LevelBadge(r.level)
-                    AppText(r.tag, color = tc.ts, fontSize = 9.sp, fontFamily = mono,
-                        modifier = Modifier.width(80.dp), overflow = TextOverflow.Ellipsis)
-                    AppText(r.msg, color = tc.ts, fontSize = 9.sp, fontFamily = mono,
-                        modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
-                }
+                AppText(
+                    presentLogLine(tab, r, settings, context, allowProcessName = localSource),
+                    color = tc.ts,
+                    fontSize = 9.sp,
+                    fontFamily = mono,
+                    maxLines = Int.MAX_VALUE,
+                    overflow = TextOverflow.Clip,
+                )
             }
         }
     }

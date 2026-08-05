@@ -730,6 +730,9 @@ internal fun computeItems(
 private fun sourcePrefixLabel(settings: AppSettings): String =
     settings.annotationPrefixLabel.trim().ifBlank { "From" }
 
+private fun annotationLineContext(tab: LogTab, settings: AppSettings): LogLinePresentationContext =
+    LogLinePresentationContext(tab, settings, visibleEntries(tab))
+
 // Extracted out of buildMd() purely to keep that function's cyclomatic complexity under the
 // detekt gate — same behavior as when it was inlined in the AnnBlock.LogRef branch. Returns the
 // next block number (only advanced when numbering is on, mirroring the original inline
@@ -743,13 +746,17 @@ private fun StringBuilder.appendLogRefBlock(tab: LogTab, settings: AppSettings, 
     }
     if (block.sourceFilename != null) appendLine("${sourcePrefixLabel(settings)} ${block.sourceFilename}")
     val rows = block.resolveRows(tab)
+    // A recovered/cross-tab LogRef has no reliable current viewer baseline or process-name map.
+    // It still copies its own PID/TID data, but deliberately falls back to numeric PID and omits Δt.
+    val localSource = block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
+    val context = if (localSource) annotationLineContext(tab, settings) else null
     when (settings.annotationLogBlockStyle) {
         AnnotationLogBlockStyle.INDENTED ->
-            rows.forEach { r -> appendLine("    ${r.ts}  ${r.level.key}/${r.tag}  ${r.msg}") }
+            rows.forEach { row -> appendLine("    ${presentLogLine(tab, row, settings, context, allowProcessName = localSource)}") }
 
         AnnotationLogBlockStyle.JIRA_JAVA -> {
             appendLine("{code:java}")
-            rows.forEach { r -> appendLine("${r.ts}  ${r.level.key}/${r.tag}  ${r.msg}") }
+            rows.forEach { row -> appendLine(presentLogLine(tab, row, settings, context, allowProcessName = localSource)) }
             appendLine("{code}")
         }
     }
