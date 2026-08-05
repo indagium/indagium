@@ -551,7 +551,7 @@ private const val FOLLOW_DIAGNOSTIC_CANDIDATE_COUNT = 3
 // independent literals that have to be kept in sync by hand.
 internal const val AUTOSAVE_MAGIC_CURRENT = "indagium-cache-v1"
 private const val AUTOSAVE_MAGIC_LEGACY_OPENLOG2 = "openLog2-cache-v1"
-private val AUTOSAVE_MAGIC_ACCEPTED = setOf(AUTOSAVE_MAGIC_CURRENT, AUTOSAVE_MAGIC_LEGACY_OPENLOG2)
+internal val AUTOSAVE_MAGIC_ACCEPTED = setOf(AUTOSAVE_MAGIC_CURRENT, AUTOSAVE_MAGIC_LEGACY_OPENLOG2)
 
 data class PendingSequenceStart(val text: String, val tag: String)
 

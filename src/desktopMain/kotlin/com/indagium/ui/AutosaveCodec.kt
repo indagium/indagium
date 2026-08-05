@@ -610,6 +610,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("showVideoFollowReadout", showVideoFollowReadout)
     put("customIssueRules", customIssueRulesJson(customIssueRules))
     put("showProcessNamesInNewTabs", showProcessNamesInNewTabs)
+    put("linuxFilePickerMode", linuxFilePickerMode.name)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -886,8 +887,32 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         // same default a fresh AppSettings() carries — see showProcessNamesInNewTabs' own doc. An
         // old blob's "processNameMode" key is simply ignored; nothing reads it any more.
         showProcessNamesInNewTabs = o.boolOrDefault("showProcessNamesInNewTabs", false),
+        linuxFilePickerMode = o.stringOrNull("linuxFilePickerMode")
+            ?.let { raw -> runCatching { LinuxFilePickerMode.valueOf(raw) }.getOrNull() }
+            ?: LinuxFilePickerMode.AUTOMATIC,
     )
 }.getOrNull()
+
+/**
+ * Reads just the persisted settings needed before AWT/Compose startup. AppState still performs
+ * the full restore later; this deliberately has no side effects beyond reading autosave.cache.
+ */
+internal fun restoredSettingsFromAutosave(autosaveFile: File): AppSettings {
+    if (!autosaveFile.exists()) return AppSettings()
+    return runCatching {
+        val lines = autosaveFile.readLines()
+        if (lines.firstOrNull() !in AUTOSAVE_MAGIC_ACCEPTED) return@runCatching AppSettings()
+        val settingsValue = lines.asSequence()
+            .drop(1)
+            .takeWhile { it != "tabs" }
+            .firstOrNull { it.substringBefore('\t') == "settings" }
+            ?.substringAfter('\t', "")
+            ?: return@runCatching AppSettings()
+        val decoded = settingsValue.unb64()
+        if (decoded.trimStart().startsWith("{")) settingsFromJson(decoded) ?: AppSettings()
+        else settingsFromToken(decoded) ?: AppSettings()
+    }.getOrDefault(AppSettings())
+}
 
 internal fun AppState.compareStateToken(): String = tokenFields(
     compareTabId,

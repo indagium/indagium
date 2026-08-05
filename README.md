@@ -99,6 +99,20 @@ xdg-mime default indagium-Indagium.desktop text/plain text/x-log
 
 or right-click a file in your file manager → **Open With** → **Indagium** → set as default.
 
+#### File picker troubleshooting
+
+If opening or saving files hangs, fails to appear, or behaves incorrectly under your Linux desktop,
+open **Settings → Appearance → File picker**, choose **Compatibility X11**, and restart Indagium.
+For an immediate one-launch workaround without changing Settings, run:
+
+```bash
+JAVA_TOOL_OPTIONS='-Dsun.awt.disableGtkFileDialogs=true' /opt/Indagium/bin/Indagium
+```
+
+**Automatic** is the default: it uses Compatibility X11 only when `/etc/os-release` has an exact
+`ID` of `debian`, `arch`, `manjaro`, or `fedora`; it uses Native GTK for Ubuntu and unknown
+distributions. A launch-time `-Dsun.awt.disableGtkFileDialogs=...` property overrides this setting.
+
 ## In-app AI assistant
 
 **Notes** and **AI** are independent toggles on the main toolbar (next to **Filter**), each showing
