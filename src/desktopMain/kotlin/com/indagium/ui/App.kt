@@ -62,6 +62,43 @@ import kotlin.math.roundToInt
 /** The popup is bounded visually, but every retained path stays reachable by scrolling. */
 internal fun recentFilesForMenu(recentFiles: List<String>): List<String> = recentFiles
 
+/**
+ * Files dropped by Linux file managers are not consistently exposed through AWT's
+ * [DragData.FilesList].  In particular, some Wayland/X11 combinations offer the standard
+ * `text/uri-list` flavour instead.  Keep this conversion local-file-only: a remote URI or an
+ * arbitrary text selection must never be mistaken for a file-open request.
+ */
+internal fun localFilesFromUriList(uriList: String): List<File> =
+    uriList.lineSequence()
+        .map(String::trim)
+        .filter { it.isNotEmpty() && !it.startsWith('#') }
+        .mapNotNull(::localFileFromDropUri)
+        .toList()
+
+private fun localFileFromDropUri(value: String): File? = runCatching {
+    URI.create(value)
+        .takeIf { it.scheme.equals("file", ignoreCase = true) }
+        ?.let(::File)
+}.getOrNull()
+
+internal fun isFileDropData(data: DragData): Boolean = when (data) {
+    is DragData.FilesList -> true
+    is DragData.Text -> data.bestMimeType.substringBefore(';').trim()
+        .equals("text/uri-list", ignoreCase = true)
+    else -> false
+}
+
+internal fun localFilesFromDropData(data: DragData): List<File> = when (data) {
+    is DragData.FilesList -> runCatching { data.readFiles().mapNotNull(::localFileFromDropUri) }
+        .getOrDefault(emptyList())
+    is DragData.Text -> if (isFileDropData(data)) {
+        runCatching { localFilesFromUriList(data.readText()) }.getOrDefault(emptyList())
+    } else {
+        emptyList()
+    }
+    else -> emptyList()
+}
+
 @Composable
 fun App(
     state: AppState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) },
@@ -125,13 +162,12 @@ fun App(
         LaunchedEffect(state) {
             state.startPendingRestoredTabLoads()
         }
-        val dropTarget = remember {
+        val dropTarget = remember(state) {
             object : DragAndDropTarget {
                 override fun onDrop(event: DragAndDropEvent): Boolean {
-                    val files = runCatching {
-                        (event.dragData() as DragData.FilesList).readFiles()
-                    }.getOrElse { return false }
-                    val dropped = files.mapNotNull { uri -> runCatching { File(URI.create(uri)) }.getOrNull() }
+                    val dropped = runCatching { localFilesFromDropData(event.dragData()) }
+                        .getOrDefault(emptyList())
+                    if (dropped.isEmpty()) return false
                     // Keep the pairing decision in AppState: opening a log publishes its tab
                     // asynchronously, so attaching here would race it and bind the video to the
                     // previously active tab instead.
@@ -145,7 +181,7 @@ fun App(
             Modifier.fillMaxSize().background(tc.bg)
                 .dragAndDropTarget(
                     shouldStartDragAndDrop = { event ->
-                        runCatching { event.dragData() is DragData.FilesList }.getOrElse { false }
+                        runCatching { isFileDropData(event.dragData()) }.getOrDefault(false)
                     },
                     target = dropTarget,
                 )
