@@ -23,9 +23,13 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class CopyMetadataPresentationTest {
+    private companion object {
+        const val PROCESS_ID = 42
+    }
+
     private val rows = listOf(
         LogEntry(1, "10:00:00.000", LogLevel.I, "App", "start"),
-        LogEntry(2, "10:00:00.250", LogLevel.E, "App", "boom", pid = 42, tid = 7),
+        LogEntry(2, "10:00:00.250", LogLevel.E, "App", "boom", pid = PROCESS_ID, tid = 7),
     )
 
     private val settings = AppSettings(
@@ -41,7 +45,7 @@ class CopyMetadataPresentationTest {
         "log",
         "test.log",
         rows,
-        analysis = LogAnalysis(processNames = mapOf(42 to "com.example.app"), pending = false),
+        analysis = LogAnalysis(processNames = mapOf(PROCESS_ID to "com.example.app"), pending = false),
         // Copy-as-name is an export preference, deliberately independent of the per-tab display
         // mode used by the PID cell in the viewer.
         processNameMode = ProcessNameMode.OFF,

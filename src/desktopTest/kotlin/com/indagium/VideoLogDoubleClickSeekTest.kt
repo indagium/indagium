@@ -26,13 +26,21 @@ class VideoLogDoubleClickSeekTest {
         var seekedTo: Long? = null
 
         override fun play() = Unit
+
         override fun pause() = Unit
+
         override fun seek(ms: Long) { seekedTo = ms }
+
         override fun setRate(rate: Float) = Unit
+
         override fun setVolume(volume: Float) = Unit
+
         override fun setMuted(muted: Boolean) = Unit
+
         override fun grabCurrentFrame(): ByteArray? = null
+
         override fun grabFrameAt(ms: Long): ByteArray? = null
+
         override fun close() = Unit
     }
 

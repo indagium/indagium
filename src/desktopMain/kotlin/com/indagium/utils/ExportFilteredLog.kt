@@ -1,8 +1,7 @@
 package com.indagium.utils
 
-import com.indagium.model.LogEntry
-import com.indagium.model.LogTab
 import com.indagium.model.AppSettings
+import com.indagium.model.LogTab
 import java.io.File
 
 // Always the full filtered data (visibleEntries — same source computeItems() uses), regardless

@@ -1,7 +1,7 @@
 @file:OptIn(org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class)
 
-import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import org.gradle.api.tasks.Exec
+import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
     // Kotlin/Compose bumped 2.1.0 -> 2.4.0 so the app can consume the official Kotlin MCP SDK
