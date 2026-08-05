@@ -807,6 +807,7 @@ class SourceIndexAppStateTest {
         val dir = createTempDirectory("openlog-windows-standard-editors").toFile()
         val localAppData = File(dir, "LocalAppData").apply { mkdirs() }
         val programFiles = File(dir, "Program Files").apply { mkdirs() }
+
         fun executable(root: File, relativePath: String): File = File(root, relativePath).apply {
             parentFile.mkdirs()
             writeText("windows executable fixture")
@@ -843,6 +844,7 @@ class SourceIndexAppStateTest {
     fun windowsToolboxDiscoveryFindsVersionedIdeaAndAndroidStudioLaunchers() {
         val dir = createTempDirectory("openlog-windows-toolbox-editors").toFile()
         val toolboxApps = File(dir, "LocalAppData/JetBrains/Toolbox/apps").apply { mkdirs() }
+
         fun executable(relativePath: String): File = File(toolboxApps, relativePath).apply {
             parentFile.mkdirs()
             writeText("windows executable fixture")

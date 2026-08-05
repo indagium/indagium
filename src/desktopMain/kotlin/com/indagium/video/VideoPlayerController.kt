@@ -161,8 +161,10 @@ internal fun growDurationIfNeeded(currentDurationMs: Long, positionMs: Long): Lo
 internal enum class VideoSeekReadiness {
     /** A headerless source is still being inspected in the background. */
     DISCOVERING,
+
     /** A positive duration is available, so timeline seeks are meaningful. */
     READY,
+
     /** Every non-playback recovery path was exhausted without finding a duration. */
     UNAVAILABLE,
 }
@@ -489,22 +491,22 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     private val grabber = FFmpegFrameGrabber(path)
     private val converter = Java2DFrameConverter()
 
-    private var _currentFrame by mutableStateOf<ImageBitmap?>(null)
-    private var _positionMs by mutableStateOf(0L)
-    private var _seekState by mutableStateOf(VideoSeekState())
-    private var _isPlaying by mutableStateOf(false)
-    private var _error by mutableStateOf<String?>(null)
-    private var _volume by mutableStateOf(1f)
-    private var _isMuted by mutableStateOf(false)
+    private var currentFrameState by mutableStateOf<ImageBitmap?>(null)
+    private var positionMsState by mutableStateOf(0L)
+    private var seekState by mutableStateOf(VideoSeekState())
+    private var isPlayingState by mutableStateOf(false)
+    private var errorState by mutableStateOf<String?>(null)
+    private var volumeState by mutableStateOf(1f)
+    private var isMutedState by mutableStateOf(false)
 
-    override val currentFrame: ImageBitmap? get() = _currentFrame
-    override val positionMs: Long get() = _positionMs
-    override val durationMs: Long get() = _seekState.durationMs
-    override val seekReadiness: VideoSeekReadiness get() = _seekState.readiness
-    override val isPlaying: Boolean get() = _isPlaying
-    override val volume: Float get() = _volume
-    override val isMuted: Boolean get() = _isMuted
-    override val error: String? get() = _error
+    override val currentFrame: ImageBitmap? get() = currentFrameState
+    override val positionMs: Long get() = positionMsState
+    override val durationMs: Long get() = seekState.durationMs
+    override val seekReadiness: VideoSeekReadiness get() = seekState.readiness
+    override val isPlaying: Boolean get() = isPlayingState
+    override val volume: Float get() = volumeState
+    override val isMuted: Boolean get() = isMutedState
+    override val error: String? get() = errorState
 
     // Written only from the decode thread; read from any thread (Compose recomposition, MCP,
     // grabCurrentFrame callers) — a plain @Volatile is enough since it's always assigned wholesale
@@ -568,14 +570,14 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         // The decoder owns the clock fields. Rebase on its next step so a Play immediately after
         // a seek cannot use a stale frame timestamp as its origin.
         resetPlaybackClockRequested = true
-        _isPlaying = true
+        isPlayingState = true
         runCatching { audioLine?.start() }
         wakeDecoder()
     }
 
     override fun pause() {
         playRequested = false
-        _isPlaying = false
+        isPlayingState = false
         runCatching { audioLine?.stop() }
         runCatching { audioLine?.flush() }
         wakeDecoder()
@@ -603,18 +605,18 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     }
 
     override fun setVolume(volume: Float) {
-        _volume = volume.coerceIn(0f, 1f)
+        volumeState = volume.coerceIn(0f, 1f)
         applyGain()
     }
 
     override fun setMuted(muted: Boolean) {
-        _isMuted = muted
+        isMutedState = muted
         applyGain()
     }
 
     private fun applyGain() {
         val control = gainControl ?: return
-        val effective = if (_isMuted) 0f else _volume
+        val effective = if (isMutedState) 0f else volumeState
         val db = if (effective < SILENT_VOLUME_THRESHOLD) {
             control.minimum
         } else {
@@ -637,7 +639,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     override fun close() {
         closed = true
         playRequested = false
-        _isPlaying = false
+        isPlayingState = false
         // Closing the audio line wakes a blocking SourceDataLine.write; interrupt wakes an idle
         // poll/sleep. The decode thread owns grabber.release() so FFmpeg is never released while
         // another thread is grabbing from it.
@@ -691,7 +693,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         true
     }.getOrElse { t ->
         AppLogger.error("video", "failed to open video", t)
-        _error = t.message ?: t::class.simpleName ?: "Failed to open video"
+        errorState = t.message ?: t::class.simpleName ?: "Failed to open video"
         publishDurationState(discoveryFinished = true)
         false
     }
@@ -817,13 +819,13 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         val frame = runCatching { grabImageAtOrAfter(minimumTimestampUs, epoch) }
             .onFailure {
                 AppLogger.error("video", "image grab failed", it)
-                _error = it.message ?: "Playback error"
+                errorState = it.message ?: "Playback error"
             }
             .getOrNull()
 
         if (frame == null) {
             if (isInitialFrame && !closed) {
-                _error = "Video contains no decodable image frames"
+                errorState = "Video contains no decodable image frames"
             }
             return
         }
@@ -836,14 +838,14 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     private fun grabNextFrame(): Frame? = runCatching { grabber.grab() }
         .onFailure {
             AppLogger.error("video", "video frame grab failed", it)
-            _error = it.message ?: "Playback error"
+            errorState = it.message ?: "Playback error"
             playRequested = false
-            _isPlaying = false
+            isPlayingState = false
         }
         .getOrNull()
         ?: run {
             // Null with no exception means end of stream, not a failure.
-            if (playRequested) { playRequested = false; _isPlaying = false }
+            if (playRequested) { playRequested = false; isPlayingState = false }
             null
         }
 
@@ -965,7 +967,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
             if (timestampUs.coerceAtLeast(0L) < timeline.positionUs) return
             val positionUs = timeline.advance(timestampUs)
             lastImage = image
-            runCatching { _currentFrame = image.toComposeImageBitmap() }
+            runCatching { currentFrameState = image.toComposeImageBitmap() }
             setPositionMs(positionUs / MICROS_PER_MS)
             // Deliberately NOT rebasing playbackStartNanos/playbackStartTimestampUs here. This used
             // to reset the wall-clock origin to "now = this frame's timestamp" on every published
@@ -990,12 +992,12 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
 
     // Step 5 of the duration-recovery chain (see growDurationIfNeeded's KDoc): every publish of a
     // real position is also a chance to notice the currently-known duration has been undershot, and
-    // fix that on the spot. Routing every _positionMs write through this one function (rather than
+    // fix that on the spot. Routing every positionMsState write through this one function (rather than
     // duplicating the growth check at each call site) is what guarantees no future publish site can
     // forget it — the three current call sites are a seek, a shown frame, and a dropped-frame clock
     // advance, and any new one inherits the same guarantee for free.
     private fun setPositionMs(ms: Long) {
-        _positionMs = ms
+        positionMsState = ms
         publishDurationState(observedDurationMs = ms)
     }
 
@@ -1003,7 +1005,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
      * thread's completion with those playback updates so duration/readiness stay monotonic. */
     private fun publishDurationState(observedDurationMs: Long = 0L, discoveryFinished: Boolean = false) {
         synchronized(presentationLock) {
-            _seekState = advanceVideoSeekState(_seekState, observedDurationMs, discoveryFinished)
+            seekState = advanceVideoSeekState(seekState, observedDurationMs, discoveryFinished)
         }
     }
 

@@ -37,8 +37,8 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -686,18 +686,18 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             first = {
                 CompactSettingWithTooltip(
                     label = "Row wrapping",
-            // AWT has no horizontal mouse-wheel axis at all (confirmed via
-            // java.awt.event.MouseWheelEvent — there's no getWheelRotationX() or
-            // equivalent), so Compose Desktop only ever produces a horizontal scroll
-            // delta when Shift is held down (its AWT bridge maps the wheel rotation into
-            // Offset.x specifically for that case). A genuine two-finger trackpad
-            // horizontal swipe never reaches Compose as a horizontal delta at all on
-            // Linux; see ui/LinuxHorizontalScroll.kt for the X11-button bridge that
-            // targets that gap directly. Shift+wheel works everywhere regardless, hence
-            // the tooltip below.
-            tooltip = "Auto wraps long lines to fit the panel width; toggle off to set a fixed " +
-                "wrap column and scroll horizontally instead. Tip: hold Shift while scrolling if " +
-                "two-finger trackpad swipe doesn't scroll horizontally.",
+                    // AWT has no horizontal mouse-wheel axis at all (confirmed via
+                    // java.awt.event.MouseWheelEvent — there's no getWheelRotationX() or
+                    // equivalent), so Compose Desktop only ever produces a horizontal scroll
+                    // delta when Shift is held down (its AWT bridge maps the wheel rotation into
+                    // Offset.x specifically for that case). A genuine two-finger trackpad
+                    // horizontal swipe never reaches Compose as a horizontal delta at all on
+                    // Linux; see ui/LinuxHorizontalScroll.kt for the X11-button bridge that
+                    // targets that gap directly. Shift+wheel works everywhere regardless, hence
+                    // the tooltip below.
+                    tooltip = "Auto wraps long lines to fit the panel width; toggle off to set a fixed " +
+                        "wrap column and scroll horizontally instead. Tip: hold Shift while scrolling if " +
+                        "two-finger trackpad swipe doesn't scroll horizontally.",
                 ) {
                     RowWrapControl(
                         auto = state.settings.autoLogRowWrap,
@@ -773,84 +773,85 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
         ) {
             Box(Modifier.weight(1f, fill = true)) {
                 CompactSettingWithTooltip(
-                label = "Ctrl+F opens",
-                tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
-                    "any rows. Tags/Regex instead focuses the corresponding filter field and hides " +
-                    "non-matching rows. \"Ctrl+F opens Original\" below applies to all three.",
-                modifier = Modifier.fillMaxWidth(),
-                labelMaxLines = 1,
-                labelAreaHeight = finalRowLabelAreaHeight,
-            ) {
-                // Rules (CtrlFTarget.MESSAGE_RULE) dropped from the selector, not the enum —
-                // an old token can still hold it. It remains valid for the shortcut, while the
-                // dropdown falls back to its current Find bar label until the user selects one
-                // of the three supported destinations.
-                val tc = tc()
-                val density = LocalDensity.current
-                val targets = listOf(CtrlFTarget.FIND_BAR, CtrlFTarget.TAGS, CtrlFTarget.KEYWORD_REGEX)
-                val labels = listOf("Find bar", "Tags", "Regex")
-                var open by remember { mutableStateOf(false) }
-                var suppressToggleUntilMs by remember { mutableStateOf(0L) }
-                val selectedIndex = targets.indexOf(state.settings.ctrlFTarget)
-                Box(Modifier.fillMaxWidth()) {
-                    HoverBox(
-                        modifier = Modifier.fillMaxWidth().height(26.dp)
-                            .clip(CORNER_SM)
-                            .background(tc.p2, CORNER_SM)
-                            .border(1.dp, tc.br, CORNER_SM),
-                        onClick = {
-                            if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open
-                        },
-                    ) {
-                        Row(
-                            Modifier.fillMaxSize().padding(horizontal = 10.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            AppText(
-                                labels.getOrElse(selectedIndex) { labels.first() },
-                                color = tc.tx,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                            )
-                            AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
-                        }
-                    }
-                    if (open) {
-                        Popup(
-                            alignment = Alignment.TopStart,
-                            offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
-                            onDismissRequest = {
-                                open = false
-                                suppressToggleUntilMs = System.currentTimeMillis() + 200
+                    label = "Ctrl+F opens",
+                    tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
+                        "any rows. Tags/Regex instead focuses the corresponding filter field and hides " +
+                        "non-matching rows. \"Ctrl+F opens Original\" below applies to all three.",
+                    modifier = Modifier.fillMaxWidth(),
+                    labelMaxLines = 1,
+                    labelAreaHeight = finalRowLabelAreaHeight,
+                ) {
+                    // Rules (CtrlFTarget.MESSAGE_RULE) dropped from the selector, not the enum —
+                    // an old token can still hold it. It remains valid for the shortcut, while the
+                    // dropdown falls back to its current Find bar label until the user selects one
+                    // of the three supported destinations.
+                    val tc = tc()
+                    val density = LocalDensity.current
+                    val targets = listOf(CtrlFTarget.FIND_BAR, CtrlFTarget.TAGS, CtrlFTarget.KEYWORD_REGEX)
+                    val labels = listOf("Find bar", "Tags", "Regex")
+                    var open by remember { mutableStateOf(false) }
+                    var suppressToggleUntilMs by remember { mutableStateOf(0L) }
+                    val selectedIndex = targets.indexOf(state.settings.ctrlFTarget)
+                    Box(Modifier.fillMaxWidth()) {
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth().height(26.dp)
+                                .clip(CORNER_SM)
+                                .background(tc.p2, CORNER_SM)
+                                .border(1.dp, tc.br, CORNER_SM),
+                            onClick = {
+                                if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open
                             },
-                            properties = PopupProperties(focusable = false),
                         ) {
-                            Column(
-                                Modifier.width(104.dp)
-                                    .shadow(8.dp, RoundedCornerShape(8.dp))
-                                    .background(tc.p, RoundedCornerShape(8.dp))
-                                    .border(1.dp, tc.br, RoundedCornerShape(8.dp))
-                                    .padding(4.dp),
-                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                            Row(
+                                Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                targets.forEachIndexed { index, target ->
-                                    val active = index == selectedIndex
-                                    HoverBox(
-                                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
-                                        baseBg = if (active) tc.abg else Color.Transparent,
-                                        onClick = {
-                                            open = false
-                                            state.updateSettings { it.copy(ctrlFTarget = target) }
-                                        },
-                                    ) {
-                                        AppText(
-                                            labels[index],
-                                            color = if (active) tc.ac else tc.tx,
-                                            fontSize = 11.sp,
-                                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                        )
+                                AppText(
+                                    labels.getOrElse(selectedIndex) { labels.first() },
+                                    color = tc.tx,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                )
+                                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
+                            }
+                        }
+                        if (open) {
+                            Popup(
+                                alignment = Alignment.TopStart,
+                                offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
+                                onDismissRequest = {
+                                    open = false
+                                    suppressToggleUntilMs = System.currentTimeMillis() + 200
+                                },
+                                properties = PopupProperties(focusable = false),
+                            ) {
+                                Column(
+                                    Modifier.width(104.dp)
+                                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                                        .background(tc.p, RoundedCornerShape(8.dp))
+                                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                                        .padding(4.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                ) {
+                                    targets.forEachIndexed { index, target ->
+                                        val active = index == selectedIndex
+                                        HoverBox(
+                                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                                            baseBg = if (active) tc.abg else Color.Transparent,
+                                            onClick = {
+                                                open = false
+                                                state.updateSettings { it.copy(ctrlFTarget = target) }
+                                            },
+                                        ) {
+                                            AppText(
+                                                labels[index],
+                                                color = if (active) tc.ac else tc.tx,
+                                                fontSize = 11.sp,
+                                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -858,65 +859,64 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     }
                 }
             }
+            Box(Modifier.weight(1f, fill = true)) {
+                CompactSettingWithTooltip(
+                    label = "Ctrl+F opens Original",
+                    tooltip = "Reveals the active file's unfiltered Original panel whenever Ctrl+F opens, whichever " +
+                        "of Find bar / Tags / Regex it opens with above. Single-tab view only — compare mode has no " +
+                        "Original/Filtered split to reveal.",
+                    modifier = Modifier.fillMaxWidth(),
+                    labelMaxLines = 2,
+                    labelAreaHeight = finalRowLabelAreaHeight,
+                ) {
+                    SegmentedControl(
+                        options = listOf("On", "Off"),
+                        selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
+                        onToggle = { idx -> state.updateSettings { it.copy(openUnfilteredOnCtrlF = idx == 0) } },
+                        modifier = Modifier.fillMaxWidth(),
+                        fillWidth = true,
+                    )
+                }
             }
             Box(Modifier.weight(1f, fill = true)) {
                 CompactSettingWithTooltip(
-                label = "Ctrl+F opens Original",
-                tooltip = "Reveals the active file's unfiltered Original panel whenever Ctrl+F opens, whichever " +
-                    "of Find bar / Tags / Regex it opens with above. Single-tab view only — compare mode has no " +
-                    "Original/Filtered split to reveal.",
-                modifier = Modifier.fillMaxWidth(),
-                labelMaxLines = 2,
-                labelAreaHeight = finalRowLabelAreaHeight,
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(openUnfilteredOnCtrlF = idx == 0) } },
+                    label = "Process names in new tabs",
+                    tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
+                        "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
+                        "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
+                        "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
+                        "different logs with two different sets of processes. Per-tab picks reset every session " +
+                        "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
                     modifier = Modifier.fillMaxWidth(),
-                    fillWidth = true,
-                )
-            }
+                    labelMaxLines = 2,
+                    labelAreaHeight = finalRowLabelAreaHeight,
+                ) {
+                    SegmentedControl(
+                        options = listOf("On", "Off"),
+                        selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
+                        onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
+                        modifier = Modifier.fillMaxWidth(),
+                        fillWidth = true,
+                    )
+                }
             }
             Box(Modifier.weight(1f, fill = true)) {
                 CompactSettingWithTooltip(
-                label = "Process names in new tabs",
-                tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
-                    "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
-                    "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
-                    "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
-                    "different logs with two different sets of processes. Per-tab picks reset every session " +
-                    "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
-                modifier = Modifier.fillMaxWidth(),
-                labelMaxLines = 2,
-                labelAreaHeight = finalRowLabelAreaHeight,
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
+                    label = "Video follow readout",
+                    tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
+                        "bar, explaining exactly what Follow is doing at the current playhead position.",
                     modifier = Modifier.fillMaxWidth(),
-                    fillWidth = true,
-                )
-            }
-            }
-            Box(Modifier.weight(1f, fill = true)) {
-                CompactSettingWithTooltip(
-                label = "Video follow readout",
-                tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
-                    "bar, explaining exactly what Follow is doing at the current playhead position.",
-                modifier = Modifier.fillMaxWidth(),
-                labelMaxLines = 2,
-                labelAreaHeight = finalRowLabelAreaHeight,
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.showVideoFollowReadout) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(showVideoFollowReadout = idx == 0) } },
-                    modifier = Modifier.fillMaxWidth(),
-                    fillWidth = true,
-                )
-            }
+                    labelMaxLines = 2,
+                    labelAreaHeight = finalRowLabelAreaHeight,
+                ) {
+                    SegmentedControl(
+                        options = listOf("On", "Off"),
+                        selectedIndices = setOf(if (state.settings.showVideoFollowReadout) 0 else 1),
+                        onToggle = { idx -> state.updateSettings { it.copy(showVideoFollowReadout = idx == 0) } },
+                        modifier = Modifier.fillMaxWidth(),
+                        fillWidth = true,
+                    )
+                }
             }
             Box(Modifier.weight(1f, fill = true)) {
                 CompactSettingWithTooltip(
@@ -927,13 +927,13 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     labelMaxLines = 2,
                     labelAreaHeight = finalRowLabelAreaHeight,
                 ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.enableDoubleClickVideoSeekOnLink) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
-                    modifier = Modifier.fillMaxWidth(),
-                    fillWidth = true,
-                )
+                    SegmentedControl(
+                        options = listOf("On", "Off"),
+                        selectedIndices = setOf(if (state.settings.enableDoubleClickVideoSeekOnLink) 0 else 1),
+                        onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
+                        modifier = Modifier.fillMaxWidth(),
+                        fillWidth = true,
+                    )
                 }
             }
         }

@@ -2374,108 +2374,108 @@ private fun LogRow(
                         while (true) {
                             val ev = awaitPointerEvent(PointerEventPass.Initial)
                             when (ev.type) {
-                            PointerEventType.Press -> {
-                                val mods = ev.keyboardModifiers
-                                if (ev.buttons.isSecondaryPressed) {
-                                    pendingSelectedRowToggle?.cancel()
-                                    ev.changes.forEach { it.consume() }
-                                    val selText = if (!sel.collapsed)
-                                        runCatching {
-                                            stripVisualWrapBreaks(annoLine.text.substring(sel.min, sel.max))
-                                        }.getOrElse { "" }
-                                    else ""
-                                    val ch = ev.changes.firstOrNull() ?: continue
-                                    onCtxMenu(
-                                        entry.id,
-                                        (rowRoot.x + ch.position.x) / density,
-                                        (rowRoot.y + ch.position.y) / density,
-                                        selText,
-                                    )
-                                } else if (ev.buttons.isPrimaryPressed) {
-                                    // A selected row's first click in a double-click sequence would
-                                    // otherwise deselect it before BasicTextField can select the
-                                    // word. Delay only that plain selected-row toggle; a second
-                                    // press cancels it, while an ordinary single click still
-                                    // deselects after the normal desktop double-click interval.
-                                    pendingSelectedRowToggle?.cancel()
-                                    val position = ev.changes.firstOrNull()?.position
-                                    val now = System.currentTimeMillis()
-                                    doubleClickInProgress = position != null &&
-                                        lastPrimaryPressPos != Offset.Unspecified &&
-                                        now - lastPrimaryPressMs <= DOUBLE_CLICK_WINDOW_MS &&
-                                        (position - lastPrimaryPressPos).getDistance() <= 10f
-                                    lastPrimaryPressMs = now
-                                    if (position != null) lastPrimaryPressPos = position
-                                    pressPos = position
-                                    pressShift = mods.isShiftPressed
-                                    pressMulti = mods.isCtrlPressed || mods.isMetaPressed
-                                    pressUnmodified = !mods.isShiftPressed && !mods.isCtrlPressed &&
-                                        !mods.isMetaPressed && !mods.isAltPressed
-                                    pressDragged = false
-                                    if (pressUnmodified) {
-                                        if (doubleClickInProgress) {
-                                            pendingDoubleClickGestureExpiry?.cancel()
-                                        } else {
-                                            onLogRowDoubleClickGestureStarted?.invoke()
-                                            pendingDoubleClickGestureExpiry?.cancel()
-                                            pendingDoubleClickGestureExpiry = clickScope.launch {
-                                                kotlinx.coroutines.delay(DOUBLE_CLICK_WINDOW_MS)
-                                                onLogRowDoubleClickGestureExpired?.invoke()
+                                PointerEventType.Press -> {
+                                    val mods = ev.keyboardModifiers
+                                    if (ev.buttons.isSecondaryPressed) {
+                                        pendingSelectedRowToggle?.cancel()
+                                        ev.changes.forEach { it.consume() }
+                                        val selText = if (!sel.collapsed)
+                                            runCatching {
+                                                stripVisualWrapBreaks(annoLine.text.substring(sel.min, sel.max))
+                                            }.getOrElse { "" }
+                                        else ""
+                                        val ch = ev.changes.firstOrNull() ?: continue
+                                        onCtxMenu(
+                                            entry.id,
+                                            (rowRoot.x + ch.position.x) / density,
+                                            (rowRoot.y + ch.position.y) / density,
+                                            selText,
+                                        )
+                                    } else if (ev.buttons.isPrimaryPressed) {
+                                        // A selected row's first click in a double-click sequence would
+                                        // otherwise deselect it before BasicTextField can select the
+                                        // word. Delay only that plain selected-row toggle; a second
+                                        // press cancels it, while an ordinary single click still
+                                        // deselects after the normal desktop double-click interval.
+                                        pendingSelectedRowToggle?.cancel()
+                                        val position = ev.changes.firstOrNull()?.position
+                                        val now = System.currentTimeMillis()
+                                        doubleClickInProgress = position != null &&
+                                            lastPrimaryPressPos != Offset.Unspecified &&
+                                            now - lastPrimaryPressMs <= DOUBLE_CLICK_WINDOW_MS &&
+                                            (position - lastPrimaryPressPos).getDistance() <= 10f
+                                        lastPrimaryPressMs = now
+                                        if (position != null) lastPrimaryPressPos = position
+                                        pressPos = position
+                                        pressShift = mods.isShiftPressed
+                                        pressMulti = mods.isCtrlPressed || mods.isMetaPressed
+                                        pressUnmodified = !mods.isShiftPressed && !mods.isCtrlPressed &&
+                                            !mods.isMetaPressed && !mods.isAltPressed
+                                        pressDragged = false
+                                        if (pressUnmodified) {
+                                            if (doubleClickInProgress) {
+                                                pendingDoubleClickGestureExpiry?.cancel()
+                                            } else {
+                                                onLogRowDoubleClickGestureStarted?.invoke()
+                                                pendingDoubleClickGestureExpiry?.cancel()
+                                                pendingDoubleClickGestureExpiry = clickScope.launch {
+                                                    kotlinx.coroutines.delay(DOUBLE_CLICK_WINDOW_MS)
+                                                    onLogRowDoubleClickGestureExpired?.invoke()
+                                                }
                                             }
                                         }
                                     }
                                 }
-                            }
-                            PointerEventType.Move -> {
-                                val start = pressPos
-                                val current = ev.changes.firstOrNull()?.position
-                                if (start != null && current != null && (current - start).getDistance() > 4f) {
-                                    pressDragged = true
-                                }
-                            }
-                            PointerEventType.Release -> {
-                                // sel reflects whatever BasicTextField's own gesture handling did
-                                // with THIS click by the time its Release arrives here — text
-                                // selection (double-click-to-select-word, in particular) happens on
-                                // the PRESS half of a click, not the release, so by Release time
-                                // `sel` already carries the new selection Press produced. A plain
-                                // click (cursor placement, no drag) always ends up COLLAPSED, so
-                                // this doesn't change ordinary click-to-select-row behavior at all.
-                                //
-                                // Without the sel.collapsed check: a double-click to select a word
-                                // is, from this handler's point of view, two ordinary clicks in
-                                // quick succession. AppState.selRow TOGGLES an already-selected row
-                                // off on a repeat plain click — so click 1 selected the row, click 2
-                                // (the second half of the double-click) immediately deselected it
-                                // again, and the Δt column's anchor mode flipped on then off inside
-                                // one user gesture — visible as the flicker this guards against.
-                                if (!doubleClickInProgress && !pressDragged && pressPos != null && latestSelection.collapsed) {
-                                    if (latestIsSelected && !pressMulti && !pressShift) {
-                                        pendingSelectedRowToggle = clickScope.launch {
-                                            kotlinx.coroutines.delay(DOUBLE_CLICK_WINDOW_MS)
-                                            onSelRow(entry.id, false, false)
-                                        }
-                                    } else {
-                                        onSelRow(entry.id, pressMulti, pressShift)
+                                PointerEventType.Move -> {
+                                    val start = pressPos
+                                    val current = ev.changes.firstOrNull()?.position
+                                    if (start != null && current != null && (current - start).getDistance() > 4f) {
+                                        pressDragged = true
                                     }
                                 }
-                                // Run alongside (rather than instead of) BasicTextField's own
-                                // second-click handling. It therefore preserves desktop word
-                                // selection while adding only the independent video seek action.
-                                if (doubleClickInProgress && !pressDragged && pressUnmodified) {
-                                    onLogRowDoubleClick?.invoke(entry.id)
-                                } else if (doubleClickInProgress && pressDragged) {
-                                    // The second press was a drag rather than a real double-click;
-                                    // do not leave Follow held while the user continues selecting.
-                                    onLogRowDoubleClickGestureExpired?.invoke()
+                                PointerEventType.Release -> {
+                                    // sel reflects whatever BasicTextField's own gesture handling did
+                                    // with THIS click by the time its Release arrives here — text
+                                    // selection (double-click-to-select-word, in particular) happens on
+                                    // the PRESS half of a click, not the release, so by Release time
+                                    // `sel` already carries the new selection Press produced. A plain
+                                    // click (cursor placement, no drag) always ends up COLLAPSED, so
+                                    // this doesn't change ordinary click-to-select-row behavior at all.
+                                    //
+                                    // Without the sel.collapsed check: a double-click to select a word
+                                    // is, from this handler's point of view, two ordinary clicks in
+                                    // quick succession. AppState.selRow TOGGLES an already-selected row
+                                    // off on a repeat plain click — so click 1 selected the row, click 2
+                                    // (the second half of the double-click) immediately deselected it
+                                    // again, and the Δt column's anchor mode flipped on then off inside
+                                    // one user gesture — visible as the flicker this guards against.
+                                    if (!doubleClickInProgress && !pressDragged && pressPos != null && latestSelection.collapsed) {
+                                        if (latestIsSelected && !pressMulti && !pressShift) {
+                                            pendingSelectedRowToggle = clickScope.launch {
+                                                kotlinx.coroutines.delay(DOUBLE_CLICK_WINDOW_MS)
+                                                onSelRow(entry.id, false, false)
+                                            }
+                                        } else {
+                                            onSelRow(entry.id, pressMulti, pressShift)
+                                        }
+                                    }
+                                    // Run alongside (rather than instead of) BasicTextField's own
+                                    // second-click handling. It therefore preserves desktop word
+                                    // selection while adding only the independent video seek action.
+                                    if (doubleClickInProgress && !pressDragged && pressUnmodified) {
+                                        onLogRowDoubleClick?.invoke(entry.id)
+                                    } else if (doubleClickInProgress && pressDragged) {
+                                        // The second press was a drag rather than a real double-click;
+                                        // do not leave Follow held while the user continues selecting.
+                                        onLogRowDoubleClickGestureExpired?.invoke()
+                                    }
+                                    pressPos = null
+                                    pressShift = false
+                                    pressMulti = false
+                                    pressUnmodified = false
+                                    pressDragged = false
+                                    doubleClickInProgress = false
                                 }
-                                pressPos = null
-                                pressShift = false
-                                pressMulti = false
-                                pressUnmodified = false
-                                pressDragged = false
-                                doubleClickInProgress = false
-                            }
                                 else -> {}
                             }
                         }

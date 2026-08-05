@@ -1,7 +1,8 @@
 package com.indagium
 
-import com.indagium.video.PacketScanResult
+import com.indagium.ui.videoSeekReadinessMessage
 import com.indagium.video.DurationRecoverySource
+import com.indagium.video.PacketScanResult
 import com.indagium.video.VideoSeekReadiness
 import com.indagium.video.VideoSeekState
 import com.indagium.video.advanceVideoSeekState
@@ -12,7 +13,6 @@ import com.indagium.video.resolveScannedDurationMs
 import com.indagium.video.scanDecodedTimestampDurationMs
 import com.indagium.video.scanDurationMs
 import com.indagium.video.scanPackets
-import com.indagium.ui.videoSeekReadinessMessage
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test

@@ -46,6 +46,7 @@ import com.indagium.update.revealInFileManager
 import com.indagium.update.runtimePackageForCurrentProcess
 import com.indagium.utils.ArchiveBudgetExceededException
 import com.indagium.utils.EntryIdMap
+import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.indagium.utils.MergeSourceFile
 import com.indagium.utils.RegexEvaluationContext
@@ -69,9 +70,6 @@ import com.indagium.utils.computeStackTraceGroups
 import com.indagium.utils.computeTidMapColors
 import com.indagium.utils.enforceArchiveVideoCacheBudget
 import com.indagium.utils.exportFilteredToFile
-import com.indagium.utils.LogLinePresentationContext
-import com.indagium.utils.presentLogLine
-import com.indagium.utils.presentLogLineMarkdown
 import com.indagium.utils.extractAppVersionHeuristic
 import com.indagium.utils.extractArchiveVideoToCache
 import com.indagium.utils.extractCandidate
@@ -92,6 +90,8 @@ import com.indagium.utils.parseLogcat
 import com.indagium.utils.parseMillisOfDay
 import com.indagium.utils.passesFilter
 import com.indagium.utils.planSplitOutputs
+import com.indagium.utils.presentLogLine
+import com.indagium.utils.presentLogLineMarkdown
 import com.indagium.utils.pruneUnreferencedArchiveVideos
 import com.indagium.utils.recoverLogRefRows
 import com.indagium.utils.requiresSplitPrompt
@@ -489,7 +489,9 @@ internal fun windowsEditorTemplates(
     toolboxAppsDir: File? = localAppData?.let { File(it, "JetBrains/Toolbox/apps") },
 ): Map<String, List<String>> {
     val found = LinkedHashMap<String, MutableList<String>>()
+
     fun add(presetId: String, file: File) = addWindowsEditorTemplate(found, presetId, file)
+
     fun under(root: File, relativePath: String) = File(root, relativePath)
 
     // Keep this list grouped by preset rather than by installation root: candidate order is then
@@ -1530,6 +1532,7 @@ class AppState(
      */
     private sealed interface VideoFollowSuppression {
         data object Gesture : VideoFollowSuppression
+
         data class ManualSeek(val followTargetLogId: Int) : VideoFollowSuppression
     }
 

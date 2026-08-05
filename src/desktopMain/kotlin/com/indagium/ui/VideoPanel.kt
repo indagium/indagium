@@ -86,10 +86,10 @@ import com.indagium.model.VideoAttachment
 import com.indagium.model.VideoSource
 import com.indagium.video.VideoPlayerController
 import com.indagium.video.VideoSeekReadiness
-import com.indagium.video.seekReadiness
 import com.indagium.video.formatVideoDurationShort
 import com.indagium.video.formatVideoTime
 import com.indagium.video.formatVideoTimeShort
+import com.indagium.video.seekReadiness
 import kotlinx.coroutines.delay
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
