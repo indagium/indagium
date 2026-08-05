@@ -232,8 +232,8 @@ internal const val DEFAULT_MCP_PORT = 8991
 
 // One entry in the editor catalog offered by the Settings → Source code editor-choice dropdown.
 // [id] is the stable key persisted in AppSettings.editorChoice; [candidates] are command templates
-// tried in order (mac/Windows/Linux variants coexist in one list — resolveExecutable naturally only
-// resolves the ones actually installed, so no OS branching is needed here).
+// tried in order. Platform launchers that need discovery rather than a fixed command (Linux desktop
+// entries and Windows per-user/Program Files installs) are appended by the platform scanners below.
 data class EditorPreset(
     val id: String,
     val displayName: String,
@@ -452,7 +452,88 @@ internal fun linuxDesktopEditorTemplates(
     return found.mapValues { (_, templates) -> templates.distinct() }
 }
 
-// Resolves [catalog] using both normal shell commands and Linux .desktop launchers. Keeping this
+private fun validWindowsEditorExecutable(file: File): File? =
+    resolveExecutable(file.absolutePath, emptyList())
+
+private fun addWindowsEditorTemplate(
+    found: MutableMap<String, MutableList<String>>,
+    presetId: String,
+    executable: File,
+) {
+    val validExecutable = validWindowsEditorExecutable(executable) ?: return
+    val preset = EDITOR_CATALOG.firstOrNull { it.id == presetId } ?: return
+    found.getOrPut(presetId) { mutableListOf() }
+        .add(preset.commandTemplateForExecutable(validExecutable))
+}
+
+private fun windowsExecutablesUnder(root: File, names: Set<String>, maxDepth: Int): List<File> =
+    root.takeIf { it.isDirectory }
+        ?.walkTopDown()
+        ?.maxDepth(maxDepth)
+        ?.filter { it.isFile && it.name.lowercase() in names }
+        ?.sortedBy { it.absolutePath }
+        ?.toList()
+        .orEmpty()
+
+// Windows installers do not reliably put their launchers on PATH. Discover the well-known
+// per-user and Program Files locations, plus versioned JetBrains installs and Toolbox's apps
+// directory. The returned commands deliberately use the same templates and validation path as the
+// catalog and Linux desktop discovery, so a choice presented in Settings is the exact one opened.
+// Parameters are seams for deterministic tests; production derives them from Windows environment
+// variables in [detectInstalledEditors].
+internal fun windowsEditorTemplates(
+    localAppData: File?,
+    programFiles: List<File>,
+    toolboxAppsDir: File? = localAppData?.let { File(it, "JetBrains/Toolbox/apps") },
+): Map<String, List<String>> {
+    val found = LinkedHashMap<String, MutableList<String>>()
+    fun add(presetId: String, file: File) = addWindowsEditorTemplate(found, presetId, file)
+    fun under(root: File, relativePath: String) = File(root, relativePath)
+
+    // Keep this list grouped by preset rather than by installation root: candidate order is then
+    // stable even when both per-user and machine-wide copies are present.
+    listOfNotNull(localAppData).forEach { root ->
+        add("vscode", under(root, "Programs/Microsoft VS Code/Code.exe"))
+        add("intellij", under(root, "Programs/JetBrains/IntelliJ IDEA/bin/idea64.exe"))
+        add("studio", under(root, "Programs/Android Studio/bin/studio64.exe"))
+        add("cursor", under(root, "Programs/cursor/Cursor.exe"))
+        add("sublime", under(root, "Programs/Sublime Text/sublime_text.exe"))
+        add("sublime", under(root, "Sublime Text/sublime_text.exe"))
+        add("zed", under(root, "Programs/Zed/Zed.exe"))
+    }
+    programFiles.forEach { root ->
+        add("vscode", under(root, "Microsoft VS Code/Code.exe"))
+        add("intellij", under(root, "JetBrains/IntelliJ IDEA/bin/idea64.exe"))
+        add("studio", under(root, "Android/Android Studio/bin/studio64.exe"))
+        add("studio", under(root, "Android Studio/bin/studio64.exe"))
+        add("cursor", under(root, "Cursor/Cursor.exe"))
+        add("sublime", under(root, "Sublime Text/sublime_text.exe"))
+        add("zed", under(root, "Zed/Zed.exe"))
+    }
+
+    // JetBrains installers place the version in the directory name (for example, "IntelliJ IDEA
+    // 2025.1"), while Toolbox uses apps/<product>/<channel>/<build>/bin. Scan only those narrow
+    // roots rather than all of Program Files or LocalAppData.
+    (listOfNotNull(localAppData).map { File(it, "Programs/JetBrains") } +
+        programFiles.map { File(it, "JetBrains") })
+        .forEach { root ->
+            windowsExecutablesUnder(root, setOf("idea64.exe"), maxDepth = 4).forEach { add("intellij", it) }
+            windowsExecutablesUnder(root, setOf("studio64.exe"), maxDepth = 4).forEach { add("studio", it) }
+        }
+    toolboxAppsDir?.let { root ->
+        windowsExecutablesUnder(root, setOf("idea64.exe"), maxDepth = 6).forEach { add("intellij", it) }
+        windowsExecutablesUnder(root, setOf("studio64.exe"), maxDepth = 6).forEach { add("studio", it) }
+    }
+    return found.mapValues { (_, templates) -> templates.distinct() }
+}
+
+private fun windowsProgramFilesDirs(): List<File> =
+    listOf("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)")
+        .mapNotNull { System.getenv(it)?.takeIf(String::isNotBlank) }
+        .distinct()
+        .map(::File)
+
+// Resolves [catalog] using normal shell commands plus platform launchers. Keeping this
 // as the one source of truth is important: the Settings scan and the eventual Open action must use
 // the same template, otherwise an editor can be shown as found but still be impossible to launch.
 internal fun resolveInstalledEditors(
@@ -470,12 +551,16 @@ internal fun resolveInstalledEditors(
 // template (the first matching candidate) — the ordered list of choices the Settings dropdown
 // offers, and the command the Open action launches.
 internal fun detectInstalledEditors(dirs: List<File> = executableSearchDirs()): List<Pair<EditorPreset, String>> {
-    val desktopTemplates = if (System.getProperty("os.name").orEmpty().contains("linux", ignoreCase = true)) {
-        linuxDesktopEditorTemplates(executableDirs = dirs)
-    } else {
-        emptyMap()
+    val osName = System.getProperty("os.name").orEmpty()
+    val platformTemplates = when {
+        osName.contains("linux", ignoreCase = true) -> linuxDesktopEditorTemplates(executableDirs = dirs)
+        osName.contains("windows", ignoreCase = true) -> windowsEditorTemplates(
+            localAppData = System.getenv("LOCALAPPDATA")?.takeIf(String::isNotBlank)?.let(::File),
+            programFiles = windowsProgramFilesDirs(),
+        )
+        else -> emptyMap()
     }
-    return resolveInstalledEditors(EDITOR_CATALOG, dirs, desktopTemplates)
+    return resolveInstalledEditors(EDITOR_CATALOG, dirs, platformTemplates)
 }
 
 // Resolves an editor template and substitutes its location placeholders. Keeping this separate
