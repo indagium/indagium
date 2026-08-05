@@ -156,6 +156,12 @@ jobs:
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
 
+      # flatpak-builder validates hicolor icons while exporting the finished bundle. Check the
+      # source asset first so an incorrectly sized replacement fails with a direct diagnostic.
+      - name: Validate Flatpak icon
+        if: matrix.linux
+        run: python3 packaging/linux/validate-flatpak-icon.py
+
       # The controller uses the host's bundled-by-JavaCV FFmpeg native, so the duration-recovery
       # path must run on every release target rather than only in the macOS-wide verification job.
       # This focused native suite covers headerless containers and raw streams without repeating
