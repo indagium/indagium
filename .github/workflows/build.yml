@@ -82,6 +82,12 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      # This runs without Flatpak and deliberately permits only the portable
+      # smoke test's supported `flatpak info --show-location` invocation. It
+      # prevents a CLI-option regression from reaching the packaging matrix.
+      - name: Validate portable smoke-test compatibility
+        run: bash scripts/test-validate-flatpak-install.sh
+
       - name: Build, test, and lint
         run: ./gradlew build
 
@@ -161,6 +167,9 @@ jobs:
           sudo apt-get install -y desktop-file-utils flatpak flatpak-builder libxml2-utils
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+          # The installed runner CLI must support the deployment-location API
+          # used by the later installed-file smoke test.
+          flatpak info --help | grep -F -- '--show-location'
 
       # The controller uses the host's bundled-by-JavaCV FFmpeg native, so the duration-recovery
       # path must run on every release target rather than only in the macOS-wide verification job.
@@ -307,8 +316,7 @@ jobs:
           flatpak info --user --show-metadata com.indagium.desktop | grep -q '^name=com.indagium.desktop$'
           flatpak info --user --show-permissions com.indagium.desktop | grep -q 'home'
           flatpak info --user --show-permissions com.indagium.desktop | grep -q 'network'
-          flatpak info --user --files com.indagium.desktop | grep -q 'share/mime/packages/com.indagium.desktop-mimeinfo.xml'
-          flatpak info --user --files com.indagium.desktop | grep -q 'share/icons/hicolor/512x512/apps/com.indagium.desktop.png'
+          bash scripts/validate-flatpak-install.sh
           flatpak uninstall --user -y com.indagium.desktop
 
       - name: Upload artifact
