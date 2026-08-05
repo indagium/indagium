@@ -1,10 +1,12 @@
 package com.indagium
 
 import com.indagium.update.ReleaseAsset
+import com.indagium.update.RuntimePackage
 import com.indagium.update.UpdateCheckResult
 import com.indagium.update.UpdateChecker
 import com.indagium.update.assetForCurrentOs
 import com.indagium.update.compareVersions
+import com.indagium.update.runtimePackageForCurrentProcess
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -89,9 +91,39 @@ class UpdateCheckerTest {
 
         assertEquals(assets[0], assetForCurrentOs(assets, osName = "Mac OS X"))
         assertEquals(assets[3], assetForCurrentOs(assets, osName = "Windows 11"))
-        assertEquals(assets[1], assetForCurrentOs(assets, osName = "Linux", osArch = "amd64"))
-        assertEquals(assets[2], assetForCurrentOs(assets, osName = "Linux", osArch = "aarch64"))
-        assertEquals(assets[2], assetForCurrentOs(assets, osName = "Linux", osArch = "arm64"))
+        assertEquals(assets[1], assetForCurrentOs(assets, osName = "Linux", osArch = "amd64", runtimePackage = RuntimePackage.NATIVE))
+        assertEquals(assets[2], assetForCurrentOs(assets, osName = "Linux", osArch = "aarch64", runtimePackage = RuntimePackage.NATIVE))
+        assertEquals(assets[2], assetForCurrentOs(assets, osName = "Linux", osArch = "arm64", runtimePackage = RuntimePackage.NATIVE))
+    }
+
+    @Test
+    fun runtimePackageDetectionRecognizesFlatpakBeforeAppImageAndAllowsNativeFallback() {
+        assertEquals(RuntimePackage.NATIVE, runtimePackageForCurrentProcess(emptyMap(), flatpakInfoExists = false))
+        assertEquals(RuntimePackage.APP_IMAGE, runtimePackageForCurrentProcess(mapOf("APPIMAGE" to "/tmp/Indagium.AppImage"), false))
+        assertEquals(RuntimePackage.FLATPAK, runtimePackageForCurrentProcess(mapOf("FLATPAK_ID" to "com.indagium.desktop"), false))
+        assertEquals(RuntimePackage.FLATPAK, runtimePackageForCurrentProcess(mapOf("APPIMAGE" to "/tmp/Indagium.AppImage"), true))
+    }
+
+    @Test
+    fun assetForCurrentOsSelectsStrictlyMatchingAppImagesAndNeverDownloadsFlatpak() {
+        val assets = listOf(
+            ReleaseAsset("Indagium-1.8.0-x86_64.AppImage", "https://example.test/x86-appimage", 1L),
+            ReleaseAsset("Indagium-1.8.0-aarch64.AppImage", "https://example.test/arm-appimage", 2L),
+            ReleaseAsset("indagium_1.8.0-1_amd64.deb", "https://example.test/deb", 3L),
+        )
+
+        assertEquals(
+            assets[0],
+            assetForCurrentOs(assets, osName = "Linux", osArch = "amd64", runtimePackage = RuntimePackage.APP_IMAGE),
+        )
+        assertEquals(
+            assets[1],
+            assetForCurrentOs(assets, osName = "Linux", osArch = "arm64", runtimePackage = RuntimePackage.APP_IMAGE),
+        )
+        assertNull(
+            assetForCurrentOs(assets.take(1), osName = "Linux", osArch = "arm64", runtimePackage = RuntimePackage.APP_IMAGE),
+        )
+        assertNull(assetForCurrentOs(assets, osName = "Linux", osArch = "amd64", runtimePackage = RuntimePackage.FLATPAK))
     }
 
     @Test

@@ -40,8 +40,8 @@ Download the build for your platform from the [Releases](../../../releases) page
 
 | Platform | File |
 |---|---|
-| Linux (x86-64) | `indagium_x.y.z-1_amd64.deb` |
-| Linux (arm64) | `indagium_x.y.z-1_arm64.deb` |
+| Linux (x86-64) | `.deb` `indagium_x.y.z-1_amd64.deb` · AppImage `Indagium-x.y.z-x86_64.AppImage` · Flatpak `Indagium-x.y.z-x86_64.flatpak` |
+| Linux (arm64) | `.deb` `indagium_x.y.z-1_arm64.deb` · AppImage `Indagium-x.y.z-aarch64.AppImage` · Flatpak `Indagium-x.y.z-aarch64.flatpak` |
 | Windows | `Indagium-x.y.z.msi` |
 | macOS (Apple Silicon) | `Indagium-x.y.z.dmg` |
 
@@ -60,15 +60,35 @@ click **Open Anyway**.
 ### Linux
 
 ```bash
+# Debian/Ubuntu and compatible distributions
 sudo dpkg -i indagium_x.y.z-1_amd64.deb
+
+# AppImage (replace x86_64 with aarch64 on ARM64)
+chmod +x Indagium-x.y.z-x86_64.AppImage
+./Indagium-x.y.z-x86_64.AppImage
+
+# Flatpak bundle (replace x86_64 with aarch64 on ARM64)
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install --user ./Indagium-x.y.z-x86_64.flatpak
+flatpak run com.indagium.desktop
 ```
 
-The package registers Indagium as a *candidate* handler for `.log`, `.txt`, `.logcat`, `.trace`, and
-`.out` — it does not make itself the default. To opt in:
+Choose the format that fits your system: `.deb` is best for Debian-family systems, AppImage runs
+without installing system files, and Flatpak installs into your user account. All three packages
+register Indagium as a *candidate* handler for `.log`, `.txt`, `.logcat`, `.trace`, and `.out` —
+they do not make themselves the default. To opt in:
 
 ```bash
+# Debian package
 xdg-mime default indagium-Indagium.desktop text/plain text/x-log
+
+# AppImage or Flatpak
+xdg-mime default com.indagium.desktop.desktop text/plain text/x-log
 ```
+
+The Flatpak sandbox permits access to your home directory for logs and source folders, but it
+cannot use host-installed **Codex account** or **Claude Code account** CLI profiles. Use an
+API/network-backed provider in Flatpak instead.
 
 ---
 

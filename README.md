@@ -70,8 +70,8 @@ Download the latest release for your platform from the [Releases](../../releases
 
 | Platform | File |
 |---|---|
-| Linux (x86-64) | `indagium_x.y.z-1_amd64.deb` |
-| Linux (arm64) | `indagium_x.y.z-1_arm64.deb` |
+| Linux (x86-64) | `.deb` `indagium_x.y.z-1_amd64.deb` · AppImage `Indagium-x.y.z-x86_64.AppImage` · Flatpak `Indagium-x.y.z-x86_64.flatpak` |
+| Linux (arm64) | `.deb` `indagium_x.y.z-1_arm64.deb` · AppImage `Indagium-x.y.z-aarch64.AppImage` · Flatpak `Indagium-x.y.z-aarch64.flatpak` |
 | Windows | `Indagium-x.y.z.msi` |
 | macOS (Apple Silicon) | `Indagium-x.y.z.dmg` |
 
@@ -86,18 +86,41 @@ they never get the quarantine flag a browser download adds). To open it anyway, 
 
 ### Linux
 
-Install with `sudo dpkg -i indagium_x.y.z-1_amd64.deb` (substitute `arm64` for `amd64` if that's
-the package you downloaded, or use your package manager's equivalent). The
-package registers Indagium as a candidate handler for `.log`/`.txt`/`.logcat`/`.trace`/`.out`
-files, but does **not** make itself the system default — a package has no business silently
-rewriting another user's `mimeapps.list`. To open `.log`/`.txt` files with Indagium by default,
-opt in yourself:
+Choose one format that matches your architecture. The `.deb` is best for Debian-family systems;
+AppImage runs without installing system files; the Flatpak bundle installs into your user account.
 
 ```bash
+# Debian/Ubuntu and compatible distributions
+sudo dpkg -i indagium_x.y.z-1_amd64.deb
+
+# AppImage (replace x86_64 with aarch64 on ARM64)
+chmod +x Indagium-x.y.z-x86_64.AppImage
+./Indagium-x.y.z-x86_64.AppImage
+
+# Flatpak bundle (replace x86_64 with aarch64 on ARM64)
+flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install --user ./Indagium-x.y.z-x86_64.flatpak
+flatpak run com.indagium.desktop
+```
+
+All three Linux packages register Indagium as a candidate handler for
+`.log`/`.txt`/`.logcat`/`.trace`/`.out` files, but do **not** make themselves the system default —
+a package has no business silently rewriting another user's `mimeapps.list`. To open
+`.log`/`.txt` files with Indagium by default, opt in yourself:
+
+```bash
+# Debian package
 xdg-mime default indagium-Indagium.desktop text/plain text/x-log
+
+# AppImage or Flatpak
+xdg-mime default com.indagium.desktop.desktop text/plain text/x-log
 ```
 
 or right-click a file in your file manager → **Open With** → **Indagium** → set as default.
+
+The Flatpak package allows access to your home directory for logs and source folders. Its sandbox
+cannot use host-installed **Codex account** or **Claude Code account** CLI profiles; select an
+API/network-backed provider there instead.
 
 #### File picker troubleshooting
 
@@ -233,12 +256,15 @@ the [available methods and prompt guide](docs/mcp/AVAILABLE_METHODS.md).
 # Package (run on the target OS)
 ./gradlew packageDmg   # macOS
 ./gradlew packageDeb   # Linux
+./gradlew packageAppImage # Linux AppImage (host architecture)
+./gradlew packageFlatpak  # Linux Flatpak bundle (host architecture; needs flatpak-builder + Flathub runtime/SDK)
 ./gradlew packageMsi   # Windows
 ```
 
 ## Releasing
 
-Push a version tag to trigger the GitHub Actions build, which produces Linux (x86-64 and arm64), Windows, and macOS packages and creates a GitHub Release automatically:
+Push a version tag to trigger the GitHub Actions build, which produces Linux `.deb`, AppImage, and
+Flatpak bundles for x86-64 and arm64, plus Windows and macOS packages, and creates a GitHub Release automatically:
 
 ```bash
 git tag v1.8.0 && git push --tags

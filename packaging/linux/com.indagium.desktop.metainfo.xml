@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.indagium.desktop</id>
+  <name>Indagium</name>
+  <summary>Analyze Android logcat files</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <launchable type="desktop-id">com.indagium.desktop.desktop</launchable>
+  <provides>
+    <mediatype>text/plain</mediatype>
+    <mediatype>text/x-log</mediatype>
+  </provides>
+  <description>
+    <p>Indagium is a desktop application for viewing, searching, and analyzing Android logcat files.</p>
+  </description>
+  <releases>
+    <release version="@VERSION@" date="2026-08-05"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

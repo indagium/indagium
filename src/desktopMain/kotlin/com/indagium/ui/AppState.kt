@@ -38,10 +38,12 @@ import com.indagium.source.SourceMatch
 import com.indagium.source.SourceStructureParser
 import com.indagium.source.sourceConfigurationFingerprint
 import com.indagium.update.ReleaseInfo
+import com.indagium.update.RuntimePackage
 import com.indagium.update.UpdateCheckResult
 import com.indagium.update.UpdateChecker
 import com.indagium.update.assetForCurrentOs
 import com.indagium.update.revealInFileManager
+import com.indagium.update.runtimePackageForCurrentProcess
 import com.indagium.utils.ArchiveBudgetExceededException
 import com.indagium.utils.EntryIdMap
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
@@ -2028,9 +2030,10 @@ class AppState(
         availableUpdate = null
     }
 
-    // No OS-matching asset (assetForCurrentOs) is a no-op here: UpdateDialog shows "View on
-    // GitHub" instead of "Download" in that case, so this is never called without one.
+    // No OS-matching asset (assetForCurrentOs), including a Flatpak package-manager install, is a
+    // no-op here. UpdateDialog shows Flatpak's update command rather than a release download.
     fun downloadUpdate() {
+        if (runtimePackageForCurrentProcess() == RuntimePackage.FLATPAK) return
         val release = availableUpdate ?: return
         val asset = assetForCurrentOs(release.assets) ?: return
         // A native FileDialog.SAVE prompt for ONE file, seeded with the asset's own name — see

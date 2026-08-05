@@ -34,6 +34,31 @@ const val UPDATE_REPO = "indagium/indagium"
 
 data class ReleaseAsset(val name: String, val downloadUrl: String, val size: Long)
 
+/** How the running app was installed, when its Linux packaging changes update behavior. */
+enum class RuntimePackage {
+    NATIVE,
+    APP_IMAGE,
+    FLATPAK,
+}
+
+const val FLATPAK_APP_ID = "com.indagium.desktop"
+const val FLATPAK_UPDATE_COMMAND = "flatpak update $FLATPAK_APP_ID"
+
+/**
+ * Detects the Linux package sandbox without relying on the current OS name. Flatpak exposes a
+ * stable environment marker, but the marker is not guaranteed for every launcher, so its mounted
+ * metadata file is also accepted. AppImage similarly exports [APPIMAGE]. Keeping the inputs
+ * injectable makes the precedence portable and unit-testable on every host platform.
+ */
+fun runtimePackageForCurrentProcess(
+    environment: Map<String, String> = System.getenv(),
+    flatpakInfoExists: Boolean = File("/.flatpak-info").isFile,
+): RuntimePackage = when {
+    environment["FLATPAK_ID"].isNullOrBlank().not() || flatpakInfoExists -> RuntimePackage.FLATPAK
+    environment["APPIMAGE"].isNullOrBlank().not() -> RuntimePackage.APP_IMAGE
+    else -> RuntimePackage.NATIVE
+}
+
 /** [version] is [tag] with a leading `v`/`V` stripped; [body] is the release notes (Markdown, may be blank). */
 data class ReleaseInfo(
     val version: String,
@@ -188,7 +213,8 @@ fun compareVersions(current: String, latest: String): Int {
 }
 
 /**
- * Picks the packaged asset matching this JVM's OS: macOS -> first `.dmg`, Windows -> first `.msi`.
+ * Picks the packaged asset matching this JVM's OS and [runtimePackage]: macOS -> first `.dmg`,
+ * Windows -> first `.msi`.
  * Neither of those carries an architecture in its filename (jpackage doesn't add one, and only one
  * build of each is ever published), so there's nothing to discriminate on and the first match wins.
  *
@@ -201,21 +227,32 @@ fun compareVersions(current: String, latest: String): Int {
  * release that only ever shipped an amd64 build — this returns null rather than silently falling
  * back to a mismatched package. That's a real, expected outcome: [com.indagium.ui.UpdateDialog]
  * already renders a "View on GitHub" link instead of a "Download" button when this returns null.
+ *
+ * AppImage uses the same strict Linux architecture matching but selects an `.AppImage` asset.
+ * Flatpak deliberately has no downloadable release asset: it is updated by its package manager,
+ * so this returns null and the dialog instructs the user to run [FLATPAK_UPDATE_COMMAND].
  */
 fun assetForCurrentOs(
     assets: List<ReleaseAsset>,
     osName: String = System.getProperty("os.name").orEmpty(),
     osArch: String = System.getProperty("os.arch").orEmpty(),
+    runtimePackage: RuntimePackage = runtimePackageForCurrentProcess(),
 ): ReleaseAsset? {
     val lowerOsName = osName.lowercase()
     return when {
         lowerOsName.contains("mac") -> assets.firstOrNull { it.name.endsWith(".dmg") }
         lowerOsName.contains("win") -> assets.firstOrNull { it.name.endsWith(".msi") }
         else -> {
-            val debs = assets.filter { it.name.endsWith(".deb") }
+            val extension = when (runtimePackage) {
+                RuntimePackage.NATIVE -> ".deb"
+                RuntimePackage.APP_IMAGE -> ".appimage"
+                RuntimePackage.FLATPAK -> return null
+            }
             val isArm = osArch.lowercase().trim() in setOf("aarch64", "arm64")
             val archTokens = if (isArm) listOf("arm64", "aarch64") else listOf("amd64", "x86_64", "x64")
-            debs.firstOrNull { deb -> archTokens.any { token -> deb.name.lowercase().contains(token) } }
+            assets.firstOrNull { asset ->
+                asset.name.lowercase().endsWith(extension) && archTokens.any { token -> asset.name.lowercase().contains(token) }
+            }
         }
     }
 }
