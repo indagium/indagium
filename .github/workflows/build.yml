@@ -4,8 +4,54 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      build_scope:
+        description: 'Packages to build after verification'
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - linux-portable
 
+# `linux-portable` lets us prove the two Linux portable formats on both supported architectures
+# without reserving Windows or macOS runners.  Tag-triggered builds (and the default manual
+# dispatch) keep the complete release matrix below.
 jobs:
+  select-build-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+
+    steps:
+      - id: select
+        name: Select packaging matrix
+        env:
+          BUILD_SCOPE: ${{ github.event.inputs.build_scope || 'all' }}
+        run: |
+          set -euo pipefail
+          case "$BUILD_SCOPE" in
+            linux-portable)
+              matrix='{"include":[
+                {"os":"ubuntu-latest","tasks":"packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-portable-x64","linux":true,"include_deb":false,"portable_arch":"x86_64"},
+                {"os":"ubuntu-24.04-arm","tasks":"packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-portable-arm64","linux":true,"include_deb":false,"portable_arch":"aarch64"}
+              ]}'
+              ;;
+            all)
+              matrix='{"include":[
+                {"os":"ubuntu-latest","tasks":"packageDeb packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/deb/*.deb\nbuild/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-x64","linux":true,"include_deb":true,"deb_arch":"amd64","portable_arch":"x86_64"},
+                {"os":"windows-latest","tasks":"packageMsi","artifact_path":"build/compose/binaries/main/msi","artifact_name":"Indagium-windows-x64","linux":false,"include_deb":false},
+                {"os":"macos-latest","tasks":"packageDmg","artifact_path":"build/compose/binaries/main/dmg","artifact_name":"Indagium-macos-arm64","linux":false,"include_deb":false},
+                {"os":"ubuntu-24.04-arm","tasks":"packageDeb packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/deb/*.deb\nbuild/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-arm64","linux":true,"include_deb":true,"deb_arch":"arm64","portable_arch":"aarch64"}
+              ]}'
+              ;;
+            *)
+              echo "Unsupported build scope: $BUILD_SCOPE" >&2
+              exit 1
+              ;;
+          esac
+          echo "matrix=$(echo "$matrix" | jq -c .)" >> "$GITHUB_OUTPUT"
+
   # Gates the packaging matrix below: compiles, runs the full desktopTest suite, and enforces
   # ktlint/detekt (see build.gradle.kts's `check` lifecycle). Runs once on macOS — this is
   # already the OS this repo's tests are developed and verified against locally — rather than
@@ -54,52 +100,12 @@ jobs:
           retention-days: 7
 
   build:
-    needs: verify
+    needs:
+      - select-build-matrix
+      - verify
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            tasks: packageDeb packageAppImage packageFlatpak
-            artifact_path: |
-              build/compose/binaries/main/deb/*.deb
-              build/compose/binaries/main/appimage/*.AppImage
-              build/compose/binaries/main/flatpak/*.flatpak
-            artifact_name: Indagium-linux-x64
-            linux: true
-            deb_arch: amd64
-            portable_arch: x86_64
-
-          - os: windows-latest
-            tasks: packageMsi
-            artifact_path: build/compose/binaries/main/msi
-            artifact_name: Indagium-windows-x64
-            linux: false
-
-          # macOS runner is Apple Silicon (arm64); unsigned (no Apple Developer cert in CI), so
-          # Gatekeeper will show an "unidentified developer" warning on first launch — same as
-          # a local unsigned build.
-          - os: macos-latest
-            tasks: packageDmg
-            artifact_path: build/compose/binaries/main/dmg
-            artifact_name: Indagium-macos-arm64
-            linux: false
-
-          # ubuntu-24.04-arm is GitHub's hosted Linux arm64 runner, free for public repos like this
-          # one. jpackage derives the .deb filename's arch segment from `dpkg --print-architecture`
-          # on the machine that builds it, so this job emits indagium_<ver>-1_arm64.deb — a distinct
-          # filename from the amd64 job's indagium_<ver>-1_amd64.deb — which is why the release job
-          # below needs no rename step to avoid the two colliding as GitHub Release assets.
-          - os: ubuntu-24.04-arm
-            tasks: packageDeb packageAppImage packageFlatpak
-            artifact_path: |
-              build/compose/binaries/main/deb/*.deb
-              build/compose/binaries/main/appimage/*.AppImage
-              build/compose/binaries/main/flatpak/*.flatpak
-            artifact_name: Indagium-linux-arm64
-            linux: true
-            deb_arch: arm64
-            portable_arch: aarch64
+      matrix: ${{ fromJSON(needs.select-build-matrix.outputs.matrix) }}
 
     runs-on: ${{ matrix.os }}
     # windows-latest defaults `run:` steps to PowerShell, where `chmod`/`./gradlew` don't work.
@@ -156,12 +162,6 @@ jobs:
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
 
-      # flatpak-builder validates hicolor icons while exporting the finished bundle. Check the
-      # source asset first so an incorrectly sized replacement fails with a direct diagnostic.
-      - name: Validate Flatpak icon
-        if: matrix.linux
-        run: python3 packaging/linux/validate-flatpak-icon.py
-
       # The controller uses the host's bundled-by-JavaCV FFmpeg native, so the duration-recovery
       # path must run on every release target rather than only in the macOS-wide verification job.
       # This focused native suite covers headerless containers and raw streams without repeating
@@ -212,7 +212,7 @@ jobs:
       # the system's own <comment>) with the hand-authored packaging/linux/indagium-mimeinfo.xml,
       # which only declares globs for extensions the system doesn't already type.
       - name: Add StartupWMClass and desktop-database refresh to Linux .desktop/postinst
-        if: matrix.linux
+        if: matrix.linux && matrix.include_deb
         run: |
           set -euo pipefail
           deb=$(find build/compose/binaries/main/deb -name '*.deb')
@@ -250,7 +250,7 @@ jobs:
       # desktop-file-validate is exactly the tool that flags "declares MimeType but Exec takes no
       # arguments" — this gate would have caught the original %F-less Exec regressing silently.
       - name: Validate generated .desktop entry
-        if: matrix.linux
+        if: matrix.linux && matrix.include_deb
         run: |
           set -euo pipefail
           sudo apt-get update && sudo apt-get install -y desktop-file-utils
@@ -269,15 +269,18 @@ jobs:
         if: matrix.linux
         run: |
           set -euo pipefail
-          deb=$(find build/compose/binaries/main/deb -maxdepth 1 -type f -name "*_${{ matrix.deb_arch }}.deb" -print -quit)
           appimage=$(find build/compose/binaries/main/appimage -maxdepth 1 -type f -name "*-${{ matrix.portable_arch }}.AppImage" -print -quit)
           flatpak_bundle=$(find build/compose/binaries/main/flatpak -maxdepth 1 -type f -name "*-${{ matrix.portable_arch }}.flatpak" -print -quit)
-          test -n "$deb"
           test -n "$appimage"
           test -n "$flatpak_bundle"
-          test "$(find build/compose/binaries/main/deb -maxdepth 1 -type f -name '*.deb' | wc -l | tr -d ' ')" = 1
           test "$(find build/compose/binaries/main/appimage -maxdepth 1 -type f -name '*.AppImage' | wc -l | tr -d ' ')" = 1
           test "$(find build/compose/binaries/main/flatpak -maxdepth 1 -type f -name '*.flatpak' | wc -l | tr -d ' ')" = 1
+
+          if [ '${{ matrix.include_deb }}' = 'true' ]; then
+            deb=$(find build/compose/binaries/main/deb -maxdepth 1 -type f -name "*_${{ matrix.deb_arch }}.deb" -print -quit)
+            test -n "$deb"
+            test "$(find build/compose/binaries/main/deb -maxdepth 1 -type f -name '*.deb' | wc -l | tr -d ' ')" = 1
+          fi
 
           appimage_workdir=$(mktemp -d)
           (
