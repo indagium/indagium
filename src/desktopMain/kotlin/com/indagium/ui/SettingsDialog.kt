@@ -525,6 +525,28 @@ private fun AppearanceSettingsSection(state: AppState) {
                 onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } })
         }
     }
+    if (isLinuxOs) {
+        CompactSettingWithTooltip(
+            label = "File picker",
+            tooltip = "Automatic uses Compatibility X11 on Debian, Arch, Manjaro, and Fedora; " +
+                "it uses Native GTK on Ubuntu and unrecognized distributions.",
+        ) {
+            val modes = LinuxFilePickerMode.entries
+            SegmentedControl(
+                options = modes.map(LinuxFilePickerMode::label),
+                selectedIndices = setOf(modes.indexOf(state.settings.linuxFilePickerMode)),
+                onToggle = { index -> state.updateSettings { it.copy(linuxFilePickerMode = modes[index]) } },
+                modifier = Modifier.fillMaxWidth(),
+                fillWidth = true,
+            )
+        }
+        AppText(
+            "Restart Indagium to apply file picker changes.",
+            color = tc.td,
+            fontSize = 10.sp,
+            fontFamily = UI,
+        )
+    }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
             "Storage",

@@ -17,9 +17,11 @@ import com.indagium.singleinstance.SingleInstanceHandle
 import com.indagium.ui.App
 import com.indagium.ui.AppState
 import com.indagium.ui.DesktopStorage
+import com.indagium.ui.applyLinuxFilePickerMode
 import com.indagium.ui.horizontalScrollDelta
 import com.indagium.ui.isLinuxOs
 import com.indagium.ui.isMacOs
+import com.indagium.ui.restoredSettingsFromAutosave
 import java.awt.AWTEvent
 import java.awt.Desktop
 import java.awt.EventQueue
@@ -39,6 +41,11 @@ fun main(args: Array<String>) {
     // real data sits unreachable under the old directory. It must also precede AppState's
     // construction, since AppState's constructor reads autosave.cache synchronously.
     DesktopStorage.migrateAppDataDirIfNeeded()
+
+    // AWT chooses the GTK/X11 FileDialog implementation when it initializes. Restore just this
+    // persisted preference before Compose or any FileDialog can touch AWT; AppState later restores
+    // the complete session normally. An explicit -Dsun.awt.disableGtkFileDialogs value wins.
+    applyLinuxFilePickerMode(restoredSettingsFromAutosave(DesktopStorage.autosaveFile()))
 
     configureSwingGlobalsForCompose()
 

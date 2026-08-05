@@ -900,6 +900,13 @@ data class VoiceInputSettings(
     val recognitionEngine: VoiceRecognitionEngine = VoiceRecognitionEngine.WHISPER,
 )
 
+/** Linux-only AWT FileDialog backend preference. Changes take effect after restarting Indagium. */
+enum class LinuxFilePickerMode(val label: String) {
+    AUTOMATIC("Automatic"),
+    NATIVE_GTK("Native GTK"),
+    COMPATIBILITY_X11("Compatibility X11"),
+}
+
 data class AppSettings(
     val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
@@ -1039,6 +1046,9 @@ data class AppSettings(
     // settingsFromJson), never in the frozen legacy positional settingsFromToken decoder. Trailing
     // with a default so old settings tokens still parse.
     val showProcessNamesInNewTabs: Boolean = false,
+    // Linux only: controls AWT's sun.awt.disableGtkFileDialogs startup property. It is persisted
+    // in keyed JSON (not the frozen legacy positional token) so switching modes survives restart.
+    val linuxFilePickerMode: LinuxFilePickerMode = LinuxFilePickerMode.AUTOMATIC,
 )
 
 enum class ThemePreset(val label: String) {
