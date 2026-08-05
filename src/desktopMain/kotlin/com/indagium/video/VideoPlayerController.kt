@@ -132,7 +132,7 @@ internal fun shouldDropLateFrame(latenessUs: Long, consecutiveDrops: Int): Boole
     latenessUs > FRAME_DROP_LATENESS_US && consecutiveDrops < MAX_CONSECUTIVE_FRAME_DROPS
 
 /**
- * Step 4 of the duration-recovery chain (see [scanDurationMs]'s KDoc for steps 1-3): raises
+ * Step 5 of the duration-recovery chain (see [scanDurationMs]'s KDoc for earlier metadata steps): raises
  * [currentDurationMs] to [positionMs] whenever real playback has moved past what's currently
  * believed to be the file's length. This is what makes an approximate or even entirely absent
  * duration estimate safe to show at all — [resolveScannedDurationMs]'s packet-count/frame-rate
@@ -154,6 +154,44 @@ internal fun shouldDropLateFrame(latenessUs: Long, consecutiveDrops: Int): Boole
 internal fun growDurationIfNeeded(currentDurationMs: Long, positionMs: Long): Long = maxOf(currentDurationMs, positionMs)
 
 /**
+ * Whether the transport has a trustworthy upper bound to use for seeking. This describes
+ * capability rather than a platform or container type: FFmpeg's reported duration can differ
+ * across native builds, so the same recovery chain drives macOS, Linux, and Windows.
+ */
+internal enum class VideoSeekReadiness {
+    /** A headerless source is still being inspected in the background. */
+    DISCOVERING,
+    /** A positive duration is available, so timeline seeks are meaningful. */
+    READY,
+    /** Every non-playback recovery path was exhausted without finding a duration. */
+    UNAVAILABLE,
+}
+
+/**
+ * One immutable duration/readiness update. Keeping these values together prevents a scan thread
+ * from publishing stale "unknown" state after the decoder has observed a usable duration. A later
+ * playback position may turn UNAVAILABLE into READY, but a ready duration never regresses.
+ */
+internal data class VideoSeekState(
+    val durationMs: Long = 0L,
+    val readiness: VideoSeekReadiness = VideoSeekReadiness.DISCOVERING,
+)
+
+internal fun advanceVideoSeekState(
+    current: VideoSeekState,
+    observedDurationMs: Long = 0L,
+    discoveryFinished: Boolean = false,
+): VideoSeekState {
+    val durationMs = growDurationIfNeeded(current.durationMs, observedDurationMs.coerceAtLeast(0L))
+    val readiness = when {
+        durationMs > 0L -> VideoSeekReadiness.READY
+        current.readiness == VideoSeekReadiness.UNAVAILABLE || discoveryFinished -> VideoSeekReadiness.UNAVAILABLE
+        else -> VideoSeekReadiness.DISCOVERING
+    }
+    return VideoSeekState(durationMs, readiness)
+}
+
+/**
  * Raw signals from ONE packet-only pass over a container — no image/audio decoding — that
  * [resolveScannedDurationMs] combines into a duration a format header didn't report:
  *  - [maxEndUs]: the maximum resolvable packet end timestamp seen (microseconds), or 0 if no
@@ -169,6 +207,19 @@ internal fun growDurationIfNeeded(currentDurationMs: Long, positionMs: Long): Lo
  * count packets after already having walked every one of them for timestamps.
  */
 internal data class PacketScanResult(val maxEndUs: Long, val videoPacketCount: Long, val videoFrameRate: Double)
+
+/** Which non-header recovery signal yielded a duration, if any. */
+internal enum class DurationRecoverySource {
+    PACKET_METADATA,
+    DECODE_TIMESTAMPS,
+    UNAVAILABLE,
+    CANCELLED,
+}
+
+internal data class DurationRecoveryResult(
+    val durationMs: Long,
+    val source: DurationRecoverySource,
+)
 
 /**
  * Walks every packet in [path] exactly once — no image/audio decoding, so this is I/O-bound only
@@ -188,6 +239,7 @@ internal data class PacketScanResult(val maxEndUs: Long, val videoPacketCount: L
  * on any dependency on that class's lifecycle.
  */
 internal fun scanPackets(path: String, isCancelled: () -> Boolean = { false }): PacketScanResult {
+    if (isCancelled()) return PacketScanResult(0L, 0L, 0.0)
     FFmpegFrameGrabber(path).use { grabber ->
         grabber.start()
         var lastEndUs = 0L
@@ -198,7 +250,7 @@ internal fun scanPackets(path: String, isCancelled: () -> Boolean = { false }): 
             val endUs = packetEndUs(packet, grabber) ?: continue
             if (endUs > lastEndUs) lastEndUs = endUs
         }
-        return PacketScanResult(lastEndUs, videoPacketCount, grabber.videoFrameRate)
+        return if (isCancelled()) PacketScanResult(0L, 0L, 0.0) else PacketScanResult(lastEndUs, videoPacketCount, grabber.videoFrameRate)
     }
 }
 
@@ -220,7 +272,9 @@ private fun packetEndUs(packet: AVPacket, grabber: FFmpegFrameGrabber): Long? {
 /**
  * Recovers a container's true duration for files whose format header reports none at all.
  * `grabber.lengthInTime` (AVFormatContext.duration) comes back 0 for two different shapes of file,
- * both handled here as two fallback steps sharing the single packet pass [scanPackets] performs:
+ * both handled here as two fallback steps sharing the single packet pass [scanPackets] performs.
+ * The caller may subsequently use [scanDecodedTimestampDurationMs] as step 4, only when both
+ * metadata signals below have failed:
  *
  *  - **Step 2 (exact)**: a container written by a live-mode/streaming muxer that never got to
  *    record its own trailer — a screen recorder that streams its output, or is killed before
@@ -239,21 +293,68 @@ private fun packetEndUs(packet: AVPacket, grabber: FFmpegFrameGrabber): Long? {
  *    divided by FFmpeg's own frame rate for that stream — [PacketScanResult.videoFrameRate], which
  *    for a raw stream is itself a guess (`avg_frame_rate` on content with no declared frame rate),
  *    not something the format actually declares. This can be off from the real duration in either
- *    direction, which is exactly why [growDurationIfNeeded] (step 4, applied where playback
+ *    direction, which is exactly why [growDurationIfNeeded] (step 5, applied where playback
  *    position is published, not here) exists: an approximate estimate from this step is safe only
  *    because playback can never run past it without immediately raising it to match.
  *
  * Guards `videoFrameRate <= 0` (unset) and non-finite (NaN/Infinity, e.g. a 0/0 avg_frame_rate)
  * rather than dividing by it blindly — either would otherwise produce a garbage or infinite
- * "duration". Returns 0 (== "still unknown") if neither step above found anything usable, e.g. an
- * empty stream, a cancelled scan, or a raw stream FFmpeg couldn't even guess a frame rate for.
+ * "duration". Returns 0 (== "still unknown") if neither metadata step above found anything
+ * usable; [recoverDurationMs] then decides whether to run the decoded timestamp fallback. This
+ * function returns 0 for cancellation too, so callers must not treat a cancelled result as a
+ * completed discovery.
  *
  * See [scanPackets] for why the packet walk itself is a separate function (both to share one pass
  * for these two steps and so a test can assert its precondition), and its own KDoc for what
  * [isCancelled] is for.
  */
 internal fun scanDurationMs(path: String, isCancelled: () -> Boolean = { false }): Long =
-    resolveScannedDurationMs(scanPackets(path, isCancelled))
+    if (isCancelled()) 0L else resolveScannedDurationMs(scanPackets(path, isCancelled))
+
+/**
+ * Last-resort duration recovery for files where the container exposes neither a length nor usable
+ * packet timestamps/frame rate. This decodes image frames solely to read their FFmpeg presentation
+ * timestamps; it is intentionally more expensive than [scanDurationMs] and callers must invoke it
+ * only after that metadata-only pass has yielded no duration.
+ */
+internal fun scanDecodedTimestampDurationMs(path: String, isCancelled: () -> Boolean = { false }): Long {
+    if (isCancelled()) return 0L
+    FFmpegFrameGrabber(path).use { grabber ->
+        grabber.start()
+        var latestTimestampUs = 0L
+        while (!isCancelled()) {
+            val frame = grabber.grabImage() ?: break
+            // JavaCV can expose the decoded-image timestamp on either the Frame or its grabber,
+            // depending on the native demuxer/decoder combination, so accept whichever is newer.
+            val decodedTimestampUs = maxOf(frame.timestamp, grabber.timestamp).coerceAtLeast(0L)
+            latestTimestampUs = maxOf(latestTimestampUs, decodedTimestampUs)
+        }
+        return if (isCancelled()) 0L else latestTimestampUs / MICROS_PER_MS
+    }
+}
+
+/**
+ * Applies the recovery order without coupling it to FFmpeg so cancellation and fallback order can
+ * be tested without native video files. Decoding is never attempted while packet metadata has
+ * produced a usable duration, nor after cancellation.
+ */
+internal fun recoverDurationMs(
+    scanPacketMetadata: () -> Long,
+    scanDecodedTimestamps: () -> Long,
+    isCancelled: () -> Boolean = { false },
+): DurationRecoveryResult {
+    if (isCancelled()) return DurationRecoveryResult(0L, DurationRecoverySource.CANCELLED)
+    val metadataDurationMs = scanPacketMetadata().coerceAtLeast(0L)
+    if (isCancelled()) return DurationRecoveryResult(0L, DurationRecoverySource.CANCELLED)
+    if (metadataDurationMs > 0L) return DurationRecoveryResult(metadataDurationMs, DurationRecoverySource.PACKET_METADATA)
+    val decodedDurationMs = scanDecodedTimestamps().coerceAtLeast(0L)
+    if (isCancelled()) return DurationRecoveryResult(0L, DurationRecoverySource.CANCELLED)
+    return if (decodedDurationMs > 0L) {
+        DurationRecoveryResult(decodedDurationMs, DurationRecoverySource.DECODE_TIMESTAMPS)
+    } else {
+        DurationRecoveryResult(0L, DurationRecoverySource.UNAVAILABLE)
+    }
+}
 
 /** The step 2 / step 3 decision described in [scanDurationMs]'s KDoc, pulled out as its own pure
  *  function so the fallback arithmetic can be unit-tested against a hand-built [PacketScanResult]
@@ -282,6 +383,7 @@ interface VideoPlayerController {
     val currentFrame: ImageBitmap?
     val positionMs: Long
     val durationMs: Long
+
     val isPlaying: Boolean
 
     /** Linear gain in [0, 1] applied to the audio line, independent of [isMuted]. Defaults to 1
@@ -333,6 +435,17 @@ interface VideoPlayerController {
  *  substitute a fake [VideoPlayerController] instead (see AppState's videoControllerFactory). */
 fun defaultVideoPlayerController(path: String): VideoPlayerController = FfmpegVideoPlayerController(path)
 
+/** Internal capability implemented by production controllers without widening the established
+ * public player interface. Older test doubles continue to work and are treated as discovering
+ * until they report a positive duration. */
+internal interface SeekReadinessAwareVideoPlayerController {
+    val seekReadiness: VideoSeekReadiness
+}
+
+internal val VideoPlayerController.seekReadiness: VideoSeekReadiness
+    get() = (this as? SeekReadinessAwareVideoPlayerController)?.seekReadiness
+        ?: if (durationMs > 0L) VideoSeekReadiness.READY else VideoSeekReadiness.DISCOVERING
+
 /**
  * Stands in for a real controller when AppState.videoController can't even get as far as opening
  * one — currently the one gap in that function's own "non-null whenever a video is attached"
@@ -344,10 +457,11 @@ fun defaultVideoPlayerController(path: String): VideoPlayerController = FfmpegVi
  * "Couldn't play this video" failure state a broken local file already gets via its own
  * FFmpeg-reported [error]. Every mutator is a no-op; there is nothing to play, seek, or grab.
  */
-internal class FailedVideoPlayerController(override val error: String) : VideoPlayerController {
+internal class FailedVideoPlayerController(override val error: String) : VideoPlayerController, SeekReadinessAwareVideoPlayerController {
     override val currentFrame: ImageBitmap? = null
     override val positionMs: Long = 0L
     override val durationMs: Long = 0L
+    override val seekReadiness: VideoSeekReadiness = VideoSeekReadiness.UNAVAILABLE
     override val isPlaying: Boolean = false
     override val volume: Float = 1f
     override val isMuted: Boolean = false
@@ -371,13 +485,13 @@ internal class FailedVideoPlayerController(override val error: String) : VideoPl
     override fun close() = Unit
 }
 
-private class FfmpegVideoPlayerController(private val path: String) : VideoPlayerController {
+private class FfmpegVideoPlayerController(private val path: String) : VideoPlayerController, SeekReadinessAwareVideoPlayerController {
     private val grabber = FFmpegFrameGrabber(path)
     private val converter = Java2DFrameConverter()
 
     private var _currentFrame by mutableStateOf<ImageBitmap?>(null)
     private var _positionMs by mutableStateOf(0L)
-    private var _durationMs by mutableStateOf(0L)
+    private var _seekState by mutableStateOf(VideoSeekState())
     private var _isPlaying by mutableStateOf(false)
     private var _error by mutableStateOf<String?>(null)
     private var _volume by mutableStateOf(1f)
@@ -385,7 +499,8 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
 
     override val currentFrame: ImageBitmap? get() = _currentFrame
     override val positionMs: Long get() = _positionMs
-    override val durationMs: Long get() = _durationMs
+    override val durationMs: Long get() = _seekState.durationMs
+    override val seekReadiness: VideoSeekReadiness get() = _seekState.readiness
     override val isPlaying: Boolean get() = _isPlaying
     override val volume: Float get() = _volume
     override val isMuted: Boolean get() = _isMuted
@@ -517,7 +632,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
             val frame = g.grabImage() ?: return@use null
             Java2DFrameConverter().use { c -> c.convert(frame)?.let(::encodePng) }
         }
-    }.onFailure { AppLogger.error("video", "grabFrameAt failed for $path", it) }.getOrNull()
+    }.onFailure { AppLogger.error("video", "single-frame grab failed", it) }.getOrNull()
 
     override fun close() {
         closed = true
@@ -568,62 +683,70 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_S16)
         grabber.start()
         applyDecodeDownscale()
-        _durationMs = grabber.lengthInTime / MICROS_PER_MS
-        maybeStartDurationRecoveryScan(_durationMs)
+        val declaredDurationMs = grabber.lengthInTime / MICROS_PER_MS
+        publishDurationState(observedDurationMs = declaredDurationMs)
+        maybeStartDurationRecoveryScan(declaredDurationMs)
         hasAudioStream = grabber.hasAudio()
         if (hasAudioStream) openAudioLine()
         true
     }.getOrElse { t ->
-        AppLogger.error("video", "Failed to open $path", t)
+        AppLogger.error("video", "failed to open video", t)
         _error = t.message ?: t::class.simpleName ?: "Failed to open video"
+        publishDurationState(discoveryFinished = true)
         false
     }
 
     /**
      * `grabber.lengthInTime` reporting 0 (or negative) means the container's own header carries no
-     * duration — see [scanDurationMs]'s KDoc for the two different shapes of durationless file this
-     * covers (steps 2 and 3 of the chain) and why a plain frame-count fallback alone can't help.
-     * Declared-duration files return immediately here and never pay for a scan.
+     * duration — see [scanDurationMs]'s KDoc for metadata steps 2/3 and
+     * [scanDecodedTimestampDurationMs] for the decoded step 4. Declared-duration files return
+     * immediately here and never pay for a scan.
      *
      * Runs on its own short-lived daemon thread, separate from both [decodeThread] and the UI
      * thread's Compose recomposition, exactly like [grabFrameAt] opens its own separate grabber
      * rather than touching this controller's playing one — spawning it here (from [openGrabber],
      * itself already running on [decodeThread]) is non-blocking, so opening a durationless file
-     * never delays showing its first frame. `_durationMs` is a Compose `mutableStateOf`, snapshot-
+     * never delays showing its first frame. The immutable seek state is Compose `mutableStateOf`, snapshot-
      * safe to write from any thread (see CLAUDE.md), so the transport bar simply recomposes once
-     * this publishes a real value — no signaling back to [decodeThread] or the UI is needed. In
-     * practice this thread finishes in single-digit-to-low-double-digit milliseconds (I/O bound, no
-     * decoding), so by the time a user could react to the panel, a real duration is already showing
-     * — see [scanDurationMs]'s own KDoc for the exact numbers this was measured against.
+     * this publishes a real value — no signaling back to [decodeThread] or the UI is needed. The
+     * normal metadata pass is I/O-bound; decoding is deliberately deferred until it fails, so an
+     * unusual source can take longer without delaying its first preview frame.
      *
-     * Cancellation: [scanDurationMs]'s `isCancelled` callback reads [closed] on every packet, so a
-     * scan racing [close] stops promptly instead of walking the rest of the file; the final publish
-     * is ALSO gated on `!closed` in case the scan's last iteration finishes between that check and
-     * [close] being called. Either way the scan's own `FFmpegFrameGrabber` is opened and released
-     * entirely inside [scanPackets]'s `use` block, so there is nothing here left to leak.
+     * Cancellation: both scans check [closed] for each packet/frame. A cancelled result preserves
+     * DISCOVERING rather than publishing UNAVAILABLE, and the final publish is gated on `!closed`.
+     * Each short-lived grabber is released inside its own `use` block.
      *
      * The publish itself goes through [growDurationIfNeeded] rather than a plain assignment: this
      * scan can take a few milliseconds, during which the decode thread may already have published
-     * real playback positions (see [setPositionMs]) that pushed `_durationMs` up via step 4's
+     * real playback positions (see [setPositionMs]) that pushed the duration up via step 5's
      * self-correcting growth. A recovered value that turned out lower than a position already
      * reached must not yank the duration back down — [growDurationIfNeeded] keeps this monotonic
      * either way, so the transport bar never regresses once a real length is showing.
      */
     private fun maybeStartDurationRecoveryScan(declaredMs: Long) {
         if (declaredMs > 0L) return
-        val scanPath = path
         Thread({
-            val recoveredMs = runCatching { scanDurationMs(scanPath) { closed } }
-                .onFailure { AppLogger.warn("video", "duration recovery scan failed for $scanPath", it) }
-                .getOrNull()
-            // Logged unconditionally (success, failure, or "found nothing") so a future report
-            // shaped like this one is diagnosable from the log alone, not just from the live UI.
-            AppLogger.info(
-                "video",
-                "duration recovery for $scanPath: declaredMs=$declaredMs recoveredMs=${recoveredMs ?: "n/a"}",
+            val result = recoverDurationMs(
+                scanPacketMetadata = {
+                    runCatching { scanDurationMs(path) { closed } }
+                        .onFailure { AppLogger.warn("video", "packet duration recovery failed", it) }
+                        .getOrDefault(0L)
+                },
+                scanDecodedTimestamps = {
+                    runCatching { scanDecodedTimestampDurationMs(path) { closed } }
+                        .onFailure { AppLogger.warn("video", "decoded timestamp duration recovery failed", it) }
+                        .getOrDefault(0L)
+                },
+                isCancelled = { closed },
             )
-            if (!closed && recoveredMs != null && recoveredMs > 0L) {
-                _durationMs = growDurationIfNeeded(_durationMs, recoveredMs)
+            // No path is included: diagnostics retain the recovery source and result without
+            // retaining user-owned recording locations.
+            AppLogger.info("video", "duration recovery source=${result.source} durationMs=${result.durationMs}")
+            if (!closed && result.source != DurationRecoverySource.CANCELLED) {
+                publishDurationState(
+                    observedDurationMs = result.durationMs,
+                    discoveryFinished = true,
+                )
             }
         }, "indagium-video-duration-scan").apply { isDaemon = true }.start()
     }
@@ -670,7 +793,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         } ?: return false
         if (!isCurrentEpoch(command.epoch)) return true
         runCatching { grabber.setTimestamp(command.targetUs) }
-            .onFailure { AppLogger.warn("video", "seek failed for $path", it) }
+            .onFailure { AppLogger.warn("video", "seek failed", it) }
         runCatching { audioLine?.flush() }
         if (!isCurrentEpoch(command.epoch)) return true
         playbackStartNanos = System.nanoTime()
@@ -693,7 +816,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     ) {
         val frame = runCatching { grabImageAtOrAfter(minimumTimestampUs, epoch) }
             .onFailure {
-                AppLogger.error("video", "image grab failed for $path", it)
+                AppLogger.error("video", "image grab failed", it)
                 _error = it.message ?: "Playback error"
             }
             .getOrNull()
@@ -712,7 +835,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
 
     private fun grabNextFrame(): Frame? = runCatching { grabber.grab() }
         .onFailure {
-            AppLogger.error("video", "grab failed for $path", it)
+            AppLogger.error("video", "video frame grab failed", it)
             _error = it.message ?: "Playback error"
             playRequested = false
             _isPlaying = false
@@ -865,7 +988,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         }
     }
 
-    // Step 4 of the duration-recovery chain (see growDurationIfNeeded's KDoc): every publish of a
+    // Step 5 of the duration-recovery chain (see growDurationIfNeeded's KDoc): every publish of a
     // real position is also a chance to notice the currently-known duration has been undershot, and
     // fix that on the spot. Routing every _positionMs write through this one function (rather than
     // duplicating the growth check at each call site) is what guarantees no future publish site can
@@ -873,7 +996,15 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     // advance, and any new one inherits the same guarantee for free.
     private fun setPositionMs(ms: Long) {
         _positionMs = ms
-        _durationMs = growDurationIfNeeded(_durationMs, ms)
+        publishDurationState(observedDurationMs = ms)
+    }
+
+    /** Must run under [presentationLock] when called from playback; it also serializes the scan
+     * thread's completion with those playback updates so duration/readiness stay monotonic. */
+    private fun publishDurationState(observedDurationMs: Long = 0L, discoveryFinished: Boolean = false) {
+        synchronized(presentationLock) {
+            _seekState = advanceVideoSeekState(_seekState, observedDurationMs, discoveryFinished)
+        }
     }
 
     private fun openAudioLine() {
@@ -890,7 +1021,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
             }.getOrNull()
             applyGain()
         }.onFailure {
-            AppLogger.warn("video", "No audio output line for $path — playing video-only", it)
+            AppLogger.warn("video", "no audio output line; playing video-only", it)
             hasAudioStream = false
         }
     }

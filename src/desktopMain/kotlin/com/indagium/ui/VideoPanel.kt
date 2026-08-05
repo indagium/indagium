@@ -85,6 +85,8 @@ import com.indagium.model.LogTab
 import com.indagium.model.VideoAttachment
 import com.indagium.model.VideoSource
 import com.indagium.video.VideoPlayerController
+import com.indagium.video.VideoSeekReadiness
+import com.indagium.video.seekReadiness
 import com.indagium.video.formatVideoDurationShort
 import com.indagium.video.formatVideoTime
 import com.indagium.video.formatVideoTimeShort
@@ -109,6 +111,14 @@ private fun videoDisplayName(attachment: VideoAttachment): String = when (val so
 private fun videoFullPath(attachment: VideoAttachment): String = when (val source = attachment.source) {
     is VideoSource.LocalFile -> source.path
     is VideoSource.ArchiveEntry -> "${source.archivePath}/${source.entryPath}"
+}
+
+/** A visible explanation for a disabled seek bar. Kept independent of Compose so its distinct
+ * transient/permanent states stay easy to regression-test. */
+internal fun videoSeekReadinessMessage(readiness: VideoSeekReadiness): String? = when (readiness) {
+    VideoSeekReadiness.DISCOVERING -> "Preparing timeline… seeking will be enabled when the video length is known."
+    VideoSeekReadiness.UNAVAILABLE -> "Timeline unavailable — playback works, but seeking needs a known duration."
+    VideoSeekReadiness.READY -> null
 }
 
 /**
@@ -619,14 +629,10 @@ private fun VideoTransportBar(
     // during a drag would fight the decode thread's own (asynchronous, one-loop-iteration-later)
     // position updates and make the thumb visibly stutter/snap back mid-drag.
     var dragPositionMs by remember(tab.id) { mutableStateOf<Long?>(null) }
-    // durationMs is 0 until FFmpeg's own header duration is known — and stays 0 forever for a
-    // container a live-mode/streaming muxer wrote with no trailer (see VideoPlayerController's
-    // scanDurationMs), until its background recovery scan publishes a real value. Slider math must
-    // not treat that 0 as a real (near-zero) duration: valueRange 0f..1f with a real positionMs in
-    // the hundreds/thousands would coerce the thumb hard to the right for a video at the START of
-    // an UNKNOWN-length recording — exactly the "pinned to the end, drags snap back" report this
-    // durationKnown branch exists to prevent. See the Slider block below for how it's used.
-    val durationKnown = controller.durationMs > 0L
+    // A zero duration alone cannot tell us whether the controller is still discovering one or has
+    // exhausted every non-playback recovery path. Readiness gives the disabled slider an honest,
+    // OS-neutral explanation instead of leaving Linux/macOS users to infer it from "--:--".
+    val seekReady = controller.seekReadiness == VideoSeekReadiness.READY
     val durationF = controller.durationMs.coerceAtLeast(1L).toFloat()
     val sliderValueMs = dragPositionMs ?: controller.positionMs
     val sliderColors = SliderDefaults.colors(thumbColor = tc.ac, activeTrackColor = tc.ac, inactiveTrackColor = tc.br)
@@ -712,24 +718,24 @@ private fun VideoTransportBar(
                 // (not sliderValueMs coerced into the placeholder 0f..1f range, which is what used
                 // to pin the thumb hard right for any real, non-zero positionMs) keeps the thumb at
                 // the truthful "can't place this yet" left edge until durationKnown flips true.
-                value = if (durationKnown) sliderValueMs.toFloat().coerceIn(0f, durationF) else 0f,
-                onValueChange = { if (durationKnown) dragPositionMs = it.toLong() },
+                value = if (seekReady) sliderValueMs.toFloat().coerceIn(0f, durationF) else 0f,
+                onValueChange = { if (seekReady) dragPositionMs = it.toLong() },
                 onValueChangeFinished = {
-                    if (durationKnown) dragPositionMs?.let { controller.seek(it) }
+                    if (seekReady) dragPositionMs?.let { controller.seek(it) }
                     dragPositionMs = null
                 },
                 valueRange = 0f..durationF,
                 // Disabled (not just visually inert) while duration is unknown: a seek target
                 // computed against the placeholder 0f..1f range would be meaningless, so dragging
                 // must be impossible rather than merely have its result discarded.
-                enabled = playable && durationKnown,
+                enabled = playable && seekReady,
                 colors = sliderColors,
                 interactionSource = sliderInteractionSource,
                 thumb = {
                     SliderDefaults.Thumb(
                         interactionSource = sliderInteractionSource,
                         colors = sliderColors,
-                        enabled = playable && durationKnown,
+                        enabled = playable && seekReady,
                         thumbSize = DpSize(14.dp, 14.dp),
                     )
                 },
@@ -737,7 +743,7 @@ private fun VideoTransportBar(
                     SliderDefaults.Track(
                         sliderState = sliderState,
                         modifier = Modifier.height(4.dp),
-                        enabled = playable && durationKnown,
+                        enabled = playable && seekReady,
                         colors = sliderColors,
                         drawStopIndicator = null,
                         thumbTrackGapSize = 0.dp,
@@ -746,6 +752,9 @@ private fun VideoTransportBar(
                 },
                 modifier = Modifier.fillMaxWidth().height(28.dp).padding(horizontal = 2.dp),
             )
+        }
+        videoSeekReadinessMessage(controller.seekReadiness)?.let { message ->
+            AppText(message, color = tc.td, fontSize = 9.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 2.dp))
         }
         if (state.settings.showVideoFollowReadout) {
             VideoFollowReadout(state = state, tab = tab, mapping = mapping, positionMs = controller.positionMs)

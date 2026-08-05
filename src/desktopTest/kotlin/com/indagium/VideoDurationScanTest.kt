@@ -1,11 +1,18 @@
 package com.indagium
 
 import com.indagium.video.PacketScanResult
+import com.indagium.video.DurationRecoverySource
+import com.indagium.video.VideoSeekReadiness
+import com.indagium.video.VideoSeekState
+import com.indagium.video.advanceVideoSeekState
 import com.indagium.video.defaultVideoPlayerController
 import com.indagium.video.growDurationIfNeeded
+import com.indagium.video.recoverDurationMs
 import com.indagium.video.resolveScannedDurationMs
+import com.indagium.video.scanDecodedTimestampDurationMs
 import com.indagium.video.scanDurationMs
 import com.indagium.video.scanPackets
+import com.indagium.ui.videoSeekReadinessMessage
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -149,6 +156,14 @@ class VideoDurationScanTest {
     }
 
     @Test
+    fun decodedTimestampFallbackCanMeasureAHeaderlessStream() {
+        // Production prefers the cheap packet metadata recovery, but this confirms the final
+        // fallback independently measures the decoded-frame timeline for a headerless stream.
+        val recoveredMs = scanDecodedTimestampDurationMs(fixture("live-noduration.mkv"))
+        assertTrue(recoveredMs in 4_500..5_100, "expected roughly 5000ms via decoded timestamps, got $recoveredMs")
+    }
+
+    @Test
     fun realControllerPublishesAFallbackDurationForARawElementaryStream() {
         // The raw-stream equivalent of realControllerPublishesARecoveredDurationForADurationlessFile
         // above: the user's reported bug had TWO distinct root causes (a live-mode container with
@@ -225,5 +240,68 @@ class VideoDurationScanTest {
         // video plays" — no recovery step needs to have found anything for the transport bar to
         // stop being stuck at "--:--" once real playback positions start arriving.
         assertEquals(1_500L, growDurationIfNeeded(currentDurationMs = 0L, positionMs = 1_500L))
+    }
+
+    @Test
+    fun metadataDurationSkipsTheExpensiveDecodedTimestampFallback() {
+        var decodedScanCalls = 0
+
+        val result = recoverDurationMs(
+            scanPacketMetadata = { 5_000L },
+            scanDecodedTimestamps = { decodedScanCalls++; 4_900L },
+        )
+
+        assertEquals(DurationRecoverySource.PACKET_METADATA, result.source)
+        assertEquals(5_000L, result.durationMs)
+        assertEquals(0, decodedScanCalls, "decoded timestamp fallback must only run after metadata recovery fails")
+    }
+
+    @Test
+    fun decodedTimestampFallbackMakesSeekingReadyWhenMetadataHasNoDuration() {
+        val result = recoverDurationMs(
+            scanPacketMetadata = { 0L },
+            scanDecodedTimestamps = { 4_900L },
+        )
+
+        assertEquals(DurationRecoverySource.DECODE_TIMESTAMPS, result.source)
+        assertEquals(4_900L, result.durationMs)
+        val state = advanceVideoSeekState(VideoSeekState(), observedDurationMs = result.durationMs, discoveryFinished = true)
+        assertEquals(VideoSeekReadiness.READY, state.readiness)
+    }
+
+    @Test
+    fun cancellationAfterMetadataScanSuppressesDecodedFallbackAndCompletion() {
+        var cancelled = false
+        var decodedScanCalls = 0
+
+        val result = recoverDurationMs(
+            scanPacketMetadata = { cancelled = true; 0L },
+            scanDecodedTimestamps = { decodedScanCalls++; 4_900L },
+            isCancelled = { cancelled },
+        )
+
+        assertEquals(DurationRecoverySource.CANCELLED, result.source)
+        assertEquals(0, decodedScanCalls)
+        assertEquals(
+            VideoSeekState(),
+            advanceVideoSeekState(VideoSeekState(), observedDurationMs = result.durationMs, discoveryFinished = false),
+            "a cancelled scan must not turn discovering into permanently unavailable",
+        )
+    }
+
+    @Test
+    fun seekReadinessAndDurationNeverRegressWhenRecoveryCompletesAfterPlayback() {
+        val afterPlayback = advanceVideoSeekState(VideoSeekState(), observedDurationMs = 6_000L)
+        val staleRecovery = advanceVideoSeekState(afterPlayback, observedDurationMs = 5_000L, discoveryFinished = true)
+
+        assertEquals(VideoSeekReadiness.READY, staleRecovery.readiness)
+        assertEquals(6_000L, staleRecovery.durationMs)
+    }
+
+    @Test
+    fun transportExplainsDiscoveringAndUnavailableAsDifferentStates() {
+        assertTrue(videoSeekReadinessMessage(VideoSeekReadiness.DISCOVERING)?.contains("Preparing timeline") == true)
+        assertTrue(videoSeekReadinessMessage(VideoSeekReadiness.UNAVAILABLE)?.contains("Timeline unavailable") == true)
+        assertEquals(null, videoSeekReadinessMessage(VideoSeekReadiness.READY))
     }
 }
