@@ -247,6 +247,9 @@ internal fun FileView(
             onClearSelection = { state.clearSelection(tab.id) },
             onCopySelection = { selectedIds -> state.copySelectedLines(tab.id, selectedIds) },
             onCopyText = { text -> state.copyToClipboard(text) },
+            onLogRowDoubleClick = { id -> state.seekVideoToLogRow(tab.id, id) },
+            onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(tab.id) },
+            onLogRowDoubleClickGestureExpired = { state.endVideoLogDoubleClickGesture(tab.id) },
             navScrollMargin = state.settings.navScrollMargin,
             focusRequester = logViewerFr,
             onPanelFocusChanged = { focused ->
