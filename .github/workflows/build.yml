@@ -130,6 +130,13 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      # The controller uses the host's bundled-by-JavaCV FFmpeg native, so the duration-recovery
+      # path must run on every release target rather than only in the macOS-wide verification job.
+      # This focused native suite covers headerless containers and raw streams without repeating
+      # the whole desktop test suite four times before packaging.
+      - name: Verify native video duration recovery
+        run: ./gradlew desktopTest --tests 'com.indagium.VideoDurationScanTest'
+
       - name: Package distribution
         # Maven Central occasionally times out on a fresh macOS ARM runner while resolving the
         # platform-specific Compose runtime. Retry the whole package task twice; Gradle reuses any
