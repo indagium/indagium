@@ -328,8 +328,8 @@ class SplitViewAndTabRegressionTest {
         val text = state.selectedLinesText("log", explicitIds = setOf(2, 3))
 
         assertEquals(
-            "10:00:00.100     42     7  W  Binder: original one\n" +
-                "10:00:00.200     42     7  E  Binder: original two",
+            "10:00:00.100  W/Binder  original one\n" +
+                "10:00:00.200  E/Binder  original two",
             text,
         )
     }

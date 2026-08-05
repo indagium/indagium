@@ -636,63 +636,71 @@ private fun StorageInfoTooltip(text: String) {
 
 @Composable
 private fun EditorBehaviorSettingsSection(state: AppState) {
-    val tc = tc()
-    CompactSettingWithTooltip(
-        label = "New video links: double-click seeks",
-        tooltip = "The default for a newly linked log/video anchor. Each video link can then be toggled " +
-            "independently from its header; this does not affect existing links or Follow.",
-    ) {
-        SegmentedControl(
-            options = listOf("On", "Off"),
-            selectedIndices = setOf(if (state.settings.enableDoubleClickVideoSeekOnLink) 0 else 1),
-            onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
-        )
-    }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        CompactSetting("Visible tabs") {
-            val tabLimits = listOf(4, 6, 8, 10, 12, 16)
-            ListStepper(
-                options = tabLimits,
-                value = state.settings.visibleTabLimit,
-                onChange = { v -> state.updateSettings { it.copy(visibleTabLimit = v) } },
-            )
-        }
-        CompactSetting("Keyboard scroll margin") {
-            val scrollMargins = listOf(0, 2, 3, 5, 8, 12)
-            ListStepper(
-                options = scrollMargins,
-                value = state.settings.navScrollMargin,
-                onChange = { v -> state.updateSettings { it.copy(navScrollMargin = v) } },
-            )
-        }
-        CompactSetting("Most-used tags") {
-            val tagLimits = listOf(0, 3, 5, 10, 20)
-            ListStepper(
-                options = tagLimits,
-                value = state.settings.mostUsedTagLimit,
-                onChange = { v -> state.updateSettings { it.copy(mostUsedTagLimit = v) } },
-            )
-        }
-        CompactSetting("Filter list rows") {
-            val rowLimits = listOf(3, 5, 8, 10, 15)
-            ListStepper(
-                options = rowLimits,
-                value = state.settings.filterListRows,
-                onChange = { v -> state.updateSettings { it.copy(filterListRows = v) } },
-            )
-        }
-    }
-    // Plain SpaceBetween, no weight()/forced alignment: with weighted equal-width columns
-    // and the last item End-aligned, that item's own leading slack (columnWidth minus its
-    // content width) piled onto the third gap on top of the third column's own trailing
-    // slack, visibly doubling it. Left tightly wrapped (each item's width = its own
-    // content, per CompactSettingWithTooltip's plain Column), SpaceBetween's
-    // (available − Σwidths)/(n−1) split gives a numerically equal gap between every pair
-    // of adjacent items regardless of how their label/control widths differ, and pins the
-    // last item flush to the row's right edge for free — no explicit End alignment needed.
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        // Keep the link default separate from the grid: it is the first setting in the section
+        // and remains easy to scan before the denser editor preferences below.
         CompactSettingWithTooltip(
-            label = "Row wrapping",
+            label = "New video links: double-click seeks",
+            tooltip = "The default for a newly linked log/video anchor. Each video link can then be toggled " +
+                "independently from its header; this does not affect existing links or Follow.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.enableDoubleClickVideoSeekOnLink) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
+            )
+        }
+
+        // Each Row uses four equally sized tracks rather than SpaceBetween. This keeps labels
+        // and controls aligned from one row to the next even when a control's natural width
+        // changes (notably Row wrapping and Ctrl+F opens).
+        EditorBehaviorGridRow(
+            first = {
+                CompactSetting("Visible tabs") {
+                    val tabLimits = listOf(4, 6, 8, 10, 12, 16)
+                    ListStepper(
+                        options = tabLimits,
+                        value = state.settings.visibleTabLimit,
+                        onChange = { v -> state.updateSettings { it.copy(visibleTabLimit = v) } },
+                    )
+                }
+            },
+            second = {
+                CompactSetting("Keyboard scroll margin") {
+                    val scrollMargins = listOf(0, 2, 3, 5, 8, 12)
+                    ListStepper(
+                        options = scrollMargins,
+                        value = state.settings.navScrollMargin,
+                        onChange = { v -> state.updateSettings { it.copy(navScrollMargin = v) } },
+                    )
+                }
+            },
+            third = {
+                CompactSetting("Most-used tags") {
+                    val tagLimits = listOf(0, 3, 5, 10, 20)
+                    ListStepper(
+                        options = tagLimits,
+                        value = state.settings.mostUsedTagLimit,
+                        onChange = { v -> state.updateSettings { it.copy(mostUsedTagLimit = v) } },
+                    )
+                }
+            },
+            fourth = {
+                CompactSetting("Filter list rows") {
+                    val rowLimits = listOf(3, 5, 8, 10, 15)
+                    ListStepper(
+                        options = rowLimits,
+                        value = state.settings.filterListRows,
+                        onChange = { v -> state.updateSettings { it.copy(filterListRows = v) } },
+                    )
+                }
+            },
+        )
+
+        EditorBehaviorGridRow(
+            first = {
+                CompactSettingWithTooltip(
+                    label = "Row wrapping",
             // AWT has no horizontal mouse-wheel axis at all (confirmed via
             // java.awt.event.MouseWheelEvent — there's no getWheelRotationX() or
             // equivalent), so Compose Desktop only ever produces a horizontal scroll
@@ -705,111 +713,144 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             tooltip = "Auto wraps long lines to fit the panel width; toggle off to set a fixed " +
                 "wrap column and scroll horizontally instead. Tip: hold Shift while scrolling if " +
                 "two-finger trackpad swipe doesn't scroll horizontally.",
-        ) {
-            RowWrapControl(
-                auto = state.settings.autoLogRowWrap,
-                wrapChars = state.settings.logRowWrapLimitChars,
-                onToggleAuto = { state.updateSettings { it.copy(autoLogRowWrap = !it.autoLogRowWrap) } },
-                onWrapCharsChange = { limit -> state.updateSettings { it.copy(logRowWrapLimitChars = limit) } },
-            )
+                ) {
+                    RowWrapControl(
+                        auto = state.settings.autoLogRowWrap,
+                        wrapChars = state.settings.logRowWrapLimitChars,
+                        onToggleAuto = { state.updateSettings { it.copy(autoLogRowWrap = !it.autoLogRowWrap) } },
+                        onWrapCharsChange = { limit -> state.updateSettings { it.copy(logRowWrapLimitChars = limit) } },
+                    )
+                }
+            },
+            second = {
+                CompactSettingWithTooltip(
+                    label = "Crash rows",
+                    tooltip = "Colors every row in an expanded crash/stack-trace group, not just the header.",
+                ) {
+                    SegmentedControl(
+                        options = listOf("On", "Off"),
+                        selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 0 else 1),
+                        onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 0) } },
+                    )
+                }
+            },
+            third = {
+                CompactSettingWithTooltip(
+                    label = "Original panel",
+                    tooltip = "Controls whether newly opened files start with the unfiltered Original panel visible.",
+                ) {
+                    SegmentedControl(
+                        options = listOf("On", "Off"),
+                        selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
+                        onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 0) } },
+                    )
+                }
+            },
+            fourth = {
+                CompactSettingWithTooltip(
+                    label = "Ctrl+F opens",
+                    tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
+                        "any rows. Tags/Regex instead focuses the corresponding filter field and hides " +
+                        "non-matching rows. \"Ctrl+F opens Original\" below applies to all three.",
+                ) {
+                    // Rules (CtrlFTarget.MESSAGE_RULE) dropped from the selector, not the enum —
+                    // a settings token saved before this change can still hold it, so indexOf
+                    // falling through to -1 (nothing highlighted, existing behavior unaffected)
+                    // is the correct degrade rather than a crash.
+                    val targets = listOf(CtrlFTarget.FIND_BAR, CtrlFTarget.TAGS, CtrlFTarget.KEYWORD_REGEX)
+                    SegmentedControl(
+                        options = listOf("Find bar", "Tags", "Regex"),
+                        selectedIndices = setOf(targets.indexOf(state.settings.ctrlFTarget)),
+                        onToggle = { idx -> state.updateSettings { it.copy(ctrlFTarget = targets[idx]) } },
+                    )
+                }
+            },
+        )
+
+        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            CompactSettingWithTooltip(
+                label = "Ctrl+F opens Original",
+                tooltip = "Reveals the active file's unfiltered Original panel whenever Ctrl+F opens, whichever " +
+                    "of Find bar / Tags / Regex it opens with above. Single-tab view only — compare mode has no " +
+                    "Original/Filtered split to reveal.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(openUnfilteredOnCtrlF = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Row number",
+                tooltip = "Shows a left gutter with each row's original row number. The number stays fixed when " +
+                    "you filter or fold rows, so it always points back to the same spot in the full log.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showRowNumbers) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showRowNumbers = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Minimap",
+                tooltip = "Replaces the scrollbar with a Sublime-style text minimap — a miniature of each line " +
+                    "colored by level. Click or drag on it to jump to that part of the file.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showMinimap) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showMinimap = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Process names in new tabs",
+                tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
+                    "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
+                    "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
+                    "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
+                    "different logs with two different sets of processes. Per-tab picks reset every session " +
+                    "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
+                )
+            }
+            // Keep this last: it is related to the video-link preference at the top but is a
+            // diagnostic display preference rather than part of the main editor grid.
+            CompactSettingWithTooltip(
+                label = "Video follow readout",
+                tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
+                    "bar, explaining exactly what Follow is doing at the current playhead position.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showVideoFollowReadout) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showVideoFollowReadout = idx == 0) } },
+                )
+            }
         }
-        CompactSettingWithTooltip(
-            label = "Crash rows",
-            tooltip = "Colors every row in an expanded crash/stack-trace group, not just the header.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 0) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            label = "Original panel",
-            tooltip = "Controls whether newly opened files start with the unfiltered Original panel visible.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 0) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            label = "Ctrl+F opens",
-            tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
-                "any rows. Tags/Regex instead focuses the corresponding filter field and hides " +
-                "non-matching rows. \"Ctrl+F opens Original\" below applies to all three.",
-        ) {
-            // Rules (CtrlFTarget.MESSAGE_RULE) dropped from the selector, not the enum —
-            // a settings token saved before this change can still hold it, so indexOf
-            // falling through to -1 (nothing highlighted, existing behavior unaffected)
-            // is the correct degrade rather than a crash.
-            val targets = listOf(CtrlFTarget.FIND_BAR, CtrlFTarget.TAGS, CtrlFTarget.KEYWORD_REGEX)
-            SegmentedControl(
-                options = listOf("Find bar", "Tags", "Regex"),
-                selectedIndices = setOf(targets.indexOf(state.settings.ctrlFTarget)),
-                onToggle = { idx -> state.updateSettings { it.copy(ctrlFTarget = targets[idx]) } },
-            )
-        }
     }
-    CompactSettingWithTooltip(
-        label = "Ctrl+F opens Original",
-        tooltip = "Reveals the active file's unfiltered Original panel whenever Ctrl+F opens, whichever " +
-            "of Find bar / Tags / Regex it opens with above. Single-tab view only — compare mode has no " +
-            "Original/Filtered split to reveal.",
+}
+
+/** A stable four-column track layout for the dense editor preferences area. */
+@Composable
+private fun EditorBehaviorGridRow(
+    first: @Composable () -> Unit,
+    second: @Composable () -> Unit,
+    third: @Composable () -> Unit,
+    fourth: @Composable () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.Top,
     ) {
-        SegmentedControl(
-            options = listOf("On", "Off"),
-            selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
-            onToggle = { idx -> state.updateSettings { it.copy(openUnfilteredOnCtrlF = idx == 0) } },
-        )
-    }
-    CompactSettingWithTooltip(
-        label = "Row number",
-        tooltip = "Shows a left gutter with each row's original row number. The number stays fixed when " +
-            "you filter or fold rows, so it always points back to the same spot in the full log.",
-    ) {
-        SegmentedControl(
-            options = listOf("On", "Off"),
-            selectedIndices = setOf(if (state.settings.showRowNumbers) 0 else 1),
-            onToggle = { idx -> state.updateSettings { it.copy(showRowNumbers = idx == 0) } },
-        )
-    }
-    CompactSettingWithTooltip(
-        label = "Minimap",
-        tooltip = "Replaces the scrollbar with a Sublime-style text minimap — a miniature of each line " +
-            "colored by level. Click or drag on it to jump to that part of the file.",
-    ) {
-        SegmentedControl(
-            options = listOf("On", "Off"),
-            selectedIndices = setOf(if (state.settings.showMinimap) 0 else 1),
-            onToggle = { idx -> state.updateSettings { it.copy(showMinimap = idx == 0) } },
-        )
-    }
-    CompactSettingWithTooltip(
-        label = "Process names in new tabs",
-        tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
-            "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
-            "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
-            "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
-            "different logs with two different sets of processes. Per-tab picks reset every session " +
-            "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
-    ) {
-        SegmentedControl(
-            options = listOf("On", "Off"),
-            selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
-            onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
-        )
-    }
-    CompactSettingWithTooltip(
-        label = "Video follow readout",
-        tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
-            "bar, explaining exactly what Follow is doing at the current playhead position.",
-    ) {
-        SegmentedControl(
-            options = listOf("On", "Off"),
-            selectedIndices = setOf(if (state.settings.showVideoFollowReadout) 0 else 1),
-            onToggle = { idx -> state.updateSettings { it.copy(showVideoFollowReadout = idx == 0) } },
-        )
+        Box(Modifier.weight(1f, fill = true)) { first() }
+        Box(Modifier.weight(1f, fill = true)) { second() }
+        Box(Modifier.weight(1f, fill = true)) { third() }
+        Box(Modifier.weight(1f, fill = true)) { fourth() }
     }
 }
 
@@ -910,6 +951,7 @@ private fun IssuesSettingsSection(state: AppState) {
 private fun ExportAnnotationsSettingsSection(state: AppState) {
     val tc = tc()
     AnnotationSettingsRow(state)
+    CopyMetadataSettingsRow(state)
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
             "Annotation file prefix",
@@ -1005,6 +1047,55 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
                 "Add mask",
                 onClick = { state.updateSettings { it.copy(copyMaskRules = it.copyMaskRules + CopyMaskRule()) } },
                 variant = ButtonVariant.Secondary,
+            )
+        }
+    }
+}
+
+/** Metadata uses the same four-column rhythm and hover help as the annotation controls above.
+ * The dependent name choice remains remembered while PID/TID copying is switched off. */
+@Composable
+internal fun CopyMetadataSettingsRow(state: AppState) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        CompactSettingWithTooltip(
+            label = "Pid/Tid copy",
+            tooltip = "Includes PID and TID for log rows that contain them when copying lines, annotations, or filtered exports.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.copyPidTid) 0 else 1),
+                onToggle = { index -> state.updateSettings { it.copy(copyPidTid = index == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Pid copy as name",
+            tooltip = "Uses a process name learned from the log instead of the numeric PID. Available only while PID/TID copying is on.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.copyPidAsName) 0 else 1),
+                onToggle = { index -> state.updateSettings { it.copy(copyPidAsName = index == 0) } },
+                enabled = state.settings.copyPidTid,
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Row number copy",
+            tooltip = "Includes the original log row number when the row-number gutter is visible in the log view.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.copyRowNumber) 0 else 1),
+                onToggle = { index -> state.updateSettings { it.copy(copyRowNumber = index == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Time delta copy",
+            tooltip = "Includes Δt only when the active tab's Δt column is visible and the log view can calculate it.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.copyTimeDelta) 0 else 1),
+                onToggle = { index -> state.updateSettings { it.copy(copyTimeDelta = index == 0) } },
             )
         }
     }

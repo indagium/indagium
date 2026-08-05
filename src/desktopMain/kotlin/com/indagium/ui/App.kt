@@ -458,10 +458,7 @@ fun App(
                                             if (selCount > 1) {
                                                 state.copySelectedLines(ctx.tabId, selectionIds.toSet())
                                             } else {
-                                                val pid = if (entry.pid > 0) "  ${entry.pid.toString().padStart(5)} ${
-                                                    entry.tid.toString().padStart(5)
-                                                }" else ""
-                                                state.copyToClipboard("${entry.ts}$pid  ${entry.level.key}  ${entry.tag}: ${entry.msg}")
+                                                state.copySelectedLines(ctx.tabId, setOf(entry.id))
                                             }
                                             state.ctx = null
                                         },

@@ -67,6 +67,9 @@ import com.indagium.utils.computeStackTraceGroups
 import com.indagium.utils.computeTidMapColors
 import com.indagium.utils.enforceArchiveVideoCacheBudget
 import com.indagium.utils.exportFilteredToFile
+import com.indagium.utils.LogLinePresentationContext
+import com.indagium.utils.presentLogLine
+import com.indagium.utils.presentLogLineMarkdown
 import com.indagium.utils.extractAppVersionHeuristic
 import com.indagium.utils.extractArchiveVideoToCache
 import com.indagium.utils.extractCandidate
@@ -4682,16 +4685,21 @@ class AppState(
     fun selectedLinesText(tabId: String, explicitIds: Set<Int>? = null): String {
         val t = tab(tabId) ?: return ""
         val ids = explicitIds ?: t.selected
-        return ids.sorted().mapNotNull { id -> t.rmap[id] }.joinToString("\n") { e ->
-            val pid = if (e.pid > 0) "  ${e.pid.toString().padStart(5)} ${e.tid.toString().padStart(5)}" else ""
-            "${e.ts}$pid  ${e.level.key}  ${e.tag}: ${e.msg}"
+        val visible = visibleEntries(t)
+        val context = LogLinePresentationContext(t, settings, visible, t.selected.ifEmpty { ids })
+        return ids.sorted().mapNotNull { id -> t.rmap[id] }.joinToString("\n") { entry ->
+            presentLogLine(t, entry, settings, context)
         }
     }
 
     fun selectedLinesMarkdownText(tabId: String, explicitIds: Set<Int>? = null): String {
         val t = tab(tabId) ?: return ""
         val ids = explicitIds ?: t.selected
-        return ids.sorted().mapNotNull { id -> t.rmap[id] }.joinToString("\n", transform = ::logEntryMarkdownLine)
+        val visible = visibleEntries(t)
+        val context = LogLinePresentationContext(t, settings, visible, t.selected.ifEmpty { ids })
+        return ids.sorted().mapNotNull { id -> t.rmap[id] }.joinToString("\n") { entry ->
+            presentLogLineMarkdown(t, entry, settings, context)
+        }
     }
 
     // ── Tab management ───────────────────────────────────────────────
@@ -5409,7 +5417,7 @@ class AppState(
 
     fun exportFilteredTo(tabId: String, file: File, csv: Boolean): Boolean {
         val t = tab(tabId) ?: return false
-        return runCatching { exportFilteredToFile(t, file, csv) }.isSuccess
+        return runCatching { exportFilteredToFile(t, file, csv, settings) }.isSuccess
     }
 
     fun saveAnnotationsTo(tabId: String, file: File): Boolean {
@@ -5570,7 +5578,7 @@ class AppState(
         settings = settings.copy(defaultSaveDir = dir)
         val saved = File(dir, path)
         ioScope.launch {
-            runCatching { exportFilteredToFile(t, saved, csv = false) }.fold(
+            runCatching { exportFilteredToFile(t, saved, csv = false, settings = settings) }.fold(
                 onSuccess = { AppLogger.info("export", "Exported filtered log to ${saved.absolutePath}") },
                 onFailure = { e -> AppLogger.error("export", "Failed to export filtered log to ${saved.absolutePath}", e) },
             )
@@ -5589,7 +5597,7 @@ class AppState(
         settings = settings.copy(defaultSaveDir = dir)
         val saved = File(dir, path)
         ioScope.launch {
-            runCatching { exportFilteredToFile(t, saved, csv = true) }.fold(
+            runCatching { exportFilteredToFile(t, saved, csv = true, settings = settings) }.fold(
                 onSuccess = { AppLogger.info("export", "Exported filtered log to ${saved.absolutePath}") },
                 onFailure = { e -> AppLogger.error("export", "Failed to export filtered log to ${saved.absolutePath}", e) },
             )
