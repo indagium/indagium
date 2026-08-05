@@ -1,6 +1,8 @@
 @file:OptIn(org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi::class)
 
 import org.gradle.api.tasks.Exec
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
+import org.gradle.api.tasks.testing.logging.TestLogEvent
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 
 plugins {
@@ -437,6 +439,22 @@ val testHomeDir = layout.buildDirectory.dir("test-home").get().asFile
 tasks.withType<Test>().configureEach {
     doFirst { testHomeDir.mkdirs() }
     systemProperty("user.home", testHomeDir.absolutePath)
+}
+
+// Default testLogging only prints "<Test> FAILED" plus the exception's class/file/line — enough
+// to point at a test, not enough to diagnose it. A CI-only failure (see the flaky-under-load note
+// on AppStateBehaviorTest's waitUntil helper) is otherwise unforensicable after the runner is
+// torn down: this is the only record once build/reports/tests isn't there to read locally. FULL
+// prints the assertion's expected/actual message and the complete stack trace inline in the
+// Gradle console log the CI workflow already captures, so a failure that only reproduces on a
+// GitHub runner is diagnosable from that log alone, without rerunning or adding artifact uploads.
+tasks.withType<Test>().configureEach {
+    testLogging {
+        events(TestLogEvent.FAILED)
+        exceptionFormat = TestExceptionFormat.FULL
+        showStackTraces = true
+        showCauses = true
+    }
 }
 
 val perfFixture: String? = System.getProperty("indagium.perf.file")

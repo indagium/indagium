@@ -91,6 +91,22 @@ jobs:
       - name: Build, test, and lint
         run: ./gradlew build
 
+      # testLogging (build.gradle.kts) already prints the full assertion message and stack trace
+      # to the console log above on failure, but the HTML/XML report additionally shows per-test
+      # timing and the full suite's pass/fail breakdown at a glance — useful for a CI-only flake
+      # (e.g. slow-runner timing; see the note on AppStateBehaviorTest's waitUntil helper) where
+      # knowing whether nearby tests also ran slow matters. Only uploaded on failure: a green run
+      # has nothing worth keeping here.
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-test-report
+          path: |
+            build/reports/tests/desktopTest
+            build/test-results/desktopTest
+          retention-days: 7
+
       # Resolved dependency report in place of a full SBOM (small dependency footprint here
       # doesn't justify a new SBOM-generating plugin) — auditable snapshot of exactly what
       # versions this release actually resolved, alongside Dependabot's advisory scanning
@@ -177,6 +193,19 @@ jobs:
       # the whole desktop test suite four times before packaging.
       - name: Verify native video duration recovery
         run: ./gradlew desktopTest --tests 'com.indagium.VideoDurationScanTest'
+
+      # See the matching step in the verify job: testLogging already puts the full failure in the
+      # console log above, this is the report tree backup. Name suffixed with artifact_name since
+      # this step runs once per matrix leg and upload-artifact rejects duplicate names in one run.
+      - name: Upload test report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: video-duration-test-report-${{ matrix.artifact_name }}
+          path: |
+            build/reports/tests/desktopTest
+            build/test-results/desktopTest
+          retention-days: 7
 
       - name: Package distribution
         # Maven Central occasionally times out on a fresh macOS ARM runner while resolving the
