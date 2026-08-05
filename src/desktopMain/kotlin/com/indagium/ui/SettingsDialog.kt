@@ -637,6 +637,17 @@ private fun StorageInfoTooltip(text: String) {
 @Composable
 private fun EditorBehaviorSettingsSection(state: AppState) {
     val tc = tc()
+    CompactSettingWithTooltip(
+        label = "New video links: double-click seeks",
+        tooltip = "The default for a newly linked log/video anchor. Each video link can then be toggled " +
+            "independently from its header; this does not affect existing links or Follow.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.enableDoubleClickVideoSeekOnLink) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
+        )
+    }
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         CompactSetting("Visible tabs") {
             val tabLimits = listOf(4, 6, 8, 10, 12, 16)

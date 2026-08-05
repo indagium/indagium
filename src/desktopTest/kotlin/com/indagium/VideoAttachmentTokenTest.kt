@@ -13,6 +13,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * Covers VideoAttachment's autosave round-trip (LogTab.tabToken/String.tabShellFromToken,
@@ -53,6 +54,20 @@ class VideoAttachmentTokenTest {
         )
         val restored = original.tabToken().tabShellFromToken()
         assertEquals(original.attachedVideo, restored?.tab?.attachedVideo)
+    }
+
+    @Test
+    fun roundTripsPerLinkDoubleClickSeekChoice() {
+        val original = tabFixture(
+            VideoAttachment(
+                path = "/videos/repro.mp4",
+                sourceLabel = "bugreport.zip/repro.mp4",
+                anchor = VideoAnchor(videoMs = 5_400, logId = 42),
+                doubleClickSeekEnabled = false,
+            ),
+        )
+
+        assertEquals(false, original.tabToken().tabShellFromToken()?.tab?.attachedVideo?.doubleClickSeekEnabled)
     }
 
     @Test
@@ -146,5 +161,25 @@ class VideoAttachmentTokenTest {
 
         val restored = legacyTabToken.tabShellFromToken()
         assertEquals(0, restored?.tab?.attachedVideo?.rotationDegrees, "a legacy 8-field attachment token must default rotationDegrees to 0")
+    }
+
+    @Test
+    fun legacyAttachedVideoTokenWithAnchorDefaultsDoubleClickSeekOn() {
+        val fullTabToken = tabFixture(
+            VideoAttachment(
+                path = "/videos/repro.mp4",
+                sourceLabel = "/videos/repro.mp4",
+                anchor = VideoAnchor(videoMs = 1_000, logId = 42),
+            ),
+        ).tabToken()
+        val rawFields = fullTabToken.split("|").toMutableList()
+        // A pre-feature attachment had fields 0..8 (through rotation) but no index-9 local
+        // double-click setting. Its anchor retains the historic/default enabled behavior.
+        val legacyAttachedVideoRaw = rawFields[11].unb64().split("|").take(9).joinToString("|")
+        rawFields[11] = legacyAttachedVideoRaw.b64()
+
+        val restored = rawFields.joinToString("|").tabShellFromToken()
+
+        assertTrue(restored?.tab?.attachedVideo?.doubleClickSeekEnabled == true)
     }
 }

@@ -169,6 +169,9 @@ internal fun CompareView(
                         onClearSelection = { state.clearSelection(leftTab.id) },
                         onCopySelection = { selectedIds -> state.copySelectedLines(leftTab.id, selectedIds) },
                         onCopyText = { text -> state.copyToClipboard(text) },
+                        onLogRowDoubleClick = { id -> state.seekVideoToLogRow(leftTab.id, id) },
+                        onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(leftTab.id) },
+                        onLogRowDoubleClickGestureExpired = { state.endVideoLogDoubleClickGesture(leftTab.id) },
                         navScrollMargin = state.settings.navScrollMargin,
                         focusRequester = leftLogFr,
                         onPanelFocusChanged = { focused ->
@@ -251,6 +254,9 @@ internal fun CompareView(
                         onClearSelection = { state.clearSelection(rightTab.id) },
                         onCopySelection = { selectedIds -> state.copySelectedLines(rightTab.id, selectedIds) },
                         onCopyText = { text -> state.copyToClipboard(text) },
+                        onLogRowDoubleClick = { id -> state.seekVideoToLogRow(rightTab.id, id) },
+                        onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(rightTab.id) },
+                        onLogRowDoubleClickGestureExpired = { state.endVideoLogDoubleClickGesture(rightTab.id) },
                         navScrollMargin = state.settings.navScrollMargin,
                         focusRequester = rightLogFr,
                         onPanelFocusChanged = { focused ->

@@ -265,6 +265,20 @@ private fun VideoHeaderFollowActions(
         onClick = { state.setVideoFollowLog(tab.id, !followLogs) },
         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
     )
+    ToolbarBtn(
+        label = "Double-click seeks video",
+        icon = Icons.Outlined.MyLocation,
+        showLabel = false,
+        tooltip = if (anchor != null) {
+            "Double-click a log row to seek this video to its mapped time"
+        } else {
+            "Link a log row to a video moment first; without an anchor, rows have no video time to seek to."
+        },
+        active = state.isVideoDoubleClickSeekEnabled(tab.id),
+        enabled = anchor != null,
+        onClick = { state.setVideoDoubleClickSeekEnabled(tab.id, !state.isVideoDoubleClickSeekEnabled(tab.id)) },
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
+    )
 }
 
 @Composable
@@ -529,6 +543,8 @@ private fun ColumnScope.VideoPlayerContents(
 ) {
     val (followLogs, mapping, targetLogId) = followState
     val followTarget = followState.navigateLogId.takeIf { followLogs }
+    val gestureSuppressesFollow = state.isVideoLogDoubleClickGestureFollowSuppressed(tab.id)
+    val manualSeekFollowTarget = state.manualVideoSeekFollowTarget(tab.id)
 
     // `selectionKey` is what lets Follow re-assert itself. Keyed on followTarget alone, Follow went
     // permanently silent after any manual click: with filters active the target holds for as long as
@@ -538,8 +554,15 @@ private fun ColumnScope.VideoPlayerContents(
     // manual click is still the one-off look-around it should be. navigateToVideoLog's own
     // already-selected dedupe (forceRecenter = false) keeps this from spamming scroll requests.
     val selectionKey = tab.selected.takeIf { controller.isPlaying }
-    LaunchedEffect(followLogs, followTarget, selectionKey) {
-        if (followLogs && followTarget != null) state.navigateToVideoLog(tab.id, followTarget)
+    LaunchedEffect(followLogs, followTarget, selectionKey, gestureSuppressesFollow, manualSeekFollowTarget) {
+        if (!followLogs || followTarget == null || gestureSuppressesFollow) return@LaunchedEffect
+        // A row double-click is both native text selection and a one-shot video seek. Do not let
+        // the position update emitted by that seek replace the clicked row (or clear its selected
+        // word). Once playback reaches another mapped row, clear the guard and normal Follow takes
+        // over immediately.
+        if (manualSeekFollowTarget == followTarget) return@LaunchedEffect
+        if (manualSeekFollowTarget != null) state.clearManualVideoSeekFollowSuppression(tab.id)
+        state.navigateToVideoLog(tab.id, followTarget)
     }
 
     val rotationDegrees = state.videoRotationDegrees(tab.id)

@@ -608,6 +608,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     debugLogFilePath?.let { put("debugLogFilePath", it) }
     put("showMinimap", showMinimap)
     put("showVideoFollowReadout", showVideoFollowReadout)
+    put("enableDoubleClickVideoSeekOnLink", enableDoubleClickVideoSeekOnLink)
     put("customIssueRules", customIssueRulesJson(customIssueRules))
     put("showProcessNamesInNewTabs", showProcessNamesInNewTabs)
     put("linuxFilePickerMode", linuxFilePickerMode.name)
@@ -881,6 +882,10 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         debugLogFilePath = o.stringOrNull("debugLogFilePath"),
         showMinimap = o.boolOrDefault("showMinimap", true),
         showVideoFollowReadout = o.boolOrDefault("showVideoFollowReadout", false),
+        // `seekVideoOnLogDoubleClick` was the short-lived global setting. Preserve its value as
+        // the default for links created after upgrade, but write only the explicit new key.
+        enableDoubleClickVideoSeekOnLink = o.boolOrNull("enableDoubleClickVideoSeekOnLink")
+            ?: o.boolOrDefault("seekVideoOnLogDoubleClick", true),
         customIssueRules = o.customIssueRulesFromJson("customIssueRules"),
         // Missing (a legacy blob predating this field, or one written while it was still the
         // three-way "processNameMode" that has since moved onto LogTab) falls back to false, the
@@ -1373,6 +1378,10 @@ private fun VideoAttachment.attachedVideoToken(): String {
         // token — an attachment token written before rotation was persisted (only 8 fields)
         // still parses, defaulting to 0.
         rotationDegrees.toString(),
+        // Field index 9, appended after rotation: per-link log-row double-click seek state. A
+        // token written before this field had no separate choice; its anchored attachment restores
+        // enabled (the historic/default behavior), while an unlinked attachment remains inactive.
+        doubleClickSeekEnabled.toString(),
     )
 }
 
@@ -1401,6 +1410,9 @@ private fun String.attachedVideoFromToken(): VideoAttachment? = runCatching {
         // Field index 8 (see attachedVideoToken above); absent on legacy tokens or an invalid/
         // corrupt value both fall back to 0 rather than propagating a bogus orientation.
         rotationDegrees = p.getOrNull(8)?.toIntOrNull()?.takeIf { it in setOf(0, 90, 180, 270) } ?: 0,
+        // Field index 9 (append-only). Legacy anchored tokens predate the local state and restore
+        // enabled to match the prior default; no anchor is always effectively inactive in AppState.
+        doubleClickSeekEnabled = p.getOrNull(9)?.toBooleanStrictOrNull() ?: (anchorVideoMs != null && anchorLogId != null),
     )
 }.getOrNull()
 

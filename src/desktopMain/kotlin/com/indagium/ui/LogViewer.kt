@@ -872,6 +872,15 @@ fun LogViewer(
     onClearSelection: (() -> Unit)? = null,
     onCopySelection: ((Set<Int>?) -> Unit)? = null,
     onCopyText: (String) -> Unit = {},
+    // A one-shot, non-selection action for an unmodified primary-button double-click on a plain
+    // row. The caller owns the tab binding and any video mapping; nullable keeps previews/tests
+    // and normal LogViewer consumers free of video coupling.
+    onLogRowDoubleClick: ((Int) -> Unit)? = null,
+    // Follow needs to know about the first press too: it can otherwise re-select its current row
+    // before the second press turns this into a log-to-video double-click seek. The expiry callback
+    // restores normal Follow after a plain single click.
+    onLogRowDoubleClickGestureStarted: (() -> Unit)? = null,
+    onLogRowDoubleClickGestureExpired: (() -> Unit)? = null,
     navScrollMargin: Int = 5,
     focusRequester: FocusRequester? = null,
     onPanelFocusChanged: (Boolean) -> Unit = {},
@@ -1408,6 +1417,12 @@ fun LogViewer(
                                             onSelRow = itemOnSelRow,
                                             onCtxMenu = itemOnCtxMenu,
                                             onSelectedTextChange = { selectedTextForCopy = it },
+                                            // AppState owns the link-local gate. Keep the handler
+                                            // installed so an anchor/link choice changed elsewhere
+                                            // is reflected without coupling LogViewer to settings.
+                                            onLogRowDoubleClick = onLogRowDoubleClick,
+                                            onLogRowDoubleClickGestureStarted = onLogRowDoubleClickGestureStarted,
+                                            onLogRowDoubleClickGestureExpired = onLogRowDoubleClickGestureExpired,
                                             rowBoundsAbs = boundsMap,
                                             regexContext = highlightRegexContext,
                                             highlightEntireCrashGroup = settings.highlightEntireCrashGroup,
@@ -2204,6 +2219,9 @@ private fun LogRow(
     onSelRow: (Int, Boolean, Boolean) -> Unit,
     onCtxMenu: (Int, Float, Float, String) -> Unit,
     onSelectedTextChange: (String) -> Unit,
+    onLogRowDoubleClick: ((Int) -> Unit)? = null,
+    onLogRowDoubleClickGestureStarted: (() -> Unit)? = null,
+    onLogRowDoubleClickGestureExpired: (() -> Unit)? = null,
     rowBoundsAbs: HashMap<Int, Pair<Float, Float>>,
     regexContext: RegexEvaluationContext,
     highlightEntireCrashGroup: Boolean = false,
@@ -2345,14 +2363,17 @@ private fun LogRow(
                     var pressPos: Offset? = null
                     var pressShift = false
                     var pressMulti = false
+                    var pressUnmodified = false
                     var pressDragged = false
                     var pendingSelectedRowToggle: Job? = null
+                    var pendingDoubleClickGestureExpiry: Job? = null
                     var lastPrimaryPressMs = 0L
                     var lastPrimaryPressPos = Offset.Unspecified
                     var doubleClickInProgress = false
-                    while (true) {
-                        val ev = awaitPointerEvent(PointerEventPass.Initial)
-                        when (ev.type) {
+                    try {
+                        while (true) {
+                            val ev = awaitPointerEvent(PointerEventPass.Initial)
+                            when (ev.type) {
                             PointerEventType.Press -> {
                                 val mods = ev.keyboardModifiers
                                 if (ev.buttons.isSecondaryPressed) {
@@ -2388,7 +2409,21 @@ private fun LogRow(
                                     pressPos = position
                                     pressShift = mods.isShiftPressed
                                     pressMulti = mods.isCtrlPressed || mods.isMetaPressed
+                                    pressUnmodified = !mods.isShiftPressed && !mods.isCtrlPressed &&
+                                        !mods.isMetaPressed && !mods.isAltPressed
                                     pressDragged = false
+                                    if (pressUnmodified) {
+                                        if (doubleClickInProgress) {
+                                            pendingDoubleClickGestureExpiry?.cancel()
+                                        } else {
+                                            onLogRowDoubleClickGestureStarted?.invoke()
+                                            pendingDoubleClickGestureExpiry?.cancel()
+                                            pendingDoubleClickGestureExpiry = clickScope.launch {
+                                                kotlinx.coroutines.delay(DOUBLE_CLICK_WINDOW_MS)
+                                                onLogRowDoubleClickGestureExpired?.invoke()
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             PointerEventType.Move -> {
@@ -2424,14 +2459,29 @@ private fun LogRow(
                                         onSelRow(entry.id, pressMulti, pressShift)
                                     }
                                 }
+                                // Run alongside (rather than instead of) BasicTextField's own
+                                // second-click handling. It therefore preserves desktop word
+                                // selection while adding only the independent video seek action.
+                                if (doubleClickInProgress && !pressDragged && pressUnmodified) {
+                                    onLogRowDoubleClick?.invoke(entry.id)
+                                } else if (doubleClickInProgress && pressDragged) {
+                                    // The second press was a drag rather than a real double-click;
+                                    // do not leave Follow held while the user continues selecting.
+                                    onLogRowDoubleClickGestureExpired?.invoke()
+                                }
                                 pressPos = null
                                 pressShift = false
                                 pressMulti = false
+                                pressUnmodified = false
                                 pressDragged = false
                                 doubleClickInProgress = false
                             }
-                            else -> {}
+                                else -> {}
+                            }
                         }
+                    } finally {
+                        pendingDoubleClickGestureExpiry?.cancel()
+                        onLogRowDoubleClickGestureExpired?.invoke()
                     }
                 }
             }

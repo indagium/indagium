@@ -1431,6 +1431,20 @@ class AppState(
     // closeTabsById releases and removes the entry when the owning tab closes.
     private val videoControllers = ConcurrentHashMap<String, VideoPlayerController>()
 
+    /**
+     * A short-lived protection for a log-row double-click seek while video-to-log Follow is on.
+     * The first click changes row selection before Compose can know whether a second click will
+     * follow, so [Gesture] prevents Follow from immediately taking that selection back. A
+     * successful seek then becomes [ManualSeek], which keeps the manually selected row and its
+     * native text selection intact until playback actually advances to a different Follow row.
+     */
+    private sealed interface VideoFollowSuppression {
+        data object Gesture : VideoFollowSuppression
+        data class ManualSeek(val followTargetLogId: Int) : VideoFollowSuppression
+    }
+
+    private val videoFollowSuppressionByTab = mutableStateMapOf<String, VideoFollowSuppression>()
+
     // ── Sequences (per-tab, stored in Filter) ────────────────────────
     // Deliberately active-tab-scoped, unlike addSequence/updateSequence/removeSequence/etc: the
     // setter has no callers anywhere in src/ (verified by grep), and every getter caller is either
@@ -3308,6 +3322,7 @@ class AppState(
      */
     fun removeVideo(tabId: String) {
         videoControllers.remove(tabId)?.close()
+        videoFollowSuppressionByTab.remove(tabId)
         upTab(tabId) { tab ->
             if (tab.attachedVideo == null) tab else tab.copy(attachedVideo = null, videoFollowLog = false)
         }
@@ -3405,9 +3420,99 @@ class AppState(
     }
 
     /** Session-only per-tab transport preference, deliberately false for every new/restored tab. */
-    fun setVideoFollowLog(tabId: String, enabled: Boolean) = upTab(tabId) { it.copy(videoFollowLog = enabled) }
+    fun setVideoFollowLog(tabId: String, enabled: Boolean) {
+        if (!enabled) videoFollowSuppressionByTab.remove(tabId)
+        upTab(tabId) { it.copy(videoFollowLog = enabled) }
+    }
 
     fun isVideoFollowLogEnabled(tabId: String): Boolean = tab(tabId)?.videoFollowLog == true
+
+    /** Arms Follow suppression before an unmodified primary row press can change selection. */
+    fun beginVideoLogDoubleClickGesture(tabId: String) {
+        if (isVideoFollowLogEnabled(tabId) && isVideoDoubleClickSeekEnabled(tabId)) {
+            videoFollowSuppressionByTab[tabId] = VideoFollowSuppression.Gesture
+        }
+    }
+
+    /** Restores ordinary Follow after a primary press did not become a double-click. */
+    fun endVideoLogDoubleClickGesture(tabId: String) {
+        if (videoFollowSuppressionByTab[tabId] is VideoFollowSuppression.Gesture) {
+            videoFollowSuppressionByTab.remove(tabId)
+        }
+    }
+
+    /** True only during the uncertainty between a first and possible second primary click. */
+    fun isVideoLogDoubleClickGestureFollowSuppressed(tabId: String): Boolean =
+        videoFollowSuppressionByTab[tabId] is VideoFollowSuppression.Gesture
+
+    /**
+     * The Follow row which must not replace a row's native double-click text selection after a
+     * manual log-to-video seek. Null means this tab has no such pending seek.
+     */
+    fun manualVideoSeekFollowTarget(tabId: String): Int? =
+        (videoFollowSuppressionByTab[tabId] as? VideoFollowSuppression.ManualSeek)?.followTargetLogId
+
+    /** Clears a completed manual-seek guard as soon as playback maps to another visible row. */
+    fun clearManualVideoSeekFollowSuppression(tabId: String) {
+        if (videoFollowSuppressionByTab[tabId] is VideoFollowSuppression.ManualSeek) {
+            videoFollowSuppressionByTab.remove(tabId)
+        }
+    }
+
+    /**
+     * Enables the current recording's log-row double-click seek action. It is deliberately
+     * independent from Follow: either may be on while the other is off. An attachment without an
+     * anchor has no mapping, so it cannot expose an active double-click seek action.
+     */
+    fun setVideoDoubleClickSeekEnabled(tabId: String, enabled: Boolean) = upTab(tabId) { tab ->
+        val video = tab.attachedVideo ?: return@upTab tab
+        // Normalize a malformed/stale stored flag away when there is no linkage. The UI and seek
+        // path also gate on anchor, but keeping the durable state coherent prevents it reviving
+        // unexpectedly if a later operation supplies an anchor without going through setVideoAnchor.
+        if (video.anchor == null) tab.copy(attachedVideo = video.copy(doubleClickSeekEnabled = false))
+        else tab.copy(attachedVideo = video.copy(doubleClickSeekEnabled = enabled))
+    }
+
+    fun isVideoDoubleClickSeekEnabled(tabId: String): Boolean {
+        val video = tab(tabId)?.attachedVideo
+        return video?.anchor != null && video.doubleClickSeekEnabled
+    }
+
+    /**
+     * Maps one log row through this tab's current anchor and seeks its attached video. This is an
+     * intentionally one-shot transport action: it never changes row selection, Follow, or panel
+     * visibility. Unknown timestamps, stale anchors, and positions outside a known duration are
+     * rejected instead of guessing a seek target.
+     */
+    fun seekVideoToLogRow(tabId: String, logId: Int): Boolean {
+        val tab = tab(tabId) ?: return false
+        if (!isVideoDoubleClickSeekEnabled(tabId) || tab.rmap[logId] == null) {
+            endVideoLogDoubleClickGesture(tabId)
+            return false
+        }
+        val videoMs = logIdToVideoMs(tab, logId)
+        if (videoMs == null || !isVideoPositionValid(tab, videoMs)) {
+            endVideoLogDoubleClickGesture(tabId)
+            return false
+        }
+        val controller = videoController(tabId)
+        if (controller == null) {
+            endVideoLogDoubleClickGesture(tabId)
+            return false
+        }
+        controller.seek(videoMs)
+        // seek() publishes its requested position immediately, before its decoder performs the
+        // asynchronous FFmpeg seek. Recording the resulting Follow target after that publication
+        // means VideoPanel suppresses precisely the effect caused by this manual transport action.
+        if (isVideoFollowLogEnabled(tabId)) {
+            followTargetVisibleLogId(tabId, videoMs)?.let { followTarget ->
+                videoFollowSuppressionByTab[tabId] = VideoFollowSuppression.ManualSeek(followTarget)
+            } ?: endVideoLogDoubleClickGesture(tabId)
+        } else {
+            endVideoLogDoubleClickGesture(tabId)
+        }
+        return true
+    }
 
     /**
      * Seeks the currently attached recording to a Notes frame. The durable [frame.source] check
@@ -3448,11 +3553,22 @@ class AppState(
 
     fun setVideoAnchor(tabId: String, videoMs: Long, logId: Int) = upTab(tabId) { t ->
         if (!isVideoPositionValid(t, videoMs) || logId !in t.rmap) return@upTab t
-        t.attachedVideo?.let { t.copy(attachedVideo = it.copy(anchor = VideoAnchor(videoMs, logId))) } ?: t
+        t.attachedVideo?.let {
+            t.copy(
+                attachedVideo = it.copy(
+                    anchor = VideoAnchor(videoMs, logId),
+                    // A created/replaced linkage takes today's default exactly once. Later
+                    // setting changes must not silently rewrite this explicit per-video choice.
+                    doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
+                ),
+            )
+        } ?: t
     }
 
     fun clearVideoAnchor(tabId: String) = upTab(tabId) { t ->
-        t.attachedVideo?.let { t.copy(attachedVideo = it.copy(anchor = null)) } ?: t
+        t.attachedVideo?.let {
+            t.copy(attachedVideo = it.copy(anchor = null, doubleClickSeekEnabled = false))
+        } ?: t
     }
 
     /** Video-time (ms) for [logId], relative to [tab]'s single anchor. */
@@ -4648,6 +4764,7 @@ class AppState(
                 cancelActiveLoad(tabId)
                 tailCoordinator.cancelTailingFor(tabId)
                 videoControllers.remove(tabId)?.close()
+                videoFollowSuppressionByTab.remove(tabId)
                 visibleItemsByTab.remove(tabId)
                 elapsedIndexByTab.remove(tabId)
                 followFloorIndexByTab.remove(tabId)

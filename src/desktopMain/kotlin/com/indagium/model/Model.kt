@@ -571,13 +571,27 @@ data class VideoAttachment(
     // attachment (a property of the recording) rather than session-only UI state, so it survives
     // restart and resets implicitly whenever the attachment itself is replaced or removed.
     val rotationDegrees: Int = 0,
+    // Whether an unmodified double-click on a log row may seek THIS linked recording. This is a
+    // property of the current log/video linkage rather than the session-wide Follow preference:
+    // one recording can safely use it while another does not. A directly constructed attachment
+    // with an anchor represents an already-created linkage, so it defaults on for compatibility
+    // with attachment tokens saved before this field existed. AppState initializes newly created
+    // links from AppSettings.enableDoubleClickVideoSeekOnLink instead.
+    val doubleClickSeekEnabled: Boolean = anchor != null,
 ) {
     constructor(
         path: String,
         sourceLabel: String,
         durationMs: Long = 0,
         anchor: VideoAnchor? = null,
-    ) : this(VideoSource.LocalFile(path), sourceLabel, durationMs, anchor)
+        doubleClickSeekEnabled: Boolean = anchor != null,
+    ) : this(
+        source = VideoSource.LocalFile(path),
+        sourceLabel = sourceLabel,
+        durationMs = durationMs,
+        anchor = anchor,
+        doubleClickSeekEnabled = doubleClickSeekEnabled,
+    )
 
     /** Compatibility/readability accessor. Archive sources intentionally have no durable local path. */
     val path: String? get() = (source as? VideoSource.LocalFile)?.path
@@ -1034,6 +1048,10 @@ data class AppSettings(
     // most users never need it. Off by default; a user who wants the detail can flip it on in
     // Settings. Trailing with a default so old settings tokens (without this field) still parse.
     val showVideoFollowReadout: Boolean = false,
+    // The default applied only when a log/video anchor linkage is created or replaced. The active
+    // choice itself lives on VideoAttachment.doubleClickSeekEnabled, so changing this setting
+    // never retroactively changes an existing video link. Defaults on for a direct workflow.
+    val enableDoubleClickVideoSeekOnLink: Boolean = true,
     // Global message-only regex anchors shown alongside built-in crashes/ANRs in the Issues panel.
     val customIssueRules: List<CustomIssueRule> = emptyList(),
     // What a NEWLY opened tab starts at: names on (ProcessNameMode.ALL) or off. Only the starting

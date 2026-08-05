@@ -4385,6 +4385,7 @@ class AppStateBehaviorTest {
         updateDownloadDir = "/tmp/openlog-rt-downloads",
         debugLoggingEnabled = true,
         debugLogFilePath = "/tmp/openlog-rt-debug.log",
+        enableDoubleClickVideoSeekOnLink = false,
     )
 
     // (ARCH-2/Batch 5) Proves the migration end to end: every AppSettings field pushed off its
@@ -4562,6 +4563,17 @@ class AppStateBehaviorTest {
         val json = AppSettings(showProcessNamesInNewTabs = true).settingsJson()
 
         assertTrue(settingsFromJson(json)!!.showProcessNamesInNewTabs)
+    }
+
+    @Test
+    fun videoDoubleClickSeekLinkDefaultDefaultsOnMigratesLegacyKeyAndRoundTrips() {
+        assertTrue(settingsFromJson("{}")!!.enableDoubleClickVideoSeekOnLink)
+        assertFalse(settingsFromJson("""{"seekVideoOnLogDoubleClick":false}""")!!.enableDoubleClickVideoSeekOnLink)
+
+        val json = AppSettings(enableDoubleClickVideoSeekOnLink = false).settingsJson()
+
+        assertFalse(settingsFromJson(json)!!.enableDoubleClickVideoSeekOnLink)
+        assertFalse(json.contains("seekVideoOnLogDoubleClick"))
     }
 
     // Once editorChoice is written explicitly (current format), it round-trips as-is rather than
