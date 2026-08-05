@@ -273,6 +273,9 @@ jobs:
           flatpak_bundle=$(find build/compose/binaries/main/flatpak -maxdepth 1 -type f -name "*-${{ matrix.portable_arch }}.flatpak" -print -quit)
           test -n "$appimage"
           test -n "$flatpak_bundle"
+          # The extractor runs from its own temporary directory, so keep the AppImage path valid
+          # after that directory change instead of relying on the checkout working directory.
+          appimage=$(realpath "$appimage")
           test "$(find build/compose/binaries/main/appimage -maxdepth 1 -type f -name '*.AppImage' | wc -l | tr -d ' ')" = 1
           test "$(find build/compose/binaries/main/flatpak -maxdepth 1 -type f -name '*.flatpak' | wc -l | tr -d ' ')" = 1
 
