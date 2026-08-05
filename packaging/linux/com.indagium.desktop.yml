@@ -22,7 +22,10 @@ modules:
       - install -Dm644 packaging/linux/com.indagium.desktop.desktop /app/share/applications/com.indagium.desktop.desktop
       - install -Dm644 packaging/linux/com.indagium.desktop.metainfo.xml /app/share/metainfo/com.indagium.desktop.metainfo.xml
       - install -Dm644 packaging/linux/indagium-mimeinfo.xml /app/share/mime/packages/com.indagium.desktop-mimeinfo.xml
-      - install -Dm644 icons/indagium.png /app/share/icons/hicolor/1024x1024/apps/com.indagium.desktop.png
+      # AppStream resolves the desktop entry's Icon= value through the standard hicolor
+      # directories.  1024x1024 is not one of them, so use the shipped 1024px source
+      # as the 512px application icon (it is downscaled by icon consumers as needed).
+      - install -Dm644 icons/indagium.png /app/share/icons/hicolor/512x512/apps/com.indagium.desktop.png
     sources:
       - type: dir
         path: .

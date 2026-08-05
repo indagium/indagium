@@ -296,6 +296,7 @@ jobs:
           flatpak info --user --show-permissions com.indagium.desktop | grep -q 'home'
           flatpak info --user --show-permissions com.indagium.desktop | grep -q 'network'
           flatpak info --user --files com.indagium.desktop | grep -q 'share/mime/packages/com.indagium.desktop-mimeinfo.xml'
+          flatpak info --user --files com.indagium.desktop | grep -q 'share/icons/hicolor/512x512/apps/com.indagium.desktop.png'
           flatpak uninstall --user -y com.indagium.desktop
 
       - name: Upload artifact
