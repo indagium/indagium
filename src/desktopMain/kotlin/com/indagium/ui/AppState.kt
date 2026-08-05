@@ -105,6 +105,8 @@ import com.indagium.video.FailedVideoPlayerController
 import com.indagium.video.VideoPlayerController
 import com.indagium.video.defaultVideoPlayerController
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.add
 import java.awt.FileDialog
 import java.awt.Frame
@@ -115,6 +117,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 internal fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = EntryIdMap(data)
 
@@ -147,6 +150,14 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
 // unreachable in practice (that many genuinely distinct files sharing one display name), just a
 // hard stop against an unbounded loop.
 private const val MAX_NOTE_TARGET_SUFFIX = 1000
+
+// Auto-export runs on Dispatchers.IO, whose workers can finish two consecutive edits out of order.
+// Keep one write lane per output file and let a queued newer snapshot supersede an older one before
+// it reaches disk, so a stale Markdown/.ann pair cannot overwrite the latest annotation state.
+private class NoteExportWriter {
+    val mutex = Mutex()
+    val revision = AtomicLong()
+}
 
 // Stage 1 wired computeMessageTemplates() into this function (Stage 2a unwired it): the
 // ~4s-on-10M-lines scan is too much to pay on every load for a panel most sessions never open. It
@@ -1450,6 +1461,10 @@ class AppState(
     private val ioJob = SupervisorJob()
     private val ioScope = CoroutineScope(ioJob + Dispatchers.IO)
     private val closed = AtomicBoolean(false)
+
+    // Keyed by absolute path rather than tab: two tabs can intentionally write to the same pinned
+    // note, and they need the same ordering guarantee as rapid edits within one tab.
+    private val noteExportWriters = ConcurrentHashMap<String, NoteExportWriter>()
 
     // Debounce jobs backing in-view search recompute (openSearch/setSearchQuery/... below) — keyed
     // by tabId, same cancel-and-relaunch shape as TailCoordinator's tailAnalysisJobs and AppState's
@@ -6352,17 +6367,25 @@ class AppState(
             // very write is about to create and prompt on the very next edit.
             upTab(tab.id) { it.copy(noteTargetName = mdFile.name) }
         }
+        val writer = noteExportWriters.computeIfAbsent(mdFile.absolutePath) { NoteExportWriter() }
+        val revision = writer.revision.incrementAndGet()
         ioScope.launch {
-            runCatching {
-                targetDir.mkdirs()
-                mdFile.writeText(buildMd(tab, settings))
-                // Sidecar stores full block state for restoration, plus the sourcePath
-                // fingerprint (5th token field) used to disambiguate same-named notes.
-                File(targetDir, "${mdFile.nameWithoutExtension}.ann")
-                    .writeText(tab.annotations.preparedForSave(tab).annotationsToken(tab.sourcePath, tab.filter))
-                legacySourceFingerprintFile(mdFile).delete()
-                writeAnnotationFrameImages(tab, mdFile)
-                rememberRecentNote(mdFile)
+            writer.mutex.withLock {
+                // A newer mutation was already queued while this coroutine waited for the file's
+                // write lane. Only the latest snapshot may be written; otherwise an old annotation
+                // state could finish after and clobber the newer one.
+                if (revision != writer.revision.get()) return@withLock
+                runCatching {
+                    targetDir.mkdirs()
+                    mdFile.writeText(buildMd(tab, settings))
+                    // Sidecar stores full block state for restoration, plus the sourcePath
+                    // fingerprint (5th token field) used to disambiguate same-named notes.
+                    File(targetDir, "${mdFile.nameWithoutExtension}.ann")
+                        .writeText(tab.annotations.preparedForSave(tab).annotationsToken(tab.sourcePath, tab.filter))
+                    legacySourceFingerprintFile(mdFile).delete()
+                    writeAnnotationFrameImages(tab, mdFile)
+                    rememberRecentNote(mdFile)
+                }
             }
         }
     }
