@@ -6,6 +6,7 @@ import com.indagium.model.SourceLogConfiguration
 import com.indagium.model.SourceWrapperRule
 import com.indagium.source.SourceIndexStore
 import com.indagium.ui.AppState
+import com.indagium.ui.EDITOR_CATALOG
 import com.indagium.ui.EditorPreset
 import com.indagium.ui.detectedTemplate
 import com.indagium.ui.editorCommandArguments
@@ -14,6 +15,7 @@ import com.indagium.ui.mkTab
 import com.indagium.ui.resolveExecutable
 import com.indagium.ui.resolveInstalledEditors
 import com.indagium.ui.splitEditorCommand
+import com.indagium.ui.windowsEditorTemplates
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
@@ -797,6 +799,73 @@ class SourceIndexAppStateTest {
         assertEquals(
             listOf(app.absolutePath, "--line", "42", source.absolutePath),
             editorCommandArguments(template, source, line = 42, dirs = emptyList()),
+        )
+    }
+
+    @Test
+    fun windowsStandardInstallDiscoveryFindsEveryCatalogEditorAndKeepsVsCodeFirst() {
+        val dir = createTempDirectory("openlog-windows-standard-editors").toFile()
+        val localAppData = File(dir, "LocalAppData").apply { mkdirs() }
+        val programFiles = File(dir, "Program Files").apply { mkdirs() }
+        fun executable(root: File, relativePath: String): File = File(root, relativePath).apply {
+            parentFile.mkdirs()
+            writeText("windows executable fixture")
+            setExecutable(true)
+        }
+
+        val vscode = executable(localAppData, "Programs/Microsoft VS Code/Code.exe")
+        val idea = executable(programFiles, "JetBrains/IntelliJ IDEA/bin/idea64.exe")
+        val studio = executable(programFiles, "Android/Android Studio/bin/studio64.exe")
+        val cursor = executable(localAppData, "Programs/cursor/Cursor.exe")
+        val sublime = executable(programFiles, "Sublime Text/sublime_text.exe")
+        val zed = executable(localAppData, "Programs/Zed/Zed.exe")
+        val source = File(dir, "Source File.kt").apply { writeText("class Source\n") }
+
+        val templates = windowsEditorTemplates(localAppData, listOf(programFiles))
+        val catalogWithoutHostCommands = EDITOR_CATALOG.map { it.copy(candidates = emptyList()) }
+        val resolved = resolveInstalledEditors(catalogWithoutHostCommands, emptyList(), templates)
+
+        assertEquals(EDITOR_CATALOG.map(EditorPreset::id), resolved.map { it.first.id })
+        // Automatic selection consumes this catalog order, so VS Code must remain its first choice.
+        assertEquals("vscode", resolved.first().first.id)
+        val commands = resolved.associate { (preset, template) ->
+            preset.id to editorCommandArguments(template, source, line = 23, dirs = emptyList())
+        }
+        assertEquals(listOf(vscode.absolutePath, "-g", "${source.absolutePath}:23"), commands["vscode"])
+        assertEquals(listOf(idea.absolutePath, "--line", "23", source.absolutePath), commands["intellij"])
+        assertEquals(listOf(studio.absolutePath, "--line", "23", source.absolutePath), commands["studio"])
+        assertEquals(listOf(cursor.absolutePath, "-g", "${source.absolutePath}:23"), commands["cursor"])
+        assertEquals(listOf(sublime.absolutePath, "${source.absolutePath}:23"), commands["sublime"])
+        assertEquals(listOf(zed.absolutePath, "${source.absolutePath}:23"), commands["zed"])
+    }
+
+    @Test
+    fun windowsToolboxDiscoveryFindsVersionedIdeaAndAndroidStudioLaunchers() {
+        val dir = createTempDirectory("openlog-windows-toolbox-editors").toFile()
+        val toolboxApps = File(dir, "LocalAppData/JetBrains/Toolbox/apps").apply { mkdirs() }
+        fun executable(relativePath: String): File = File(toolboxApps, relativePath).apply {
+            parentFile.mkdirs()
+            writeText("windows executable fixture")
+            setExecutable(true)
+        }
+        val idea = executable("IDEA-U/ch-0/251.1/bin/idea64.exe")
+        val studio = executable("AndroidStudio/ch-0/251.1/bin/studio64.exe")
+        val source = File(dir, "Source.kt").apply { writeText("class Source\n") }
+
+        val templates = windowsEditorTemplates(localAppData = null, programFiles = emptyList(), toolboxAppsDir = toolboxApps)
+        val catalog = listOf(
+            EditorPreset("intellij", "IntelliJ IDEA", emptyList()),
+            EditorPreset("studio", "Android Studio", emptyList()),
+        )
+        val resolved = resolveInstalledEditors(catalog, emptyList(), templates).associate { it.first.id to it.second }
+
+        assertEquals(
+            listOf(idea.absolutePath, "--line", "41", source.absolutePath),
+            editorCommandArguments(resolved.getValue("intellij"), source, line = 41, dirs = emptyList()),
+        )
+        assertEquals(
+            listOf(studio.absolutePath, "--line", "41", source.absolutePath),
+            editorCommandArguments(resolved.getValue("studio"), source, line = 41, dirs = emptyList()),
         )
     }
 
