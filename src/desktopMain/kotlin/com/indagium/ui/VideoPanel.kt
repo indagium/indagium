@@ -344,6 +344,12 @@ internal fun BoundVideoPanel(
     var detached by remember(tab.id) { mutableStateOf(false) }
     val onSidebarVisibleChange = LocalVideoSidebarExpandedChange.current
 
+    // The initial preview must start after this composition commits: starting FFmpeg while this
+    // function is still composing can publish its first frame before VideoFrameArea has subscribed
+    // to controller.currentFrame. With no later updates while paused, that leaves the first open
+    // black until Play; SideEffect makes the subscription exist before decoding begins.
+    SideEffect { controller.start() }
+
     // A detached player deliberately does not retain a blank sidebar slot. Returning from it
     // restores the embedded player without recreating its controller.
     LaunchedEffect(detached) { onSidebarVisibleChange(!detached) }
@@ -597,6 +603,11 @@ private fun VideoFrameArea(
     Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
         val err = controller.error
         val frame = controller.currentFrame
+        // A controller can know the full timeline before it has a bitmap to show — notably on the
+        // first archive-backed open, where FFmpeg's initial preview decode may not publish until
+        // Play. Calling that state "Opening" makes a fully ready video look stuck. The transport
+        // remains usable, so tell the user what action is available instead.
+        val readyToPlay = controller.seekReadiness == VideoSeekReadiness.READY
         when {
             err != null -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(Icons.Outlined.ErrorOutline, contentDescription = null, tint = DANGER_RED, modifier = Modifier.size(22.dp))
@@ -623,7 +634,11 @@ private fun VideoFrameArea(
                     contentScale = ContentScale.Fit,
                 )
             }
-            else -> AppText("Opening video…", color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+            else -> AppText(
+                if (readyToPlay) "Ready to play" else "Opening video…",
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 12.sp,
+            )
         }
     }
 }
