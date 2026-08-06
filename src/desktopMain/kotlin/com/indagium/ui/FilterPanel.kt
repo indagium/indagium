@@ -17,7 +17,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
-import androidx.compose.ui.draganddrop.DragData
 import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
@@ -67,7 +66,6 @@ import com.indagium.utils.passesFilter
 import com.indagium.utils.resolvePidTidTokens
 import kotlinx.coroutines.delay
 import java.io.File
-import java.net.URI
 import kotlin.math.roundToInt
 
 // A message-rule search suggestion. inScope marks whether it's within the currently active
@@ -826,8 +824,7 @@ internal fun FilterPanel(
     val filterDropTarget = remember(onImportFiltersFromFiles, onUnhandledFileDrop) {
         object : DragAndDropTarget {
             override fun onDrop(event: DragAndDropEvent): Boolean {
-                val dropped = runCatching { (event.dragData() as DragData.FilesList).readFiles() }.getOrElse { return false }
-                    .mapNotNull { uri -> runCatching { File(URI.create(uri)) }.getOrNull() }
+                val dropped = runCatching { localFilesFromDropData(event.dragData()) }.getOrDefault(emptyList())
                 val filterFiles = dropped.filter { it.exists() && it.extension.equals("json", ignoreCase = true) }
                 // Compose hands a drop to the innermost target that accepted the drag and does NOT
                 // retry the ancestor when this returns false — so without an explicit hand-off, a
@@ -847,7 +844,7 @@ internal fun FilterPanel(
             .border(BorderStroke(1.dp, if (panelFocused && keyboardFocusVisible) tc.ac else tc.br))
             .dragAndDropTarget(
                 shouldStartDragAndDrop = { event ->
-                    runCatching { event.dragData() is DragData.FilesList }.getOrElse { false }
+                    runCatching { isFileDropData(event.dragData()) }.getOrDefault(false)
                 },
                 target = filterDropTarget,
             )
