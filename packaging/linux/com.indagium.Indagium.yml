@@ -1,8 +1,8 @@
-app-id: com.indagium.desktop
+app-id: com.indagium.Indagium
 runtime: org.freedesktop.Platform
 runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
-command: com.indagium.desktop
+command: com.indagium.Indagium
 finish-args:
   # Logs and source trees are selected from arbitrary locations in the user's home directory.
   - --filesystem=home
@@ -18,14 +18,14 @@ modules:
     build-commands:
       - install -d /app/indagium
       - cp -a app/. /app/indagium/
-      - install -Dm755 packaging/linux/flatpak-launcher.sh /app/bin/com.indagium.desktop
-      - install -Dm644 packaging/linux/com.indagium.desktop.desktop /app/share/applications/com.indagium.desktop.desktop
-      - install -Dm644 packaging/linux/com.indagium.desktop.metainfo.xml /app/share/metainfo/com.indagium.desktop.metainfo.xml
-      - install -Dm644 packaging/linux/indagium-mimeinfo.xml /app/share/mime/packages/com.indagium.desktop-mimeinfo.xml
+      - install -Dm755 packaging/linux/flatpak-launcher.sh /app/bin/com.indagium.Indagium
+      - install -Dm644 packaging/linux/com.indagium.Indagium.desktop /app/share/applications/com.indagium.Indagium.desktop
+      - install -Dm644 packaging/linux/com.indagium.Indagium.metainfo.xml /app/share/metainfo/com.indagium.Indagium.metainfo.xml
+      - install -Dm644 packaging/linux/indagium-mimeinfo.xml /app/share/mime/packages/com.indagium.Indagium-mimeinfo.xml
       # AppStream resolves the desktop entry's Icon= value through the standard hicolor
       # directories. The image dimensions must match the directory, so install the
       # packaging-specific 512px derivative rather than the 1024px source artwork.
-      - install -Dm644 packaging/linux/com.indagium.desktop.png /app/share/icons/hicolor/512x512/apps/com.indagium.desktop.png
+      - install -Dm644 packaging/linux/com.indagium.Indagium.png /app/share/icons/hicolor/512x512/apps/com.indagium.Indagium.png
     sources:
       - type: dir
         path: .

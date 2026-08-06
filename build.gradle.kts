@@ -367,7 +367,7 @@ tasks.register<Exec>("packageAppImage") {
     inputs.dir(composeAppDirectory)
     inputs.files(
         "scripts/package-appimage.sh",
-        "packaging/linux/com.indagium.desktop.desktop",
+        "packaging/linux/com.indagium.Indagium.desktop",
         "packaging/linux/indagium-mimeinfo.xml",
         "icons/indagium.png",
     )
@@ -391,10 +391,10 @@ tasks.register<Exec>("packageFlatpak") {
     inputs.dir(composeAppDirectory)
     inputs.files(
         "scripts/package-flatpak.sh",
-        "packaging/linux/com.indagium.desktop.yml",
-        "packaging/linux/com.indagium.desktop.desktop",
-        "packaging/linux/com.indagium.desktop.metainfo.xml",
-        "packaging/linux/com.indagium.desktop.png",
+        "packaging/linux/com.indagium.Indagium.yml",
+        "packaging/linux/com.indagium.Indagium.desktop",
+        "packaging/linux/com.indagium.Indagium.metainfo.xml",
+        "packaging/linux/com.indagium.Indagium.png",
         "packaging/linux/flatpak-launcher.sh",
         "packaging/linux/indagium-mimeinfo.xml",
         "packaging/linux/validate-flatpak-icon.py",

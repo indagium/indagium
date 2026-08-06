@@ -100,7 +100,7 @@ class UpdateCheckerTest {
     fun runtimePackageDetectionRecognizesFlatpakBeforeAppImageAndAllowsNativeFallback() {
         assertEquals(RuntimePackage.NATIVE, runtimePackageForCurrentProcess(emptyMap(), flatpakInfoExists = false))
         assertEquals(RuntimePackage.APP_IMAGE, runtimePackageForCurrentProcess(mapOf("APPIMAGE" to "/tmp/Indagium.AppImage"), false))
-        assertEquals(RuntimePackage.FLATPAK, runtimePackageForCurrentProcess(mapOf("FLATPAK_ID" to "com.indagium.desktop"), false))
+        assertEquals(RuntimePackage.FLATPAK, runtimePackageForCurrentProcess(mapOf("FLATPAK_ID" to "com.indagium.Indagium"), false))
         assertEquals(RuntimePackage.FLATPAK, runtimePackageForCurrentProcess(mapOf("APPIMAGE" to "/tmp/Indagium.AppImage"), true))
     }
 

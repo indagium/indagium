@@ -9,9 +9,9 @@ import struct
 import sys
 
 
-ICON_RELATIVE_PATH = Path("packaging/linux/com.indagium.desktop.png")
-MANIFEST_RELATIVE_PATH = Path("packaging/linux/com.indagium.desktop.yml")
-HICOLOR_ICON_PATH = "/app/share/icons/hicolor/512x512/apps/com.indagium.desktop.png"
+ICON_RELATIVE_PATH = Path("packaging/linux/com.indagium.Indagium.png")
+MANIFEST_RELATIVE_PATH = Path("packaging/linux/com.indagium.Indagium.yml")
+HICOLOR_ICON_PATH = "/app/share/icons/hicolor/512x512/apps/com.indagium.Indagium.png"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 EXPECTED_DIMENSIONS = (512, 512)
 

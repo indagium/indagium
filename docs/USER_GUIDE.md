@@ -70,7 +70,7 @@ chmod +x Indagium-x.y.z-x86_64.AppImage
 # Flatpak bundle (replace x86_64 with aarch64 on ARM64)
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak install --user ./Indagium-x.y.z-x86_64.flatpak
-flatpak run com.indagium.desktop
+flatpak run com.indagium.Indagium
 ```
 
 Choose the format that fits your system: `.deb` is best for Debian-family systems, AppImage runs
@@ -83,7 +83,7 @@ they do not make themselves the default. To opt in:
 xdg-mime default indagium-Indagium.desktop text/plain text/x-log
 
 # AppImage or Flatpak
-xdg-mime default com.indagium.desktop.desktop text/plain text/x-log
+xdg-mime default com.indagium.Indagium.desktop text/plain text/x-log
 ```
 
 The Flatpak sandbox permits access to your home directory for logs and source folders, but it

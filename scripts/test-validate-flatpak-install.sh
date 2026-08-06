@@ -11,15 +11,15 @@ deployment_dir="$temp_dir/deployment"
 mkdir -p "$deployment_dir/files/share/mime/packages"
 mkdir -p "$deployment_dir/files/share/icons/hicolor/512x512/apps"
 cp "$project_dir/packaging/linux/indagium-mimeinfo.xml" \
-    "$deployment_dir/files/share/mime/packages/com.indagium.desktop-mimeinfo.xml"
-cp "$project_dir/packaging/linux/com.indagium.desktop.png" \
-    "$deployment_dir/files/share/icons/hicolor/512x512/apps/com.indagium.desktop.png"
+    "$deployment_dir/files/share/mime/packages/com.indagium.Indagium-mimeinfo.xml"
+cp "$project_dir/packaging/linux/com.indagium.Indagium.png" \
+    "$deployment_dir/files/share/icons/hicolor/512x512/apps/com.indagium.Indagium.png"
 
 mkdir -p "$temp_dir/bin"
 printf '%s\n' \
     '#!/usr/bin/env bash' \
     'set -euo pipefail' \
-    'if [[ "$*" == "info --user --show-location com.indagium.desktop" ]]; then' \
+    'if [[ "$*" == "info --user --show-location com.indagium.Indagium" ]]; then' \
     '  printf "%s\\n" "$FAKE_FLATPAK_LOCATION"' \
     '  exit 0' \
     'fi' \

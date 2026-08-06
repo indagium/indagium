@@ -100,7 +100,7 @@ chmod +x Indagium-x.y.z-x86_64.AppImage
 # Flatpak bundle (replace x86_64 with aarch64 on ARM64)
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak install --user ./Indagium-x.y.z-x86_64.flatpak
-flatpak run com.indagium.desktop
+flatpak run com.indagium.Indagium
 ```
 
 All three Linux packages register Indagium as a candidate handler for
@@ -113,7 +113,7 @@ a package has no business silently rewriting another user's `mimeapps.list`. To 
 xdg-mime default indagium-Indagium.desktop text/plain text/x-log
 
 # AppImage or Flatpak
-xdg-mime default com.indagium.desktop.desktop text/plain text/x-log
+xdg-mime default com.indagium.Indagium.desktop text/plain text/x-log
 ```
 
 or right-click a file in your file manager → **Open With** → **Indagium** → set as default.
