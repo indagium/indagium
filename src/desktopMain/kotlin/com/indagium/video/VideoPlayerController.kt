@@ -681,15 +681,27 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         presentFrame(frame, epoch)
     }
 
+    // Temporary diagnostic breadcrumbs (not gated behind debugLoggingEnabled's normal
+    // info/warn/error selectivity — deliberately loud) for a reported Linux symptom where a video
+    // opened as part of attaching a bug-report archive gets stuck at "Preparing timeline..."
+    // forever: no error, no recovered duration, and critically NO other video-tagged log line
+    // either, which an ordinary successful open also never produces (there is no "opened OK" log
+    // today) — so the previous silence couldn't distinguish "worked fine" from "hung before
+    // logging anything". These pin down exactly which step never returns.
     private fun openGrabber(): Boolean = runCatching {
+        AppLogger.info("video", "openGrabber: starting grabber.start() for $path")
         grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_S16)
         grabber.start()
+        AppLogger.info("video", "openGrabber: grabber.start() returned")
         applyDecodeDownscale()
         val declaredDurationMs = grabber.lengthInTime / MICROS_PER_MS
+        AppLogger.info("video", "openGrabber: declaredDurationMs=$declaredDurationMs")
         publishDurationState(observedDurationMs = declaredDurationMs)
         maybeStartDurationRecoveryScan(declaredDurationMs)
         hasAudioStream = grabber.hasAudio()
+        AppLogger.info("video", "openGrabber: hasAudioStream=$hasAudioStream, opening audio line")
         if (hasAudioStream) openAudioLine()
+        AppLogger.info("video", "openGrabber: complete")
         true
     }.getOrElse { t ->
         AppLogger.error("video", "failed to open video", t)
@@ -727,7 +739,9 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
      */
     private fun maybeStartDurationRecoveryScan(declaredMs: Long) {
         if (declaredMs > 0L) return
+        AppLogger.info("video", "maybeStartDurationRecoveryScan: spawning scan thread")
         Thread({
+            AppLogger.info("video", "duration recovery scan thread: started")
             val result = recoverDurationMs(
                 scanPacketMetadata = {
                     runCatching { scanDurationMs(path) { closed } }

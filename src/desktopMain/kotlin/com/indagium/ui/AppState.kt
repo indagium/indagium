@@ -3413,6 +3413,11 @@ class AppState(
 
     private fun attachVideo(tabId: String, source: VideoSource, sourceLabel: String): String? {
         if (tab(tabId) == null) return null
+        // Temporary diagnostic breadcrumb — see the matching openGrabber breadcrumbs in
+        // VideoPlayerController.kt for why: there is no other log line marking a video attach at
+        // all today, so this pins down exactly when (relative to everything else happening at
+        // archive-open time) a stuck-forever video's attach actually occurred.
+        AppLogger.info("video", "attachVideo: tabId=$tabId source=${source::class.simpleName} label=$sourceLabel")
         // A controller owns a grabber/audio line for precisely one source. Dispose it BEFORE
         // publishing replacement metadata so a recomposition cannot keep using the old decoder.
         videoControllers.remove(tabId)?.close()
