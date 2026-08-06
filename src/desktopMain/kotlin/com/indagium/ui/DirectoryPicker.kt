@@ -4,6 +4,7 @@ import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
 import javax.swing.JFileChooser
+import javax.swing.UIManager
 
 /** Cross-platform directory picker used whenever the app needs a folder rather than a file. */
 internal fun interface DirectoryPicker {
@@ -39,11 +40,28 @@ private object MacDirectoryPicker : DirectoryPicker {
 /** Used on Linux and Windows, where AWT FileDialog has no directory-only mode. */
 private object SwingDirectoryPicker : DirectoryPicker {
     override fun pick(title: String, initialDirectory: File?): File? {
+        applySystemLookAndFeelOnce()
         val chooser = JFileChooser()
         configureDirectoryChooser(chooser, title, initialDirectoryForPicker(initialDirectory))
         if (chooser.showOpenDialog(null) != JFileChooser.APPROVE_OPTION) return null
         return resolveChosenDirectory(chooser.selectedFile, chooser.currentDirectory)
     }
+}
+
+// Swing's own default ("Metal") look-and-feel is what makes this JFileChooser look like a
+// stray Java-95 dialog instead of matching the rest of a GTK/Windows desktop — Compose Desktop
+// never touches Swing's L&F itself (it renders its own UI directly via Skia), so nothing else in
+// the app sets this. Applied lazily, once, right before the first JFileChooser is constructed
+// (Swing components read UIManager's current L&F at construction time, so this must run before
+// `JFileChooser()` above) rather than eagerly at startup, since it's only ever needed on this one
+// dialog. A failure here (e.g. a headless/sandboxed CI JVM, or a desktop with no native GTK L&F
+// available) is not fatal: the chooser still works, just with the Metal fallback it already had.
+@Volatile private var systemLookAndFeelApplied = false
+
+private fun applySystemLookAndFeelOnce() {
+    if (systemLookAndFeelApplied) return
+    systemLookAndFeelApplied = true
+    runCatching { UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName()) }
 }
 
 /**
