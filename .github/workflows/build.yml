@@ -173,7 +173,7 @@ jobs:
         run: chmod +x gradlew
 
       # AppImage is self-contained, but Flatpak needs its builder, CLI, and the exact runtime/Sdk
-      # declared in packaging/linux/com.indagium.desktop.yml.  Install these before the
+      # declared in packaging/linux/com.indagium.Indagium.yml.  Install these before the
       # Gradle packaging tasks so `packageFlatpak` behaves the same in CI and on a clean machine.
       - name: Install Linux portable-packaging tools
         if: matrix.linux
@@ -330,7 +330,7 @@ jobs:
             "$appimage" --appimage-extract >/dev/null
             test -x squashfs-root/AppRun
             desktop_file=$(find squashfs-root -type f -name '*.desktop' -print -quit)
-            mimeinfo_file=squashfs-root/usr/share/mime/packages/com.indagium.desktop-mimeinfo.xml
+            mimeinfo_file=squashfs-root/usr/share/mime/packages/com.indagium.Indagium-mimeinfo.xml
             test -n "$desktop_file"
             test -f "$mimeinfo_file"
             desktop-file-validate "$desktop_file"
@@ -341,12 +341,12 @@ jobs:
           rm -rf "$appimage_workdir"
 
           flatpak install --user -y --bundle "$flatpak_bundle"
-          flatpak info --user com.indagium.desktop
-          flatpak info --user --show-metadata com.indagium.desktop | grep -q '^name=com.indagium.desktop$'
-          flatpak info --user --show-permissions com.indagium.desktop | grep -q 'home'
-          flatpak info --user --show-permissions com.indagium.desktop | grep -q 'network'
+          flatpak info --user com.indagium.Indagium
+          flatpak info --user --show-metadata com.indagium.Indagium | grep -q '^name=com.indagium.Indagium$'
+          flatpak info --user --show-permissions com.indagium.Indagium | grep -q 'home'
+          flatpak info --user --show-permissions com.indagium.Indagium | grep -q 'network'
           bash scripts/validate-flatpak-install.sh
-          flatpak uninstall --user -y com.indagium.desktop
+          flatpak uninstall --user -y com.indagium.Indagium
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

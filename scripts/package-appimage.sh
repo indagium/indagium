@@ -3,7 +3,7 @@
 # release assets are addressed by immutable GitHub asset IDs and verified before execution.
 set -euo pipefail
 
-readonly APP_ID='com.indagium.desktop'
+readonly APP_ID='com.indagium.Indagium'
 readonly APPIMAGETOOL_X86_64_ASSET_ID='324406882'
 readonly APPIMAGETOOL_X86_64_SHA256='a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0'
 readonly APPIMAGETOOL_AARCH64_ASSET_ID='324406837'

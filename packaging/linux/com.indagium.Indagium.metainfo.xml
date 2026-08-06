@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>com.indagium.desktop</id>
+  <id>com.indagium.Indagium</id>
   <name>Indagium</name>
   <summary>Analyze Android logcat files</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>LicenseRef-proprietary</project_license>
-  <launchable type="desktop-id">com.indagium.desktop.desktop</launchable>
+  <launchable type="desktop-id">com.indagium.Indagium.desktop</launchable>
   <provides>
     <mediatype>text/plain</mediatype>
     <mediatype>text/x-log</mediatype>

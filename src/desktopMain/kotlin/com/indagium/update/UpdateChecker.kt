@@ -41,7 +41,7 @@ enum class RuntimePackage {
     FLATPAK,
 }
 
-const val FLATPAK_APP_ID = "com.indagium.desktop"
+const val FLATPAK_APP_ID = "com.indagium.Indagium"
 const val FLATPAK_UPDATE_COMMAND = "flatpak update $FLATPAK_APP_ID"
 
 /**

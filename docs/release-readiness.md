@@ -16,7 +16,7 @@ Before a public release:
 3. Build every package on its target OS and architecture. Linux releases must include `.deb`,
    `x86_64`/`aarch64` AppImage, and `x86_64`/`aarch64` Flatpak artifacts with non-colliding names.
 4. On a clean Linux user account, install/query each Flatpak bundle with
-   `flatpak install --user ./Indagium-<version>-<arch>.flatpak`, then run `flatpak info com.indagium.desktop`.
+   `flatpak install --user ./Indagium-<version>-<arch>.flatpak`, then run `flatpak info com.indagium.Indagium`.
    Extract and launch each AppImage without FUSE (`APPIMAGE_EXTRACT_AND_RUN=1`); install the `.deb` normally.
 5. Launch each installed app and verify the runtime icon, file-open dialog, drag/drop, autosave restore, note save/open, and filter import/export.
 6. Upgrade over the previous released version and verify existing app data is still readable.

@@ -2,7 +2,7 @@
 # Produces a direct-install Flatpak bundle from Compose Desktop's createDistributable output.
 set -euo pipefail
 
-readonly APP_ID='com.indagium.desktop'
+readonly APP_ID='com.indagium.Indagium'
 readonly RUNTIME='org.freedesktop.Platform//24.08'
 readonly SDK='org.freedesktop.Sdk//24.08'
 readonly FLATHUB_REPO='https://dl.flathub.org/repo/flathub.flatpakrepo'

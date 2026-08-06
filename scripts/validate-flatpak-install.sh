@@ -7,7 +7,7 @@
 # application tree.
 set -euo pipefail
 
-readonly app_id='com.indagium.desktop'
+readonly app_id='com.indagium.Indagium'
 
 usage() {
     echo "Usage: $0 [APPLICATION_ID]" >&2
