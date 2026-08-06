@@ -88,6 +88,28 @@ class VideoDurationScanTest {
     }
 
     @Test
+    fun realControllerPublishesItsDeclaredDurationFromTheDecodeThread() {
+        // Archive-backed playback and an already-restored attachment both create the controller
+        // before the UI has completed its first composition. The decoder still publishes a normal
+        // container's declared duration from its own thread, so this must become visible as the
+        // fixed header duration — never stay at zero and later turn into the current play position.
+        val controller = defaultVideoPlayerController(fixture("normal-duration.mkv"))
+        try {
+            val deadline = System.currentTimeMillis() + 15_000
+            while (controller.durationMs <= 0L && controller.error == null && System.currentTimeMillis() < deadline) {
+                Thread.sleep(50)
+            }
+            assertEquals(null, controller.error, "the fixture must open cleanly")
+            assertTrue(
+                controller.durationMs in 4_900..5_100,
+                "controller should retain its declared duration, got ${controller.durationMs}",
+            )
+        } finally {
+            controller.close()
+        }
+    }
+
+    @Test
     fun scanIsCancellableAndReportsStillUnknownWhenCancelledBeforeAnyPacket() {
         // Mirrors what FfmpegVideoPlayerController.maybeStartDurationRecoveryScan passes as
         // isCancelled: `{ closed }`. Cancelled up front, the scan must report "still unknown" (0),
