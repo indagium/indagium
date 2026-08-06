@@ -242,9 +242,15 @@ fun extractArchiveVideoToCache(
             BoundedInputStream(stream, maxEntryBytes).use { input ->
                 partial.outputStream().use { output -> input.copyTo(output) }
             }
-            if (!partial.renameTo(destination)) {
-                partial.copyTo(destination, overwrite = true)
+            if (!partial.renameTo(destination) && !(destination.delete() && partial.renameTo(destination))) {
+                // Only reachable if renameTo fails for a reason deletion-and-retry can't fix
+                // (e.g. a permissions issue) — a genuine failure, not a truncation risk: unlike
+                // the old fallback here (a second, non-atomic stream copy straight into
+                // `destination`'s name), nothing between these two attempts ever leaves a
+                // partially-written file at `destination` for the cache-hit check above to find
+                // and reuse as if it were complete.
                 partial.delete()
+                return@synchronized null
             }
             destination
         } catch (t: Throwable) {

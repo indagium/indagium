@@ -11,8 +11,10 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class BugReportVideoCacheTest {
@@ -75,6 +77,53 @@ class BugReportVideoCacheTest {
         val extracted = extractArchiveVideoToCache(archive, playbackCandidate, cacheDir)
 
         assertEquals(expectedFileName, extracted?.name)
+    }
+
+    @Test
+    fun extractedFileIsByteIdenticalToTheArchivedEntry() {
+        val dir = createTempDirectory("openlog-video-content").toFile()
+        val content = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8, 9)
+        val archive = zip(dir, "bugreport.zip", mapOf("screen/repro.mp4" to content))
+        val candidate = ZipLogCandidate("screen/repro.mp4", "repro.mp4", sizeBytes = -1L, kind = ZipLogCandidateKind.VIDEO)
+
+        val extracted = extractArchiveVideoToCache(archive, candidate, File(dir, "cache"))
+
+        assertContentEquals(content, extracted?.readBytes())
+    }
+
+    // Regression guard for a real reported bug: video playing from an archive lost its duration
+    // and never recovered it — while the identical bytes opened directly worked fine. Traced to
+    // this write path's old fallback, only reachable when the primary `partial.renameTo(destination)`
+    // (atomic — either fully succeeds or leaves `destination` untouched) fails: it copied straight
+    // into `destination`'s final name a second time, non-atomically. If the process died mid-copy,
+    // `destination` was left truncated but non-empty — and the cache-hit check above
+    // (`destination.isFile && destination.length() > 0`) has no integrity check, so every future
+    // open of that archived video would silently reuse the truncated copy forever. This test can't
+    // portably force `File.renameTo` to fail via a Windows-style "destination already exists" case
+    // (POSIX rename atomically replaces, so that path only reliably fails on Windows), so it uses a
+    // renameTo failure every platform agrees on instead: `destination` pre-existing as a non-empty
+    // directory. What matters here is the outcome once rename fails at all: extraction must return
+    // null (a clean, visible failure — surfaced as "Couldn't play this video", see
+    // FailedVideoPlayerController) rather than ever falling back to a copy that could be interrupted
+    // mid-write and cached as if it were complete.
+    @Test
+    fun extractionFailsCleanlyRatherThanRiskingATruncatedCacheEntryWhenRenameCannotSucceed() {
+        val dir = createTempDirectory("openlog-video-rename-failure").toFile()
+        val archive = zip(dir, "bugreport.zip", mapOf("screen/repro.mp4" to byteArrayOf(1, 2, 3)))
+        val candidate = ZipLogCandidate("screen/repro.mp4", "repro.mp4", sizeBytes = -1L, kind = ZipLogCandidateKind.VIDEO)
+        val cacheDir = File(dir, "cache")
+        val destination = File(File(cacheDir, "videos"), archiveVideoCacheFileName(archive, candidate))
+        // A non-empty directory at the destination path: renameTo fails on every platform (can't
+        // replace a directory with a file), and so does a plain delete() (directory isn't empty) —
+        // deterministically exercising the "rename truly cannot succeed" branch without depending
+        // on the platform-specific Windows "destination file already exists" rename failure.
+        destination.mkdirs()
+        File(destination, "not-empty").writeText("x")
+
+        val extracted = extractArchiveVideoToCache(archive, candidate, cacheDir)
+
+        assertNull(extracted)
+        assertTrue(destination.isDirectory, "must not have replaced or corrupted the pre-existing path")
     }
 
     // ── pruneUnreferencedArchiveVideos (A2) ─────────────────────────────
