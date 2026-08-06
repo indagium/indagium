@@ -15,6 +15,7 @@ import org.bytedeco.javacv.Java2DFrameConverter
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.nio.ShortBuffer
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.imageio.ImageIO
 import javax.sound.sampled.AudioFormat
@@ -400,6 +401,14 @@ interface VideoPlayerController {
      *  failing to open is surfaced here, never as a crash. Null while healthy. */
     val error: String?
 
+    /**
+     * Starts decoding after the controller has been installed in a composed player surface. The
+     * default preserves compatibility for lightweight test doubles, which have no decoder to
+     * start. Production defers this rather than starting from its constructor so its first preview
+     * frame cannot be published before Compose has subscribed to [currentFrame].
+     */
+    fun start() = Unit
+
     fun play()
 
     fun pause()
@@ -570,12 +579,14 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     // every time a frame is actually shown. See shouldDropLateFrame's KDoc for why this is bounded.
     private var consecutiveDrops = 0
 
+    private val decodeStarted = AtomicBoolean(false)
+
     private val decodeThread = Thread({ runLoop() }, "indagium-video-decode").apply {
         isDaemon = true
     }
 
-    init {
-        decodeThread.start()
+    override fun start() {
+        if (!closed && decodeStarted.compareAndSet(false, true)) decodeThread.start()
     }
 
     override fun play() {
@@ -658,7 +669,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         // poll/sleep. The decode thread owns grabber.release() so FFmpeg is never released while
         // another thread is grabbing from it.
         runCatching { audioLine?.close() }
-        decodeThread.interrupt()
+        if (decodeStarted.get()) decodeThread.interrupt()
     }
 
     // ── Decode loop (background thread) ─────────────────────────────

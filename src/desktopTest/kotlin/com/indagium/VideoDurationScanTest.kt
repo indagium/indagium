@@ -95,6 +95,7 @@ class VideoDurationScanTest {
         // fixed header duration — never stay at zero and later turn into the current play position.
         val controller = defaultVideoPlayerController(fixture("normal-duration.mkv"))
         try {
+            controller.start()
             val deadline = System.currentTimeMillis() + 15_000
             while (controller.durationMs <= 0L && controller.error == null && System.currentTimeMillis() < deadline) {
                 Thread.sleep(50)
@@ -128,6 +129,7 @@ class VideoDurationScanTest {
         // exactly the "00:00 duration, slider pinned right" state the user reported.
         val controller = defaultVideoPlayerController(fixture("live-noduration.mkv"))
         try {
+            controller.start()
             val deadline = System.currentTimeMillis() + 15_000
             while (controller.durationMs <= 0L && controller.error == null && System.currentTimeMillis() < deadline) {
                 Thread.sleep(50)
@@ -196,6 +198,7 @@ class VideoDurationScanTest {
         // under test, not just the pure function.
         val controller = defaultVideoPlayerController(fixture("raw-h264-no-timestamps.h264"))
         try {
+            controller.start()
             val deadline = System.currentTimeMillis() + 15_000
             while (controller.durationMs <= 0L && controller.error == null && System.currentTimeMillis() < deadline) {
                 Thread.sleep(50)
