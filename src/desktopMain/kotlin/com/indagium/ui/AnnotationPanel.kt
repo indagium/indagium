@@ -18,7 +18,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
-import androidx.compose.ui.draganddrop.DragData
 import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
@@ -74,7 +73,6 @@ import java.awt.FileDialog
 import java.awt.Frame
 import java.awt.Toolkit
 import java.io.File
-import java.net.URI
 import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
@@ -348,9 +346,7 @@ fun AnnotationPanel(
     val imageDropTarget = remember(tab.id, activeBlockFieldId, navIndex, ann.blocks, onAddImage, onUnhandledFileDrop) {
         object : DragAndDropTarget {
             override fun onDrop(event: DragAndDropEvent): Boolean {
-                val files = runCatching { (event.dragData() as DragData.FilesList).readFiles() }
-                    .getOrElse { return false }
-                    .mapNotNull { uri -> runCatching { File(URI.create(uri)) }.getOrNull() }
+                val files = runCatching { localFilesFromDropData(event.dragData()) }.getOrDefault(emptyList())
                 if (addDroppedImageFiles(files)) return true
                 // Nothing here decoded as an image. Compose gives a drop to the innermost target
                 // that accepted the drag and never retries the ancestor on a false return, so a
@@ -410,7 +406,7 @@ fun AnnotationPanel(
             .border(BorderStroke(1.dp, if (panelFocused && keyboardFocusVisible) tc.ac else tc.br))
             .dragAndDropTarget(
                 shouldStartDragAndDrop = { event ->
-                    runCatching { event.dragData() is DragData.FilesList }.getOrElse { false }
+                    runCatching { isFileDropData(event.dragData()) }.getOrDefault(false)
                 },
                 target = imageDropTarget,
             )
