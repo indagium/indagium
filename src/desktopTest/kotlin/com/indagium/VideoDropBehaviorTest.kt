@@ -5,6 +5,9 @@ import com.indagium.model.LogLevel
 import com.indagium.model.VideoSource
 import com.indagium.ui.AppState
 import com.indagium.ui.mkTab
+import com.indagium.utils.ZipLogCandidate
+import com.indagium.utils.ZipLogCandidateKind
+import com.indagium.utils.archiveVideoCacheFileName
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -239,6 +242,64 @@ class VideoDropBehaviorTest {
         state.setVideoFollowLog(tab.id, true)
         state.navigateToVideoLog(tab.id, secondId)
         assertEquals(setOf(secondId), state.tab(tab.id)?.selected)
+    }
+
+    // Regression guard for a reported Linux bug: videoController(tabId) used to call
+    // resolveVideoPlaybackPath (and, for an ArchiveEntry source, the filesystem work inside
+    // extractArchiveVideoToCache — re-deriving the cache-key fingerprint from the archive's own
+    // canonicalPath/length/lastModified, then stat-ing and touching the cache file's
+    // setLastModified) on every single call, even once a controller already existed for that tab.
+    // Harmless on a fast local disk; measured as the video panel never appearing to progress past
+    // "Preparing timeline..." when the archive sits on a slow mount, because videoController is
+    // called unmemoized from BoundVideoPanel's composable body — continuously while the panel is
+    // visible, rapidly while playing — so the UI thread stayed perpetually busy re-resolving a
+    // path it already had rather than ever getting to render the controller's (already correct)
+    // published duration.
+    //
+    // getOrPut alone can't distinguish old from new code here: it already returns the existing map
+    // entry without invoking its lambda once the key is present, so an identity check on the
+    // returned controller (first === second) would pass either way — what actually changed is
+    // whether resolveVideoPlaybackPath's filesystem work runs at all on the second call. Proven via
+    // its one directly observable side effect: extractArchiveVideoToCache's cache-hit path touches
+    // the extracted file's mtime on every call. Pin the cache file to an arbitrary past mtime after
+    // the first (real) call, then assert a second videoController call leaves it untouched.
+    @Test
+    fun videoControllerDoesNotReTouchTheCacheFileOnceAControllerAlreadyExistsForTheTab() {
+        val dir = createTempDirectory("openlog-video-no-retouch").toFile()
+        val archive = zip(
+            dir, "bugreport.zip",
+            mapOf(
+                "logs/main.log" to "06-26 10:00:00.000  1  1 I Main: loaded\n",
+                "screen/recording.mp4" to "not decoded by this test",
+            ),
+        )
+        val state = AppState(File(dir, "state.cache"))
+        state.openZipFile(archive)
+        val picker = checkNotNull(state.pendingZipPicker)
+        state.openZipEntries(archive, picker.candidates, picker.videoCandidates.single())
+        waitUntil { state.tabs.size == 1 && state.tabs.single().attachedVideo != null }
+        val tab = state.tabs.single()
+
+        assertNotNull(state.videoController(tab.id))
+        // archiveCachePath is the real, shared app-data cache directory, not a per-test temp dir
+        // (AppState's archiveCacheDir parameter is never overridden in these tests) — other tests'
+        // extractions can already be sitting alongside this one, so the exact cache filename must
+        // be computed the same way resolveVideoPlaybackPath does, not assumed to be the dir's only
+        // entry.
+        val candidate = ZipLogCandidate(
+            entryPath = "screen/recording.mp4",
+            displayName = "recording.mp4",
+            sizeBytes = -1L,
+            kind = ZipLogCandidateKind.VIDEO,
+        )
+        val cached = File(File(state.archiveCachePath, "videos"), archiveVideoCacheFileName(archive, candidate))
+        assertTrue(cached.isFile, "expected the archive-entry video to already be extracted to $cached")
+        val arbitraryPastMs = 1_000_000L
+        assertTrue(cached.setLastModified(arbitraryPastMs))
+
+        assertNotNull(state.videoController(tab.id))
+
+        assertEquals(arbitraryPastMs, cached.lastModified(), "a second videoController call must not re-touch the cache file")
     }
 
     private fun stateWithActiveTab(dir: File): AppState = AppState(File(dir, "state.cache")).also { state ->

@@ -3473,6 +3473,21 @@ class AppState(
      *  broken local file already gets. [FailedVideoPlayerController] fills that one gap so this
      *  function's contract — non-null whenever [LogTab.attachedVideo] is non-null — actually holds. */
     fun videoController(tabId: String): VideoPlayerController? {
+        // Checked before resolveVideoPlaybackPath, not just via getOrPut's own lazy factory,
+        // because resolveVideoPlaybackPath itself is not free for a VideoSource.ArchiveEntry: it
+        // touches the filesystem (recomputing the cache-key fingerprint from the archive's own
+        // canonicalPath/length/lastModified, then stat-ing and touching the cache destination)
+        // every time it runs. This function is called unmemoized from BoundVideoPanel's composable
+        // body, so every recomposition — continuous while the panel is visible, rapid while
+        // playing (currentFrame/positionMs change on every decoded frame) — used to pay for that
+        // filesystem round trip again, even though the controller was already constructed and
+        // bound to one path for its whole lifetime (see this function's own KDoc). Harmless
+        // overhead on a fast local disk; measured as a real, user-visible stall — the video panel
+        // never appearing to progress past "Preparing timeline..." — when the archive happens to
+        // sit on a slow mount (reported against a VM shared folder), since the UI thread stayed
+        // perpetually busy re-deriving a path it already had instead of ever getting to render the
+        // controller's (already correct) published duration.
+        videoControllers[tabId]?.let { return it }
         val attachment = tab(tabId)?.attachedVideo ?: return null
         val path = resolveVideoPlaybackPath(attachment.source)
         return videoControllers.getOrPut(tabId) {
