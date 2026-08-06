@@ -51,17 +51,33 @@ private object SwingDirectoryPicker : DirectoryPicker {
 // Swing's own default ("Metal") look-and-feel is what makes this JFileChooser look like a
 // stray Java-95 dialog instead of matching the rest of a GTK/Windows desktop — Compose Desktop
 // never touches Swing's L&F itself (it renders its own UI directly via Skia), so nothing else in
-// the app sets this. Applied lazily, once, right before the first JFileChooser is constructed
-// (Swing components read UIManager's current L&F at construction time, so this must run before
-// `JFileChooser()` above) rather than eagerly at startup, since it's only ever needed on this one
-// dialog. A failure here (e.g. a headless/sandboxed CI JVM, or a desktop with no native GTK L&F
-// available) is not fatal: the chooser still works, just with the Metal fallback it already had.
+// the app sets this.
+//
+// UIManager.getSystemLookAndFeelClassName() is deliberately NOT used here: on Linux it resolves
+// to GTKLookAndFeel, Swing's own ~20-year-old GTK2-era reimplementation — not a live bridge into
+// the desktop's actual (GTK3/4) theme engine. On a current distro this frequently "succeeds" (no
+// exception) while silently rendering its own generic fallback look — flat grey, boxy widgets —
+// which reads as visually indistinguishable from Metal; that's not a crash to catch, so there was
+// nothing for the previous runCatching to report. Nimbus is used instead: pure-Java (part of
+// java.desktop, no native GTK library to fail to bind to), so it reliably renders something
+// modern and clearly not Metal, even though it still won't pixel-match any specific GTK theme.
+// A byte-for-byte native match would mean replacing this Swing JFileChooser with a custom
+// Compose-rendered picker entirely — out of scope for this lazy L&F swap.
+//
+// Applied lazily, once, right before the first JFileChooser is constructed (Swing components read
+// UIManager's current L&F at construction time, so this must run before `JFileChooser()` above)
+// rather than eagerly at startup, since it's only ever needed on this one dialog. A failure here
+// (e.g. a headless/sandboxed CI JVM) is not fatal: the chooser still works, just with whichever
+// L&F was already active.
 @Volatile private var systemLookAndFeelApplied = false
 
 private fun applySystemLookAndFeelOnce() {
     if (systemLookAndFeelApplied) return
     systemLookAndFeelApplied = true
-    runCatching { UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName()) }
+    runCatching {
+        val nimbus = UIManager.getInstalledLookAndFeels().firstOrNull { it.name == "Nimbus" }
+        UIManager.setLookAndFeel(nimbus?.className ?: UIManager.getSystemLookAndFeelClassName())
+    }
 }
 
 /**
