@@ -689,7 +689,10 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     // today) — so the previous silence couldn't distinguish "worked fine" from "hung before
     // logging anything". These pin down exactly which step never returns.
     private fun openGrabber(): Boolean = runCatching {
-        AppLogger.info("video", "openGrabber: starting grabber.start() for $path")
+        AppLogger.info(
+            "video",
+            "openGrabber: starting grabber.start() for $path (controller=${System.identityHashCode(this)})",
+        )
         grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_S16)
         grabber.start()
         AppLogger.info("video", "openGrabber: grabber.start() returned")

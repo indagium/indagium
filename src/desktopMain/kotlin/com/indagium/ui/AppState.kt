@@ -3490,6 +3490,12 @@ class AppState(
         videoControllers[tabId]?.let { return it }
         val attachment = tab(tabId)?.attachedVideo ?: return null
         val path = resolveVideoPlaybackPath(attachment.source)
+        // Temporary diagnostic breadcrumb, paired with the identity-hash logs in
+        // VideoPlayerController.openGrabber and VideoTransportBar's SideEffect — see those for
+        // why: this is the one place a NEW controller gets constructed for a tab, so logging here
+        // (rather than on every videoController call, which would be call-per-recomposition noise)
+        // pins down exactly which controller instance this tab's map entry ends up holding.
+        AppLogger.info("video", "videoController: constructing new controller for tabId=$tabId path=$path")
         return videoControllers.getOrPut(tabId) {
             if (path != null) videoControllerFactory(path) else FailedVideoPlayerController(videoUnavailableMessage(attachment))
         }
