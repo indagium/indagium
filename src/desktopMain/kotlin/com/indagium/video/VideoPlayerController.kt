@@ -3,6 +3,7 @@ package com.indagium.video
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import com.indagium.debug.AppLogger
@@ -499,6 +500,19 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     private var volumeState by mutableStateOf(1f)
     private var isMutedState by mutableStateOf(false)
 
+    // FFmpeg opens and decodes on [decodeThread], while Compose reads these fields during a UI
+    // snapshot. A direct `mutableStateOf` write from the decoder can otherwise remain in that
+    // thread's snapshot on Linux/Windows: the initial declared duration is then still read as 0
+    // and playback grows that stale 0 into a fake duration. Applying every controller-state
+    // mutation through one mutable snapshot makes the write globally visible and schedules the
+    // observing composition. The lock also prevents competing UI and decoder mutations from
+    // applying overlapping snapshots.
+    private val uiStateLock = Any()
+
+    private fun publishUiState(update: () -> Unit) = synchronized(uiStateLock) {
+        Snapshot.withMutableSnapshot(update)
+    }
+
     override val currentFrame: ImageBitmap? get() = currentFrameState
     override val positionMs: Long get() = positionMsState
     override val durationMs: Long get() = seekState.durationMs
@@ -570,14 +584,14 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         // The decoder owns the clock fields. Rebase on its next step so a Play immediately after
         // a seek cannot use a stale frame timestamp as its origin.
         resetPlaybackClockRequested = true
-        isPlayingState = true
+        publishUiState { isPlayingState = true }
         runCatching { audioLine?.start() }
         wakeDecoder()
     }
 
     override fun pause() {
         playRequested = false
-        isPlayingState = false
+        publishUiState { isPlayingState = false }
         runCatching { audioLine?.stop() }
         runCatching { audioLine?.flush() }
         wakeDecoder()
@@ -605,12 +619,12 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     }
 
     override fun setVolume(volume: Float) {
-        volumeState = volume.coerceIn(0f, 1f)
+        publishUiState { volumeState = volume.coerceIn(0f, 1f) }
         applyGain()
     }
 
     override fun setMuted(muted: Boolean) {
-        isMutedState = muted
+        publishUiState { isMutedState = muted }
         applyGain()
     }
 
@@ -639,7 +653,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     override fun close() {
         closed = true
         playRequested = false
-        isPlayingState = false
+        publishUiState { isPlayingState = false }
         // Closing the audio line wakes a blocking SourceDataLine.write; interrupt wakes an idle
         // poll/sleep. The decode thread owns grabber.release() so FFmpeg is never released while
         // another thread is grabbing from it.
@@ -708,7 +722,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         true
     }.getOrElse { t ->
         AppLogger.error("video", "failed to open video", t)
-        errorState = t.message ?: t::class.simpleName ?: "Failed to open video"
+        publishUiState { errorState = t.message ?: t::class.simpleName ?: "Failed to open video" }
         publishDurationState(discoveryFinished = true)
         false
     }
@@ -723,11 +737,11 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
      * thread's Compose recomposition, exactly like [grabFrameAt] opens its own separate grabber
      * rather than touching this controller's playing one — spawning it here (from [openGrabber],
      * itself already running on [decodeThread]) is non-blocking, so opening a durationless file
-     * never delays showing its first frame. The immutable seek state is Compose `mutableStateOf`, snapshot-
-     * safe to write from any thread (see CLAUDE.md), so the transport bar simply recomposes once
-     * this publishes a real value — no signaling back to [decodeThread] or the UI is needed. The
-     * normal metadata pass is I/O-bound; decoding is deliberately deferred until it fails, so an
-     * unusual source can take longer without delaying its first preview frame.
+     * never delays showing its first frame. [publishUiState] applies the immutable seek state from
+     * this background thread into a mutable Compose snapshot, so the transport bar observes the
+     * completed write rather than retaining the state from its initial composition. The normal
+     * metadata pass is I/O-bound; decoding is deliberately deferred until it fails, so an unusual
+     * source can take longer without delaying its first preview frame.
      *
      * Cancellation: both scans check [closed] for each packet/frame. A cancelled result preserves
      * DISCOVERING rather than publishing UNAVAILABLE, and the final publish is gated on `!closed`.
@@ -836,13 +850,13 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         val frame = runCatching { grabImageAtOrAfter(minimumTimestampUs, epoch) }
             .onFailure {
                 AppLogger.error("video", "image grab failed", it)
-                errorState = it.message ?: "Playback error"
+                publishUiState { errorState = it.message ?: "Playback error" }
             }
             .getOrNull()
 
         if (frame == null) {
             if (isInitialFrame && !closed) {
-                errorState = "Video contains no decodable image frames"
+                publishUiState { errorState = "Video contains no decodable image frames" }
             }
             return
         }
@@ -855,14 +869,19 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     private fun grabNextFrame(): Frame? = runCatching { grabber.grab() }
         .onFailure {
             AppLogger.error("video", "video frame grab failed", it)
-            errorState = it.message ?: "Playback error"
+            publishUiState {
+                errorState = it.message ?: "Playback error"
+                isPlayingState = false
+            }
             playRequested = false
-            isPlayingState = false
         }
         .getOrNull()
         ?: run {
             // Null with no exception means end of stream, not a failure.
-            if (playRequested) { playRequested = false; isPlayingState = false }
+            if (playRequested) {
+                playRequested = false
+                publishUiState { isPlayingState = false }
+            }
             null
         }
 
@@ -984,7 +1003,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
             if (timestampUs.coerceAtLeast(0L) < timeline.positionUs) return
             val positionUs = timeline.advance(timestampUs)
             lastImage = image
-            runCatching { currentFrameState = image.toComposeImageBitmap() }
+            runCatching { publishUiState { currentFrameState = image.toComposeImageBitmap() } }
             setPositionMs(positionUs / MICROS_PER_MS)
             // Deliberately NOT rebasing playbackStartNanos/playbackStartTimestampUs here. This used
             // to reset the wall-clock origin to "now = this frame's timestamp" on every published
@@ -1014,7 +1033,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     // forget it — the three current call sites are a seek, a shown frame, and a dropped-frame clock
     // advance, and any new one inherits the same guarantee for free.
     private fun setPositionMs(ms: Long) {
-        positionMsState = ms
+        publishUiState { positionMsState = ms }
         publishDurationState(observedDurationMs = ms)
     }
 
@@ -1022,7 +1041,32 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
      * thread's completion with those playback updates so duration/readiness stay monotonic. */
     private fun publishDurationState(observedDurationMs: Long = 0L, discoveryFinished: Boolean = false) {
         synchronized(presentationLock) {
-            seekState = advanceVideoSeekState(seekState, observedDurationMs, discoveryFinished)
+            var before: VideoSeekState? = null
+            var after: VideoSeekState? = null
+            publishUiState {
+                before = seekState
+                seekState = advanceVideoSeekState(seekState, observedDurationMs, discoveryFinished)
+                after = seekState
+            }
+            // Temporary diagnostic breadcrumb, paired with VideoTransportBar's render-time log —
+            // that log showed a case where seekState's write (declaredDurationMs=135167, logged by
+            // openGrabber) was never subsequently observed as read by the UI at all: renders stayed
+            // at durationMs=0 for over 100ms after the write, then went silent for 2.6s, then
+            // resumed tracking positionMs as a fake duration — the exact shape growDurationIfNeeded
+            // produces when its current.durationMs argument is 0, which should be impossible once a
+            // real 135167 has been written here. This logs every actual write to seekState (the one
+            // source of truth VideoTransportBar reads), controller-identity-tagged, so the next
+            // capture can show definitively whether seekState itself ever regresses/resets — a real
+            // bug in this controller — or whether it stays correct the whole time and the UI is
+            // simply never observing an already-correct value — a Compose recomposition/snapshot
+            // problem instead.
+            if (before != after) {
+                AppLogger.info(
+                    "video",
+                    "publishDurationState: controller=${System.identityHashCode(this)} " +
+                        "$before -> $after (observedDurationMs=$observedDurationMs, discoveryFinished=$discoveryFinished)",
+                )
+            }
         }
     }
 
