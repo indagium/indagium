@@ -99,11 +99,42 @@ internal fun localFilesFromDropData(data: DragData): List<File> = when (data) {
     else -> emptyList()
 }
 
+/**
+ * Candidate mitigation for a reported Linux/XFCE symptom: a drag from an external file manager
+ * dropped onto this window sometimes does nothing at all — no onDrop, no visible rejection —
+ * apparently depending on whether the window already had input focus at drop time. That lines up
+ * with a long-documented category of X11/XDND quirks in AWT's Motif/X11 drop-target
+ * implementation, where some window managers only deliver the XdndDrop message to a window that's
+ * already focused/raised. Same mechanism as [raiseWindow] in Main.kt (used there for GNOME/Mutter
+ * ignoring a bare toFront() under focus-stealing prevention): a brief isAlwaysOnTop toggle forces
+ * the compositor to actually raise+focus the window, run here on [DragAndDropTarget.onStarted] —
+ * the earliest point a drag is recognized as eligible for this target — so the window is focused
+ * before the drop message would need to be delivered. Harmless no-op-ish on platforms/WMs that
+ * already deliver drops correctly (macOS/Windows never pass a non-null window here at all — see
+ * App's `window` parameter).
+ *
+ * Unverified against a real X11/XFCE session (no Linux desktop available to reproduce this on) —
+ * a reasonable, low-risk thing to try given the reported symptom, not a confirmed fix.
+ */
+internal fun raiseWindowForIncomingDrag(window: java.awt.Window?) {
+    if (window == null || !isLinuxOs) return
+    if (window is java.awt.Frame && window.extendedState and java.awt.Frame.ICONIFIED != 0) {
+        window.extendedState = window.extendedState and java.awt.Frame.ICONIFIED.inv()
+    }
+    window.toFront()
+    window.requestFocus()
+    window.isAlwaysOnTop = true
+    window.isAlwaysOnTop = false
+}
+
 @Composable
 fun App(
     state: AppState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) },
     onLicenseDeclined: () -> Unit = {},
     onResetAppData: () -> Unit = {},
+    // Null in tests (no real AWT window there) and unused on macOS/Windows — see
+    // raiseWindowForIncomingDrag's own KDoc for why this is Linux-only.
+    window: java.awt.Window? = null,
 ) {
     val theme = themeColors(state.settings.theme)
     val platformDensity = LocalDensity.current
@@ -162,8 +193,12 @@ fun App(
         LaunchedEffect(state) {
             state.startPendingRestoredTabLoads()
         }
-        val dropTarget = remember(state) {
+        val dropTarget = remember(state, window) {
             object : DragAndDropTarget {
+                override fun onStarted(event: DragAndDropEvent) {
+                    raiseWindowForIncomingDrag(window)
+                }
+
                 override fun onDrop(event: DragAndDropEvent): Boolean {
                     val dropped = runCatching { localFilesFromDropData(event.dragData()) }
                         .getOrDefault(emptyList())

@@ -210,6 +210,7 @@ fun main(args: Array<String>) {
                     appState.close(forAppDataReset = true)
                     exitApplication()
                 },
+                window = window,
             )
         }
     }
