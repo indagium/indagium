@@ -680,6 +680,20 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     )
                 }
             },
+            fifth = {
+                CompactSettingWithTooltip(
+                    label = "Follow live logs",
+                    tooltip = "Keeps the view pinned to the newest line while a tab is live-watching " +
+                        "(Start Live Watching). Scrolling up to read earlier lines pauses following; " +
+                        "scrolling back down to the last line resumes it.",
+                ) {
+                    SegmentedControl(
+                        options = listOf("On", "Off"),
+                        selectedIndices = setOf(if (state.settings.autoScrollWhileTailing) 0 else 1),
+                        onToggle = { idx -> state.updateSettings { it.copy(autoScrollWhileTailing = idx == 0) } },
+                    )
+                }
+            },
         )
 
         EditorBehaviorGridRow(

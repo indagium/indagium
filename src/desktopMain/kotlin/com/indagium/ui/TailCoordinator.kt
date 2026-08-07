@@ -2,11 +2,13 @@ package com.indagium.ui
 
 import com.indagium.debug.AppLogger
 import com.indagium.model.MessageCompositionState
+import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.FileTailer
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.computeMessageTemplates
 import com.indagium.utils.computeProcessNames
 import com.indagium.utils.computeStackTraceGroups
+import com.indagium.utils.detectArchiveFormat
 import com.indagium.utils.mergeMessageTemplates
 import com.indagium.utils.parseLogcatLines
 import com.indagium.utils.passesFilter
@@ -53,6 +55,11 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         val path = t.sourcePath ?: return
         val file = File(path)
         if (!file.isFile) return
+        // A bare compressed log (foo.log.gz) is a real, currently-existing file, but appending
+        // raw gzip bytes straight into logData as RAW entries via FileTailer would be nonsense —
+        // there's no way to incrementally re-decompress "whatever got appended to the file since
+        // last poll" the way a plain text file's new lines can just be read. Refuse to tail it.
+        if (detectArchiveFormat(file) != ArchiveFormat.None) return
         val tailer = FileTailer(file, onNewLines = { newLines -> appendTailedLines(tabId, newLines) })
         val job = tailer.start(scope)
         activeTails[tabId] = ActiveTail(tailer, job)
