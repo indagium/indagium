@@ -345,6 +345,13 @@ jobs:
           flatpak info --user --show-metadata com.indagium.Indagium | grep -q '^name=com.indagium.Indagium$'
           flatpak info --user --show-permissions com.indagium.Indagium | grep -q 'home'
           flatpak info --user --show-permissions com.indagium.Indagium | grep -q 'network'
+          # Word-anchored: the permissions line is `;`-delimited, and a bare `grep x11` would also
+          # match `fallback-x11` (substring), silently passing even if the manifest regressed to
+          # the Wayland-with-X11-fallback socket that leaves Wayland-session users headless (see
+          # packaging/linux/com.indagium.Indagium.yml). Assert plain x11 is present and
+          # fallback-x11 is gone.
+          flatpak info --user --show-permissions com.indagium.Indagium | grep -qE '(^|[;=])x11(;|$)'
+          ! flatpak info --user --show-permissions com.indagium.Indagium | grep -q 'fallback-x11'
           bash scripts/validate-flatpak-install.sh
           flatpak uninstall --user -y com.indagium.Indagium
 

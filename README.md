@@ -122,6 +122,17 @@ The Flatpak package allows access to your home directory for logs and source fol
 cannot use host-installed **Codex account** or **Claude Code account** CLI profiles; select an
 API/network-backed provider there instead.
 
+#### Flatpak: "No X11 DISPLAY variable was set"
+
+Indagium's UI toolkit (Java/AWT) needs a real X11 or XWayland display; the Flatpak sandbox cannot
+supply one on its own. On a remote/VNC/xrdp/x2go session (or any shell started outside your X
+session), set `DISPLAY` on the **host** before launching — setting it via `flatpak run --env=`
+does not work, since Flatpak picks the X11 socket to bind before the sandbox exists:
+
+```bash
+DISPLAY=:1.0 flatpak run com.indagium.Indagium
+```
+
 #### File picker troubleshooting
 
 If opening or saving files hangs, fails to appear, or behaves incorrectly under your Linux desktop,

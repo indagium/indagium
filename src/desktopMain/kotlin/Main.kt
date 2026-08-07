@@ -26,17 +26,43 @@ import java.awt.AWTEvent
 import java.awt.Desktop
 import java.awt.EventQueue
 import java.awt.Frame
+import java.awt.GraphicsEnvironment
 import java.awt.Taskbar
 import java.awt.Toolkit
 import java.awt.event.AWTEventListener
 import java.awt.event.MouseEvent
 import java.io.File
+import kotlin.system.exitProcess
 
 fun main(args: Array<String>) {
-    // MUST be the very first statement: it is the one-time openLog2 -> Indagium app-data copy
-    // (see DesktopStorage.migrateAppDataDir), and it must run before anything creates the new
-    // app-data dir on disk. In particular it must precede SingleInstance.acquire below, whose
-    // baseDir.mkdirs() would otherwise make the new dir exist-but-unmarked on Linux/Windows,
+    // Compose Desktop on Linux is AWT/Skiko (ComposeWindow is a java.awt.Window) and the bundled
+    // JDK has no Wayland backend, so it always needs a real X11/XWayland display. Left unchecked,
+    // a headless launch (Flatpak under a Wayland session before the --socket=x11 fix; a .deb or
+    // AppImage run over ssh without X forwarding; a systemd/cron context with no DISPLAY) dies
+    // deep inside the first composition with a bare java.awt.HeadlessException stack trace from
+    // LayoutConfiguration_desktopKt.getGlobalDensity — which tells the user nothing actionable.
+    // Fail fast with one clear line instead. This MUST run before anything touches AWT — in
+    // particular before Toolkit.getDefaultToolkit() and configureSwingGlobalsForCompose() below,
+    // both of which would themselves throw the same opaque HeadlessException.
+    //
+    // It is safe to run this ABOVE the migration call below despite that call's own "very first
+    // statement" comment: this guard never touches disk, it only reads GraphicsEnvironment state
+    // and either falls through or exits. So the migration's invariant — nothing creates the new
+    // app-data dir before it runs — still holds; a headless launch simply migrates on the next
+    // real (non-headless) launch instead.
+    if (GraphicsEnvironment.isHeadless()) {
+        System.err.println(
+            "Indagium needs a graphical display (X11 or XWayland) and none was found. " +
+                "If you're on a remote/VNC/xrdp/x2go session or ran this over ssh, set DISPLAY " +
+                "before launching, e.g.: DISPLAY=:0 indagium",
+        )
+        exitProcess(1)
+    }
+
+    // MUST be the very first statement that touches disk: it is the one-time openLog2 -> Indagium
+    // app-data copy (see DesktopStorage.migrateAppDataDir), and it must run before anything creates
+    // the new app-data dir on disk. In particular it must precede SingleInstance.acquire below,
+    // whose baseDir.mkdirs() would otherwise make the new dir exist-but-unmarked on Linux/Windows,
     // causing the migration to be skipped or half-merged on the *next* launch while the user's
     // real data sits unreachable under the old directory. It must also precede AppState's
     // construction, since AppState's constructor reads autosave.cache synchronously.
