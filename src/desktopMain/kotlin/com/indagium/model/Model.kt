@@ -1073,6 +1073,12 @@ data class AppSettings(
     val copyPidAsName: Boolean = false,
     val copyRowNumber: Boolean = false,
     val copyTimeDelta: Boolean = false,
+    // Keeps the viewer pinned to the newest line while a tab is live-watching (TailCoordinator).
+    // On by default — that's the point of watching a file live. Scrolling up to read history
+    // pauses following and scrolling back down to the last line resumes it, but that pause is
+    // transient per-session viewport state (LogViewerScrollStateStore.followTailState), never
+    // written back here — only an explicit flip of this toggle changes the standing preference.
+    val autoScrollWhileTailing: Boolean = true,
 )
 
 enum class ThemePreset(val label: String) {

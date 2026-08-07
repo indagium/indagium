@@ -494,6 +494,14 @@ class LogViewerScrollStateStore {
     private val lazyStates = mutableMapOf<String, LazyListState>()
     private val horizontalStates = mutableMapOf<String, ScrollState>()
 
+    // Whether a panel should keep auto-scrolling to the newest row while its tab is live-watching.
+    // Lives here rather than a remember{} for the same reason lazyState does: it must survive tab
+    // switches and the Unfiltered split toggle, keyed by the same "$tabId:$panel" panelKey so the
+    // ":original" and ":main" panels of a split follow independently. Being store-backed (not
+    // AppSettings-backed) is also exactly what makes it session-only — the scroll-up pause never
+    // outlives the tab, and never gets written back to the standing autoScrollWhileTailing setting.
+    private val followTailStates = mutableMapOf<String, MutableState<Boolean>>()
+
     fun lazyState(panelKey: String): LazyListState =
         lazyStates.getOrPut(panelKey) { LazyListState() }
 
@@ -503,10 +511,14 @@ class LogViewerScrollStateStore {
     fun scrollState(panelKey: String): ScrollState =
         horizontalStates.getOrPut(panelKey) { ScrollState(0) }
 
+    fun followTailState(panelKey: String): MutableState<Boolean> =
+        followTailStates.getOrPut(panelKey) { mutableStateOf(true) }
+
     fun removeTab(tabId: String) {
         val prefix = "$tabId:"
         lazyStates.keys.removeAll { it.startsWith(prefix) }
         horizontalStates.keys.removeAll { it.startsWith(prefix) }
+        followTailStates.keys.removeAll { it.startsWith(prefix) }
     }
 }
 
@@ -1107,6 +1119,61 @@ fun LogViewer(
             }
             val lazyState = listState ?: scrollStates.lazyState(panelKey)
             val hScroll   = scrollStates.scrollState(panelKey)
+            // ---- Tail-follow (settings.autoScrollWhileTailing) ----------------------------------
+            // The runtime half of the setting. `followTail` is derived FROM LAYOUT on every viewport
+            // change rather than tracked as a scroll delta, and that is the whole reason this is
+            // race-free: our own scroll lands at the bottom, where isAtLastRow is true anyway, so the
+            // derived value agrees with itself and there is never a "who scrolled?" question in the
+            // steady state. Suspending and resuming here is transient viewport state — it must never
+            // write back to settings.autoScrollWhileTailing (see AppSettings' comment on that field).
+            val followTail = scrollStates.followTailState(panelKey)
+            // The one window where the derivation IS wrong is mid-flight during our own scroll, when
+            // firstVisibleItem* has moved but layout hasn't settled. This masks exactly that window.
+            var selfScrolling by remember(panelKey) { mutableStateOf(false) }
+            val currentLastRowIndex by rememberUpdatedState(listItems.lastIndex)
+            // Re-arm on every transition into live-watching: choosing to watch a file means wanting
+            // to see the newest line, even if this panel had been scrolled away earlier.
+            LaunchedEffect(panelKey, effectiveTab.tailing) {
+                if (effectiveTab.tailing) followTail.value = true
+            }
+            // User-intent sampler. Keyed on the viewport position, NOT on the item count: appending
+            // rows below the fold never changes firstVisibleItem*, so a tail batch cannot flip
+            // following off, while any real viewport move (wheel, drag, scrollbar, minimap, keyboard
+            // nav, or a note/Find/video jump — see the note beside the annotation-nav effects above)
+            // does. snapshotFlow conflates, so a burst of scroll frames collapses to one reading.
+            LaunchedEffect(panelKey, lazyState) {
+                snapshotFlow { lazyState.firstVisibleItemIndex to lazyState.firstVisibleItemScrollOffset }
+                    .collect {
+                        if (!selfScrolling) {
+                            followTail.value = isAtLastRow(
+                                lazyState.layoutInfo.visibleItemsInfo.lastOrNull()?.index,
+                                currentLastRowIndex,
+                            )
+                        }
+                    }
+            }
+            // The follow itself. listItems.size is the append signal; it deliberately does not fire
+            // when the active filter hides every newly tailed line, which is the correct behaviour —
+            // nothing new is visible, so nothing should move. Instant, never animated: at
+            // FileTailer's ~500ms poll the next batch would land mid-animation (the same reasoning
+            // scrollForCursor records below). The spacer index is listItems.size, one past the last
+            // real row — see newestRowScrollOffset for why that lands the newest row flush at the
+            // bottom edge with no row-height estimate.
+            LaunchedEffect(panelKey, settings.autoScrollWhileTailing, effectiveTab.tailing, listItems.size) {
+                if (!settings.autoScrollWhileTailing || !effectiveTab.tailing || !followTail.value) return@LaunchedEffect
+                selfScrolling = true
+                try {
+                    val viewportHeight = lazyState.layoutInfo.let { it.viewportEndOffset - it.viewportStartOffset }
+                    lazyState.scrollToItem(listItems.size, newestRowScrollOffset(viewportHeight))
+                } finally {
+                    // Release only after layout settles, so the sampler above reads the SETTLED
+                    // position rather than a mid-scroll one — the same one-frame trick centerOnItem
+                    // uses. Too narrow a mask un-follows the panel on its own first batch; too wide
+                    // swallows a genuine user scroll that raced the batch.
+                    withFrameNanos { }
+                    selfScrolling = false
+                }
+            }
             val scrollbarStyle = appScrollbarStyle(tc)
             val density = LocalDensity.current
             // Must cover EVERYTHING drawn in the CenterEnd column beside the log rows — the
@@ -1596,6 +1663,17 @@ fun LogViewer(
             val allOnSelectAll: () -> Unit = { localAllSelected = computedAllItems.summary.allIds.toSet() }
             val allOnClearSelection: () -> Unit = { localAllSelected = emptySet() }
 
+            // NOTE for whoever touches tail-follow next: every LaunchedEffect below that calls
+            // followItem/centerOnItem/scrollForCursor on filteredLazyState or allLazyState (annotation
+            // nav, video-follow — which reuses the same FOLLOW branch below via AppState.followVisibleLog
+            // — Find-bar search nav, and the one-shot restore-selection-on-split-open effect further
+            // down) moves the viewport away from the last row as an unavoidable side effect. That
+            // suspends this panel's tail-following (see ItemList's own follow-tail sampler, which derives
+            // "following" purely from whether the last row is on screen). This is intentional and
+            // load-bearing, not a bug: the user (or a video anchor) explicitly asked to look at a
+            // specific row, and that request must win over a live tail's pull toward the newest line.
+            // Don't "fix" this into two scroll owners fighting — there is deliberately only one, and
+            // whichever effect scrolled last owns the viewport until the user scrolls back to the tail.
             LaunchedEffect(annotationNavigationRequest?.id, itemsVersion, allItemsVersion, tab.expanded) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
                 if (request.scrollMode == NavigationScrollMode.FOLLOW) {
@@ -1858,6 +1936,9 @@ fun LogViewer(
         } else {
             val mainLazyState = scrollStates.lazyState("${tab.id}:main")
             val searchNavScope = rememberCoroutineScope()
+            // Same interaction with tail-follow as the split-view cluster above: any scroll these
+            // two effects (or the keyboard nav in handleNavKey/handleSelKey below) perform on
+            // mainLazyState suspends this panel's follow, on purpose — see that comment for why.
             LaunchedEffect(annotationNavigationRequest?.id, itemsVersion, tab.expanded) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
                 if (request.scrollMode == NavigationScrollMode.FOLLOW) {
@@ -1967,6 +2048,32 @@ internal fun centerAnchorIndex(index: Int, viewportHeight: Int, visibleItemSizes
     return (index - rowsToHalfViewport).coerceAtLeast(0)
 }
 
+// Pure geometry for tail-follow (Part 5), extracted the same way centerAnchorIndex above is: the
+// surrounding Compose scroll machinery can't be exercised headlessly, but these two decisions can.
+//
+// "At the newest line" means the last REAL row is on screen — not that the trailing "tail-space"
+// spacer (a real lazy item at index listItems.size, see the LazyColumn below) is fully exposed.
+// Requiring the latter would force the user to scroll an extra half-viewport past the last line
+// before following resumes, which reads as broken. lastVisibleIndex landing ON the spacer still
+// counts: it can only get there by first passing over the last row, and clamping there (rather
+// than treating it as "not yet at the bottom") is what lets scrollToItem overshoot slightly
+// without spuriously un-following. A null lastVisibleIndex (no layout yet, or a genuinely empty
+// list) defaults to true — nothing to disagree with, and defaulting to true is what lets the
+// follow effect below scroll on its very first composition instead of waiting for a real
+// "not following" reading first.
+internal fun isAtLastRow(lastVisibleIndex: Int?, lastRowIndex: Int): Boolean =
+    lastVisibleIndex == null || lastVisibleIndex >= lastRowIndex
+
+// Placing the tail-space SPACER's top at the viewport bottom puts the last row's bottom edge
+// exactly there, with no row-height estimate needed — LazyListState's scrollOffset convention is
+// "this many px below the viewport top" (the same convention followItem above already relies on),
+// so a negative offset of exactly one viewport height pulls the spacer's top up to the viewport's
+// bottom edge. A log shorter than one viewport clamps to 0 automatically (LazyListState coerces an
+// over-large scroll), which is also the correct picture: everything is already on screen.
+// viewportHeight <= 0 (layout not measured yet) returns 0 rather than a meaningless positive
+// offset — scrollToItem(spacerIndex, 0) is a harmless no-op until real layout info exists.
+internal fun newestRowScrollOffset(viewportHeight: Int): Int = if (viewportHeight <= 0) 0 else -viewportHeight
+
 private suspend fun LazyListState.centerOnItem(index: Int) {
     scrollToItem(index)
     withFrameNanos { }
@@ -2022,6 +2129,11 @@ internal fun rankCollapsedHeadersByProximity(headers: List<Pair<String, Int>>, e
 // animation produced a visible gap where the old row had already lost its highlight but the
 // new row hadn't scrolled into view yet. An immediate jump keeps the highlight continuously
 // visible across the scroll.
+//
+// Also the vehicle for keyboard nav (handleNavKey/handleSelKey) to move the viewport, so — like
+// the other scroll effects above — pressing an arrow/page key away from the last row suspends
+// tail-follow. Deliberate: the keyboard is the most explicit possible "I'm looking at this row"
+// signal there is.
 private fun scrollForCursor(lazyState: LazyListState, scope: CoroutineScope, targetItemsIdx: Int, margin: Int) {
     val visible = lazyState.layoutInfo.visibleItemsInfo
     if (visible.isEmpty()) {

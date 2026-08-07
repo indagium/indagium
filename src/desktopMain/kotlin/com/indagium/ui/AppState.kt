@@ -45,6 +45,7 @@ import com.indagium.update.assetForCurrentOs
 import com.indagium.update.revealInFileManager
 import com.indagium.update.runtimePackageForCurrentProcess
 import com.indagium.utils.ArchiveBudgetExceededException
+import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.EntryIdMap
 import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
@@ -68,6 +69,7 @@ import com.indagium.utils.computeProcessNames
 import com.indagium.utils.computeSearchMatches
 import com.indagium.utils.computeStackTraceGroups
 import com.indagium.utils.computeTidMapColors
+import com.indagium.utils.detectArchiveFormat
 import com.indagium.utils.enforceArchiveVideoCacheBudget
 import com.indagium.utils.exportFilteredToFile
 import com.indagium.utils.extractAppVersionHeuristic
@@ -79,14 +81,13 @@ import com.indagium.utils.invalidateComputeCache
 import com.indagium.utils.isLikelyTextFile
 import com.indagium.utils.isSupportedArchiveFile
 import com.indagium.utils.listArchiveLogCandidates
-import com.indagium.utils.listArchiveVideoCandidates
 import com.indagium.utils.matchingHighlighter
 import com.indagium.utils.matchingMessageRule
 import com.indagium.utils.mergeLogs
 import com.indagium.utils.messageRuleSpecForTemplate
 import com.indagium.utils.newId
 import com.indagium.utils.openArchiveCandidateStream
-import com.indagium.utils.parseLogcat
+import com.indagium.utils.parseLogFile
 import com.indagium.utils.parseMillisOfDay
 import com.indagium.utils.passesFilter
 import com.indagium.utils.planSplitOutputs
@@ -95,6 +96,8 @@ import com.indagium.utils.presentLogLineMarkdown
 import com.indagium.utils.pruneUnreferencedArchiveVideos
 import com.indagium.utils.recoverLogRefRows
 import com.indagium.utils.requiresSplitPrompt
+import com.indagium.utils.scanArchiveCandidates
+import com.indagium.utils.scanFolderForLogs
 import com.indagium.utils.splitFileToFiles
 import com.indagium.utils.splitStreamToFiles
 import com.indagium.utils.suggestedSplitPartCount
@@ -1023,6 +1026,24 @@ data class PendingZipPicker(
     val videoCandidates: List<ZipLogCandidate> = emptyList(),
 )
 
+// Deliberately a SEPARATE state class from PendingZipPicker above, not a generalization of it —
+// they share only the picker dialog composable (ui/EntryPickerDialog.kt), never the plumbing.
+// PendingZipPicker's `zipFile` is threaded through four archive-specific subsystems that are every
+// one of them WRONG for a folder: openZipEntry's fake "$path!$entry" sourcePath (breaks dedup for
+// a folder child, which has a real path of its own), LogTab.archiveCandidate persistence (restores
+// via extractCandidate, which can't run on a directory), startTailing's File(...).isFile check on
+// that fake path (always false, so a folder-opened log could never be tailed), and
+// attachVideoFromZip/VideoSource.ArchiveEntry (extracts from a directory as if it were a zip
+// entry). openFolder/openFolderEntries below route through the ordinary plain-file machinery
+// instead — openFile, SplitSource.RealFile, attachVideoToTab — so a folder's opened tabs come out
+// indistinguishable from having opened each file directly.
+data class PendingFolderPicker(
+    val folder: File,
+    val candidates: List<ZipLogCandidate>,
+    val videoCandidates: List<ZipLogCandidate> = emptyList(),
+    val truncated: Boolean = false,
+)
+
 enum class SplitMode { SPLIT, OPEN_AS_IS }
 
 sealed class SplitSource {
@@ -1089,7 +1110,13 @@ sealed interface UpdateDownloadState {
 class AppState(
     private val autosaveFile: File = defaultAutosaveFile(),
     restoreOnCreate: Boolean = false,
-    private val parser: (File) -> List<LogEntry> = ::parseLogcat,
+    // ::parseLogFile (not ::parseLogcat) is what makes bare compressed logs (.log.gz etc) "just
+    // work" everywhere a plain file already did — this one seam covers openFileInternal, the
+    // split path, and loadRestoredTab, which would otherwise re-parse gzip bytes as raw (garbage)
+    // logcat lines on every relaunch of a restored .log.gz tab. parseLogFile falls through to
+    // parseLogcat unchanged for every file that isn't a bare compressed log, so this is a no-op
+    // for the overwhelming majority of callers/tests.
+    private val parser: (File) -> List<LogEntry> = ::parseLogFile,
     private val notesDir: File = DesktopStorage.notesDir(),
     private val archiveCacheDir: File = DesktopStorage.archiveCacheDir(),
     private val customCommandsDir: File = DesktopStorage.customCommandsDir(),
@@ -1655,6 +1682,7 @@ class AppState(
     var pendingSearchNavigation by mutableStateOf<SearchNavigationRequest?>(null)
         private set
     var pendingZipPicker by mutableStateOf<PendingZipPicker?>(null)
+    var pendingFolderPicker by mutableStateOf<PendingFolderPicker?>(null)
     var pendingSplitPrompt by mutableStateOf<PendingSplitPrompt?>(null)
         private set
     var mergeTabsDialogOpen by mutableStateOf(false)
@@ -4971,9 +4999,25 @@ class AppState(
     fun openFileAsIs(file: File): String? = openFileInternal(file, bypassSplitPrompt = true)
 
     fun openPaths(files: List<File>, splitPromptThresholdBytes: Long = SPLIT_PROMPT_BYTES) {
-        val openable = files.filter { isOpenableAsLog(it) }
+        // Folders never reach isOpenableAsLog's file-only checks (isLikelyLogPath/isLikelyTextFile
+        // both require File.isFile), so without this partition every folder in `files` would be
+        // silently dropped exactly like before folder support existed. Each folder gets its own
+        // independent openFolder call — unlike openDroppedFiles' folder handling below, there's no
+        // video/log pairing heuristic here that a second source could make ambiguous, so a folder
+        // alongside ordinary files (CLI args, a macOS "Open With" batch) is simply handled on its
+        // own rather than rejected the way a mixed drop is.
+        val (folders, nonFolders) = files.partition { it.isDirectory }
+        folders.forEach { openFolder(it) }
+        val openable = nonFolders.filter { isOpenableAsLog(it) }
         val oversizedFiles = openable.filter { file ->
-            !isSupportedArchiveFile(file) && requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
+            // ArchiveFormat.None, not !isSupportedArchiveFile: a bare compressed log (foo.log.gz)
+            // reports its on-disk (compressed) size via file.length(), which under-reports the
+            // real decompressed content by roughly the compression ratio — requiresSplitPrompt
+            // would almost never fire for it even on a huge log, and there's no SplitSource for a
+            // compressed file to route into anyway. It's bounded by BoundedInputStream/
+            // MAX_ARCHIVE_ENTRY_BYTES during parsing instead, the same deal an archive entry
+            // already has (see extractCandidate's KDoc) — never split-prompted, just capped.
+            detectArchiveFormat(file) is ArchiveFormat.None && requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
         }
         if (oversizedFiles.isNotEmpty()) {
             pendingSplitPrompt = PendingSplitPrompt(
@@ -4991,12 +5035,41 @@ class AppState(
     }
 
     /**
-     * Handles file drops without guessing an association. A lone video goes to the current tab;
-     * exactly one plain log plus one video forms an explicit pair and is attached only after that
-     * log tab publishes. Every other batch opens its log files but leaves videos unattached with a
-     * visible explanation rather than overwriting an arbitrary tab's recording.
+     * Handles file drops without guessing an association. Folders are partitioned out first and
+     * handled entirely separately from the video/log pairing logic below: exactly one folder
+     * dropped alone routes to [openFolder] (the same picker archives use, scanned instead of
+     * listed). A folder can never join that pairing — openFolder scans exactly one source, so a
+     * second source in the same drop (another folder, or any file) has no single association to
+     * guess, unlike a lone video which unambiguously means "attach this". Non-folder files in the
+     * same drop still open normally through the logic below; only the folder(s) are rejected, with
+     * a clear explanation of why.
      */
     fun openDroppedFiles(files: List<File>) {
+        val (folders, nonFolders) = files.partition { it.isDirectory }
+        if (folders.isNotEmpty()) {
+            if (folders.size == 1 && nonFolders.isEmpty()) {
+                openFolder(folders.single())
+                return
+            }
+            if (nonFolders.isNotEmpty()) openDroppedNonFolderFiles(nonFolders)
+            showOpenError(
+                title = "Folders were not opened",
+                path = folders.joinToString(", ") { it.absolutePath },
+                message = "Drop one folder by itself to choose which of its logs to open.",
+            )
+            return
+        }
+        openDroppedNonFolderFiles(nonFolders)
+    }
+
+    /**
+     * The pre-folder-support drop logic, unchanged: a lone video goes to the current tab; exactly
+     * one plain log plus one video forms an explicit pair and is attached only after that log tab
+     * publishes. Every other batch opens its log files but leaves videos unattached with a visible
+     * explanation rather than overwriting an arbitrary tab's recording. [openDroppedFiles] above is
+     * the sole caller, having already stripped out every directory in the drop.
+     */
+    private fun openDroppedNonFolderFiles(files: List<File>) {
         val (videos, nonVideos) = files.partition { it.extension.lowercase() in VIDEO_FILE_EXTENSIONS }
         when {
             videos.size == 1 && nonVideos.isEmpty() -> {
@@ -5040,15 +5113,66 @@ class AppState(
     // content-sniffed text file with a non-standard extension can be greyed out in the picker
     // even though it would open fine. The dialog shows all files instead, and this validates
     // (with a real error message) after the user actually picks one.
-    fun isOpenableAsLog(file: File): Boolean =
-        file.exists() && (isSupportedArchiveFile(file) || isLikelyLogPath(file) || isLikelyTextFile(file))
+    fun isOpenableAsLog(file: File): Boolean = file.exists() && when (detectArchiveFormat(file)) {
+        // Zip/SevenZ/Sequential show the archive picker; CompressedFile opens straight through
+        // (see openPath below) — both are unconditionally "openable", the difference is only in
+        // *how* openPath routes them from here.
+        ArchiveFormat.Zip, ArchiveFormat.SevenZ -> true
+        is ArchiveFormat.Sequential -> true
+        is ArchiveFormat.CompressedFile -> true
+        is ArchiveFormat.Unsupported -> false
+        ArchiveFormat.None -> isLikelyLogPath(file) || isLikelyTextFile(file)
+    }
 
+    // Order matters here — see each branch's own comment for why it has to run before the ones
+    // after it, not just before the final openPath fallback.
     fun openPathOrShowError(file: File) {
+        // A directory can still reach here via the Open button: AWT's FileDialog on Linux commonly
+        // delegates to a native GTK chooser that lets the user navigate into and select a folder
+        // outright, unlike macOS/Windows' file-only dialogs. Route it through the same
+        // scan-then-picker flow a dropped folder gets, rather than falling through to
+        // isOpenableAsLog below, which would reject a directory with a "not a log file" message.
+        if (file.isDirectory) {
+            openFolder(file)
+            return
+        }
+        // Must precede isOpenableAsLog: a video's extension makes isOpenableAsLog's ArchiveFormat.
+        // None branch fall through to isLikelyLogPath/isLikelyTextFile, both of which reject it —
+        // producing "This doesn't look like a log/text file...", which is simply the wrong message
+        // for a file the Open button is choosing to attach rather than open as a log. Mirrors
+        // openDroppedFiles' lone-video branch, but targets the active tab (there's no drop-pairing
+        // heuristic to apply for a single deliberately-picked file) and sets videoPanelVisible via
+        // attachVideoToActiveTab -> attachVideo, so the result is immediately visible.
+        if (file.extension.lowercase() in VIDEO_FILE_EXTENSIONS) {
+            if (attachVideoToActiveTab(file) == null) {
+                showOpenError(
+                    title = "Could not attach video",
+                    path = file.absolutePath,
+                    message = "Open a log tab first, then open a video to attach it to that tab.",
+                )
+            }
+            return
+        }
+        // Also ahead of isOpenableAsLog: Unsupported already makes isOpenableAsLog return false,
+        // so without this branch a RAR/Zstandard/lzip/lzop file would fall into the generic
+        // "doesn't look like a log file" error below instead of a precise one naming the format
+        // and what's actually supported.
+        val format = detectArchiveFormat(file)
+        if (format is ArchiveFormat.Unsupported) {
+            showOpenError(
+                title = "Unsupported archive format",
+                path = file.absolutePath,
+                message = "${format.label} isn't supported. Supported archives: .zip, .7z, the .tar family " +
+                    "(.tar, .tar.gz, .tar.bz2, .tar.xz, .tar.lzma), .ar, and bare compressed logs like .log.gz.",
+            )
+            return
+        }
         if (!isOpenableAsLog(file)) {
             showOpenError(
                 title = "Could not open file",
                 path = file.absolutePath,
-                message = "This doesn't look like a log/text file or a supported archive (.zip/.7z).",
+                message = "This doesn't look like a log/text file or a supported archive " +
+                    "(.zip, .7z, the .tar family, .ar, or a compressed log like .log.gz).",
             )
             return
         }
@@ -5075,13 +5199,26 @@ class AppState(
         if (existing != null) {
             activeTabId = existing.id; return existing.id
         }
-        if (!bypassSplitPrompt && requiresSplitPrompt(file.length())) {
+        // ArchiveFormat.None, not a raw length check: see openPaths' identical guard for why a
+        // bare compressed log is exempt (its on-disk size under-reports real content, and it has
+        // no SplitSource to route into — BoundedInputStream during parsing is its size cap).
+        if (!bypassSplitPrompt && detectArchiveFormat(file) is ArchiveFormat.None && requiresSplitPrompt(file.length())) {
             pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.RealFile(file)))
             return null
         }
         val n = tabCounter.getAndIncrement() // capture on calling thread before launching
         val tabId = "t$n"
-        val largeFile = file.length() >= LARGE_FILE_MODE_BYTES
+        // file.length() is the on-disk (compressed) size for a bare compressed log — often ~10x
+        // smaller than what it actually decompresses to, which is what largeFileMode's rendering
+        // shortcuts care about. There's no cheap way to know the real decompressed size before
+        // parsing (the `parser` seam above returns just List<LogEntry>, not a byte count), so this
+        // multiplies as a rough correction rather than under-triggering largeFileMode on a
+        // multi-GB gzip that looks tiny on disk.
+        val largeFile = if (detectArchiveFormat(file) is ArchiveFormat.CompressedFile) {
+            file.length() * 8 >= LARGE_FILE_MODE_BYTES
+        } else {
+            file.length() >= LARGE_FILE_MODE_BYTES
+        }
         beginLoading()
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
             var published = false
@@ -5157,13 +5294,18 @@ class AppState(
         recentMenuOpen = !recentMenuOpen
     }
 
-    fun openPath(file: File): String? {
-        return if (isSupportedArchiveFile(file)) {
-            openZipFile(file)
-            null
-        } else {
-            openFile(file)
-        }
+    fun openPath(file: File): String? = when (detectArchiveFormat(file)) {
+        // Zip/SevenZ/Sequential all go through the picker-capable archive path.
+        ArchiveFormat.Zip, ArchiveFormat.SevenZ -> { openZipFile(file); null }
+        is ArchiveFormat.Sequential -> { openZipFile(file); null }
+        // CompressedFile falls through to plain openFile alongside None (an ordinary log/text
+        // file) — that's what makes a bare compressed log cheap to support: no picker (there's
+        // exactly one log inside), sourcePath stays the bare absolute path so dedup/recents/
+        // displaySourceLabel all keep working unmodified, and autosave persists an ordinary
+        // FileSource that restores correctly via the `parser` seam change above. Unsupported
+        // and None both land here too — openFile's own existence/readability check produces the
+        // right error for those, same as before this change.
+        else -> openFile(file)
     }
 
     fun dismissOpenError() {
@@ -5192,15 +5334,19 @@ class AppState(
             )
             return
         }
-        val candidates = runCatching { listArchiveLogCandidates(file) }.getOrElse { error ->
+        // One pass over the archive's entries for both listers together (scanArchiveCandidates,
+        // BugReportZip.kt) — for a zip that's two cheap central-directory reads either way, but a
+        // sequential format (tar/ar, no index) would otherwise mean decompressing a multi-GB
+        // .tar.gz twice just to answer "any logs?" and "any videos?" separately.
+        val scan = runCatching { scanArchiveCandidates(file) }.getOrElse { error ->
             AppLogger.error("archive", "Archive scan failed", error)
             showOpenError("Could not open archive", path, "The archive could not be scanned.")
             return
         }
-        // Scanned separately from the log/ANR candidates above (own extension-gated lister, see
-        // BugReportZip.kt). Recordings never become log rows; the picker presents them separately
-        // as an explicit optional attachment choice.
-        val videoCandidates = runCatching { listArchiveVideoCandidates(file) }.getOrDefault(emptyList())
+        val candidates = scan.logCandidates
+        // Recordings never become log rows; the picker presents them separately as an explicit
+        // optional attachment choice.
+        val videoCandidates = scan.videoCandidates
         AppLogger.info("archive", "Archive scan found ${candidates.size} candidates")
         when {
             candidates.size == 1 && videoCandidates.isEmpty() -> {
@@ -5281,6 +5427,95 @@ class AppState(
 
     fun cancelZipPicker() {
         pendingZipPicker = null
+    }
+
+    // Mirrors openZipFile's rule exactly: a single log candidate with no video auto-opens, any
+    // other non-empty result shows the picker, zero candidates is an error. The one deliberate
+    // difference is that the scan itself runs on ioScope rather than synchronously on the calling
+    // (UI) thread — a folder walk touches real filesystem metadata for potentially thousands of
+    // entries (FolderScan.kt's MAX_FOLDER_ENTRIES_SCANNED), and a folder on a slow or
+    // network-mounted disk would otherwise freeze the UI for as long as that walk takes.
+    // (openZipFile's own scan stays synchronous — existing tests assert pendingZipPicker
+    // immediately after the call with no wait; that's a separate, pre-existing tradeoff and not
+    // something to "fix" to match this.) Recent-file tracking is deliberately skipped for the
+    // folder path itself: Recent Files' click handler calls openPath (not openPathOrShowError),
+    // which has no directory branch — see openPathOrShowError's — so remembering a folder there
+    // would silently produce "could not open file" instead of reopening the picker.
+    fun openFolder(folder: File) {
+        val path = folder.absolutePath
+        if (!folder.exists() || !folder.isDirectory) {
+            showOpenError(
+                title = "Could not open folder",
+                path = path,
+                message = "The folder does not exist or is not readable.",
+            )
+            return
+        }
+        ioScope.launch {
+            val scan = runCatching { scanFolderForLogs(folder) }.getOrElse { error ->
+                AppLogger.error("folder", "Folder scan failed", error)
+                showOpenError("Could not open folder", path, "The folder could not be scanned.")
+                return@launch
+            }
+            val candidates = scan.logCandidates
+            // Same "keep recordings out of the log picker rows" split as scanArchiveCandidates.
+            val videoCandidates = scan.videoCandidates
+            AppLogger.info("folder", "Folder scan found ${candidates.size} candidates")
+            when {
+                candidates.size == 1 && videoCandidates.isEmpty() -> openFolderEntries(folder, listOf(candidates.first()))
+                candidates.isNotEmpty() -> pendingFolderPicker = PendingFolderPicker(folder, candidates, videoCandidates, scan.truncated)
+                else -> showOpenError(
+                    title = "No log files found",
+                    path = path,
+                    message = "This folder does not contain readable .log, .txt, or ANR trace entries.",
+                )
+            }
+        }
+    }
+
+    // Returns the tabId allocated for each selected candidate that actually started loading, in
+    // the same order as `selected` — same contract as openZipEntries, same reason (ARCH-3:
+    // IndagiumToolOperations wants a concrete id to await, not a sourcePath to re-derive it from).
+    // Routes end-to-end through the ordinary plain-file machinery (openFile, SplitSource.RealFile,
+    // the private attachVideoToTabWhenAvailable above) rather than anything archive-shaped — see
+    // PendingFolderPicker's doc comment for why generalizing openZipEntries' plumbing here would
+    // silently break tailing, restore-from-autosave, and video attachment for a folder-opened tab.
+    // splitPromptThresholdBytes defaults to the real SPLIT_PROMPT_BYTES threshold (matching
+    // openPaths' identical parameter) but is overridable so a test can exercise the oversized
+    // branch without writing a fixture that's actually hundreds of MB — a folder child's size
+    // comes from its real on-disk length() (unlike an archive candidate's persisted sizeBytes,
+    // which openZipEntries' own tests fake with a `.copy()`), so there's no cheaper way to steer
+    // this gate from a test than lowering the threshold itself.
+    fun openFolderEntries(
+        folder: File,
+        selected: List<ZipLogCandidate>,
+        videoToAttach: ZipLogCandidate? = null,
+        splitPromptThresholdBytes: Long = SPLIT_PROMPT_BYTES,
+    ): List<String> {
+        val files = selected.map { File(folder, it.entryPath) }
+        val (oversized, normal) = files.partition { requiresSplitPrompt(it.length(), splitPromptThresholdBytes) }
+        if (oversized.isNotEmpty()) {
+            // Same "defer everything selected, not just the oversized ones" shape as
+            // openZipEntries' identical branch — confirmSplitPrompt already knows how to open a
+            // plain File deferred this way (its `deferredFiles.forEach { openPath(it) }`).
+            pendingSplitPrompt = PendingSplitPrompt(
+                sources = oversized.map { SplitSource.RealFile(it) },
+                deferredFiles = normal,
+            )
+            pendingFolderPicker = null
+            return emptyList()
+        }
+        val tabIds = files.mapNotNull { openFile(it) }
+        pendingFolderPicker = null
+        if (videoToAttach?.kind == ZipLogCandidateKind.VIDEO) {
+            val videoFile = File(folder, videoToAttach.entryPath)
+            tabIds.forEach { tabId -> attachVideoToTabWhenAvailable(videoFile, tabId) }
+        }
+        return tabIds
+    }
+
+    fun cancelFolderPicker() {
+        pendingFolderPicker = null
     }
 
     // Jar-URL-style "!" separator for the source path — for display/dedup only (a zip-extracted

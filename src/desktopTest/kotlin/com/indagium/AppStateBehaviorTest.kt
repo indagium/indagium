@@ -4386,6 +4386,7 @@ class AppStateBehaviorTest {
         debugLoggingEnabled = true,
         debugLogFilePath = "/tmp/openlog-rt-debug.log",
         enableDoubleClickVideoSeekOnLink = false,
+        autoScrollWhileTailing = false,
     )
 
     // (ARCH-2/Batch 5) Proves the migration end to end: every AppSettings field pushed off its

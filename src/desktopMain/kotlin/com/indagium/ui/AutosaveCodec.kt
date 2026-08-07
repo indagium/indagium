@@ -616,6 +616,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("copyPidAsName", copyPidAsName)
     put("copyRowNumber", copyRowNumber)
     put("copyTimeDelta", copyTimeDelta)
+    put("autoScrollWhileTailing", autoScrollWhileTailing)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -903,6 +904,9 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         copyPidAsName = o.boolOrDefault("copyPidAsName", false),
         copyRowNumber = o.boolOrDefault("copyRowNumber", false),
         copyTimeDelta = o.boolOrDefault("copyTimeDelta", false),
+        // Default-on: a legacy blob predating this field should behave exactly like a fresh
+        // AppSettings() — following the tail is the point of live-watching a file.
+        autoScrollWhileTailing = o.boolOrDefault("autoScrollWhileTailing", true),
     )
 }.getOrNull()
 
