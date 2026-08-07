@@ -90,6 +90,16 @@ The Flatpak sandbox permits access to your home directory for logs and source fo
 cannot use host-installed **Codex account** or **Claude Code account** CLI profiles. Use an
 API/network-backed provider in Flatpak instead.
 
+### Flatpak: "No X11 DISPLAY variable was set"
+
+Indagium's UI toolkit (Java/AWT) needs a real X11 or XWayland display. On a remote/VNC/xrdp/x2go
+session, set `DISPLAY` on the **host** before launching — `flatpak run --env=DISPLAY=…` does not
+work, because Flatpak decides which X11 socket to bind before the sandbox exists:
+
+```bash
+DISPLAY=:1.0 flatpak run com.indagium.Indagium
+```
+
 ---
 
 ## 2. Quick start

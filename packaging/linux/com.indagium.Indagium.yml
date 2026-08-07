@@ -8,8 +8,15 @@ finish-args:
   - --filesystem=home
   # Network-backed AI providers and the built-in loopback MCP control server need networking.
   - --share=network
-  - --socket=wayland
-  - --socket=fallback-x11
+  # The bundled JDK's AWT/Skiko toolkit is X11-only (no Wayland backend), so it always
+  # needs an X11 display, via XWayland when the session is Wayland. `fallback-x11` grants
+  # X11 ONLY when no Wayland compositor is present, so on any Wayland session flatpak binds
+  # the Wayland socket instead, leaves /tmp/.X11-unix unbound, and unsets DISPLAY inside the
+  # sandbox — a deterministic HeadlessException at startup for every Wayland user.
+  # `--socket=wayland` is a permission the toolkit can never exercise; plain `--socket=x11`
+  # is what actually works, with XWayland transparently serving Wayland sessions.
+  # Revisit only if the bundled runtime becomes Wayland-capable (e.g. a JBR WLToolkit).
+  - --socket=x11
   - --socket=pulseaudio
   - --device=dri
 modules:
