@@ -45,6 +45,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.*
 import com.indagium.utils.RegexEvaluationContext
+import com.indagium.utils.cachedSeqGroupsFor
 import com.indagium.utils.computeItems
 import com.indagium.utils.deltaAnchorId
 import com.indagium.utils.deltaMillis
@@ -272,10 +273,19 @@ internal fun spliceSummarize(
 
 // Plain class on purpose: instances serve as remember/LaunchedEffect keys, where identity
 // comparison is O(1) but a data-class equals would deep-compare millions of items.
+//
+// CHANGE B: [expandedAt] records the `tab.expanded` set this item list was actually BUILT from.
+// largeFileMode's async path below (see the LaunchedEffect) can return a PREVIOUS, stale
+// ComputedLogItems for up to LOADING_GRACE_MS with `loading == false` — a nav effect that resolves
+// against that window's item list would scroll to a position computed under the OLD fold state, then
+// mark its own request satisfied and never retry. Nav effects compare this against the live
+// `tab.expanded` to detect that case ("stale") and treat it exactly like `loading`: don't consume the
+// request yet. `null` means "not computed yet / unknown" and must always count as stale.
 internal class ComputedLogItems(
     val items: List<LogItem>,
     val summary: ItemsSummary,
     val loading: Boolean,
+    val expandedAt: Set<String>?,
 )
 
 private val EMPTY_SUMMARY = summarizeItems(emptyList())
@@ -295,12 +305,12 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
     if (!tab.largeFileMode) {
         return remember(tab.id, dataSize, lastId, filter, expanded, manualBlocks, stackTraceGroups, analysisPending, applyFilter) {
             val items = computeItems(tab, applyFilter)
-            ComputedLogItems(items, summarizeItems(items), loading = false)
+            ComputedLogItems(items, summarizeItems(items), loading = false, expandedAt = expanded)
         }
     }
 
     var computed by remember(tab.id, applyFilter) {
-        mutableStateOf(ComputedLogItems(emptyList(), EMPTY_SUMMARY, loading = true))
+        mutableStateOf(ComputedLogItems(emptyList(), EMPTY_SUMMARY, loading = true, expandedAt = null))
     }
     LaunchedEffect(tab.id, dataSize, lastId, filter, expanded, manualBlocks, stackTraceGroups, analysisPending, applyFilter) {
         val snapshot = tab.copy(selected = emptySet())
@@ -315,7 +325,7 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
                 val items = computeItems(snapshot, applyFilter, cancellationCheck = { ensureActive() })
                 val summary = spliceSummarize(previous.items, previous.summary, items)
                     ?: summarizeItems(items)
-                ComputedLogItems(items, summary, loading = false)
+                ComputedLogItems(items, summary, loading = false, expandedAt = snapshot.expanded)
             }
             // Grace period before flagging as loading: sub-quarter-second recomputes (the common
             // expand/collapse case, now that filter and sequence results are memoized across
@@ -323,7 +333,11 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
             // genuinely slow recomputes show it.
             val quick = withTimeoutOrNull(LOADING_GRACE_MS) { deferred.await() }
             computed = quick ?: run {
-                computed = ComputedLogItems(computed.items, computed.summary, loading = true)
+                // Preserve expandedAt from the previous (now-stale) result rather than resetting it —
+                // this placeholder still carries the OLD list, so its staleness must still be
+                // computed against whatever `expanded` it actually reflects, not wiped to null (which
+                // would make an already-known-stale list look "unknown" instead).
+                computed = ComputedLogItems(computed.items, computed.summary, loading = true, expandedAt = computed.expandedAt)
                 deferred.await()
             }
         }
@@ -458,18 +472,99 @@ internal fun expansionAndIndexForEntry(
     var expanded = tab.expanded
     var candidateItems = currentItems ?: computeItems(tab.copy(expanded = expanded), applyFilter, regexContext)
     repeat(24) {
+        // CORE RULE: expand only folds that HIDE the target. Never expand the header that DISPLAYS
+        // it. A header shows the SAME entry id whether it's folded or open (SeqHeader/StackTraceHeader
+        // show their root line, ManualHeader TO_START shows its anchor — see Filter.kt), so ANY item
+        // displaying entryId — a Row, or a header whether collapsed or expanded — is already a valid
+        // landing spot: clicking a crash in the Issues panel must scroll to that crash's stack-trace
+        // header and leave it collapsed (the user opens it themselves), while an OUTER fold that hides
+        // that header — e.g. a manual "Collapse -> To start" block — still needs expanding so the
+        // header becomes reachable at all (handled by the collapsedHeaders probing below).
         val visibleIdx = candidateItems.indexOfEntry(entryId)
         if (visibleIdx >= 0) return ExpansionAndIndexTarget(expanded, visibleIdx)
-        if (tab.largeFileMode) return null
+        // Stack-trace membership is the one containment question answerable WITHOUT a computeItems
+        // probe — analysis.stackTraceGroups already lists each group's member ids outright. Worth a
+        // direct lookup on a huge file, where the probing path below is off the table: a Find-bar
+        // match is computed over the fully-expanded list (utils/SearchComputeResult.kt), so it
+        // frequently lands on a frame INSIDE a collapsed trace, which is never a direct hit on the
+        // header. Without this, Next/Prev onto such a match would silently do nothing.
+        if (tab.largeFileMode) {
+            val owningStackGid = tab.analysis.stackTraceGroups
+                .firstOrNull { it.gid !in expanded && entryId in it.memberIds }?.gid
+            if (owningStackGid != null) {
+                expanded = expanded + owningStackGid
+                candidateItems = computeItems(tab.copy(expanded = expanded), applyFilter, regexContext)
+                return@repeat
+            }
+            // Sequence containment gets the same cheap treatment as stack traces just above, via
+            // cachedSeqGroupsFor's memoized read of the seqGroups computeItems already built on the
+            // last full pass for this (tab, applyFilter) — a Find-bar match is computed over the
+            // fully-expanded list (utils/SearchComputeResult.kt) so it frequently lands on a line
+            // INSIDE a collapsed sequence group, which — unlike a stack trace — had no escape hatch
+            // at all here before: on a huge file collapsedHeaders below deliberately excludes
+            // SeqHeader candidates (probing one costs a full computeItems), so the jump silently
+            // resolved to null and the group never opened. This is O(total swallowed ids) of plain
+            // int scanning per round — a sequence def with no end pattern can swallow most of the
+            // file, so it isn't free — but it is orders of magnitude cheaper than the
+            // one-full-computeItems-per-guess probing the largeFileMode guard exists to avoid.
+            // cachedSeqGroupsFor returning null means only "no cheap answer available" (cache
+            // empty/stale/sequences off) — never "no group contains entryId" — so that case simply
+            // falls through unchanged, same as finding no owning group below.
+            val seqGroups = cachedSeqGroupsFor(tab, applyFilter)
+            if (seqGroups != null) {
+                var gidToOpen: String? = null
+                for (sg in seqGroups) {
+                    val inPlain = entryId in sg.plain
+                    val nested = sg.nested.firstOrNull { entryId == it.rid || entryId in it.ch }
+                    if (!inPlain && nested == null) continue
+                    // Outermost first: opening a nested sub-sequence is useless while its parent is
+                    // still folded — the parent's own header (which the CORE RULE would then match on
+                    // the very next round) isn't even reachable yet.
+                    gidToOpen = when {
+                        sg.gid !in expanded -> sg.gid
+                        nested != null && nested.gid !in expanded -> nested.gid
+                        else -> null
+                    }
+                    if (gidToOpen != null) break
+                }
+                if (gidToOpen != null) {
+                    expanded = expanded + gidToOpen
+                    candidateItems = computeItems(tab.copy(expanded = expanded), applyFilter, regexContext)
+                    return@repeat
+                }
+            }
+        }
+        // By this point neither cheap branch above resolved anything: entryId isn't displayed by any
+        // row or header, so it's buried strictly inside a fold. Reaching it means probing candidates
+        // by actually expanding them — a full computeItems PER GUESS, which is what largeFileMode
+        // must not do across the thousands of collapsed sequence/stack-trace headers a big log has.
+        //
+        // Manual blocks are the one exception, and they're deliberately still probed on huge files:
+        // they're user-created (a handful at most, not thousands), and they're the only fold kind
+        // whose header can never be a direct hit for the lines it hides — a TO_START header displays
+        // its ANCHOR, i.e. the line at the far END of the range it folds. Without this, "Collapse →
+        // To start" on a large file would swallow every jump into it, which is exactly the case this
+        // whole fix exists for. Cost is bounded by the number of manual blocks, not by file size.
         val collapsedHeaders = candidateItems.mapNotNull { item ->
             when (item) {
-                is LogItem.SeqHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
                 is LogItem.ManualHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
-                is LogItem.StackTraceHeader -> item.gid.takeIf { !item.expanded }?.let { it to item.entry.id }
+                is LogItem.SeqHeader ->
+                    item.gid.takeIf { !item.expanded && !tab.largeFileMode }?.let { it to item.entry.id }
+                is LogItem.StackTraceHeader ->
+                    item.gid.takeIf { !item.expanded && !tab.largeFileMode }?.let { it to item.entry.id }
                 is LogItem.Row -> null
             }
         }
+        // On a huge file with no manual block in the way there is nothing cheap left to try, so stop
+        // rather than fall through to the blind fallback below and open an arbitrary group.
+        if (collapsedHeaders.isEmpty()) return null
         val ranked = rankCollapsedHeadersByProximity(collapsedHeaders, entryId)
+        // anyEntry deliberately stays loose (matches collapsed headers too, not just Rows/expanded
+        // headers): with nested folds — e.g. a collapsed sequence inside a collapsed manual block —
+        // expanding just the outer block never turns entryId into a Row in one step, so a stricter
+        // check would make every candidate fail to verify. The blind `?: ranked.firstOrNull()`
+        // fallback is likewise load-bearing for that same nested case: verification can legitimately
+        // fail for every ranked candidate on a single round, and we still need to make progress.
         val groupToOpen = ranked.firstOrNull { gid ->
             computeItems(tab.copy(expanded = expanded + gid), applyFilter, regexContext).anyEntry(entryId)
         } ?: ranked.firstOrNull() ?: return null
@@ -1674,8 +1769,32 @@ fun LogViewer(
             // specific row, and that request must win over a live tail's pull toward the newest line.
             // Don't "fix" this into two scroll owners fighting — there is deliberately only one, and
             // whichever effect scrolled last owns the viewport until the user scrolls back to the tail.
-            LaunchedEffect(annotationNavigationRequest?.id, itemsVersion, allItemsVersion, tab.expanded) {
+            // Survives this LaunchedEffect being cancelled and restarted (by its own tab.expanded
+            // key, which its own onToggleGroup calls below flip) partway through resolving a
+            // request — BEFORE reaching onConsumeAnnotationNavigation. Without this, that restart
+            // would re-run expansionAndIndexForEntry against a tab.expanded the USER may have since
+            // hand-collapsed (the request itself never got a chance to actually consume), and
+            // re-expand exactly what they just closed. See CHANGE 4 in the task write-up (bug B).
+            var satisfiedAnnotationNavId by remember(tab.id) { mutableStateOf(-1L) }
+            LaunchedEffect(
+                annotationNavigationRequest?.id, itemsVersion, allItemsVersion, tab.expanded,
+                computedItems.loading, computedAllItems.loading, computedItems.expandedAt, computedAllItems.expandedAt,
+            ) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
+                if (request.id == satisfiedAnnotationNavId) return@LaunchedEffect
+                // CHANGE B: largeFileMode's async recompute (rememberComputedLogItems) can keep
+                // serving the PREVIOUS item list — built from an older `expanded` set — for up to
+                // LOADING_GRACE_MS with `loading == false`. Resolving against that stale list would
+                // scroll to an index computed under the wrong fold state and still mark the request
+                // satisfied, wasting the jump (the user would have to press again). Bail before doing
+                // any resolution work; expandedAt is in this effect's keys, so it re-runs the instant
+                // a fresh list lands — this is what makes a single click work instead of two.
+                val itemsStale = computedItems.expandedAt != tab.expanded
+                val allItemsStale = computedAllItems.expandedAt != tab.expanded
+                if (itemsStale || allItemsStale) return@LaunchedEffect
+                // Staleness is already ruled out by the guard above, so this is purely "a fresh list is
+                // still being computed".
+                val stillLoading = computedItems.loading || computedAllItems.loading
                 if (request.scrollMode == NavigationScrollMode.FOLLOW) {
                     var filteredIdx = request.logIds.firstNotNullOfOrNull { entryId ->
                         items.indexOfEntry(entryId).takeIf { it >= 0 }
@@ -1690,8 +1809,10 @@ fun LogViewer(
                     if ((filteredIdx == null || allIdx == null) && request.expandCollapsedGroups) {
                         var opened = tab.expanded
                         if (filteredIdx == null) {
-                            val target = request.logIds.firstNotNullOfOrNull { entryId ->
-                                expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
+                            val target = withContext(Dispatchers.Default) {
+                                request.logIds.firstNotNullOfOrNull { entryId ->
+                                    expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
+                                }
                             }
                             if (target != null) {
                                 (target.expanded - opened).forEach { gid -> onToggleGroup(gid) }
@@ -1701,8 +1822,10 @@ fun LogViewer(
                             }
                         }
                         if (allIdx == null) {
-                            val target = request.logIds.firstNotNullOfOrNull { entryId ->
-                                expansionAndIndexForEntry(tab, applyFilter = false, entryId = entryId, currentItems = allItems)
+                            val target = withContext(Dispatchers.Default) {
+                                request.logIds.firstNotNullOfOrNull { entryId ->
+                                    expansionAndIndexForEntry(tab, applyFilter = false, entryId = entryId, currentItems = allItems)
+                                }
                             }
                             if (target != null) {
                                 (target.expanded - opened).forEach { gid -> onToggleGroup(gid) }
@@ -1712,16 +1835,30 @@ fun LogViewer(
                             }
                         }
                     }
+                    if (filteredIdx == null && allIdx == null && stillLoading) {
+                        // Items are still being computed (largeFileMode's async path) — don't drop
+                        // the request; computedItems.loading/computedAllItems.loading are in this
+                        // effect's keys, so it re-runs once they settle.
+                        return@LaunchedEffect
+                    }
+                    if (filteredIdx != null || allIdx != null) satisfiedAnnotationNavId = request.id
                     filteredIdx?.let { filteredLazyState.followItem(it) }
                     allIdx?.let { allLazyState.followItem(it) }
                     onConsumeAnnotationNavigation(request.id)
                     return@LaunchedEffect
                 }
-                val filteredTarget = request.logIds.firstNotNullOfOrNull { entryId ->
-                    expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
+                val filteredTarget = withContext(Dispatchers.Default) {
+                    request.logIds.firstNotNullOfOrNull { entryId ->
+                        expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
+                    }
                 }
-                val originalTarget = request.logIds.firstNotNullOfOrNull { entryId ->
-                    expansionAndIndexForEntry(tab, applyFilter = false, entryId = entryId, currentItems = allItems)
+                val originalTarget = withContext(Dispatchers.Default) {
+                    request.logIds.firstNotNullOfOrNull { entryId ->
+                        expansionAndIndexForEntry(tab, applyFilter = false, entryId = entryId, currentItems = allItems)
+                    }
+                }
+                if (filteredTarget == null && originalTarget == null && stillLoading) {
+                    return@LaunchedEffect
                 }
                 if (filteredTarget != null || originalTarget != null) {
                     localAllSelected = request.logIds.toSet()
@@ -1738,6 +1875,7 @@ fun LogViewer(
                         opened = opened + target.expanded
                         allLazyState.centerOnItem(target.index)
                     }
+                    satisfiedAnnotationNavId = request.id
                 }
                 onConsumeAnnotationNavigation(request.id)
             }
@@ -1758,10 +1896,27 @@ fun LogViewer(
             // the restart's own expansionAndIndexForEntry calls then find their targets already
             // visible with no further expansion needed, falling straight to centering instead of
             // looping.
-            LaunchedEffect(searchNavigationRequest?.id, itemsVersion, allItemsVersion, tab.expanded) {
+            // See satisfiedAnnotationNavId above for why this is needed (CHANGE 4 / bug B): it
+            // guards this effect's own search-nav request against being re-applied by a restart
+            // triggered mid-flight by its own onToggleGroup calls (keyed on tab.expanded), which
+            // would otherwise re-expand a group the user had since manually collapsed.
+            var satisfiedSearchNavId by remember(tab.id) { mutableStateOf(-1L) }
+            LaunchedEffect(
+                searchNavigationRequest?.id, itemsVersion, allItemsVersion, tab.expanded,
+                computedItems.loading, computedAllItems.loading, computedItems.expandedAt, computedAllItems.expandedAt,
+            ) {
                 val request = searchNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
+                if (request.id == satisfiedSearchNavId) return@LaunchedEffect
+                // CHANGE B: see the split-view annotation-nav effect above for why this must run
+                // before any resolution — a stale item list would otherwise center on the wrong
+                // index and still consume the request, so the user's click would need a second press.
+                val itemsStale = computedItems.expandedAt != tab.expanded
+                val allItemsStale = computedAllItems.expandedAt != tab.expanded
+                if (itemsStale || allItemsStale) return@LaunchedEffect
                 var opened = tab.expanded
-                val filteredTarget = expansionAndIndexForEntry(tab, applyFilter = true, entryId = request.entryId, currentItems = items)
+                val filteredTarget = withContext(Dispatchers.Default) {
+                    expansionAndIndexForEntry(tab, applyFilter = true, entryId = request.entryId, currentItems = items)
+                }
                 if (filteredTarget != null) {
                     if (filteredTarget.expanded != opened) {
                         // A collapsed group had to open to reveal the match at all — a real
@@ -1778,7 +1933,9 @@ fun LogViewer(
                         scrollForCursor(filteredLazyState, syncScope, filteredTarget.index, navScrollMargin)
                     }
                 }
-                val originalTarget = expansionAndIndexForEntry(tab, applyFilter = false, entryId = request.entryId, currentItems = allItems)
+                val originalTarget = withContext(Dispatchers.Default) {
+                    expansionAndIndexForEntry(tab, applyFilter = false, entryId = request.entryId, currentItems = allItems)
+                }
                 if (originalTarget != null) {
                     // Original panel has its own independent selection (localAllSelected) — keep it
                     // in sync with the match too, same as a Filtered-panel row click does.
@@ -1792,6 +1949,15 @@ fun LogViewer(
                         scrollForCursor(allLazyState, syncScope, originalTarget.index, navScrollMargin)
                     }
                 }
+                if (filteredTarget == null && originalTarget == null &&
+                    (computedItems.loading || computedAllItems.loading)
+                ) {
+                    // Items are still being computed or stale — don't give up on this request yet;
+                    // the loading/expandedAt flags above are in this effect's keys, so it re-runs
+                    // once they settle.
+                    return@LaunchedEffect
+                }
+                if (filteredTarget != null || originalTarget != null) satisfiedSearchNavId = request.id
                 onConsumeSearchNavigation(request.id)
             }
 
@@ -1810,14 +1976,18 @@ fun LogViewer(
                 // once the real (larger) size arrives, so it doesn't end up actually centered.
                 snapshotFlow { containerH }.first { it > 0f }
                 var opened = tab.expanded
-                val originalTarget = expansionAndIndexForEntry(tab, applyFilter = false, entryId = targetId, currentItems = allItems)
+                val originalTarget = withContext(Dispatchers.Default) {
+                    expansionAndIndexForEntry(tab, applyFilter = false, entryId = targetId, currentItems = allItems)
+                }
                 if (originalTarget != null) {
                     (originalTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
                     if (originalTarget.expanded != opened) kotlinx.coroutines.delay(80)
                     opened = opened + originalTarget.expanded
                     allLazyState.centerOnItem(originalTarget.index)
                 }
-                val filteredTarget = expansionAndIndexForEntry(tab, applyFilter = true, entryId = targetId, currentItems = items)
+                val filteredTarget = withContext(Dispatchers.Default) {
+                    expansionAndIndexForEntry(tab, applyFilter = true, entryId = targetId, currentItems = items)
+                }
                 if (filteredTarget != null) {
                     (filteredTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
                     if (filteredTarget.expanded != opened) kotlinx.coroutines.delay(80)
@@ -1913,11 +2083,15 @@ fun LogViewer(
                             onSelRow(id, multi, range)
                             if (!multi && !range) {
                                 localAllSelected = setOf(id)
-                                val target = expansionAndIndexForEntry(tab, applyFilter = false, entryId = id, currentItems = allItems)
-                                if (target != null) syncScope.launch {
-                                    (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
-                                    if (target.expanded != tab.expanded) kotlinx.coroutines.delay(80)
-                                    allLazyState.centerOnItem(target.index)
+                                syncScope.launch {
+                                    val target = withContext(Dispatchers.Default) {
+                                        expansionAndIndexForEntry(tab, applyFilter = false, entryId = id, currentItems = allItems)
+                                    }
+                                    if (target != null) {
+                                        (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
+                                        if (target.expanded != tab.expanded) kotlinx.coroutines.delay(80)
+                                        allLazyState.centerOnItem(target.index)
+                                    }
                                 }
                             }
                         },
@@ -1939,45 +2113,99 @@ fun LogViewer(
             // Same interaction with tail-follow as the split-view cluster above: any scroll these
             // two effects (or the keyboard nav in handleNavKey/handleSelKey below) perform on
             // mainLazyState suspends this panel's follow, on purpose — see that comment for why.
-            LaunchedEffect(annotationNavigationRequest?.id, itemsVersion, tab.expanded) {
+            // See the split-view annotation-nav effect above for why this is needed (CHANGE 4 /
+            // bug B): guards against this effect re-applying an already-handled request when its
+            // own onToggleGroup calls (via the tab.expanded key) cancel and restart it before it
+            // reaches onConsumeAnnotationNavigation.
+            var satisfiedAnnotationNavId by remember(tab.id) { mutableStateOf(-1L) }
+            LaunchedEffect(
+                annotationNavigationRequest?.id, itemsVersion, tab.expanded,
+                computedItems.loading, computedItems.expandedAt,
+            ) {
                 val request = annotationNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
+                if (request.id == satisfiedAnnotationNavId) return@LaunchedEffect
+                // CHANGE B: see the split-view annotation-nav effect above for the full rationale —
+                // largeFileMode can still be serving a stale (older-`expanded`) item list here with
+                // loading == false; resolving against it would scroll to a wrong index and still
+                // consume the request. Bail before doing any resolution work; expandedAt is in this
+                // effect's keys, so it re-runs once the fresh list lands — this is what makes a
+                // single click work instead of needing two.
+                val itemsStale = computedItems.expandedAt != tab.expanded
+                if (itemsStale) return@LaunchedEffect
                 if (request.scrollMode == NavigationScrollMode.FOLLOW) {
                     val directIdx = request.logIds.firstNotNullOfOrNull { entryId ->
                         items.indexOfEntry(entryId).takeIf { it >= 0 }
                     }
+                    var followedIdx = directIdx
                     // A direct miss only gets the expand treatment when AppState explicitly asked
                     // for it — see the split-view FOLLOW branch above for the full rationale.
                     if (directIdx == null && request.expandCollapsedGroups) {
-                        val target = request.logIds.firstNotNullOfOrNull { entryId ->
-                            expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
+                        val target = withContext(Dispatchers.Default) {
+                            request.logIds.firstNotNullOfOrNull { entryId ->
+                                expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
+                            }
                         }
                         if (target != null) {
                             (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
                             if (target.expanded != tab.expanded) kotlinx.coroutines.delay(80)
                             mainLazyState.followItem(target.index)
+                            followedIdx = target.index
                         }
                     } else {
                         directIdx?.let { mainLazyState.followItem(it) }
                     }
+                    if (followedIdx == null && computedItems.loading) {
+                        // Items still being computed or stale (largeFileMode) — don't drop the
+                        // request; loading/expandedAt are in this effect's keys, so it re-runs once
+                        // items settle.
+                        return@LaunchedEffect
+                    }
+                    if (followedIdx != null) satisfiedAnnotationNavId = request.id
                     onConsumeAnnotationNavigation(request.id)
                     return@LaunchedEffect
                 }
-                val target = request.logIds.firstNotNullOfOrNull { entryId ->
-                    expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
+                val target = withContext(Dispatchers.Default) {
+                    request.logIds.firstNotNullOfOrNull { entryId ->
+                        expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
+                    }
+                }
+                if (target == null && computedItems.loading) {
+                    return@LaunchedEffect
                 }
                 if (target != null) {
                     (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
                     if (target.expanded != tab.expanded) kotlinx.coroutines.delay(80)
                     mainLazyState.centerOnItem(target.index)
+                    satisfiedAnnotationNavId = request.id
                 }
                 onConsumeAnnotationNavigation(request.id)
             }
             // Find bar's own navigation channel — see SearchNavigationRequest's doc comment and
             // the split-view LaunchedEffect above for why this stays separate from
             // annotationNavigationRequest and scrolls minimally instead of always centering.
-            LaunchedEffect(searchNavigationRequest?.id, itemsVersion) {
+            // See the split-view search-nav effect above for why this is needed (CHANGE 4 / bug B):
+            // this effect's own onToggleGroup call changes tab.expanded, which — via itemsVersion,
+            // since the item list itself shifts when a fold opens or closes — can cancel and
+            // restart this effect before it reaches onConsumeSearchNavigation. Without this guard a
+            // restart landing right after the user manually collapsed the very group this request
+            // just opened would see it collapsed again and re-expand it, exactly bug (B).
+            var satisfiedSearchNavId by remember(tab.id) { mutableStateOf(-1L) }
+            LaunchedEffect(searchNavigationRequest?.id, itemsVersion, computedItems.loading, computedItems.expandedAt) {
                 val request = searchNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
-                val target = expansionAndIndexForEntry(tab, applyFilter = true, entryId = request.entryId, currentItems = items)
+                if (request.id == satisfiedSearchNavId) return@LaunchedEffect
+                // CHANGE B: see the split-view annotation-nav effect above for the full rationale —
+                // bail before resolving against a possibly-stale list so a single click can't resolve
+                // against the old fold state and silently waste the jump.
+                val itemsStale = computedItems.expandedAt != tab.expanded
+                if (itemsStale) return@LaunchedEffect
+                val target = withContext(Dispatchers.Default) {
+                    expansionAndIndexForEntry(tab, applyFilter = true, entryId = request.entryId, currentItems = items)
+                }
+                if (target == null && computedItems.loading) {
+                    // Items still being computed or stale (largeFileMode) — don't give up yet;
+                    // loading/expandedAt are in this effect's keys, so it re-runs once settled.
+                    return@LaunchedEffect
+                }
                 if (target != null) {
                     if (target.expanded != tab.expanded) {
                         (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
@@ -1986,6 +2214,7 @@ fun LogViewer(
                     } else {
                         scrollForCursor(mainLazyState, searchNavScope, target.index, navScrollMargin)
                     }
+                    satisfiedSearchNavId = request.id
                 }
                 onConsumeSearchNavigation(request.id)
             }

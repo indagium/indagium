@@ -261,6 +261,144 @@ class SplitViewAndTabRegressionTest {
     }
 
     @Test
+    fun jumpToEntryLandsOnACollapsedStackTraceHeaderWithoutExpandingIt() {
+        // CHANGE A (reverted "expand the header that displays the target" behaviour): a
+        // StackTraceHeader displays its own root entry whether folded or open (Filter.kt:685-688), so
+        // the Issues panel's CrashSite — which points straight at that root — must land on the header
+        // as-is and leave it COLLAPSED; the user opens the trace themselves. Fixture mirrors
+        // StackTraceComputerTest's real-dump shape.
+        val tab = mkTab(
+            "log",
+            "test.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "ActivityManager", "unrelated line", pid = 100),
+                LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 100),
+                LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "java.lang.NullPointerException: boom", pid = 100),
+                LogEntry(4, "10:00:00.300", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 100),
+                LogEntry(5, "10:00:00.400", LogLevel.E, "AndroidRuntime", "    at android.app.Activity.performCreate(Activity.java:1)", pid = 100),
+            ),
+        )
+
+        val target = expansionAndIndexForEntry(tab, applyFilter = true, entryId = 2)
+
+        assertEquals(tab.expanded, assertNotNull(target).expanded)
+        val expandedItems = computeItems(tab.copy(expanded = target.expanded), applyFilter = true)
+        val header = expandedItems[target.index] as LogItem.StackTraceHeader
+        assertEquals(2, header.entry.id)
+        assertFalse(header.expanded)
+    }
+
+    @Test
+    fun jumpToEntryLandsOnACollapsedManualHeaderWithoutExpandingIt() {
+        // CHANGE A: a TO_START ManualHeader displays the block's own anchor entry, and the anchor's
+        // own Row is deliberately filtered out of the block's rendered interior (Filter.kt:673-678) —
+        // landing on the anchor id itself must resolve directly to that header without opening it.
+        val tab = mkTab(
+            "log",
+            "test.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "App", "first"),
+                LogEntry(2, "10:00:00.100", LogLevel.I, "App", "referenced"),
+                LogEntry(3, "10:00:00.200", LogLevel.I, "App", "manual anchor"),
+            ),
+        ).copy(
+            manualBlocks = listOf(ManualCollapseBlock("m1", 3, ManualCollapseDirection.TO_START)),
+        )
+
+        val target = expansionAndIndexForEntry(tab, applyFilter = true, entryId = 3)
+
+        assertEquals(tab.expanded, assertNotNull(target).expanded)
+        val expandedItems = computeItems(tab.copy(expanded = target.expanded), applyFilter = true)
+        val header = expandedItems[target.index] as LogItem.ManualHeader
+        assertEquals(3, header.entry.id)
+        assertFalse(header.expanded)
+    }
+
+    @Test
+    fun jumpToEntryLandsOnACollapsedSequenceHeaderWithoutExpandingIt() {
+        // CHANGE A: a SeqHeader displays the sequence's own root entry whether folded or open
+        // (Filter.kt:630) — companion to the "referenced line inside the group" test above, but here
+        // the target IS the header's own line, which must resolve directly to it, collapsed.
+        val tab = mkTab(
+            "log",
+            "test.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Auth", "request started"),
+                LogEntry(2, "10:00:00.100", LogLevel.I, "com.app.Auth", "referenced"),
+                LogEntry(3, "10:00:00.200", LogLevel.I, "com.app.Auth", "third"),
+            ),
+        ).copy(
+            filter = Filter(
+                sequences = listOf(
+                    SequenceDef("auth-start", "request started", priority = 1, color = Color.Red, tag = "com.app.Auth"),
+                ),
+            ),
+        )
+
+        val target = expansionAndIndexForEntry(tab, applyFilter = true, entryId = 1)
+
+        assertEquals(tab.expanded, assertNotNull(target).expanded)
+        val expandedItems = computeItems(tab.copy(expanded = target.expanded), applyFilter = true)
+        val header = expandedItems[target.index] as LogItem.SeqHeader
+        assertEquals(1, header.entry.id)
+        assertFalse(header.expanded)
+    }
+
+    @Test
+    fun jumpToEntryExpandsOnlyTheOuterManualBlockWhenAStackTraceRootSitsInsideIt() {
+        // The Issues-panel scenario: a crash site (a StackTraceHeader root) nested inside a collapsed
+        // TO_START manual block. entryId resolves through the OUTER fold ONLY — found via the
+        // ranked-candidate search, since nothing displays entryId while the block is collapsed —
+        // landing on the still-collapsed inner StackTraceHeader itself. CHANGE A: the inner trace is
+        // deliberately left collapsed; the loop must not also expand the header that now displays the
+        // target once the outer block opens.
+        val tab = mkTab(
+            "log",
+            "test.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "ActivityManager", "unrelated line", pid = 100),
+                LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main", pid = 100),
+                LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "java.lang.NullPointerException: boom", pid = 100),
+                LogEntry(4, "10:00:00.300", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)", pid = 100),
+                LogEntry(5, "10:00:00.400", LogLevel.E, "AndroidRuntime", "    at android.app.Activity.performCreate(Activity.java:1)", pid = 100),
+                LogEntry(6, "10:00:00.500", LogLevel.I, "App", "manual anchor", pid = 100),
+            ),
+        ).copy(
+            manualBlocks = listOf(ManualCollapseBlock("m1", 6, ManualCollapseDirection.TO_START)),
+        )
+
+        val target = expansionAndIndexForEntry(tab, applyFilter = true, entryId = 2)
+
+        assertEquals(setOf("m1"), target?.expanded)
+        val expandedItems = computeItems(tab.copy(expanded = target!!.expanded), applyFilter = true)
+        val header = expandedItems[target.index] as LogItem.StackTraceHeader
+        assertEquals(2, header.entry.id)
+        assertFalse(header.expanded)
+    }
+
+    @Test
+    fun jumpToEntryLeavesExpansionUntouchedWhenTargetIsAlreadyAPlainRow() {
+        // Guard: an entry that's already visible as a plain Row (no fold involved at all) must not
+        // trigger any expansion — this is the ordinary, overwhelmingly common case, and the fix
+        // above must not regress it into probing/expanding groups it never needed to touch.
+        val tab = mkTab(
+            "log",
+            "test.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "App", "first"),
+                LogEntry(2, "10:00:00.100", LogLevel.I, "App", "second"),
+                LogEntry(3, "10:00:00.200", LogLevel.I, "App", "third"),
+            ),
+        )
+
+        val target = expansionAndIndexForEntry(tab, applyFilter = true, entryId = 2)
+
+        assertEquals(tab.expanded, assertNotNull(target).expanded)
+        val items = computeItems(tab.copy(expanded = target.expanded), applyFilter = true)
+        assertEquals(2, (items[target.index] as LogItem.Row).entry.id)
+    }
+
+    @Test
     fun expansionAndIndexForEntryReturnsNullImmediatelyForAnEntryExcludedByTheFilter() {
         // Regression: before the fast-fail check, this burned up to 24 rounds of full
         // computeItems() recomputation trying every collapsed header in the file for an entry

@@ -250,6 +250,23 @@ fun invalidateComputeCache(tabId: String) {
     computeCacheByTab.remove("$tabId#false")
 }
 
+// Read-only peek at the memoized sequence groups from this tab's last computeItems(tab,
+// applyFilter) call — for expansionAndIndexForEntry's largeFileMode branch (ui/LogViewer.kt),
+// which needs sequence-containment membership without paying for a fresh computeItems just to get
+// it. Reuses the EXACT SAME validity predicate computeItems applies to its own `prior` lookup
+// above, so this can never hand back groups computed against a stale logData/analysis/filter.
+// A null return means only "no cheap answer available right now" (cache empty, invalidated, built
+// under a different tab/filter/analysis, or sequences disabled/not-yet-computed) — it is NEVER
+// evidence that no group contains a given id; callers must treat null as "fall through," not as a
+// negative membership answer. Pure read: never computes, never populates the cache, never mutates
+// anything, so calling it has no effect on later computeItems calls.
+fun cachedSeqGroupsFor(tab: LogTab, applyFilter: Boolean): List<SeqGroup>? =
+    computeCacheByTab["${tab.id}#$applyFilter"]?.takeIf {
+        it.logData === tab.logData &&
+            it.stackGroupsRef === tab.analysis.stackTraceGroups &&
+            it.filter == tab.filter
+    }?.seqGroups
+
 // Fast path for the single most common expand/collapse: toggling one stack-trace ("crash")
 // block. Its rendered footprint is strictly local — the header flips its `expanded` flag and the
 // member rows appear/disappear immediately after it; nothing else in the item list changes
