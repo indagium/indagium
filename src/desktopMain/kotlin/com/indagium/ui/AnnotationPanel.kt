@@ -13,6 +13,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1035,8 +1036,13 @@ private fun MdPreviewDialog(
             Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
             val scroll = rememberScrollState()
             Box(Modifier.fillMaxSize()) {
+                // Body is a plain Column inside a verticalScroll (not a LazyColumn, which
+                // SelectionContainer can't span), so wrapping just the body here — not the outer
+                // Column with the header Row's Copy/Copy as HTML/Export frames buttons, and not the
+                // whole dialog per the b/372053402 note at CaseLibraryDialog.kt:342-352 — is safe and
+                // needs no extra sizing modifier on SelectionContainer itself.
                 Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp)) {
-                    RenderedMarkdownPreview(tab, settings, mono, tc)
+                    SelectionContainer { RenderedMarkdownPreview(tab, settings, mono, tc) }
                 }
                 VerticalScrollbar(
                     adapter = rememberScrollbarAdapter(scroll),
