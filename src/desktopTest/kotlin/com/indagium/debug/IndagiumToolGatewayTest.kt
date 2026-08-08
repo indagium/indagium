@@ -32,7 +32,18 @@ class IndagiumToolGatewayTest {
 
     @BeforeTest
     fun setUp() {
-        state = AppState(autosaveFile = File.createTempFile("openlog-gateway-test", ".cache"))
+        // notesDir isolated from AppState()'s default (shared across this whole gradle test run —
+        // see build.gradle.kts' testHomeDir sandboxing comment): upAnn's overwrite gate now defers
+        // a mutation instead of committing it whenever its export target already exists on disk
+        // (AppState.upAnn/PendingNoteOverwrite). Every test in this class shares this one "t1"/
+        // "sample.log" tab via setUp(), so if it used the default notes dir, another test ELSEWHERE
+        // in the suite that already exported the same default "sample_analysis.md" there would make
+        // add_text_note/add_log_note/add_image_note etc. non-deterministically defer instead of
+        // commit, purely from suite run order — nothing this class actually tests.
+        state = AppState(
+            autosaveFile = File.createTempFile("openlog-gateway-test", ".cache"),
+            notesDir = kotlin.io.path.createTempDirectory("openlog-gateway-notes").toFile(),
+        )
         state.tabs = listOf(mkTab("t1", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))))
         operations = IndagiumToolOperations(state)
         server = ControlServer(state, 0)

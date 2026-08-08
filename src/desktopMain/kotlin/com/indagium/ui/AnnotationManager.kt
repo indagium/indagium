@@ -99,7 +99,13 @@ internal class AnnotationManager(private val appState: AppState) {
             val block = AnnBlock.LogRef(id = id, logIds = cleanIds, caption = caption)
             tab.copy(annotations = tab.annotations.copy(blocks = tab.annotations.blocks + block))
         }
-        return id
+        // Same membership check as addNoteBlock, and for the same reason: upAnn's overwrite-conflict
+        // gate (AppState.upAnn/PendingNoteOverwrite) can stash this mutation on pendingNoteOverwrite
+        // instead of committing it to `tabs`, so the block this call just minted may not actually be
+        // observable anywhere yet. Without this check, MCP's add_log_note would report `ok: true`
+        // with an id nothing can find — "a returned block id means the block is observable" is the
+        // invariant every add-a-block entry point here must hold.
+        return id.takeIf { appState.tab(tabId)?.annotations?.blocks?.any { block -> block.id == id } == true }
     }
 
     fun updateBlock(tabId: String, blockId: String, newText: String) = appState.upAnn(tabId) { t ->

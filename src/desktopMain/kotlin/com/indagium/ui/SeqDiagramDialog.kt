@@ -381,8 +381,18 @@ private fun DialogFooter(state: AppState) {
     ) {
         DialogActionButton("Add to notes", active = true, enabled = ready) {
             // Reveal the Notes panel on success, so the block the user just created is visible
-            // rather than silently appended to a hidden panel.
-            state.seqDiagrams.confirm()?.let { state.annotationVisible = true }
+            // rather than silently appended to a hidden panel. Since the upAnn overwrite-conflict
+            // gate (AppState.upAnn/PendingNoteOverwrite), confirm() ALSO returns null on the
+            // deferred path — the add wasn't lost, it's stashed pending a decision on the "Existing
+            // notes found" prompt (see SeqDiagramCoordinator.confirm()). Without checking for that
+            // too, choosing "Add to notes" on a colliding target would close this dialog behind a
+            // Notes panel that's still hidden while the prompt renders on top of it — the exact
+            // "block landed somewhere the user can't see" failure this reveal exists to prevent,
+            // just relocated from the success path to the deferred one.
+            val hadPendingBefore = state.pendingNoteOverwrite != null
+            val blockId = state.seqDiagrams.confirm()
+            val freshlyPending = !hadPendingBefore && state.pendingNoteOverwrite != null
+            if (blockId != null || freshlyPending) state.annotationVisible = true
         }
         DialogActionButton("Copy source", active = false, enabled = ready) {
             state.seqDiagrams.currentSource()?.let { state.copyToClipboard(it) }

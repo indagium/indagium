@@ -818,6 +818,10 @@ fun AppButton(
     modifier: Modifier = Modifier,
     leadingIcon: ImageVector? = null,
     horizontalPadding: Dp = 10.dp,
+    // Lets a caller join two AppButtons into one segmented control (see the Notes header's
+    // Open+▾ split button) the same way ToolbarBtn does — CORNER_MD default means every
+    // pre-existing call site (none of which passes this) renders identically to before.
+    shape: Shape = CORNER_MD,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
@@ -832,7 +836,7 @@ fun AppButton(
     Box(
         modifier = modifier
             .then(if (variant == ButtonVariant.Secondary)
-                Modifier.border(0.5.dp, if (isDanger) DANGER_RED.copy(.5f) else tc.br, CORNER_MD)
+                Modifier.border(0.5.dp, if (isDanger) DANGER_RED.copy(.5f) else tc.br, shape)
             else Modifier)
             .background(
                 when {
@@ -840,9 +844,9 @@ fun AppButton(
                     hovered && enabled -> tc.hv
                     else -> Color.Transparent
                 },
-                CORNER_MD,
+                shape,
             )
-            .clip(CORNER_MD)
+            .clip(shape)
             .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }

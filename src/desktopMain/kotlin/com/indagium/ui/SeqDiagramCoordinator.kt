@@ -199,6 +199,15 @@ class SeqDiagramCoordinator(private val appState: AppState) {
      * The note text is the fenced dialect source plus the spec/model header — see
      * diagram/DiagramSpecCodec.kt. Nothing about the .ann format changes: this is an ordinary
      * [com.indagium.model.AnnBlock.Note].
+     *
+     * A null return from the addNoteBlock() branch below is not necessarily a failure: upAnn's
+     * overwrite-conflict gate (AppState.upAnn/PendingNoteOverwrite) can stash a first-time-conflict
+     * mutation on pendingNoteOverwrite instead of committing it, in which case addNoteBlock's own
+     * membership check correctly reports "not observable yet" as null — the add is pending a
+     * decision on the "Existing notes found" prompt, not lost. Closing the dialog unconditionally
+     * (cancel(), below) stays correct either way: the diagram itself was already fully built and
+     * previewed, so there's nothing left for this dialog to do once the note text has been handed
+     * off, whether that landed immediately or is waiting on the user's next click elsewhere.
      */
     fun confirm(): String? {
         val req = request ?: return null
