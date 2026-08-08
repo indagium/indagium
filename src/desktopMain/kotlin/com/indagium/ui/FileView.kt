@@ -308,6 +308,8 @@ internal fun FileView(
                         onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
                         onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
                         onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it) },
+                        onEditDiagram = { blockId -> state.seqDiagrams.beginEdit(tab.id, blockId) },
+                        onNavigateDiagramLine = { entryId -> state.navigateToLogLine(tab.id, entryId) },
                         width = state.annotationPanelWidth,
                         focusRequester = annotationFr,
                         onPanelFocusChanged = { focused ->

@@ -286,7 +286,7 @@ flowchart TB
 
     subgraph automation["Automation — package debug"]
         server["ControlServer<br/>Ktor CIO, MCP + REST"]
-        gateway["IndagiumToolGateway<br/>56-tool contract"]
+        gateway["IndagiumToolGateway<br/>57-tool contract"]
         ops["IndagiumToolOperations<br/>55 handlers"]
     end
 
@@ -1301,7 +1301,7 @@ flowchart TB
     gw["IndagiumToolGateway<br/>init enforces parity"]
 
     mcp["Shared MCP Server<br/>external clients"]
-    rest["REST routes<br/>51 of 56 tools"]
+    rest["REST routes<br/>51 of 57 tools"]
     managed["Per-run managed MCP Server<br/>Codex / Claude Code"]
     fns["openAiFunctions()<br/>in-app agent, no HTTP"]
 
@@ -1321,7 +1321,7 @@ flowchart TB
 
 Five tools are MCP-only and have no REST route: `get_sequence_summary`, `get_project_info`,
 `search_similar_cases`, `get_case`, `reindex_cases`. This is a real gap, not a rounding — REST has 51
-routes against 56 tools.
+routes against 57 tools.
 
 Because `openAiFunctions()` serialises the *same* `ToolSchema` into OpenAI function definitions
 (`debug/IndagiumToolGateway.kt:42-48`), there is no second hand-written tool catalogue anywhere. A

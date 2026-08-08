@@ -41,6 +41,34 @@ internal enum class AiQuickAction(val label: String, val prompt: String, val req
         requiresLine = true,
         slashName = "timeline",
     ),
+    // requiresLine = false: a diagram is about a RANGE, not a point. The prompt asks the model to
+    // establish that range from the current selection or the visible view rather than demanding a
+    // pinned line the user may not have picked.
+    SEQUENCE_DIAGRAM(
+        label = "Sequence diagram",
+        prompt = """
+            Draw a UML sequence diagram of what happens in this tab, and add it to Notes.
+
+            1. Call get_tags to see which tags actually carry the interaction, and get_visible_lines
+               (or the current selection) to establish the line range worth diagramming.
+            2. Pick 4-8 tags that represent real components. Do not include every tag — a diagram
+               over an unfiltered log is unreadable, and curation is the whole job here.
+            3. Call build_sequence_diagram with those tags and a tight startLineId/endLineId range.
+               Add external actors only where the interaction genuinely enters from or exits to
+               something outside the log (a user, a peer device, a server).
+            4. Look at the returned messageCount, truncated flag and warnings. If it is truncated or
+               reads as noise, narrow the range or the tag list and build it again rather than
+               keeping a bad diagram.
+            5. Call add_text_note with the returned `source` verbatim, wrapped in a fenced code block
+               tagged with the returned dialect, and a one-line caption above it saying what the
+               diagram shows.
+
+            Never invent participants, arrows or ordering: everything in the diagram must come from
+            build_sequence_diagram's output.
+        """.trimIndent(),
+        requiresLine = false,
+        slashName = "uml",
+    ),
     ISSUE_INVESTIGATION(
         label = "Investigate issue",
         prompt = """

@@ -56,7 +56,8 @@ class IndagiumToolGatewayTest {
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing", "resolve_log_source",
             "get_source_file", "list_source_declarations", "get_source_declarations",
             "get_project_info", "set_highlighters", "reindex_sources", "add_manual_collapse", "add_sequence",
-            "save_filter_preset", "search_similar_cases", "get_case", "set_case_metadata", "reindex_cases",
+            "save_filter_preset", "search_similar_cases", "get_case",
+            "build_sequence_diagram", "set_case_metadata", "reindex_cases",
             "get_video_frame", "get_follow_diagnostics",
         )
         assertEquals(expected, operations.toolGateway.tools.map { it.name }.toSet())

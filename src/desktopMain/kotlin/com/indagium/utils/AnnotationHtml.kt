@@ -13,7 +13,18 @@ import java.util.Base64
 // inside an escaped fragment is safe, but the risk of a mask rule's word-boundary regex matching
 // inside a base64 image payload (however unlikely) isn't worth it for a feature whose plain-text
 // fallback is already masked.
-fun buildAnnotationsHtml(tab: LogTab, settings: AppSettings = AppSettings()): String = buildString {
+/**
+ * [renderDiagramPng] rasterizes a diagram note for inline embedding. It is injected rather than
+ * called directly because rendering needs the active colour theme, which lives in `ui` — this
+ * package has no access to it, and shouldn't. The default returns null, which degrades a diagram
+ * note to its fenced source in a `<pre>`: correct, just not a picture. That default is what keeps
+ * every existing caller and the test suite unchanged.
+ */
+fun buildAnnotationsHtml(
+    tab: LogTab,
+    settings: AppSettings = AppSettings(),
+    renderDiagramPng: (com.indagium.diagram.SeqDiagram) -> ByteArray? = { null },
+): String = buildString {
     append("<div>")
     if (tab.annotations.prefix.isNotBlank()) {
         append("<p>").append(escapeHtmlMultiline(tab.annotations.prefix)).append("</p>")
@@ -21,7 +32,7 @@ fun buildAnnotationsHtml(tab: LogTab, settings: AppSettings = AppSettings()): St
     var blockNumber = 1
     for (block in tab.annotations.blocks) {
         blockNumber = when (block) {
-            is AnnBlock.Note -> appendNoteHtml(block, settings, blockNumber)
+            is AnnBlock.Note -> appendNoteHtml(block, settings, blockNumber, renderDiagramPng)
             is AnnBlock.LogRef -> appendLogRefHtml(tab, block, settings, blockNumber)
             is AnnBlock.Image -> appendImageHtml(block, settings, blockNumber)
         }
@@ -34,9 +45,32 @@ fun buildAnnotationsHtml(tab: LogTab, settings: AppSettings = AppSettings()): St
 
 // Mirrors buildMd()'s AnnBlock.Note branch: only emitted (and only advances the numbering) when
 // the note has non-blank text.
-private fun StringBuilder.appendNoteHtml(block: AnnBlock.Note, settings: AppSettings, blockNumber: Int): Int {
+private fun StringBuilder.appendNoteHtml(
+    block: AnnBlock.Note,
+    settings: AppSettings,
+    blockNumber: Int,
+    renderDiagramPng: (com.indagium.diagram.SeqDiagram) -> ByteArray?,
+): Int {
     if (block.text.isBlank()) return blockNumber
     val prefix = if (settings.numberAnnotationBlocks) "$blockNumber. " else ""
+    val diagram = com.indagium.diagram.parseDiagramNote(block.text)
+    if (diagram != null) {
+        // This is the single highest-value sink for a diagram: pasting a rich-text clipboard into
+        // a Jira/Confluence comment is the one path that puts an actual picture in the ticket
+        // without the user hand-attaching a file (which is what the !diagram-0N.png! anchor in
+        // buildMd's Jira form requires). So embed the PNG the same way appendImageHtml does.
+        val png = diagram.model?.let(renderDiagramPng)
+        if (prefix.isNotEmpty()) append("<p>").append(escapeHtmlMultiline(prefix.trim())).append("</p>")
+        if (png != null) {
+            append("<img src=\"data:image/png;base64,")
+            append(Base64.getEncoder().encodeToString(png))
+            append("\" alt=\"Sequence diagram\">")
+        } else {
+            // No model to draw (an older or hand-authored note) — the source still communicates.
+            append("<pre>").append(escapeHtmlMultiline(diagram.source)).append("</pre>")
+        }
+        return if (settings.numberAnnotationBlocks) blockNumber + 1 else blockNumber
+    }
     append("<p>").append(escapeHtmlMultiline(prefix + block.text)).append("</p>")
     return if (settings.numberAnnotationBlocks) blockNumber + 1 else blockNumber
 }

@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CallMerge
 import androidx.compose.material.icons.outlined.Block
+import androidx.compose.material.icons.outlined.Schema
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.Layers
@@ -448,7 +449,10 @@ fun App(
                         // two-row shape.
                         val hasProcessBlock = hasShowMapAction || hasHideMapAction || hasNameAction
                         val hasProcessSecondRow = hasShowMapAction && hasHideMapAction && hasNameAction
-                        val estimatedMenuHeight = (458 +
+                        // 490, not 458: the always-present "Sequence diagram…" Action row in the
+                        // sequence block below adds one more 32dp entry. This estimate only decides
+                        // where the menu is anchored, but an under-estimate lets it open off-screen.
+                        val estimatedMenuHeight = (490 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (state.pendingSequenceStart != null) 32 else 0) +
                             (if (hasProcessBlock) 73 else 0) +
@@ -549,6 +553,11 @@ fun App(
                                     add(CtxMenuEntry.Action(Icons.Outlined.Flag, "Complete sequence end") { state.completeSequenceEndFromCtx() })
                                 }
                                 add(CtxMenuEntry.Action(Icons.Outlined.PlayArrow, "Set sequence start") { state.setSequenceStartFromCtx() })
+                                add(
+                                    CtxMenuEntry.Action(Icons.Outlined.Schema, "Sequence diagram…") {
+                                        state.seqDiagrams.begin(ctx.tabId, selectedIds.toSet())
+                                    },
+                                )
                                 add(CtxMenuEntry.Divider)
                             }
                             // Collapse actions — own block. Every entry is conditional on
@@ -1772,6 +1781,10 @@ fun App(
                     onDismiss = { state.cancelSplitPrompt() },
                 )
             }
+
+            // Renders itself off state.seqDiagrams.request (null = closed), so there's no separate
+            // boolean flag to keep in sync with the request payload.
+            SeqDiagramDialog(state)
 
             if (state.mergeTabsDialogOpen) {
                 var selected by remember {

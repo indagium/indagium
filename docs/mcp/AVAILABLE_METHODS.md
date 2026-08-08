@@ -62,6 +62,16 @@ version-controlled map of what an AI can do and how to prompt it. Most read meth
   `reindex_cases` retrieve comparable investigations.
 - `get_video_frame` and `get_follow_diagnostics` relate a selected log line to attached video.
 
+## Diagrams
+
+- `build_sequence_diagram` turns a range of log lines into UML sequence-diagram source (Mermaid by
+  default, PlantUML on request). Tags become participants and an arrow is drawn each time the
+  logging tag changes, so the result reads as a component handoff. It is read-only — pass the
+  returned `source` to `add_text_note` to put it in the analysis. Curate: name 4–8 meaningful tags
+  (`get_tags` lists them with counts) and a tight `startLineId`/`endLineId` range. A diagram built
+  over an unfiltered log is unreadable, and the `truncated` flag in the result means the arrow cap
+  was hit and the picture is incomplete.
+
 ## Prompt starters
 
 > Investigate the crash in the active tab. Start with crash sites, narrow before reading rows,

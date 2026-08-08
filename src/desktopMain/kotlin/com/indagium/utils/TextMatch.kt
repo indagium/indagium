@@ -220,6 +220,31 @@ internal fun firstRegexMatch(
     }
 }
 
+// Same lookup as firstRegexMatch, but hands back the whole MatchResult (named capture groups
+// intact) instead of just the matched substring's text — diagram/SeqDiagramBuilder.kt's RULES
+// arrow mode needs the named groups to build a message's endpoints/label from a
+// DiagramMessageRule's templates. Kept here rather than duplicated in that package so it shares
+// the exact same compiled-regex cache and backtracking-budget wrapping as every other regex entry
+// point in the app (SEC-2/SEC-3 above) — internal, not private, so it's visible module-wide: the
+// diagram package is a different package in the same module (this project is a single
+// jvm("desktop") target), and Kotlin's `internal` is module-scoped, not package-scoped — the same
+// cross-package `internal` visibility Filter.kt's CANCELLATION_CHECK_INTERVAL and this file's own
+// RegexEvaluationContext already rely on for their `ui`-package callers.
+internal fun firstRegexMatchResult(
+    haystack: String,
+    pattern: String,
+    ignoreCase: Boolean = true,
+    regexContext: RegexEvaluationContext = RegexEvaluationContext(),
+): MatchResult? {
+    val options = if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet()
+    val compiled = regexCache.getOrPut(RegexKey(pattern, ignoreCase)) {
+        runCatching { Regex(pattern, options) }
+    }.getOrNull() ?: return null
+    return regexContext.evaluate(pattern, ignoreCase, timedOutResult = null) {
+        compiled.find(deadlineWrap(haystack, regexContext))
+    }
+}
+
 internal fun regexRanges(
     haystack: String,
     pattern: String,

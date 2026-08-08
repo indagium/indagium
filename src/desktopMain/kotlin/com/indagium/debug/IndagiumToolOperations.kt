@@ -47,6 +47,15 @@ import com.indagium.utils.visibleEntries
 import java.io.File
 import java.util.Base64
 import kotlin.math.roundToInt
+import com.indagium.diagram.ArrowMode
+import com.indagium.diagram.DiagramDialect
+import com.indagium.diagram.DiagramOptions
+import com.indagium.diagram.DiagramParticipant
+import com.indagium.diagram.DiagramRange
+import com.indagium.diagram.ParticipantKind
+import com.indagium.diagram.SeqDiagramSpec
+import com.indagium.diagram.buildSequenceDiagram
+import com.indagium.diagram.toSource
 
 // Hex-color parsing constants for set_highlighters (parseHexColor / colorToHex).
 private const val OPAQUE_ALPHA_MASK = 0xFF000000L
@@ -58,6 +67,10 @@ private const val HEX_RADIX = 16
 
 // Mirrors CaseSearch's own DEFAULT_SEARCH_LIMIT (private to that class) — kept in sync manually
 // since it's only reached here when the caller omits `limit` entirely.
+// Hard ceiling on the diagram arrow cap a caller may request — past this a sequence diagram is
+// not readable by anyone, and the raster clamp in the renderer would shrink it to illegibility.
+private const val MAX_DIAGRAM_MESSAGES = 400
+
 private const val DEFAULT_CASE_SEARCH_LIMIT = 8
 private const val DEFAULT_SEQUENCE_OCCURRENCE_LIMIT = 100
 private const val MAX_SEQUENCE_OCCURRENCE_LIMIT = 500
@@ -192,6 +205,7 @@ internal class IndagiumToolOperations(
             searchSimilarCasesRoute(a.str("query") ?: "", a.strList("tags") ?: emptyList(), a.str("excludeSourcePath"), a.anyInt("limit"))
         },
         "get_case" to { a -> getCaseRoute(a.str("id") ?: "") },
+        "build_sequence_diagram" to { a -> buildSequenceDiagramRoute(a.str("tabId") ?: "", a) },
         "set_case_metadata" to { a ->
             setCaseMetadataRoute(a.str("tabId") ?: "", a.str("appVersion"), a.strList("decisiveTags"))
         },
@@ -701,6 +715,65 @@ internal class IndagiumToolOperations(
             limit = limit ?: DEFAULT_CASE_SEARCH_LIMIT,
         )
         return mapOf("matches" to results.map { caseSummaryToMap(it) })
+    }
+
+    /**
+     * Builds a sequence diagram and returns its source. Read-only by design: writing it into the
+     * notes is a separate, explicit `add_text_note` call, so a model can iterate on participants
+     * and range without leaving half-finished diagrams in the user's analysis.
+     *
+     * Participants are resolved by TAG NAME rather than index because that's what a model actually
+     * has — it sees tags in get_tags/get_visible_lines output, never our internal column order.
+     */
+    private fun buildSequenceDiagramRoute(tabId: String, args: Map<String, Any?>): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val actorNames = args.strList("actors").orEmpty().filter { it.isNotBlank() }
+        val entryActor = args.str("entryActor")
+        val exitActor = args.str("exitActor")
+        val actors = actorNames.map { name ->
+            DiagramParticipant(
+                id = name, label = name, kind = ParticipantKind.ACTOR,
+                isEntryPoint = name == entryActor, isExitPoint = name == exitActor,
+            )
+        }
+        val tagParticipants = args.strList("tags").orEmpty().filter { it.isNotBlank() }
+            .map { DiagramParticipant(id = it, label = it, kind = ParticipantKind.TAG, tag = it) }
+
+        val startId = args.int("startLineId")
+        val endId = args.int("endLineId")
+        val range = if (startId != null && endId != null) DiagramRange.Ids(startId, endId) else DiagramRange.VisibleView
+
+        val spec = SeqDiagramSpec(
+            dialect = if (args.str("dialect").equals("plantuml", ignoreCase = true)) DiagramDialect.PLANTUML else DiagramDialect.MERMAID,
+            title = args.str("title") ?: "",
+            participants = actors + tagParticipants,
+            range = range,
+            mode = if (args.str("mode").equals("timeline", ignoreCase = true)) ArrowMode.LINE_PER_MESSAGE else ArrowMode.TAG_TRANSITION,
+            options = DiagramOptions(
+                collapseRepeats = args.bool("collapseRepeats") ?: true,
+                maxMessages = args.int("maxMessages")?.coerceIn(1, MAX_DIAGRAM_MESSAGES) ?: DiagramOptions().maxMessages,
+            ),
+            sourceFile = java.io.File(tab.filename).name,
+        )
+
+        val diagram = buildSequenceDiagram(tab, spec)
+        if (diagram.messages.isEmpty()) {
+            return mapOf(
+                "error" to "the selected tags and range produced no arrows — widen the range, or pick tags that " +
+                    "actually appear in it (get_tags lists them with counts)",
+                "warnings" to diagram.warnings,
+                "scannedEntries" to diagram.scannedEntries,
+            )
+        }
+        return mapOf(
+            "source" to diagram.toSource(spec.dialect),
+            "dialect" to spec.dialect.name.lowercase(),
+            "participants" to diagram.participants.map { mapOf("label" to it.label, "kind" to it.kind.name.lowercase(), "tag" to it.tag) },
+            "messageCount" to diagram.messages.size,
+            "truncated" to diagram.truncated,
+            "scannedEntries" to diagram.scannedEntries,
+            "warnings" to diagram.warnings,
+        )
     }
 
     private fun getCaseRoute(id: String): Map<String, Any?> {

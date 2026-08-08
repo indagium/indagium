@@ -56,6 +56,7 @@ import com.indagium.utils.SearchComputeResult
 import com.indagium.utils.TS_UNKNOWN
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.utils.ZipLogCandidateKind
+import com.indagium.utils.annotationDiagramFileName
 import com.indagium.utils.annotationImageFileName
 import com.indagium.utils.archiveVideoCacheFileName
 import com.indagium.utils.buildAnnotationsHtml
@@ -1521,6 +1522,12 @@ class AppState(
 
     // See AnnotationManager's own doc comment for what it owns vs. what stays on AppState.
     private val annotationManager = AnnotationManager(this)
+
+    // UML sequence-diagram generation (com.indagium.diagram). Owns the builder dialog's open
+    // request, its debounced background preview build, and writing the result into the notes as an
+    // ordinary AnnBlock.Note — see SeqDiagramCoordinator. Public because App.kt renders the dialog
+    // straight off it, the same way the merge-tabs dialog reads mergeTabsDialogOpen below.
+    val seqDiagrams = SeqDiagramCoordinator(this)
 
     // App.kt writes this directly (dialog dismiss/confirm), not just reads it, so it needs a
     // full get/set forwarding var rather than a read-only getter like mcpControlError above.
@@ -3226,6 +3233,12 @@ class AppState(
         navigateToVideoLog(tabId, logId, forceRecenter = true)
 
     /** Evidence cards use the established selection/scroll pathway so collapsed groups expand. */
+    /** Reveals and selects a single log line — used by a diagram note when the user clicks an
+     *  arrow (see AnnotationPanel's DiagramNoteView). Deliberately routed through the same
+     *  navigation request the AI evidence cards use, so it inherits the compare-mode handling and
+     *  the collapsed-block reveal rather than re-deriving them. */
+    fun navigateToLogLine(tabId: String, entryId: Int) = requestAiLogNavigation(tabId, listOf(entryId))
+
     private fun requestAiLogNavigation(tabId: String, lineIds: List<Int>) {
         val tab = tab(tabId) ?: return
         val actualIds = lineIds.distinct().filter { it in tab.rmap }
@@ -5746,7 +5759,10 @@ class AppState(
     // buildMd() text copyAnn() writes for editors that don't accept the HTML flavor.
     fun copyRichPreview(tabId: String) {
         val t = tab(tabId) ?: return
-        val html = buildAnnotationsHtml(t, settings)
+        // Diagrams are rasterized in the ACTIVE theme, so a pasted picture matches what the user is
+        // looking at rather than a fixed light palette.
+        val diagramTheme = themeColors(settings.theme).toDiagramTheme()
+        val html = buildAnnotationsHtml(t, settings) { DiagramRenderCache.pngBytes(it, diagramTheme) }
         val plainText = maskWordForCopy(buildMd(t, settings), settings)
         Toolkit.getDefaultToolkit().systemClipboard.setContents(HtmlTransferable(html, plainText), null)
     }
@@ -5772,13 +5788,47 @@ class AppState(
     // stamp, rename the files out from under the previous export, and orphan the old ones.
     private fun writeAnnotationFrameImages(t: LogTab, mdFile: File) {
         val images = t.annotations.blocks.filterIsInstance<AnnBlock.Image>()
-        if (images.isEmpty()) return
+        val diagrams = t.diagramNotes()
+        if (images.isEmpty() && diagrams.isEmpty()) return
         val framesDir = File(mdFile.parentFile, "${mdFile.nameWithoutExtension}_frames")
         framesDir.mkdirs()
         // writeFileAtomically is text/Writer-only (AutosaveCodec) — image bytes need a plain
         // File.writeBytes.
         images.forEachIndexed { index, image ->
             File(framesDir, annotationImageFileName(index + 1, image.format, t.annotations.frameStamp)).writeBytes(image.bytes)
+        }
+        writeAnnotationDiagramImages(t, framesDir, diagrams)
+    }
+
+    /**
+     * Rasterizes every diagram note beside the .md, under the name buildMd()'s JIRA_JAVA
+     * `!diagram-0N.png!` anchor references (utils/annotationDiagramFileName) — the diagram
+     * counterpart of the frame images above, and ordinal-independent of them.
+     *
+     * PNG, not the JPEG the image path uses: a diagram is line art, and JPEG fringes every arrow.
+     *
+     * Rendering goes through DiagramRenderCache because this runs on EVERY debounced note edit (see
+     * autoExportAnnotations) — without it, typing in an unrelated text block would re-rasterize
+     * every diagram in the document on a 400 ms cadence. The cache key includes the theme, so a
+     * theme switch still re-renders rather than exporting a stale palette.
+     *
+     * A note whose header carries no model (written by an older build, or hand-authored) is skipped
+     * rather than failing the export: its fenced source is still in the .md, so the analysis is
+     * complete, just without a picture for Jira until it's regenerated.
+     */
+    private fun writeAnnotationDiagramImages(
+        t: LogTab,
+        framesDir: File,
+        diagrams: List<Pair<String, com.indagium.diagram.ParsedDiagram>>,
+    ) {
+        if (diagrams.isEmpty()) return
+        val diagramTheme = themeColors(settings.theme).toDiagramTheme()
+        diagrams.forEachIndexed { index, (_, parsed) ->
+            val model = parsed.model ?: return@forEachIndexed
+            runCatching { DiagramRenderCache.pngBytes(model, diagramTheme) }
+                .onSuccess { bytes ->
+                    File(framesDir, annotationDiagramFileName(index + 1, t.annotations.frameStamp)).writeBytes(bytes)
+                }
         }
     }
 
