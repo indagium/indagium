@@ -46,7 +46,7 @@ Source sets are `desktopMain` and `desktopTest` (Kotlin Multiplatform with a sin
 
 ## Architecture
 
-Indagium is a Compose Multiplatform Desktop log viewer for Android logcat files. All code lives under `src/desktopMain/kotlin/com/indagium/` — ~47k lines across 11 packages.
+Indagium is a Compose Multiplatform Desktop log viewer for Android logcat files. All code lives under `src/desktopMain/kotlin/com/indagium/` — ~50k lines across 12 packages.
 
 > **`docs/SAAD.md` is the authoritative architecture document.** It covers module boundaries, the
 > threading model, persistence formats, security posture, and known risks, with file:line citations.
@@ -78,7 +78,8 @@ File → LogParser.parseLogcat()  ──→  List<LogEntry>          (sequential
 | `ui` | Compose UI **and** `AppState` + coordinators + persistence codecs. The biggest package by far. |
 | `source` | Source indexing and log→call-site resolution. Pure text/regex/brace-matching, no compiler dep. Own store at `appDataDir()/source-index` (`indagium-source-index-v1`, schema v9; also accepts the legacy `openLog2-source-index-v1` magic). |
 | `cases` | Similarity index over previously written analysis notes; backs `search_similar_cases`. Store at `appDataDir()/case-index` (`indagium-case-index-v1`; also accepts the legacy `openLog2-case-index-v1` magic). |
-| `debug` | `ControlServer` (Ktor CIO, loopback-only, MCP over Streamable HTTP + REST, off by default), the **56-tool** catalogue + handlers joined by `IndagiumToolGateway`, hand-rolled `Json`, `AppLogger`. |
+| `diagram` | UML sequence-diagram generation, UI-free: `SeqDiagramBuilder` (log range -> model), `DiagramEmitters` (Mermaid/PlantUML text), `SeqDiagramRenderer` (Graphics2D -> `BufferedImage` + clickable `ArrowHit`s), `DiagramSpecCodec` (the `<!-- indagium:diagram v1 ... -->` note header). Stored as an ordinary `AnnBlock.Note` — no `.ann` format change. |
+| `debug` | `ControlServer` (Ktor CIO, loopback-only, MCP over Streamable HTTP + REST, off by default), the **57-tool** catalogue + handlers joined by `IndagiumToolGateway`, hand-rolled `Json`, `AppLogger`. |
 | `ai` | `LlmProvider` (Anthropic + OpenAI-compatible over HTTP) and the subprocess account agents (Codex stdio JSON-RPC, Claude Code stream-json), `AiAgentRunner` loop, `AiToolExecutionCoordinator` (the single policy point: budget, tab pinning, confirmation gate). |
 | `video` | JavaCV/FFmpeg playback on a dedicated decode thread; per-tab controllers owned by `AppState`. |
 | `voice` | Dictation: Whisper JNI, Apple Speech (build-time-compiled JNI bridge), Windows Speech helper. |

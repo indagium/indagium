@@ -27,3 +27,24 @@ fun annotationImageFileName(imageOrdinal: Int, format: String, frameStamp: Strin
     val pattern = if (frameStamp != null) "frame-$frameStamp-%02d.%s" else "frame-%02d.%s"
     return pattern.format(imageOrdinal, ext)
 }
+
+/**
+ * Filename for the Nth exported sequence diagram, 1-based — the exact counterpart of
+ * [annotationImageFileName], and held to the same contract: this one function is the only place the
+ * name is formed, so buildMd()'s `!diagram-0N.png!` Jira anchor and the bytes
+ * AppState.writeAnnotationFrameImages() writes beside the .md can never drift apart.
+ *
+ * [diagramOrdinal] counts diagram notes in document order, INDEPENDENTLY of
+ * [annotationImageFileName]'s image ordinal — a document with two screenshots and two diagrams
+ * produces frame-01/frame-02 and diagram-01/diagram-02, not a shared 1..4 sequence. They share
+ * [frameStamp] (see its doc there) so one analysis's whole set of attachments carries one moment,
+ * and two people's exports can't collide as Jira attachments.
+ *
+ * Always PNG: a sequence diagram is line art, and the JPEG the image path uses would fringe every
+ * arrow and label. This is also why diagrams do NOT go through AnnotationManager.addImageBlock —
+ * see utils/ImageDownscale.kt's 1280px/400KB JPEG cap.
+ */
+fun annotationDiagramFileName(diagramOrdinal: Int, frameStamp: String? = null): String {
+    val pattern = if (frameStamp != null) "diagram-$frameStamp-%02d.png" else "diagram-%02d.png"
+    return pattern.format(diagramOrdinal)
+}

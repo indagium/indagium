@@ -2,6 +2,9 @@ package com.indagium.utils
 
 import androidx.compose.ui.graphics.Color
 import com.indagium.model.*
+import com.indagium.diagram.DiagramDialect
+import com.indagium.diagram.ParsedDiagram
+import com.indagium.diagram.parseDiagramNote
 import com.indagium.ui.DANGER_RED
 import com.indagium.ui.SEQ_COLORS
 
@@ -781,6 +784,52 @@ private fun StringBuilder.appendLogRefBlock(tab: LogTab, settings: AppSettings, 
     return if (settings.numberAnnotationBlocks) blockNumber + 1 else blockNumber
 }
 
+/**
+ * A diagram note's export form, which differs sharply by target — this is the whole reason
+ * [AnnotationLogBlockStyle] reaches into diagram rendering at all.
+ *
+ * INDENTED (real Markdown): emit the fenced block verbatim. GitHub, GitLab and most Markdown
+ * viewers render a ```mermaid fence into an actual picture, so the text IS the diagram there and
+ * an image would be strictly worse (it can't be diffed, searched or edited).
+ *
+ * JIRA_JAVA: Jira's wiki renderer understands neither Mermaid nor ``` fences, so emit a
+ * `!diagram-0N.png!` attachment anchor — the same mechanism screenshots already use, resolved by
+ * the PNG AppState.writeAnnotationFrameImages() drops into the sibling `_frames/` folder under the
+ * name annotationDiagramFileName() forms. The source goes below it in a `{code}` block so the
+ * diagram stays reproducible from the ticket alone even though Jira won't draw it.
+ *
+ * The spec/model header is stripped in both cases: it's machine state for reopening the note (see
+ * diagram/DiagramSpecCodec.kt), and would otherwise show up as a stray HTML comment — or, in Jira,
+ * as a wall of raw JSON.
+ */
+private fun StringBuilder.appendDiagramNote(
+    diagram: ParsedDiagram,
+    settings: AppSettings,
+    diagramOrdinal: Int,
+    frameStamp: String?,
+) {
+    // ParsedDiagram.source is the fence BODY (the header and the ``` lines are already parsed off),
+    // so the Markdown form re-wraps it rather than stripping anything.
+    val fenceLanguage = when (diagram.dialect) {
+        DiagramDialect.MERMAID -> "mermaid"
+        DiagramDialect.PLANTUML -> "plantuml"
+    }
+    when (settings.annotationLogBlockStyle) {
+        AnnotationLogBlockStyle.INDENTED -> {
+            appendLine("```$fenceLanguage")
+            appendLine(diagram.source.trimEnd('\n'))
+            appendLine("```")
+        }
+
+        AnnotationLogBlockStyle.JIRA_JAVA -> {
+            appendLine("!${annotationDiagramFileName(diagramOrdinal, frameStamp)}!")
+            appendLine("{code}")
+            appendLine(diagram.source.trimEnd('\n'))
+            appendLine("{code}")
+        }
+    }
+}
+
 // No Markdown/data-URI image is ever embedded here — it won't render in Jira plain text, and a
 // bare clipboard paste can only carry one image at a time anyway. Two-step workflow instead:
 // "Export frames" (AppState.exportAnnotationFrames) writes each image as frame-0N.jpg next to a
@@ -801,12 +850,21 @@ fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildS
     // assign the same images, via the shared annotationImageFileName() helper, or the anchors below
     // would reference files that don't exist (or exist under a different, unstamped/stamped name).
     var imageOrdinal = 0
+    // Counts diagram notes only, on its own sequence — see annotationDiagramFileName's doc for why
+    // diagrams and screenshots don't share one ordinal.
+    var diagramOrdinal = 0
     for (block in tab.annotations.blocks) {
         when (block) {
             is AnnBlock.Note -> {
                 if (block.text.isNotBlank()) {
                     if (settings.numberAnnotationBlocks) append("${blockNumber++}. ")
-                    appendLine(block.text)
+                    val diagram = parseDiagramNote(block.text)
+                    if (diagram != null) {
+                        diagramOrdinal += 1
+                        appendDiagramNote(diagram, settings, diagramOrdinal, tab.annotations.frameStamp)
+                    } else {
+                        appendLine(block.text)
+                    }
                     appendLine()
                 }
             }

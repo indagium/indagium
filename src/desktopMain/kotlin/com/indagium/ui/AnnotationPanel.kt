@@ -10,6 +10,8 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.*
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -57,6 +59,9 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
+import com.indagium.diagram.ParsedDiagram
+import com.indagium.diagram.parseDiagramNote
+import com.indagium.diagram.stripDiagramSpecHeader
 import com.indagium.model.AnnBlock
 import com.indagium.model.AppSettings
 import com.indagium.model.LogTab
@@ -89,6 +94,13 @@ private const val UNVERIFIED_RELINK_NOTICE_MS = 8_000L
 // reorder offset math) and the actual ImageBlockView render, so the estimate never drifts from
 // what's really on screen the way a content-dependent guess (like textFieldDp for text) would.
 private const val IMAGE_BLOCK_THUMBNAIL_DP = 140f
+
+// Height-estimate inputs for a diagram note (see estimateBlockHeightPx). DIAGRAM_CHROME_DP covers
+// the participant headers, the gap above the first row and the stats/actions line below the
+// picture; DIAGRAM_ROW_DP is one message row's vertical pitch at 1x, matching the renderer's own
+// BASE_ROW_H. Both are deliberately generous — an over-estimate self-corrects.
+private const val DIAGRAM_CHROME_DP = 130f
+private const val DIAGRAM_ROW_DP = 44f
 
 internal fun annotationPreviewCopyShortcutHandled(actionPressed: Boolean, key: Key, textFieldFocused: Boolean): Boolean =
     actionPressed && key == Key.C && !textFieldFocused
@@ -169,6 +181,12 @@ fun AnnotationPanel(
     onUnhandledFileDrop: (List<File>) -> Unit,
     onNavigateLogRef: (AnnBlock.LogRef) -> Unit,
     onNavigateVideoFrame: (VideoFrameReference) -> Unit,
+    // Diagram notes (com.indagium.diagram) are ordinary AnnBlock.Notes whose text carries a spec
+    // header + fenced source — see DiagramSpecCodec. Defaulted so every existing call site (and the
+    // test harness) keeps compiling; a caller that doesn't wire them just gets a non-interactive
+    // diagram, never a broken one.
+    onEditDiagram: (blockId: String) -> Unit = {},
+    onNavigateDiagramLine: (entryId: Int) -> Unit = {},
     width: Float,
     focusRequester: FocusRequester? = null,
     onPanelFocusChanged: (Boolean) -> Unit = {},
@@ -249,7 +267,17 @@ fun AnnotationPanel(
         val controlsDp = 23f
         val outerChromeDp = 20f
         val dp = when (block) {
-            is AnnBlock.Note -> controlsDp + textFieldDp(block.text, 20.7f, 60f) + outerChromeDp
+            is AnnBlock.Note -> {
+                // A diagram note draws a picture ABOVE its text field. Estimate the picture from
+                // the model's own message count (the one thing that drives its height) rather than
+                // rendering it here — this runs during layout for every block, and rasterizing to
+                // measure would be far too expensive. Erring high is safe per this function's own
+                // doc: an over-estimate self-corrects, an under-estimate causes the scroll clamp.
+                val diagramDp = parseDiagramNote(block.text)?.model?.let { model ->
+                    DIAGRAM_CHROME_DP + model.messages.size * DIAGRAM_ROW_DP
+                } ?: 0f
+                controlsDp + diagramDp + textFieldDp(block.text, 20.7f, 60f) + outerChromeDp
+            }
             is AnnBlock.LogRef -> {
                 val captionDp = textFieldDp(block.caption, 20.7f, 52f)
                 val rowCount = block.resolveRows(tab).size
@@ -654,6 +682,8 @@ fun AnnotationPanel(
                             onMoveDown = { onMoveBlock(block.id, 1) },
                             onAddBelow = { onAddNoteAfter(block.id) },
                             dragHandleModifier = dragHandleModifier,
+                            onEditDiagram = { onEditDiagram(block.id) },
+                            onNavigateDiagramLine = onNavigateDiagramLine,
                         )
                         is AnnBlock.LogRef -> LogRefBlock(
                             block = block, tab = tab, settings = settings, mono = mono, tc = tc,
@@ -1065,11 +1095,32 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
         tab.annotations.blocks.forEach { block ->
             when (block) {
                 is AnnBlock.Note -> if (block.text.isNotBlank()) {
-                    AnnotationMarkdownText(
-                        text = block.text,
-                        tc = tc,
-                        numberPrefix = if (settings.numberAnnotationBlocks) "${blockNumber++}. " else null,
-                    )
+                    // Diagrams are drawn out-of-band from the Markdown renderer, the same way
+                    // AnnBlock.Image is below — the renderer has no Mermaid support, and feeding it
+                    // the note text raw would show a wall of spec-header JSON followed by source.
+                    val parsed = remember(block.text) { parseDiagramNote(block.text) }
+                    val diagramModel = parsed?.model
+                    if (diagramModel != null) {
+                        val diagramTheme = tc.toDiagramTheme()
+                        val rendered = remember(diagramModel, diagramTheme) { DiagramRenderCache.render(diagramModel, diagramTheme) }
+                        val bitmap = remember(rendered) { rendered.toComposeBitmap() }
+                        Image(
+                            bitmap = bitmap,
+                            contentDescription = "Sequence diagram",
+                            modifier = Modifier
+                                .width((rendered.widthPx / rendered.scale).dp)
+                                .height((rendered.heightPx / rendered.scale).dp),
+                        )
+                        if (settings.numberAnnotationBlocks) blockNumber++
+                    } else {
+                        AnnotationMarkdownText(
+                            // A diagram note with no drawable model still shouldn't leak its header
+                            // into the preview; stripping is a no-op for an ordinary note.
+                            text = if (parsed != null) stripDiagramSpecHeader(block.text) else block.text,
+                            tc = tc,
+                            numberPrefix = if (settings.numberAnnotationBlocks) "${blockNumber++}. " else null,
+                        )
+                    }
                 }
 
                 is AnnBlock.LogRef -> {
@@ -1226,14 +1277,27 @@ private fun NoteBlock(
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onAddBelow: () -> Unit,
     dragHandleModifier: Modifier = Modifier,
+    onEditDiagram: () -> Unit = {},
+    onNavigateDiagramLine: (Int) -> Unit = {},
 ) {
+    // A diagram note is still a text note underneath: the picture is rendered ABOVE the editable
+    // source rather than replacing it, so the fenced Mermaid/PlantUML stays hand-editable (and an
+    // older build, or one with a corrupt header, degrades to exactly the plain text field).
+    val diagram = remember(block.text) { parseDiagramNote(block.text) }
     Column(
         Modifier.fillMaxWidth()
             .border(BorderStroke(2.dp, if (focused) tc.ac else tc.ac.copy(.35f)))
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
-        BlockControls("text", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, dragHandleModifier = dragHandleModifier)
+        BlockControls(
+            if (diagram != null) "diagram" else "text",
+            tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, dragHandleModifier = dragHandleModifier,
+        )
         Spacer(Modifier.height(5.dp))
+        if (diagram != null) {
+            DiagramNoteView(diagram, tc, onEditDiagram, onNavigateDiagramLine)
+            Spacer(Modifier.height(6.dp))
+        }
         BasicTextField(
             value = block.text,
             onValueChange = onUpdate,
@@ -1250,6 +1314,68 @@ private fun NoteBlock(
                 inner()
             },
         )
+    }
+}
+
+// ── Diagram note view ──────────────────────────────────────────────────
+/**
+ * The picture half of a diagram note: the rendered sequence diagram, its stats line, and the
+ * actions that only make sense for a diagram.
+ *
+ * Clicking an arrow jumps to the log line that produced it. That is the entire reason this feature
+ * renders in-app instead of shelling out to PlantUML, and it works because the note's spec header
+ * carries the built model — including each message's entryId, which no diagram dialect's syntax can
+ * express (see DiagramSpecCodec's modelToMap).
+ */
+@Composable
+private fun DiagramNoteView(
+    parsed: ParsedDiagram,
+    tc: ThemeColors,
+    onEdit: () -> Unit,
+    onNavigateLine: (Int) -> Unit,
+) {
+    val model = parsed.model
+    if (model == null) {
+        // A diagram note written by an older build, or hand-authored: the fence still exports and
+        // still renders wherever Mermaid is supported, there's just no model to draw or click.
+        AppText("Diagram source only — regenerate to see and click the picture.", color = tc.td, fontSize = 11.sp, maxLines = 2)
+        AppButton("Edit diagram…", onEdit, variant = ButtonVariant.Secondary)
+        return
+    }
+    val theme = tc.toDiagramTheme()
+    val rendered = remember(model, theme) { DiagramRenderCache.render(model, theme) }
+    val bitmap = remember(rendered) { rendered.toComposeBitmap() }
+    val density = LocalDensity.current.density
+
+    Box(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+    ) {
+        Image(
+            bitmap = bitmap,
+            contentDescription = "Sequence diagram",
+            modifier = Modifier
+                .width((rendered.widthPx / rendered.scale).dp)
+                .height((rendered.heightPx / rendered.scale).dp)
+                .pointerInput(rendered) {
+                    detectTapGestures { offset ->
+                        // Compose hands pointer coordinates in PIXELS; the hit boxes are in image
+                        // pixels, which are (logical dp * density-independent render scale). Convert
+                        // through both: pixels -> dp (/ density) -> image px (* rendered.scale).
+                        val ix = (offset.x / density * rendered.scale).toInt()
+                        val iy = (offset.y / density * rendered.scale).toInt()
+                        rendered.hits.firstOrNull { h ->
+                            ix >= h.x && ix <= h.x + h.width && iy >= h.y && iy <= h.y + h.height
+                        }?.let { if (it.entryId > 0) onNavigateLine(it.entryId) }
+                    }
+                },
+        )
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppText(
+            "${model.messages.size} arrows · ${model.participants.size} lifelines" + if (model.truncated) " · truncated" else "",
+            color = tc.td, fontSize = 10.sp, modifier = Modifier.weight(1f),
+        )
+        AppButton("Edit…", onEdit, variant = ButtonVariant.Ghost)
     }
 }
 

@@ -163,6 +163,7 @@ internal class AiToolExecutionCoordinator(
     private companion object {
         const val DEFAULT_MAX_TOOL_RESULT_CHARS = 12_000
         val TAB_SCOPED_TOOL_NAMES = setOf(
+            "build_sequence_diagram",
             "close_tab", "get_filter", "set_filter", "get_visible_lines", "get_line_context",
             "select_lines", "get_selection", "toggle_group", "expand_all", "collapse_all",
             "get_tags", "get_packages", "get_log_composition", "get_crash_sites", "get_issue_description",

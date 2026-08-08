@@ -1286,6 +1286,49 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             ),
         ),
     ),
+    McpTool(
+        "build_sequence_diagram",
+        "Build a UML sequence diagram from a range of a tab's log lines and return its Mermaid (or " +
+            "PlantUML) source. Log tags become participants (lifelines) and an arrow is drawn each " +
+            "time the logging tag changes, so this reads as a component-handoff diagram. Does NOT " +
+            "write anything: to put the result in the analysis notes, pass the returned source to " +
+            "add_text_note. Curate hard — pick 4-8 meaningful tags and a tight line range; a diagram " +
+            "over an unfiltered log is unreadable. Returns the source plus participants, messageCount, " +
+            "truncated and any warnings.",
+        schema(
+            "tabId" to "string",
+            "tags" to "array",
+            "actors" to "array",
+            "entryActor" to "string",
+            "exitActor" to "string",
+            "startLineId" to "integer",
+            "endLineId" to "integer",
+            "dialect" to "string",
+            "mode" to "string",
+            "title" to "string",
+            "maxMessages" to "integer",
+            "collapseRepeats" to "boolean",
+            required = listOf("tabId"),
+            enums = mapOf(
+                "dialect" to listOf("mermaid", "plantuml"),
+                "mode" to listOf("tagTransition", "timeline"),
+            ),
+            descriptions = mapOf(
+                "tags" to "Log tags to draw as participants, in the column order you want. " +
+                    "Omit to auto-pick the busiest tags in range (capped at 12).",
+                "actors" to "External entities that are not log tags (e.g. \"User\", \"Server\") to add as actor lifelines.",
+                "entryActor" to "One of `actors`, to originate the diagram's first arrow.",
+                "exitActor" to "One of `actors`, to receive the diagram's final return arrow.",
+                "startLineId" to "First log line id of the range (inclusive). Omit both ids to use the whole filtered view.",
+                "endLineId" to "Last log line id of the range (inclusive).",
+                "dialect" to "Output syntax. Defaults to mermaid.",
+                "mode" to "tagTransition (default) draws an arrow when the tag changes; " +
+                    "timeline draws every line as an event on its own tag's lifeline.",
+                "maxMessages" to "Arrow cap; the result reports truncated=true when it bites. Defaults to 120.",
+                "collapseRepeats" to "Fold consecutive identical messages into one with a repeat count. Defaults to true.",
+            ),
+        ),
+    ),
 )
 
 // REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl
