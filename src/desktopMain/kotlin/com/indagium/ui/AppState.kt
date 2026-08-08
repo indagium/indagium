@@ -668,13 +668,20 @@ data class PendingDuplicateFilterSave(val tabId: String, val existingId: String,
 
 data class PendingFilterRename(val id: String, val currentName: String, val isDraft: Boolean, val tabId: String?)
 
-// autoExportAnnotations' synchronous overwrite gate publishes this instead of writing when the
-// resolved auto-export target already exists on disk AND the tab has no recorded noteTargetName
-// decision yet (see LogTab.noteTargetName's doc comment). targetPath/targetName are both the
-// resolved file — targetName (bare, no directory) is what a "keep this name" decision pins on the
-// tab, targetPath (absolute) is what the dialog copy shows the user and what "Open existing notes"
-// loads.
-data class PendingNoteOverwrite(val tabId: String, val targetPath: String, val targetName: String)
+// upAnn's synchronous overwrite gate publishes this instead of COMMITTING a mutation when it would
+// be the first edit on this tab to resolve to an auto-export target that already exists on disk,
+// with the tab carrying no recorded noteTargetName decision yet (see LogTab.noteTargetName's doc
+// comment). Note this gates the mutation itself now, not just the disk write: [pendingTab] is the
+// tab as it WOULD look if the edit were applied — computed by upAnn's `fn` — but deliberately never
+// written into `tabs`, so the note the user is adding doesn't appear in the Notes panel (or become
+// exportable, or observable by an MCP reader, or anything else "real") until they pick an option on
+// the prompt. A second mutation on the SAME tab while this is still open (another keystroke,
+// another MCP call arriving before the modal is dismissed) folds into [pendingTab] instead of being
+// applied against the now-stale committed tab or silently dropped — see upAnn. targetPath/
+// targetName are both the resolved file — targetName (bare, no directory) is what a "keep this
+// name" decision pins on the tab, targetPath (absolute) is what the dialog copy shows the user and
+// what "Open existing notes" loads.
+data class PendingNoteOverwrite(val tabId: String, val targetPath: String, val targetName: String, val pendingTab: LogTab)
 
 /** How AppState.beginLogRelink ("Locate log…", Change 2b/2c) should finish attaching notes to the
  *  tab it just opened, once verification clears it (immediately, or after the user confirms a
@@ -5039,7 +5046,7 @@ class AppState(
             )
             oversizedFiles.forEach { file ->
                 rememberRecentFile(file)
-                rememberAutoExportedNoteFor(file.name)
+                rememberAutoExportedNoteFor(file.name, file.absolutePath)
             }
             recentMenuOpen = false
             return
@@ -5206,7 +5213,7 @@ class AppState(
         }
         rememberRecentFile(file)
         recentMenuOpen = false
-        rememberAutoExportedNoteFor(file.name)
+        rememberAutoExportedNoteFor(file.name, path)
         // Switch to existing tab if this file is already open
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) {
@@ -5265,6 +5272,7 @@ class AppState(
                 AppLogger.info("open", "Opened ${file.name} (${logData.size} entries)")
                 markActiveLoadFinished(tabId)
                 published = true
+                autoLoadOwnNotesIfAny(tabId)
                 val issueRules = settings.customIssueRules
                 val full = buildLogAnalysis(logData, issueRules)
                 ensureActive()
@@ -5591,6 +5599,7 @@ class AppState(
                 AppLogger.info("open", "Opened ${candidate.displayName} from archive (${logData.size} entries)")
                 markActiveLoadFinished(tabId)
                 published = true
+                autoLoadOwnNotesIfAny(tabId)
                 val issueRules = settings.customIssueRules
                 val full = buildLogAnalysis(logData, issueRules)
                 ensureActive()
@@ -5691,7 +5700,7 @@ class AppState(
             return
         }
         rememberRecentFile(file)
-        rememberAutoExportedNoteFor(file.name)
+        rememberAutoExportedNoteFor(file.name, path)
         val n = tabCounter.getAndIncrement()
         val tabId = "t$n"
         val logData = runCatching { parser(file) }.getOrElse { error ->
@@ -5714,6 +5723,7 @@ class AppState(
             tabs = tabs + t
             activeTabId = t.id
         }
+        autoLoadOwnNotesIfAny(tabId)
     }
 
     private fun openSplitSourceAsIs(source: SplitSource) {
@@ -6051,11 +6061,20 @@ class AppState(
                 return
             }
         }
-        // Fallback: load raw text as a single note block (e.g. plain .md without sidecar)
+        // Fallback: load raw text as a single note block (e.g. plain .md without sidecar). Must
+        // REPLACE the block list, not append — this is "switch to this note," exactly like the
+        // .ann branch above, never "merge it into what I have." `blocks + block` here used to
+        // splice the picked file's raw text onto whatever was already open, so choosing a
+        // sidecar-less file from Open Note silently produced a hybrid of two unrelated analyses
+        // while still repointing noteTargetName at the just-picked file — the next auto-export
+        // would then overwrite that file with the merged result. recoveredNoteRows is reset to
+        // emptyMap() for the same reason the .ann branch always sets it explicitly: this fallback's
+        // single Note block never carries a LogRef, so any rows recovered for the PREVIOUS note's
+        // LogRef blocks are now orphaned state that belongs to a file this tab no longer shows.
         val text = runCatching { file.readText() }.getOrElse { return }
         upTab(tabId) { t ->
             val block = AnnBlock.Note(newId("n"), text)
-            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block), noteTargetName = pinName)
+            t.copy(annotations = t.annotations.copy(blocks = listOf(block)), noteTargetName = pinName, recoveredNoteRows = emptyMap())
         }
     }
 
@@ -6088,6 +6107,91 @@ class AppState(
 
     fun openNoteFileAsync(tabId: String, file: File) {
         ioScope.launch { openNoteFile(tabId, file) }
+    }
+
+    // Reopening a log used to hand the fresh tab a blank noteTargetName, re-arming upAnn's
+    // overwrite gate on the very first edit — every session, forever. That's what actually produced
+    // the reported "logcat_analysis_11.md" trail: each reopen re-triggered the "Existing notes
+    // found" prompt, and with the (now-fixed) bug that suffixed notes were invisible in the Open
+    // Note menu, "Save to a new file" was the only choice that visibly worked, over and over. Auto-
+    // loading the tab's OWN previously-saved notes on open removes the gate's reason to re-arm at
+    // all, instead of leaving the symptom for the user to work around each time.
+    //
+    // Gated on an EXACT sourcePath fingerprint match — never a name-only one, and never a
+    // NotRecorded or Unreadable fingerprint — mirroring resolveNoteTarget/recentNotesForTab's own
+    // disambiguation. Two different files that happen to share a base name — "/a/logcat.log" and
+    // "/b/logcat.log" — both resolve to "logcat_analysis.md" in one shared notes dir; matching by
+    // fingerprint alone is what keeps /a from auto-loading /b's analysis (or vice versa) just
+    // because one sorts first among the candidates. Anything short of a positive match — no
+    // fingerprint recorded (a legacy note predating the fingerprint token, or one saved by a
+    // session that never recorded one) OR one that exists but couldn't be read/parsed — those
+    // still fall through to the ordinary prompt on first edit, exactly as before this fix, rather
+    // than being silently adopted on a guess.
+    //
+    // Only runs for a genuinely fresh tab — noteTargetName == null AND no annotation blocks already
+    // present. Both conditions matter: an autosave-restored tab already carries its own blocks (and
+    // usually its own pin) rebuilt from the cache, so running this against it would at best be a
+    // no-op (already pinned) and at worst splice a DIFFERENT file's blocks on top of blocks the user
+    // already has open, merely because both happen to resolve to the same fingerprint match. A
+    // brand-new open — the only case this exists for — always starts with zero blocks.
+    //
+    // Deliberately not run under stateLock: it does filesystem I/O (existence + fingerprint checks
+    // across every candidate slot, plus openNoteFile's own read) and calls openNoteFile, which does
+    // its own upTab/stateLock internally. Every call site is already on ioScope (or, for
+    // loadSplitPartAsTab, a thread that already does synchronous file I/O beforehand), so this adds
+    // no new blocking behavior on the UI thread that wasn't already there.
+    private fun autoLoadOwnNotesIfAny(tabId: String) {
+        val current = tab(tabId) ?: return
+        val sourcePath = current.sourcePath ?: return
+        if (current.noteTargetName != null || current.annotations.blocks.isNotEmpty()) return
+        val match = noteFileCandidateFiles(current.filename, sourcePath)
+            .filter { it.exists() }
+            .filter { readSourceFingerprint(it) == SourceFingerprint.Recorded(sourcePath) }
+            .maxByOrNull { it.lastModified() }
+            ?: return
+        openNoteFile(tabId, match)
+    }
+
+    // "New Analysis" header action (AnnotationPanel). Auto-load above removed the only route that
+    // used to exist for starting a fresh analysis: it pins a tab's own notes the instant a log is
+    // reopened, so the overwrite prompt's old "Save to a new file" branch (saveNotesToNewNoteFile)
+    // never gets a chance to fire for "I want to abandon this and start over" — there was, until
+    // this function, no way to begin a new analysis without either editing over the old one or
+    // closing and reopening the tab (which just auto-loads the same notes right back).
+    //
+    // One click, no prompt, by design: clears every field Annotations carries — blocks, prefix,
+    // suffix, AND issueDescription — down to a totally blank Annotations(), not just the block
+    // list. This is the same "switch, don't merge" call openNoteFile's .ann branch already makes
+    // when moving to a different file wholesale; prefix/suffix/issueDescription are as much part of
+    // "the previous analysis" as its blocks are; leaving them behind would produce a Notes panel
+    // that LOOKS blank (no blocks) but still exports the old issue's heading/footer/AI context on
+    // the very first new note, which is exactly the kind of silent leftover-state bug this whole fix
+    // set exists to stop causing.
+    //
+    // Pins noteTargetName to the next genuinely-free "_N" slot via the SAME nextFreeNoteTargetName
+    // walk, and the SAME "conflict means either .md OR .ann exists" predicate, saveNotesToNewNoteFile
+    // uses — one naming scheme for "give me an unused note file," not two. The clear and the pin are
+    // one upTab call for the reason loadAnnotationsFrom/confirmNoteOverwrite both document: a second,
+    // later call pinning the name would leave a window where a zero-block, not-yet-pinned tab could
+    // be read as "still the old file" by anything racing this one (autosave, an MCP tool call).
+    //
+    // Uses upTab, not upAnn: like openNoteFile, starting fresh is not itself an edit to react to —
+    // and since nextFreeNoteTargetName-by-construction only ever returns a name nothing on disk owns
+    // yet, upAnn's needsFreshOverwritePrompt could never fire on it anyway (it requires blocks to be
+    // non-empty, and this tab has none). Going through plain upTab makes that guarantee visible at
+    // the call site instead of relying on a downstream check to happen to agree: pendingNoteOverwrite
+    // is untouched by this function, full stop. The previous file is never read, moved, or written —
+    // it simply stops being this tab's export target, exactly as if the user had never opened it.
+    // And since autoExportAnnotations' own `blocks.isEmpty()` guard short-circuits before any file
+    // I/O, the newly pinned name touches disk only once the user adds their first real note — a
+    // click on this button alone creates nothing.
+    fun newAnalysis(tabId: String) {
+        val t = tab(tabId) ?: return
+        val targetDir = activeNotesDir()
+        val newName = nextFreeNoteTargetName(analysisNoteMarkdownName(t.filename, t.sourcePath), MAX_NOTE_TARGET_SUFFIX) { name ->
+            File(targetDir, name).exists() || File(targetDir, "${name.removeSuffix(".md")}.ann").exists()
+        }
+        upTab(tabId) { it.copy(annotations = Annotations(), noteTargetName = newName, recoveredNoteRows = emptyMap()) }
     }
 
     private fun userNotesDir(): File? {
@@ -6590,29 +6694,122 @@ class AppState(
         ).distinct()
     }
 
+    // Every FILE NAME resolveNoteTarget's collision walk could have assigned this (filename,
+    // sourcePath) pair — the plain "<base>_analysis.md" (or its archive-qualified twin, see
+    // noteNamesForFilename) that the first tab to export here got, plus every "_2".."_<MAX_NOTE_
+    // TARGET_SUFFIX-1>" slot a later, different-fingerprint tab would have been pushed into by that
+    // SAME walk (see resolveNoteTarget). Before this fix, only the plain name was ever looked for —
+    // which is exactly why a note saved via "Save to a new file" (any "_2".."_11" slot) became
+    // permanently unreachable from the UI: nothing ever looked past the first candidate again.
+    // Reuses resolveNoteTarget's own suffix convention rather than inventing a second one.
+    private fun noteFileCandidateNames(filename: String, sourcePath: String? = null): List<String> =
+        noteNamesForFilename(filename, sourcePath).flatMap { base ->
+            val stem = base.removeSuffix(".md")
+            listOf(base) + (2 until MAX_NOTE_TARGET_SUFFIX).map { suffix -> "${stem}_$suffix.md" }
+        }.distinct()
+
+    // The [noteFileCandidateNames] set, materialized as actual Files across every directory notes
+    // get saved to or read from. Only for call sites that need to actually enumerate candidate FILES
+    // on disk — the once-per-tab-open auto-load step (autoLoadOwnNotesIfAny) and the recentNotes
+    // pre-warm (rememberAutoExportedNoteFor) below. recentNotesForTab is called far more often
+    // (every AnnotationPanel recomposition, not just on open — see its own comment) and matches by
+    // regex predicate against the already-small recentNotes list instead, precisely to avoid paying
+    // to materialize ~2000 candidate strings on every recomposition.
+    private fun noteFileCandidateFiles(filename: String, sourcePath: String? = null): List<File> {
+        val names = noteFileCandidateNames(filename, sourcePath)
+        return noteLookupDirs().flatMap { dir -> names.map { name -> File(dir, name) } }
+    }
+
     // Two tabs can share a bare filename while being entirely different files (different
     // folders, or one from inside a zip) — matching by name alone would surface one file's notes
-    // as a "recent note" suggestion for the other. Excludes only on POSITIVE evidence of a
-    // mismatch (both a recorded fingerprint and a known sourcePath for this tab, and they
-    // differ); a note saved before this fingerprinting existed (no .src sidecar) or a tab with no
-    // sourcePath (e.g. a merged tab) still matches by name as before — see resolveNoteTarget.
+    // as a "recent note" suggestion for the other. Requires POSITIVE evidence the note belongs to
+    // THIS tab whenever there's something to compare against — see the sourcePath-null exception
+    // below for the one case that still falls back to name-only matching.
+    //
+    // Name matching is widened to the full noteFileCandidateNames set (base name AND every "_N"
+    // collision-walk slot), not just the bare "<base>_analysis.md" — see that function's comment for
+    // why the narrower match made suffixed notes unreachable. The fingerprint filter below is
+    // UNCHANGED by that widening: it's still what stops one folder's "_N" note from leaking into a
+    // different same-named tab's menu just because more names now match syntactically.
+    //
+    // The two "no fingerprint to compare" cases are NOT symmetric, and conflating them is exactly
+    // the bug this rewrite fixes:
+    //   - tab.sourcePath == null (a merged tab, a split part, a notes-only Case Library open) is a
+    //     TAB-side unknown: there is nothing to compare a fingerprint against no matter how good our
+    //     read of the note file is, so falling back to name-only matching is the only way these tabs
+    //     keep a working Open Note dropdown at all — hiding everything here would silently break a
+    //     working feature for a whole class of tabs, not make it safer.
+    //   - A NOTE-side SourceFingerprint.NotRecorded/Unreadable, by contrast, means we have a real
+    //     sourcePath to check against but the note itself didn't give us a positive answer (nothing
+    //     was ever recorded, or a recorded value exists but couldn't be read/parsed — see
+    //     SourceFingerprint's own doc comment for why those two must never collapse into each
+    //     other). The user explicitly chose to hide these entirely rather than show them as
+    //     "unverified": only a fingerprint that POSITIVELY matches tab.sourcePath is enough to list
+    //     the note as belonging to this tab.
     fun recentNotesForTab(tab: LogTab): List<String> {
-        val relatedNames = noteNamesForFilename(tab.filename, tab.sourcePath).toSet()
+        val namePatterns = noteNamesForFilename(tab.filename, tab.sourcePath).map { base ->
+            Regex("^${Regex.escape(base.removeSuffix(".md"))}(_\\d+)?\\.md$")
+        }
+        val sourcePath = tab.sourcePath
         return recentNotes.filter { path ->
             val f = File(path)
-            if (f.name !in relatedNames) return@filter false
-            val recorded = readSourceFingerprint(f)
-            recorded == null || tab.sourcePath == null || recorded == tab.sourcePath
+            if (namePatterns.none { it.matches(f.name) }) return@filter false
+            if (sourcePath == null) return@filter true
+            (readSourceFingerprint(f) as? SourceFingerprint.Recorded)?.path == sourcePath
         }
     }
 
-    private fun rememberAutoExportedNoteFor(filename: String) {
-        val noteNames = noteNamesForFilename(filename)
-        val noteFile = noteLookupDirs()
-            .asSequence()
-            .flatMap { dir -> noteNames.asSequence().map { name -> File(dir, name) } }
-            .firstOrNull { it.exists() } ?: return
-        if (noteFile.exists()) rememberRecentNote(noteFile)
+    // The Open Note popup (RecentNotesPopup) needs to mark which of its entries IS the note
+    // currently open in this tab. tab.noteTargetName is only a bare filename ("logcat_analysis.md"),
+    // while every popup entry is a full absolute path — and a bare-name comparison alone is NOT
+    // enough to disambiguate: noteLookupDirs() spans up to three directories (the configured save
+    // dir, the sandboxed/default notesDir, and the legacy notes dir), so two different, unrelated
+    // notes named "logcat_analysis.md" in two different lookup dirs can both be sitting in the
+    // recentNotes list at once, and a name-only check would checkmark both. Resolving THIS tab's pin
+    // against activeNotesDir() — the exact same directory autoExportAnnotations/resolveNoteTarget
+    // treat as the write target for this tab — and comparing the full absolute path is what makes
+    // the mark unambiguous: at most one entry in noteLookupDirs() can ever be "the" file this tab is
+    // pinned to, by construction. Returns null (nothing to mark) when the tab has no pin yet — a
+    // fresh, never-saved analysis has no on-disk file to point at.
+    fun activeNoteFilePath(tab: LogTab): String? =
+        tab.noteTargetName?.let { File(activeNotesDir(), it).absolutePath }
+
+    // Speculative pre-warm of the app-wide recentNotes cache, run at each open-a-file call site
+    // before a LogTab even exists yet (those call sites only have `file`/`path` in hand) — the note
+    // file(s) may already be sitting on disk from an earlier session's export, and recentNotesForTab
+    // (which does the real, per-tab-fingerprint-checked filtering for display) can only ever surface
+    // a path that's already IN this list, not discover one fresh. Used to remember only the first
+    // existing UNSUFFIXED name; that's exactly why a note saved via "Save to a new file" never made
+    // it into the Open Note menu even after recentNotesForTab's own matching was widened above — the
+    // path was simply never in recentNotes to begin with. Now registers every noteFileCandidateNames
+    // match that both exists AND passes an ownership check here (no recorded fingerprint yet, or
+    // one that matches THIS sourcePath) — so widening what gets remembered can't leak a different
+    // file's "_N" note into this cache either.
+    // `sourcePath` defaults to null only because it costs nothing extra to keep that shape for any
+    // future caller that genuinely doesn't have one yet; every current call site does, and omitting
+    // it would make the fingerprint check vacuously true (every candidate "passes").
+    //
+    // NOT the same predicate as recentNotesForTab's any more: this only pre-warms a cache that
+    // recentNotesForTab re-filters (with its own fresh read, and its own stricter positive-match
+    // rule) at display time, so being lax here about SourceFingerprint.NotRecorded can't leak a
+    // wrong note onto screen — recentNotesForTab's own gate still stands between this cache and the
+    // dropdown. SourceFingerprint.Unreadable is excluded, though: we cannot prove it does NOT belong
+    // to a different sourcePath, and there is no display-time re-check strict enough to catch that
+    // for a sourcePath-null tab (recentNotesForTab falls back to name-only matching there — see its
+    // own comment) — so treat it the same way resolveNoteTarget does, as a possible conflict rather
+    // than a free pass.
+    private fun rememberAutoExportedNoteFor(filename: String, sourcePath: String? = null) {
+        noteFileCandidateFiles(filename, sourcePath)
+            .filter { it.exists() }
+            .filter { candidate ->
+                if (sourcePath == null) return@filter true
+                when (val fp = readSourceFingerprint(candidate)) {
+                    SourceFingerprint.NotRecorded -> true
+                    is SourceFingerprint.Recorded -> fp.path == sourcePath
+                    SourceFingerprint.Unreadable -> false
+                }
+            }
+            .forEach { rememberRecentNote(it) }
     }
 
     private fun rememberRecentNote(file: File) {
@@ -6641,16 +6838,33 @@ class AppState(
         recentNotesMenuOpen = !recentNotesMenuOpen
     }
 
-    // The overwrite gate below MUST run synchronously, before the ioScope.launch that does the
-    // actual write — not inside it. upAnn fires on every keystroke (updateBlock et al.), and
-    // ioScope is Dispatchers.IO (multi-threaded): a gate placed inside the launch would let
-    // overlapping coroutines race to prompt/write, and a lock would only mask that instead of
-    // removing it. Gating here, on the caller's already-serialized thread, means at most one
-    // decision is ever in flight per tab with no coordination needed.
+    // The overwrite gate MUST run synchronously, before the ioScope.launch that does the actual
+    // write — not inside it. upAnn fires on every keystroke (updateBlock et al.), and ioScope is
+    // Dispatchers.IO (multi-threaded): a gate placed inside the launch would let overlapping
+    // coroutines race to prompt/write, and a lock would only mask that instead of removing it.
+    // Gating here, on the caller's already-serialized thread, means at most one decision is ever in
+    // flight per tab with no coordination needed.
+    //
+    // As of the fix for the "note is added the instant the overwrite prompt appears" bug, the REAL
+    // gate lives one level up, in upAnn: it decides — synchronously, before committing anything to
+    // `tabs` — whether applying a mutation would create a brand-new conflict, and if so stashes the
+    // mutated tab on pendingNoteOverwrite instead of ever calling this function. So by the time
+    // autoExportAnnotations runs, `tab` has already been committed to `tabs` and is known-safe to
+    // export: either it's pinned (noteTargetName != null, so resolveNoteTarget can't disagree with
+    // what's already on disk under this session's ownership), or upAnn's own
+    // needsFreshOverwritePrompt check just found no collision moments ago, on this same thread. The
+    // pendingNoteOverwrite/exists() checks below are consequently a defensive backstop for a
+    // same-thread TOCTOU (something else creating the file in the instant between that check and
+    // this one) — not the load-bearing gate any more, and by construction they should never fire on
+    // the intended path. Kept anyway: cheap insurance beats a silent overwrite, and removing them
+    // would be trading a belt for a suspender rather than any real behavior duplication.
     private fun autoExportAnnotations(tab: LogTab) {
         if (!autoExportNotes || !settings.autoExportNotes || tab.annotations.blocks.isEmpty()) return
         // A prompt is already up (for this tab or another) — write nothing until it's resolved,
-        // rather than silently proceeding or silently dropping the edit.
+        // rather than silently proceeding or silently dropping the edit. For THIS tab, upAnn never
+        // reaches here while a prompt is pending (it folds into pendingNoteOverwrite.pendingTab
+        // instead — see upAnn), so in practice this only ever guards against some OTHER tab's
+        // prompt being up.
         if (pendingNoteOverwrite != null) return
         val targetDir = activeNotesDir()
         val mdFile = resolveNoteTarget(targetDir, tab)
@@ -6666,7 +6880,13 @@ class AppState(
         // decision that skips this check is an explicit one recorded on the tab itself.
         if (tab.noteTargetName == null) {
             if (mdFile.exists()) {
-                pendingNoteOverwrite = PendingNoteOverwrite(tab.id, mdFile.absolutePath, mdFile.name)
+                // Should not happen on the intended path (see this function's block comment) — if
+                // it does, `tab` is unfortunately already committed to `tabs` with the new blocks by
+                // this point, so unlike upAnn's own gate this can only stop the write, not un-commit
+                // the edit. pendingTab = tab is still correct (not stale): tab IS the committed
+                // state, so there is nothing further to "land" once the prompt resolves beyond what
+                // confirmNoteOverwrite et al. already do with any pendingTab.
+                pendingNoteOverwrite = PendingNoteOverwrite(tab.id, mdFile.absolutePath, mdFile.name, pendingTab = tab)
                 return
             }
             // No conflict — mdFile is guaranteed not to exist here (the branch above already
@@ -6711,21 +6931,78 @@ class AppState(
     // disambiguating correctly.
     private fun legacySourceFingerprintFile(mdFile: File): File = File(mdFile.parent, "${mdFile.name}.src")
 
-    private fun readSourceFingerprint(mdFile: File): String? {
+    // Three-state read result for a note's recorded owner. Collapsing this to a plain String?
+    // (as it used to be) makes "no owner was ever recorded" and "an owner IS recorded but we
+    // failed to read/parse it" indistinguishable at every call site — and that collision is a
+    // real hazard, not a theoretical one: macOS TCC lets exists()/length() succeed on a
+    // sandboxed file (e.g. under ~/Downloads before the app has been granted access) while
+    // readText() throws. A caller that reads that throw as "nothing recorded" will treat a
+    // DIFFERENT bug report's saved analysis as fair game to reuse or silently list as this tab's
+    // own. [Unreadable] exists so every call site is forced to make that "can't prove either way"
+    // case its own decision instead of it silently defaulting to the permissive one.
+    private sealed interface SourceFingerprint {
+        /** A fingerprint was read and parsed successfully and is non-blank. */
+        data class Recorded(val path: String) : SourceFingerprint
+
+        /** Neither source exists, or a source exists but is readable-and-empty (no index-4
+         *  field, or a blank one, or a blank legacy sidecar). A genuine, positive "nothing was
+         *  ever recorded here" — the state a brand-new, never-saved note is in. MUST stay
+         *  permissive wherever it's checked: resolveNoteTarget reusing the plain "<base>.md" name
+         *  on a tab's very first save depends on a fresh candidate's fingerprint reading as this,
+         *  not as a conflict. */
+        data object NotRecorded : SourceFingerprint
+
+        /** A source exists but threw on read, or failed to parse (see the malformed-field
+         *  handling below). MUST NOT be treated as [NotRecorded] anywhere: we cannot prove this
+         *  candidate isn't a different log's note, so every caller must treat it the same way it
+         *  would treat a fingerprint recording a DIFFERENT sourcePath — skip it, hide it, never
+         *  adopt it. */
+        data object Unreadable : SourceFingerprint
+    }
+
+    // Resolution order: try the .ann's embedded index-4 field first; only fall through to the
+    // legacy .src sidecar (pre-dating that field) if the .ann yielded nothing positive. A
+    // positive result ([Recorded]) from EITHER source wins outright — an unreadable .ann next to
+    // a perfectly readable, valid .src is still [Recorded], because the .src's answer is exactly
+    // as trustworthy on its own as it always was; the .ann merely gets first refusal. Only when
+    // BOTH sources come back empty do the individual outcomes matter: if either one THREW (as
+    // opposed to reading fine and simply having nothing in it), the overall answer must be
+    // [Unreadable], not [NotRecorded] — we did not positively learn "nothing was ever recorded,"
+    // we merely failed to find out.
+    private fun readSourceFingerprint(mdFile: File): SourceFingerprint {
         val annFile = File(mdFile.parent, "${mdFile.nameWithoutExtension}.ann")
-        val fromAnn = annFile.takeIf { it.exists() }
-            ?.let { file ->
-                runCatching {
-                    file.readText()
-                        .tokenFields()
-                        .getOrNull(4)
-                        ?.takeIf { it.isNotBlank() }
-                }.getOrNull()
+        var annUnreadable = false
+        val fromAnn = if (annFile.exists()) {
+            // tokenFieldAt(4), NOT tokenFields()[4]: the latter decodes every sibling field too, so
+            // a corrupt prefix/suffix/blocks field would throw here and downgrade this note to
+            // [Unreadable] — hiding a note whose fingerprint is perfectly intact and matches this
+            // very tab. Only corruption of the fingerprint field itself may cost us the answer.
+            runCatching {
+                annFile.readText().tokenFieldAt(4)
+            }.getOrElse {
+                annUnreadable = true
+                null
             }
-        if (fromAnn != null) return fromAnn
-        return legacySourceFingerprintFile(mdFile).takeIf { it.exists() }
-            ?.let { runCatching { it.readText().trim() }.getOrNull() }
-            ?.takeIf { it.isNotBlank() }
+        } else {
+            null
+        }
+        if (fromAnn != null) return SourceFingerprint.Recorded(fromAnn)
+
+        val srcFile = legacySourceFingerprintFile(mdFile)
+        var srcUnreadable = false
+        val fromSrc = if (srcFile.exists()) {
+            runCatching { srcFile.readText().trim() }
+                .getOrElse {
+                    srcUnreadable = true
+                    null
+                }
+                ?.takeIf { it.isNotBlank() }
+        } else {
+            null
+        }
+        if (fromSrc != null) return SourceFingerprint.Recorded(fromSrc)
+
+        return if (annUnreadable || srcUnreadable) SourceFingerprint.Unreadable else SourceFingerprint.NotRecorded
     }
 
     // Picks the .md target for this tab's auto-exported note in targetDir. A recorded
@@ -6739,6 +7016,12 @@ class AppState(
     // to compare); otherwise walks "_2", "_3", ... until it finds a slot with no conflicting
     // fingerprint, so a genuine collision no longer silently overwrites an unrelated file's saved
     // notes.
+    //
+    // SourceFingerprint.Unreadable is deliberately handled the SAME as a recorded-but-different
+    // fingerprint here (skip the slot, keep walking) — NOT the same as NotRecorded. We can't prove
+    // an unreadable candidate is ours, and the whole point of this walk is to never silently
+    // overwrite a file we can't prove we own; treating "couldn't tell" as "clear to reuse" would
+    // reopen exactly the silent-clobber hazard the fingerprint exists to close.
     private fun resolveNoteTarget(targetDir: File, tab: LogTab): File {
         tab.noteTargetName?.let { return File(targetDir, it) }
         val baseName = analysisNoteMarkdownName(tab.filename, tab.sourcePath)
@@ -6748,8 +7031,12 @@ class AppState(
         var suffix = 2
         while (suffix < MAX_NOTE_TARGET_SUFFIX) {
             val candidate = File(targetDir, candidateName)
-            val recorded = readSourceFingerprint(candidate)
-            if (recorded == null || recorded == sourcePath) return candidate
+            val ownedByThisTabOrFree = when (val recorded = readSourceFingerprint(candidate)) {
+                is SourceFingerprint.NotRecorded -> true
+                is SourceFingerprint.Recorded -> recorded.path == sourcePath
+                SourceFingerprint.Unreadable -> false
+            }
+            if (ownedByThisTabOrFree) return candidate
             candidateName = "${baseName.removeSuffix(".md")}_$suffix.md"
             suffix++
         }
@@ -6757,30 +7044,40 @@ class AppState(
     }
 
     // The three choices on the "note file already exists" prompt (see PendingNoteOverwrite /
-    // autoExportAnnotations). Dismissing the dialog without picking one of these three must leave
-    // pendingNoteOverwrite unset instead — App.kt's Dialog(onDismissRequest = ::cancelNoteOverwrite).
+    // upAnn). Dismissing the dialog without picking one of these three must leave
+    // pendingNoteOverwrite unset instead — App.kt's Dialog(onDismissRequest = ::cancelNoteOverwrite)
+    // — which, per cancelNoteOverwrite's own doc comment below, now also means discarding the
+    // never-committed mutation that triggered the prompt, not merely re-arming the gate.
 
     /** "Overwrite": pin to the name that was about to be overwritten, then let the write proceed. */
     fun confirmNoteOverwrite() {
         val pending = pendingNoteOverwrite ?: return
         pendingNoteOverwrite = null
-        // Setting the pin inside the SAME upAnn call (not after) matters exactly like it does for
-        // loadAnnotationsFrom: upAnn re-resolves and auto-exports immediately, and resolveNoteTarget
-        // checks the pin first, so this one call both records the decision and performs the write
-        // the gate had held back — no separate unpinned export sneaks out first.
-        upAnn(pending.tabId) { it.copy(noteTargetName = pending.targetName) }
+        // Commits pending.pendingTab, NOT tab(pending.tabId) — the edit that triggered this prompt
+        // was never applied to the live tab (see upAnn/PendingNoteOverwrite), so the live tab is
+        // still whatever it looked like BEFORE that edit. pendingTab already carries it, plus any
+        // further edits folded in while the prompt was open. Setting the pin inside the SAME upAnn
+        // call (not after) matters exactly like it does for loadAnnotationsFrom: upAnn re-resolves
+        // and auto-exports immediately, and resolveNoteTarget checks the pin first, so this one call
+        // both records the decision, lands the stashed edit(s), and performs the write the gate had
+        // held back — no separate unpinned export sneaks out first.
+        upAnn(pending.tabId) { pending.pendingTab.copy(noteTargetName = pending.targetName) }
     }
 
     /** "Open existing notes": load the file the tab was about to overwrite instead, discarding the unsaved edit that triggered the prompt. */
     fun openExistingNoteInsteadOfOverwrite() {
         val pending = pendingNoteOverwrite ?: return
         pendingNoteOverwrite = null
-        // The edit that TRIGGERED this prompt is still only in memory, and openNoteFile replaces
-        // the whole block list. Capture it first and re-append after loading, so choosing "open
-        // existing" merges (earlier analysis, then the note just written) instead of silently
-        // throwing away the very thing the user was in the middle of adding — losing typed work to
-        // a dialog that never warned about it is not a choice this prompt is offering.
-        val unsavedBlocks = tab(pending.tabId)?.annotations?.blocks.orEmpty()
+        // The edit(s) that TRIGGERED this prompt live only in pending.pendingTab — never committed,
+        // see upAnn/PendingNoteOverwrite — and openNoteFile replaces the live tab's whole block list
+        // from disk. Diff pendingTab against the tab as it stands RIGHT NOW (before the load) to
+        // recover exactly the blocks the prompt-triggering edit(s) added, then re-append them after
+        // loading, so choosing "open existing" merges (earlier analysis, then the note(s) just
+        // added) instead of silently throwing away the very thing the user was in the middle of
+        // adding — losing typed work to a dialog that never warned about it is not a choice this
+        // prompt is offering.
+        val beforeIds = tab(pending.tabId)?.annotations?.blocks?.map { it.id }?.toSet().orEmpty()
+        val unsavedBlocks = pending.pendingTab.annotations.blocks.filterNot { it.id in beforeIds }
         openNoteFile(pending.tabId, File(pending.targetPath))
         if (unsavedBlocks.isEmpty()) return
         upAnn(pending.tabId) { t ->
@@ -6802,20 +7099,125 @@ class AppState(
         val newName = nextFreeNoteTargetName(pending.targetName, MAX_NOTE_TARGET_SUFFIX) { name ->
             File(targetDir, name).exists() || File(targetDir, "${name.removeSuffix(".md")}.ann").exists()
         }
-        upAnn(pending.tabId) { it.copy(noteTargetName = newName) }
+        // Same reasoning as confirmNoteOverwrite: commit pending.pendingTab, the snapshot that
+        // actually carries the edit(s) this prompt held back, not the still-unedited live tab.
+        upAnn(pending.tabId) { pending.pendingTab.copy(noteTargetName = newName) }
     }
 
-    /** Dialog dismissed/cancelled: leave the decision unset so the very next edit re-prompts. */
+    /** Dialog dismissed/cancelled: discard the never-committed mutation that triggered this prompt
+     *  (pendingNoteOverwrite.pendingTab is simply dropped — it was never in `tabs` to begin with),
+     *  and leave the decision unset so the very next edit re-prompts fresh. This used to be a
+     *  narrower guarantee — the edit itself had already landed in tab.annotations.blocks, silently
+     *  unsaved and unexported — so "must NOT be a permanent silent no-save state" meant only that
+     *  auto-export would eventually catch up. Now cancel is the literal thing it sounds like: the
+     *  edit that triggered the prompt never happened, full stop, and the next edit starts clean.
+     *
+     *  Accepted limitation, deliberately not fixed here: a pending edit lives only on
+     *  pendingNoteOverwrite, which is plain in-memory AppState fields, not part of `tabs` — so it
+     *  isn't covered by autosave's periodic snapshot either. Quitting the app (or crashing) while
+     *  the prompt is open discards the pending edit exactly like an explicit Cancel would, silently.
+     *  Consistent with "cancel discards" above, and the prompt itself is meant to be answered
+     *  immediately (it blocks nothing else in the UI), so the exposure window is small — persisting
+     *  a not-yet-decided, not-yet-owned mutation across restarts would need its own storage format
+     *  decision this fix doesn't need to make. */
     fun cancelNoteOverwrite() {
         pendingNoteOverwrite = null
+    }
+
+    // The two halves of upAnn's overwrite gate, split out so upAnn itself stays readable and so
+    // autoExportAnnotations' defensive re-check can describe itself as "the same check upAnn
+    // already ran" without inlining the logic twice.
+
+    /** True exactly when applying a mutation would be the FIRST edit on this tab to collide with an
+     *  existing, un-owned export target — the case that needs a human decision before anything
+     *  commits. Mirrors autoExportAnnotations' own exists()-check line for line, but against a tab
+     *  that hasn't been (and, if this returns true, will not be) written into `tabs` yet. */
+    private fun needsFreshOverwritePrompt(next: LogTab): Boolean {
+        if (!autoExportNotes || !settings.autoExportNotes || next.annotations.blocks.isEmpty()) return false
+        if (next.noteTargetName != null) return false
+        return resolveNoteTarget(activeNotesDir(), next).exists()
+    }
+
+    /** Builds the stashed-mutation record upAnn publishes instead of committing [next] — resolves
+     *  the same target file autoExportAnnotations would otherwise have exported to, and carries the
+     *  fully-mutated tab itself so the three resolution functions above have the actual edit to
+     *  commit once the user decides, not just whatever's still sitting in `tabs`. */
+    private fun buildPendingNoteOverwrite(tabId: String, next: LogTab): PendingNoteOverwrite {
+        val mdFile = resolveNoteTarget(activeNotesDir(), next)
+        return PendingNoteOverwrite(tabId, mdFile.absolutePath, mdFile.name, pendingTab = next)
     }
 
     // Annotation-aware tab updater — auto-exports after any annotation change. internal, not
     // private: AnnotationManager (Task 12 slice 5) routes its block mutations through this too,
     // so auto-export keeps firing regardless of which class made the edit.
+    //
+    // This is also the overwrite-conflict gate for the MUTATION itself, not only for the export —
+    // see PendingNoteOverwrite's doc comment. This is the fix for the reported bug where the new
+    // note visibly appeared in the Notes panel (and so, reasonably, looked already-saved) the
+    // instant the "Existing notes found" prompt rendered, before the user had picked an option.
+    // Three cases, checked in order:
+    //  1. A prompt is ALREADY up for THIS tab: `fn` is applied to the still-pending snapshot
+    //     (pendingForThisTab.pendingTab), not the stale committed tab, and the result replaces it.
+    //     This is what makes a second keystroke, or a second MCP call, arriving before the modal is
+    //     dismissed safe — it folds into the pending edit instead of being lost or applied against
+    //     out-of-date state.
+    //  2. No prompt is up anywhere, and applying `fn` would create a BRAND NEW conflict
+    //     (needsFreshOverwritePrompt): the mutated tab is stashed on pendingNoteOverwrite and
+    //     deliberately NOT committed to `tabs` — the note doesn't exist anywhere the user, the
+    //     export writer, or an MCP reader can observe it until the prompt is resolved.
+    //  3. Anything else — a DIFFERENT tab's prompt is up, this tab is already pinned
+    //     (noteTargetName != null), or there's no conflict at all — commits immediately and
+    //     auto-exports, exactly as every mutation did before this change.
+    //
+    // Accepted limitation, deliberately not fixed here: case 3 also covers a SECOND tab hitting a
+    // brand-new, first-time conflict while some OTHER tab's prompt is already open — that mutation
+    // still commits immediately (needsFreshOverwritePrompt is only consulted when
+    // pendingNoteOverwrite == null), though its export stays held back by autoExportAnnotations'
+    // own `pendingNoteOverwrite != null` guard until the first prompt resolves. Properly gating a
+    // second, independent conflict needs per-tab pending state and a non-singleton modal — real
+    // work, for a genuinely rare interleaving (two different tabs each hitting a FIRST-time
+    // conflict in the same narrow window), so it's left as a known gap rather than in scope here.
+    //
+    // The read (current), the decision (which of the three cases above applies), and the write
+    // (upTab / pendingNoteOverwrite = ...) are one synchronized(stateLock) block — not read-then-
+    // lock-then-blind-write. upTab (see its own comment above) exists precisely because a tabs
+    // read-modify-write split across two unsynchronized steps loses updates under concurrency: a UI
+    // keystroke and an MCP add_note arriving on a Ktor thread can both read the same `current`, and
+    // whichever writes last would otherwise silently discard the other's note. `fn` is applied
+    // exactly once per call, inside the lock, because callers such as confirmAddAnn mint new block
+    // ids inside their `fn` lambda — applying it twice (e.g. once to decide, once to commit) would
+    // produce two different ids for what should be one block. synchronized(stateLock) is inline
+    // (kotlin.synchronized), so the non-local `return` on a missing tab, and upTab's own nested
+    // synchronized(stateLock) call inside the `else` branch, both work exactly as they read: the
+    // monitor is reentrant, and `return` exits upAnn itself, not just the lambda. Note this does put
+    // needsFreshOverwritePrompt's File.exists() probe under the lock — accepted deliberately: it
+    // only runs on the *unpinned* first-conflict path (at most once per tab per session, before a
+    // decision pins noteTargetName), the same stat call already happened synchronously on the
+    // caller's thread before this fix, and a compare-and-swap scheme to keep I/O off the lock is
+    // more machinery than this rare path justifies. autoExportAnnotations itself stays OUTSIDE the
+    // lock — it only launches work on ioScope, so holding stateLock across it would serialize
+    // unrelated tabs' exports for no benefit.
     internal fun upAnn(tabId: String, fn: (LogTab) -> LogTab) {
-        upTab(tabId, fn)
-        tab(tabId)?.let { autoExportAnnotations(it) }
+        val committed = synchronized(stateLock) {
+            val pendingForThisTab = pendingNoteOverwrite?.takeIf { it.tabId == tabId }
+            val current = pendingForThisTab?.pendingTab ?: tab(tabId) ?: return
+            val next = fn(current)
+            when {
+                pendingForThisTab != null -> {
+                    pendingNoteOverwrite = pendingForThisTab.copy(pendingTab = next)
+                    null
+                }
+                pendingNoteOverwrite == null && needsFreshOverwritePrompt(next) -> {
+                    pendingNoteOverwrite = buildPendingNoteOverwrite(tabId, next)
+                    null
+                }
+                else -> {
+                    upTab(tabId) { next }
+                    tab(tabId)
+                }
+            }
+        }
+        committed?.let { autoExportAnnotations(it) }
     }
 
     fun pickSaveFolder() {

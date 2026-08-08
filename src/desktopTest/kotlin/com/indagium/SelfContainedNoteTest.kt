@@ -7,6 +7,7 @@ import com.indagium.ui.AppState
 import com.indagium.ui.annotationsFromToken
 import com.indagium.ui.mkTab
 import java.io.File
+import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -30,7 +31,17 @@ class SelfContainedNoteTest {
     }
 
     private fun newState(): AppState {
-        val state = AppState(autosaveFile = File.createTempFile("openlog-self-contained-note-test", ".cache"))
+        // notesDir isolated from AppState()'s default (shared across this whole gradle test run —
+        // see build.gradle.kts' testHomeDir sandboxing comment): upAnn's overwrite gate now defers
+        // a mutation instead of committing it whenever its export target already exists on disk
+        // (see AppState.upAnn/PendingNoteOverwrite), so another test elsewhere in the suite that
+        // already exported this same tab's default "sample_analysis.md" into the shared sandbox
+        // notes dir would make confirmAddAnn below non-deterministically defer instead of commit —
+        // this file is about sourceEntries materialization, not the overwrite prompt.
+        val state = AppState(
+            autosaveFile = File.createTempFile("openlog-self-contained-note-test", ".cache"),
+            notesDir = createTempDirectory("openlog-self-contained-notes-dir").toFile(),
+        )
         openState = state
         return state
     }

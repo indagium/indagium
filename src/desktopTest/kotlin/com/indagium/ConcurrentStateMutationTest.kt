@@ -1,7 +1,11 @@
 package com.indagium
 
 import com.indagium.debug.ControlServer
+import com.indagium.model.AnnBlock
+import com.indagium.model.LogEntry
+import com.indagium.model.LogLevel
 import com.indagium.ui.AppState
+import com.indagium.ui.mkTab
 import java.io.File
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
@@ -15,6 +19,7 @@ import kotlin.test.assertTrue
 private const val AWAIT_SECONDS = 10L
 private const val OPEN_THREAD_COUNT = 12
 private const val MERGE_THREAD_COUNT = 8
+private const val ANNOTATE_THREAD_COUNT = 24
 
 // A-01: AppState's tabs list is mutated from at least four independent thread contexts in
 // production (the Compose/AWT UI thread, the single-instance accept thread, ControlServer's Ktor
@@ -182,5 +187,32 @@ class ConcurrentStateMutationTest {
         state.setMcpControlEnabled(false, state.settings.mcpControlPort)
         Thread.sleep(400)
         assertNull(state.controlServerToken(), "a final disable must leave no server bound regardless of prior concurrent toggling")
+    }
+
+    // §1 of the note-overwrite-prompt fix: upAnn's read-check-write used to be split across an
+    // unsynchronized read/modify and a synchronized-but-blind write (`upTab(tabId) { next }`,
+    // discarding the in-lock value) — a lost-update window matching exactly the bug upTab's own
+    // comment records. In production this is a UI keystroke racing an MCP add_note call on a Ktor
+    // thread; here, N real threads hit addNoteBlock on one tab at the same released instant. Every
+    // one of them must land — none silently dropped by a later write clobbering an earlier one.
+    @Test
+    fun concurrentAddNoteBlockCallsFromMultipleThreadsOnOneTabNeverLoseAnEdit() {
+        val dir = createTempDirectory("openlog-concurrent-annotate").toFile()
+        val notesDir = File(dir, "notes")
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        val sourcePath = File(dir, "sample.log").absolutePath
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = sourcePath),
+        )
+
+        runConcurrently(ANNOTATE_THREAD_COUNT) { i ->
+            state.addNoteBlock("log", "note from thread $i")
+        }
+
+        val blocks = state.tab("log")?.annotations?.blocks.orEmpty()
+        assertEquals(ANNOTATE_THREAD_COUNT, blocks.size, "every concurrent addNoteBlock call must land — none may be silently overwritten")
+        val texts = blocks.filterIsInstance<AnnBlock.Note>().map { it.text }.toSet()
+        assertEquals((0 until ANNOTATE_THREAD_COUNT).map { "note from thread $it" }.toSet(), texts)
     }
 }

@@ -292,6 +292,19 @@ private fun tokenFields(vararg values: String): String = values.joinToString("|"
 
 internal fun String.tokenFields(): List<String> = split("|", limit = Int.MAX_VALUE).map { it.fieldValue() }
 
+// Decodes ONE positional field without touching its siblings. tokenFields() above decodes every
+// field eagerly, so a single corrupt field there poisons the whole read — which matters for
+// AppState.readSourceFingerprint: it only ever wants index 4 (the sourcePath fingerprint), and
+// under the three-state SourceFingerprint contract a failed read means "cannot prove ownership"
+// (Unreadable), which hides the note and makes resolveNoteTarget skip its slot. Going through
+// tokenFields() there would let a corrupt PREFIX — a field the fingerprint has nothing to do with —
+// hide a note that demonstrably does belong to this log. Isolating the decode keeps that blast
+// radius to the one field actually being asked about. Returns null when the field is absent
+// (legacy shorter token) or blank; THROWS when that field itself is corrupt, so the caller can tell
+// "nothing recorded" apart from "recorded but unreadable" — the whole point of the split.
+internal fun String.tokenFieldAt(index: Int): String? =
+    split("|", limit = Int.MAX_VALUE).getOrNull(index)?.fieldValue()?.takeIf { it.isNotBlank() }
+
 // Some issue trackers (certain Jira instances) reject a comment containing the literal word
 // "java" outside a code block. Masks a configurable whole word (default "java") when copying a
 // note's Markdown — skips the {code:java}/{code} fence marker lines buildMd() emits for
@@ -331,9 +344,11 @@ internal fun analysisNoteMarkdownName(filename: String, sourcePath: String? = nu
 // then "<base>_2.md", "<base>_3.md", ... up to (exclusive) [maxSuffix]. Pure and filesystem-free
 // (the caller supplies [taken]) so it's directly unit-testable with a fake set of names, unlike
 // AppState.resolveNoteTarget's own fingerprint-aware collision walk this deliberately does NOT
-// replace — this one backs a single call site: AppState.saveNotesToNewNoteFile, the "Save to a new
-// file" choice on the note-overwrite prompt (see PendingNoteOverwrite), where the user has already
-// confirmed they want a fresh name rather than the fingerprint logic silently reusing an old one.
+// replace — this backs two call sites, both of which have already decided (by construction) that
+// they want a fresh name rather than the fingerprint logic silently reusing an old one:
+// AppState.saveNotesToNewNoteFile, the "Save to a new file" choice on the note-overwrite prompt
+// (see PendingNoteOverwrite), and AppState.newAnalysis, the "New Analysis" header action, which has
+// no pending prompt to answer but wants the exact same "first free _N slot" naming.
 internal fun nextFreeNoteTargetName(baseName: String, maxSuffix: Int, taken: (String) -> Boolean): String {
     if (!taken(baseName)) return baseName
     var candidateName = baseName

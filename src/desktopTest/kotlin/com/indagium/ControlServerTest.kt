@@ -39,8 +39,18 @@ class ControlServerTest {
     @BeforeTest
     fun setUp() {
         // Point autosave at a throwaway temp file — openFile() writes autosave synchronously,
-        // and tests must never touch the user's real ~/.openlog2/autosave.cache.
-        state = AppState(autosaveFile = File.createTempFile("openlog-control-server-test", ".cache"))
+        // and tests must never touch the user's real ~/.openlog2/autosave.cache. notesDir is
+        // isolated the same way and for a related reason: AppState()'s default notes dir is shared
+        // across this ENTIRE gradle test run (see build.gradle.kts' testHomeDir sandboxing comment),
+        // and upAnn's overwrite gate now defers a mutation instead of committing it whenever its
+        // export target already exists on disk (AppState.upAnn/PendingNoteOverwrite) — so another
+        // test elsewhere in the suite that already exported this class's default "test.log"/
+        // "sample.log" tab's note there would make the /annotations/* routes below
+        // non-deterministically defer instead of commit, purely from suite run order.
+        state = AppState(
+            autosaveFile = File.createTempFile("openlog-control-server-test", ".cache"),
+            notesDir = kotlin.io.path.createTempDirectory("openlog-control-server-notes").toFile(),
+        )
         server = ControlServer(state, 0) // port 0 → OS picks a free port
         server.start()
     }

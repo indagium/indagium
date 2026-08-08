@@ -425,7 +425,14 @@ class AppStateBehaviorTest {
 
     @Test
     fun addAnnotationStoresStructuredLogReference() {
-        val state = AppState()
+        // notesDir isolated (rather than bare AppState()'s default, real-app-data-dir-under-the-
+        // sandboxed-user.home): upAnn's overwrite gate now defers a mutation instead of committing
+        // it whenever its export target already exists on disk (see upAnn/PendingNoteOverwrite), so
+        // any OTHER test in this same suite run that already exported a "test_analysis.md" into the
+        // shared sandbox notes dir would make this one non-deterministically observe an empty
+        // blocks list instead of the LogRef it just added — this test is about confirmAddAnn's
+        // stored block shape, not about the overwrite prompt, so it must not share that directory.
+        val state = AppState(notesDir = createTempDirectory("openlog-annotation-notes").toFile())
         state.tabs = listOf(mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.E, "App", "Boom"))))
 
         state.confirmAddAnn("log", "log", listOf(1), "Investigate", null)
@@ -437,7 +444,9 @@ class AppStateBehaviorTest {
 
     @Test
     fun consecutiveLogRefAnnotationsGetDistinctIdsAndDoNotCrossContaminateReferencedLines() {
-        val state = AppState()
+        // See addAnnotationStoresStructuredLogReference's comment just above for why this can't use
+        // AppState()'s default (shared, sandbox) notes directory.
+        val state = AppState(notesDir = createTempDirectory("openlog-annotation-notes").toFile())
         state.tabs = listOf(
             mkTab(
                 "log", "test.log",
@@ -1491,7 +1500,12 @@ class AppStateBehaviorTest {
             writeText("06-26 10:00:00.000  123  456 I App: hello\n")
         }
         val cacheFile = File(dir, "state.cache")
-        val state = AppState(cacheFile)
+        // notesDir isolated — see addAnnotationStoresStructuredLogReference's comment. sourcePath is
+        // unique per test run here, but resolveNoteTarget still reuses a same-named PLAIN target
+        // when its recorded fingerprint is null (an earlier, differently-sourced test's export left
+        // in the shared sandbox dir counts as "no evidence of a different owner"), so confirmAddAnn
+        // below could still hit upAnn's overwrite gate without this.
+        val state = AppState(cacheFile, notesDir = File(dir, "notes"))
         val tab = mkTab("log", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
             .copy(sourcePath = logFile.absolutePath)
         state.tabs = listOf(tab)
@@ -2414,7 +2428,11 @@ class AppStateBehaviorTest {
     @Test
     fun openNoteFileRestoresAnnotationsFromAnnSidecarEvenWhenMdIsMissing() {
         val dir = createTempDirectory("openlog-ann-recovery").toFile()
-        val state = AppState(File(dir, "state.cache"))
+        // notesDir isolated — see addAnnotationStoresStructuredLogReference's comment. addNoteBlock
+        // below must commit synchronously for this test's "Body text" assertions to mean anything;
+        // sharing AppState()'s default sandbox notes dir risked upAnn's overwrite gate deferring it
+        // instead, based on nothing but another test's leftover "test_analysis.md".
+        val state = AppState(File(dir, "state.cache"), notesDir = File(dir, "notes"))
         state.tabs = listOf(mkTab("log", "test.log", emptyList()))
         state.activeTabId = "log"
         state.setPrefix("log", "Heading")
@@ -2427,7 +2445,7 @@ class AppStateBehaviorTest {
         assertTrue(!md.exists())
         assertTrue(ann.exists())
 
-        val restored = AppState(File(dir, "restored.cache"))
+        val restored = AppState(File(dir, "restored.cache"), notesDir = File(dir, "notes"))
         restored.tabs = listOf(mkTab("log", "test.log", emptyList()))
         restored.openNoteFile("log", ann)
 
@@ -2469,6 +2487,74 @@ class AppStateBehaviorTest {
         state.openNoteFile("log", md)
 
         assertEquals("sample_analysis_2.md", state.tab("log")?.noteTargetName)
+    }
+
+    // Regression for "chose another file → nothing changed": the fallback branch of openNoteFile
+    // (a .md with NO .ann sidecar) used to do `blocks + block`, silently merging the picked file's
+    // raw text into whatever was already open instead of switching to it. Asserts the exact
+    // resulting block list, not just a count — a count-only assertion (e.g. "still one block")
+    // would have missed the bug just as easily, since the reported symptom was extra content
+    // appearing alongside the old, not necessarily a growing count in every scenario.
+    @Test
+    fun openingASidecarlessMdFileReplacesRatherThanAppendsExistingBlocks() {
+        val dir = createTempDirectory("openlog-sidecarless-replace").toFile()
+        val state = AppState(File(dir, "state.cache"))
+        state.tabs = listOf(mkTab("log", "test.log", emptyList()))
+        state.activeTabId = "log"
+
+        val annB = File(dir, "b.ann").apply {
+            writeText(Annotations(blocks = listOf(AnnBlock.Note("b1", "NOTE FROM FILE B"))).annotationsToken())
+        }
+        state.openNoteFile("log", annB)
+        assertEquals(
+            listOf("NOTE FROM FILE B"),
+            state.tab("log")?.annotations?.blocks?.filterIsInstance<AnnBlock.Note>()?.map { it.text },
+        )
+
+        // C has no .ann sidecar at all — this is the fallback path under test, not the .ann branch
+        // exercised above.
+        val mdC = File(dir, "c.md").apply { writeText("## orphan md CCC") }
+        state.openNoteFile("log", mdC)
+
+        val blocksAfter = state.tab("log")?.annotations?.blocks.orEmpty()
+        assertEquals(
+            listOf(AnnBlock.Note(blocksAfter.single().id, "## orphan md CCC")),
+            blocksAfter,
+            "opening a sidecar-less note must REPLACE the block list with only its own content, never merge onto what was already open",
+        )
+        assertEquals("c.md", state.tab("log")?.noteTargetName)
+    }
+
+    // "Round-trip: open note A (with .ann) → add a note → open note B (no .ann) → only B's content
+    // is present." Distinct from the test above in that A's blocks aren't just "whatever openNoteFile
+    // itself put there" — an ordinary edit (addNoteBlock, going through upAnn like any real user
+    // action) lands on top first, so this also proves the fix isn't accidentally scoped to "only
+    // undoes openNoteFile's own append," but genuinely replaces the tab's live block list regardless
+    // of how it got there.
+    @Test
+    fun openingASidecarlessMdAfterEditingTheOpenNoteDiscardsAllOfItsEarlierBlocks() {
+        val dir = createTempDirectory("openlog-sidecarless-roundtrip").toFile()
+        val state = AppState(File(dir, "state.cache"), notesDir = File(dir, "notes"))
+        state.tabs = listOf(mkTab("log", "test.log", emptyList()))
+        state.activeTabId = "log"
+
+        val annA = File(dir, "a.ann").apply {
+            writeText(Annotations(blocks = listOf(AnnBlock.Note("a1", "NOTE FROM FILE A"))).annotationsToken())
+        }
+        state.openNoteFile("log", annA)
+        state.addNoteBlock("log", "an edit made while A is open")
+        assertEquals(
+            listOf("NOTE FROM FILE A", "an edit made while A is open"),
+            state.tab("log")?.annotations?.blocks?.filterIsInstance<AnnBlock.Note>()?.map { it.text },
+        )
+
+        val mdB = File(dir, "b_no_sidecar.md").apply { writeText("only B's content") }
+        state.openNoteFile("log", mdB)
+
+        val blocksAfter = state.tab("log")?.annotations?.blocks.orEmpty()
+        assertEquals(1, blocksAfter.size)
+        assertEquals("only B's content", (blocksAfter.single() as AnnBlock.Note).text)
+        assertEquals("b_no_sidecar.md", state.tab("log")?.noteTargetName)
     }
 
     @Test
@@ -2942,6 +3028,223 @@ class AppStateBehaviorTest {
         assertTrue(originalBytes.contentEquals(existingMd.readBytes()))
     }
 
+    // The reported bug itself, made explicit: the earlier autoExportAnnotations-only gate held the
+    // DISK WRITE back but committed the mutation into `tabs` immediately, so the Notes panel (bound
+    // straight to tab.annotations.blocks) showed the new block appearing WHILE the "Existing notes
+    // found" modal was still open — reading as "my old file is already gone." upAnn's gate (§1 of
+    // the fix) must hold the MUTATION itself back, not just the export.
+    @Test
+    fun theNewNoteIsNotObservableInTabsWhileTheOverwritePromptIsPending() {
+        val dir = createTempDirectory("openlog-note-overwrite-invisible").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val sourcePath = File(dir, "sample.log").absolutePath
+        File(notesDir, "sample_analysis.md").writeText("## earlier analysis\n\nkeep this")
+        File(notesDir, "sample_analysis.ann").writeText(Annotations().annotationsToken(sourcePath))
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = sourcePath),
+        )
+
+        val returnedId = state.addNoteBlock("log", "brand new note")
+
+        assertNotNull(state.pendingNoteOverwrite)
+        // The membership-check contract ("a returned block id means the block is observable" —
+        // see AnnotationManager.addNoteBlock/addLogRefBlock) must hold: nothing was committed, so
+        // addNoteBlock must report null even though upAnn "ran" and minted a block internally.
+        assertEquals(null, returnedId)
+        assertTrue(
+            state.tab("log")?.annotations?.blocks.orEmpty().isEmpty(),
+            "the tab must carry zero blocks until the prompt is resolved — the new note lives only on pendingNoteOverwrite.pendingTab",
+        )
+    }
+
+    // Mirrors the invisibility test above, but through confirmAddAnn (the LogRef path) instead of
+    // addNoteBlock, since it's a different call path into the same upAnn gate.
+    @Test
+    fun theNewLogRefIsNotObservableInTabsWhileTheOverwritePromptIsPending() {
+        val dir = createTempDirectory("openlog-note-overwrite-invisible-logref").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val sourcePath = File(dir, "sample.log").absolutePath
+        File(notesDir, "sample_analysis.md").writeText("## earlier analysis\n\nkeep this")
+        File(notesDir, "sample_analysis.ann").writeText(Annotations().annotationsToken(sourcePath))
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = sourcePath),
+        )
+
+        state.confirmAddAnn("log", "log", listOf(1), "brand new note", null)
+
+        assertNotNull(state.pendingNoteOverwrite)
+        assertTrue(state.tab("log")?.annotations?.blocks.orEmpty().isEmpty())
+    }
+
+    // §1's concurrency fix, exercised at the level a real double-edit would trigger it: a second
+    // mutation on the SAME tab arriving before the modal is dismissed (another keystroke, or an MCP
+    // call landing mid-prompt) must fold into the still-pending edit rather than being lost or
+    // applied against the now-stale (unmutated) committed tab.
+    @Test
+    fun aSecondEditOnTheSameTabWhileThePromptIsPendingFoldsInAndBothSurvive() {
+        val dir = createTempDirectory("openlog-note-overwrite-double-edit").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val sourcePath = File(dir, "sample.log").absolutePath
+        File(notesDir, "sample_analysis.md").writeText("## earlier analysis\n\nkeep this")
+        File(notesDir, "sample_analysis.ann").writeText(Annotations().annotationsToken(sourcePath))
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = sourcePath),
+        )
+
+        state.addNoteBlock("log", "first pending note")
+        val firstPending = assertNotNull(state.pendingNoteOverwrite)
+
+        state.addNoteBlock("log", "second pending note")
+        // Still exactly one prompt, for the same tab — not a second, competing one.
+        assertEquals(firstPending.tabId, state.pendingNoteOverwrite?.tabId)
+        assertTrue(state.tab("log")?.annotations?.blocks.orEmpty().isEmpty(), "still nothing committed")
+
+        state.confirmNoteOverwrite()
+
+        assertEquals(
+            listOf("first pending note", "second pending note"),
+            state.tab("log")?.annotations?.blocks?.map { (it as AnnBlock.Note).text },
+        )
+        waitUntil {
+            val text = File(notesDir, "sample_analysis.md").readText()
+            text.contains("first pending note") && text.contains("second pending note")
+        }
+    }
+
+    // §2: reopening a log used to hand the fresh tab a blank noteTargetName, re-arming the gate on
+    // the very first edit of every session — the actual mechanism behind the reported
+    // "logcat_analysis_11.md" trail. Auto-loading the tab's own previously-saved notes on open
+    // removes the gate's reason to re-arm at all.
+    @Test
+    fun reopeningALogAutoLoadsItsOwnNotesAndNeverPromptsAgain() {
+        val dir = createTempDirectory("openlog-reopen-autoload").toFile()
+        val notesDir = File(dir, "notes")
+        val logFile = File(dir, "sample.log").apply { writeText("line one\nline two\n") }
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+
+        val tabId = checkNotNull(state.openFile(logFile))
+        waitUntil { state.tab(tabId) != null }
+        state.addNoteBlock(tabId, "first analysis")
+        assertEquals(null, state.pendingNoteOverwrite, "no prior file existed, so the very first save must not prompt")
+        // exists() first — this file doesn't exist yet at the moment addNoteBlock returns (the
+        // write happens on ioScope), so an early poll's readText() would throw instead of retrying.
+        val firstMd = File(notesDir, "sample_analysis.md")
+        waitUntil { firstMd.exists() && firstMd.readText().contains("first analysis") }
+        assertEquals("sample_analysis.md", state.tab(tabId)?.noteTargetName)
+
+        state.closeTab(tabId)
+        assertEquals(null, state.tab(tabId))
+
+        val reopenedId = checkNotNull(state.openFile(logFile))
+        waitUntil { state.tab(reopenedId)?.annotations?.blocks?.isNotEmpty() == true }
+
+        assertEquals(null, state.pendingNoteOverwrite, "reopening the same log must not re-arm the overwrite gate")
+        assertEquals("sample_analysis.md", state.tab(reopenedId)?.noteTargetName, "auto-load must pin the same file the earlier session used")
+        assertEquals(
+            listOf("first analysis"),
+            state.tab(reopenedId)?.annotations?.blocks?.map { (it as AnnBlock.Note).text },
+        )
+
+        // A further edit must land in the SAME file with no prompt — the whole point of the fix.
+        state.addNoteBlock(reopenedId, "second analysis")
+        assertEquals(null, state.pendingNoteOverwrite)
+        waitUntil { File(notesDir, "sample_analysis.md").readText().contains("second analysis") }
+        assertTrue(!File(notesDir, "sample_analysis_2.md").exists())
+    }
+
+    // The user's own stated concern (see the plan's "Same-name-different-folder safety" section):
+    // two files that share a bare name in different folders must never cross-adopt each other's
+    // notes on open, and must never leak into each other's Open Note menu — including when one of
+    // the two lives in a "_N" collision-walk slot, exactly the case bug (b) made unreachable.
+    @Test
+    fun sameNameDifferentFolderLogsEachAutoLoadOnlyTheirOwnNoteAndNeverEachOthersInTheMenu() {
+        val dir = createTempDirectory("openlog-same-name-different-folder").toFile()
+        val notesDir = File(dir, "notes")
+        val folderA = File(dir, "a").apply { mkdirs() }
+        val folderB = File(dir, "b").apply { mkdirs() }
+        val fileA = File(folderA, "logcat.log").apply { writeText("line one\n") }
+        val fileB = File(folderB, "logcat.log").apply { writeText("line one\n") }
+        val pathA = fileA.absolutePath
+        val pathB = fileB.absolutePath
+
+        notesDir.mkdirs()
+        File(notesDir, "logcat_analysis.md").writeText("belongs to A")
+        File(notesDir, "logcat_analysis.ann").writeText(
+            Annotations(blocks = listOf(AnnBlock.Note(id = "a1", text = "A's note"))).annotationsToken(pathA),
+        )
+        // B's earlier session collided with A's plain name and was pushed into "_2" by
+        // resolveNoteTarget's own collision walk — this is the slot bug (b) made unreachable.
+        File(notesDir, "logcat_analysis_2.md").writeText("belongs to B")
+        File(notesDir, "logcat_analysis_2.ann").writeText(
+            Annotations(blocks = listOf(AnnBlock.Note(id = "b1", text = "B's note"))).annotationsToken(pathB),
+        )
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+
+        val tabA = checkNotNull(state.openFile(fileA))
+        waitUntil { state.tab(tabA)?.annotations?.blocks?.isNotEmpty() == true }
+        val tabB = checkNotNull(state.openFile(fileB))
+        waitUntil { state.tab(tabB)?.annotations?.blocks?.isNotEmpty() == true }
+
+        assertEquals(null, state.pendingNoteOverwrite, "auto-load must resolve both tabs without ever prompting")
+        assertEquals("logcat_analysis.md", state.tab(tabA)?.noteTargetName)
+        assertEquals("logcat_analysis_2.md", state.tab(tabB)?.noteTargetName)
+        assertEquals(listOf("A's note"), state.tab(tabA)?.annotations?.blocks?.map { (it as AnnBlock.Note).text })
+        assertEquals(listOf("B's note"), state.tab(tabB)?.annotations?.blocks?.map { (it as AnnBlock.Note).text })
+
+        // recentNotesForTab's widened name matching (bug (b)'s fix) must not defeat its own
+        // fingerprint filter: each tab's Open Note menu offers only its own file.
+        state.recentNotes = listOf(
+            File(notesDir, "logcat_analysis.md").absolutePath,
+            File(notesDir, "logcat_analysis_2.md").absolutePath,
+        )
+        assertEquals(
+            listOf(File(notesDir, "logcat_analysis.md").absolutePath),
+            state.recentNotesForTab(checkNotNull(state.tab(tabA))),
+        )
+        assertEquals(
+            listOf(File(notesDir, "logcat_analysis_2.md").absolutePath),
+            state.recentNotesForTab(checkNotNull(state.tab(tabB))),
+        )
+    }
+
+    // A note with no recorded fingerprint (predates the sourcePath token, or was saved by a path
+    // that never recorded one) can't be PROVEN to belong to this tab's sourcePath — auto-load must
+    // never adopt it on a guess. It still falls through to the ordinary prompt on the first edit,
+    // exactly as before this fix.
+    @Test
+    fun aNoteWithNoRecordedFingerprintNeverAutoLoadsAndStillGoesThroughThePrompt() {
+        val dir = createTempDirectory("openlog-legacy-no-fingerprint").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val logFile = File(dir, "sample.log").apply { writeText("line one\n") }
+
+        File(notesDir, "sample_analysis.md").writeText("## legacy analysis\n\nkeep this")
+        File(notesDir, "sample_analysis.ann").writeText(
+            Annotations(blocks = listOf(AnnBlock.Note(id = "n1", text = "legacy note"))).annotationsToken(),
+        )
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        val tabId = checkNotNull(state.openFile(logFile))
+        waitUntil { state.tab(tabId) != null }
+
+        // Give the (correctly no-op) auto-load scan a moment to run before asserting it did nothing.
+        Thread.sleep(150)
+        assertEquals(null, state.tab(tabId)?.noteTargetName, "an unrecorded fingerprint must never be auto-adopted")
+        assertTrue(state.tab(tabId)?.annotations?.blocks.orEmpty().isEmpty())
+
+        state.addNoteBlock(tabId, "brand new note")
+        assertNotNull(state.pendingNoteOverwrite)
+    }
+
     @Test
     fun openNoteFileOnANonDefaultNameKeepsExportingToThatName() {
         val dir = createTempDirectory("openlog-open-note-non-default").toFile()
@@ -2963,6 +3266,112 @@ class AppStateBehaviorTest {
         assertEquals(null, state.pendingNoteOverwrite)
         waitUntil { renamedMd.readText().contains("new note") }
         assertTrue(!File(notesDir, "sample_analysis.md").exists())
+    }
+
+    // "New Analysis" (AppState.newAnalysis): auto-load pins a tab's own notes on open, which means
+    // the overwrite prompt's old "Save to a new file" branch never fires for the case this covers —
+    // before this action existed there was NO way to start a fresh analysis without editing over an
+    // already-pinned tab's saved notes. Covers every guarantee called out in the ask: blocks (AND
+    // prefix/suffix/issueDescription — the decided "truly blank slate" scope) are cleared, the pin
+    // lands on the next free "_N" slot via the same naming saveNotesToNewNoteFile uses, the previous
+    // file is left byte-for-byte untouched on disk, nothing is written for the new pin until a real
+    // note is added (autoExportAnnotations' own zero-blocks guard), and the prompt never fires
+    // (upTab, not upAnn — needsFreshOverwritePrompt is never even consulted).
+    @Test
+    fun newAnalysisClearsTheTabPinsTheNextFreeSlotAndLeavesThePreviousFileUntouched() {
+        val dir = createTempDirectory("openlog-new-analysis").toFile()
+        val notesDir = File(dir, "notes")
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(mkTab("log", "sample.log", emptyList()))
+        state.activeTabId = "log"
+        // mkTab's own default ("From $filename") — asserted here so the clear below is meaningful
+        // rather than vacuously true because the tab never had a prefix to begin with.
+        assertEquals("From sample.log", state.tab("log")?.annotations?.prefix)
+
+        state.addNoteBlock("log", "first analysis")
+        val firstMd = File(notesDir, "sample_analysis.md")
+        waitUntil { firstMd.exists() && firstMd.readText().contains("first analysis") }
+        val originalBytes = firstMd.readBytes()
+        assertEquals("sample_analysis.md", state.tab("log")?.noteTargetName)
+
+        state.newAnalysis("log")
+
+        val after = checkNotNull(state.tab("log"))
+        assertEquals(
+            Annotations(),
+            after.annotations,
+            "blocks AND prefix/suffix/issueDescription must all be cleared — a truly blank analysis, the same wholesale replacement openNoteFile's .ann branch already does when switching files",
+        )
+        assertEquals("sample_analysis_2.md", after.noteTargetName)
+        assertEquals(null, state.pendingNoteOverwrite, "the new pin is free by construction — must never raise the overwrite prompt")
+
+        assertTrue(firstMd.exists())
+        assertTrue(originalBytes.contentEquals(firstMd.readBytes()), "the previously-open file must be completely untouched on disk")
+
+        // Zero blocks means autoExportAnnotations early-returns — clicking "New Analysis" alone must
+        // not create the new file.
+        Thread.sleep(150)
+        assertTrue(!File(notesDir, "sample_analysis_2.md").exists())
+
+        // The pin only takes effect once the user actually writes something.
+        state.addNoteBlock("log", "second analysis")
+        waitUntil { File(notesDir, "sample_analysis_2.md").exists() }
+        val secondMdText = File(notesDir, "sample_analysis_2.md").readText()
+        assertTrue(secondMdText.contains("second analysis"))
+        assertTrue(!secondMdText.contains("first analysis"))
+    }
+
+    @Test
+    fun newAnalysisWhenEarlierSlotsAreTakenPicksTheFirstGenuinelyFreeOne() {
+        val dir = createTempDirectory("openlog-new-analysis-collision").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        File(notesDir, "sample_analysis.md").writeText("slot 1 (plain) taken")
+        File(notesDir, "sample_analysis_2.md").writeText("slot 2 taken")
+        // Slot 3 has only an orphaned .ann (no paired .md) — must still count as taken, exactly like
+        // saveNotesToNewNoteFile's own predicate: a hand-deleted .md with a leftover sidecar must not
+        // let this pick a slot whose sidecar it would then clobber.
+        File(notesDir, "sample_analysis_3.ann").writeText(Annotations().annotationsToken())
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        state.tabs = listOf(mkTab("log", "sample.log", emptyList()))
+        state.activeTabId = "log"
+
+        state.newAnalysis("log")
+
+        assertEquals("sample_analysis_4.md", state.tab("log")?.noteTargetName)
+        assertEquals(null, state.pendingNoteOverwrite)
+        assertTrue(state.tab("log")?.annotations?.blocks.orEmpty().isEmpty())
+    }
+
+    // AppState.activeNoteFilePath backs RecentNotesPopup's "which entry is the currently open note"
+    // checkmark (Fix 3). No Compose UI test harness exists in this suite, so coverage targets the
+    // AppState-level resolution the popup's marking logic is built on directly.
+    @Test
+    fun activeNoteFilePathIsNullForAnUnpinnedTab() {
+        val dir = createTempDirectory("openlog-active-note-path-unpinned").toFile()
+        val state = AppState(File(dir, "state.cache"))
+        val tab = mkTab("log", "sample.log", emptyList())
+
+        assertEquals(null, state.activeNoteFilePath(tab), "a fresh, never-saved analysis has no on-disk file to point at")
+    }
+
+    // The disambiguation the ask specifically calls for: noteTargetName is only a bare filename, and
+    // noteLookupDirs() spans multiple directories (the configured save dir takes precedence over the
+    // sandboxed notesDir — see userNotesDir/activeNotesDir) — so two unrelated, same-named notes can
+    // legitimately sit in different lookup dirs at once. A name-only comparison couldn't tell them
+    // apart; resolving against activeNotesDir() (the SAME directory autoExportAnnotations actually
+    // writes to) picks the one this tab really owns.
+    @Test
+    fun activeNoteFilePathResolvesAgainstTheCurrentActiveNotesDirNotJustAnyLookupDirWithAMatchingName() {
+        val dir = createTempDirectory("openlog-active-note-path-disambiguate").toFile()
+        val configuredDir = File(dir, "configured").apply { mkdirs() }
+        val fallbackNotesDir = File(dir, "notes").apply { mkdirs() }
+        File(configuredDir, "sample_analysis.md").writeText("belongs to the configured dir")
+        File(fallbackNotesDir, "sample_analysis.md").writeText("belongs to the fallback dir")
+        val state = AppState(File(dir, "state.cache"), notesDir = fallbackNotesDir)
+        state.updateSettings { it.copy(defaultSaveDir = configuredDir.absolutePath) }
+        val tab = mkTab("log", "sample.log", emptyList()).copy(noteTargetName = "sample_analysis.md")
+
+        assertEquals(File(configuredDir, "sample_analysis.md").absolutePath, state.activeNoteFilePath(tab))
     }
 
     @Test
@@ -3020,18 +3429,33 @@ class AppStateBehaviorTest {
             recentNotes = listOf(noteFile.absolutePath)
         }
         val tab = mkTab("log", "sample.log", emptyList()).copy(sourcePath = sourcePath)
-        val validToken = Annotations().annotationsToken(File(dir, "different/sample.log").absolutePath)
+        // Fingerprint deliberately MATCHES this tab, so the only thing each iteration varies is
+        // which field got corrupted — otherwise every case would be hidden for the boring reason
+        // (wrong owner) and the test would prove nothing about corruption handling.
+        val validToken = Annotations().annotationsToken(sourcePath)
 
-        // tokenFields decodes every field eagerly. Corrupting any one of them must be contained,
-        // including fields before the fingerprint and the fingerprint field itself.
-        repeat(5) { fieldIndex ->
+        // Fields 0..3 (prefix/suffix/blocks/issueDescription) have nothing to do with ownership.
+        // Corrupting one must NOT cost us the fingerprint: readSourceFingerprint decodes index 4 in
+        // isolation (tokenFieldAt, not tokenFields) precisely so unrelated corruption can't
+        // downgrade a provably-owned note to Unreadable and hide it from its own log's dropdown.
+        repeat(4) { fieldIndex ->
             annFile.writeText(validToken.withMalformedAnnotationField(fieldIndex))
             assertEquals(
                 listOf(noteFile.absolutePath),
                 state.recentNotesForTab(tab),
-                "malformed field $fieldIndex must behave as an absent fingerprint",
+                "malformed field $fieldIndex is unrelated to ownership and must not hide the note",
             )
         }
+
+        // Field 4 IS the fingerprint. Corrupting it means we can no longer prove this note belongs
+        // to this log — and under the three-state SourceFingerprint contract "cannot prove" is
+        // Unreadable, which hides it, rather than being silently downgraded to "nothing recorded"
+        // and matching every same-named log (the reported bug).
+        annFile.writeText(validToken.withMalformedAnnotationField(4))
+        assertTrue(
+            state.recentNotesForTab(tab).isEmpty(),
+            "a corrupt fingerprint field must hide the note, not match permissively",
+        )
     }
 
     @Test
@@ -3079,6 +3503,181 @@ class AppStateBehaviorTest {
         assertEquals(malformedToken, malformedAnn.readText())
         assertEquals(originalSourcePath, legacyFingerprint.readText())
         assertEquals(listOf(File(notesDir, "sample_analysis_2.md").absolutePath), state.recentNotes)
+    }
+
+    // ── SourceFingerprint's three-state read (readSourceFingerprint / resolveNoteTarget /
+    // recentNotesForTab / autoLoadOwnNotesIfAny) ──────────────────────────────────────────────
+    //
+    // Regression coverage for the confirmed bug: a fingerprint sidecar that EXISTS but can't be
+    // READ (macOS TCC on ~/Downloads is the real-world trigger — exists()/length() succeed,
+    // readText() throws) was silently downgraded to "nothing recorded," which is indistinguishable
+    // from a note that genuinely never recorded an owner. That collapse let an unrelated tab's
+    // Open Note menu list a different bug report's note (recentNotesForTab) and, more seriously,
+    // let resolveNoteTarget hand out a filename it could not prove was free, with only the
+    // overwrite prompt left standing between that and a silent clobber.
+    //
+    // makeUnreadable(): setReadable(false) is a documented no-op when the JVM is running as root
+    // (root can always read its own files regardless of permission bits) — every test below
+    // verifies canRead() actually flipped and fails loudly rather than silently exercising the
+    // wrong (readable) code path if it didn't.
+    private fun File.makeUnreadable() {
+        check(setReadable(false)) { "setReadable(false) failed for $this" }
+        assertFalse(canRead(), "$this must actually be unreadable for this test to be meaningful (are we running as root?)")
+    }
+
+    // The user's own reported bug, reproduced directly: an unreadable legacy .src sidecar whose
+    // (unreadable) content in fact names a DIFFERENT log than this tab's. Pre-fix, the failed read
+    // was silently treated as "no fingerprint recorded," and recentNotesForTab's permissive
+    // `recorded == null` clause let this note match every tab named "sample.log" — including one
+    // it does not belong to. Post-fix, Unreadable must never be read as "no owner," so the note is
+    // hidden entirely rather than shown as a false match.
+    @Test
+    fun recentNotesForTabHidesNoteWithAnUnreadableFingerprintInsteadOfMatchingEveryLog() {
+        val dir = createTempDirectory("openlog-unreadable-fingerprint-hides").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val noteFile = File(notesDir, "sample_analysis.md").apply { writeText("belongs to folder_a") }
+        val ownerPath = File(dir, "folder_a/sample.log").absolutePath
+        val srcFile = File(notesDir, "sample_analysis.md.src").apply { writeText(ownerPath) }
+        srcFile.makeUnreadable()
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir).apply {
+            recentNotes = listOf(noteFile.absolutePath)
+        }
+        // A tab for a log OTHER than the (unreadable) recorded owner — exactly the shape of the
+        // reported bug: this tab has no legitimate claim to the note, yet the pre-fix "unreadable
+        // == unrecorded" collapse let it through anyway.
+        val unrelatedTab = mkTab("log", "sample.log", emptyList())
+            .copy(sourcePath = File(dir, "folder_b/sample.log").absolutePath)
+
+        assertTrue(
+            state.recentNotesForTab(unrelatedTab).isEmpty(),
+            "an unreadable fingerprint must never be treated as 'no owner' — it must not match a log it cannot be proven to belong to",
+        )
+
+        srcFile.setReadable(true)
+    }
+
+    // §2's load-bearing case: a brand-new save, where no fingerprint of ANY kind has ever been
+    // recorded, must still land on the plain "<base>_analysis.md" name. If SourceFingerprint's
+    // NotRecorded state were ever treated as a conflict (the way Unreadable correctly is), every
+    // fresh save would walk straight to "_2" instead.
+    @Test
+    fun resolveNoteTargetReusesPlainNameOnFirstSaveWhenNothingIsRecorded() {
+        val dir = createTempDirectory("openlog-notrecorded-first-save").toFile()
+        val notesDir = File(dir, "notes")
+        val logFile = File(dir, "sample.log").apply { writeText("line one\n") }
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        val tabId = checkNotNull(state.openFile(logFile))
+        waitUntil { state.tab(tabId) != null }
+
+        state.addNoteBlock(tabId, "first analysis")
+
+        assertEquals(
+            null,
+            state.pendingNoteOverwrite,
+            "NotRecorded must stay permissive — nothing on disk to conflict with on a genuine first save",
+        )
+        assertEquals("sample_analysis.md", state.tab(tabId)?.noteTargetName)
+        waitUntil { File(notesDir, "sample_analysis.md").exists() }
+    }
+
+    // resolveNoteTarget's collision walk must treat an unreadable fingerprint at a candidate slot
+    // the same as a fingerprint recording a DIFFERENT owner — skip it and keep walking — rather
+    // than reusing it the way it would a genuinely NotRecorded slot. Asserts the actual filename
+    // the walk lands on, since resolveNoteTarget itself is private and only observable through
+    // where autoExportAnnotations ends up pinning the tab.
+    @Test
+    fun resolveNoteTargetSkipsASlotWhoseFingerprintIsUnreadable() {
+        val dir = createTempDirectory("openlog-unreadable-skips-slot").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        // No sample_analysis.md itself needs to exist — only its fingerprint sidecar, which is all
+        // resolveNoteTarget's walk actually consults.
+        val srcFile = File(notesDir, "sample_analysis.md.src").apply { writeText("irrelevant — never read") }
+        srcFile.makeUnreadable()
+
+        val logFile = File(dir, "sample.log").apply { writeText("line one\n") }
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        val tabId = checkNotNull(state.openFile(logFile))
+        waitUntil { state.tab(tabId) != null }
+
+        state.addNoteBlock(tabId, "new analysis")
+
+        assertEquals(
+            null,
+            state.pendingNoteOverwrite,
+            "the _2 slot resolveNoteTarget walks to is genuinely free — must not prompt",
+        )
+        assertEquals(
+            "sample_analysis_2.md",
+            state.tab(tabId)?.noteTargetName,
+            "an unreadable fingerprint at the plain-name slot must be skipped, not reused",
+        )
+        waitUntil { File(notesDir, "sample_analysis_2.md").exists() }
+        assertTrue(!File(notesDir, "sample_analysis.md").exists(), "the unreadable slot itself must never be written to")
+
+        srcFile.setReadable(true)
+    }
+
+    // The asymmetry called out in SourceFingerprint's own doc comment: a positive answer from
+    // EITHER source wins outright. An unreadable .ann next to a readable, valid .src must still
+    // resolve to Recorded(the .src's path) — the .ann merely gets first refusal, it does not veto
+    // a good answer from the other source.
+    @Test
+    fun unreadableAnnPlusReadableValidSrcStillCountsAsRecorded() {
+        val dir = createTempDirectory("openlog-unreadable-ann-readable-src").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val noteFile = File(notesDir, "sample_analysis.md").apply { writeText("owner via src") }
+        val sourcePath = File(dir, "folder_a/sample.log").absolutePath
+        val annFile = File(notesDir, "sample_analysis.ann").apply {
+            // Deliberately a DIFFERENT path than sourcePath — proves this value is never actually
+            // consulted once the read throws, rather than merely being outvoted by the .src.
+            writeText(Annotations().annotationsToken(File(dir, "folder_b/sample.log").absolutePath))
+        }
+        annFile.makeUnreadable()
+        File(notesDir, "sample_analysis.md.src").writeText(sourcePath)
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir).apply {
+            recentNotes = listOf(noteFile.absolutePath)
+        }
+        val tab = mkTab("log", "sample.log", emptyList()).copy(sourcePath = sourcePath)
+
+        assertEquals(
+            listOf(noteFile.absolutePath),
+            state.recentNotesForTab(tab),
+            "a readable, valid .src must still produce a positive match even when the .ann next to it is unreadable",
+        )
+
+        annFile.setReadable(true)
+    }
+
+    // Auto-load's exact-match requirement (§4) must reject Unreadable exactly like it already
+    // rejects NotRecorded — never adopt a note on anything short of proof, even when the
+    // unreadable sidecar's real (unread) content happens to name this very log.
+    @Test
+    fun autoLoadDoesNotAdoptANoteWithAnUnreadableFingerprint() {
+        val dir = createTempDirectory("openlog-autoload-unreadable").toFile()
+        val notesDir = File(dir, "notes").apply { mkdirs() }
+        val logFile = File(dir, "sample.log").apply { writeText("line one\n") }
+        val sourcePath = logFile.absolutePath
+
+        File(notesDir, "sample_analysis.md").writeText("## legacy analysis\n\nkeep this")
+        val srcFile = File(notesDir, "sample_analysis.md.src").apply { writeText(sourcePath) }
+        srcFile.makeUnreadable()
+
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        val tabId = checkNotNull(state.openFile(logFile))
+        waitUntil { state.tab(tabId) != null }
+
+        // Give the (correctly no-op) auto-load scan a moment to run before asserting it did nothing.
+        Thread.sleep(150)
+        assertEquals(
+            null,
+            state.tab(tabId)?.noteTargetName,
+            "an unreadable fingerprint must never be auto-adopted, even though its real (unread) content names this exact log",
+        )
+        assertTrue(state.tab(tabId)?.annotations?.blocks.orEmpty().isEmpty())
+
+        srcFile.setReadable(true)
     }
 
     @Test
@@ -5025,7 +5624,12 @@ class AppStateBehaviorTest {
 
     @Test
     fun reorderBlockMovesBlockToArbitraryIndex() {
-        val state = AppState()
+        // Isolated notesDir — see addAnnotationStoresStructuredLogReference's comment: this test's
+        // blank workspace tab always exports to the same "Untitled_workspace_analysis.md", so
+        // sharing AppState()'s default (sandboxed-but-suite-wide) notes dir risks colliding with
+        // another test's leftover export and having upAnn's overwrite gate defer these blocks
+        // instead of committing them — this test is about reorderBlock, not the overwrite prompt.
+        val state = AppState(notesDir = createTempDirectory("openlog-reorder-notes").toFile())
         state.addTab()
         val tabId = state.tabs.single().id
         val firstId = state.addNoteBlock(tabId, "first", null)!!

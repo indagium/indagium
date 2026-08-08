@@ -149,12 +149,21 @@ fun AnnotationPanel(
     settings: AppSettings,
     recentNotes: List<String> = emptyList(),
     recentNotesMenuOpen: Boolean = false,
+    // The absolute path of the note file THIS tab is currently pinned to (AppState.
+    // activeNoteFilePath), or null when unpinned. Purely for RecentNotesPopup's checkmark — see its
+    // own comment for why this must be a full path, not just tab.noteTargetName's bare filename.
+    activeNotePath: String? = null,
     onToggleMd: () -> Unit,
     onCopy: () -> Unit,
     onCopyImage: (AnnBlock.Image) -> Unit,
     onCopyRichPreview: () -> Unit,
     onExportFrames: () -> Unit,
     onSave: () -> Unit,
+    // "New Analysis" header action — clears this tab's Notes panel to a blank analysis and pins it
+    // to the next free note-file slot, without touching whatever file was previously open. See
+    // AppState.newAnalysis's own doc comment for why this is one click/no prompt and what "blank"
+    // includes (prefix/suffix/issueDescription too, not just blocks).
+    onNewAnalysis: () -> Unit,
     onToggleRecentNotes: () -> Unit,
     onOpenNote: (File) -> Unit,
     // "Locate log…" (Change 2b/2c) — only ever shown/wired up when this tab has no log
@@ -202,6 +211,11 @@ fun AnnotationPanel(
     val hasAnnotationBlocks = ann.blocks.isNotEmpty()
     val hasRecentNotes = recentNotes.isNotEmpty()
     val headerButtonModifier = Modifier.height(28.dp)
+    // Open+▾ split-button shapes — same joined-pair idea as TabBar's log-file Open/▾ precedent
+    // (TabBar.kt's leftShape/middleShape/rightShape), just built off CORNER_MD's 4.dp radius
+    // instead of the toolbar's 7.dp so the corners match every other AppButton in this header.
+    val openJoinedShape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
+    val recentNotesDropdownShape = RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
     var panelFocused by remember { mutableStateOf(false) }
     var prefixFocused by remember { mutableStateOf(false) }
     var issueDescFocused by remember { mutableStateOf(false) }
@@ -491,6 +505,9 @@ fun AnnotationPanel(
         // discoverable only through a responsive overflow menu. Rich HTML copying belongs with
         // the rendered Preview below. FlowRow wraps to a second line at narrow panel widths
         // instead of clipping/overflowing the header (see the "Locate log…" clipping report).
+        // Five controls at the common width — Preview/Copy/Save/New fit on one line with the
+        // Open+▾ split button trailing them, mirroring TabBar's log-file Open/▾ pair so opening a
+        // note and opening a log read as the same gesture.
         Box(
             Modifier.fillMaxWidth().heightIn(min = 36.dp).background(tc.p2)
                 .border(BorderStroke(1.dp, tc.br)).padding(horizontal = 12.dp, vertical = 4.dp),
@@ -503,28 +520,49 @@ fun AnnotationPanel(
                 AppButton("Preview", onClick = onToggleMd, enabled = hasAnnotationBlocks, modifier = headerButtonModifier)
                 AppButton("Copy", onClick = onCopy, modifier = headerButtonModifier)
                 AppButton("Save", onClick = onSave, modifier = headerButtonModifier)
-                AppButton("Open Note", onClick = { openNotePicker() }, modifier = headerButtonModifier)
+                AppButton("New", onClick = onNewAnalysis, modifier = headerButtonModifier)
                 // Only when this tab has no log at all (opened via Case Library's "Open notes
                 // only," a blank new tab, or its own log going missing) — the guided reconnect
                 // path for Change 2's "note opened without its log" hazard. See
-                // openLocateLogPicker/AppState.locateLogForTab.
+                // openLocateLogPicker/AppState.locateLogForTab. Placed next to Open/▾ (its nearest
+                // relative in purpose) rather than earlier in the row; it's a rare state and, per
+                // the FlowRow comment above, is allowed to be the thing that wraps to its own line.
                 if (tab.logData.isEmpty()) {
                     AppButton("Locate log…", onClick = { openLocateLogPicker() }, modifier = headerButtonModifier)
                 }
-                Box {
+                // Wrapped in its own zero-spacing Row so FlowRow's 4.dp horizontalArrangement gap
+                // treats Open+▾ as one atomic child instead of prying them apart — same reason
+                // TabBar never lets its own Open/▾ pair split across a wrap point.
+                Row {
                     AppButton(
-                        "▾ ${recentNotes.size}",
-                        enabled = hasRecentNotes,
-                        modifier = headerButtonModifier.widthIn(min = 40.dp),
-                        onClick = onToggleRecentNotes,
+                        "Open",
+                        onClick = { openNotePicker() },
+                        modifier = headerButtonModifier,
+                        shape = if (hasRecentNotes) openJoinedShape else CORNER_MD,
                     )
-                    if (recentNotesMenuOpen && hasRecentNotes) {
-                        RecentNotesPopup(
-                            recentNotes = recentNotes,
-                            onOpenNote = onOpenNote,
-                            onDismiss = onToggleRecentNotes,
-                            tc = tc,
-                        )
+                    // Hidden (not disabled) when there's no history — matches TabBar's own
+                    // `if (hasRecentFiles) ToolbarBtn("▾", …)` for the log-file Open button: a
+                    // dropdown arrow with nothing behind it is dead chrome, not a legitimate
+                    // disabled state, so it shouldn't render at all.
+                    if (hasRecentNotes) {
+                        Box {
+                            AppButton(
+                                "▾",
+                                modifier = headerButtonModifier.width(18.dp),
+                                horizontalPadding = 0.dp,
+                                shape = recentNotesDropdownShape,
+                                onClick = onToggleRecentNotes,
+                            )
+                            if (recentNotesMenuOpen) {
+                                RecentNotesPopup(
+                                    recentNotes = recentNotes,
+                                    activeNotePath = activeNotePath,
+                                    onOpenNote = onOpenNote,
+                                    onDismiss = onToggleRecentNotes,
+                                    tc = tc,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -887,6 +925,11 @@ fun AnnotationPanel(
 @Composable
 private fun RecentNotesPopup(
     recentNotes: List<String>,
+    // Full absolute path of the note THIS tab is pinned to (AppState.activeNoteFilePath), or null.
+    // Compared by exact path equality, not by File(path).name — see activeNoteFilePath's own
+    // comment for why a name-only match can't disambiguate two same-named notes living in
+    // different noteLookupDirs() entries, both of which can legitimately appear in this same list.
+    activeNotePath: String?,
     onOpenNote: (File) -> Unit,
     onDismiss: () -> Unit,
     tc: ThemeColors,
@@ -947,6 +990,15 @@ private fun RecentNotesPopup(
                     displayNotes.forEachIndexed { idx, path ->
                         val file = File(path)
                         val exists = file.exists()
+                        // Exact-path match against activeNotePath — see this popup's own param
+                        // comment. Deliberately independent of `forceHover`/selectedIdx below: that
+                        // is keyboard-roving focus (moves with arrow keys, resets whenever the popup
+                        // reopens) and says nothing about which file is actually open, while this is
+                        // a fixed fact about tab state that shouldn't flicker as the user arrows
+                        // around the list. Conflating the two would make "currently selected" and
+                        // "currently open" indistinguishable — often the same row, but not always
+                        // (e.g. arrowing to preview a different entry without opening it yet).
+                        val isActive = activeNotePath != null && path == activeNotePath
                         TooltipArea(
                             tooltip = {
                                 Box(
@@ -965,15 +1017,29 @@ private fun RecentNotesPopup(
                                 forceHover = idx == selectedIdx,
                                 onClick = if (exists) ({ onOpenNote(file) }) else null,
                             ) {
-                                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    // Fixed-width gutter so the checkmark's presence/absence never
+                                    // shifts the filename column between rows.
                                     AppText(
-                                        file.name,
-                                        color = if (exists) tc.tx else tc.td,
+                                        if (isActive) "✓" else "",
+                                        color = tc.ac,
                                         fontSize = 11.sp,
                                         fontFamily = MONO,
-                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.width(14.dp),
                                     )
-                                    AppText(file.parent ?: path, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                                    Column(Modifier.weight(1f)) {
+                                        AppText(
+                                            file.name,
+                                            color = if (exists) tc.tx else tc.td,
+                                            fontSize = 11.sp,
+                                            fontFamily = MONO,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        AppText(file.parent ?: path, color = tc.td, fontSize = 9.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+                                    }
                                 }
                             }
                         }

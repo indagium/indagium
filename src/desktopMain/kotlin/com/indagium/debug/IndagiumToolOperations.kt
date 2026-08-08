@@ -1282,15 +1282,30 @@ internal class IndagiumToolOperations(
         return mapOf("ok" to true)
     }
 
+    // addNoteBlock/addLogRefBlock return null both for a genuine failure and for the (far more
+    // common in practice) deferred-add path: upAnn's overwrite-conflict gate (AppState.upAnn/
+    // PendingNoteOverwrite) stashes a first-time-conflict mutation on pendingNoteOverwrite instead
+    // of committing it, pending a human decision on the "Existing notes found" prompt — the add
+    // isn't lost, it just isn't observable yet (see SeqDiagramCoordinator.confirm()'s comment for
+    // the same distinction on the UI side). A bare "note was not created" is misleading in exactly
+    // that case: an MCP caller reading it would reasonably retry or give up, when what's actually
+    // needed is for the user to resolve the prompt this same call just raised. Message-level fix
+    // only — the tool layer's control flow (route → null → generic error map) is unchanged.
+    private fun noteNotCreatedMessage(tabId: String, kind: String): String {
+        val pending = appState.pendingNoteOverwrite?.takeIf { it.tabId == tabId } ?: return "$kind was not created"
+        return "$kind was not created: an \"Existing notes found\" prompt is open for this tab " +
+            "(target: ${pending.targetName}) — a person needs to resolve it before more notes can be added."
+    }
+
     private fun addTextNoteRoute(tabId: String, text: String, afterId: String?): Map<String, Any?> {
         if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
-        val id = appState.addNoteBlock(tabId, text, afterId) ?: return mapOf("error" to "note was not created")
+        val id = appState.addNoteBlock(tabId, text, afterId) ?: return mapOf("error" to noteNotCreatedMessage(tabId, "note"))
         return mapOf("ok" to true, "tabId" to tabId, "blockId" to id)
     }
 
     private fun addLogNoteRoute(tabId: String, lineIds: List<Int>, caption: String): Map<String, Any?> {
         if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
-        val id = appState.addLogRefBlock(tabId, lineIds, caption) ?: return mapOf("error" to "log note was not created")
+        val id = appState.addLogRefBlock(tabId, lineIds, caption) ?: return mapOf("error" to noteNotCreatedMessage(tabId, "log note"))
         return mapOf("ok" to true, "tabId" to tabId, "blockId" to id)
     }
 
