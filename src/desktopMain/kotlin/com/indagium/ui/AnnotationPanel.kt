@@ -1069,7 +1069,7 @@ private fun DiagramLibrarySection(
                     // tracks otherwise overlap at the right edge when the library overflows.
                     modifier = Modifier.align(Alignment.CenterEnd)
                         .fillMaxHeight()
-                        .padding(end = 10.dp)
+                        .padding(end = 3.dp)
                         .width(6.dp),
                     style = appScrollbarStyle(tc),
                 )
