@@ -31,7 +31,6 @@ import kotlin.test.assertTrue
  * touches Window/Toolkit.
  */
 class DiagramRendererTest {
-
     private val theme = DiagramTheme.LIGHT
 
     private fun tag(i: Int) = DiagramParticipant("T$i", "Tag $i", ParticipantKind.TAG, tag = "T$i")

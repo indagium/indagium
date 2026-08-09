@@ -4,6 +4,13 @@ The running app's `tools/list` response is authoritative for exact schemas. This
 version-controlled map of what an AI can do and how to prompt it. Most read methods require
 `tabId`; start with `list_tabs` and use the returned id, never a filename.
 
+For automated end-to-end verification, launch a dedicated process with both
+`INDAGIUM_DEBUG_CONTROL=<port>` and
+`INDAGIUM_DEBUG_APP_DATA_DIR=<canonical-empty-temp-directory>`. The app-data directory must be an
+empty, non-symlink child beneath the JVM temporary directory (or macOS `/private/tmp` /
+`/private/var/folders`). This prevents the test process from restoring the user's autosave or
+Recent state; file-open calls must still use explicit approved fixture paths.
+
 ## Read logs and narrow evidence
 
 - `list_tabs` — open tabs and ids; `open_log_file`, `preview_split_log_file`, and
@@ -65,12 +72,32 @@ version-controlled map of what an AI can do and how to prompt it. Most read meth
 ## Diagrams
 
 - `build_sequence_diagram` turns a range of log lines into UML sequence-diagram source (Mermaid by
-  default, PlantUML on request). Tags become participants and an arrow is drawn each time the
-  logging tag changes, so the result reads as a component handoff. It is read-only — pass the
-  returned `source` to `add_text_note` to put it in the analysis. Curate: name 4–8 meaningful tags
-  (`get_tags` lists them with counts) and a tight `startLineId`/`endLineId` range. A diagram built
-  over an unfiltered log is unreadable, and the `truncated` flag in the result means the arrow cap
-  was hit and the picture is incomplete.
+  default, PlantUML on request). Its default **Component flow** joins tag changes into handoffs.
+  Prefer `components`: each object is `{ id, displayName, tagIds, enabled }`, so a component can
+  deliberately represent several raw tags. Components are not capped at eight participants; use a
+  tight range and the returned coverage/warnings to judge readability. `tags` remains available for
+  legacy callers, and `mergedTags` is a shorthand map from component name/id to tag arrays. The MCP
+  boundary accepts at most 64 components, 64 actors, 128 legacy tags, 128 tags per component, and
+  1,024 component/merged tag references; IDs/tags are at most 256 characters and labels/titles at
+  most 512. Component and actor IDs must be unique and cannot collide.
+
+  `actors` accepts legacy strings or `{ id, label, mirrorComponentId?, mirrorDirection? }` objects.
+  A mirror retains the original non-self component edge and adds a marked duplicate to the actor;
+  `mirrorDirection` is `inbound`, `outbound`, or `both` (the default). Legacy `entryActor` and
+  `exitActor` remain supported for one-way opening/closing arrows.
+
+  Tags outside enabled components are hidden by default. Set `unmappedTagPolicy` to `groupAsOther`
+  only when grouping every remaining in-range tag into the single `Other` component is meaningful.
+  It is not a per-tag choice. `sourceEnrichment: true` adds only high-confidence, one-hop inferred
+  calls with at least 0.7 log-to-source confidence and declared return types; ambiguous targets
+  remain warnings. If no source index is loaded or no components are defined, the response reports
+  enrichment as unavailable instead of silently returning an unenriched result. `activationPolicy`
+  defaults to `evidenceBacked` and emits activation spans only when correlated log/rule/source
+  evidence supports them (`none` disables spans). The result includes per-message evidence (`log`,
+  `rule`, `sourceInferred`, or `actorMirror`) and range coverage as well as `truncated` and up to 100
+  bounded warnings. `maxMessages` defaults to 60 and is hard-capped at 400.
+
+  The tool is read-only — pass returned `source` to `add_text_note` to put it in the analysis.
 
 ## Prompt starters
 

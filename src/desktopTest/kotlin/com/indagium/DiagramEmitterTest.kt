@@ -255,7 +255,10 @@ class DiagramEmitterTest {
         val mermaidLines = diagram.toMermaid().lines()
         val mm19Idx = mermaidLines.indexOfFirst { it.contains(": m19") }
         val closeBIdx = mermaidLines.indexOfFirst { it.contains("◀ B") }
-        assertTrue(closeBIdx > mm19Idx, "Mermaid's close marker for B must still sit near its ORIGINAL end (message 20), not clamped to message 10 like PlantUML")
+        assertTrue(
+            closeBIdx > mm19Idx,
+            "Mermaid's close marker for B must retain its original end, unlike PlantUML's clamp.",
+        )
     }
 
     // ── Error notes ───────────────────────────────────────────────────────────────────────────

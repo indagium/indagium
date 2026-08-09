@@ -46,6 +46,7 @@ fun buildSequenceDiagram(
     spec: SeqDiagramSpec,
     resolveLabel: (LogEntry) -> String? = { null },
     cancellationCheck: CancellationCheck = CancellationCheck {},
+    resolveSourceInteractions: (LogEntry) -> List<DiagramSourceInteraction> = { emptyList() },
 ): SeqDiagram {
     val warnings = mutableListOf<String>()
     val allVisible = visibleEntries(tab, applyFilter = true)
@@ -54,8 +55,16 @@ fun buildSequenceDiagram(
     val resolved = resolveRange(tab, spec.range, allVisible, cancellationCheck, warnings)
     val candidateEntries = resolved.entries
 
-    val participantResolution = resolveTagParticipants(spec.participants, candidateEntries)
-    val registry = ParticipantRegistry(participantResolution.participants, participantResolution.groupedTags)
+    val participantResolution = if (spec.components.isNotEmpty()) {
+        resolveComponentParticipants(spec, candidateEntries)
+    } else {
+        resolveTagParticipants(spec.participants, candidateEntries)
+    }
+    val registry = ParticipantRegistry(
+        participantResolution.participants,
+        participantResolution.groupedTags,
+        participantResolution.tagToParticipantId,
+    )
     val entryPointIdx = spec.participants
         .firstOrNull { it.kind == ParticipantKind.ACTOR && it.isEntryPoint }
         ?.let { registry.indexForId(it.id) }
@@ -83,9 +92,24 @@ fun buildSequenceDiagram(
         )
     }
 
-    val rawMessages = gen.messages
+    val sourceResult = if (spec.sourceEnrichment.enabled) {
+        // Runtime interactions retain priority: enrichment may supplement only the remaining
+        // ordered output capacity, never force an unbounded source scan or displace them.
+        val remainingSourceBudget = (spec.options.maxMessages - gen.messages.size).coerceAtLeast(0)
+        buildSourceInteractions(
+            participantResolution.representedEntries, registry, spec.options, spec.sourceEnrichment,
+            resolveSourceInteractions, cancellationCheck, warnings, remainingSourceBudget,
+        )
+    } else {
+        SourceInteractionResult()
+    }
+    // Frames rely on entry-id order; sorting is stable, so source edges for one entry stay after
+    // that entry's runtime edge while no longer being appended after the whole range.
+    val rawMessages = applyActorMirrors(
+        (gen.messages + sourceResult.messages).sortedBy { it.entryId }, registry, spec.actors,
+    )
     val collapsed = if (spec.options.collapseRepeats) collapseRepeats(rawMessages) else identityCollapse(rawMessages)
-    val truncated = collapsed.messages.size > spec.options.maxMessages
+    val truncated = collapsed.messages.size > spec.options.maxMessages || sourceResult.truncated
     val cappedMessages = if (truncated) collapsed.messages.subList(0, spec.options.maxMessages).toList() else collapsed.messages
     val notes = buildNotes(gen.notes, collapsed.rawToCollapsedIndex, cappedMessages.size)
 
@@ -97,6 +121,11 @@ fun buildSequenceDiagram(
     } else {
         emptyList()
     }
+    val activations = if (spec.options.activationPolicy == ActivationPolicy.EVIDENCE_BACKED) {
+        buildActivationSpans(cappedMessages)
+    } else {
+        emptyList()
+    }
 
     return SeqDiagram(
         spec = spec,
@@ -104,6 +133,7 @@ fun buildSequenceDiagram(
         messages = cappedMessages,
         frames = frames,
         notes = notes,
+        activationSpans = activations,
         truncated = truncated,
         scannedEntries = candidateEntries.size,
         coverage = participantResolution.coverage,
@@ -224,6 +254,7 @@ private fun resolveSeqGroupRange(
     // other cachedSeqGroupsFor caller in this codebase.
     val groups = cachedSeqGroupsFor(tab, true) ?: computeSeqGroups(allVisible, tab.filter.sequences, cancellationCheck)
     val ids = IntArray(allVisible.size) { allVisible[it].id }
+
     fun idxOf(id: Int): Int? = Arrays.binarySearch(ids, id).takeIf { it >= 0 }
 
     for (sg in groups) {
@@ -256,6 +287,7 @@ private data class ParticipantResolution(
     val representedEntries: List<LogEntry>,
     val groupedTags: Set<String>,
     val coverage: DiagramCoverage,
+    val tagToParticipantId: Map<String, String> = emptyMap(),
 )
 
 /** Returns range-correct candidates for the participant inspector.  It resolves [spec.range]
@@ -267,6 +299,7 @@ fun diagramParticipantCandidates(
 ): List<DiagramParticipantCandidate> {
     val warnings = mutableListOf<String>()
     val resolved = resolveRange(tab, spec.range, visibleEntries(tab, applyFilter = true), cancellationCheck, warnings)
+    if (spec.components.isNotEmpty()) return componentCandidates(spec, resolved.entries, cancellationCheck)
     val configured = spec.participants.filter { it.kind == ParticipantKind.TAG && it.tag != null }.associateBy { it.tag!! }
     var previousTag: String? = null
     val counts = LinkedHashMap<String, Int>()
@@ -300,6 +333,44 @@ fun diagramParticipantCandidates(
                     else -> DiagramParticipantRepresentation.SHOW
                 },
             participant = participant,
+        )
+    }
+}
+
+private fun componentCandidates(
+    spec: SeqDiagramSpec,
+    entries: List<LogEntry>,
+    cancellationCheck: CancellationCheck,
+): List<DiagramParticipantCandidate> {
+    val owner = LinkedHashMap<String, DiagramComponent>()
+    spec.components.filter { it.enabled }.forEach { component -> component.tagIds.forEach { owner.putIfAbsent(it, component) } }
+    val counts = LinkedHashMap<String, Int>()
+    val transitions = HashMap<String, Int>()
+    val errors = HashMap<String, Int>()
+    var previous: String? = null
+    entries.forEachIndexed { index, entry ->
+        if (index % CANCELLATION_CHECK_INTERVAL == 0) cancellationCheck()
+        counts[entry.tag] = (counts[entry.tag] ?: 0) + 1
+        if (errorLevel(entry.level)) errors[entry.tag] = (errors[entry.tag] ?: 0) + 1
+        previous?.takeIf { it != entry.tag }?.let { prior ->
+            transitions[prior] = (transitions[prior] ?: 0) + 1
+            transitions[entry.tag] = (transitions[entry.tag] ?: 0) + 1
+        }
+        previous = entry.tag
+    }
+    return counts.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key }).map { (tag, count) ->
+        val component = owner[tag]
+        DiagramParticipantCandidate(
+            tag = tag,
+            entryCount = count,
+            transitionCount = transitions[tag] ?: 0,
+            errorCount = errors[tag] ?: 0,
+            representation = when {
+                component != null -> DiagramParticipantRepresentation.SHOW
+                spec.unmappedTagPolicy == UnmappedTagPolicy.GROUP_AS_OTHER -> DiagramParticipantRepresentation.OTHER
+                else -> DiagramParticipantRepresentation.HIDE
+            },
+            participant = component?.let { DiagramParticipant(it.id, it.displayName, ParticipantKind.TAG, tag = tag) },
         )
     }
 }
@@ -348,10 +419,55 @@ private fun resolveTagParticipants(
     return ParticipantResolution(actors + tagParticipants + listOfNotNull(other), representedEntries, groupedTags, coverage)
 }
 
+/** Component selection is intentionally separate from legacy participants: an enabled component
+ * owns all of its tags, and one global policy controls every remaining in-range tag. */
+private fun resolveComponentParticipants(spec: SeqDiagramSpec, candidateEntries: List<LogEntry>): ParticipantResolution {
+    val enabled = spec.components.filter { it.enabled }
+    val tagToComponent = LinkedHashMap<String, DiagramComponent>()
+    enabled.forEach { component -> component.tagIds.forEach { tag -> tagToComponent.putIfAbsent(tag, component) } }
+    val participants = buildList {
+        // Preserve old entry/exit actors when a migrated/partially edited spec still has them.
+        addAll(spec.participants.filter { it.kind == ParticipantKind.ACTOR })
+        spec.actors.forEach { actor ->
+            if (none { it.id == actor.id }) add(DiagramParticipant(actor.id, actor.label, ParticipantKind.ACTOR))
+        }
+        enabled.forEach { component ->
+            add(DiagramParticipant(component.id, component.displayName, ParticipantKind.TAG))
+        }
+    }
+    val unmapped = candidateEntries.asSequence().map { it.tag }.filter { it !in tagToComponent }.toSet()
+    val groupedTags = if (spec.unmappedTagPolicy == UnmappedTagPolicy.GROUP_AS_OTHER) unmapped else emptySet()
+    val withOther = if (groupedTags.isEmpty()) {
+        participants
+    } else {
+        val existing = participants.mapTo(HashSet()) { it.id }
+        val id = generateSequence("Other") { "${it}_" }.first { it !in existing }
+        participants + DiagramParticipant(id, "Other", ParticipantKind.TAG, representation = DiagramParticipantRepresentation.OTHER)
+    }
+    val shownTags = tagToComponent.keys
+    val represented = candidateEntries.filter { it.tag in shownTags || it.tag in groupedTags }
+    return ParticipantResolution(
+        participants = withOther,
+        representedEntries = represented,
+        groupedTags = groupedTags,
+        coverage = DiagramCoverage(
+            scannedEntries = candidateEntries.size,
+            shownEntries = candidateEntries.count { it.tag in shownTags },
+            groupedEntries = candidateEntries.count { it.tag in groupedTags },
+            hiddenEntries = candidateEntries.count { it.tag !in shownTags && it.tag !in groupedTags },
+        ),
+        tagToParticipantId = tagToComponent.mapValues { it.value.id },
+    )
+}
+
 // Mutable participant list threaded through a scan — a TAG participant is fixed up front, but an
 // ACTOR referenced by an unrecognized RULES-mode from/to name is only discovered mid-scan, so the
 // final SeqDiagram.participants list can't be known until the scan completes.
-private class ParticipantRegistry(initial: List<DiagramParticipant>, groupedTags: Set<String> = emptySet()) {
+private class ParticipantRegistry(
+    initial: List<DiagramParticipant>,
+    groupedTags: Set<String> = emptySet(),
+    tagToParticipantId: Map<String, String> = emptyMap(),
+) {
     val list: MutableList<DiagramParticipant> = initial.toMutableList()
     private val idxByTag = HashMap<String, Int>()
     private val idxById = HashMap<String, Int>()
@@ -363,6 +479,7 @@ private class ParticipantRegistry(initial: List<DiagramParticipant>, groupedTags
         }
         val otherIdx = list.indexOfFirst { it.kind == ParticipantKind.TAG && it.representation == DiagramParticipantRepresentation.OTHER }
         if (otherIdx >= 0) groupedTags.forEach { idxByTag[it] = otherIdx }
+        tagToParticipantId.forEach { (tag, participantId) -> idxById[participantId]?.let { idxByTag[tag] = it } }
     }
 
     fun indexForTag(tag: String): Int? = idxByTag[tag]
@@ -454,7 +571,7 @@ private fun runRules(
     val enabledRules = rules.filter { it.enabled && it.pattern.isNotBlank() }
     var current: Int? = null
     var sinceCancellationCheck = 0
-    for (entry in entries) {
+    for ((entryIndex, entry) in entries.withIndex()) {
         if (++sinceCancellationCheck >= CANCELLATION_CHECK_INTERVAL) {
             sinceCancellationCheck = 0
             cancellationCheck()
@@ -507,7 +624,7 @@ private fun runRulesMatched(
     if (fromCreated) warnings += "Rule '${rule.id}' referenced unknown participant '$fromName' — added it as an actor."
     if (toCreated) warnings += "Rule '${rule.id}' referenced unknown participant '$toName' — added it as an actor."
     val kind = if (fromIdx == toIdx) MessageKind.SELF else MessageKind.CALL
-    gen.messages += DiagramMessage(fromIdx, toIdx, label, entry.id, entry.ts, entry.level, kind)
+    gen.messages += DiagramMessage(fromIdx, toIdx, label, entry.id, entry.ts, entry.level, kind, evidence = MessageEvidence.RULE)
     if (options.notesForErrors && errorLevel(entry.level)) gen.notes += PendingNote(gen.messages.lastIndex, toIdx, label)
     return toIdx
 }
@@ -532,6 +649,121 @@ private fun runLinePerMessage(
         gen.messages += DiagramMessage(idx, idx, label, entry.id, entry.ts, entry.level, MessageKind.SELF)
         if (options.notesForErrors && errorLevel(entry.level)) gen.notes += PendingNote(gen.messages.lastIndex, idx, label)
     }
+}
+
+private data class SourceInteractionResult(
+    val messages: List<DiagramMessage> = emptyList(),
+    val truncated: Boolean = false,
+)
+
+// Budget and provenance validation are intentionally co-located so every callback is bounded
+// before it can append a message; extracting the loop would obscure that security invariant.
+@Suppress("CyclomaticComplexMethod", "LoopWithTooManyJumpStatements")
+private fun buildSourceInteractions(
+    entries: List<LogEntry>,
+    registry: ParticipantRegistry,
+    options: DiagramOptions,
+    enrichment: DiagramSourceEnrichment,
+    resolveSourceInteractions: (LogEntry) -> List<DiagramSourceInteraction>,
+    cancellationCheck: CancellationCheck,
+    warnings: MutableList<String>,
+    messageBudget: Int,
+): SourceInteractionResult {
+    if (messageBudget <= 0) {
+        if (entries.isNotEmpty()) warnings += "Source enrichment skipped: runtime interactions reached the diagram message cap."
+        return SourceInteractionResult(truncated = entries.isNotEmpty())
+    }
+    val messages = ArrayList<DiagramMessage>(messageBudget)
+    var truncated = entries.size > messageBudget
+    var attempts = 0
+    for ((entryIndex, entry) in entries.withIndex()) {
+        if (attempts >= messageBudget || messages.size >= messageBudget) {
+            truncated = true
+            break
+        }
+        attempts++
+        if (entryIndex % CANCELLATION_CHECK_INTERVAL == 0) cancellationCheck()
+        val interactions = resolveSourceInteractions(entry)
+        if (interactions.size > MAX_SOURCE_INTERACTIONS_PER_ENTRY) truncated = true
+        for (interaction in interactions.take(MAX_SOURCE_INTERACTIONS_PER_ENTRY)) {
+            val from = registry.indexForId(interaction.fromComponentId)
+            val to = registry.indexForId(interaction.toComponentId)
+            if (from == null || to == null) {
+                warnings += "Source interaction '${interaction.fromComponentId}' → '${interaction.toComponentId}' does not match an enabled component."
+                continue
+            }
+            if (from == to) continue
+            val needsReturn = enrichment.addReturnArrows && !interaction.returnLabel.isNullOrBlank()
+            val messageCost = if (needsReturn) 2 else 1
+            if (messages.size + messageCost > messageBudget) {
+                truncated = true
+                break
+            }
+            messages += DiagramMessage(
+                from, to, truncateLabel(collapseWhitespace(interaction.label), options.labelMaxChars),
+                entry.id, entry.ts, entry.level, MessageKind.CALL, evidence = MessageEvidence.SOURCE_INFERRED,
+            )
+            if (needsReturn) {
+                messages += DiagramMessage(
+                    to, from,
+                    truncateLabel(collapseWhitespace(interaction.returnLabel.orEmpty()), options.labelMaxChars),
+                    entry.id, entry.ts, entry.level, MessageKind.RETURN, evidence = MessageEvidence.SOURCE_INFERRED,
+                )
+            }
+        }
+    }
+    if (truncated) warnings += "Source enrichment was capped to preserve the diagram message budget."
+    return SourceInteractionResult(messages, truncated)
+}
+
+/** Duplicate component edges for explicitly mirrored actors, immediately after their original. */
+private fun applyActorMirrors(
+    messages: List<DiagramMessage>,
+    registry: ParticipantRegistry,
+    actors: List<DiagramActor>,
+): List<DiagramMessage> {
+    val mirrors = actors.mapNotNull { actor ->
+        val component = actor.mirrorComponentId?.let(registry::indexForId) ?: return@mapNotNull null
+        val actorIdx = registry.indexForId(actor.id) ?: return@mapNotNull null
+        Triple(component, actorIdx, actor.mirrorDirection)
+    }
+    if (mirrors.isEmpty()) return messages
+    return buildList(messages.size + mirrors.size) {
+        messages.forEach { message ->
+            add(message)
+            if (message.fromIdx == message.toIdx) return@forEach
+            mirrors.forEach { (componentIdx, actorIdx, direction) ->
+                val outbound = message.fromIdx == componentIdx && direction != MirrorDirection.INBOUND
+                val inbound = message.toIdx == componentIdx && direction != MirrorDirection.OUTBOUND
+                when {
+                    outbound && actorIdx != message.toIdx -> add(message.copy(fromIdx = actorIdx, evidence = MessageEvidence.ACTOR_MIRROR))
+                    inbound && actorIdx != message.fromIdx -> add(message.copy(toIdx = actorIdx, evidence = MessageEvidence.ACTOR_MIRROR))
+                }
+            }
+        }
+    }
+}
+
+/** Activations are emitted only for correlated call/return pairs, never for a bare transition. */
+private fun buildActivationSpans(messages: List<DiagramMessage>): List<DiagramActivationSpan> {
+    data class OpenCall(val from: Int, val to: Int, val index: Int, val evidence: MessageEvidence)
+    val open = ArrayDeque<OpenCall>()
+    val spans = mutableListOf<DiagramActivationSpan>()
+    messages.forEachIndexed { index, message ->
+        when {
+            message.kind == MessageKind.CALL && message.fromIdx != message.toIdx && message.evidence != MessageEvidence.ACTOR_MIRROR ->
+                open.addLast(OpenCall(message.fromIdx, message.toIdx, index, message.evidence))
+            message.kind == MessageKind.RETURN && message.evidence != MessageEvidence.ACTOR_MIRROR -> {
+                val match = open.lastOrNull { it.from == message.toIdx && it.to == message.fromIdx && it.evidence == message.evidence }
+                if (match != null) {
+                    while (open.isNotEmpty() && open.last() != match) open.removeLast()
+                    open.removeLast()
+                    spans += DiagramActivationSpan(match.to, match.index, index, match.evidence)
+                }
+            }
+        }
+    }
+    return spans
 }
 
 // ── Label formatting ──────────────────────────────────────────────────────────────────────────
@@ -631,7 +863,11 @@ private fun collapseRepeats(raw: List<DiagramMessage>): CollapseResult {
         var count = 1
         while (j < raw.size) {
             val cand = raw[j]
-            if (cand.fromIdx == first.fromIdx && cand.toIdx == first.toIdx && normalizeForRepeatCollapse(cand.label) == normFirst) {
+            val sameInteraction = cand.fromIdx == first.fromIdx &&
+                cand.toIdx == first.toIdx &&
+                cand.evidence == first.evidence &&
+                normalizeForRepeatCollapse(cand.label) == normFirst
+            if (sameInteraction) {
                 mapping[j] = out.size
                 count++
                 j++
@@ -671,7 +907,9 @@ private fun buildFrames(
     if (seqGroups.isEmpty()) return emptyList()
     val defMap = sequences.associateBy { it.id }
     val ids = IntArray(allVisible.size) { allVisible[it].id }
+
     fun idxOf(id: Int): Int? = Arrays.binarySearch(ids, id).takeIf { it >= 0 }
+
     fun idAt(idx: Int): Int = allVisible[idx].id
 
     val frames = mutableListOf<DiagramFrame>()

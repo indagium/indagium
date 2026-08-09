@@ -1,12 +1,16 @@
 package com.indagium.debug
 
 import androidx.compose.ui.graphics.Color
+import com.indagium.diagram.MAX_SOURCE_INTERACTIONS_PER_ENTRY
 import com.indagium.model.AnnBlock
 import com.indagium.model.FilterMode
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.SequenceDef
 import com.indagium.model.VideoAttachment
+import com.indagium.source.LogCallSite
+import com.indagium.source.SourceDirectCall
+import com.indagium.source.SourceIndex
 import com.indagium.ui.AppState
 import com.indagium.ui.mkTab
 import kotlinx.serialization.json.Json
@@ -675,6 +679,214 @@ class IndagiumToolGatewayTest {
         ) as Map<*, *>
 
         assertTrue((result["error"] as String).contains("no video attached"))
+    }
+
+    @Test
+    fun sequenceDiagramAcceptsComponentsActorsPoliciesAndReturnsEvidenceCoverage() {
+        state.tabs = listOf(
+            mkTab("t1", "components.log", listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "Ui", "tap"),
+                LogEntry(2, "10:00:00.010", LogLevel.I, "Service", "request"),
+                LogEntry(3, "10:00:00.020", LogLevel.I, "Noise", "ignored"),
+            )),
+        )
+        val result = operations.toolGateway.execute(
+            "build_sequence_diagram",
+            mapOf(
+                "tabId" to "t1",
+                "components" to listOf(
+                    mapOf("id" to "ui", "displayName" to "UI", "tagIds" to listOf("Ui")),
+                    mapOf("id" to "svc", "displayName" to "Service", "tagIds" to listOf("Service")),
+                ),
+                "actors" to listOf(mapOf(
+                    "id" to "backend", "label" to "Backend", "mirrorComponentId" to "svc", "mirrorDirection" to "both",
+                )),
+                "unmappedTagPolicy" to "hide",
+                "activationPolicy" to "evidenceBacked",
+            ),
+        ) as Map<*, *>
+
+        assertEquals(2, (result["coverage"] as Map<*, *>)["shownEntries"])
+        assertEquals(1, (result["coverage"] as Map<*, *>)["hiddenEntries"])
+        assertTrue((result["participants"] as List<*>).any { (it as Map<*, *>)["id"] == "backend" })
+        assertTrue((result["messages"] as List<*>).all { (it as Map<*, *>)["evidence"] != null })
+        assertNotNull(result["activationSpans"])
+    }
+
+    @Test
+    fun sequenceDiagramKeepsLegacyTagsAndEntryExitActorsCompatible() {
+        state.tabs = listOf(
+            mkTab("t1", "legacy.log", listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "A", "begin"),
+                LogEntry(2, "10:00:00.010", LogLevel.I, "B", "end"),
+            )),
+        )
+        val result = operations.toolGateway.execute(
+            "build_sequence_diagram",
+            mapOf("tabId" to "t1", "tags" to listOf("A", "B"), "actors" to listOf("User", "Server"),
+                "entryActor" to "User", "exitActor" to "Server"),
+        ) as Map<*, *>
+
+        val participantIds = (result["participants"] as List<*>).map { (it as Map<*, *>)["id"] }
+        assertTrue(participantIds.containsAll(listOf("A", "B", "User", "Server")))
+    }
+
+    @Test
+    fun sequenceDiagramRejectsOversizedParticipantCollections() {
+        fun call(extra: Map<String, Any?>): Map<*, *> = operations.toolGateway.execute(
+            "build_sequence_diagram", mapOf("tabId" to "t1") + extra,
+        ) as Map<*, *>
+
+        val components = (0..64).map { mapOf("id" to "c$it", "displayName" to "C$it", "tagIds" to emptyList<String>()) }
+        val actors = (0..64).map { "actor-$it" }
+        val merged = (0..64).associate { "merged-$it" to listOf("tag-$it") }
+        val tags = (0..128).map { "tag-$it" }
+
+        assertTrue((call(mapOf("components" to components))["error"] as String).contains("at most 64"))
+        assertTrue((call(mapOf("actors" to actors))["error"] as String).contains("at most 64"))
+        assertTrue((call(mapOf("mergedTags" to merged))["error"] as String).contains("at most 64"))
+        assertTrue((call(mapOf("tags" to tags))["error"] as String).contains("at most 128"))
+    }
+
+    @Test
+    fun sequenceDiagramRejectsDuplicateAndCollidingParticipantIds() {
+        fun error(extra: Map<String, Any?>): String = (operations.toolGateway.execute(
+            "build_sequence_diagram", mapOf("tabId" to "t1") + extra,
+        ) as Map<*, *>)["error"] as String
+
+        assertTrue(error(mapOf("components" to listOf(
+            mapOf("id" to "same", "tagIds" to listOf("A")),
+            mapOf("id" to "same", "tagIds" to listOf("B")),
+        ))).contains("duplicate component id"))
+        assertTrue(error(mapOf("actors" to listOf("User", mapOf("id" to "User", "label" to "Person"))))
+            .contains("duplicate actor id"))
+        assertTrue(error(mapOf(
+            "components" to listOf(mapOf("id" to "shared", "tagIds" to listOf("A"))),
+            "actors" to listOf(mapOf("id" to "shared", "label" to "Shared")),
+        )).contains("both a component and actor"))
+    }
+
+    @Test
+    fun sequenceDiagramRejectsOversizedStringsAndTagMembership() {
+        fun error(extra: Map<String, Any?>): String = (operations.toolGateway.execute(
+            "build_sequence_diagram", mapOf("tabId" to "t1") + extra,
+        ) as Map<*, *>)["error"] as String
+
+        assertTrue(error(mapOf("title" to "x".repeat(513))).contains("title must be at most 512"))
+        assertTrue(error(mapOf("components" to listOf(mapOf(
+            "id" to "c", "tagIds" to (0..128).map { "tag-$it" },
+        )))).contains("tagIds may contain at most 128"))
+        assertTrue(error(mapOf("actors" to listOf(mapOf(
+            "id" to "x".repeat(257), "label" to "Actor",
+        )))).contains("id must be at most 256"))
+    }
+
+    @Test
+    fun sequenceDiagramStillClampsMaxMessagesAtTheHardCap() {
+        state.tabs = listOf(mkTab("t1", "many.log", (1..450).map { id ->
+            LogEntry(id, "10:00:00.000", LogLevel.I, if (id % 2 == 0) "A" else "B", "message-$id")
+        }))
+        val result = operations.toolGateway.execute(
+            "build_sequence_diagram",
+            mapOf("tabId" to "t1", "tags" to listOf("A", "B"), "collapseRepeats" to false, "maxMessages" to 50_000),
+        ) as Map<*, *>
+
+        assertEquals(400, result["messageCount"])
+        assertEquals(true, result["truncated"])
+        assertEquals(400, (result["messages"] as List<*>).size)
+    }
+
+    @Test
+    fun sequenceDiagramSourceEnrichmentUsesLoadedIndex() {
+        val directCalls = (0 until MAX_SOURCE_INTERACTIONS_PER_ENTRY * 2).map { index ->
+            SourceDirectCall(
+                targetFilePath = "/fixture/NetworkService.kt",
+                targetOwnerType = "demo.NetworkService",
+                targetMethodName = "fetch$index",
+                targetMethodSignature = "fun fetch$index(): ApiResult",
+                targetDeclaredReturnType = "ApiResult",
+                callLine = 12 + index,
+            )
+        }
+        val sourceIndex = SourceIndex(
+            version = 10,
+            roots = listOf("/fixture"),
+            sites = listOf(LogCallSite(
+                filePath = "/fixture/Screen.kt",
+                tag = "Screen",
+                methodName = "refresh",
+                methodStartLine = 1,
+                methodEndLine = 20,
+                callLine = 10,
+                matcher = Regex.escape("refresh operation completed"),
+                literalLen = 27,
+                owningType = "demo.Screen",
+                methodSignature = "fun refresh()",
+                directCalls = directCalls,
+            )),
+            fileMeta = emptyMap(),
+            builtAt = 1L,
+        )
+        operations = IndagiumToolOperations(state) { sourceIndex }
+        state.tabs = listOf(mkTab("t1", "source.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Screen", "refresh operation completed"),
+        )))
+
+        val result = operations.toolGateway.execute("build_sequence_diagram", mapOf(
+            "tabId" to "t1",
+            "components" to listOf(
+                mapOf("id" to "screen", "displayName" to "Screen", "tagIds" to listOf("Screen")),
+                mapOf("id" to "network", "displayName" to "NetworkService", "tagIds" to listOf("Network")),
+            ),
+            "sourceEnrichment" to true,
+        )) as Map<*, *>
+
+        val messages = result["messages"] as List<*>
+        assertTrue(messages.any { (it as Map<*, *>)["evidence"] == "source_inferred" })
+        assertEquals(
+            MAX_SOURCE_INTERACTIONS_PER_ENTRY * 2,
+            messages.count { (it as Map<*, *>)["evidence"] == "source_inferred" },
+        )
+        assertEquals(true, (result["sourceEnrichment"] as Map<*, *>)["available"])
+    }
+
+    @Test
+    fun sequenceDiagramSourceEnrichmentReportsUnavailableIndex() {
+        operations = IndagiumToolOperations(state) { null }
+        state.tabs = listOf(mkTab("t1", "source.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "event"),
+        )))
+        val result = operations.toolGateway.execute("build_sequence_diagram", mapOf(
+            "tabId" to "t1",
+            "components" to listOf(mapOf("id" to "a", "displayName" to "A", "tagIds" to listOf("A"))),
+            "sourceEnrichment" to true,
+        )) as Map<*, *>
+
+        assertTrue((result["warnings"] as List<*>).any { it.toString().contains("no source index") })
+        assertEquals(false, (result["sourceEnrichment"] as Map<*, *>)["available"])
+    }
+
+    @Test
+    fun sequenceDiagramSourceCacheHashesMessagesAndEvictsOldUniqueEntries() {
+        val sensitiveTag = "PrivateCustomerTag"
+        val sensitiveMessage = "account 123456789 unique diagnostic payload"
+        val key = diagramSourceCacheKey(sensitiveTag, sensitiveMessage)
+
+        assertEquals(key, diagramSourceCacheKey(sensitiveTag, sensitiveMessage))
+        assertNotEquals(key, diagramSourceCacheKey(sensitiveTag, "$sensitiveMessage changed"))
+        assertNotEquals(diagramSourceCacheKey("a", "b\u0000c"), diagramSourceCacheKey("a\u0000b", "c"))
+        assertTrue(!key.contains(sensitiveTag) && !key.contains(sensitiveMessage))
+        assertEquals(DIAGRAM_SOURCE_CACHE_KEY_CHARS, key.length, "SHA-256 base64url keys remain fixed-size")
+
+        val cache = DiagramSourceLruCache<Int>(MAX_MCP_DIAGRAM_SOURCE_CACHE_ENTRIES)
+        repeat(MAX_MCP_DIAGRAM_SOURCE_CACHE_ENTRIES * 3) { index -> cache["key-$index"] = index }
+
+        assertEquals(MAX_MCP_DIAGRAM_SOURCE_CACHE_ENTRIES, cache.size)
+        assertNull(cache["key-0"])
+        assertEquals(
+            MAX_MCP_DIAGRAM_SOURCE_CACHE_ENTRIES * 3 - 1,
+            cache["key-${MAX_MCP_DIAGRAM_SOURCE_CACHE_ENTRIES * 3 - 1}"],
+        )
     }
 
     // Smallest thing ImageIO will both write and read back, so AnnotationManager's

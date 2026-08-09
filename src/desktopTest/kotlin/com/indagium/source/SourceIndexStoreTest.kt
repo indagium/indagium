@@ -150,6 +150,22 @@ class SourceIndexStoreTest {
     }
 
     @Test
+    fun schemaV9IndexIsRejectedSoItWillBeRebuiltWithSourceMetadata() {
+        val dir = createTempDirectory("openlog-src-store-v9").toFile()
+        val file = File(dir, "source-index").apply {
+            writeText(
+                buildString {
+                    appendLine("indagium-source-index-v1")
+                    appendLine("version\t9")
+                    appendLine("builtAt\t1000")
+                },
+            )
+        }
+
+        assertNull(SourceIndexStore.load(file))
+    }
+
+    @Test
     fun malformedLineIsSkippedWithoutThrowing() {
         val dir = createTempDirectory("openlog-src-store-garbled").toFile()
         val file = File(dir, "source-index").apply {

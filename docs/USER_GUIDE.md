@@ -20,7 +20,7 @@ This guide is task-oriented. If you want the architecture instead, see [SAAD.md]
 [12. Crashes, ANRs and custom issues](#12-crashes-anrs-and-custom-issues) ·
 [13. Saved filters](#13-saved-filters) · [14. Comparing two logs](#14-comparing-two-logs)
 
-**Producing output** — [15. Notes and analysis export](#15-notes-and-analysis-export) ·
+**Producing output** — [15. Notes, diagrams and analysis export](#15-notes-and-analysis-export) ·
 [16. Show in code](#16-show-in-code) · [17. Live tailing](#17-live-tailing) ·
 [18. Merging and splitting](#18-merging-and-splitting) ·
 [19. Exporting the filtered log](#19-exporting-the-filtered-log)
@@ -423,6 +423,72 @@ Beyond blocks, a note has:
 
 The `.ann` sidecar is what makes a saved note fully reversible — it preserves block structure, image
 bytes, and log references that plain Markdown cannot carry. Keep the two files together.
+
+### Sequence-diagram workspaces
+
+A sequence diagram is a dedicated, closable tab rather than a modal dialog. Create one from a
+non-empty row selection to use that inclusive range, or start from the current filtered view. Its
+header shows the source log, scope and save state; **Back to source log** returns to the originating
+tab. You can keep several diagram tabs open at once. If the source log is closed, an existing
+diagram remains viewable from its cached model, but must be relinked before it can be regenerated.
+
+The left inspector is collapsible and resizable. It groups the controls as **Scope**,
+**Components**, **Actors**, **Interaction inference**, **Presentation**, and **Draft library**.
+The canvas supports pan, pointer-centred zoom, fit/reset, visible scrollbars, warnings, and coverage
+counts.
+
+#### Choose and organise components
+
+The Components section presents tags in three useful tiers:
+
+- Tags on the selected rows are enabled initially.
+- Tags elsewhere in the current filtered view are available but disabled initially.
+- Tags outside that view are available only through search, with their analysis counts.
+
+Every enabled row is a named component. Rename a component for a useful diagram label, merge two or
+more raw tags into one component, inspect its tag membership, or unmerge it again. This replaces the
+old per-tag **Show / Other / Hide** choice: a component is simply enabled or disabled.
+
+The advanced **Group unmapped in-range tags as Other** switch is the only `Other` behaviour. It
+groups *all* otherwise-unmapped tags in the chosen scope into one `Other` lifeline. With it off
+(the default), unmapped tags are hidden. It never silently changes the status of tags that were not
+explicitly selected.
+
+With one row or one component there is no handoff to draw. The workspace explains that situation and
+offers the event-timeline view instead.
+
+#### Read and refine interactions
+
+**Component flow** is the default: it summarizes handoffs between enabled components. **Every event**
+and message-pattern rules live under Advanced when you need a literal timeline or explicit endpoints.
+Aliases remain display-only; the raw tag identity is retained for regeneration and line navigation.
+
+Actors can stand for people, services, or hardware. An actor can mirror a component inbound,
+outbound, or both (both is the default). Mirroring duplicates every applicable non-self edge beside
+the original edge; it does not replace or redirect the original evidence.
+
+Each message records why it exists: a log transition, a pattern rule, source inference, or actor
+mirroring. Source-inferred interactions are visibly dashed. Source enrichment is deliberately
+conservative: it follows only high-confidence direct calls one hop, shows declared return types, and
+surfaces ambiguous matches instead of guessing. Runtime return values appear only when the log or a
+rule supplied them. Activation bars appear only for correlated call/return evidence, never from an
+unrelated tag change.
+
+Arrows remain clickable: selecting one navigates to the log line that supplied it. Warnings and
+coverage identify hidden, grouped, truncated, or ambiguous evidence so the diagram does not look
+more certain than its source.
+
+#### Drafts, notes, and export
+
+Save a workspace as a draft and reopen it from the Draft library. Closing a changed diagram asks
+whether to save the draft, discard the changes, or cancel the close. Attach a diagram to a note as a
+snapshot (self-contained) or as a linked draft. Diagram cards in Notes stay collapsed until you
+expand them; their summary still shows title, scope, counts, revision, and actions.
+
+Image is the default attachment/export representation, so a saved Markdown or Jira analysis contains
+the diagram PNG (for example, `!diagram-01.png!`) as well as the image file. Choose source export
+when Mermaid or PlantUML text is the useful review artifact. Changing a title, caption, or export
+format updates metadata only; it does not rebuild the diagram.
 
 **Formatting options** (Settings → Export & annotations): Markdown indented style or **Jira**
 style (log blocks wrapped in `{code:java}`, images as `!frame-01.jpg!` wiki anchors), automatic block

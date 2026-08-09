@@ -32,7 +32,9 @@ class FolderPickerAppStateTest {
             state.pickSourceFolder()
 
             assertEquals(selected.absolutePath, state.settings.defaultSaveDir)
-            assertEquals(listOf(selected.absolutePath), state.settings.sourceFolders)
+            // Source roots are security boundaries and are persisted canonically so `/var` and
+            // macOS's `/private/var` alias cannot become two different registrations.
+            assertEquals(listOf(selected.canonicalPath), state.settings.sourceFolders)
             assertEquals(listOf("Choose Save Folder", "Choose Source Folder"), picker.titles)
             assertNull(picker.initialDirectories.first())
             assertNull(picker.initialDirectories[1])

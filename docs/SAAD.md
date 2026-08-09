@@ -257,6 +257,7 @@ flowchart TB
         fileview["FileView / CompareView"]
         viewer["LogViewer + Minimap + TidMap + SearchBar"]
         fpanel["FilterPanel"]
+        diagramws["DiagramWorkspace<br/>tabs · inspector · canvas"]
         rpanel["Right sidebar<br/>AnnotationPanel · AiSidebar · VideoPanel"]
         dialogs["SettingsDialog · SourceCodeDialog<br/>McpInfoDialog · UpdateDialog · Dialogs.kt"]
     end
@@ -282,6 +283,12 @@ flowchart TB
     subgraph indexes["Indexes"]
         srcidx["source/<br/>SourceIndexer · LogSourceResolver · SourceIndexStore"]
         caseidx["cases/<br/>CaseIndexer · CaseSearch · CaseIndexStore"]
+    end
+
+    subgraph diagrams["Diagram engine — package diagram"]
+        diagrambuild["SeqDiagramBuilder<br/>components · evidence · activations"]
+        diagramrender["SeqDiagramRenderer / DiagramEmitters"]
+        diagramcodec["DiagramSpecCodec"]
     end
 
     subgraph automation["Automation — package debug"]
@@ -311,6 +318,9 @@ flowchart TB
     coord --> persist
     coord --> server
     state --> indexes
+    state --> diagrams
+    diagrams --> engine
+    diagrams --> indexes
     state --> media
     ops --> state
     gateway --> ops
@@ -352,6 +362,7 @@ observed in the code and enforced by convention and review rather than by toolin
 | `model` | All domain data types. No behaviour beyond trivial accessors and custom `equals`. | Compose `Color` only | Everything else |
 | `utils` | Pure log-processing algorithms: parse, filter, fold, merge, split, export, tail, match. | `model` | `ui`, `ai`, `debug`, any Compose UI |
 | `source` | Source-code indexing and log-line → call-site resolution. Pure text/regex, no compiler. | `model`, `utils` | `ui`, `ai`, `debug` |
+| `diagram` | UI-free sequence-diagram model, builder, renderer, text emitters, and note codec. | `model`, `utils`, `source` | `ui`, `ai`, `debug`, Compose UI |
 | `cases` | Similarity index over previously written analysis notes. | `model`, `utils` | `ui`, `ai`, `debug` |
 | `video` | FFmpeg-backed playback and frame grabbing. | `model` | `ui` |
 | `voice` | Audio capture and the three transcription backends. | — | `ui` |
@@ -389,6 +400,7 @@ flowchart TB
     ai["ai"]
     debug["debug"]
     source["source"]
+    diagram["diagram"]
     cases["cases"]
     utils["utils"]
     model["model"]
@@ -400,6 +412,7 @@ flowchart TB
     ui --> ai
     ui --> debug
     ui --> source
+    ui --> diagram
     ui --> cases
     ui --> utils
     ui --> model
@@ -419,6 +432,9 @@ flowchart TB
 
     source --> utils
     source --> model
+    diagram --> source
+    diagram --> utils
+    diagram --> model
     cases --> utils
     cases --> model
     video --> model
@@ -750,6 +766,33 @@ It is never persisted and never leaves the process.
 
 ---
 
+### 8.3 Sequence-diagram workspace model
+
+Diagram workspaces are deliberately separate from `LogTab`. `AppState.tabs` remains the list of open
+log files; `ActiveSurface` selects either a log tab or an independent `DiagramWorkspaceSession`.
+This keeps log lifecycle, compare view, and autosave semantics from acquiring diagram-only state.
+A workspace carries the source-log id (when it is still open), optional draft id, editable spec,
+dirty state, candidate tiers, and the last usable preview. A source tab can therefore close without
+destroying an already-built diagram; regeneration is disabled until a source is relinked.
+
+The durable diagram spec is intentionally evidence-oriented:
+
+| Type | Responsibility |
+|---|---|
+| `DiagramComponent` | Stable id, display name, enabled state, and one-or-more raw `tagIds`; replaces per-tag presentation states. |
+| `DiagramActor` | External participant; may mirror a component inbound, outbound, or both while retaining the original edge. |
+| `UnmappedTagPolicy` | Global `HIDE` (default) or `GROUP_AS_OTHER` for every otherwise-unmapped in-range tag. |
+| `DiagramMessage` | Endpoint, label, originating line, kind, and `MessageEvidence` (`LOG`, `RULE`, `SOURCE_INFERRED`, or `ACTOR_MIRROR`). |
+| `DiagramActivationSpan` | Inclusive call/return interval carrying the evidence that justified it. |
+| `SeqDiagramSpec` | Range, components, actors, interaction mode/rules, source-enrichment and presentation options. |
+
+Raw tag ids remain the provenance identity even when a component has been renamed or tags have been
+merged. This is what makes aliases, unmerge, source resolution, and arrow-to-log navigation stable
+across edits. The builder duplicates a mirrored actor edge adjacent to its original only for a
+non-self interaction and records `ACTOR_MIRROR` evidence; it never reassigns the original endpoint.
+
+---
+
 ## 9. Key packages and classes
 
 ### 9.1 `model`
@@ -831,13 +874,23 @@ It is never persisted and never leaves the process.
 |---|---|
 | `source/SourceIndexer.kt` | Builds the call-site index by text scanning and brace matching — no compiler, no parser dependency |
 | `source/LogSourceResolver.kt` | Maps `(tag, msg)` back to call sites with confidence ranking |
-| `source/SourceIndexStore.kt` | On-disk index, format `indagium-source-index-v1` (a load also accepts the legacy `openLog2-source-index-v1` magic), schema version 9 |
+| `source/SourceIndexStore.kt` | On-disk index, format `indagium-source-index-v1` (a load also accepts the legacy `openLog2-source-index-v1` magic), schema version 10 |
 | `source/SourceStructureParser.kt` | Declaration scanner for the read-only source-navigation tools |
 | `cases/CaseIndexer.kt` / `CaseSearch.kt` / `CaseIndexStore.kt` | Similarity index over previously written notes; idf-lite scoring with tag boost and stale-version penalty |
 | `video/VideoPlayerController.kt` | FFmpeg decode loop on a dedicated thread, audio via `javax.sound.sampled` |
 | `voice/VoiceInputController.kt` + backends | Dictation state machine; Whisper JNI, Apple Speech JNI, Windows helper process |
 | `update/UpdateChecker.kt` | GitHub Releases API, per-OS asset selection, streamed download to a `.part` file |
 | `singleinstance/SingleInstance.kt` | File lock plus loopback socket; forwards file arguments to the running instance |
+
+### 9.7 `diagram`
+
+| File | Role |
+|---|---|
+| `diagram/DiagramModel.kt` | Dialect-neutral spec and result model: components, actors, evidence, activation spans, coverage, ranges, and interaction rules. |
+| `diagram/SeqDiagramBuilder.kt` | Cancellable range resolution, component mapping, interaction inference, source one-hop enrichment, mirroring, and evidence-backed activation construction. |
+| `diagram/SeqDiagramRenderer.kt` / `DiagramEmitters.kt` | Themed raster rendering with arrow hit targets plus Mermaid and PlantUML source emission. |
+| `diagram/DiagramSpecCodec.kt` | v3 note-header codec; reads v1/v2 attachments and snapshots, migrates their legacy participant/actor fields, and writes current metadata. |
+| `ui/SeqDiagramDialog.kt` / `SeqDiagramCoordinator.kt` | Dedicated tab surface, conflated per-workspace preview pipeline, drafts, close handling, and source relinking. |
 
 ---
 
@@ -912,6 +965,27 @@ to re-materialise the entire item list. It copies the cached list and splices th
 out; returning `null` falls back to a full rebuild.
 
 **Cancellation** is covered in [§12.3](#123-cancellation-of-computeitems).
+
+### 10.2 Diagram build and preview pipeline
+
+Diagram work is a second, per-workspace pipeline; it does not piggyback on the log viewer's
+composition path. Build-affecting inputs — range, components, actors, unmapped-tag policy,
+inference, source enrichment, and activation policy — feed a conflated `mapLatest` job. A later
+edit cancels range resolution, filtering, candidate counting, participant mapping, source lookup,
+and rendering before the obsolete result can publish. Metadata-only edits (title, attachment
+caption, and export format) bypass the pipeline entirely.
+
+The pipeline reuses cached filtered entries and caches source resolution by source-index revision and
+tag/message. It resolves selected-range candidates separately from current-filtered-view candidates;
+whole-log candidates remain a search operation backed by existing analysis counts. The diagram model
+then records coverage, evidence, warnings, and activation spans before it reaches either renderer.
+
+Raster work runs off the Compose thread and produces an `ImageBitmap` for interactive preview. PNG
+encoding is deferred to copy/export. This distinction keeps a large preview from blocking input and
+avoids repeatedly encoding bytes the canvas does not need. The Notes panel follows the same rule:
+it parses only a diagram card's summary while collapsed; full codec decode and render happen
+asynchronously only after expansion. Parsed notes are cached by block id/text, and attachment images
+are re-exported only when their model, theme, or export mode changes.
 
 ---
 
@@ -995,6 +1069,21 @@ request object carrying a nonce on `AppState`, and the log view consumes it:
 The nonce is what makes "navigate to the same line twice in a row" work — without it the second
 request would be equal to the first and would not trigger recomposition.
 
+### 11.6 Diagram surfaces are not log tabs
+
+`AppState.tabs` remains log-only. Diagram workspace sessions live in a separate collection selected
+through `ActiveSurface`, so log-tab code cannot accidentally treat a diagram as a log with an empty
+body. Each session owns its source-log identity, draft reference, spec, dirty state, candidate and
+preview state, zoom/pan presentation state, and cached model. Closing a dirty workspace routes
+through a three-way save-draft/discard/cancel decision; closing a source log converts dependent
+workspaces to offline/view-only state rather than discarding their cached evidence.
+
+The workspace inspector follows the same Bound-adapter rule as other UI leaf surfaces: it receives
+immutable state plus callbacks rather than `AppState`. Its sidebar is independently collapsible and
+resizable; canvas pan, zoom, fit/reset, scrollbars, and arrow navigation are presentation state, not
+diagram-spec state. This distinction is essential: a viewport adjustment must never mark a draft
+dirty or trigger a diagram rebuild.
+
 ---
 
 ## 12. Threading and concurrency model
@@ -1007,6 +1096,7 @@ request would be equal to the first and would not trigger recomposition.
 | `Dispatchers.Default` | `ui/LogViewer.kt:308`, `ui/AppState.kt:2914`, `ui/Minimap.kt:453`, `ui/TidMap.kt:130` | CPU-bound work: `computeItems` for large files, minimap rendering, TID colouring, custom-issue scanning |
 | `CoroutineScope(SupervisorJob() + Dispatchers.Default)` | `ai/AiSidebarRuntime.kt:62` | AI runtime |
 | `CoroutineScope(SupervisorJob() + Dispatchers.IO)` | `ai/AccountAgentRunner.kt:29` | Subprocess agent runs |
+| Per-workspace `mapLatest` pipeline | Diagram workspace coordinator | Cancellable candidate and preview builds; metadata edits do not enter this pipeline |
 | Ktor CIO request coroutines | `debug/ControlServer.kt` | Tool invocations from external clients |
 
 `SupervisorJob` throughout means one failed file load cannot cancel the scope and take every other
@@ -1079,6 +1169,7 @@ from any single file:
 | Search recompute | 150 ms | `ui/AppState.kt:4064` | Keystrokes in the Find bar |
 | Tail re-analysis | 1500 ms | `ui/TailCoordinator.kt:128` | Continuous appends into periodic crash re-detection |
 | AI UI update | 75 ms | `ai/AiSidebarRuntime.kt:281-288` | Token deltas, so Markdown is not reparsed per token |
+| Diagram workspace build | Conflated / latest only | Diagram workspace coordinator | Spec edits into one cancellable candidate/preview build; never metadata-only edits |
 | Loading indicator grace | 250 ms | `ui/LogViewer.kt:72` | Suppresses a flashing spinner for sub-quarter-second recomputes |
 
 ### 12.6 Threading map
@@ -1156,7 +1247,7 @@ Everything is a plain file under one app-data directory, resolved per OS by
 | Path | Contents | Format |
 |---|---|---|
 | `autosave.cache` | Session: tabs, filters, settings, saved filters, recents | `indagium-cache-v1`, line-oriented (a load also accepts the legacy `openLog2-cache-v1` magic) |
-| `source-index` | Indexed `Log.*`/Timber call sites | `indagium-source-index-v1`, schema v9 (a load also accepts the legacy `openLog2-source-index-v1` magic) |
+| `source-index` | Indexed `Log.*`/Timber call sites, owner/method/return metadata, and direct-call hints | `indagium-source-index-v1`, schema v10 (a load also accepts the legacy `openLog2-source-index-v1` magic) |
 | `case-index` | Similarity index over past analysis notes | `indagium-case-index-v1`, schema v1 (a load also accepts the legacy `openLog2-case-index-v1` magic) |
 | `control-token` | Bearer token for the control server | 32 hex chars, plaintext |
 | `notes/` | Saved analyses: `<base>_analysis.md` + `.ann` sidecar | Markdown + token format |
@@ -1268,6 +1359,26 @@ structure, including image bytes and log references, when the note is reopened. 
 carries `sourcePath` (`ui/AppState.kt:5327`), which is what lets the case index associate a note with
 the log it came from.
 
+### 13.7 Diagram compatibility and source-index invalidation
+
+Diagram notes stay ordinary `AnnBlock.Note` values, so the `.ann` container format does not change.
+Their invisible header is a separate diagram codec: writers emit v3 while readers continue to accept
+v1 and v2 headers and library snapshots. Loading migrates legacy per-participant presentation and
+entry/exit actor fields into components, actors, and the global unmapped-tag policy. This migration
+is deterministic and preserves the original raw tag identities; a legacy attachment that cannot be
+fully reconstructed remains readable as a source/snapshot card instead of being discarded.
+
+Draft-library snapshots use the same codec, not a parallel serialized model. Snapshot attachments
+retain the rendered model and source identity; linked attachments retain the durable draft id and
+revision. Both forms can be viewed after their source log closes. The default attachment/export mode
+is image, which writes the diagram PNG and its Markdown/Jira image reference; source is an explicit
+opt-in format.
+
+The source index moves to schema v10. It adds the owning type, method signature, declared return
+type, and high-confidence direct-call edges needed for one-hop enrichment. A non-v10 index is not
+partially trusted: it is rebuilt before inferred arrows are offered. Runtime values are intentionally
+absent from this store; they can enter a diagram only through log or rule evidence.
+
 ---
 
 ## 14. External integrations
@@ -1286,6 +1397,28 @@ the log it came from.
 | REST | 51 routes | `debug/ControlServer.kt:1240` `REST_ROUTES` |
 | Auth | `Authorization: Bearer <32 hex>`, constant-time compare | `debug/ControlServer.kt:126-173` |
 | CORS | Installed **only** when `mcpAllowBrowserClients` is on | `debug/ControlServer.kt:336-345` |
+
+#### 14.1.1 Debug-control isolated runtime
+
+End-to-end MCP verification uses a debug-only process, not the user's normal application instance.
+Launch it with both `INDAGIUM_DEBUG_CONTROL=<port>` and
+`INDAGIUM_DEBUG_APP_DATA_DIR=<canonical-empty-temp-directory>`. The first switch force-enables the
+loopback control server for that process only; the second redirects *all* app-data storage before
+any migration, restore, or single-instance work begins.
+
+The override is a fail-closed contract. The path must be absolute, contain no symlink path
+components, resolve beneath the JVM temporary directory (or macOS `/private/tmp` /
+`/private/var/folders`), name a non-root child directory, and be empty when it already exists. A
+relative path, arbitrary user directory, symlink, file, or non-empty directory is rejected instead
+of falling back to normal app data. The override is ignored unless debug control is enabled, so it
+cannot become a user-facing storage setting.
+
+An accepted override skips the legacy openLog2 → Indagium migration and isolates autosave and Recent
+state, control token, notes/drafts, source and case indexes, archive cache, diagnostic log, and the
+single-instance lock/socket. Test inputs may therefore be read from explicit fixture paths while all
+generated state remains inside the empty debug directory. This is a test-safety boundary, not a
+general-purpose sandbox: normal file-open authorization still belongs to the caller and MCP tool
+policy.
 
 **The single tool contract.** This is the structural idea worth understanding. There is one
 catalogue, `MCP_TOOLS` (`debug/ControlServer.kt:666`, 56 entries), and one handler map,

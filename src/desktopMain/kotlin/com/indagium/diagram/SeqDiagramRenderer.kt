@@ -166,6 +166,15 @@ private const val BASE_PLACEHOLDER_FONT = 13f
  *  scales down together, so a clamped diagram is smaller and crisper, never just cropped. */
 private const val MAX_IMAGE_DIM_PX = 8000
 
+private const val ACTIVATION_BAR_WIDTH_MULTIPLIER = 5
+private const val MIN_ACTIVATION_BAR_WIDTH = 4
+private const val ACTIVATION_HIGHLIGHT_ALPHA = 72
+private const val ACTIVATION_DEFAULT_ALPHA = 64
+private const val FRAME_LOCAL_HEIGHT_RATIO = .72f
+private const val FRAME_BORDER_STROKE = 1.5f
+private const val NOTE_FILL_ALPHA = 50
+private const val MIN_RENDER_SCALE = .05f
+
 private const val ELLIPSIS = "…"
 
 // ── Scaled constants bundle ───────────────────────────────────────────────────────────────────
@@ -175,6 +184,7 @@ private const val ELLIPSIS = "…"
 // member functions called from those initializers.
 private class Metrics(val scale: Float) {
     private fun s(v: Float): Int = (v * scale).roundToInt()
+
     private fun sf(v: Float): Float = max(1f, v * scale) // stroke widths/dash lengths must stay > 0
 
     val margin = s(BASE_MARGIN)
@@ -250,16 +260,23 @@ private class FrameLayout(val frame: DiagramFrame, val left: Int, val top: Int, 
 
 private class NoteLayout(val note: DiagramNoteMark, val x: Int, val y: Int, val width: Int, val height: Int, val lines: List<String>)
 
+private class ActivationLayout(val span: DiagramActivationSpan, val x: Int, val top: Int, val bottom: Int, val width: Int)
+
+// A measured layout is intentionally one immutable transport object shared by paint and hit-test.
+@Suppress("LongParameterList")
 private class DiagramLayout(
     val widthPx: Int,
     val heightPx: Int,
-    val titleY: Int, // baseline for the title text, -1 when spec.title is blank
+    // Baseline for the title text, -1 when spec.title is blank.
+    val titleY: Int,
     val lifelineBottom: Int,
     val participants: List<ParticipantLayout>,
     val rows: List<RowLayout>,
     val frames: List<FrameLayout>,
     val notes: List<NoteLayout>,
-    val footerY: Int, // baseline for the truncation footer text, -1 when the diagram isn't truncated
+    val activations: List<ActivationLayout>,
+    // Baseline for the truncation footer text, -1 when the diagram isn't truncated.
+    val footerY: Int,
     val metrics: Metrics,
     val titleFont: Font,
     val participantFont: Font,
@@ -373,6 +390,9 @@ private fun withRepeatSuffix(m: DiagramMessage): String = if (m.repeatCount > 1)
 
 // ── Measure ────────────────────────────────────────────────────────────────────────────────────
 
+// Measurement has coordinated branches for every renderable construct; splitting it would make
+// the shared coordinate system less auditable than retaining this single layout pass.
+@Suppress("CyclomaticComplexMethod", "LongMethod")
 private fun measure(diagram: SeqDiagram, scale: Float): DiagramLayout {
     val metrics = Metrics(scale)
     val titleFont = Font(Font.SANS_SERIF, Font.BOLD, (BASE_TITLE_FONT * scale).roundToInt().coerceAtLeast(1))
@@ -387,6 +407,7 @@ private fun measure(diagram: SeqDiagram, scale: Float): DiagramLayout {
         // ── Participant columns ──
         val pFm = scratch.getFontMetrics(participantFont)
         val maxTextW = metrics.participantBoxMaxW - 2 * metrics.participantPadH
+
         data class Prelim(val lines: List<String>, val boxWidth: Int, val headerH: Int)
 
         val prelim = diagram.participants.map { p ->
@@ -455,6 +476,19 @@ private fun measure(diagram: SeqDiagram, scale: Float): DiagramLayout {
             FrameLayout(f, left, top, max(left + 1, right), max(top + 1, bottom))
         }
 
+        val activationLayouts = diagram.activationSpans.mapNotNull { span ->
+            val invalidSpan = span.participantIdx !in participantLayouts.indices ||
+                span.startMessage !in rows.indices ||
+                span.endMessage !in rows.indices ||
+                span.startMessage > span.endMessage
+            if (invalidSpan) return@mapNotNull null
+            val width = (metrics.strokeThick * ACTIVATION_BAR_WIDTH_MULTIPLIER)
+                .roundToInt()
+                .coerceAtLeast(MIN_ACTIVATION_BAR_WIDTH)
+            val x = participantLayouts[span.participantIdx].centerX - width / 2
+            ActivationLayout(span, x, rows[span.startMessage].arrowY, rows[span.endMessage].arrowY, width)
+        }
+
         // ── Notes ──
         val noteFm = scratch.getFontMetrics(noteFont)
         val noteInnerW = metrics.noteW - 2 * metrics.notePad
@@ -492,6 +526,7 @@ private fun measure(diagram: SeqDiagram, scale: Float): DiagramLayout {
             rows = rows,
             frames = frameLayouts,
             notes = noteLayouts,
+            activations = activationLayouts,
             footerY = footerY,
             metrics = metrics,
             titleFont = titleFont,
@@ -554,11 +589,26 @@ private fun paint(g: Graphics2D, diagram: SeqDiagram, theme: DiagramTheme, layou
 
     layout.frames.forEach { paintFrame(g, it, layout, theme) }
     paintLifelines(g, layout, theme)
+    layout.activations.forEach { paintActivation(g, it, theme) }
     layout.participants.forEach { paintParticipantHeader(g, it, layout, theme) }
     diagram.messages.forEachIndexed { i, m -> layout.rows.getOrNull(i)?.let { paintMessage(g, m, it, layout, theme) } }
     layout.notes.forEach { paintNote(g, it, layout, theme) }
     paintTitle(g, diagram, layout, theme)
     paintFooter(g, diagram, layout, theme)
+}
+
+private fun paintActivation(g: Graphics2D, activation: ActivationLayout, theme: DiagramTheme) {
+    val color = when (activation.span.evidence) {
+        MessageEvidence.SOURCE_INFERRED -> Color(
+            theme.frame.red, theme.frame.green, theme.frame.blue, ACTIVATION_HIGHLIGHT_ALPHA,
+        )
+        MessageEvidence.RULE -> Color(
+            theme.note.red, theme.note.green, theme.note.blue, ACTIVATION_HIGHLIGHT_ALPHA,
+        )
+        else -> Color(theme.arrow.red, theme.arrow.green, theme.arrow.blue, ACTIVATION_DEFAULT_ALPHA)
+    }
+    g.color = color
+    g.fillRect(activation.x, activation.top, activation.width, (activation.bottom - activation.top).coerceAtLeast(1))
 }
 
 private fun paintLifelines(g: Graphics2D, layout: DiagramLayout, theme: DiagramTheme) {
@@ -650,7 +700,7 @@ private fun paintDirectMessage(
     val x2 = geo.x2
     val y = geo.y
     g.color = theme.arrow
-    g.stroke = if (m.kind == MessageKind.RETURN) {
+    g.stroke = if (m.kind == MessageKind.RETURN || m.evidence == MessageEvidence.SOURCE_INFERRED) {
         BasicStroke(metrics.strokeThin, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, metrics.dashReturn, 0f)
     } else {
         BasicStroke(metrics.strokeThick)
@@ -692,12 +742,12 @@ private fun paintFrame(g: Graphics2D, fl: FrameLayout, layout: DiagramLayout, th
     val arc = 10
     // A frame spanning most of the canvas gives no grouping cue and used to turn the whole
     // preview into a tinted slab. Keep its border/label, but reserve the wash for local groups.
-    if (h < layout.heightPx * .72f) {
+    if (h < layout.heightPx * FRAME_LOCAL_HEIGHT_RATIO) {
         g.color = Color(base.red, base.green, base.blue, BASE_FRAME_WASH_ALPHA)
         g.fillRoundRect(fl.left, fl.top, w, h, arc, arc)
     }
     g.color = Color(base.red, base.green, base.blue, BASE_FRAME_BORDER_ALPHA)
-    g.stroke = BasicStroke(1.5f)
+    g.stroke = BasicStroke(FRAME_BORDER_STROKE)
     g.drawRoundRect(fl.left, fl.top, w, h, arc, arc)
     g.color = Color(base.red, base.green, base.blue)
     val label = "  ".repeat(fl.frame.depth) + frameLabelText(fl.frame)
@@ -707,7 +757,7 @@ private fun paintFrame(g: Graphics2D, fl: FrameLayout, layout: DiagramLayout, th
 private fun paintNote(g: Graphics2D, nl: NoteLayout, layout: DiagramLayout, theme: DiagramTheme) {
     val color = if (nl.note.isError) theme.errorAccent else theme.note
     val arc = layout.metrics.noteArc
-    g.color = Color(color.red, color.green, color.blue, 50)
+    g.color = Color(color.red, color.green, color.blue, NOTE_FILL_ALPHA)
     g.fillRoundRect(nl.x, nl.y, nl.width, nl.height, arc, arc)
     g.color = color
     g.stroke = BasicStroke(layout.metrics.strokeThin)
@@ -765,7 +815,7 @@ fun renderSequenceDiagram(diagram: SeqDiagram, theme: DiagramTheme, scale: Float
             MAX_IMAGE_DIM_PX.toFloat() / layout.widthPx,
             MAX_IMAGE_DIM_PX.toFloat() / layout.heightPx,
         )
-        effectiveScale = (effectiveScale * shrink).coerceAtLeast(0.05f)
+        effectiveScale = (effectiveScale * shrink).coerceAtLeast(MIN_RENDER_SCALE)
         layout = measure(diagram, effectiveScale)
     }
     // Integer rounding across many small constants is not perfectly linear under a shrink factor, so

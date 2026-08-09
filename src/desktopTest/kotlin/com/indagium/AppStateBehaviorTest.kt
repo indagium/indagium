@@ -672,7 +672,10 @@ class AppStateBehaviorTest {
         target.importFilters(source.exportFilters())
 
         assertEquals(listOf("Release"), target.savedFilterFolders.map { it.name })
-        assertEquals("Release", target.savedFilterFolders.single { it.id == target.savedFilters.single().folderId }.name)
+        assertEquals(
+            "Release",
+            target.savedFilterFolders.single { it.id == target.savedFilters.single().folderId }.name
+        )
         assertTrue(target.savedFilters.single().favorite)
     }
 
@@ -1232,7 +1235,9 @@ class AppStateBehaviorTest {
         state.beginRenameFilter(networkId)
         state.confirmRenameFilter(" errors ")
         assertEquals("A saved filter named \"errors\" already exists.", state.filterRenameError)
-        assertEquals(null, state.savedFilters.find { it.name == "errors" }?.let { if (it.id == networkId) it else null })
+        assertEquals(
+            null,
+            state.savedFilters.find { it.name == "errors" }?.let { if (it.id == networkId) it else null })
     }
 
     @Test
@@ -1426,7 +1431,16 @@ class AppStateBehaviorTest {
         val state = AppState()
         state.addTab()
         state.upFlt(state.tabs.single().id) { f ->
-            f.copy(sequences = listOf(SequenceDef(id = "outer", matchText = "start", priority = 1, color = SEQ_COLORS[0])))
+            f.copy(
+                sequences = listOf(
+                    SequenceDef(
+                        id = "outer",
+                        matchText = "start",
+                        priority = 1,
+                        color = SEQ_COLORS[0]
+                    )
+                )
+            )
         }
         state.newSeqColor = SEQ_COLORS[0]
 
@@ -2159,7 +2173,10 @@ class AppStateBehaviorTest {
         waitUntil { state.openError != null || (state.tabs.isNotEmpty() && !state.isLoading) }
 
         assertEquals(emptyList(), state.tabs, "an over-budget entry must not open as a (misleadingly empty) tab")
-        assertTrue(state.openError?.message?.contains("extraction limit") == true, "expected a clear budget error:\n${state.openError}")
+        assertTrue(
+            state.openError?.message?.contains("extraction limit") == true,
+            "expected a clear budget error:\n${state.openError}"
+        )
     }
 
     @Test
@@ -2391,11 +2408,21 @@ class AppStateBehaviorTest {
         val videosDir = File(archiveCacheDir, "videos")
         val nameA = archiveVideoCacheFileName(
             archiveA,
-            ZipLogCandidate(candidateA.entryPath, candidateA.displayName, sizeBytes = -1L, kind = ZipLogCandidateKind.VIDEO),
+            ZipLogCandidate(
+                candidateA.entryPath,
+                candidateA.displayName,
+                sizeBytes = -1L,
+                kind = ZipLogCandidateKind.VIDEO
+            ),
         )
         val nameB = archiveVideoCacheFileName(
             archiveB,
-            ZipLogCandidate(candidateB.entryPath, candidateB.displayName, sizeBytes = -1L, kind = ZipLogCandidateKind.VIDEO),
+            ZipLogCandidate(
+                candidateB.entryPath,
+                candidateB.displayName,
+                sizeBytes = -1L,
+                kind = ZipLogCandidateKind.VIDEO
+            ),
         )
         waitUntil { File(videosDir, nameA).exists() && File(videosDir, nameB).exists() }
 
@@ -2467,7 +2494,12 @@ class AppStateBehaviorTest {
         state.tabs = listOf(mkTab("log", "test.log", emptyList()))
         state.activeTabId = "log"
         val ann = File(dir, "foo.ann").apply {
-            writeText(Annotations(blocks = listOf(AnnBlock.Note("n1", "hand-copied note"))).annotationsToken(null, null))
+            writeText(
+                Annotations(blocks = listOf(AnnBlock.Note("n1", "hand-copied note"))).annotationsToken(
+                    null,
+                    null
+                )
+            )
         }
 
         state.openNoteFile("log", ann)
@@ -2824,7 +2856,12 @@ class AppStateBehaviorTest {
                 .copy(sourcePath = File(dir, "folder_b/sample.log").absolutePath),
         )
         stateB.confirmAddAnn("log", "log", listOf(1), "notes for file B", null)
-        waitUntil { File(notesDir, "sample_analysis_2.md").exists() && File(notesDir, "sample_analysis_2.ann").exists() }
+        waitUntil {
+            File(notesDir, "sample_analysis_2.md").exists() && File(
+                notesDir,
+                "sample_analysis_2.ann"
+            ).exists()
+        }
 
         // File A's saved note must survive untouched — this is the silent-overwrite bug being fixed.
         assertEquals(originalContent, File(notesDir, "sample_analysis.md").readText())
@@ -3148,7 +3185,11 @@ class AppStateBehaviorTest {
         waitUntil { state.tab(reopenedId)?.annotations?.blocks?.isNotEmpty() == true }
 
         assertEquals(null, state.pendingNoteOverwrite, "reopening the same log must not re-arm the overwrite gate")
-        assertEquals("sample_analysis.md", state.tab(reopenedId)?.noteTargetName, "auto-load must pin the same file the earlier session used")
+        assertEquals(
+            "sample_analysis.md",
+            state.tab(reopenedId)?.noteTargetName,
+            "auto-load must pin the same file the earlier session used"
+        )
         assertEquals(
             listOf("first analysis"),
             state.tab(reopenedId)?.annotations?.blocks?.map { (it as AnnBlock.Note).text },
@@ -3300,13 +3341,21 @@ class AppStateBehaviorTest {
         assertEquals(
             Annotations(),
             after.annotations,
-            "blocks AND prefix/suffix/issueDescription must all be cleared — a truly blank analysis, the same wholesale replacement openNoteFile's .ann branch already does when switching files",
+            "blocks AND prefix/suffix/issueDescription must all be cleared — a truly blank " +
+                "analysis, matching openNoteFile's wholesale replacement when switching files",
         )
         assertEquals("sample_analysis_2.md", after.noteTargetName)
-        assertEquals(null, state.pendingNoteOverwrite, "the new pin is free by construction — must never raise the overwrite prompt")
+        assertEquals(
+            null,
+            state.pendingNoteOverwrite,
+            "the new pin is free by construction — must never raise the overwrite prompt"
+        )
 
         assertTrue(firstMd.exists())
-        assertTrue(originalBytes.contentEquals(firstMd.readBytes()), "the previously-open file must be completely untouched on disk")
+        assertTrue(
+            originalBytes.contentEquals(firstMd.readBytes()),
+            "the previously-open file must be completely untouched on disk"
+        )
 
         // Zero blocks means autoExportAnnotations early-returns — clicking "New Analysis" alone must
         // not create the new file.
@@ -3351,7 +3400,11 @@ class AppStateBehaviorTest {
         val state = AppState(File(dir, "state.cache"))
         val tab = mkTab("log", "sample.log", emptyList())
 
-        assertEquals(null, state.activeNoteFilePath(tab), "a fresh, never-saved analysis has no on-disk file to point at")
+        assertEquals(
+            null,
+            state.activeNoteFilePath(tab),
+            "a fresh, never-saved analysis has no on-disk file to point at"
+        )
     }
 
     // The disambiguation the ask specifically calls for: noteTargetName is only a bare filename, and
@@ -3522,7 +3575,10 @@ class AppStateBehaviorTest {
     // wrong (readable) code path if it didn't.
     private fun File.makeUnreadable() {
         check(setReadable(false)) { "setReadable(false) failed for $this" }
-        assertFalse(canRead(), "$this must actually be unreadable for this test to be meaningful (are we running as root?)")
+        assertFalse(
+            canRead(),
+            "$this must actually be unreadable for this test to be meaningful (are we running as root?)"
+        )
     }
 
     // The user's own reported bug, reproduced directly: an unreadable legacy .src sidecar whose
@@ -3613,7 +3669,10 @@ class AppStateBehaviorTest {
             "an unreadable fingerprint at the plain-name slot must be skipped, not reused",
         )
         waitUntil { File(notesDir, "sample_analysis_2.md").exists() }
-        assertTrue(!File(notesDir, "sample_analysis.md").exists(), "the unreadable slot itself must never be written to")
+        assertTrue(
+            !File(notesDir, "sample_analysis.md").exists(),
+            "the unreadable slot itself must never be written to"
+        )
 
         srcFile.setReadable(true)
     }
@@ -3887,7 +3946,10 @@ class AppStateBehaviorTest {
         assertEquals(0, parseCalls)
         assertTrue(state.tabs.isEmpty())
         assertEquals(listOf("large.log"), state.pendingSplitPrompt?.sources?.map { it.displayName })
-        assertEquals(dir.absolutePath, state.defaultSplitDestination(state.pendingSplitPrompt!!.sources.single()).absolutePath)
+        assertEquals(
+            dir.absolutePath,
+            state.defaultSplitDestination(state.pendingSplitPrompt!!.sources.single()).absolutePath
+        )
     }
 
     @Test
@@ -4186,7 +4248,10 @@ class AppStateBehaviorTest {
         assertTrue(state.tab(tabId)!!.analysis.pending, "analysis must stay pending until the debounced refresh fires")
 
         waitUntil(timeoutMs = 5_000) { !state.tab(tabId)!!.analysis.pending }
-        assertTrue(state.tab(tabId)!!.analysis.crashSites.isNotEmpty(), "the debounced refresh must eventually pick up the crash")
+        assertTrue(
+            state.tab(tabId)!!.analysis.crashSites.isNotEmpty(),
+            "the debounced refresh must eventually pick up the crash"
+        )
 
         state.stopTailing(tabId)
     }
@@ -4340,7 +4405,11 @@ class AppStateBehaviorTest {
 
         assertEquals(
             listOf(
-                Triple("com.my.app.ui.PetsScreen: Card stack expanded", "Card stack expanded", "com.my.app.ui.PetsScreen"),
+                Triple(
+                    "com.my.app.ui.PetsScreen: Card stack expanded",
+                    "Card stack expanded",
+                    "com.my.app.ui.PetsScreen"
+                ),
                 Triple(
                     "com.my.app.ui.PetsScreen: Card stack expanded: stackId",
                     "Card stack expanded: stackId",
@@ -4792,7 +4861,14 @@ class AppStateBehaviorTest {
         state.addTab()
         val tabId = state.tabs.single().id
         state.setFilterMode(tabId, FilterMode.KEYWORD)
-        state.addMessageRule(tabId, include = true, pattern = "timeout", regex = true, tag = "NetTag", packagePrefix = null)
+        state.addMessageRule(
+            tabId,
+            include = true,
+            pattern = "timeout",
+            regex = true,
+            tag = "NetTag",
+            packagePrefix = null
+        )
 
         state.saveFilter(tabId, "rule-filter")
         state.clearFilter(tabId)
@@ -4877,7 +4953,8 @@ class AppStateBehaviorTest {
         val cacheFile = File(dir, "state.cache")
 
         fun legacyField(v: String): String =
-            if (v.isEmpty()) "~" else java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(v.toByteArray(Charsets.UTF_8))
+            if (v.isEmpty()) "~" else java.util.Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(v.toByteArray(Charsets.UTF_8))
 
         val legacyRawToken = listOf(
             "LIGHT", "12", "true", "", "5", "5", "8", "true", "true", "JIRA_JAVA", "false", "From",
@@ -5136,7 +5213,10 @@ class AppStateBehaviorTest {
         val state = AppState()
         state.updateSettings { it.copy(ctrlFTarget = CtrlFTarget.FIND_BAR) }
         val json = state.settings.settingsJson()
-        assertFalse(json.contains("inViewSearch"), "settingsJson must no longer emit the retired inViewSearch key: $json")
+        assertFalse(
+            json.contains("inViewSearch"),
+            "settingsJson must no longer emit the retired inViewSearch key: $json"
+        )
     }
 
     @Test
@@ -5324,9 +5404,30 @@ class AppStateBehaviorTest {
         assertEquals(setOf("Network"), state.tabs.single().filter.activeTags)
         assertTrue(state.tabs.single().filter.excludeTags.isEmpty())
 
-        state.addMessageRule(tabId, include = false, pattern = "timeout", regex = true, tag = "Network", packagePrefix = null)
-        state.addMessageRule(tabId, include = true, pattern = "timeout", regex = true, tag = "Network", packagePrefix = null)
-        state.addMessageRule(tabId, include = true, pattern = "timeout", regex = true, tag = "Network", packagePrefix = null)
+        state.addMessageRule(
+            tabId,
+            include = false,
+            pattern = "timeout",
+            regex = true,
+            tag = "Network",
+            packagePrefix = null
+        )
+        state.addMessageRule(
+            tabId,
+            include = true,
+            pattern = "timeout",
+            regex = true,
+            tag = "Network",
+            packagePrefix = null
+        )
+        state.addMessageRule(
+            tabId,
+            include = true,
+            pattern = "timeout",
+            regex = true,
+            tag = "Network",
+            packagePrefix = null
+        )
         val rules = state.tabs.single().filter.messageRules
         assertEquals(1, rules.size)
         assertTrue(rules.single().include)
@@ -5908,10 +6009,12 @@ class AppStateBehaviorTest {
         val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message")
         state.tabs = listOf(
             mkTab("t1", "test.log", listOf(entry)).copy(
-                filter = Filter(highlighters = listOf(
-                    Highlighter("one", "first", false, HL_COLORS[0], true),
-                    Highlighter("two", "second", false, HL_COLORS[1], true),
-                )),
+                filter = Filter(
+                    highlighters = listOf(
+                        Highlighter("one", "first", false, HL_COLORS[0], true),
+                        Highlighter("two", "second", false, HL_COLORS[1], true),
+                    )
+                ),
             ),
         )
         state.newHlColor = HL_COLORS[0]
@@ -6380,9 +6483,23 @@ class AppStateBehaviorTest {
             "t1",
             "large.log",
             listOf(
-                LogEntry(1, "10:00:00.000", LogLevel.W, "Binder", "Caught a RuntimeException from the binder stub implementation.", pid = 7),
+                LogEntry(
+                    1,
+                    "10:00:00.000",
+                    LogLevel.W,
+                    "Binder",
+                    "Caught a RuntimeException from the binder stub implementation.",
+                    pid = 7
+                ),
                 LogEntry(2, "10:00:00.001", LogLevel.W, "Binder", "java.lang.ArrayIndexOutOfBoundsException:", pid = 7),
-                LogEntry(3, "10:00:00.002", LogLevel.W, "Binder", "    at android.os.Binder.execTransact(Binder.java:1)", pid = 7),
+                LogEntry(
+                    3,
+                    "10:00:00.002",
+                    LogLevel.W,
+                    "Binder",
+                    "    at android.os.Binder.execTransact(Binder.java:1)",
+                    pid = 7
+                ),
                 LogEntry(4, "10:00:00.003", LogLevel.I, "ActivityManager", "ANR in com.example", pid = 8),
             ),
         )
@@ -6498,7 +6615,12 @@ class AppStateBehaviorTest {
         assertEquals(
             listOf("alpha", null, null),
             listOf(111, 222, 333).map {
-                resolveProcessDisplayName(tab.processNameMode, tab.analysis.processNames, tab.manualProcessNamePicks, it)
+                resolveProcessDisplayName(
+                    tab.processNameMode,
+                    tab.analysis.processNames,
+                    tab.manualProcessNamePicks,
+                    it
+                )
             },
         )
     }
@@ -6535,7 +6657,12 @@ class AppStateBehaviorTest {
         assertEquals(
             listOf("alpha", null, "charlie"),
             listOf(111, 222, 333).map {
-                resolveProcessDisplayName(tab.processNameMode, tab.analysis.processNames, tab.manualProcessNamePicks, it)
+                resolveProcessDisplayName(
+                    tab.processNameMode,
+                    tab.analysis.processNames,
+                    tab.manualProcessNamePicks,
+                    it
+                )
             },
         )
     }
@@ -6583,7 +6710,8 @@ class AppStateBehaviorTest {
         val base = mkTab("t1", "app.log", emptyList())
         assertEquals(
             base.persistedSnapshot(),
-            base.copy(manualProcessNamePicks = setOf(1234), processNameMode = ProcessNameMode.MANUAL).persistedSnapshot(),
+            base.copy(manualProcessNamePicks = setOf(1234), processNameMode = ProcessNameMode.MANUAL)
+                .persistedSnapshot(),
         )
 
         val dir = createTempDirectory("openlog-procname-persist").toFile()
@@ -6624,7 +6752,10 @@ class AppStateBehaviorTest {
         // the actual fix; every real completion path (buildLogAnalysis, via mkTab) must still land
         // on pending=false explicitly.
         assertTrue(LogAnalysis().pending, "a bare LogAnalysis() must read as not-yet-analyzed")
-        assertFalse(mkTab("t1", "a.log", emptyList()).analysis.pending, "mkTab computes real analysis and must mark it complete")
+        assertFalse(
+            mkTab("t1", "a.log", emptyList()).analysis.pending,
+            "mkTab computes real analysis and must mark it complete"
+        )
     }
 
     @Test
@@ -6646,7 +6777,10 @@ class AppStateBehaviorTest {
         assertTrue(tab.analysis.stackTraceGroups.isEmpty())
 
         val items = computeItems(tab, applyFilter = true)
-        assertTrue(items.none { it is LogItem.StackTraceHeader }, "no stack trace groups exist; none should be rendered")
+        assertTrue(
+            items.none { it is LogItem.StackTraceHeader },
+            "no stack trace groups exist; none should be rendered"
+        )
     }
 
     @Test
@@ -6732,7 +6866,8 @@ class AppStateBehaviorTest {
         // prove non-blocking for every possible slow bind, but it does pin the regression a
         // revert-to-synchronous would reintroduce: the call must return long before any bind on
         // a real port could plausibly complete network-stack setup.
-        val state = AppState(controlTokenFile = File(createTempDirectory("openlog-mcp-token").toFile(), "control-token"))
+        val state =
+            AppState(controlTokenFile = File(createTempDirectory("openlog-mcp-token").toFile(), "control-token"))
         val elapsedMs = kotlin.system.measureTimeMillis {
             state.setMcpControlEnabled(true, 0)
         }
@@ -6749,7 +6884,8 @@ class AppStateBehaviorTest {
         val blocker = ControlServer(AppState(), 0)
         blocker.start()
         try {
-            val state = AppState(controlTokenFile = File(createTempDirectory("openlog-mcp-token").toFile(), "control-token"))
+            val state =
+                AppState(controlTokenFile = File(createTempDirectory("openlog-mcp-token").toFile(), "control-token"))
             state.settings = state.settings.copy(mcpControlPort = blocker.boundPort)
 
             // Must not throw: a past version let ControlServer.start()'s BindException escape
@@ -6771,7 +6907,8 @@ class AppStateBehaviorTest {
     fun mcpControlEnableSucceedsOnFreePortAfterEarlierFailure() {
         val blocker = ControlServer(AppState(), 0)
         blocker.start()
-        val state = AppState(controlTokenFile = File(createTempDirectory("openlog-mcp-token").toFile(), "control-token"))
+        val state =
+            AppState(controlTokenFile = File(createTempDirectory("openlog-mcp-token").toFile(), "control-token"))
         state.setMcpControlEnabled(true, blocker.boundPort)
         waitUntil { state.mcpControlError != null }
         blocker.stop()
@@ -7335,7 +7472,14 @@ class AppStateBehaviorTest {
             LogEntry(3, "10:00:00.200", LogLevel.I, "App", "end marker"),
         )
         val seqs = listOf(
-            SequenceDef("seq", "start marker", priority = 1, color = Color.Red, tag = "App", endMatchText = "end marker"),
+            SequenceDef(
+                "seq",
+                "start marker",
+                priority = 1,
+                color = Color.Red,
+                tag = "App",
+                endMatchText = "end marker"
+            ),
         )
         state.tabs = listOf(mkTab("log", "test.log", logs).copy(filter = Filter(sequences = seqs)))
         // expanded is empty by default, so the sequence group above starts collapsed.
@@ -7348,7 +7492,10 @@ class AppStateBehaviorTest {
         // Found even though its owning group is currently collapsed (search matches against a
         // fully-expanded copy of the tab — see AppState.scheduleSearchRecompute).
         assertEquals(listOf(2), state.tab("log")!!.search.matchIds.toList())
-        assertTrue(state.tab("log")!!.expanded.isEmpty(), "the real tab.expanded must stay untouched by the search computation itself")
+        assertTrue(
+            state.tab("log")!!.expanded.isEmpty(),
+            "the real tab.expanded must stay untouched by the search computation itself"
+        )
 
         // Jumping to it requests a pendingSearchNavigation (search's own channel, not
         // pendingAnnotationNavigation — see SearchNavigationRequest's doc comment) that

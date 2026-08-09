@@ -1,9 +1,12 @@
 package com.indagium
 
 import com.indagium.diagram.ArrowMode
-import com.indagium.diagram.DiagramDialect
+import com.indagium.diagram.DiagramActivationSpan
+import com.indagium.diagram.DiagramActor
 import com.indagium.diagram.DiagramAttachmentMetadata
 import com.indagium.diagram.DiagramAttachmentMode
+import com.indagium.diagram.DiagramComponent
+import com.indagium.diagram.DiagramDialect
 import com.indagium.diagram.DiagramExportMode
 import com.indagium.diagram.DiagramFrame
 import com.indagium.diagram.DiagramMessage
@@ -13,10 +16,13 @@ import com.indagium.diagram.DiagramOptions
 import com.indagium.diagram.DiagramParticipant
 import com.indagium.diagram.DiagramRange
 import com.indagium.diagram.LabelSource
+import com.indagium.diagram.MessageEvidence
 import com.indagium.diagram.MessageKind
+import com.indagium.diagram.MirrorDirection
 import com.indagium.diagram.ParticipantKind
 import com.indagium.diagram.SeqDiagram
 import com.indagium.diagram.SeqDiagramSpec
+import com.indagium.diagram.UnmappedTagPolicy
 import com.indagium.diagram.encodeDiagramNote
 import com.indagium.diagram.parseDiagramNote
 import com.indagium.diagram.stripDiagramSpecHeader
@@ -40,7 +46,12 @@ class DiagramSpecCodecTest {
         ),
         range = DiagramRange.Ids(10, 42),
         mode = ArrowMode.RULES,
-        rules = listOf(DiagramMessageRule(id = "r1", pattern = "sending to (?<to>\\w+)", fromTemplate = "self", toTemplate = "\${to}", labelTemplate = "\${msg}")),
+        rules = listOf(
+            DiagramMessageRule(
+                id = "r1", pattern = "sending to (?<to>\\w+)",
+                fromTemplate = "self", toTemplate = "\${to}", labelTemplate = "\${msg}",
+            ),
+        ),
         options = DiagramOptions(
             collapseRepeats = false,
             maxMessages = 42,
@@ -182,7 +193,7 @@ class DiagramSpecCodecTest {
 
     @Test
     fun parseDiagramNoteReturnsNullForAnUnsupportedFutureVersion() {
-        val futureVersion = "<!-- indagium:diagram v3 {\"dialect\":\"mermaid\"} -->\n```mermaid\nsequenceDiagram\n```\n"
+        val futureVersion = "<!-- indagium:diagram v4 {\"dialect\":\"mermaid\"} -->\n```mermaid\nsequenceDiagram\n```\n"
         assertNull(parseDiagramNote(futureVersion))
     }
 
@@ -287,7 +298,8 @@ class DiagramSpecCodecTest {
 
     @Test
     fun v1CarriedModelsRemainReadableWithoutASourceHash() {
-        val note = "<!-- indagium:diagram v1 {\"dialect\":\"mermaid\",\"model\":{\"participants\":[{\"id\":\"A\",\"label\":\"A\",\"kind\":\"TAG\",\"tag\":\"A\"}],\"messages\":[]}} -->\n" +
+        val note = "<!-- indagium:diagram v1 {\"dialect\":\"mermaid\",\"model\":{\"participants\":[" +
+            "{\"id\":\"A\",\"label\":\"A\",\"kind\":\"TAG\",\"tag\":\"A\"}],\"messages\":[]}} -->\n" +
             "```mermaid\nsequenceDiagram\n```\n"
         val parsed = assertNotNull(parseDiagramNote(note))
         assertNotNull(parsed.model)
@@ -318,10 +330,61 @@ class DiagramSpecCodecTest {
         val sourceMode = assertNotNull(updateDiagramNoteExportMode(captioned, DiagramExportMode.SOURCE))
         val parsed = assertNotNull(parseDiagramNote(sourceMode))
 
-        assertTrue(sourceMode.startsWith("<!-- indagium:diagram v2 "))
+        assertTrue(sourceMode.startsWith("<!-- indagium:diagram v3 "))
         assertEquals("Startup sequence", parsed.caption)
         assertEquals(DiagramExportMode.SOURCE, parsed.exportMode)
         assertEquals("sequenceDiagram", parsed.source)
         assertNull(updateDiagramNoteCaption("ordinary note", "nope"))
+    }
+
+    @Test
+    fun v3RoundTripsComponentsActorsEvidenceAndActivationSpans() {
+        val spec = SeqDiagramSpec(
+            components = listOf(DiagramComponent("app", "App", setOf("A", "B"))),
+            actors = listOf(DiagramActor("client", "Client", "app", MirrorDirection.OUTBOUND)),
+            unmappedTagPolicy = UnmappedTagPolicy.GROUP_AS_OTHER,
+        )
+        val participants = listOf(
+            DiagramParticipant("app", "App", ParticipantKind.TAG),
+            DiagramParticipant("client", "Client", ParticipantKind.ACTOR),
+        )
+        val model = SeqDiagram(
+            spec, participants,
+            listOf(DiagramMessage(0, 1, "call", 9, "10:00:00", LogLevel.I, MessageKind.CALL, evidence = MessageEvidence.SOURCE_INFERRED)),
+            activationSpans = listOf(DiagramActivationSpan(1, 0, 0, MessageEvidence.SOURCE_INFERRED)),
+        )
+        val parsed = assertNotNull(parseDiagramNote(encodeDiagramNote(spec, source, model)))
+        assertEquals(spec, parsed.spec)
+        assertEquals(MessageEvidence.SOURCE_INFERRED, parsed.model?.messages?.single()?.evidence)
+        assertEquals(model.activationSpans, parsed.model?.activationSpans)
+    }
+
+    @Test
+    fun codecRejectsDuplicateAndOversizedUntrustedSpecIdentifiers() {
+        val duplicate = "<!-- indagium:diagram v1 {\"dialect\":\"mermaid\",\"participants\":[" +
+            "{\"id\":\"A\",\"label\":\"A\",\"kind\":\"TAG\",\"tag\":\"A\"}," +
+            "{\"id\":\"A\",\"label\":\"Again\",\"kind\":\"TAG\",\"tag\":\"B\"}]} -->\n" +
+            "```mermaid\nsequenceDiagram\n```\n"
+        assertNull(parseDiagramNote(duplicate))
+
+        val tooLongTitle = "x".repeat(16 * 1024 + 1)
+        val oversized = "<!-- indagium:diagram v1 {\"dialect\":\"mermaid\",\"title\":\"$tooLongTitle\"} -->\n```mermaid\nsequenceDiagram\n```\n"
+        assertNull(parseDiagramNote(oversized))
+    }
+
+    @Test
+    fun codecDropsUntrustedModelsWithOutOfRangeMessageAndActivationIndices() {
+        val participants = listOf(DiagramParticipant("A", "A", ParticipantKind.TAG, tag = "A"))
+        val model = SeqDiagram(
+            SeqDiagramSpec(participants = participants), participants,
+            listOf(DiagramMessage(0, 0, "ok", 1, "10:00:00", LogLevel.I, MessageKind.SELF)),
+            activationSpans = listOf(DiagramActivationSpan(0, 0, 0, MessageEvidence.LOG)),
+        )
+        val encoded = encodeDiagramNote(model.spec, source, model)
+        val badMessage = assertNotNull(parseDiagramNote(encoded.replace("\"f\":0", "\"f\":99")))
+        assertNull(badMessage.model)
+
+        val badActivation = assertNotNull(parseDiagramNote(encoded.replace("\"s\":0", "\"s\":99")))
+        assertNull(badActivation.model)
     }
 }

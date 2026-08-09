@@ -25,7 +25,6 @@ import kotlin.test.assertTrue
  * be the one where this bug was first noticed and reported.
  */
 class DiagramNoteOverwriteGateTest {
-
     private val entries = listOf(
         LogEntry(1, "10:00:00.000", LogLevel.I, "BluetoothAdapter", "enable() called"),
         LogEntry(2, "10:00:00.120", LogLevel.I, "BluetoothManagerService", "handleEnable"),
@@ -48,7 +47,11 @@ class DiagramNoteOverwriteGateTest {
     // Builds the preview and returns once it's ready to confirm — every test below starts from
     // here, since begin()'s build runs on SeqDiagramCoordinator's own background scope.
     private fun AppState.beginAndAwaitPreview(tabId: String) {
-        seqDiagrams.begin(tabId)
+        // The component workflow deliberately starts a no-selection workspace with every
+        // discovered tag disabled. Seed the fixture's selected rows, as the real "diagram from
+        // selection" action does, so this overwrite suite exercises a drawable IMAGE attachment
+        // rather than a valid-but-source-only empty workspace.
+        seqDiagrams.begin(tabId, entries.mapTo(linkedSetOf()) { it.id })
         waitUntil { seqDiagrams.preview.diagramOrNull != null }
     }
 
@@ -95,12 +98,7 @@ class DiagramNoteOverwriteGateTest {
             (state.tab("log")?.annotations?.blocks?.single() as AnnBlock.Note).text.contains("indagium:diagram"),
             "the committed block must be the diagram note, not something else",
         )
-        // "sequenceDiagram", not the literal word "mermaid" — buildMd's appendDiagramNote renders
-        // the exported .md differently depending on settings.annotationLogBlockStyle (default
-        // JIRA_JAVA wraps the source in a "{code}" block with a "!diagram-0N.png!" anchor, no
-        // "```mermaid" fence at all; only INDENTED keeps that literal fence). "sequenceDiagram" is
-        // the Mermaid dialect's own header keyword, present in diagram.source under EITHER style.
-        waitUntil { existingMd.readText().contains("sequenceDiagram") }
+        assertDefaultDiagramImageExport(existingMd)
     }
 
     @Test
@@ -122,7 +120,7 @@ class DiagramNoteOverwriteGateTest {
         assertEquals(2, blocks.size)
         assertEquals("earlier note", (blocks[0] as AnnBlock.Note).text)
         assertTrue((blocks[1] as AnnBlock.Note).text.contains("indagium:diagram"))
-        waitUntil { existingMd.readText().contains("sequenceDiagram") }
+        assertDefaultDiagramImageExport(existingMd)
     }
 
     @Test
@@ -140,7 +138,8 @@ class DiagramNoteOverwriteGateTest {
         assertEquals(null, state.pendingNoteOverwrite)
         assertEquals("sample_analysis_2.md", state.tab("log")?.noteTargetName)
         val newFile = File(existingMd.parentFile, "sample_analysis_2.md")
-        waitUntil { newFile.exists() && newFile.readText().contains("sequenceDiagram") }
+        waitUntil { newFile.exists() }
+        assertDefaultDiagramImageExport(newFile)
         // The original file must survive untouched.
         assertTrue(originalBytes.contentEquals(existingMd.readBytes()))
     }
@@ -152,5 +151,16 @@ class DiagramNoteOverwriteGateTest {
             Thread.sleep(10)
         }
         assertTrue(condition())
+    }
+
+    /** IMAGE is the compatibility/default export mode: the Markdown points at a durable PNG,
+     * rather than carrying Mermaid source.  Verify both halves of that contract here so stale
+     * overwrite gates cannot accidentally keep asserting the old SOURCE behaviour. */
+    private fun assertDefaultDiagramImageExport(markdown: File) {
+        val framesDir = File(markdown.parentFile, "${markdown.nameWithoutExtension}_frames")
+        val png = File(framesDir, "diagram-01.png")
+        waitUntil {
+            markdown.readText().contains("!diagram-01.png!") && png.isFile && png.length() > 0L
+        }
     }
 }

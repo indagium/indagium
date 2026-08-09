@@ -59,7 +59,14 @@ fun main(args: Array<String>) {
         exitProcess(1)
     }
 
-    // MUST be the very first statement that touches disk: it is the one-time openLog2 -> Indagium
+    // This debug-only setup does not touch disk. When both switches are present it installs an
+    // explicit, empty directory beneath an approved temporary root so MCP verification cannot
+    // restore or modify the user's normal autosave/Recent state. It must stay before migration
+    // and every other storage user.
+    val debugControlOverridePort = configureDebugStorage()
+
+    // MUST be the very first statement that touches disk after the optional debug-only storage
+    // setup above: it is the one-time openLog2 -> Indagium
     // app-data copy (see DesktopStorage.migrateAppDataDir), and it must run before anything creates
     // the new app-data dir on disk. In particular it must precede SingleInstance.acquire below,
     // whose baseDir.mkdirs() would otherwise make the new dir exist-but-unmarked on Linux/Windows,
@@ -179,9 +186,8 @@ fun main(args: Array<String>) {
         // Packaged builds (packageDmg/packageDeb/packageMsi) set neither and default the setting
         // off, so end users never have this listener running unless they explicitly enable it.
         DisposableEffect(Unit) {
-            val envPort = debugControlPort()
             when {
-                envPort != null -> appState.startControlServerForThisSessionOnly(envPort)
+                debugControlOverridePort != null -> appState.startControlServerForThisSessionOnly(debugControlOverridePort)
                 appState.settings.mcpControlEnabled -> appState.setMcpControlEnabled(true, appState.settings.mcpControlPort)
             }
             onDispose { appState.stopControlServerForShutdown() }
@@ -260,6 +266,19 @@ private fun debugInputEnabled(): Boolean =
 private fun debugControlPort(): Int? =
     (System.getenv("INDAGIUM_DEBUG_CONTROL") ?: System.getenv("OPENLOG_DEBUG_CONTROL"))?.toIntOrNull()
         ?: (System.getProperty("indagium.debugControl") ?: System.getProperty("openlog.debugControl"))?.toIntOrNull()
+
+private fun configureDebugStorage(): Int? {
+    val port = debugControlPort()
+    DesktopStorage.installDebugAppDataDirOverride(debugAppDataDirOverridePath(), port != null)
+    return port
+}
+
+// Deliberately has no legacy spelling: this is a new test-only isolation contract, not a persisted
+// setting. DesktopStorage accepts only an empty canonical directory beneath the JVM temporary
+// root (or macOS's /private temporary roots), rejects symlinks, and ignores this value entirely
+// when debug control is not active.
+private fun debugAppDataDirOverridePath(): String? =
+    System.getenv("INDAGIUM_DEBUG_APP_DATA_DIR") ?: System.getProperty("indagium.debugAppDataDir")
 
 // On macOS, a JFrame's per-window icon becomes the miniaturized window's Dock image. Leaving it
 // unset lets AppKit render the normal live window miniature; the packaged bundle's indagium.icns

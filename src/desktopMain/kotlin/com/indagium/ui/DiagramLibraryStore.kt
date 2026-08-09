@@ -7,6 +7,7 @@ import com.indagium.diagram.encodeDiagramNote
 import com.indagium.diagram.parseDiagramNote
 import com.indagium.utils.writeFileAtomically
 import java.io.File
+import java.util.Base64
 import java.util.UUID
 
 /** A stable identity for the log a diagram was made from.  The path is retained even when the
@@ -82,9 +83,38 @@ private const val DIAGRAM_LIBRARY_MAGIC = "diagram-library-v1"
 private const val DIAGRAM_LIBRARY_VERSION = 1
 private const val ITEM_REQUIRED_FIELDS = 8
 private const val ATTACHMENT_FIELDS = 5
+internal const val MAX_DIAGRAM_LIBRARY_FILE_BYTES = 64L * 1024L * 1024L
+internal const val MAX_DIAGRAM_LIBRARY_LINE_CHARS = 6 * 1024 * 1024
+internal const val MAX_DIAGRAM_LIBRARY_ITEMS = 128
+internal const val MAX_DIAGRAM_LIBRARY_ATTACHMENTS = 4_096
+internal const val MAX_DIAGRAM_LIBRARY_ATTACHMENTS_PER_ITEM = 256
+internal const val MAX_DIAGRAM_LIBRARY_ID_CHARS = 256
+internal const val MAX_DIAGRAM_LIBRARY_TITLE_CHARS = 512
+internal const val MAX_DIAGRAM_LIBRARY_DESCRIPTION_CHARS = 16 * 1024
+internal const val MAX_DIAGRAM_LIBRARY_SOURCE_PATH_CHARS = 16 * 1024
+internal const val MAX_DIAGRAM_LIBRARY_FINGERPRINT_CHARS = 1_024
+internal const val MAX_DIAGRAM_LIBRARY_SNAPSHOT_CHARS = 3 * 1024 * 1024
+private const val MAX_DIAGRAM_LIBRARY_LINES = 8_192
+private const val MAX_RECORD_FIELDS = 11
+private const val MAX_ID_TOKEN_BYTES = 1_024
+private const val MAX_TITLE_TOKEN_BYTES = 2_048
+private const val MAX_DESCRIPTION_TOKEN_BYTES = 64 * 1024
+private const val MAX_SOURCE_PATH_TOKEN_BYTES = 64 * 1024
+private const val MAX_FINGERPRINT_TOKEN_BYTES = 4 * 1024
+private const val MAX_SNAPSHOT_TOKEN_BYTES = 4 * 1024 * 1024
+private const val PERSISTED_RECORD_OVERHEAD_BYTES = 256L
 
 private fun String.token(): String = if (isEmpty()) "~" else b64()
-private fun String.value(): String = if (this == "~") "" else unb64()
+
+private fun maxBase64Chars(decodedBytes: Int): Int = ((decodedBytes + 2) / 3) * 4
+
+private fun String.boundedValue(maxChars: Int, maxBytes: Int): String? {
+    if (this == "~") return ""
+    if (length > maxBase64Chars(maxBytes)) return null
+    val bytes = runCatching { Base64.getUrlDecoder().decode(this) }.getOrNull() ?: return null
+    if (bytes.size > maxBytes) return null
+    return String(bytes, Charsets.UTF_8).takeIf { it.length <= maxChars }
+}
 
 private fun rangeSummary(spec: SeqDiagramSpec): String = when (val range = spec.range) {
     is com.indagium.diagram.DiagramRange.VisibleView -> "Visible view"
@@ -130,22 +160,23 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
     /** Search is intentionally global; optional source scoping is a UI filter, not a separate
      * library.  It covers title/description, provenance, aliases/tags and rule text in the codec
      * source, without requiring the source log to still exist. */
-    fun search(query: String = "", source: DiagramSourceIdentity? = null): List<DiagramLibrarySummary> = synchronized(lock) {
-        val needle = query.trim().lowercase()
-        items.values.asSequence()
-            .filter { source == null || it.source == source }
-            .map { it to it.toSummary() }
-            .filter { (item, summary) ->
-                needle.isBlank() || listOf(
-                    summary.title, summary.description, summary.source.sourcePath,
-                    summary.source.contentFingerprint, summary.participantLabels.joinToString(" "),
-                    item.snapshot.encodedDiagramNote,
-                ).any { it.lowercase().contains(needle) }
-            }
-            .map { it.second }
-            .sortedWith(compareByDescending<DiagramLibrarySummary> { it.lastOpenedAt }.thenByDescending { it.updatedAt })
-            .toList()
-    }
+    fun search(query: String = "", source: DiagramSourceIdentity? = null): List<DiagramLibrarySummary> =
+        synchronized(lock) {
+            val needle = query.trim().lowercase()
+            items.values.asSequence()
+                .filter { source == null || it.source == source }
+                .map { it to it.toSummary() }
+                .filter { (item, summary) ->
+                    needle.isBlank() || listOf(
+                        summary.title, summary.description, summary.source.sourcePath,
+                        summary.source.contentFingerprint, summary.participantLabels.joinToString(" "),
+                        item.snapshot.encodedDiagramNote,
+                    ).any { it.lowercase().contains(needle) }
+                }
+                .map { it.second }
+                .sortedWith(compareByDescending<DiagramLibrarySummary> { it.lastOpenedAt }.thenByDescending { it.updatedAt })
+                .toList()
+        }
 
     fun recent(limit: Int = 20): List<DiagramLibrarySummary> = synchronized(lock) {
         items.values.map { it.toSummary() }
@@ -155,9 +186,10 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
     }
 
     fun save(item: DiagramLibraryItem): DiagramLibraryItem = synchronized(lock) {
-        require(item.id.isNotBlank()) { "Diagram library id must not be blank" }
-        require(item.snapshot.parsed() != null) { "A diagram library snapshot must be a valid DiagramSpecCodec note" }
-        items[item.id] = item
+        requireValidItem(item)
+        val updated = LinkedHashMap(items).apply { put(item.id, item) }
+        requireValidLibrary(updated.values)
+        items = updated
         persist()
         item
     }
@@ -172,14 +204,17 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
         DiagramLibraryItem(UUID.randomUUID().toString(), title, description, source, snapshot, now, now),
     )
 
-    fun update(id: String, transform: (DiagramLibraryItem) -> DiagramLibraryItem): DiagramLibraryItem? = synchronized(lock) {
-        val old = items[id] ?: return@synchronized null
-        val updated = transform(old).copy(id = id)
-        require(updated.snapshot.parsed() != null) { "A diagram library snapshot must be a valid DiagramSpecCodec note" }
-        items[id] = updated
-        persist()
-        updated
-    }
+    fun update(id: String, transform: (DiagramLibraryItem) -> DiagramLibraryItem): DiagramLibraryItem? =
+        synchronized(lock) {
+            val old = items[id] ?: return@synchronized null
+            val updated = transform(old).copy(id = id)
+            requireValidItem(updated)
+            val updatedItems = LinkedHashMap(items).apply { put(id, updated) }
+            requireValidLibrary(updatedItems.values)
+            items = updatedItems
+            persist()
+            updated
+        }
 
     fun delete(id: String): Boolean = synchronized(lock) {
         if (items.remove(id) == null) return@synchronized false
@@ -229,46 +264,185 @@ class DiagramLibraryStore(private val file: File = File(DesktopStorage.appDataDi
         }
     }
 
+    private fun requireValidItem(item: DiagramLibraryItem) {
+        require(item.id.isNotBlank() && item.id.length <= MAX_DIAGRAM_LIBRARY_ID_CHARS) {
+            "Diagram library id must contain 1..$MAX_DIAGRAM_LIBRARY_ID_CHARS characters"
+        }
+        require(item.title.length <= MAX_DIAGRAM_LIBRARY_TITLE_CHARS) { "Diagram library title is too long" }
+        require(item.description.length <= MAX_DIAGRAM_LIBRARY_DESCRIPTION_CHARS) { "Diagram library description is too long" }
+        require(item.source.sourcePath.length <= MAX_DIAGRAM_LIBRARY_SOURCE_PATH_CHARS) { "Diagram source path is too long" }
+        require(item.source.contentFingerprint.length <= MAX_DIAGRAM_LIBRARY_FINGERPRINT_CHARS) {
+            "Diagram source fingerprint is too long"
+        }
+        require(item.snapshot.encodedDiagramNote.length <= MAX_DIAGRAM_LIBRARY_SNAPSHOT_CHARS) {
+            "Diagram library snapshot is too large"
+        }
+        require(item.snapshot.encodedDiagramNote.toByteArray(Charsets.UTF_8).size <= MAX_SNAPSHOT_TOKEN_BYTES) {
+            "Diagram library snapshot uses too many encoded bytes"
+        }
+        require(item.snapshot.parsed() != null) { "A diagram library snapshot must be a valid DiagramSpecCodec note" }
+        require(item.attachments.size <= MAX_DIAGRAM_LIBRARY_ATTACHMENTS_PER_ITEM) {
+            "A diagram library item has too many attachments"
+        }
+        item.attachments.forEach(::requireValidAttachment)
+    }
+
+    private fun requireValidAttachment(attachment: DiagramLibraryAttachment) {
+        require(attachment.tabId.isNotBlank() && attachment.tabId.length <= MAX_DIAGRAM_LIBRARY_ID_CHARS) {
+            "Diagram attachment tab id must be non-blank and bounded"
+        }
+        require(attachment.blockId.isNotBlank() && attachment.blockId.length <= MAX_DIAGRAM_LIBRARY_ID_CHARS) {
+            "Diagram attachment block id must be non-blank and bounded"
+        }
+    }
+
+    private fun requireValidLibrary(records: Collection<DiagramLibraryItem>) {
+        require(records.size <= MAX_DIAGRAM_LIBRARY_ITEMS) { "Diagram library has too many items" }
+        require(records.sumOf { it.attachments.size } <= MAX_DIAGRAM_LIBRARY_ATTACHMENTS) {
+            "Diagram library has too many attachments"
+        }
+        require(estimatedPersistedBytes(records) <= MAX_DIAGRAM_LIBRARY_FILE_BYTES) { "Diagram library is too large" }
+    }
+
+    private fun estimatedPersistedBytes(records: Collection<DiagramLibraryItem>): Long {
+        var bytes = PERSISTED_RECORD_OVERHEAD_BYTES
+        records.forEach { item ->
+            bytes += PERSISTED_RECORD_OVERHEAD_BYTES + listOf(
+                item.id, item.title, item.description, item.source.sourcePath,
+                item.source.contentFingerprint, item.snapshot.encodedDiagramNote,
+            ).sumOf(::estimatedTokenBytes)
+            bytes += item.attachments.sumOf { attachment ->
+                PERSISTED_RECORD_OVERHEAD_BYTES + estimatedTokenBytes(item.id) +
+                    estimatedTokenBytes(attachment.tabId) + estimatedTokenBytes(attachment.blockId)
+            }
+        }
+        return bytes
+    }
+
+    private fun estimatedTokenBytes(value: String): Long {
+        if (value.isEmpty()) return 1L
+        val utf8Bytes = value.toByteArray(Charsets.UTF_8).size.toLong()
+        return ((utf8Bytes + 2L) / 3L) * 4L
+    }
+
     private fun loadRecords(): Map<String, DiagramLibraryItem> {
         if (!file.isFile) return emptyMap()
-        val lines = runCatching { file.readLines() }.getOrNull().orEmpty()
-        if (lines.firstOrNull() != DIAGRAM_LIBRARY_MAGIC) return emptyMap()
-        val version = lines.drop(1).firstOrNull { it.startsWith("version\t") }?.substringAfter('\t')?.toIntOrNull()
-        if (version != DIAGRAM_LIBRARY_VERSION) return emptyMap()
+        if (file.length() !in 1..MAX_DIAGRAM_LIBRARY_FILE_BYTES) return emptyMap()
 
         val loaded = linkedMapOf<String, DiagramLibraryItem>()
         val pendingAttachments = mutableMapOf<String, MutableList<DiagramLibraryAttachment>>()
-        lines.drop(1).forEach { line -> runCatching {
-            val fields = line.split('\t')
-            when (fields.firstOrNull()) {
-                "item" -> parseItem(fields)?.let { loaded[it.id] = it }
-                "attachment" -> parseAttachment(fields)?.let { (id, attachment) ->
-                    pendingAttachments.getOrPut(id, ::mutableListOf) += attachment
+        var magicSeen = false
+        var version: Int? = null
+        var attachmentCount = 0
+        runCatching {
+            forEachBoundedLine { line ->
+                if (!magicSeen) {
+                    magicSeen = line == DIAGRAM_LIBRARY_MAGIC
+                    return@forEachBoundedLine magicSeen
+                }
+                val fields = line.split('\t', limit = MAX_RECORD_FIELDS)
+                when (fields.firstOrNull()) {
+                    "version" -> version = fields.getOrNull(1)?.toIntOrNull()
+                    "item" -> if (loaded.size < MAX_DIAGRAM_LIBRARY_ITEMS) {
+                        runCatching { parseItem(fields) }.getOrNull()?.let { loaded[it.id] = it }
+                    }
+
+                    "attachment" -> parseAttachment(fields)?.let { (id, attachment) ->
+                        val attachments = pendingAttachments.getOrPut(id, ::mutableListOf)
+                        if (attachmentCount < MAX_DIAGRAM_LIBRARY_ATTACHMENTS &&
+                            attachments.size < MAX_DIAGRAM_LIBRARY_ATTACHMENTS_PER_ITEM
+                        ) {
+                            attachments += attachment
+                            attachmentCount++
+                        }
+                    }
+                }
+                true
+            }
+        }
+        if (!magicSeen || version != DIAGRAM_LIBRARY_VERSION) return emptyMap()
+        return loaded.mapValues { (id, item) -> item.copy(attachments = pendingAttachments[id].orEmpty()) }
+    }
+
+    /** Streams the file without ever constructing an oversized line or an unbounded line list.
+     * Returning false from [onLine] stops early (used when the magic header is invalid). */
+    private fun forEachBoundedLine(onLine: (String) -> Boolean) {
+        file.inputStream().buffered().reader(Charsets.UTF_8).use { reader ->
+            val line = StringBuilder()
+            var lineTooLong = false
+            var lineCount = 0
+            var inspectedChars = 0L
+            while (lineCount < MAX_DIAGRAM_LIBRARY_LINES && inspectedChars < MAX_DIAGRAM_LIBRARY_FILE_BYTES) {
+                val next = reader.read()
+                if (next < 0) {
+                    if ((line.isNotEmpty() || lineTooLong) && !lineTooLong) onLine(line.toString())
+                    return
+                }
+                inspectedChars++
+                when (val char = next.toChar()) {
+                    '\n' -> {
+                        lineCount++
+                        if (!lineTooLong && !onLine(line.toString())) return
+                        line.setLength(0)
+                        lineTooLong = false
+                    }
+
+                    '\r' -> Unit
+                    else -> if (line.length < MAX_DIAGRAM_LIBRARY_LINE_CHARS) line.append(char) else lineTooLong = true
                 }
             }
-        } }
-        return loaded.mapValues { (id, item) -> item.copy(attachments = pendingAttachments[id].orEmpty()) }
+        }
     }
 
     private fun parseItem(fields: List<String>): DiagramLibraryItem? {
         // type + eight required fields; lastOpenedAt was appended and safely defaults for early
         // v1 records that predate the Recent surface.
         if (fields.size < ITEM_REQUIRED_FIELDS + 1) return null
-        val snapshot = DiagramLibrarySnapshot(fields[6].value())
+        val decoded = decodeItemFields(fields) ?: return null
+        val snapshot = DiagramLibrarySnapshot(decoded.snapshot)
         if (snapshot.parsed() == null) return null
+        val createdAt = fields[7].toLongOrNull()
+        val updatedAt = fields[8].toLongOrNull()
+        if (createdAt == null || updatedAt == null) return null
         return DiagramLibraryItem(
-            id = fields[1].value(), title = fields[2].value(), description = fields[3].value(),
-            source = DiagramSourceIdentity(fields[4].value(), fields[5].value()), snapshot = snapshot,
-            createdAt = fields[7].toLong(), updatedAt = fields[8].toLong(),
+            id = decoded.id, title = decoded.title, description = decoded.description,
+            source = DiagramSourceIdentity(decoded.sourcePath, decoded.fingerprint), snapshot = snapshot,
+            createdAt = createdAt, updatedAt = updatedAt,
             lastOpenedAt = fields.getOrNull(9)?.toLongOrNull() ?: 0L,
         ).takeIf { it.id.isNotBlank() }
+    }
+
+    private data class DecodedItemFields(
+        val id: String,
+        val title: String,
+        val description: String,
+        val sourcePath: String,
+        val fingerprint: String,
+        val snapshot: String,
+    )
+
+    private fun decodeItemFields(fields: List<String>): DecodedItemFields? {
+        val values = listOf(
+            fields[1].boundedValue(MAX_DIAGRAM_LIBRARY_ID_CHARS, MAX_ID_TOKEN_BYTES),
+            fields[2].boundedValue(MAX_DIAGRAM_LIBRARY_TITLE_CHARS, MAX_TITLE_TOKEN_BYTES),
+            fields[3].boundedValue(MAX_DIAGRAM_LIBRARY_DESCRIPTION_CHARS, MAX_DESCRIPTION_TOKEN_BYTES),
+            fields[4].boundedValue(MAX_DIAGRAM_LIBRARY_SOURCE_PATH_CHARS, MAX_SOURCE_PATH_TOKEN_BYTES),
+            fields[5].boundedValue(MAX_DIAGRAM_LIBRARY_FINGERPRINT_CHARS, MAX_FINGERPRINT_TOKEN_BYTES),
+            fields[6].boundedValue(MAX_DIAGRAM_LIBRARY_SNAPSHOT_CHARS, MAX_SNAPSHOT_TOKEN_BYTES),
+        )
+        if (values.any { it == null }) return null
+        return DecodedItemFields(
+            id = values[0].orEmpty(), title = values[1].orEmpty(), description = values[2].orEmpty(),
+            sourcePath = values[3].orEmpty(), fingerprint = values[4].orEmpty(), snapshot = values[5].orEmpty(),
+        )
     }
 
     private fun parseAttachment(fields: List<String>): Pair<String, DiagramLibraryAttachment>? {
         if (fields.size < ATTACHMENT_FIELDS + 1) return null
         val kind = enumValues<DiagramAttachmentKind>().firstOrNull { it.name == fields[4] } ?: return null
-        return fields[1].value() to DiagramLibraryAttachment(
-            tabId = fields[2].value(), blockId = fields[3].value(), kind = kind, attachedAt = fields[5].toLong(),
-        )
+        val ids = fields.slice(1..3).map { it.boundedValue(MAX_DIAGRAM_LIBRARY_ID_CHARS, MAX_ID_TOKEN_BYTES) }
+        val attachedAt = fields[5].toLongOrNull()
+        if (ids.any { it.isNullOrBlank() } || attachedAt == null) return null
+        return ids[0].orEmpty() to DiagramLibraryAttachment(ids[1].orEmpty(), ids[2].orEmpty(), kind, attachedAt)
     }
 }

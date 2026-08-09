@@ -454,6 +454,9 @@ internal fun logItemStableKey(tabId: String, item: LogItem): String = when (item
     is LogItem.StackTraceHeader -> "$tabId:st${item.gid}"
 }
 
+// The branches model distinct fold kinds and large-file safety paths. Keeping them together is
+// intentional: each loop iteration must choose at most one expansion against the same snapshot.
+@Suppress("CyclomaticComplexMethod")
 internal fun expansionAndIndexForEntry(
     tab: LogTab,
     applyFilter: Boolean,

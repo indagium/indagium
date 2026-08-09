@@ -37,6 +37,7 @@ A desktop log viewer for Android logcat files, built with Kotlin and Compose Mul
 **Producing output**
 
 - **Annotations** — annotate log selections with notes, images, and video frames; export as Markdown or Jira markup
+- **Sequence-diagram workspaces** — turn a selected log range into an interactive, themed component-flow diagram; merge raw tags into named components, add mirrored actors, inspect evidence, save drafts, and attach an image or editable source to a note
 - **Export filtered log** — write the current filtered set to TXT or CSV
 - **Merge and split** — interleave several logs by timestamp, or split one huge file into parts
 - **Show in code** — register your project's source folder(s) in Settings, then right-click a log line to view the exact method that emitted it (Kotlin/Java, `Log.*` + Timber, plus custom wrappers); also exposed to AI assistants via the `resolve_log_source` MCP tool
