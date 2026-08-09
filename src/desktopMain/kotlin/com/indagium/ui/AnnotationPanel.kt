@@ -106,6 +106,12 @@ private const val IMAGE_BLOCK_THUMBNAIL_DP = 140f
 private const val DIAGRAM_CHROME_DP = 130f
 private const val DIAGRAM_ROW_DP = 44f
 
+private data class DiagramScrollAnchor(
+    val blockId: String,
+    val viewportTopPx: Float,
+    val blockHeightPx: Float,
+)
+
 internal fun annotationPreviewCopyShortcutHandled(actionPressed: Boolean, key: Key, textFieldFocused: Boolean): Boolean =
     actionPressed && key == Key.C && !textFieldFocused
 
@@ -642,12 +648,26 @@ fun AnnotationPanel(
         var stickToBottom by remember(tab.id) {
             mutableStateOf(scroll.maxValue <= 0 || scroll.value >= scroll.maxValue - stickToBottomPx)
         }
-        LaunchedEffect(scroll) {
+        var diagramScrollAnchor by remember(tab.id) { mutableStateOf<DiagramScrollAnchor?>(null) }
+        LaunchedEffect(scroll, diagramScrollAnchor) {
             snapshotFlow { scroll.maxValue <= 0 || scroll.value >= scroll.maxValue - stickToBottomPx }
-                .collect { stickToBottom = it }
+                .collect { if (diagramScrollAnchor == null) stickToBottom = it }
         }
-        LaunchedEffect(totalBlockHeightPx, scroll) {
-            if (stickToBottom) scroll.scrollTo(scroll.maxValue)
+        LaunchedEffect(totalBlockHeightPx, scroll, diagramScrollAnchor) {
+            val anchor = diagramScrollAnchor
+            if (anchor != null) {
+                val currentHeight = blockHeightOf(anchor.blockId)
+                if (kotlin.math.abs(currentHeight - anchor.blockHeightPx) > 0.5f) {
+                    withFrameNanos { }
+                    val blockTop = blockStartOffsets[anchor.blockId] ?: 0f
+                    val targetScroll = (blockTop - anchor.viewportTopPx).roundToInt()
+                    scroll.scrollTo(targetScroll.coerceIn(0, scroll.maxValue))
+                    diagramScrollAnchor = null
+                    stickToBottom = false
+                }
+            } else if (stickToBottom) {
+                scroll.scrollTo(scroll.maxValue)
+            }
         }
         LaunchedEffect(highlightedBlockId, tab.id, blockStartOffsets[highlightedBlockId]) {
             val target = highlightedBlockId ?: return@LaunchedEffect
@@ -678,22 +698,23 @@ fun AnnotationPanel(
                 )
                 if (issueDescExpanded) {
                     Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
-                        BasicTextField(
+                        // Keep the private issue note compact inside the panel. Once it reaches the
+                        // same bounded height used by the other annotation text areas, scrolling
+                        // stays inside the field and the clear action remains available.
+                        ScrollableTextArea(
                             value = ann.issueDescription,
-                            onValueChange = onUpdateIssueDescription,
-                            textStyle = TextStyle(color = tc.tx, fontSize = 11.sp, fontFamily = FontFamily.Default, lineHeight = 16.sp),
-                            cursorBrush = SolidColor(tc.ac),
+                            onValue = onUpdateIssueDescription,
+                            placeholder = "Not included in previews or exports…",
                             modifier = Modifier.fillMaxWidth()
-                                .background(tc.bg, CORNER_SM)
-                                .border(1.dp, tc.br, CORNER_SM)
-                                .onFocusChanged { issueDescFocused = it.isFocused }
-                                .padding(8.dp).defaultMinSize(minHeight = 60.dp),
-                            decorationBox = { inner ->
-                                if (ann.issueDescription.isEmpty()) {
-                                    AppText("Not included in previews or exports…", color = tc.td, fontSize = 11.sp)
-                                }
-                                inner()
-                            },
+                                // ScrollableTextArea groups focus around the scrolling field, so
+                                // hasFocus is the correct value for shortcut gating.
+                                .onFocusChanged { issueDescFocused = it.hasFocus },
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp,
+                            minHeight = 60.dp,
+                            maxHeight = 160.dp,
+                            resetKey = tab.id,
+                            onClear = { onUpdateIssueDescription("") },
                         )
                     }
                 }
@@ -753,6 +774,15 @@ fun AnnotationPanel(
                             onMoveDown = { onMoveBlock(block.id, 1) },
                             onAddBelow = { onAddNoteAfter(block.id) },
                             dragHandleModifier = dragHandleModifier,
+                            onBeforeToggleDiagram = {
+                                val blockTop = blockStartOffsets[block.id] ?: 0f
+                                diagramScrollAnchor = DiagramScrollAnchor(
+                                    blockId = block.id,
+                                    viewportTopPx = blockTop - scroll.value,
+                                    blockHeightPx = blockHeightOf(block.id),
+                                )
+                                stickToBottom = false
+                            },
                             onEditDiagram = { onEditDiagram(block.id) },
                             onNavigateDiagramLine = onNavigateDiagramLine,
                             onCopyDiagramImage = onCopyDiagramImage,
@@ -1591,6 +1621,7 @@ private fun NoteBlock(
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onAddBelow: () -> Unit,
     dragHandleModifier: Modifier = Modifier,
+    onBeforeToggleDiagram: () -> Unit = {},
     onEditDiagram: () -> Unit = {},
     onNavigateDiagramLine: (Int) -> Unit = {},
     onCopyDiagramImage: (png: ByteArray, fallbackText: String) -> Unit = { _, _ -> },
@@ -1640,7 +1671,10 @@ private fun NoteBlock(
                 onUpdateDiagramText = onUpdate,
                 onNavigateLine = onNavigateDiagramLine,
                 expanded = diagramExpanded,
-                onToggleExpanded = { diagramExpanded = !diagramExpanded },
+                onToggleExpanded = {
+                    onBeforeToggleDiagram()
+                    diagramExpanded = !diagramExpanded
+                },
             )
         } else {
             BasicTextField(
@@ -1664,7 +1698,7 @@ private fun NoteBlock(
 }
 
 @Composable
-private fun RowScope.DiagramHeaderSummary(parsed: ParsedDiagram) {
+private fun DiagramHeaderSummary(parsed: ParsedDiagram) {
     val model = parsed.model
     val selection = when (val range = parsed.spec.range) {
         is com.indagium.diagram.DiagramRange.Ids -> "Lines ${range.from}–${range.to}"
@@ -1798,8 +1832,17 @@ private fun DiagramNoteView(
         },
     )
     Spacer(Modifier.height(6.dp))
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        AppButton(if (expanded) "▾" else "▸", onToggleExpanded, variant = ButtonVariant.Ghost)
+    Row(
+        modifier = Modifier.fillMaxWidth()
+            .clickable(onClick = onToggleExpanded)
+            .padding(horizontal = 4.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            Modifier.size(18.dp).background(tc.br.copy(.5f), CORNER_SM),
+            contentAlignment = Alignment.Center,
+        ) { AppText(if (expanded) "▾" else "▸", color = tc.ts, fontSize = 14.sp) }
         DiagramHeaderSummary(parsed)
     }
     // Render even while the preview is collapsed so the card can retain its current layout. PNG
