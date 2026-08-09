@@ -1065,7 +1065,12 @@ private fun DiagramLibrarySection(
             if (needsScrollbar) {
                 VerticalScrollbar(
                     adapter = rememberScrollbarAdapter(listScroll),
-                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+                    // Leave a visible gutter before AnnotationPanel's outer scrollbar; the two
+                    // tracks otherwise overlap at the right edge when the library overflows.
+                    modifier = Modifier.align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .padding(end = 10.dp)
+                        .width(6.dp),
                     style = appScrollbarStyle(tc),
                 )
             }
