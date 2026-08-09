@@ -263,6 +263,188 @@ fun LevelBadge(level: LogLevel) {
     ) { AppText(level.key.toString(), color = color, fontSize = 10.sp, fontFamily = MONO, fontWeight = FontWeight.SemiBold) }
 }
 
+@Composable
+internal fun TagPill(
+    tag: String, color: Color,
+    trailing: String = "×",      // "×" for removable, or a count for a toggle pill
+    active: Boolean = true,      // false → tc.td.copy(.10f) fill, tc.br border, tc.ts text
+    tooltip: String = tag,       // full dotted tag when `tag` is a shortened label
+    onClick: () -> Unit,
+) {
+    val tc = tc()
+    val fill = if (active) color.copy(.13f) else tc.td.copy(.10f)
+    val border = if (active) color.copy(.27f) else tc.br
+    val labelColor = if (active) color else tc.ts
+    BoxWithConstraints {
+        // Cap the text to the pill's actual available width (from the enclosing FlowRow), not a
+        // guessed constant — the filter panel can be resized down to 140dp (FILTER_PANEL_MIN_WIDTH),
+        // narrower than a fixed 260dp cap, which let the trailing × render past the panel's own
+        // edge and get clipped instead of the text truncating to make room for it.
+        val textCap = (maxWidth - 32.dp).coerceAtLeast(40.dp)
+        Box(
+            Modifier.background(fill, CORNER_SM)
+                .border(1.dp, border, CORNER_SM)
+                .clip(CORNER_SM)
+                .clickable(onClick = onClick)
+                .padding(start = 7.dp, end = 4.dp, top = 1.dp, bottom = 1.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                // A label that differs from its tooltip has already been shortened
+                // (displayTagForPrefix strips the package), so hovering must reveal the full
+                // dotted tag even though the shortened form fits — hence alwaysHint, not
+                // forceShow, which would instead pin the popup open with no pointer.
+                FullTextHint(tooltip, alwaysHint = tooltip != tag) { onTextLayout ->
+                    AppText(
+                        tag, color = labelColor, fontSize = 11.sp, fontFamily = MONO,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = textCap),
+                        onTextLayout = onTextLayout,
+                    )
+                }
+                AppText(
+                    trailing,
+                    color = if (trailing == "×") labelColor.copy(.7f) else labelColor,
+                    fontSize = if (trailing == "×") 14.sp else 10.sp,
+                )
+            }
+        }
+    }
+}
+
+// Bounded scrollable list that works inside a verticalScroll parent.
+// heightIn(max=X) breaks inside an unbounded parent; height(X) is reliable.
+@Composable
+internal fun ScrollableItems(
+    itemCount: Int,
+    rowDp: Int = 28,
+    maxDp: Int = 150,
+    scrollToIndex: Int = -1,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    if (itemCount == 0) return
+    val h = (itemCount * rowDp).coerceAtMost(maxDp).dp
+    val scrollState = rememberScrollState()
+    val density = LocalDensity.current.density
+    LaunchedEffect(scrollToIndex) {
+        if (scrollToIndex >= 0) {
+            val rowPx = (rowDp * density).roundToInt()
+            val itemTop = scrollToIndex * rowPx
+            val itemBot = itemTop + rowPx
+            val viewTop = scrollState.value
+            val viewBot = viewTop + (maxDp * density).roundToInt()
+            when {
+                itemTop < viewTop -> scrollState.animateScrollTo(itemTop)
+                itemBot > viewBot -> scrollState.animateScrollTo(itemBot - (maxDp * density).roundToInt())
+            }
+        }
+    }
+    Box(modifier.fillMaxWidth().height(h)) {
+        Column(Modifier.fillMaxSize().verticalScroll(scrollState), content = content)
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scrollState),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+            style = appScrollbarStyle(tc()),
+        )
+    }
+}
+
+@Composable
+internal fun BoundedScrollBox(
+    rowLimit: Int,
+    rowDp: Int = 28,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) = BoundedScrollBoxDp(rowLimit * rowDp, modifier, content)
+
+// Same box as BoundedScrollBox, parameterized directly by the cap in dp rather than a row
+// count/row-height pair — for sections like Issues where rows aren't uniform height (a collapsed
+// group vs. an expanded one) and the caller has already reduced that down to a single dp figure
+// (see issuesBoxHeightDp).
+@Composable
+internal fun BoundedScrollBoxDp(
+    maxHeightDp: Int,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    // heightIn(max) rather than height(): maxHeightDp is only ever a guessed/derived content
+    // height, and a fixed height clips real content that's taller than the guess (e.g. a wrapping
+    // message line). heightIn(max) makes it a cap for many rows while letting fewer/shorter rows
+    // size to their own content instead of being stretched-then-clipped to it.
+    val h = maxHeightDp.dp
+    val scrollState = rememberScrollState()
+    Box(modifier.fillMaxWidth().heightIn(max = h)) {
+        // fillMaxWidth, not fillMaxSize: fillMaxSize would claim the full `h` cap regardless of
+        // actual content height, forcing the Box back to a fixed size and defeating heightIn above.
+        Column(Modifier.fillMaxWidth().verticalScroll(scrollState), content = content)
+        // The scrollbar sits inside a matchParentSize() Box (same pattern as UpdateDialog) so its
+        // fillMaxHeight() doesn't participate in sizing the outer Box — a plain fillMaxHeight child
+        // measures at the full `h` cap and would pin the Box to it, defeating heightIn above.
+        Box(Modifier.matchParentSize()) {
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(scrollState),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+                style = appScrollbarStyle(tc()),
+            )
+        }
+    }
+}
+
+@Composable
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+internal fun FullTextHint(
+    text: String,
+    modifier: Modifier = Modifier,
+    forceShow: Boolean = false,
+    // Two independent axes, easy to conflate: forceShow drops the *hover* requirement (a
+    // keyboard-selected row reveals its own truncated text without the pointer), while
+    // alwaysHint drops the *overflow* requirement — for a label that was deliberately
+    // abbreviated before it got here (displayTagForPrefix's package-stripped tag), where the
+    // rendered text fits perfectly and still isn't what the user needs to read.
+    alwaysHint: Boolean = false,
+    content: @Composable BoxScope.((TextLayoutResult) -> Unit) -> Unit,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    var hovered by remember { mutableStateOf(false) }
+    var isOverflowing by remember(text) { mutableStateOf(false) }
+    var anchorHeightPx by remember { mutableStateOf(0) }
+    Box(
+        modifier
+            .onSizeChanged { anchorHeightPx = it.height }
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
+    ) {
+        content { result -> isOverflowing = result.hasVisualOverflow }
+        if ((hovered || forceShow) && (isOverflowing || alwaysHint)) {
+            // Popup(alignment, offset) aligns matching corners of anchor and popup — TopStart
+            // means "popup's top-left = anchor's top-left", NOT "popup below anchor". Placing it
+            // below requires shifting by the anchor's own *measured* height (device px, matching
+            // offset's unit) plus a gap; a guessed constant (the previous approach, and an even
+            // more wrong alignment=BottomStart before that) either overlaps the anchor on some
+            // densities/text sizes or — with BottomStart — aligns the popup's own bottom-left to
+            // the anchor's bottom-left, making the popup extend upward and fully cover the anchor.
+            // Either overlap makes the popup the topmost hit-test target at the cursor, which
+            // fires Exit on the anchor, hides the popup, then Enter fires again — rapid flicker.
+            val gapPx = with(density) { 4.dp.roundToPx() }
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, anchorHeightPx + gapPx),
+                properties = PopupProperties(focusable = false),
+            ) {
+                Box(
+                    Modifier.widthIn(max = 520.dp)
+                        .background(tc.p, RoundedCornerShape(5.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(5.dp))
+                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                ) {
+                    AppText(text, color = tc.tx, fontSize = 11.sp, fontFamily = MONO, maxLines = 3, overflow = TextOverflow.Clip)
+                }
+            }
+        }
+    }
+}
+
 // Header font size for ColHeader's column labels — kept in sync with the "#" cell's own width
 // formula (rowNumberColumnWidth) so it lines up reasonably with the row gutter below it.
 private const val COL_HEADER_FONT_SP = 9f

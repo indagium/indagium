@@ -38,9 +38,13 @@ private const val CURRENT_SPEC_VERSION = "v3"
 // below a pathological renderer allocation while matching the public MCP's 400-arrow limit.
 private const val MAX_DIAGRAM_MESSAGES = 400
 private const val MAX_CODEC_PARTICIPANTS = 128
-private const val MAX_CODEC_COMPONENTS = 128
+// internal, not private: validSpec only runs on *decode*, so the component editor
+// (ui/SeqDiagramDialog.kt) is what has to stop a user building a spec that saves fine and then
+// silently refuses to reopen. It needs the real numbers — a duplicated pair of literals over there
+// would drift the moment either of these moves, in the direction that reintroduces the data loss.
+internal const val MAX_CODEC_COMPONENTS = 128
 private const val MAX_CODEC_ACTORS = 128
-private const val MAX_CODEC_TAG_IDS = 512
+internal const val MAX_CODEC_TAG_IDS = 512
 private const val MAX_CODEC_RULES = 128
 private const val MAX_CODEC_HEADER_CHARS = 512 * 1024
 private const val MAX_CODEC_SOURCE_CHARS = 2 * 1024 * 1024

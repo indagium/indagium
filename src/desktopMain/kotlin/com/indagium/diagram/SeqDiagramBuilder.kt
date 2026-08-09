@@ -24,6 +24,12 @@ import kotlin.math.roundToInt
 // wants more control supplies spec.participants explicitly instead (which is never capped here).
 private const val DEFAULT_MAX_AUTO_PARTICIPANTS = 8
 
+// Bounds DiagramParticipantCandidate.pids per tag. This scan runs in the cancellable IO lane over
+// ranges up to 10M entries (see requestCandidates); an uncapped HashMap<String, MutableSet<Int>>
+// is exactly the boxing hazard resolveTimeRange's carry-forward comment (below) and Filter.kt's
+// idBitSet exist to avoid, so pid collection stops the moment a tag's set reaches this cap.
+private const val MAX_CANDIDATE_PIDS = 8
+
 /**
  * Builds a [SeqDiagram] from a range of [tab]'s entries. Always scans over
  * `utils.visibleEntries(tab, applyFilter = true)` — the exact set the filter panel currently
@@ -301,31 +307,19 @@ fun diagramParticipantCandidates(
     val resolved = resolveRange(tab, spec.range, visibleEntries(tab, applyFilter = true), cancellationCheck, warnings)
     if (spec.components.isNotEmpty()) return componentCandidates(spec, resolved.entries, cancellationCheck)
     val configured = spec.participants.filter { it.kind == ParticipantKind.TAG && it.tag != null }.associateBy { it.tag!! }
-    var previousTag: String? = null
-    val counts = LinkedHashMap<String, Int>()
-    val transitions = HashMap<String, Int>()
-    val errors = HashMap<String, Int>()
-    for (entry in resolved.entries) {
-        counts[entry.tag] = (counts[entry.tag] ?: 0) + 1
-        if (errorLevel(entry.level)) errors[entry.tag] = (errors[entry.tag] ?: 0) + 1
-        previousTag?.takeIf { it != entry.tag }?.let { prior ->
-            transitions[prior] = (transitions[prior] ?: 0) + 1
-            transitions[entry.tag] = (transitions[entry.tag] ?: 0) + 1
-        }
-        previousTag = entry.tag
-    }
+    val stats = tagStats(resolved.entries, cancellationCheck)
     val automaticallyShown = if (configured.isEmpty()) {
-        counts.entries.sortedByDescending { it.value }.take(DEFAULT_MAX_AUTO_PARTICIPANTS).map { it.key }.toSet()
+        stats.counts.entries.sortedByDescending { it.value }.take(DEFAULT_MAX_AUTO_PARTICIPANTS).map { it.key }.toSet()
     } else {
         emptySet()
     }
-    return counts.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key }).map { (tag, count) ->
+    return stats.counts.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key }).map { (tag, count) ->
         val participant = configured[tag]
         DiagramParticipantCandidate(
             tag = tag,
             entryCount = count,
-            transitionCount = transitions[tag] ?: 0,
-            errorCount = errors[tag] ?: 0,
+            transitionCount = stats.transitions[tag] ?: 0,
+            errorCount = stats.errors[tag] ?: 0,
             representation = participant?.representation
                 ?: when {
                     configured.isNotEmpty() -> DiagramParticipantRepresentation.HIDE
@@ -333,8 +327,39 @@ fun diagramParticipantCandidates(
                     else -> DiagramParticipantRepresentation.SHOW
                 },
             participant = participant,
+            pids = stats.pids[tag]?.toSet() ?: emptySet(),
         )
     }
+}
+
+// Per-tag counts from a single scan over a resolved range. Shared by both candidate paths —
+// diagramParticipantCandidates' legacy branch just above (the one actually reachable from the UI:
+// SeqDiagramCoordinator.requestCandidates always normalises spec.components to emptyList() before
+// calling in, so the componentCandidates guard right below never fires in practice) and
+// componentCandidates itself — so a candidate's pids are populated regardless of which branch runs.
+private class TagStats {
+    val counts = LinkedHashMap<String, Int>()
+    val transitions = HashMap<String, Int>()
+    val errors = HashMap<String, Int>()
+    val pids = HashMap<String, MutableSet<Int>>()
+}
+
+private fun tagStats(entries: List<LogEntry>, cancellationCheck: CancellationCheck): TagStats {
+    val stats = TagStats()
+    var previous: String? = null
+    entries.forEachIndexed { index, entry ->
+        if (index % CANCELLATION_CHECK_INTERVAL == 0) cancellationCheck()
+        stats.counts[entry.tag] = (stats.counts[entry.tag] ?: 0) + 1
+        if (errorLevel(entry.level)) stats.errors[entry.tag] = (stats.errors[entry.tag] ?: 0) + 1
+        previous?.takeIf { it != entry.tag }?.let { prior ->
+            stats.transitions[prior] = (stats.transitions[prior] ?: 0) + 1
+            stats.transitions[entry.tag] = (stats.transitions[entry.tag] ?: 0) + 1
+        }
+        previous = entry.tag
+        val pidsForTag = stats.pids.getOrPut(entry.tag) { HashSet() }
+        if (pidsForTag.size < MAX_CANDIDATE_PIDS) pidsForTag.add(entry.pid)
+    }
+    return stats
 }
 
 private fun componentCandidates(
@@ -344,33 +369,21 @@ private fun componentCandidates(
 ): List<DiagramParticipantCandidate> {
     val owner = LinkedHashMap<String, DiagramComponent>()
     spec.components.filter { it.enabled }.forEach { component -> component.tagIds.forEach { owner.putIfAbsent(it, component) } }
-    val counts = LinkedHashMap<String, Int>()
-    val transitions = HashMap<String, Int>()
-    val errors = HashMap<String, Int>()
-    var previous: String? = null
-    entries.forEachIndexed { index, entry ->
-        if (index % CANCELLATION_CHECK_INTERVAL == 0) cancellationCheck()
-        counts[entry.tag] = (counts[entry.tag] ?: 0) + 1
-        if (errorLevel(entry.level)) errors[entry.tag] = (errors[entry.tag] ?: 0) + 1
-        previous?.takeIf { it != entry.tag }?.let { prior ->
-            transitions[prior] = (transitions[prior] ?: 0) + 1
-            transitions[entry.tag] = (transitions[entry.tag] ?: 0) + 1
-        }
-        previous = entry.tag
-    }
-    return counts.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key }).map { (tag, count) ->
+    val stats = tagStats(entries, cancellationCheck)
+    return stats.counts.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key }).map { (tag, count) ->
         val component = owner[tag]
         DiagramParticipantCandidate(
             tag = tag,
             entryCount = count,
-            transitionCount = transitions[tag] ?: 0,
-            errorCount = errors[tag] ?: 0,
+            transitionCount = stats.transitions[tag] ?: 0,
+            errorCount = stats.errors[tag] ?: 0,
             representation = when {
                 component != null -> DiagramParticipantRepresentation.SHOW
                 spec.unmappedTagPolicy == UnmappedTagPolicy.GROUP_AS_OTHER -> DiagramParticipantRepresentation.OTHER
                 else -> DiagramParticipantRepresentation.HIDE
             },
             participant = component?.let { DiagramParticipant(it.id, it.displayName, ParticipantKind.TAG, tag = tag) },
+            pids = stats.pids[tag]?.toSet() ?: emptySet(),
         )
     }
 }

@@ -1616,6 +1616,12 @@ class AppState(
     /** Main content routing only.  [tabs] intentionally remains a collection of log tabs; open
      * sequence diagrams are independent, non-persisted editor surfaces owned by seqDiagrams. */
     var activeSurface by mutableStateOf<ActiveSurface?>(null)
+
+    /** True while a diagram workspace owns the content area (App.kt:317).  activeTabId stays
+     *  semantically intact for everything that depends on it — the Video/Cases/Compare toolbar
+     *  buttons, autosave, compare mode — so this exists purely to keep exactly one tab reading
+     *  as selected in the tab bar. */
+    val diagramSurfaceActive: Boolean get() = activeSurface is ActiveSurface.Diagram
     var compareMode by mutableStateOf(false)
     var compareTabId by mutableStateOf("")
     var loadingStatus by mutableStateOf<String?>(null)

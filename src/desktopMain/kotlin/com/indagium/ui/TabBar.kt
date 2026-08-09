@@ -12,6 +12,8 @@ import androidx.compose.material.icons.automirrored.outlined.CompareArrows
 import androidx.compose.material.icons.automirrored.outlined.ManageSearch
 import androidx.compose.material.icons.automirrored.outlined.StickyNote2
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Block
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Movie
@@ -33,6 +35,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
+import com.indagium.diagram.SeqDiagramSpec
 import com.indagium.model.*
 import java.awt.FileDialog
 import java.awt.Frame
@@ -191,16 +194,26 @@ internal fun TabBar(state: AppState) {
     }
 }
 
+// At 12sp MONO, 140dp minus 12dp start padding minus a 24dp CloseButton leaves ~90dp of label —
+// enough for a short diagram title without the 100dp pill's cramped ellipsis.
+private val DIAGRAM_TAB_WIDTH = 140.dp
+
 /** Diagram sessions are rendered beside, never inside, the log-tab collection.  This preserves
  * every LogTab-only invariant (compare, autosave and tab ordering) while still giving diagrams
- * normal tab affordances. */
+ * the same tab chrome (TabShell) as log tabs — see the design-correspondence note at the top of
+ * this file's diagram-tab section. */
 @Composable
 private fun DiagramWorkspaceTabs(state: AppState) {
     val tc = tc()
     val density = LocalDensity.current.density
     var overflowOpen by remember { mutableStateOf(false) }
-    BoxWithConstraints(Modifier.widthIn(max = 330.dp).height(32.dp)) {
-        val rawCapacity = (maxWidth.value / 105f).toInt().coerceIn(1, 3)
+    // Right-click menu for a single diagram tab. Local to this composable per Step 2 of the
+    // tab-shell plan — deliberately not an AppState field; TabCtxMenuState (log tabs) is a
+    // full-window overlay anchored by absolute position, but a diagram tab only needs two actions
+    // so a Popup anchored to that tab's own Box (like the overflow Popup below) is enough.
+    var ctxMenuWorkspaceId by remember { mutableStateOf<String?>(null) }
+    BoxWithConstraints(Modifier.widthIn(max = 460.dp).fillMaxHeight()) {
+        val rawCapacity = (maxWidth.value / 145f).toInt().coerceIn(1, 3)
         val capacity = if (state.seqDiagrams.workspaces.size > rawCapacity) {
             (rawCapacity - 1).coerceAtLeast(1)
         } else {
@@ -216,19 +229,39 @@ private fun DiagramWorkspaceTabs(state: AppState) {
         Row(Modifier.fillMaxHeight(), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
             visibleIds.mapNotNull(byId::get).forEach { workspace ->
                 val active = state.activeSurface == ActiveSurface.Diagram(workspace.id)
-                Row(
-                    Modifier.width(100.dp).fillMaxHeight()
-                        .background(if (active) tc.bg else tc.p, RoundedCornerShape(5.dp))
-                        .border(1.dp, tc.br, RoundedCornerShape(5.dp))
-                        .clickable { state.seqDiagrams.activateWorkspace(workspace.id) }
-                        .padding(start = 7.dp, end = 3.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    AppText(
-                        workspace.spec.title.ifBlank { "Diagram" }, fontSize = 10.sp, maxLines = 1,
-                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                Box(Modifier.width(DIAGRAM_TAB_WIDTH).fillMaxHeight()) {
+                    TabShell(
+                        pointerKey = workspace.id,
+                        label = workspace.spec.title.ifBlank { "Diagram" },
+                        tooltip = diagramTabTooltip(workspace.spec),
+                        isActive = active,
+                        showClose = true,
+                        onClick = { state.seqDiagrams.activateWorkspace(workspace.id) },
+                        onClose = { state.seqDiagrams.requestCloseWorkspace(workspace.id) },
+                        onCtxMenu = { _, _ -> ctxMenuWorkspaceId = workspace.id },
                     )
-                    CloseButton(onClick = { state.seqDiagrams.requestCloseWorkspace(workspace.id) })
+                    if (ctxMenuWorkspaceId == workspace.id) {
+                        Popup(
+                            alignment = Alignment.TopStart,
+                            offset = IntOffset(0, (34 * density).roundToInt()),
+                            onDismissRequest = { ctxMenuWorkspaceId = null },
+                            properties = PopupProperties(focusable = true),
+                        ) {
+                            Column(
+                                Modifier.width(190.dp).background(tc.p, RoundedCornerShape(7.dp))
+                                    .border(1.dp, tc.br, RoundedCornerShape(7.dp)).padding(vertical = 4.dp),
+                            ) {
+                                CtxItem(icon = Icons.Outlined.Close, label = "Close") {
+                                    state.seqDiagrams.requestCloseWorkspace(workspace.id)
+                                    ctxMenuWorkspaceId = null
+                                }
+                                CtxItem(icon = Icons.Outlined.Block, label = "Close all diagrams") {
+                                    closeAllDiagramWorkspaces(state)
+                                    ctxMenuWorkspaceId = null
+                                }
+                            }
+                        }
+                    }
                 }
             }
             if (overflowIds.isNotEmpty()) {
@@ -267,6 +300,33 @@ private fun DiagramWorkspaceTabs(state: AppState) {
                 }
             }
         }
+    }
+}
+
+/** Closes every diagram workspace, saving nothing silently.
+ *
+ * pendingCloseWorkspaceId is a single slot (SeqDiagramCoordinator), so a naive
+ * `workspaces.forEach(::requestCloseWorkspace)` has every dirty workspace overwrite the previous
+ * one's prompt: exactly one of them asks to save and the rest stay open with no explanation.
+ * Instead close the clean ones outright and hand the first dirty one to the normal Save/Discard
+ * gate — re-invoking the action walks the remaining drafts one prompt at a time, which is the only
+ * shape that never discards an unsaved draft without asking.
+ */
+private fun closeAllDiagramWorkspaces(state: AppState) {
+    val ids = state.seqDiagrams.workspaces.map { it.id }
+    ids.filterNot(state.seqDiagrams::workspaceNeedsSave).forEach { state.seqDiagrams.closeWorkspace(it) }
+    ids.firstOrNull(state.seqDiagrams::workspaceNeedsSave)?.let(state.seqDiagrams::requestCloseWorkspace)
+}
+
+/** Title + scope + source, matching what the inspector's own Scope pill shows (rangeSummary,
+ * ui/SeqDiagramDialog.kt) so the tab tooltip and the inspector never disagree about the range. */
+private fun diagramTabTooltip(spec: SeqDiagramSpec): String = buildString {
+    append(spec.title.ifBlank { "Diagram" })
+    append('\n')
+    append(rangeSummary(spec.range))
+    spec.sourceFile?.let {
+        append('\n')
+        append(it)
     }
 }
 
@@ -484,7 +544,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                         TabItem(
                             tab = tab,
                             label = tabDisplayLabel(tab, state.tabs),
-                            isActive = tab.id == state.activeTabId,
+                            isActive = tab.id == state.activeTabId && !state.diagramSurfaceActive,
                             showClose = true,
                             dragging = isDragging,
                             onClick = { if (dragTabId == null) state.activateTab(tab.id) },
@@ -538,11 +598,24 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
 }
 
 // ── Shared ────────────────────────────────────────────────────────────
+/** The log-tab visual recipe, generalised so [DiagramWorkspaceTabs] can render diagram tabs
+ *  through the exact same shell instead of an ad-hoc pill.  [pointerKey] replaces `tab.id` as the
+ *  `pointerInput` restart key (cross-tab/cross-workspace id collisions are the same hazard either
+ *  way — see the ID-collision note in CLAUDE.md); [tooltip] is the plain-text tooltip body
+ *  (log tabs show the source path, diagram tabs show title/range/source); [leading] is an
+ *  optional composable slot before the label (log tabs use it for the live-tailing `●`).
+ */
 @Composable
-internal fun TabItem(
-    tab: LogTab, isActive: Boolean, showClose: Boolean,
-    label: String = tab.filename,
-    dragging: Boolean = false, onClick: () -> Unit, onClose: () -> Unit,
+internal fun TabShell(
+    pointerKey: Any,
+    label: String,
+    tooltip: String,
+    isActive: Boolean,
+    showClose: Boolean,
+    dragging: Boolean = false,
+    leading: (@Composable () -> Unit)? = null,
+    onClick: () -> Unit,
+    onClose: () -> Unit,
     onCtxMenu: (Float, Float) -> Unit = { _, _ -> },
 ) {
     val tc = tc()
@@ -567,7 +640,7 @@ internal fun TabItem(
             .onGloballyPositioned { rowRoot = it.positionInRoot() }
             .onPointerEvent(PointerEventType.Enter) { hov = true }
             .onPointerEvent(PointerEventType.Exit) { hov = false }
-            .pointerInput(tab.id) {
+            .pointerInput(pointerKey) {
                 awaitPointerEventScope {
                     while (true) {
                         val ev = awaitPointerEvent(PointerEventPass.Initial)
@@ -583,23 +656,7 @@ internal fun TabItem(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
-        // Live tailing (utils/FileTailer.kt) is toggled from the tab's right-click context menu,
-        // not a clickable button here — this is purely an indicator, plain and non-interactive.
-        if (tab.tailing) {
-            TooltipArea(
-                tooltip = {
-                    Box(
-                        Modifier.background(tc.p2, RoundedCornerShape(4.dp))
-                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                    ) {
-                        AppText("Live tailing — watching file for new lines", color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
-                    }
-                },
-            ) {
-                AppText("●", color = DANGER_RED, fontSize = 10.sp)
-            }
-        }
+        leading?.invoke()
         TooltipArea(
             tooltip = {
                 val tooltipScroll = rememberScrollState()
@@ -613,7 +670,7 @@ internal fun TabItem(
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                 ) {
                     AppText(
-                        tab.sourcePath ?: tab.filename,
+                        tooltip,
                         color = tc.tx,
                         fontSize = 11.sp,
                         fontFamily = MONO,
@@ -637,4 +694,44 @@ internal fun TabItem(
             CloseButton(onClick = onClose)
         }
     }
+}
+
+@Composable
+internal fun TabItem(
+    tab: LogTab, isActive: Boolean, showClose: Boolean,
+    label: String = tab.filename,
+    dragging: Boolean = false, onClick: () -> Unit, onClose: () -> Unit,
+    onCtxMenu: (Float, Float) -> Unit = { _, _ -> },
+) {
+    val tc = tc()
+    TabShell(
+        pointerKey = tab.id,
+        label = label,
+        tooltip = tab.sourcePath ?: tab.filename,
+        isActive = isActive,
+        showClose = showClose,
+        dragging = dragging,
+        // Live tailing (utils/FileTailer.kt) is toggled from the tab's right-click context menu,
+        // not a clickable button here — this is purely an indicator, plain and non-interactive.
+        leading = if (tab.tailing) {
+            {
+                TooltipArea(
+                    tooltip = {
+                        Box(
+                            Modifier.background(tc.p2, RoundedCornerShape(4.dp))
+                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        ) {
+                            AppText("Live tailing — watching file for new lines", color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                        }
+                    },
+                ) {
+                    AppText("●", color = DANGER_RED, fontSize = 10.sp)
+                }
+            }
+        } else null,
+        onClick = onClick,
+        onClose = onClose,
+        onCtxMenu = onCtxMenu,
+    )
 }

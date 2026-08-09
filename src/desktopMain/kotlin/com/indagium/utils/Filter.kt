@@ -271,6 +271,18 @@ fun cachedSeqGroupsFor(tab: LogTab, applyFilter: Boolean): List<SeqGroup>? =
             it.filter == tab.filter
     }?.seqGroups
 
+// Read-only peek at the filtered entry list from this tab's last computeItems(tab, applyFilter)
+// call. Same validity predicate, same null contract as cachedSeqGroupsFor above: null means "no
+// cheap answer available right now" (cache empty, invalidated, or built under a different
+// tab/filter/analysis) — NEVER "this tab has no visible entries." Pure read, same as
+// cachedSeqGroupsFor: never computes, never populates the cache, never mutates anything.
+fun cachedVisibleEntriesFor(tab: LogTab, applyFilter: Boolean): List<LogEntry>? =
+    computeCacheByTab["${tab.id}#$applyFilter"]?.takeIf {
+        it.logData === tab.logData &&
+            it.stackGroupsRef === tab.analysis.stackTraceGroups &&
+            it.filter == tab.filter
+    }?.visible
+
 // Fast path for the single most common expand/collapse: toggling one stack-trace ("crash")
 // block. Its rendered footprint is strictly local — the header flips its `expanded` flag and the
 // member rows appear/disappear immediately after it; nothing else in the item list changes
@@ -343,6 +355,32 @@ private sealed class ChildRef {
 
 private data class ManualRange(val block: ManualCollapseBlock, val range: IntRange)
 
+// Resolves each of `blocks` (must already be filtered to enabled ones) to an index range into
+// whatever entry list [indexOfId] answers against — `data` from computeItems, or a tab's plain
+// visibleEntries() from expandSelectionThroughCollapsedBlocks below — which is exactly why this
+// takes the lookup as a parameter rather than closing over computeItems' own `data`/`indexOfId`.
+// A block whose anchor (or, for RANGE, whose endId) isn't found by [indexOfId] — e.g. filtered out
+// of the list being resolved against — is silently dropped via mapNotNull rather than surfaced as
+// an error, matching the pre-hoist inline behavior. Byte-identical mapNotNull shape and sort order
+// to that inline version — do not touch either without re-checking selectTopLevelManualRanges
+// below, which depends on this exact order.
+private fun manualRangesFor(
+    blocks: List<ManualCollapseBlock>,
+    dataLastIndex: Int,
+    indexOfId: (Int) -> Int?,
+): List<ManualRange> = blocks.mapNotNull { block ->
+    val anchor = indexOfId(block.anchorId) ?: return@mapNotNull null
+    val range = when (block.direction) {
+        ManualCollapseDirection.TO_START -> 0..anchor
+        ManualCollapseDirection.TO_END -> anchor..dataLastIndex
+        ManualCollapseDirection.RANGE -> {
+            val end = block.endId?.let(indexOfId) ?: return@mapNotNull null
+            minOf(anchor, end)..maxOf(anchor, end)
+        }
+    }
+    ManualRange(block, range)
+}.sortedWith(compareBy<ManualRange> { it.range.first }.thenByDescending { it.range.last })
+
 // Reproduces, exactly, the selection rule the old per-index walk used: scanning left to right,
 // the first (widest, per the sort below) range starting at each index wins; any other range whose
 // start falls inside an already-selected range is silently dropped. `ranges` must already be
@@ -362,6 +400,90 @@ private fun selectTopLevelManualRanges(dataSize: Int, ranges: List<ManualRange>)
         } else { result += r; i = r.range.last + 1 }
     }
     return result
+}
+
+/**
+ * Expands a row selection so selecting a collapsed header means what it looks like it means:
+ * every line that fold hides — identical to what the user would have selected after uncollapsing
+ * the block by hand.
+ *
+ * Only expands a fold that is currently COLLAPSED (`gid !in tab.expanded`); an already-open fold's
+ * interior rows are individually selectable, so a header id already in [selected] there says
+ * exactly what the user meant, with nothing to add. `TO_START` is the case that makes this
+ * function necessary at all: Filter.kt defines it as `0..anchor`, so everything it hides has
+ * strictly LOWER ids than the only selectable row — a plain `min..max` id span can never reach it.
+ *
+ * Ordered so the cheap, common cases never pay for the expensive one: stack-trace and sequence
+ * membership are answered straight off ids the group models already carry (no index arithmetic
+ * needed), so only a matched, currently-collapsed manual block pays for resolving the visible-entry
+ * index space and calling [manualRangesFor]. Returns the identical [selected] instance when nothing
+ * expands, so a plain-row selection allocates nothing on this path.
+ */
+fun expandSelectionThroughCollapsedBlocks(tab: LogTab, selected: Set<Int>, applyFilter: Boolean = true): Set<Int> {
+    if (selected.isEmpty()) return selected
+
+    var expanded: MutableSet<Int>? = null
+    fun addAll(ids: Collection<Int>) {
+        if (ids.isEmpty()) return
+        (expanded ?: LinkedHashSet(selected).also { expanded = it }).addAll(ids)
+    }
+
+    // Resolved at most once, and only if a fold actually needs it. Both the manual-block and the
+    // sequence-group branch below want the visible list, so asking each of them independently
+    // would run a second full filter pass over the whole log whenever the cache is cold and both
+    // branches match.
+    var visibleMemo: List<LogEntry>? = null
+    fun visible(): List<LogEntry> =
+        visibleMemo ?: (cachedVisibleEntriesFor(tab, applyFilter) ?: visibleEntries(tab, applyFilter)).also { visibleMemo = it }
+
+    // Stack traces: same access pattern as expansionAndIndexForEntry's largeFileMode branch
+    // (ui/LogViewer.kt) — analysis.stackTraceGroups already lists each group's member ids outright.
+    for (g in tab.analysis.stackTraceGroups) {
+        if (g.rid in selected && g.gid !in tab.expanded) addAll(g.memberIds)
+    }
+
+    // Manual collapse blocks. Gather the collapsed candidates first — cheap, no visible-entry
+    // resolution needed — and only pay for indexOfId/manualRangesFor if any actually matched. In
+    // practice the cache below is warm: the user just clicked a collapsed header, which is what ran
+    // computeItems(tab, applyFilter) in the first place.
+    val collapsedManual = tab.manualBlocks.filter { it.enabled && it.anchorId in selected && it.id !in tab.expanded }
+    if (collapsedManual.isNotEmpty()) {
+        val visible = visible()
+        val ids = IntArray(visible.size) { visible[it].id }
+        fun indexOfId(id: Int): Int? = java.util.Arrays.binarySearch(ids, id).takeIf { it >= 0 }
+        manualRangesFor(collapsedManual, visible.lastIndex, ::indexOfId).forEach { mr ->
+            addAll(mr.range.map { visible[it].id })
+        }
+    }
+
+    // Sequence groups, including nested children — only when sequence folding is on at all,
+    // mirroring computeItems' own gate, so a tab with sequences disabled never pays for
+    // computeSeqGroups just to answer this. cachedSeqGroupsFor null means "no cheap answer right
+    // now," never "no groups exist" — fall back to computing fresh, exactly as resolveSeqGroupRange
+    // (diagram/SeqDiagramBuilder.kt) already does for the same cache.
+    if (tab.filter.seqOn && tab.filter.sequences.any { it.enabled }) {
+        val groups = cachedSeqGroupsFor(tab, applyFilter) ?: computeSeqGroups(visible(), tab.filter.sequences)
+        for (sg in groups) {
+            if (sg.rid in selected && sg.gid !in tab.expanded) {
+                // A collapsed OUTER header hides its whole subtree unconditionally — including each
+                // nested group's own header row, not just its ch — matching computeItems' own
+                // totalCh accounting (plain.size + nested.sumOf { 1 [the ng.rid row] + ch.size }).
+                // Skipping ng.rid here would leave its tag unseeded even though the row is bound to
+                // land inside the resulting id range anyway (resolveIdsRange is a continuous
+                // min..max scan) — precisely the hiddenEntries regression this function exists to fix.
+                addAll(sg.plain)
+                sg.nested.forEach { ng -> addAll(listOf(ng.rid) + ng.ch) }
+            }
+            for (ng in sg.nested) {
+                // The nested header ITSELF collapsed while its parent is already open: only its own
+                // ch is hidden — nested groups are a single level deep, there's nothing further to
+                // recurse into.
+                if (ng.rid in selected && ng.gid !in tab.expanded) addAll(ng.ch)
+            }
+        }
+    }
+
+    return expanded ?: selected
 }
 
 // Cooperative-cancellation hook for computeItems/computeSeqGroups (P-01). Both are plain,
@@ -537,18 +659,7 @@ internal fun computeItems(
 
     fun rootIdxOf(rid: Int): Int = indexOfId(rid) ?: -1
 
-    val allManualRanges = manualBlocksEnabled.mapNotNull { block ->
-        val anchor = indexOfId(block.anchorId) ?: return@mapNotNull null
-        val range = when (block.direction) {
-            ManualCollapseDirection.TO_START -> 0..anchor
-            ManualCollapseDirection.TO_END -> anchor..data.lastIndex
-            ManualCollapseDirection.RANGE -> {
-                val end = block.endId?.let(::indexOfId) ?: return@mapNotNull null
-                minOf(anchor, end)..maxOf(anchor, end)
-            }
-        }
-        ManualRange(block, range)
-    }.sortedWith(compareBy<ManualRange> { it.range.first }.thenByDescending { it.range.last })
+    val allManualRanges = manualRangesFor(manualBlocksEnabled, data.lastIndex, ::indexOfId)
 
     val topLevelManualCandidates = selectTopLevelManualRanges(data.size, allManualRanges)
 

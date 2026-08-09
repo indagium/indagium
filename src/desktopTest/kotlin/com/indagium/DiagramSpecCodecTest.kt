@@ -387,4 +387,52 @@ class DiagramSpecCodecTest {
         val badActivation = assertNotNull(parseDiagramNote(encoded.replace("\"s\":0", "\"s\":99")))
         assertNull(badActivation.model)
     }
+
+    // ── Components UI constraints (SeqDiagramDialog.kt's ParticipantsSection owns these — the
+    // codec only checks them on *decode*, never on save, so a UI bug here would silently produce
+    // a note that fails to reopen) ───────────────────────────────────────────────────────────────
+
+    @Test
+    fun aliasAndMultiTagComponentsRoundTripUnchanged() {
+        val spec = SeqDiagramSpec(
+            components = listOf(
+                DiagramComponent(id = "BT", displayName = "Bluetooth radio", tagIds = setOf("BT")),
+                DiagramComponent(id = "cmp-1", displayName = "Networking", tagIds = setOf("Wifi", "Nsd"), enabled = false),
+            ),
+        )
+
+        val parsed = assertNotNull(parseDiagramNote(encodeDiagramNote(spec, source)))
+
+        assertEquals(spec.components, parsed.spec.components)
+    }
+
+    @Test
+    fun aSpecWithATagInTwoComponentsIsRejected() {
+        val spec = SeqDiagramSpec(
+            components = listOf(
+                DiagramComponent(id = "A", displayName = "A", tagIds = setOf("Shared")),
+                DiagramComponent(id = "cmp-1", displayName = "B", tagIds = setOf("Shared", "Other")),
+            ),
+        )
+
+        assertNull(parseDiagramNote(encodeDiagramNote(spec, source)), "the same tag owned by two components must never survive a reopen")
+    }
+
+    @Test
+    fun aSpecOverTheComponentCapIsRejected() {
+        val spec = SeqDiagramSpec(
+            components = (1..129).map { DiagramComponent(id = "t$it", displayName = "t$it", tagIds = setOf("tag$it")) },
+        )
+
+        assertNull(parseDiagramNote(encodeDiagramNote(spec, source)), "129 components is one over MAX_CODEC_COMPONENTS")
+    }
+
+    @Test
+    fun anEmptyTagIdComponentIsRejected() {
+        val spec = SeqDiagramSpec(
+            components = listOf(DiagramComponent(id = "empty", displayName = "Nothing here", tagIds = emptySet())),
+        )
+
+        assertNull(parseDiagramNote(encodeDiagramNote(spec, source)), "the EMPTY_COMPONENT_ID-shaped sentinel must never reach the wire")
+    }
 }
