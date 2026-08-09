@@ -36,11 +36,47 @@ private fun LogCallSite.toLine(): String = listOf(
     matcher.fieldToken(),
     literalLen.toString(),
     configurationDependent.toString(),
+    owningType.orEmpty().fieldToken(),
+    methodSignature.fieldToken(),
+    declaredReturnType.orEmpty().fieldToken(),
+    directCalls.fieldToken(),
 ).joinToString("\t")
+
+// Direct-call fields use base64-url too, so ':' and ';' are safe structural separators.  Keeping
+// this nested record inside a site line preserves the store's useful "one malformed line only
+// loses one record" recovery property.
+private fun List<SourceDirectCall>.fieldToken(): String = if (isEmpty()) "~" else joinToString(";") { call ->
+    listOf(
+        call.targetFilePath.fieldToken(),
+        call.targetOwnerType.fieldToken(),
+        call.targetMethodName.fieldToken(),
+        call.targetMethodSignature.fieldToken(),
+        call.targetDeclaredReturnType.orEmpty().fieldToken(),
+        call.callLine.toString(),
+    ).joinToString(":")
+}
+
+private fun String.directCallsFieldValue(): List<SourceDirectCall> {
+    if (this == "~" || isBlank()) return emptyList()
+    return split(';').mapNotNull { token ->
+        val fields = token.split(':')
+        if (fields.size != 6) return@mapNotNull null
+        runCatching {
+            SourceDirectCall(
+                targetFilePath = fields[0].fieldValue(),
+                targetOwnerType = fields[1].fieldValue(),
+                targetMethodName = fields[2].fieldValue(),
+                targetMethodSignature = fields[3].fieldValue(),
+                targetDeclaredReturnType = fields[4].fieldValue().takeIf { it.isNotBlank() },
+                callLine = fields[5].toInt(),
+            )
+        }.getOrNull()
+    }
+}
 
 private fun parseSiteLine(rest: String): LogCallSite? {
     val parts = rest.split("\t")
-    if (parts.size < 9) return null
+    if (parts.size < 13) return null
     return LogCallSite(
         filePath = parts[0].fieldValue(),
         tag = parts[1].fieldValue().takeIf { it.isNotBlank() },
@@ -51,6 +87,10 @@ private fun parseSiteLine(rest: String): LogCallSite? {
         matcher = parts[6].fieldValue(),
         literalLen = parts[7].toInt(),
         configurationDependent = parts[8].toBooleanStrict(),
+        owningType = parts[9].fieldValue().takeIf { it.isNotBlank() },
+        methodSignature = parts[10].fieldValue(),
+        declaredReturnType = parts[11].fieldValue().takeIf { it.isNotBlank() },
+        directCalls = parts[12].directCallsFieldValue(),
     )
 }
 

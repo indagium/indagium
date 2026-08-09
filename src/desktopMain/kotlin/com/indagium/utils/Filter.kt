@@ -1,11 +1,11 @@
 package com.indagium.utils
 
 import androidx.compose.ui.graphics.Color
-import com.indagium.model.*
 import com.indagium.diagram.DiagramDialect
 import com.indagium.diagram.DiagramExportMode
 import com.indagium.diagram.ParsedDiagram
 import com.indagium.diagram.parseDiagramNote
+import com.indagium.model.*
 import com.indagium.ui.DANGER_RED
 import com.indagium.ui.SEQ_COLORS
 

@@ -30,6 +30,24 @@ import kotlin.test.assertTrue
 // real ~/.openlog2-equivalent location (see the constructor's own doc comments on those seams).
 class SourceIndexAppStateTest {
     @Test
+    fun canonicalRegisteredRootMatchesSymlinkSpellingDuringReindexAndStatus() {
+        val dir = createTempDirectory("openlog-src-canonical-root").toFile()
+        val real = File(dir, "real-src").apply { mkdirs() }
+        File(real, "Feature.kt").writeText("fun run() { Log.d(\"Tag\", \"Message\") }")
+        val link = File(dir, "linked-src")
+        runCatching { java.nio.file.Files.createSymbolicLink(link.toPath(), real.toPath()) }
+            .getOrElse { return }
+        val state = newState(dir)
+        state.updateSettings { it.copy(sourceFolders = listOf(link.absolutePath)) }
+
+        state.reindexSources(link.absolutePath)
+        waitUntil { state.sourceIndexStatusForFolder(real.absolutePath).siteCount == 1 }
+
+        assertEquals(1, state.sourceIndexStatusForFolder(link.absolutePath).siteCount)
+        assertEquals(real.canonicalPath, state.sourceIndex?.roots?.single())
+    }
+
+    @Test
     fun settingsRoundTripPreservesLoggingConfigurationsAndAssignments() {
         val dir = createTempDirectory("openlog-src-logging-settings").toFile()
         val cacheFile = File(dir, "state.cache")
@@ -228,18 +246,18 @@ class SourceIndexAppStateTest {
         val state = newState(dir, indexFile)
         state.updateSettings { it.copy(sourceFolders = listOf(first.absolutePath)) }
         state.reindexSources(first.absolutePath)
-        waitUntil { state.resolveLogSource("Duplicate", "same message").singleOrNull()?.site?.filePath?.startsWith(first.absolutePath) == true }
+        waitUntil { state.resolveLogSource("Duplicate", "same message").singleOrNull()?.site?.filePath?.startsWith(first.canonicalPath) == true }
 
         state.removeSourceFolder(first.absolutePath)
         state.updateSettings { it.copy(sourceFolders = listOf(second.absolutePath)) }
         state.reindexSources(second.absolutePath)
-        waitUntil { state.resolveLogSource("Duplicate", "same message").singleOrNull()?.site?.filePath?.startsWith(second.absolutePath) == true }
+        waitUntil { state.resolveLogSource("Duplicate", "same message").singleOrNull()?.site?.filePath?.startsWith(second.canonicalPath) == true }
 
-        assertEquals(listOf(second.absolutePath), state.resolveLogSource("Duplicate", "same message").map { File(it.site.filePath).parentFile.absolutePath })
+        assertEquals(listOf(second.canonicalPath), state.resolveLogSource("Duplicate", "same message").map { File(it.site.filePath).parentFile.canonicalPath })
         val persisted = SourceIndexStore.load(indexFile)!!
-        assertTrue(persisted.sites.all { it.filePath.startsWith(second.absolutePath) })
-        assertTrue(persisted.fileMeta.keys.all { it.startsWith(second.absolutePath) })
-        assertEquals(listOf(second.absolutePath), persisted.roots)
+        assertTrue(persisted.sites.all { it.filePath.startsWith(second.canonicalPath) })
+        assertTrue(persisted.fileMeta.keys.all { it.startsWith(second.canonicalPath) })
+        assertEquals(listOf(second.canonicalPath), persisted.roots)
     }
 
     private fun waitUntil(timeoutMs: Long = 5_000, condition: () -> Boolean) {

@@ -104,6 +104,7 @@ private fun mermaidNoteSpan(f: DiagramFrame, messages: List<DiagramMessage>, ali
 
 fun SeqDiagram.toMermaid(): String {
     val aliases = sanitizedAliases(participants)
+
     fun aliasOf(idx: Int): String = aliases.getOrElse(idx) { "p$idx" }
 
     val opens = frames.groupBy { it.firstMsg }
@@ -123,7 +124,8 @@ fun SeqDiagram.toMermaid(): String {
                 append("    Note over ").append(mermaidNoteSpan(f, messages, aliases)).append(": ")
                     .append("  ".repeat(f.depth)).append("▶ ").append(mermaidEscape(frameLabel(f))).append('\n')
             }
-            val arrow = if (msg.kind == MessageKind.RETURN) "-->>" else "->>"
+            // Dashed arrows distinguish source-index inference from runtime/rule evidence.
+            val arrow = if (msg.kind == MessageKind.RETURN || msg.evidence == MessageEvidence.SOURCE_INFERRED) "-->>" else "->>"
             val label = mermaidEscape(msg.label) + repeatSuffix(msg.repeatCount)
             append("    ").append(aliasOf(msg.fromIdx)).append(arrow).append(aliasOf(msg.toIdx)).append(": ").append(label).append('\n')
             errorNotesByMsg[i]?.forEach { note ->
@@ -198,6 +200,7 @@ private fun normalizeFramesForNesting(frames: List<DiagramFrame>): List<DiagramF
 
 fun SeqDiagram.toPlantUml(): String {
     val aliases = sanitizedAliases(participants)
+
     fun aliasOf(idx: Int): String = aliases.getOrElse(idx) { "p$idx" }
 
     val normalizedFrames = normalizeFramesForNesting(frames)
@@ -218,7 +221,7 @@ fun SeqDiagram.toPlantUml(): String {
             opens[i]?.sortedBy { it.depth }?.forEach { f ->
                 append("group ").append(plantUmlEscape(frameLabel(f))).append('\n')
             }
-            val arrow = if (msg.kind == MessageKind.RETURN) "-->" else "->"
+            val arrow = if (msg.kind == MessageKind.RETURN || msg.evidence == MessageEvidence.SOURCE_INFERRED) "-->" else "->"
             val label = plantUmlEscape(msg.label) + repeatSuffix(msg.repeatCount)
             append(aliasOf(msg.fromIdx)).append(' ').append(arrow).append(' ').append(aliasOf(msg.toIdx)).append(": ").append(label).append('\n')
             errorNotesByMsg[i]?.forEach { note ->

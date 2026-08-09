@@ -1612,6 +1612,10 @@ class AppState(
     // ── Tabs ────────────────────────────────────────────────────────
     var tabs by mutableStateOf(emptyList<LogTab>())
     var activeTabId by mutableStateOf("")
+
+    /** Main content routing only.  [tabs] intentionally remains a collection of log tabs; open
+     * sequence diagrams are independent, non-persisted editor surfaces owned by seqDiagrams. */
+    var activeSurface by mutableStateOf<ActiveSurface?>(null)
     var compareMode by mutableStateOf(false)
     var compareTabId by mutableStateOf("")
     var loadingStatus by mutableStateOf<String?>(null)
@@ -3239,7 +3243,6 @@ class AppState(
     fun requestVideoLogNavigation(tabId: String, logId: Int) =
         navigateToVideoLog(tabId, logId, forceRecenter = true)
 
-    /** Evidence cards use the established selection/scroll pathway so collapsed groups expand. */
     /** Reveals and selects a single log line — used by a diagram note when the user clicks an
      *  arrow (see AnnotationPanel's DiagramNoteView). Deliberately routed through the same
      *  navigation request the AI evidence cards use, so it inherits the compare-mode handling and
@@ -4895,13 +4898,17 @@ class AppState(
     }
 
     fun activateTab(tabId: String) {
-        if (tabs.any { it.id == tabId }) activeTabId = tabId
+        if (tabs.any { it.id == tabId }) {
+            activeTabId = tabId
+            activeSurface = ActiveSurface.Log(tabId)
+        }
     }
 
     fun activateOverflowTab(tabId: String): Unit = synchronized(stateLock) {
         val tab = tabs.find { it.id == tabId } ?: return
         tabs = tabs.filter { it.id != tabId } + tab
         activeTabId = tabId
+        activeSurface = ActiveSurface.Log(tabId)
     }
 
     fun reorderTabs(fromId: String, beforeId: String?): Unit = synchronized(stateLock) {
@@ -4948,6 +4955,7 @@ class AppState(
         if (tabIds.isEmpty()) return
         synchronized(stateLock) {
             tabIds.forEach { tabId ->
+                seqDiagrams.sourceTabClosed(tabId)
                 aiSessions.remove(tabId)
                 cancelActiveLoad(tabId)
                 tailCoordinator.cancelTailingFor(tabId)
@@ -4963,6 +4971,9 @@ class AppState(
             pendingRestoredLoads.removeAll { it.tab.id in tabIds }
             val next = tabs.filter { it.id !in tabIds }
             if (activeTabId in tabIds) activeTabId = preferredActiveId?.takeIf { id -> next.any { it.id == id } } ?: next.lastOrNull()?.id ?: ""
+            if (activeSurface is ActiveSurface.Log && (activeSurface as ActiveSurface.Log).tabId in tabIds) {
+                activeSurface = activeTabId.takeIf { it.isNotBlank() }?.let(ActiveSurface::Log)
+            }
             if (compareTabId in tabIds) compareTabId = next.firstOrNull()?.id ?: ""
             if (next.size < 2) compareMode = false
             tabs = next
@@ -7237,16 +7248,17 @@ class AppState(
 
     fun pickSourceFolder() {
         val chosen = pickDirectory("Choose Source Folder") ?: return
-        updateSettings { it.copy(sourceFolders = (it.sourceFolders + chosen.absolutePath).distinct()) }
+        val canonical = canonicalSourcePath(chosen.path)
+        updateSettings { it.copy(sourceFolders = (it.sourceFolders + canonical).distinct()) }
     }
 
     fun removeSourceFolder(path: String) {
-        val rootAbs = File(path).absolutePath
+        val rootAbs = canonicalSourcePath(path)
         updateSettings {
             it.copy(
-                sourceFolders = it.sourceFolders.filterNot { folder -> File(folder).absolutePath == rootAbs },
-                sourceFolderInfo = it.sourceFolderInfo.filterKeys { folder -> File(folder).absolutePath != rootAbs },
-                sourceFolderConfigurationIds = it.sourceFolderConfigurationIds.filterKeys { folder -> File(folder).absolutePath != rootAbs },
+                sourceFolders = it.sourceFolders.filterNot { folder -> canonicalSourcePath(folder) == rootAbs },
+                sourceFolderInfo = it.sourceFolderInfo.filterKeys { folder -> canonicalSourcePath(folder) != rootAbs },
+                sourceFolderConfigurationIds = it.sourceFolderConfigurationIds.filterKeys { folder -> canonicalSourcePath(folder) != rootAbs },
             )
         }
         pruneSourceIndexForRegisteredFolders()
@@ -7257,7 +7269,9 @@ class AppState(
     }
 
     fun sourceConfigurationsForFolder(folder: String): List<SourceLogConfiguration> {
-        val ids = settings.sourceFolderConfigurationIds[File(folder).absolutePath].orEmpty().toSet()
+        val canonical = canonicalSourcePath(folder)
+        val ids = settings.sourceFolderConfigurationIds.entries
+            .firstOrNull { canonicalSourcePath(it.key) == canonical }?.value.orEmpty().toSet()
         return settings.sourceLogConfigurations.filter { it.id in ids }
     }
 
@@ -7291,7 +7305,7 @@ class AppState(
     }
 
     fun assignSourceLogConfigurations(folder: String, ids: List<String>) {
-        val path = File(folder).absolutePath
+        val path = canonicalSourcePath(folder)
         val valid = ids.distinct().filter { id -> settings.sourceLogConfigurations.any { it.id == id } }
         updateSettings { it.copy(sourceFolderConfigurationIds = it.sourceFolderConfigurationIds + (path to valid)) }
     }
@@ -7337,27 +7351,42 @@ class AppState(
         }
     }
 
-    private fun isUnderSourceRoot(path: String, rootAbs: String): Boolean =
-        path == rootAbs || path.startsWith(rootAbs + File.separator)
+    private fun canonicalSourcePath(path: String): String = runCatching {
+        File(path).canonicalFile.absolutePath
+    }.getOrElse {
+        File(path).absoluteFile.toPath().normalize().toString()
+    }
+
+    private fun registeredSourceRoots(): List<String> = settings.sourceFolders
+        .map(::canonicalSourcePath)
+        .distinct()
+
+    /** Path-aware containment avoids both sibling-prefix matches (`/src` vs `/src2`) and symlink
+     * escapes. SourceIndexer/Store persist the same canonical representation. */
+    private fun isUnderSourceRoot(path: String, rootAbs: String): Boolean {
+        val candidate = File(canonicalSourcePath(path)).toPath()
+        val root = File(canonicalSourcePath(rootAbs)).toPath()
+        return candidate == root || candidate.startsWith(root)
+    }
 
     // Registered folders may intentionally overlap (for example, a project root plus a module
     // source root with a different logging configuration). A source file belongs to the most
     // specific matching root; using the first configured folder would validate nested-module
     // sites against the wrong configuration fingerprint and make source actions appear disabled.
-    private fun sourceRootForPath(path: String): String? = settings.sourceFolders
+    private fun sourceRootForPath(path: String): String? = registeredSourceRoots()
         .asSequence()
-        .map { File(it).absolutePath }
         .filter { root -> isUnderSourceRoot(path, root) }
-        .maxByOrNull(String::length)
+        .maxByOrNull { File(it).toPath().nameCount }
 
     private fun belongsToSourceFolder(path: String, rootAbs: String): Boolean {
-        val registeredRoots = settings.sourceFolders.map { File(it).absolutePath }
-        return if (rootAbs in registeredRoots) {
-            sourceRootForPath(path) == rootAbs
+        val canonicalRoot = canonicalSourcePath(rootAbs)
+        val registeredRoots = registeredSourceRoots()
+        return if (canonicalRoot in registeredRoots) {
+            sourceRootForPath(path) == canonicalRoot
         } else {
             // Persisted-index inspection can happen before autosaved settings finish restoring;
             // preserve the status API's historical folder-scoped behavior in that case.
-            isUnderSourceRoot(path, rootAbs)
+            isUnderSourceRoot(path, canonicalRoot)
         }
     }
 
@@ -7370,10 +7399,10 @@ class AppState(
     private fun pruneSourceIndexForRegisteredFolders() {
         val pruned = synchronized(stateLock) {
             val current = sourceIndex ?: return
-            val registeredRoots = settings.sourceFolders.map { File(it).absolutePath }.toSet()
+            val registeredRoots = registeredSourceRoots().toSet()
             SourceIndex(
                 version = SOURCE_INDEX_VERSION,
-                roots = settings.sourceFolders,
+                roots = registeredSourceRoots(),
                 sites = current.sites.filter { sourceRootForPath(it.filePath) != null },
                 fileMeta = current.fileMeta.filterKeys { sourceRootForPath(it) != null },
                 builtAt = current.builtAt,
@@ -7391,7 +7420,7 @@ class AppState(
     // filter. Never indexed yet (no rootBuiltAt entry) reads as the zero-value status.
     fun sourceIndexStatusForFolder(folder: String): SourceIndexStatus {
         val index = sourceIndex ?: return SourceIndexStatus()
-        val rootAbs = File(folder).absolutePath
+        val rootAbs = canonicalSourcePath(folder)
         val builtAt = index.rootBuiltAt[rootAbs] ?: return SourceIndexStatus()
         val metaEntries = index.fileMeta.filterKeys { belongsToSourceFolder(it, rootAbs) }
         val configurationChanged = index.rootConfigFingerprints[rootAbs] !=
@@ -7413,9 +7442,9 @@ class AppState(
     // double-clicked into two concurrent scans racing to publish/save. Only files under [folder]
     // are rescanned; sites/fileMeta from every other registered folder are carried over unchanged.
     fun reindexSources(folder: String) {
-        val rootAbs = File(folder).absolutePath
+        val rootAbs = canonicalSourcePath(folder)
         val started = synchronized(stateLock) {
-            if (rootAbs !in settings.sourceFolders.map { File(it).absolutePath } || rootAbs in indexingFolders) {
+            if (rootAbs !in registeredSourceRoots() || rootAbs in indexingFolders) {
                 false
             } else {
                 indexingFolders = indexingFolders + rootAbs
@@ -7430,7 +7459,7 @@ class AppState(
                 val partial = runCatching {
                     val configs = sourceConfigurationsForFolder(rootAbs)
                     SourceIndexer.build(
-                        roots = listOf(File(folder)),
+                        roots = listOf(File(rootAbs)),
                         progress = { scanned, total -> loadingStatus = "Indexing source… ($scanned/$total)" },
                         options = SourceIndexBuildOptions(
                             wrapperRules = configs.flatMap { it.wrapperRules },
@@ -7445,7 +7474,7 @@ class AppState(
                 if (partial != null) {
                     val mergedAt = System.currentTimeMillis()
                     val merged = synchronized(stateLock) {
-                        val registeredRoots = settings.sourceFolders.map { File(it).absolutePath }.toSet()
+                        val registeredRoots = registeredSourceRoots().toSet()
                         if (rootAbs !in registeredRoots) return@synchronized null
                         val current = sourceIndex
                         // Preserve sites from another still-registered root, including a nested
@@ -7460,7 +7489,7 @@ class AppState(
                         val rebuiltMeta = partial.fileMeta.filterKeys { sourceRootForPath(it) == rootAbs }
                         SourceIndex(
                             version = SOURCE_INDEX_VERSION,
-                            roots = settings.sourceFolders,
+                            roots = registeredSourceRoots(),
                             sites = keptSites + rebuiltSites,
                             fileMeta = keptMeta + rebuiltMeta,
                             builtAt = mergedAt,

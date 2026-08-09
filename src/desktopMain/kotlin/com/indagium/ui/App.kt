@@ -14,11 +14,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CallMerge
 import androidx.compose.material.icons.outlined.Block
-import androidx.compose.material.icons.outlined.Schema
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Schema
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Checkbox
@@ -307,12 +307,14 @@ fun App(
             Column(Modifier.fillMaxSize()) {
                 TabBar(state)
                 val activeTab = state.activeTab()
+                val activeSurface = state.activeSurface ?: activeTab?.id?.let(ActiveSurface::Log)
                 when {
-                    state.tabs.isEmpty() ->
+                    state.tabs.isEmpty() && state.seqDiagrams.workspaces.isEmpty() ->
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             AppText("No files open — click Open to add a log", color = tc.ts, fontSize = 14.sp)
                         }
 
+                    activeSurface is ActiveSurface.Diagram -> SeqDiagramWorkspace(state, activeSurface.workspaceId)
                     state.compareMode -> CompareView(
                         state = state,
                         requestedPanelFocus = pendingPanelFocus,
@@ -1781,10 +1783,6 @@ fun App(
                     onDismiss = { state.cancelSplitPrompt() },
                 )
             }
-
-            // Renders itself off state.seqDiagrams.request (null = closed), so there's no separate
-            // boolean flag to keep in sync with the request payload.
-            SeqDiagramDialog(state)
 
             if (state.mergeTabsDialogOpen) {
                 var selected by remember {

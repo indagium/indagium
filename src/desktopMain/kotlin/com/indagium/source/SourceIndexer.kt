@@ -3,6 +3,7 @@ package com.indagium.source
 import com.indagium.debug.AppLogger
 import com.indagium.model.SourceWrapperRule
 import java.io.File
+import java.nio.file.Files
 
 // ── Public entry point ───────────────────────────────────────────────────
 
@@ -18,35 +19,52 @@ object SourceIndexer {
         progress: ((scanned: Int, total: Int) -> Unit)? = null,
         options: SourceIndexBuildOptions = SourceIndexBuildOptions(),
     ): SourceIndex {
-        val files = roots.flatMap { collectSourceFiles(it) }.distinct()
+        val canonicalRoots = roots.mapNotNull(::canonicalFileOrNull).distinctBy { it.path }
+        val files = canonicalRoots.flatMap { collectSourceFiles(it) }.distinctBy { it.path }
         val sites = mutableListOf<LogCallSite>()
         val fileMeta = mutableMapOf<String, FileMeta>()
         val texts = mutableMapOf<String, String>()
 
-        files.forEach { file ->
-            runCatching { texts[file.absolutePath] = file.readText() }
+        files.forEach { candidate ->
+            // Re-resolve and re-check immediately before reading. collectSourceFiles already
+            // returns canonical contained files, but keeping the authorization at the read
+            // boundary prevents a future traversal refactor from weakening this invariant.
+            val file = canonicalFileUnderRoots(candidate, canonicalRoots) ?: return@forEach
+            runCatching { texts[file.path] = file.readText() }
                 .onFailure { e -> AppLogger.error("source-index", "Failed to read source file", e) }
         }
         val globalConstants = buildGlobalConstants(texts)
         val discoveredRules = if (options.autoDiscover) discoverWrapperRules(texts) else emptyList()
         val wrapperRules = (options.wrapperRules + discoveredRules).distinct()
+        // Parse declarations before extracting log sites.  The same lightweight scanner powers
+        // source navigation, and lets a site carry only direct calls whose target can be resolved
+        // uniquely inside this indexed source set.
+        val methodsByFile = texts.mapValues { (path, source) ->
+            indexedMethods(path, source, path.endsWith(".java", ignoreCase = true))
+        }
+        val directCallsByMethod = resolveDirectCalls(texts, methodsByFile)
 
-        files.forEachIndexed { idx, file ->
+        files.forEachIndexed { idx, candidate ->
             runCatching {
-                val text = texts[file.absolutePath] ?: return@runCatching
-                fileMeta[file.absolutePath] = FileMeta(mtime = file.lastModified(), size = file.length())
+                val file = canonicalFileUnderRoots(candidate, canonicalRoots) ?: return@runCatching
+                val text = texts[file.path] ?: return@runCatching
+                fileMeta[file.path] = FileMeta(mtime = file.lastModified(), size = file.length())
                 sites += extractCallSites(
-                    file.absolutePath,
+                    file.path,
                     text,
                     isJavaFile = file.extension.equals("java", true),
                     globalConstants = globalConstants,
+                    sourceMethods = methodsByFile[file.path].orEmpty(),
+                    directCallsByMethod = directCallsByMethod,
                 )
                 sites += extractWrapperCallSites(
-                    file.absolutePath,
+                    file.path,
                     text,
                     isJavaFile = file.extension.equals("java", true),
                     wrapperRules = wrapperRules,
                     globalConstants = globalConstants,
+                    sourceMethods = methodsByFile[file.path].orEmpty(),
+                    directCallsByMethod = directCallsByMethod,
                 )
             }.onFailure { e -> AppLogger.error("source-index", "Failed to index source file", e) }
             progress?.invoke(idx + 1, files.size)
@@ -54,7 +72,7 @@ object SourceIndexer {
 
         return SourceIndex(
             version = SOURCE_INDEX_VERSION,
-            roots = roots.map { it.absolutePath },
+            roots = canonicalRoots.map { it.path },
             sites = sites.distinctBy { site ->
                 listOf(
                     site.filePath,
@@ -67,19 +85,37 @@ object SourceIndexer {
             },
             fileMeta = fileMeta,
             builtAt = System.currentTimeMillis(),
-            rootConfigFingerprints = roots.associate { root ->
-                root.absolutePath to (options.configurationFingerprint
+            rootConfigFingerprints = canonicalRoots.associate { root ->
+                root.path to (options.configurationFingerprint
                     ?: sourceConfigurationFingerprint(emptyList(), options.autoDiscover))
             },
         )
     }
 
     private fun collectSourceFiles(root: File): List<File> {
-        if (!root.exists()) return emptyList()
+        if (!root.exists() || !root.isDirectory) return emptyList()
         return root.walkTopDown()
-            .onEnter { dir -> dir == root || (dir.name !in SKIP_DIR_NAMES && !dir.name.startsWith(".")) }
-            .filter { it.isFile && it.extension.lowercase() in SOURCE_EXTENSIONS }
+            .onEnter { directory ->
+                directory == root || (
+                    directory.name !in SKIP_DIR_NAMES &&
+                        !directory.name.startsWith(".") &&
+                        !Files.isSymbolicLink(directory.toPath()) &&
+                        canonicalFileUnderRoots(directory, listOf(root)) != null
+                )
+            }
+            .mapNotNull { candidate ->
+                if (!candidate.isFile || candidate.extension.lowercase() !in SOURCE_EXTENSIONS) return@mapNotNull null
+                canonicalFileUnderRoots(candidate, listOf(root))
+            }
             .toList()
+    }
+
+    private fun canonicalFileOrNull(file: File): File? = runCatching { file.canonicalFile }.getOrNull()
+
+    private fun canonicalFileUnderRoots(file: File, roots: List<File>): File? {
+        val canonical = canonicalFileOrNull(file) ?: return null
+        val candidatePath = canonical.toPath()
+        return canonical.takeIf { roots.any { root -> candidatePath.startsWith(root.toPath()) } }
     }
 }
 
@@ -800,6 +836,218 @@ private fun findEnclosingMethod(text: String, mask: CodeMask, lines: LineIndex, 
     return MethodInfo("<file>", line, line)
 }
 
+// ── Indexed method metadata and conservative direct-call resolution ─────────
+
+private data class IndexedMethod(
+    val id: String,
+    val filePath: String,
+    val owningType: String?,
+    val name: String,
+    val signature: String,
+    val declaredReturnType: String?,
+    val parameterCount: Int,
+    val startLine: Int,
+    val endLine: Int,
+    val startOffset: Int,
+    val endOffsetExclusive: Int,
+)
+
+private val SOURCE_TYPE_KINDS = setOf(
+    "class", "interface", "object", "enum", "enum_class", "annotation_class", "value_class", "record", "annotation",
+)
+
+private fun indexedMethods(filePath: String, text: String, isJavaFile: Boolean): List<IndexedMethod> {
+    val structure = SourceStructureParser.parse(text, isJavaFile)
+    val declarations = structure.declarations
+    val byId = declarations.associateBy { it.id }
+    val packageName = findFilePackage(text, CodeMask(text))
+
+    fun ownerFor(declaration: SourceDeclaration): String? {
+        val owners = mutableListOf<String>()
+        var parent = declaration.parentId?.let(byId::get)
+        while (parent != null) {
+            if (parent.kind in SOURCE_TYPE_KINDS) owners += parent.name
+            parent = parent.parentId?.let(byId::get)
+        }
+        if (owners.isEmpty()) return null
+        val local = owners.asReversed().joinToString(".")
+        return if (packageName.isNullOrBlank()) local else "$packageName.$local"
+    }
+
+    return declarations.asSequence()
+        .filter { it.kind == "function" || it.kind == "method" || it.kind == "constructor" }
+        .map { declaration ->
+            IndexedMethod(
+                id = "$filePath:${declaration.startOffset}",
+                filePath = filePath,
+                owningType = ownerFor(declaration),
+                name = declaration.name,
+                signature = declaration.signature,
+                declaredReturnType = declaredReturnType(declaration, isJavaFile),
+                parameterCount = declarationParameterCount(declaration.signature),
+                startLine = declaration.startLine,
+                endLine = declaration.endLine,
+                startOffset = declaration.startOffset,
+                endOffsetExclusive = declaration.endOffsetExclusive,
+            )
+        }.toList()
+}
+
+private fun declaredReturnType(declaration: SourceDeclaration, isJavaFile: Boolean): String? {
+    if (declaration.kind == "constructor") return null
+    val signature = declaration.signature
+    if (!isJavaFile) {
+        return Regex("""\)\s*:\s*([A-Za-z_]\w*(?:[.<>,?\[\]]*)?)""")
+            .find(signature)?.groupValues?.getOrNull(1)
+    }
+    // The scanner has already classified this as a Java method.  Strip annotations/modifiers and
+    // capture the token sequence immediately before the known method name.
+    val match = Regex(
+        """(?:^|\s)(?:public\s+|private\s+|protected\s+|static\s+|final\s+|synchronized\s+|abstract\s+|native\s+)*""" +
+            """([A-Za-z_]\w*(?:[.<>,?\[\]]*)?)\s+${Regex.escape(declaration.name)}\s*\(""",
+    ).find(signature) ?: return null
+    return match.groupValues[1].takeUnless { it == "void" }
+}
+
+private fun declarationParameterCount(signature: String): Int {
+    val body = signature.substringAfter('(', "").substringBeforeLast(')', "")
+    if (body.isBlank()) return 0
+    var depth = 0
+    var count = 1
+    body.forEach { char ->
+        when (char) {
+            '<', '(', '[', '{' -> depth++
+            '>', ')', ']', '}' -> if (depth > 0) depth--
+            ',' -> if (depth == 0) count++
+        }
+    }
+    return count
+}
+
+private fun resolveDirectCalls(
+    texts: Map<String, String>,
+    methodsByFile: Map<String, List<IndexedMethod>>,
+): Map<String, List<SourceDirectCall>> {
+    val allMethods = methodsByFile.values.flatten()
+    val byOwnerAndName = allMethods.filter { it.owningType != null }
+        .groupBy { it.owningType!! to it.name }
+    val ownersBySimple = allMethods.mapNotNull { it.owningType }.distinct().groupBy { it.substringAfterLast('.') }
+
+    return methodsByFile.flatMap { (filePath, methods) ->
+        val text = texts[filePath] ?: return@flatMap emptyList()
+        val mask = CodeMask(text)
+        val lines = LineIndex(text)
+        val packageName = findFilePackage(text, mask)
+        val context = DirectCallContext(
+            text = text,
+            mask = mask,
+            lines = lines,
+            packageName = packageName,
+            byOwnerAndName = byOwnerAndName,
+            knownOwners = byOwnerAndName.keys.mapTo(linkedSetOf()) { it.first },
+            ownersBySimple = ownersBySimple,
+        )
+        methods.map { method ->
+            method.id to directCallsInMethod(method, context)
+        }
+    }.toMap()
+}
+
+private val DIRECT_MEMBER_CALL_RE = Regex("""\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)?)\s*\.\s*([A-Za-z_]\w*)\s*\(""")
+private val DIRECT_LOCAL_CALL_RE = Regex("""\b([A-Za-z_]\w*)\s*\(""")
+private val DIRECT_CALL_KEYWORDS = setOf("if", "for", "while", "when", "catch", "return", "throw", "super", "this")
+
+private data class DirectCallContext(
+    val text: String,
+    val mask: CodeMask,
+    val lines: LineIndex,
+    val packageName: String?,
+    val byOwnerAndName: Map<Pair<String, String>, List<IndexedMethod>>,
+    val knownOwners: Set<String>,
+    val ownersBySimple: Map<String, List<String>>,
+)
+
+private fun directCallsInMethod(method: IndexedMethod, context: DirectCallContext): List<SourceDirectCall> {
+    if (method.owningType == null) return emptyList()
+    // Exclude the declaration header itself (`fun refresh(...)`), which otherwise looks like an
+    // unqualified recursive call to the lightweight regex scanner.
+    val bodyStart = context.text.indexOf('{', method.startOffset)
+        .takeIf { it in method.startOffset until method.endOffsetExclusive }
+        ?.plus(1) ?: method.startOffset
+    val memberCalls = DIRECT_MEMBER_CALL_RE.findAll(context.text)
+        .mapNotNull { directMemberCall(it, method, bodyStart, context) }
+    val localCalls = DIRECT_LOCAL_CALL_RE.findAll(context.text)
+        .mapNotNull { directLocalCall(it, method, bodyStart, context) }
+    return (memberCalls + localCalls).distinct().toList()
+}
+
+private fun directMemberCall(
+    match: MatchResult,
+    method: IndexedMethod,
+    bodyStart: Int,
+    context: DirectCallContext,
+): SourceDirectCall? {
+    val offset = match.range.first
+    if (!isDirectCallInBody(offset, bodyStart, method, context.mask)) return null
+    val receiver = match.groupValues[1].replace(Regex("\\s+"), "")
+    if (receiver == "Log" || receiver == "Timber") return null
+    val owners = if (receiver == "this") {
+        setOfNotNull(method.owningType)
+    } else {
+        declaredOwnerCandidates(receiver, context.text, offset, context.packageName)
+    }
+    val target = directCallTarget(owners, match.groupValues[2], match.range.last, context) ?: return null
+    return target.toDirectCall(context.lines, offset)
+}
+
+private fun directLocalCall(
+    match: MatchResult,
+    method: IndexedMethod,
+    bodyStart: Int,
+    context: DirectCallContext,
+): SourceDirectCall? {
+    val offset = match.range.first
+    if (!isDirectCallInBody(offset, bodyStart, method, context.mask)) return null
+    val name = match.groupValues[1]
+    if (name in DIRECT_CALL_KEYWORDS || context.text.substring(0, offset).trimEnd().endsWith('.')) return null
+    val owners = setOfNotNull(method.owningType)
+    val target = directCallTarget(owners, name, match.range.last, context) ?: return null
+    return target.toDirectCall(context.lines, offset)
+}
+
+private fun isDirectCallInBody(offset: Int, bodyStart: Int, method: IndexedMethod, mask: CodeMask): Boolean =
+    offset in bodyStart until method.endOffsetExclusive && mask.isCode.getOrElse(offset) { false }
+
+private fun directCallTarget(
+    ownerCandidates: Set<String>,
+    name: String,
+    openParen: Int,
+    context: DirectCallContext,
+): IndexedMethod? {
+    val args = parseArgs(context.text, context.mask, openParen).args
+    val argumentCount = if (args.size == 1 && args.single().isBlank()) 0 else args.size
+    val fullyQualifiedOwners = ownerCandidates.flatMap { candidate ->
+        when {
+            candidate in context.knownOwners -> listOf(candidate)
+            candidate.contains('.') -> listOf(candidate)
+            else -> context.ownersBySimple[candidate].orEmpty()
+        }
+    }
+    return fullyQualifiedOwners.distinct()
+        .flatMap { owner -> context.byOwnerAndName[owner to name].orEmpty() }
+        .filter { it.parameterCount == argumentCount }
+        .singleOrNull()
+}
+
+private fun IndexedMethod.toDirectCall(lines: LineIndex, offset: Int): SourceDirectCall? = SourceDirectCall(
+    targetFilePath = filePath,
+    targetOwnerType = owningType ?: return null,
+    targetMethodName = name,
+    targetMethodSignature = signature,
+    targetDeclaredReturnType = declaredReturnType,
+    callLine = lines.lineOf(offset),
+)
+
 // ── Call-site extraction ──────────────────────────────────────────────────────
 
 private val LOG_METHODS = setOf("v", "d", "i", "w", "e", "wtf")
@@ -833,10 +1081,15 @@ private fun buildSite(
     msgExprRaw: String,
     tag: String?,
     configurationDependent: Boolean = false,
+    sourceMethods: List<IndexedMethod> = emptyList(),
+    directCallsByMethod: Map<String, List<SourceDirectCall>> = emptyMap(),
 ): LogCallSite? {
     val parts = buildTemplateParts(msgExprRaw)
     val matcherInfo = buildMatcher(parts) ?: return null
     val methodInfo = findEnclosingMethod(text, mask, lines, callStartIdx, isJavaFile)
+    val indexedMethod = sourceMethods
+        .filter { callStartIdx in it.startOffset until it.endOffsetExclusive }
+        .minByOrNull { it.endOffsetExclusive - it.startOffset }
     return LogCallSite(
         filePath = filePath,
         tag = tag,
@@ -847,6 +1100,10 @@ private fun buildSite(
         matcher = matcherInfo.pattern,
         literalLen = matcherInfo.literalLen,
         configurationDependent = configurationDependent,
+        owningType = indexedMethod?.owningType,
+        methodSignature = indexedMethod?.signature.orEmpty(),
+        declaredReturnType = indexedMethod?.declaredReturnType,
+        directCalls = indexedMethod?.let { directCallsByMethod[it.id].orEmpty() }.orEmpty(),
     )
 }
 
@@ -861,6 +1118,8 @@ private class ScanCtx(
     val isJavaFile: Boolean,
     val filePackage: String?,
     val globalConstants: Map<String, String>,
+    val sourceMethods: List<IndexedMethod>,
+    val directCallsByMethod: Map<String, List<SourceDirectCall>>,
 )
 
 private fun extractCallSites(
@@ -868,11 +1127,16 @@ private fun extractCallSites(
     text: String,
     isJavaFile: Boolean,
     globalConstants: Map<String, String> = emptyMap(),
+    sourceMethods: List<IndexedMethod> = emptyList(),
+    directCallsByMethod: Map<String, List<SourceDirectCall>> = emptyMap(),
 ): List<LogCallSite> {
     val mask = CodeMask(text)
     val filePackage = findFilePackage(text, mask)
     val constMap = buildConstMap(text, mask, filePackage)
-    val ctx = ScanCtx(filePath, text, mask, LineIndex(text), constMap, isJavaFile, filePackage, globalConstants)
+    val ctx = ScanCtx(
+        filePath, text, mask, LineIndex(text), constMap, isJavaFile, filePackage, globalConstants,
+        sourceMethods, directCallsByMethod,
+    )
     return CALL_RE.findAll(text).mapNotNull { processCallMatch(ctx, it) }.toList()
 }
 
@@ -896,7 +1160,10 @@ private fun processLogCall(ctx: ScanCtx, startIdx: Int, method: String, openPare
     val callArgs = parseArgs(ctx.text, ctx.mask, openParenIdx)
     if (callArgs.args.size < 2) return null
     val tag = resolveTag(callArgs.args[0], startIdx, ctx.text, ctx.mask, ctx.constMap, ctx.filePackage, ctx.globalConstants)
-    return buildSite(ctx.filePath, ctx.text, ctx.mask, ctx.lines, ctx.isJavaFile, startIdx, callArgs.args[1], tag)
+    return buildSite(
+        ctx.filePath, ctx.text, ctx.mask, ctx.lines, ctx.isJavaFile, startIdx, callArgs.args[1], tag,
+        sourceMethods = ctx.sourceMethods, directCallsByMethod = ctx.directCallsByMethod,
+    )
 }
 
 // Handles a `Timber.tag("X").d(...)` chain — the "tag" call itself isn't a log site, the log
@@ -909,13 +1176,19 @@ private fun processTimberTagChain(ctx: ScanCtx, startIdx: Int, openParenIdx: Int
     val chain = findChainedTimberCall(ctx.text, ctx.mask, tagArgs.closeIdx) ?: return null
     val callArgs = parseArgs(ctx.text, ctx.mask, chain.openParenIdx)
     if (callArgs.args.isEmpty()) return null
-    return buildSite(ctx.filePath, ctx.text, ctx.mask, ctx.lines, ctx.isJavaFile, startIdx, callArgs.args[0], tagValue)
+    return buildSite(
+        ctx.filePath, ctx.text, ctx.mask, ctx.lines, ctx.isJavaFile, startIdx, callArgs.args[0], tagValue,
+        sourceMethods = ctx.sourceMethods, directCallsByMethod = ctx.directCallsByMethod,
+    )
 }
 
 private fun processTimberCall(ctx: ScanCtx, startIdx: Int, openParenIdx: Int): LogCallSite? {
     val callArgs = parseArgs(ctx.text, ctx.mask, openParenIdx)
     if (callArgs.args.isEmpty()) return null
-    return buildSite(ctx.filePath, ctx.text, ctx.mask, ctx.lines, ctx.isJavaFile, startIdx, callArgs.args[0], null)
+    return buildSite(
+        ctx.filePath, ctx.text, ctx.mask, ctx.lines, ctx.isJavaFile, startIdx, callArgs.args[0], null,
+        sourceMethods = ctx.sourceMethods, directCallsByMethod = ctx.directCallsByMethod,
+    )
 }
 
 private val CUSTOM_CALL_RE = Regex("""\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)?)\s*\.\s*(\w+)\s*\(""")
@@ -985,6 +1258,8 @@ private fun extractWrapperCallSites(
     isJavaFile: Boolean,
     wrapperRules: List<SourceWrapperRule>,
     globalConstants: Map<String, String>,
+    sourceMethods: List<IndexedMethod> = emptyList(),
+    directCallsByMethod: Map<String, List<SourceDirectCall>> = emptyMap(),
 ): List<LogCallSite> {
     if (wrapperRules.isEmpty()) return emptyList()
     val mask = CodeMask(text)
@@ -1013,6 +1288,8 @@ private fun extractWrapperCallSites(
             messageExpr,
             tag,
             configurationDependent = true,
+            sourceMethods = sourceMethods,
+            directCallsByMethod = directCallsByMethod,
         )
     }.toList()
 }

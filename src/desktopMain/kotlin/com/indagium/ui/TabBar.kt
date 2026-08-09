@@ -89,6 +89,10 @@ internal fun TabBar(state: AppState) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TabOverflowRow(state = state, modifier = Modifier.weight(1f).fillMaxHeight())
+        if (state.seqDiagrams.workspaces.isNotEmpty()) {
+            DiagramWorkspaceTabs(state)
+            Spacer(Modifier.width(toolbarGap))
+        }
         Spacer(Modifier.width(toolbarGap))
         ToolbarBtn(
             "Filter",
@@ -185,6 +189,96 @@ internal fun TabBar(state: AppState) {
         ) { state.settingsOpen = true }
         Spacer(Modifier.width(toolbarGap))
     }
+}
+
+/** Diagram sessions are rendered beside, never inside, the log-tab collection.  This preserves
+ * every LogTab-only invariant (compare, autosave and tab ordering) while still giving diagrams
+ * normal tab affordances. */
+@Composable
+private fun DiagramWorkspaceTabs(state: AppState) {
+    val tc = tc()
+    val density = LocalDensity.current.density
+    var overflowOpen by remember { mutableStateOf(false) }
+    BoxWithConstraints(Modifier.widthIn(max = 330.dp).height(32.dp)) {
+        val rawCapacity = (maxWidth.value / 105f).toInt().coerceIn(1, 3)
+        val capacity = if (state.seqDiagrams.workspaces.size > rawCapacity) {
+            (rawCapacity - 1).coerceAtLeast(1)
+        } else {
+            rawCapacity
+        }
+        val activeId = (state.activeSurface as? ActiveSurface.Diagram)?.workspaceId
+        val (visibleIds, overflowIds) = diagramWorkspaceIdsForWidth(
+            state.seqDiagrams.workspaces.map { it.id },
+            activeId,
+            capacity,
+        )
+        val byId = state.seqDiagrams.workspaces.associateBy { it.id }
+        Row(Modifier.fillMaxHeight(), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            visibleIds.mapNotNull(byId::get).forEach { workspace ->
+                val active = state.activeSurface == ActiveSurface.Diagram(workspace.id)
+                Row(
+                    Modifier.width(100.dp).fillMaxHeight()
+                        .background(if (active) tc.bg else tc.p, RoundedCornerShape(5.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(5.dp))
+                        .clickable { state.seqDiagrams.activateWorkspace(workspace.id) }
+                        .padding(start = 7.dp, end = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AppText(
+                        workspace.spec.title.ifBlank { "Diagram" }, fontSize = 10.sp, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                    )
+                    CloseButton(onClick = { state.seqDiagrams.requestCloseWorkspace(workspace.id) })
+                }
+            }
+            if (overflowIds.isNotEmpty()) {
+                ToolbarBtn("▾ ${overflowIds.size}", active = overflowOpen, modifier = Modifier.fillMaxHeight()) {
+                    overflowOpen = !overflowOpen
+                }
+            }
+        }
+        if (overflowOpen && overflowIds.isNotEmpty()) {
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, (34 * density).roundToInt()),
+                onDismissRequest = { overflowOpen = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.width(240.dp).background(tc.p, RoundedCornerShape(7.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(7.dp)).padding(vertical = 4.dp),
+                ) {
+                    overflowIds.mapNotNull(byId::get).forEach { workspace ->
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                state.seqDiagrams.activateWorkspace(workspace.id)
+                                overflowOpen = false
+                            },
+                        ) {
+                            AppText(
+                                workspace.spec.title.ifBlank { "Diagram" },
+                                fontSize = 11.sp,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+internal fun diagramWorkspaceIdsForWidth(
+    ids: List<String>,
+    activeId: String?,
+    capacity: Int,
+): Pair<List<String>, List<String>> {
+    if (ids.size <= capacity) return ids to emptyList()
+    val visible = ids.takeLast(capacity).toMutableList()
+    if (activeId in ids && activeId !in visible) visible[0] = activeId!!
+    return visible to ids.filterNot { it in visible }
 }
 
 // Renders visible tabs and an overflow "▾ N" button for any that don't fit.

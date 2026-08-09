@@ -41,6 +41,7 @@ internal enum class AiQuickAction(val label: String, val prompt: String, val req
         requiresLine = true,
         slashName = "timeline",
     ),
+
     // requiresLine = false: a diagram is about a RANGE, not a point. The prompt asks the model to
     // establish that range from the current selection or the visible view rather than demanding a
     // pinned line the user may not have picked.

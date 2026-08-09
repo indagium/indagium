@@ -32,7 +32,6 @@ import kotlin.test.assertTrue
  * in the app while every single-call test stayed green. These drive that loop directly.
  */
 class RevealConvergenceTest {
-
     // Crash (a stack-trace group root) folded inside a collapsed "Collapse → To start" block: the
     // exact Issues-panel scenario, needing TWO nested folds opened to reach one line.
     private fun crashInsideCollapseToStart(): AppState {

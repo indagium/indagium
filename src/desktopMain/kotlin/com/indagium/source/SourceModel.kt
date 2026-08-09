@@ -1,5 +1,6 @@
 package com.indagium.source
 
+import com.indagium.model.LogEntry
 import com.indagium.model.SourceLogConfiguration
 import java.security.MessageDigest
 
@@ -7,7 +8,26 @@ import java.security.MessageDigest
  *  changes in a way that makes a previously-persisted index stale. Task 1 doesn't persist
  *  anything yet, but later tasks compare this against a saved value to decide whether a cached
  *  index must be rebuilt rather than merely refreshed. */
-const val SOURCE_INDEX_VERSION = 9
+const val SOURCE_INDEX_VERSION = 10
+
+/** Generic message matchers are capped at 0.3, so this admits only specific tagged resolution. */
+const val MIN_SOURCE_ENRICHMENT_CONFIDENCE = 0.4
+
+/**
+ * A conservative, statically-resolved call made directly by an indexed method.
+ *
+ * Entries are emitted only when the receiver, target owner, method name and arity identify one
+ * method in the indexed source tree.  This intentionally excludes speculative overload and
+ * dynamic-dispatch guesses: callers can safely render these as source-inferred edges.
+ */
+data class SourceDirectCall(
+    val targetFilePath: String,
+    val targetOwnerType: String,
+    val targetMethodName: String,
+    val targetMethodSignature: String,
+    val targetDeclaredReturnType: String?,
+    val callLine: Int,
+)
 
 /** One Android logging call site discovered by [SourceIndexer.build].
  *
@@ -32,6 +52,14 @@ data class LogCallSite(
     // Direct Log/Timber sites remain valid when custom-wrapper settings change. Wrapper sites
     // must be hidden until their folder is reindexed with the current configuration.
     val configurationDependent: Boolean = false,
+    /** Fully-qualified lexical owner (for example `com.example.SyncService`), when known. */
+    val owningType: String? = null,
+    /** Source declaration header for [methodName], preserved for source-only diagram labels. */
+    val methodSignature: String = "",
+    /** Declared Kotlin/Java return type; runtime values are deliberately never inferred here. */
+    val declaredReturnType: String? = null,
+    /** High-confidence direct calls made by the enclosing method. */
+    val directCalls: List<SourceDirectCall> = emptyList(),
 )
 
 /** Snapshot of a source file's on-disk state at index-build time, used by later tasks to detect
@@ -68,6 +96,76 @@ data class SourceIndexStatus(
     val changedFileCount: Int = 0,
     val configurationChanged: Boolean = false,
 )
+
+/** A source-only relationship between two indexed log sites. */
+data class SourceInferredCall(
+    val from: LogCallSite,
+    val to: LogCallSite,
+    val call: SourceDirectCall,
+)
+
+/** A diagram-ready, one-hop source inference rooted in an actual resolved log entry. */
+data class SourceOneHopCall(
+    val sourceSite: LogCallSite,
+    val sourceOwnerType: String?,
+    val targetOwnerType: String,
+    val targetMethodName: String,
+    val targetMethodSignature: String,
+    val declaredReturnType: String?,
+    val callLine: Int,
+    /** Confidence of the log-to-source resolution; the direct source call itself is exact. */
+    val confidence: Double,
+)
+
+/**
+ * Exposes one-hop source enrichment without making the diagram package depend on the indexer.
+ *
+ * A relationship is returned only when a call stored on [from] targets the exact source method
+ * containing [to].  A caller that wants to render a source-only target can instead use
+ * [directCalls] and the target metadata it contains.
+ */
+class SourceEnrichmentResolver(index: SourceIndex) {
+    private val sites = index.sites
+    private val logResolver = LogSourceResolver(index)
+
+    fun directCalls(site: LogCallSite): List<SourceDirectCall> = site.directCalls
+
+    fun inferOneHop(from: LogCallSite, to: LogCallSite): SourceInferredCall? {
+        val call = from.directCalls.firstOrNull { candidate ->
+            candidate.targetFilePath == to.filePath &&
+                candidate.targetOwnerType == to.owningType &&
+                candidate.targetMethodName == to.methodName &&
+                candidate.targetMethodSignature == to.methodSignature
+        } ?: return null
+        return SourceInferredCall(from, to, call)
+    }
+
+    fun inferOneHop(from: LogCallSite): List<SourceInferredCall> = sites.mapNotNull { to -> inferOneHop(from, to) }
+
+    /** Resolves [entry] to source and returns only direct calls that were uniquely indexed. */
+    fun resolveOneHop(entry: LogEntry, limit: Int = 10): List<SourceOneHopCall> =
+        resolveOneHop(entry.tag, entry.msg, limit)
+
+    /** Tag/message variant for callers that intentionally do not hold a [LogEntry]. */
+    fun resolveOneHop(tag: String?, message: String, limit: Int = 10): List<SourceOneHopCall> = logResolver
+        .resolve(tag, message, limit)
+        .filter { it.confidence >= MIN_SOURCE_ENRICHMENT_CONFIDENCE }
+        .flatMap { match ->
+            match.site.directCalls.map { call ->
+                SourceOneHopCall(
+                    sourceSite = match.site,
+                    sourceOwnerType = match.site.owningType,
+                    targetOwnerType = call.targetOwnerType,
+                    targetMethodName = call.targetMethodName,
+                    targetMethodSignature = call.targetMethodSignature,
+                    declaredReturnType = call.targetDeclaredReturnType,
+                    callLine = call.callLine,
+                    confidence = match.confidence,
+                )
+            }
+        }
+        .take(limit)
+}
 
 /** Host state for the source-code popup (Task 4): the resolved candidates for whichever log row
  *  triggered it, and which one is currently shown. [selected] is an index into [matches]. */

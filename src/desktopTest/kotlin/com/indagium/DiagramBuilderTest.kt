@@ -2,14 +2,20 @@ package com.indagium
 
 import androidx.compose.ui.graphics.Color
 import com.indagium.diagram.ArrowMode
+import com.indagium.diagram.DiagramActor
+import com.indagium.diagram.DiagramComponent
 import com.indagium.diagram.DiagramMessageRule
 import com.indagium.diagram.DiagramOptions
 import com.indagium.diagram.DiagramParticipant
 import com.indagium.diagram.DiagramParticipantRepresentation
 import com.indagium.diagram.DiagramRange
+import com.indagium.diagram.DiagramSourceEnrichment
+import com.indagium.diagram.DiagramSourceInteraction
+import com.indagium.diagram.MessageEvidence
 import com.indagium.diagram.MessageKind
 import com.indagium.diagram.ParticipantKind
 import com.indagium.diagram.SeqDiagramSpec
+import com.indagium.diagram.UnmappedTagPolicy
 import com.indagium.diagram.buildSequenceDiagram
 import com.indagium.diagram.diagramParticipantCandidates
 import com.indagium.diagram.toMermaid
@@ -518,5 +524,93 @@ class DiagramBuilderTest {
         assertTrue(diagram.participants.any { it.label == "Other" })
         assertFalse(diagram.participants.any { it.tag == "B" || it.tag == "C" })
         assertEquals(2, diagram.messages.size, "A→Other plus Other self; hidden C produces no arrow")
+    }
+
+    @Test
+    fun componentsMergeTagsAndGlobalUnmappedPolicyControlsOther() {
+        val tab = mkTab("t1", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "B", "merged"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "C", "unmapped"),
+        ))
+        val component = DiagramComponent("app", "App", setOf("A", "B"))
+        val grouped = buildSequenceDiagram(tab, SeqDiagramSpec(
+            components = listOf(component),
+            unmappedTagPolicy = UnmappedTagPolicy.GROUP_AS_OTHER,
+            options = plainOptions(),
+        ))
+        assertEquals(2, grouped.participants.size)
+        assertEquals("App", grouped.participants.first().label)
+        assertEquals(3, grouped.coverage.shownEntries + grouped.coverage.groupedEntries)
+        assertTrue(grouped.messages.any { it.kind == MessageKind.CALL })
+
+        val hidden = buildSequenceDiagram(tab, SeqDiagramSpec(components = listOf(component), options = plainOptions()))
+        assertEquals(1, hidden.participants.size)
+        assertEquals(1, hidden.coverage.hiddenEntries)
+    }
+
+    @Test
+    fun mirroredActorDuplicatesOnlyNonSelfComponentEdgesAdjacentToOriginal() {
+        val tab = mkTab("t1", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "B", "handoff"),
+        ))
+        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(
+            components = listOf(DiagramComponent("a", "A", setOf("A")), DiagramComponent("b", "B", setOf("B"))),
+            actors = listOf(DiagramActor("client", "Client", "a")),
+            options = plainOptions(),
+        ))
+        assertEquals(2, diagram.messages.size)
+        assertEquals(MessageEvidence.LOG, diagram.messages[0].evidence)
+        assertEquals(MessageEvidence.ACTOR_MIRROR, diagram.messages[1].evidence)
+        assertEquals(diagram.messages[0].toIdx, diagram.messages[1].toIdx)
+    }
+
+    @Test
+    fun enabledSourceEnrichmentAddsDashedEvidenceBackedCallAndDeclaredReturn() {
+        val tab = mkTab("t1", "app.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "A", "invoke")))
+        val diagram = buildSequenceDiagram(
+            tab,
+            SeqDiagramSpec(
+                components = listOf(DiagramComponent("a", "A", setOf("A")), DiagramComponent("b", "B", setOf("B"))),
+                sourceEnrichment = DiagramSourceEnrichment(enabled = true),
+                options = plainOptions(),
+            ),
+            resolveSourceInteractions = { listOf(DiagramSourceInteraction("a", "b", "B.work()", "String")) },
+        )
+        assertEquals(listOf(MessageEvidence.SOURCE_INFERRED, MessageEvidence.SOURCE_INFERRED), diagram.messages.map { it.evidence })
+        assertEquals(MessageKind.RETURN, diagram.messages.last().kind)
+        assertEquals("String", diagram.messages.last().label)
+        assertEquals(1, diagram.activationSpans.size)
+        assertTrue(diagram.toMermaid().contains("-->>"))
+    }
+
+    @Test
+    fun sourceEnrichmentStopsResolverWorkOnceRuntimeOutputReachesTheMessageCap() {
+        val maxMessages = 12
+        val tab = mkTab(
+            "t1", "app.log",
+            (1..10_000).map { id ->
+                LogEntry(id, "10:00:00.000", LogLevel.I, "A", "unique source site $id")
+            },
+        )
+        var resolverCalls = 0
+        val diagram = buildSequenceDiagram(
+            tab,
+            SeqDiagramSpec(
+                components = listOf(DiagramComponent("a", "A", setOf("A"))),
+                sourceEnrichment = DiagramSourceEnrichment(enabled = true),
+                options = plainOptions(maxMessages = maxMessages),
+            ),
+            resolveSourceInteractions = {
+                resolverCalls++
+                listOf(DiagramSourceInteraction("a", "remote", "should not be resolved"))
+            },
+        )
+
+        assertTrue(resolverCalls <= maxMessages, "source resolver must remain bounded by output capacity")
+        assertEquals(0, resolverCalls, "runtime interactions already consume the available output budget")
+        assertTrue(diagram.truncated)
+        assertTrue(diagram.warnings.any { it.contains("Source enrichment") })
     }
 }

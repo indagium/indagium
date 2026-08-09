@@ -5,16 +5,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.indagium.diagram.DiagramAttachmentMetadata
 import com.indagium.diagram.DiagramAttachmentMode
+import com.indagium.diagram.DiagramDialect
 import com.indagium.diagram.DiagramExportMode
+import com.indagium.diagram.DiagramParticipantCandidate
+import com.indagium.diagram.DiagramSourceInteraction
 import com.indagium.diagram.DiagramTheme
 import com.indagium.diagram.SeqDiagram
 import com.indagium.diagram.SeqDiagramSpec
 import com.indagium.diagram.buildSequenceDiagram
+import com.indagium.diagram.diagramParticipantCandidates
 import com.indagium.diagram.encodeDiagramNote
 import com.indagium.diagram.parseDiagramNote
 import com.indagium.diagram.toSource
 import com.indagium.model.LogEntry
 import com.indagium.model.LogTab
+import com.indagium.source.SourceEnrichmentResolver
 import com.indagium.utils.CancellationCheck
 import com.indagium.utils.computeLogFingerprint
 import kotlinx.coroutines.CoroutineScope
@@ -51,6 +56,48 @@ data class OfflineDiagramLibraryRequest(
     val item: DiagramLibraryItem,
     val spec: SeqDiagramSpec,
 )
+
+/** The main content currently shown by the application.  Diagram workspaces deliberately live
+ * outside [AppState.tabs]: a log tab remains a log tab, including for autosave and compare mode. */
+sealed interface ActiveSurface {
+    data class Log(val tabId: String) : ActiveSurface
+
+    data class Diagram(val workspaceId: String) : ActiveSurface
+}
+
+/** A diagram is an independent working document.  Keeping the last rendered model here is what
+ * makes it possible to close a source log yet continue inspecting/copying its diagram. */
+data class DiagramWorkspaceSession(
+    val id: String,
+    val sourceTabId: String?,
+    /** Kept when [request] is cleared after closing the source log. */
+    val spec: SeqDiagramSpec,
+    val request: SeqDiagramRequest?,
+    val preview: DiagramPreviewState = DiagramPreviewState.NotComputed,
+    val candidates: DiagramCandidateState = DiagramCandidateState.NotComputed,
+    val openedLibraryItem: DiagramLibraryItem? = null,
+    val offlineRequest: OfflineDiagramLibraryRequest? = null,
+    val dirty: Boolean = false,
+    val inspectorOpen: Boolean = true,
+    val inspectorWidth: Float = 330f,
+)
+
+sealed class DiagramCandidateState {
+    data object NotComputed : DiagramCandidateState()
+
+    data class Computing(val previous: List<DiagramParticipantCandidate> = emptyList()) : DiagramCandidateState()
+
+    data class Computed(val values: List<DiagramParticipantCandidate>) : DiagramCandidateState()
+
+    data class Failed(val message: String) : DiagramCandidateState()
+
+    val valuesOrEmpty: List<DiagramParticipantCandidate>
+        get() = when (this) {
+            is Computed -> values
+            is Computing -> previous
+            else -> emptyList()
+        }
+}
 
 /**
  * The dialog's preview state.
@@ -90,6 +137,171 @@ class SeqDiagramCoordinator(
     private val appState: AppState,
     private val libraryStore: DiagramLibraryStore = DiagramLibraryStore(),
 ) {
+    /** Open dedicated diagram surfaces.  They are session-only: drafts/notes remain the durable
+     * representation, while an open workspace is comparable to an editor tab. */
+    var workspaces by mutableStateOf<List<DiagramWorkspaceSession>>(emptyList())
+        private set
+    var activeWorkspaceId by mutableStateOf<String?>(null)
+        private set
+    var pendingCloseWorkspaceId by mutableStateOf<String?>(null)
+        private set
+    var candidatePreview by mutableStateOf<DiagramCandidateState>(DiagramCandidateState.NotComputed)
+        private set
+
+    /** Test-visible instrumentation for the metadata-edit performance contract. */
+    internal val candidateScanCount = java.util.concurrent.atomic.AtomicLong()
+    internal val previewBuildCount = java.util.concurrent.atomic.AtomicLong()
+
+    private fun activeWorkspace(): DiagramWorkspaceSession? =
+        activeWorkspaceId?.let { id -> workspaces.firstOrNull { it.id == id } }
+
+    val activeSession: DiagramWorkspaceSession? get() = activeWorkspace()
+
+    private fun replaceWorkspace(id: String, transform: (DiagramWorkspaceSession) -> DiagramWorkspaceSession) {
+        workspaces = workspaces.map { if (it.id == id) transform(it) else it }
+    }
+
+    /** Selects an existing diagram surface without changing AppState.tabs. */
+    fun activateWorkspace(id: String): Boolean {
+        val workspace = workspaces.firstOrNull { it.id == id } ?: return false
+        activeWorkspaceId = id
+        request = workspace.request
+        preview = workspace.preview
+        candidatePreview = workspace.candidates
+        openedLibraryItem = workspace.openedLibraryItem
+        libraryOpenReadOnly = workspace.sourceTabId == null || appState.tab(workspace.sourceTabId) == null
+        offlineLibraryRequest = workspace.offlineRequest
+        appState.activeSurface = ActiveSurface.Diagram(id)
+        return true
+    }
+
+    private fun persistActiveWorkspace(dirty: Boolean? = null) {
+        val id = activeWorkspaceId ?: return
+        replaceWorkspace(id) { current ->
+            current.copy(
+                sourceTabId = request?.tabId ?: current.sourceTabId,
+                spec = request?.spec ?: current.spec,
+                request = request,
+                preview = preview,
+                candidates = candidatePreview,
+                openedLibraryItem = openedLibraryItem,
+                offlineRequest = offlineLibraryRequest,
+                dirty = dirty ?: current.dirty,
+            )
+        }
+    }
+
+    fun updateInspector(open: Boolean? = null, width: Float? = null) {
+        val id = activeWorkspaceId ?: return
+        replaceWorkspace(id) { current ->
+            current.copy(
+                inspectorOpen = open ?: current.inspectorOpen,
+                inspectorWidth = (width ?: current.inspectorWidth).coerceIn(
+                    INSPECTOR_MIN_WIDTH,
+                    INSPECTOR_MAX_WIDTH,
+                ),
+            )
+        }
+    }
+
+    private fun openWorkspace(
+        sourceTabId: String?, request: SeqDiagramRequest?, preview: DiagramPreviewState,
+        item: DiagramLibraryItem? = null, offline: OfflineDiagramLibraryRequest? = null,
+    ) {
+        persistActiveWorkspace()
+        val id = "diagram-${java.util.UUID.randomUUID()}"
+        val workspace = DiagramWorkspaceSession(
+            id = id, sourceTabId = sourceTabId, spec = request?.spec ?: offline?.spec ?: SeqDiagramSpec(),
+            request = request, preview = preview, openedLibraryItem = item, offlineRequest = offline,
+        )
+        workspaces = workspaces + workspace
+        activeWorkspaceId = id
+        this.request = request
+        this.preview = preview
+        candidatePreview = DiagramCandidateState.NotComputed
+        openedLibraryItem = item
+        libraryOpenReadOnly = sourceTabId == null || appState.tab(sourceTabId) == null
+        offlineLibraryRequest = offline
+        appState.activeSurface = ActiveSurface.Diagram(id)
+    }
+
+    /** Closing is intentionally a two-step API so the host can offer Save / Discard / Cancel. */
+    fun workspaceNeedsSave(id: String): Boolean = workspaces.firstOrNull { it.id == id }?.dirty == true
+
+    fun requestCloseWorkspace(id: String) {
+        if (workspaceNeedsSave(id)) {
+            pendingCloseWorkspaceId = id
+            activateWorkspace(id)
+        } else {
+            closeWorkspace(id)
+        }
+    }
+
+    fun cancelWorkspaceClose() {
+        pendingCloseWorkspaceId = null
+    }
+
+    fun closeWorkspace(id: String, save: Boolean = false): Boolean {
+        val workspace = workspaces.firstOrNull { it.id == id } ?: return false
+        if (save) {
+            activateWorkspace(id)
+            if (saveDraft() == null) return false
+        }
+        if (pendingCloseWorkspaceId == id) pendingCloseWorkspaceId = null
+        previewJobs.remove(id)?.cancel()
+        candidateJobs.remove(id)?.cancel()
+        previewGenerations.remove(id)
+        candidateGenerations.remove(id)
+        workspaces = workspaces.filterNot { it.id == id }
+        if (activeWorkspaceId == id) {
+            val next = workspaces.lastOrNull()
+            if (next != null) {
+                activateWorkspace(next.id)
+            } else {
+                activeWorkspaceId = null
+                request = null
+                preview = DiagramPreviewState.NotComputed
+                candidatePreview = DiagramCandidateState.NotComputed
+                openedLibraryItem = null
+                offlineLibraryRequest = null
+                appState.activeSurface = appState.activeTab()?.id?.let(ActiveSurface::Log)
+            }
+        }
+        return true
+    }
+
+    /** Source logs are allowed to close independently.  No cached model is discarded; requests
+     * to regenerate simply report that a source must be relinked. */
+    fun sourceTabClosed(tabId: String) {
+        workspaces.filter { it.sourceTabId == tabId }.forEach { workspace ->
+            replaceWorkspace(workspace.id) { it.copy(request = null, dirty = it.dirty) }
+        }
+        if (request?.tabId == tabId) {
+            request = null
+            libraryOpenReadOnly = true
+            offlineLibraryRequest = activeWorkspace()?.let { workspace ->
+                workspace.openedLibraryItem?.let { OfflineDiagramLibraryRequest(it, workspace.spec) }
+            }
+            persistActiveWorkspace()
+        }
+    }
+
+    /** Relinks an offline workspace to an already open log.  The cached preview remains visible
+     * until the caller explicitly regenerates it. */
+    fun relinkWorkspace(id: String, tabId: String): Boolean {
+        val workspace = workspaces.firstOrNull { it.id == id } ?: return false
+        val tab = appState.tab(tabId) ?: return false
+        val spec = workspace.spec.copy(sourceFile = File(tab.filename).name)
+        replaceWorkspace(id) {
+            it.copy(
+                sourceTabId = tabId,
+                request = SeqDiagramRequest(tabId, spec, libraryItemId = workspace.request?.libraryItemId),
+                offlineRequest = null,
+            )
+        }
+        activateWorkspace(id)
+        return true
+    }
 
     /** Non-null exactly while the dialog is open. */
     var request by mutableStateOf<SeqDiagramRequest?>(null)
@@ -137,7 +349,10 @@ class SeqDiagramCoordinator(
     // Its own scope rather than reaching into AppState's private ioScope: this keeps AppState's
     // surface unchanged, and lets a preview job be cancelled without touching file loading.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var previewJob: Job? = null
+    private val previewJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+    private val candidateJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+    private val previewGenerations = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
+    private val candidateGenerations = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
 
     // ── Opening ──────────────────────────────────────────────────────────────────────────────
 
@@ -148,7 +363,7 @@ class SeqDiagramCoordinator(
      */
     fun begin(tabId: String, seedIds: Set<Int> = emptySet()) {
         val tab = appState.tab(tabId) ?: return
-        val range = if (seedIds.size >= 2) {
+        val range = if (seedIds.isNotEmpty()) {
             com.indagium.diagram.DiagramRange.Ids(seedIds.min(), seedIds.max())
         } else {
             com.indagium.diagram.DiagramRange.VisibleView
@@ -156,11 +371,19 @@ class SeqDiagramCoordinator(
         // Reuse this tab's last spec (participants, options, dialect) so a second diagram from the
         // same log doesn't start from scratch — only the range is re-seeded from the new selection.
         val base = lastSpecByTab[tabId] ?: SeqDiagramSpec()
-        val spec = base.copy(range = range, sourceFile = File(tab.filename).name)
-        request = SeqDiagramRequest(tabId, spec)
-        openedLibraryItem = null
-        libraryOpenReadOnly = false
-        offlineLibraryRequest = null
+        // A non-empty selection, including exactly one row, is an inclusive range.  Its exact
+        // tags start enabled; tags discovered elsewhere in the filtered view stay opt-in.
+        val selectedTags = seedIds.mapNotNull(tab.rmap::get).map { it.tag }.distinct()
+        val seededComponents = if (seedIds.isNotEmpty()) selectedTags.map { tag ->
+            com.indagium.diagram.DiagramComponent(tag, tag, setOf(tag), enabled = true)
+        } else base.components.ifEmpty {
+            // Keeps a brand-new no-selection workspace in explicit component mode from its first
+            // build. Candidate tags discovered asynchronously remain disabled until chosen.
+            listOf(com.indagium.diagram.DiagramComponent(EMPTY_COMPONENT_ID, "", emptySet(), enabled = false))
+        }
+        val spec = base.copy(range = range, components = seededComponents, sourceFile = File(tab.filename).name)
+        openWorkspace(tabId, SeqDiagramRequest(tabId, spec), DiagramPreviewState.NotComputed)
+        requestCandidates(tabId, spec)
         requestPreview(tabId, spec)
     }
 
@@ -170,31 +393,28 @@ class SeqDiagramCoordinator(
         val tab = appState.tab(tabId) ?: return false
         val block = tab.annotations.blocks.firstOrNull { it.id == blockId } as? com.indagium.model.AnnBlock.Note ?: return false
         val parsed = parseDiagramNote(block.text) ?: return false
-        request = SeqDiagramRequest(tabId, parsed.spec, editingBlockId = blockId)
-        openedLibraryItem = null
-        libraryOpenReadOnly = false
-        offlineLibraryRequest = null
         // Seed the preview with the note's OWN carried model rather than immediately rebuilding:
         // the note may have been opened without its log (Case Library "notes only"), where a
         // rebuild would produce nothing. Regenerating is an explicit action from here.
-        preview = parsed.model?.let { DiagramPreviewState.Computed(it) } ?: DiagramPreviewState.NotComputed
+        openWorkspace(
+            tabId, SeqDiagramRequest(tabId, parsed.spec, editingBlockId = blockId),
+            parsed.model?.let { DiagramPreviewState.Computed(it) } ?: DiagramPreviewState.NotComputed,
+        )
         return true
     }
 
     fun cancel() {
-        previewJob?.cancel()
-        previewJob = null
-        request = null
-        preview = DiagramPreviewState.NotComputed
-        openedLibraryItem = null
-        libraryOpenReadOnly = false
-        offlineLibraryRequest = null
+        activeWorkspaceId?.let { closeWorkspace(it) }
     }
 
     fun updateSpec(spec: SeqDiagramSpec) {
         val current = request ?: return
         request = current.copy(spec = spec)
-        requestPreview(current.tabId, spec)
+        persistActiveWorkspace(dirty = true)
+        // Text metadata and export dialect have no bearing on source rows or the diagram model.
+        // Keeping them off this path prevents a title keystroke from starting an O(n) scan.
+        if (requiresRebuild(current.spec, spec)) requestPreview(current.tabId, spec)
+        if (current.spec.range != spec.range) requestCandidates(current.tabId, spec)
     }
 
     // ── Diagram library ─────────────────────────────────────────────────────────────────────
@@ -209,11 +429,13 @@ class SeqDiagramCoordinator(
         libraryRevision++
         val parsed = item.parsed ?: return false
         val usableTabId = tabId?.takeIf { appState.tab(it) != null }
-        openedLibraryItem = item
-        request = usableTabId?.let { SeqDiagramRequest(it, parsed.spec, libraryItemId = item.id) }
-        libraryOpenReadOnly = usableTabId == null
-        offlineLibraryRequest = if (usableTabId == null) OfflineDiagramLibraryRequest(item, parsed.spec) else null
-        preview = parsed.model?.let { DiagramPreviewState.Computed(it) } ?: DiagramPreviewState.NotComputed
+        openWorkspace(
+            usableTabId,
+            usableTabId?.let { SeqDiagramRequest(it, parsed.spec, libraryItemId = item.id) },
+            parsed.model?.let { DiagramPreviewState.Computed(it) } ?: DiagramPreviewState.NotComputed,
+            item = item,
+            offline = if (usableTabId == null) OfflineDiagramLibraryRequest(item, parsed.spec) else null,
+        )
         return true
     }
 
@@ -232,8 +454,10 @@ class SeqDiagramCoordinator(
         val req = request ?: return null
         val diagram = preview.diagramOrNull ?: return null
         val tab = appState.tab(req.tabId) ?: return null
-        val source = diagram.toSource(req.spec.dialect)
-        val snapshot = DiagramLibrarySnapshot.create(req.spec, source, diagram)
+        val persistedSpec = persistableSpec(req.spec) ?: return null
+        val persistedDiagram = diagram.copy(spec = persistedSpec)
+        val source = persistedDiagram.toSource(persistedSpec.dialect)
+        val snapshot = DiagramLibrarySnapshot.create(persistedSpec, source, persistedDiagram)
         val now = System.currentTimeMillis()
         val resolvedTitle = title ?: req.spec.title.ifBlank { "Untitled diagram" }
         val saved = if (req.libraryItemId == null) {
@@ -247,9 +471,10 @@ class SeqDiagramCoordinator(
                 )
             } ?: return null
         }
-        request = req.copy(libraryItemId = saved.id)
+        request = req.copy(spec = persistedSpec, libraryItemId = saved.id)
         openedLibraryItem = saved
         libraryOpenReadOnly = false
+        persistActiveWorkspace(dirty = false)
         libraryRevision++
         return saved
     }
@@ -272,11 +497,7 @@ class SeqDiagramCoordinator(
 
     fun deleteLibraryItem(id: String): Boolean {
         if (openedLibraryItem?.id == id) {
-            request = null
-            preview = DiagramPreviewState.NotComputed
-            openedLibraryItem = null
-            libraryOpenReadOnly = false
-            offlineLibraryRequest = null
+            activeWorkspaceId?.let { closeWorkspace(it) }
         }
         return libraryStore.delete(id).also { deleted -> if (deleted) libraryRevision++ }
     }
@@ -366,6 +587,61 @@ class SeqDiagramCoordinator(
 
     private val lastSpecByTab = mutableMapOf<String, SeqDiagramSpec>()
 
+    /** Candidate tiers are another full range scan, so they have their own latest-only lane.
+     * Components are deliberately removed for the scan: counts/tiering depend only on the source
+     * view and range; enabled/merged ownership is overlaid synchronously by the inspector. */
+    fun requestCandidates(tabId: String, spec: SeqDiagramSpec) {
+        val workspaceId = activeWorkspaceId ?: return
+        val generation = candidateGenerations.computeIfAbsent(workspaceId) { java.util.concurrent.atomic.AtomicLong() }.incrementAndGet()
+        val tab = appState.tab(tabId) ?: return
+        candidateJobs.remove(workspaceId)?.cancel()
+        publishCandidates(workspaceId, DiagramCandidateState.Computing(candidatePreview.valuesOrEmpty))
+        val sourceSpec = spec.copy(
+            range = com.indagium.diagram.DiagramRange.VisibleView,
+            components = emptyList(),
+            participants = emptyList(),
+        )
+        val logRef = System.identityHashCode(tab.logData)
+        val filterRef = System.identityHashCode(tab.filter)
+        val job = scope.launch {
+            delay(PREVIEW_DEBOUNCE_MS)
+            coroutineContext.ensureActive()
+            val latest = appState.tab(tabId) ?: return@launch
+            // A changed log/filter makes this worker stale; the Composable effect schedules the
+            // replacement using the new key rather than publishing a mismatched candidate set.
+            if (System.identityHashCode(latest.logData) != logRef || System.identityHashCode(latest.filter) != filterRef) return@launch
+            val result = runCatching {
+                candidateScanCount.incrementAndGet()
+                diagramParticipantCandidates(latest, sourceSpec, CancellationCheck {
+                    if (!isActive) throw kotlinx.coroutines.CancellationException()
+                })
+            }
+            coroutineContext.ensureActive()
+            result.fold(
+                onSuccess = {
+                    if (candidateGenerations[workspaceId]?.get() == generation) {
+                        publishCandidates(workspaceId, DiagramCandidateState.Computed(it))
+                    }
+                },
+                onFailure = { error ->
+                    if (error is kotlinx.coroutines.CancellationException) throw error
+                    if (candidateGenerations[workspaceId]?.get() == generation) {
+                        publishCandidates(
+                            workspaceId,
+                            DiagramCandidateState.Failed(error.message ?: "Could not inspect tags."),
+                        )
+                    }
+                },
+            )
+        }
+        candidateJobs[workspaceId] = job
+    }
+
+    private fun publishCandidates(workspaceId: String, state: DiagramCandidateState) {
+        replaceWorkspace(workspaceId) { it.copy(candidates = state) }
+        if (activeWorkspaceId == workspaceId) candidatePreview = state
+    }
+
     /**
      * Rebuilds the preview off the composition thread, cancelling any in-flight build first.
      *
@@ -374,36 +650,66 @@ class SeqDiagramCoordinator(
      * slider on a 10M-line tab enqueues dozens of multi-second scans that all still have to run.
      */
     fun requestPreview(tabId: String, spec: SeqDiagramSpec) {
-        previewJob?.cancel()
-        preview = DiagramPreviewState.Computing(preview.diagramOrNull)
-        previewJob = scope.launch {
+        val workspaceId = activeWorkspaceId ?: return
+        val generation = previewGenerations.computeIfAbsent(workspaceId) { java.util.concurrent.atomic.AtomicLong() }.incrementAndGet()
+        previewJobs.remove(workspaceId)?.cancel()
+        val previous = preview.diagramOrNull
+        publishPreview(workspaceId, DiagramPreviewState.Computing(previous))
+        val job = scope.launch {
             // Debounce: the dialog calls this on every keystroke/toggle, and a build is far more
             // expensive than the 180 ms a user spends finishing a click.
             delay(PREVIEW_DEBOUNCE_MS)
             coroutineContext.ensureActive()
             val tab = appState.tab(tabId)
             if (tab == null) {
-                preview = DiagramPreviewState.Failed("This tab is no longer open.")
+                if (previewGenerations[workspaceId]?.get() == generation) {
+                    publishPreview(
+                        workspaceId,
+                        previous?.let(DiagramPreviewState::Computed)
+                            ?: DiagramPreviewState.Failed("This log is closed. Relink it to regenerate."),
+                    )
+                }
                 return@launch
             }
             val built = runCatching {
+                previewBuildCount.incrementAndGet()
                 buildSequenceDiagram(
                     tab = tab,
                     spec = spec,
                     resolveLabel = sourceLabelResolver(spec),
                     cancellationCheck = CancellationCheck { if (!isActive) throw kotlinx.coroutines.CancellationException() },
+                    resolveSourceInteractions = sourceInteractionResolver(spec),
                 )
             }
             coroutineContext.ensureActive()
             built.fold(
-                onSuccess = { preview = DiagramPreviewState.Computed(it) },
+                onSuccess = {
+                    if (previewGenerations[workspaceId]?.get() == generation) {
+                        publishPreview(workspaceId, DiagramPreviewState.Computed(it))
+                    }
+                },
                 onFailure = { e ->
                     if (e is kotlinx.coroutines.CancellationException) throw e
-                    preview = DiagramPreviewState.Failed(e.message ?: "Could not build this diagram.")
+                    if (previewGenerations[workspaceId]?.get() == generation) {
+                        publishPreview(
+                            workspaceId,
+                            DiagramPreviewState.Failed(e.message ?: "Could not build this diagram."),
+                        )
+                    }
                 },
             )
         }
+        previewJobs[workspaceId] = job
     }
+
+    private fun publishPreview(workspaceId: String, state: DiagramPreviewState) {
+        replaceWorkspace(workspaceId) { it.copy(preview = state) }
+        if (activeWorkspaceId == workspaceId) preview = state
+    }
+
+    private fun requiresRebuild(old: SeqDiagramSpec, new: SeqDiagramSpec): Boolean =
+        old.copy(title = "", dialect = DiagramDialect.MERMAID) !=
+            new.copy(title = "", dialect = DiagramDialect.MERMAID)
 
     /**
      * Backs `DiagramOptions.labelSource`'s SOURCE_METHOD/BOTH modes.
@@ -421,6 +727,64 @@ class SeqDiagramCoordinator(
                 "$cls#${match.site.methodName}()"
             }
         }
+    }
+
+    /** Supplies one-hop source edges only for an explicitly enabled enrichment build.  Calls are
+     * cached by tag/message against one captured index revision and are dropped unless both ends
+     * already identify enabled components — no inferred actor is fabricated. */
+    private fun sourceInteractionResolver(spec: SeqDiagramSpec): (LogEntry) -> List<DiagramSourceInteraction> {
+        if (!spec.sourceEnrichment.enabled || spec.components.isEmpty()) return { emptyList() }
+        val index = appState.sourceIndex ?: return { emptyList() }
+        val resolver = SourceEnrichmentResolver(index)
+        val cache = BoundedSourceInteractionCache(SOURCE_CACHE_MAX_ENTRIES)
+
+        fun componentId(owner: String?): String? {
+            val simple = owner?.substringAfterLast('.')?.trim().orEmpty()
+            return spec.components.firstOrNull { component ->
+                component.enabled && (
+                    component.id == owner || component.displayName == owner ||
+                        component.displayName.substringAfterLast('.') == simple ||
+                        component.tagIds.any { tag -> tag == owner || tag.substringAfterLast('.') == simple }
+                )
+            }?.id
+        }
+        return { entry ->
+            cache.getOrPut(sourceCacheKey(entry)) {
+                resolver.resolveOneHop(entry).mapNotNull { call ->
+                    if (call.confidence < MIN_SOURCE_CONFIDENCE) return@mapNotNull null
+                    val from = componentId(call.sourceOwnerType)
+                    val to = componentId(call.targetOwnerType)
+                    if (from == null || to == null) null else DiagramSourceInteraction(
+                        fromComponentId = from,
+                        toComponentId = to,
+                        label = "${call.targetOwnerType}.${call.targetMethodSignature}",
+                        returnLabel = call.declaredReturnType?.takeIf { spec.sourceEnrichment.addReturnArrows },
+                    )
+                }.distinct()
+            }
+        }
+    }
+
+    private fun sourceCacheKey(entry: LogEntry): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        digest.update(entry.tag.toByteArray(Charsets.UTF_8))
+        digest.update(0.toByte())
+        digest.update(entry.msg.toByteArray(Charsets.UTF_8))
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(digest.digest())
+    }
+
+    private fun persistableSpec(spec: SeqDiagramSpec): SeqDiagramSpec? {
+        val realComponents = spec.components.filter { it.tagIds.isNotEmpty() }
+        if (realComponents.isNotEmpty()) return spec.copy(components = realComponents)
+        val disabled = candidatePreview.valuesOrEmpty.map { candidate ->
+            com.indagium.diagram.DiagramComponent(
+                id = candidate.tag,
+                displayName = candidate.tag,
+                tagIds = setOf(candidate.tag),
+                enabled = false,
+            )
+        }
+        return disabled.takeIf { it.isNotEmpty() }?.let { spec.copy(components = it) }
     }
 
     // ── Writing the result into the notes ────────────────────────────────────────────────────
@@ -445,7 +809,9 @@ class SeqDiagramCoordinator(
     fun confirm(): String? {
         val req = request ?: return null
         val diagram = preview.diagramOrNull ?: return null
-        val source = diagram.toSource(req.spec.dialect)
+        val persistedSpec = persistableSpec(req.spec) ?: return null
+        val persistedDiagram = diagram.copy(spec = persistedSpec)
+        val source = persistedDiagram.toSource(persistedSpec.dialect)
         // A new note captures today's preference as note-owned metadata. Editing must preserve
         // the existing note's metadata (or its legacy image default), rather than retroactively
         // applying the current preference to an already attached artifact.
@@ -456,8 +822,8 @@ class SeqDiagramCoordinator(
                 ?.firstOrNull { it.id == req.editingBlockId } as? com.indagium.model.AnnBlock.Note)
                 ?.let { parseDiagramNote(it.text)?.attachment }
         }
-        val text = encodeDiagramNote(req.spec, source, diagram, attachment = attachment)
-        lastSpecByTab[req.tabId] = req.spec
+        val text = encodeDiagramNote(persistedSpec, source, persistedDiagram, attachment = attachment)
+        lastSpecByTab[req.tabId] = persistedSpec
         val blockId = if (req.editingBlockId != null) {
             appState.updateBlock(req.tabId, req.editingBlockId, text)
             req.editingBlockId
@@ -491,7 +857,24 @@ class SeqDiagramCoordinator(
 
     private companion object {
         const val PREVIEW_DEBOUNCE_MS = 180L
+        const val EMPTY_COMPONENT_ID = "__indagium_empty_component__"
+        const val INSPECTOR_MIN_WIDTH = 220f
+        const val INSPECTOR_MAX_WIDTH = 520f
+        const val MIN_SOURCE_CONFIDENCE = 0.7
+        const val SOURCE_CACHE_MAX_ENTRIES = 256
     }
+}
+
+private class BoundedSourceInteractionCache(private val maxEntries: Int) {
+    private val values = object : LinkedHashMap<String, List<DiagramSourceInteraction>>(maxEntries, 0.75f, true) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, List<DiagramSourceInteraction>>?,
+        ): Boolean = size > maxEntries
+    }
+
+    @Synchronized
+    fun getOrPut(key: String, producer: () -> List<DiagramSourceInteraction>): List<DiagramSourceInteraction> =
+        values[key] ?: producer().also { values[key] = it }
 }
 
 /** Every diagram note in [tab], paired with its block id — the one place that decides "is this

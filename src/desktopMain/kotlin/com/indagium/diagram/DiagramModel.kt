@@ -2,6 +2,9 @@ package com.indagium.diagram
 
 import com.indagium.model.LogLevel
 
+/** Shared source-enrichment contract for MCP/UI adapters and the builder. */
+const val MAX_SOURCE_INTERACTIONS_PER_ENTRY = 10
+
 // ── UML sequence-diagram model ──────────────────────────────────────────────────────────────
 //
 // This package turns a range of a tab's log entries into a dialect-neutral sequence-diagram
@@ -27,6 +30,51 @@ enum class ParticipantKind { TAG, ACTOR }
  * their own lifeline, [OTHER] share the generated `Other` lifeline, and [HIDE] are deliberately
  * omitted.  It is meaningful only for TAG participants; actors are always shown. */
 enum class DiagramParticipantRepresentation { SHOW, OTHER, HIDE }
+
+/** The workspace-level policy for rows which do not belong to an enabled component. */
+enum class UnmappedTagPolicy { HIDE, GROUP_AS_OTHER }
+
+/** A durable, user-facing component.  A component can own any number of raw log tags. */
+data class DiagramComponent(
+    val id: String,
+    val displayName: String,
+    val tagIds: Set<String>,
+    val enabled: Boolean = true,
+)
+
+/** Direction(s) in which an actor mirrors the component it represents. */
+enum class MirrorDirection { INBOUND, OUTBOUND, BOTH }
+
+/** A workspace actor.  A mirrored actor duplicates, rather than replaces, component edges. */
+data class DiagramActor(
+    val id: String,
+    val label: String,
+    val mirrorComponentId: String? = null,
+    val mirrorDirection: MirrorDirection = MirrorDirection.BOTH,
+)
+
+/** Provenance for an interaction.  Renderer and emitters preserve this in the in-app model. */
+enum class MessageEvidence { LOG, RULE, SOURCE_INFERRED, ACTOR_MIRROR }
+
+/** When activation bars are included in the built model. */
+enum class ActivationPolicy { NONE, EVIDENCE_BACKED }
+
+/** Source-index enrichment is deliberately bounded to one direct edge. */
+data class DiagramSourceEnrichment(
+    val enabled: Boolean = false,
+    val directCallDepth: Int = 1,
+    val addReturnArrows: Boolean = true,
+)
+
+/** One high-confidence, one-hop source-index edge.  IDs refer to components (or explicit
+ * participants), never raw tags, so source enrichment remains stable after tag merging. */
+data class DiagramSourceInteraction(
+    val fromComponentId: String,
+    val toComponentId: String,
+    val label: String,
+    /** Usually a declared return type. Runtime values must not be placed here by source-only code. */
+    val returnLabel: String? = null,
+)
 
 /** How [SeqDiagramBuilder.buildSequenceDiagram] turns a scanned entry into an arrow.
  *  [TAG_TRANSITION] (the default) infers a CALL whenever the active tag changes and a SELF
@@ -161,6 +209,8 @@ data class DiagramOptions(
     val seqGroupFrames: Boolean = false,
     // LogLevel.E/A entries also get a DiagramNoteMark, regardless of arrow mode.
     val notesForErrors: Boolean = true,
+    /** Do not invent activations from unrelated transitions. */
+    val activationPolicy: ActivationPolicy = ActivationPolicy.EVIDENCE_BACKED,
 )
 
 data class SeqDiagramSpec(
@@ -180,6 +230,11 @@ data class SeqDiagramSpec(
     // diagram was drawn from, or warn before regenerating against a different one. Never read by
     // this package itself.
     val sourceFile: String? = null,
+    /** New component workflow. Empty deliberately means use legacy [participants] behaviour. */
+    val components: List<DiagramComponent> = emptyList(),
+    val actors: List<DiagramActor> = emptyList(),
+    val unmappedTagPolicy: UnmappedTagPolicy = UnmappedTagPolicy.HIDE,
+    val sourceEnrichment: DiagramSourceEnrichment = DiagramSourceEnrichment(),
 )
 
 data class DiagramMessage(
@@ -197,6 +252,15 @@ data class DiagramMessage(
     val kind: MessageKind,
     // > 1 when collapseRepeats folded a run of identical-shape consecutive messages into this one.
     val repeatCount: Int = 1,
+    val evidence: MessageEvidence = MessageEvidence.LOG,
+)
+
+/** A correlated call/return activation interval, inclusive message indices. */
+data class DiagramActivationSpan(
+    val participantIdx: Int,
+    val startMessage: Int,
+    val endMessage: Int,
+    val evidence: MessageEvidence,
 )
 
 /** One auto-detected sequence group rendered as a bracket around [firstMsg]..[lastMsg]
@@ -235,6 +299,7 @@ data class SeqDiagram(
     val messages: List<DiagramMessage>,
     val frames: List<DiagramFrame> = emptyList(),
     val notes: List<DiagramNoteMark> = emptyList(),
+    val activationSpans: List<DiagramActivationSpan> = emptyList(),
     // True when maxMessages capped the output — the diagram is a PREFIX of what the full range
     // would have produced, not a sample of it (see the builder: fold-then-cap, so this reports
     // "there were more messages after this point", not "some messages were skipped in the middle").

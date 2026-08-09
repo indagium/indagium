@@ -2,12 +2,11 @@
 
 package com.indagium.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.HorizontalScrollbar
 import androidx.compose.foundation.VerticalScrollbar
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,13 +14,13 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.verticalScroll
@@ -29,6 +28,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -36,7 +36,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -51,34 +50,32 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.indagium.diagram.ActivationPolicy
 import com.indagium.diagram.ArrowMode
+import com.indagium.diagram.DiagramActor
+import com.indagium.diagram.DiagramComponent
 import com.indagium.diagram.DiagramDialect
-import com.indagium.diagram.DiagramParticipant
-import com.indagium.diagram.DiagramParticipantRepresentation
 import com.indagium.diagram.DiagramRange
 import com.indagium.diagram.LabelSource
+import com.indagium.diagram.MirrorDirection
 import com.indagium.diagram.ParticipantKind
-import com.indagium.diagram.SeqDiagramSpec
 import com.indagium.diagram.SeqDiagram
-import com.indagium.diagram.diagramParticipantCandidates
+import com.indagium.diagram.SeqDiagramSpec
+import com.indagium.diagram.UnmappedTagPolicy
+import com.indagium.diagram.displayName
 import com.indagium.model.LogTab
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.exp
 import kotlin.math.roundToInt
-
-// Above this many lifelines a sequence diagram stops being readable no matter how good the layout
-// is — the user is told rather than silently handed spaghetti. Matches the builder's own
-// auto-derive cap.
-private const val PARTICIPANT_WARN_THRESHOLD = 8
-
-private const val WORKSPACE_WIDTH = 1_320
-private const val WORKSPACE_HEIGHT = 820
-private const val INSPECTOR_WIDTH = 330
 
 private data class CanvasZoomAnchor(val content: Offset, val pointer: Offset)
 
 /**
- * The "build a sequence diagram" dialog.
+ * Dedicated sequence-diagram editor surface.  It is intentionally not a Dialog: the log tab bar
+ * remains available, diagrams can coexist with logs, and closing a log does not close its cached
+ * diagram.
  *
  * Two columns: controls on the left, a live rendered preview on the right. The preview is what
  * makes participant selection tractable — tag curation is the whole difficulty of this feature
@@ -89,63 +86,87 @@ private data class CanvasZoomAnchor(val content: Offset, val pointer: Offset)
  * below would be a no-op. See the same flag and comment on SettingsDialog's call site in App.kt.
  */
 @Composable
-fun SeqDiagramDialog(state: AppState) {
-    val req = state.seqDiagrams.request
-    val offline = state.seqDiagrams.offlineLibraryRequest
-    if (req == null && offline == null) return
+fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
+    if (state.seqDiagrams.activeWorkspaceId != workspaceId) state.seqDiagrams.activateWorkspace(workspaceId)
+    val session = state.seqDiagrams.activeSession ?: return
+    val req = session.request
+    val offline = session.offlineRequest
     val tab = req?.let { request -> state.tab(request.tabId) }
-    val spec = req?.spec ?: offline!!.spec
+    val spec = req?.spec ?: offline?.spec ?: session.spec
     val readOnly = req == null || tab == null || state.seqDiagrams.libraryOpenReadOnly
     val tc = tc()
-    var inspectorOpen by remember { mutableStateOf(true) }
 
-    Dialog(
-        onDismissRequest = { state.seqDiagrams.cancel() },
-        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
+    fun requestClose() {
+        state.seqDiagrams.requestCloseWorkspace(workspaceId)
+    }
+
+    Column(
+        Modifier.fillMaxSize().background(tc.p).padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Column(
-            Modifier.width(WORKSPACE_WIDTH.dp).height(WORKSPACE_HEIGHT.dp)
-                .background(tc.p, CORNER_MD)
-                .border(1.dp, tc.br, CORNER_MD)
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    AppText(
-                        if (readOnly) "Diagram workspace · cached" else if (req.editingBlockId != null) "Diagram workspace" else "New diagram workspace",
-                        fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                AppText(
+                    if (readOnly) "Diagram workspace · cached" else if (req.editingBlockId != null) "Diagram workspace" else "New diagram workspace",
+                    fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                )
+                if (readOnly) {
+                    AppText(spec.title.ifBlank { "Untitled sequence diagram" }, fontSize = 12.sp)
+                } else {
+                    InlineField(
+                        spec.title,
+                        { state.seqDiagrams.updateSpec(spec.copy(title = it)) },
+                        "Untitled sequence diagram", Modifier.fillMaxWidth(), fontSize = 12.sp,
                     )
-                    if (readOnly) {
-                        AppText(spec.title.ifBlank { "Untitled sequence diagram" }, fontSize = 12.sp)
-                    } else {
-                        InlineField(
-                            spec.title,
-                            { state.seqDiagrams.updateSpec(spec.copy(title = it)) },
-                            "Untitled sequence diagram", Modifier.fillMaxWidth(), fontSize = 12.sp,
+                }
+                AppText("${rangeSummary(spec.range)} · ${spec.sourceFile ?: "current log"}", color = tc.td, fontSize = 10.sp)
+            }
+            AppButton(
+                if (session.inspectorOpen) "Inspector ▾" else "Inspector ▸",
+                { state.seqDiagrams.updateInspector(open = !session.inspectorOpen) },
+                variant = ButtonVariant.Ghost
+            )
+            Spacer(Modifier.width(4.dp))
+            CloseButton(onClick = ::requestClose)
+        }
+
+        Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (session.inspectorOpen) {
+                Column(
+                    Modifier.width(session.inspectorWidth.dp).fillMaxHeight()
+                        .background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (tab != null && !readOnly) WorkspaceInspector(tab, state, spec) { state.seqDiagrams.updateSpec(it) }
+                    else OfflineInspector(spec)
+                }
+                HDivider { delta -> state.seqDiagrams.updateInspector(width = session.inspectorWidth + delta) }
+            }
+            DiagramPreviewPane(state, Modifier.weight(1f).fillMaxHeight())
+        }
+
+        WorkspaceFooter(state, req, readOnly, onClose = ::requestClose)
+    }
+    if (state.seqDiagrams.pendingCloseWorkspaceId == workspaceId) {
+        Dialog(onDismissRequest = { state.seqDiagrams.cancelWorkspaceClose() }, properties = DialogProperties(dismissOnClickOutside = false)) {
+            Column(
+                Modifier.width(330.dp).background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                AppText("Save diagram draft?", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                AppText("This workspace has unsaved changes.", color = tc.td, fontSize = 11.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(7.dp), modifier = Modifier.fillMaxWidth()) {
+                    DialogActionButton("Save", active = true, enabled = state.seqDiagrams.preview.diagramOrNull != null) {
+                        state.seqDiagrams.closeWorkspace(
+                            workspaceId,
+                            save = true
                         )
                     }
-                    AppText("${rangeSummary(spec.range)} · ${spec.sourceFile ?: "current log"}", color = tc.td, fontSize = 10.sp)
-                }
-                AppButton(if (inspectorOpen) "Inspector ▾" else "Inspector ▸", { inspectorOpen = !inspectorOpen }, variant = ButtonVariant.Ghost)
-                Spacer(Modifier.width(4.dp))
-                CloseButton(onClick = { state.seqDiagrams.cancel() })
-            }
-
-            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                DiagramPreviewPane(state, Modifier.weight(1f).fillMaxHeight())
-                if (inspectorOpen) {
-                    Column(
-                        Modifier.width(INSPECTOR_WIDTH.dp).fillMaxHeight()
-                            .background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM)
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) { if (tab != null && !readOnly) WorkspaceInspector(tab, state, spec) { state.seqDiagrams.updateSpec(it) }
-                        else OfflineInspector(spec) }
+                    DialogActionButton("Discard", active = false) { state.seqDiagrams.closeWorkspace(workspaceId) }
+                    DialogActionButton("Cancel", active = false) { state.seqDiagrams.cancelWorkspaceClose() }
                 }
             }
-
-            DialogFooter(state, req, readOnly)
         }
     }
 }
@@ -153,8 +174,20 @@ fun SeqDiagramDialog(state: AppState) {
 @Composable
 private fun OfflineInspector(spec: SeqDiagramSpec) {
     SectionHeader("Cached diagram")
-    AppText("This diagram is viewable from its saved snapshot, but its source log is not open.", color = tc().td, fontSize = 11.sp, maxLines = 3, modifier = Modifier.padding(horizontal = 12.dp))
-    AppText("Open or relink ${spec.sourceFile ?: "the source log"} to edit, regenerate, save, or attach it.", color = tc().td, fontSize = 10.sp, maxLines = 3, modifier = Modifier.padding(horizontal = 12.dp))
+    AppText(
+        "This diagram is viewable from its saved snapshot, but its source log is not open.",
+        color = tc().td,
+        fontSize = 11.sp,
+        maxLines = 3,
+        modifier = Modifier.padding(horizontal = 12.dp)
+    )
+    AppText(
+        "Open or relink ${spec.sourceFile ?: "the source log"} to edit, regenerate, save, or attach it.",
+        color = tc().td,
+        fontSize = 10.sp,
+        maxLines = 3,
+        modifier = Modifier.padding(horizontal = 12.dp)
+    )
 }
 
 @Composable
@@ -162,7 +195,7 @@ private fun WorkspaceInspector(tab: LogTab, state: AppState, spec: SeqDiagramSpe
     SectionHeader("Scope")
     RangeSection(tab, spec, onSpec)
     Divider()
-    ParticipantSection(tab, state, spec, onSpec)
+    ComponentSection(tab, state, spec, onSpec)
     Divider()
     ModeSection(spec, onSpec)
     Divider()
@@ -178,120 +211,205 @@ private fun rangeSummary(range: DiagramRange): String = when (range) {
 
 // ── Participants ─────────────────────────────────────────────────────────────────────────────
 
+/** Component-first curation.  A component owns one or more raw tags; raw tags remain visible in
+ * the inspector so merging never obscures provenance.  The old participant editor below remains
+ * only as a legacy-note compatibility reader and is not used by a new workspace. */
 @Composable
-private fun ParticipantSection(tab: LogTab, state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
+private fun ComponentSection(tab: LogTab, state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
     val tc = tc()
-    // This is deliberately derived from the exact resolved/filter-visible range the builder uses,
-    // rather than whole-tab analysis counts. Representation choices therefore never lie about
-    // what will be shown, grouped into Other, or omitted.
-    val candidates = remember(tab.id, spec) {
-        diagramParticipantCandidates(tab, spec)
+    val candidateState = state.seqDiagrams.candidatePreview
+    val candidates = candidateState.valuesOrEmpty
+    // Source-view changes invalidate tiers, but title/component toggles don't.  The coordinator
+    // does the expensive range scan in its cancellable IO lane.
+    LaunchedEffect(tab.id, System.identityHashCode(tab.logData), System.identityHashCode(tab.filter), spec.range) {
+        state.seqDiagrams.requestCandidates(tab.id, spec)
     }
-    val selectedTags = spec.participants.filter { it.kind == ParticipantKind.TAG }.mapNotNull { it.tag }.toSet()
-    val actors = spec.participants.filter { it.kind == ParticipantKind.ACTOR }
-    var newActor by remember { mutableStateOf("") }
+    val ownerByTag = remember(spec.components) {
+        spec.components.flatMap { component -> component.tagIds.map { it to component } }.toMap()
+    }
+    var mergeTags by remember(spec.components) { mutableStateOf(emptySet<String>()) }
+    var newActor by remember(spec.actors) { mutableStateOf("") }
+    var tagSearch by remember { mutableStateOf("") }
 
-    fun setRepresentation(tag: String, representation: DiagramParticipantRepresentation) {
-        val existing = spec.participants.firstOrNull { it.kind == ParticipantKind.TAG && it.tag == tag }
-        val next = if (existing == null) {
-            spec.participants + DiagramParticipant(tag, tag, ParticipantKind.TAG, tag = tag, representation = representation)
+    fun addRealComponent(component: DiagramComponent): List<DiagramComponent> =
+        spec.components.filter { it.tagIds.isNotEmpty() } + component
+
+    fun toggleTag(tag: String, enabled: Boolean) {
+        val owner = ownerByTag[tag]
+        val components = if (owner == null) {
+            addRealComponent(DiagramComponent(tag, tag, setOf(tag), enabled))
         } else {
-            spec.participants.map { if (it.id == existing.id) it.copy(representation = representation) else it }
+            spec.components.map { if (it.id == owner.id) it.copy(enabled = enabled) else it }
         }
-        onSpec(spec.copy(participants = next))
+        onSpec(spec.copy(components = components))
     }
 
-    SectionHeader("Participants")
-    if (selectedTags.isEmpty()) {
-        AppText("Recommended tags are based on the selected range.", color = tc.td, fontSize = 11.sp, maxLines = 2)
-    } else if (selectedTags.size + actors.size > PARTICIPANT_WARN_THRESHOLD) {
-        AppText(
-            "${selectedTags.size + actors.size} lifelines — diagrams get hard to read past $PARTICIPANT_WARN_THRESHOLD.",
-            color = DANGER_RED, fontSize = 11.sp, maxLines = 2,
+    fun mergeSelected() {
+        if (mergeTags.size < 2) return
+        val involved = spec.components.filter { component -> component.tagIds.any { it in mergeTags } }
+        val tags = (involved.flatMap { it.tagIds } + mergeTags).toSet()
+        val component = DiagramComponent(
+            id = "component-${System.nanoTime()}", displayName = tags.first(), tagIds = tags,
+            enabled = involved.any { it.enabled } || involved.isEmpty(),
         )
-    }
-    Column(
-        Modifier.fillMaxWidth().heightIn(max = 170.dp).verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        candidates.forEach { candidate ->
-            val rep = candidate.representation
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                AppText(candidate.tag, fontSize = 10.sp, modifier = Modifier.weight(1f), overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                AppText("${candidate.entryCount}", color = tc.td, fontSize = 9.sp)
-                PillBtn("Show", rep == DiagramParticipantRepresentation.SHOW) { setRepresentation(candidate.tag, DiagramParticipantRepresentation.SHOW) }
-                PillBtn("Other", rep == DiagramParticipantRepresentation.OTHER) { setRepresentation(candidate.tag, DiagramParticipantRepresentation.OTHER) }
-                PillBtn("Hide", rep == DiagramParticipantRepresentation.HIDE) { setRepresentation(candidate.tag, DiagramParticipantRepresentation.HIDE) }
-            }
-        }
+        onSpec(
+            spec.copy(
+                components = spec.components.filter { it.tagIds.isNotEmpty() && it !in involved } + component,
+            ),
+        )
+        mergeTags = emptySet()
     }
 
-    // The tag/id stays immutable; the display name is what reaches the canvas and exported
-    // dialect, so a short alias makes a dense diagram readable without losing its provenance.
-    if (spec.participants.isNotEmpty()) {
-        AppText("Display names", color = tc.td, fontSize = 10.sp)
-        spec.participants.forEach { participant ->
-            // A raw log tag remains the stable identity.  When the source index can connect one
-            // of that tag's in-range rows to code, offer the class/file name as a deliberate
-            // display alias instead of replacing the tag automatically.
-            val classSuggestion = remember(tab.id, participant.tag, state.settings.sourceFolders) {
-                participant.tag?.let { tag ->
-                    tab.logData.firstOrNull { it.tag == tag }?.let { entry ->
-                        state.resolveLogSource(tag, entry.msg, limit = 1).firstOrNull()
-                            ?.site?.filePath?.substringAfterLast('/')?.substringBeforeLast('.')
-                    }
-                }
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                AppText(participant.tag ?: "actor", color = tc.td, fontSize = 10.sp, maxLines = 1, modifier = Modifier.width(78.dp))
-                InlineField(
-                    participant.alias.orEmpty(),
-                    { alias -> onSpec(spec.copy(participants = spec.participants.map { if (it.id == participant.id) it.copy(alias = alias.ifBlank { null }) else it })) },
-                    "Display name", Modifier.weight(1f), fontSize = 10.sp,
-                )
-                if (!classSuggestion.isNullOrBlank() && classSuggestion != participant.alias) {
-                    AppButton("Use class", {
-                        onSpec(spec.copy(participants = spec.participants.map {
-                            if (it.id == participant.id) it.copy(alias = classSuggestion) else it
-                        }))
+    SectionHeader("Components")
+    AppText("Enabled components participate in the diagram. Select raw tags to merge them.", color = tc.td, fontSize = 10.sp, maxLines = 2)
+    InlineField(tagSearch, { tagSearch = it }, "Search all log tags…", Modifier.fillMaxWidth(), fontSize = 10.sp)
+    if (tagSearch.isNotBlank()) {
+        tab.analysis.tagCounts.entries.asSequence()
+            .filter { (tag, _) -> tag.contains(tagSearch.trim(), ignoreCase = true) && tag !in ownerByTag }
+            .sortedByDescending { it.value }.take(8).forEach { (tag, count) ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AppText(tag, fontSize = 10.sp, modifier = Modifier.weight(1f), overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    AppText("$count total", color = tc.td, fontSize = 9.sp)
+                    AppButton("Add disabled", {
+                        onSpec(
+                            spec.copy(
+                                components = addRealComponent(
+                                    DiagramComponent(tag, tag, setOf(tag), enabled = false),
+                                ),
+                            ),
+                        )
                     }, variant = ButtonVariant.Ghost)
                 }
             }
+    }
+    if (candidateState is DiagramCandidateState.Computing) {
+        AppText("Refreshing tag tiers…", color = tc.td, fontSize = 10.sp)
+    } else if (candidateState is DiagramCandidateState.Failed) {
+        AppText(candidateState.message, color = DANGER_RED, fontSize = 10.sp)
+    }
+    Column(Modifier.fillMaxWidth().heightIn(max = 180.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        candidates.forEach { candidate ->
+            val component = ownerByTag[candidate.tag]
+            val enabled = component?.enabled == true
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                CheckRow(checked = candidate.tag in mergeTags, onToggle = {
+                    mergeTags = if (candidate.tag in mergeTags) mergeTags - candidate.tag else mergeTags + candidate.tag
+                }) { }
+                CheckRow(checked = enabled, onToggle = { toggleTag(candidate.tag, !enabled) }) { }
+                AppText(candidate.tag, fontSize = 10.sp, modifier = Modifier.weight(1f), overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                AppText("${candidate.entryCount}", color = tc.td, fontSize = 9.sp)
+            }
         }
     }
-
-    // External actors: entities that never appear as a logcat tag (the user, a peer device, a
-    // backend) but which the interaction visibly enters from or exits to.
-    actors.forEach { actor ->
+    Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+        AppButton("Merge selected", ::mergeSelected, enabled = mergeTags.size > 1, variant = ButtonVariant.Ghost)
+        CheckRow(checked = spec.unmappedTagPolicy == UnmappedTagPolicy.GROUP_AS_OTHER, onToggle = {
+            val next = if (spec.unmappedTagPolicy == UnmappedTagPolicy.HIDE) {
+                UnmappedTagPolicy.GROUP_AS_OTHER
+            } else {
+                UnmappedTagPolicy.HIDE
+            }
+            onSpec(spec.copy(unmappedTagPolicy = next))
+        }) { AppText("Group unmapped as Other", fontSize = 10.sp) }
+    }
+    spec.components.filter { it.tagIds.isNotEmpty() }.forEach { component ->
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            AppText(actor.label, fontSize = 11.sp, modifier = Modifier.weight(1f))
-            PillBtn("in", actor.isEntryPoint) {
-                onSpec(spec.copy(participants = spec.participants.map { p ->
-                    when {
-                        p.id == actor.id -> p.copy(isEntryPoint = !p.isEntryPoint)
-                        p.kind == ParticipantKind.ACTOR -> p.copy(isEntryPoint = false) // at most one entry point
-                        else -> p
-                    }
-                }))
-            }
-            PillBtn("out", actor.isExitPoint) {
-                onSpec(spec.copy(participants = spec.participants.map { p ->
-                    when {
-                        p.id == actor.id -> p.copy(isExitPoint = !p.isExitPoint)
-                        p.kind == ParticipantKind.ACTOR -> p.copy(isExitPoint = false)
-                        else -> p
-                    }
-                }))
-            }
-            AppButton("×", { onSpec(spec.copy(participants = spec.participants.filterNot { it.id == actor.id })) }, variant = ButtonVariant.Ghost)
+            InlineField(component.displayName, { name ->
+                onSpec(spec.copy(components = spec.components.map { if (it.id == component.id) it.copy(displayName = name) else it }))
+            }, "Component name", Modifier.weight(1f), fontSize = 10.sp)
+            AppText("${component.tagIds.size} tags", color = tc.td, fontSize = 9.sp)
+            if (component.tagIds.size > 1) AppButton("Unmerge", {
+                val split = component.tagIds.map { tag -> DiagramComponent(tag, tag, setOf(tag), component.enabled) }
+                onSpec(spec.copy(components = spec.components.filterNot { it.id == component.id } + split))
+            }, variant = ButtonVariant.Ghost)
         }
     }
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        InlineField(newActor, { newActor = it }, "Add external actor…", Modifier.weight(1f), fontSize = 11.sp)
+    Divider()
+    SectionHeader("Actors")
+    spec.actors.forEach { actor ->
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            InlineField(
+                actor.label,
+                { label ->
+                    onSpec(
+                        spec.copy(
+                            actors = spec.actors.map { if (it.id == actor.id) it.copy(label = label) else it },
+                            participants = spec.participants.map {
+                                if (it.id == actor.id) it.copy(label = label) else it
+                            },
+                        ),
+                    )
+                },
+                "Actor",
+                Modifier.weight(1f),
+                fontSize = 10.sp
+            )
+            val targets = spec.components.filter { it.tagIds.isNotEmpty() }
+            val currentTarget = targets.indexOfFirst { it.id == actor.mirrorComponentId }
+            AppButton(actor.mirrorComponentId?.let { id -> targets.firstOrNull { it.id == id }?.displayName } ?: "No mirror", {
+                val target = targets.getOrNull(currentTarget + 1)?.id
+                onSpec(spec.copy(actors = spec.actors.map { if (it.id == actor.id) it.copy(mirrorComponentId = target) else it }))
+            }, variant = ButtonVariant.Ghost)
+            if (actor.mirrorComponentId != null) AppButton(actor.mirrorDirection.name.lowercase(), {
+                val direction = when (actor.mirrorDirection) {
+                    MirrorDirection.INBOUND -> MirrorDirection.OUTBOUND
+                    MirrorDirection.OUTBOUND -> MirrorDirection.BOTH
+                    MirrorDirection.BOTH -> MirrorDirection.INBOUND
+                }
+                onSpec(spec.copy(actors = spec.actors.map { if (it.id == actor.id) it.copy(mirrorDirection = direction) else it }))
+            }, variant = ButtonVariant.Ghost)
+            AppButton("×", {
+                onSpec(
+                    spec.copy(
+                        actors = spec.actors.filterNot { it.id == actor.id },
+                        participants = spec.participants.filterNot { it.id == actor.id },
+                    ),
+                )
+            }, variant = ButtonVariant.Ghost)
+        }
+    }
+    // Keep entry/exit controls for v1/v2 actors while the codec migrates them forward.
+    spec.participants.filter { it.kind == ParticipantKind.ACTOR }.forEach { actor ->
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppText(actor.displayName, fontSize = 10.sp, modifier = Modifier.weight(1f))
+            PillBtn(
+                "in",
+                actor.isEntryPoint
+            ) {
+                onSpec(spec.copy(participants = spec.participants.map {
+                    if (it.id == actor.id) it.copy(isEntryPoint = !it.isEntryPoint) else if (it.kind == ParticipantKind.ACTOR) it.copy(
+                        isEntryPoint = false
+                    ) else it
+                }))
+            }
+            PillBtn(
+                "out",
+                actor.isExitPoint
+            ) {
+                onSpec(spec.copy(participants = spec.participants.map {
+                    if (it.id == actor.id) it.copy(isExitPoint = !it.isExitPoint) else if (it.kind == ParticipantKind.ACTOR) it.copy(
+                        isExitPoint = false
+                    ) else it
+                }))
+            }
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+        InlineField(newActor, { newActor = it }, "Add actor…", Modifier.weight(1f), fontSize = 10.sp)
         AppButton("Add", {
-            val name = newActor.trim()
-            if (name.isNotEmpty() && spec.participants.none { it.id == name }) {
-                onSpec(spec.copy(participants = spec.participants + DiagramParticipant(name, name, ParticipantKind.ACTOR)))
+            val label = newActor.trim()
+            if (label.isNotEmpty()) {
+                val id = "actor-${System.nanoTime()}"
+                onSpec(
+                    spec.copy(
+                        actors = spec.actors + DiagramActor(id, label),
+                        participants = spec.participants + com.indagium.diagram.DiagramParticipant(
+                            id = id,
+                            label = label,
+                            kind = ParticipantKind.ACTOR,
+                        ),
+                    ),
+                )
                 newActor = ""
             }
         }, enabled = newActor.isNotBlank())
@@ -308,7 +426,7 @@ private fun RangeSection(tab: LogTab, spec: SeqDiagramSpec, onSpec: (SeqDiagramS
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         PillBtn("Selection", range is DiagramRange.Ids) {
             val sel = tab.selected
-            if (sel.size >= 2) onSpec(spec.copy(range = DiagramRange.Ids(sel.min(), sel.max())))
+            if (sel.isNotEmpty()) onSpec(spec.copy(range = DiagramRange.Ids(sel.min(), sel.max())))
         }
         PillBtn("Whole view", range is DiagramRange.VisibleView) { onSpec(spec.copy(range = DiagramRange.VisibleView)) }
         PillBtn("Time", range is DiagramRange.Time) { onSpec(spec.copy(range = DiagramRange.Time("", ""))) }
@@ -318,14 +436,16 @@ private fun RangeSection(tab: LogTab, spec: SeqDiagramSpec, onSpec: (SeqDiagramS
         is DiagramRange.VisibleView -> AppText(
             "Everything the current filter shows.", color = tc.td, fontSize = 11.sp, maxLines = 2,
         )
+
         is DiagramRange.Time -> Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             InlineField(range.fromTs, { onSpec(spec.copy(range = range.copy(fromTs = it))) }, "from HH:MM:SS", Modifier.weight(1f), fontSize = 11.sp)
             InlineField(range.toTs, { onSpec(spec.copy(range = range.copy(toTs = it))) }, "to HH:MM:SS", Modifier.weight(1f), fontSize = 11.sp)
         }
+
         is DiagramRange.SeqGroupRef -> AppText("Sequence group ${range.gid}", color = tc.td, fontSize = 11.sp)
     }
-    if (range is DiagramRange.Ids && tab.selected.size < 2) {
-        AppText("Select rows in the log to change this.", color = tc.td, fontSize = 10.sp, maxLines = 2)
+    if (range is DiagramRange.Ids && tab.selected.isEmpty()) {
+        AppText("Select one or more rows in the log to change this.", color = tc.td, fontSize = 10.sp, maxLines = 2)
     }
 }
 
@@ -336,7 +456,7 @@ private fun ModeSection(spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) 
     val tc = tc()
     SectionHeader("Interactions")
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        PillBtn("Tag handoff", spec.mode == ArrowMode.TAG_TRANSITION) { onSpec(spec.copy(mode = ArrowMode.TAG_TRANSITION)) }
+        PillBtn("Component flow", spec.mode == ArrowMode.TAG_TRANSITION) { onSpec(spec.copy(mode = ArrowMode.TAG_TRANSITION)) }
         PillBtn("Rules", spec.mode == ArrowMode.RULES) { onSpec(spec.copy(mode = ArrowMode.RULES)) }
         PillBtn("Timeline", spec.mode == ArrowMode.LINE_PER_MESSAGE) { onSpec(spec.copy(mode = ArrowMode.LINE_PER_MESSAGE)) }
     }
@@ -346,6 +466,18 @@ private fun ModeSection(spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) 
         ArrowMode.LINE_PER_MESSAGE -> "Every line as an event on its own tag's lifeline."
     }
     AppText(explanation, color = tc.td, fontSize = 10.sp, maxLines = 3)
+    val enabledComponents = spec.components.count { it.enabled && it.tagIds.isNotEmpty() }
+    val oneRow = (spec.range as? DiagramRange.Ids)?.let { it.from == it.to } == true
+    if (spec.mode == ArrowMode.TAG_TRANSITION && (oneRow || enabledComponents == 1)) {
+        AppText(
+            if (oneRow) "A one-row scope has no component handoff." else "One enabled component has no component handoff.",
+            color = tc.td, fontSize = 10.sp, maxLines = 2,
+        )
+        AppButton("Use event timeline", { onSpec(spec.copy(mode = ArrowMode.LINE_PER_MESSAGE)) }, variant = ButtonVariant.Ghost)
+    }
+    CheckRow(checked = spec.sourceEnrichment.enabled, onToggle = {
+        onSpec(spec.copy(sourceEnrichment = spec.sourceEnrichment.copy(enabled = !spec.sourceEnrichment.enabled)))
+    }) { AppText("Add one-hop source calls", fontSize = 10.sp) }
     if (spec.mode == ArrowMode.RULES) DiagramRulesEditor(spec, onSpec)
 }
 
@@ -363,7 +495,14 @@ private fun DiagramRulesEditor(spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) ->
         val error = remember(rule.pattern) { invalidPattern(rule.pattern) }
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                AppText(rule.pattern, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.weight(1f), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                AppText(
+                    rule.pattern,
+                    fontSize = 10.sp,
+                    fontFamily = MONO,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                )
                 AppButton("×", { onSpec(spec.copy(rules = spec.rules.filterNot { it.id == rule.id })) }, variant = ButtonVariant.Ghost)
             }
             if (error != null) AppText("Invalid regex: ${error.take(90)}", color = DANGER_RED, fontSize = 9.sp, maxLines = 2)
@@ -409,21 +548,27 @@ private fun DiagramRulesEditor(spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) ->
 }
 
 private data class InteractionRuleDraft(val pattern: String, val from: String = "\${from}", val to: String = "\${to}", val label: String = "\${msg}")
+
 private data class InteractionTemplate(val label: String, val rules: List<InteractionRuleDraft>)
 
 /** Conservative starting points, deliberately offered as explicit Add actions rather than
  * automatic detection. Users can inspect and edit the resulting ordinary rules immediately. */
 private val interactionTemplates = listOf(
-    InteractionTemplate("HTTP request", listOf(InteractionRuleDraft("(?i)(?<from>\\S+).*\\b(?<verb>GET|POST|PUT|DELETE|PATCH)\\s+(?<to>https?://\\S+)", label = "\${verb} \${msg}"))),
+    InteractionTemplate(
+        "HTTP request",
+        listOf(InteractionRuleDraft("(?i)(?<from>\\S+).*\\b(?<verb>GET|POST|PUT|DELETE|PATCH)\\s+(?<to>https?://\\S+)", label = "\${verb} \${msg}"))
+    ),
     InteractionTemplate("RPC / Binder", listOf(InteractionRuleDraft("(?i)(?<from>\\S+).*\\b(?:rpc|binder)\\b.*\\bto\\s+(?<to>\\S+)"))),
     InteractionTemplate("Broadcast", listOf(InteractionRuleDraft("(?i)(?<from>\\S+).*\\bbroadcast\\b.*\\bto\\s+(?<to>\\S+)"))),
     InteractionTemplate("Worker / job", listOf(InteractionRuleDraft("(?i)(?<from>\\S+).*\\b(?:worker|job)\\b.*\\bto\\s+(?<to>\\S+)"))),
     InteractionTemplate("Socket", listOf(InteractionRuleDraft("(?i)(?<from>\\S+).*\\bsocket\\b.*\\bto\\s+(?<to>\\S+)"))),
     InteractionTemplate("Database", listOf(InteractionRuleDraft("(?i)(?<from>\\S+).*\\b(?:query|insert|update|delete)\\b.*\\b(?<to>database|db)\\b"))),
-    InteractionTemplate("Request / response", listOf(
-        InteractionRuleDraft("(?i)(?<from>\\S+).*\\brequest\\b.*\\bto\\s+(?<to>\\S+)"),
-        InteractionRuleDraft("(?i)(?<from>\\S+).*\\bresponse\\b.*\\bfrom\\s+(?<to>\\S+)"),
-    )),
+    InteractionTemplate(
+        "Request / response", listOf(
+            InteractionRuleDraft("(?i)(?<from>\\S+).*\\brequest\\b.*\\bto\\s+(?<to>\\S+)"),
+            InteractionRuleDraft("(?i)(?<from>\\S+).*\\bresponse\\b.*\\bfrom\\s+(?<to>\\S+)"),
+        )
+    ),
 )
 
 // ── Options ──────────────────────────────────────────────────────────────────────────────────
@@ -462,6 +607,14 @@ private fun OptionsSection(state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDi
     } else {
         AppText("Label with source method — needs an indexed source folder.", color = tc.td, fontSize = 10.sp, maxLines = 2)
     }
+    CheckRow(checked = o.activationPolicy == ActivationPolicy.EVIDENCE_BACKED, onToggle = {
+        val next = if (o.activationPolicy == ActivationPolicy.NONE) {
+            ActivationPolicy.EVIDENCE_BACKED
+        } else {
+            ActivationPolicy.NONE
+        }
+        onSpec(spec.copy(options = o.copy(activationPolicy = next)))
+    }) { AppText("Evidence-backed activations", fontSize = 11.sp) }
 
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText("Max arrows", fontSize = 11.sp)
@@ -485,6 +638,10 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
     val tc = tc()
     val theme = tc.toDiagramTheme()
     val preview = state.seqDiagrams.preview
+    val diagram = preview.diagramOrNull
+    val display by produceState<DiagramDisplay?>(initialValue = null, key1 = diagram, key2 = theme) {
+        value = withContext(Dispatchers.Default) { diagram?.let { DiagramRenderCache.display(it, theme) } }
+    }
     var zoom by remember { mutableStateOf(1f) }
     var fitZoom by remember { mutableStateOf(1f) }
     var fitWidthZoom by remember { mutableStateOf(1f) }
@@ -516,11 +673,11 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
             }, variant = ButtonVariant.Ghost)
         }
         Divider()
-        val diagram = preview.diagramOrNull
         when {
+            diagram != null && display == null -> CenteredHint("Rendering…", tc.td)
             diagram != null -> {
-                val rendered = remember(diagram, theme) { DiagramRenderCache.render(diagram, theme) }
-                val bitmap = remember(rendered) { rendered.toComposeBitmap() }
+                val rendered = display!!.rendered
+                val bitmap = display!!.bitmap
                 BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                     // Fit shows an orienting overview even for a long trace.  At that scale the
                     // diagram remains navigable through the always-visible scrollbars; Fit width
@@ -558,7 +715,9 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
                                     // Space only changes the canvas drag mode; letting it continue
                                     // avoids suppressing a platform-level shortcut unexpectedly.
                                     false
-                                } else false
+                                } else {
+                                    false
+                                }
                             }
                             .pointerInput(zoom, spaceHeld) {
                                 awaitPointerEventScope {
@@ -574,7 +733,10 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
                                                     val nextZoom = (zoom * exp((-change.scrollDelta.y * .12f).toDouble()).toFloat()).coerceIn(.15f, 2.5f)
                                                     if (nextZoom != zoom) {
                                                         zoomAnchor = CanvasZoomAnchor(
-                                                            content = Offset((horizontal.value + change.position.x) / zoom, (vertical.value + change.position.y) / zoom),
+                                                            content = Offset(
+                                                                (horizontal.value + change.position.x) / zoom,
+                                                                (vertical.value + change.position.y) / zoom
+                                                            ),
                                                             pointer = change.position,
                                                         )
                                                         zoom = nextZoom
@@ -584,12 +746,14 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
                                                 // Leave unmodified wheel events untouched so the
                                                 // normal vertical/horizontal scroll modifiers run.
                                             }
+
                                             PointerEventType.Press -> {
                                                 canvasFocusRequester.requestFocus()
                                                 panning = spaceHeld || event.buttons.isTertiaryPressed
                                                 lastPosition = change.position
                                                 if (panning) event.changes.forEach { it.consume() }
                                             }
+
                                             PointerEventType.Move -> if (panning) {
                                                 val delta = change.position - lastPosition
                                                 horizontal.dispatchRawDelta(-delta.x)
@@ -597,6 +761,7 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
                                                 lastPosition = change.position
                                                 event.changes.forEach { it.consume() }
                                             }
+
                                             PointerEventType.Release -> panning = false
                                             else -> Unit
                                         }
@@ -640,6 +805,7 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
                     warnings.take(2).forEach { AppText(it, color = DANGER_RED, fontSize = 10.sp, maxLines = 2) }
                 }
             }
+
             preview is DiagramPreviewState.Failed -> CenteredHint(preview.message, DANGER_RED)
             preview is DiagramPreviewState.Computing -> CenteredHint("Building…", tc.td)
             else -> CenteredHint("Pick participants and a range.", tc.td)
@@ -657,11 +823,12 @@ private fun CenteredHint(text: String, color: androidx.compose.ui.graphics.Color
 // ── Footer ───────────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun DialogFooter(state: AppState, request: SeqDiagramRequest?, readOnly: Boolean) {
+private fun WorkspaceFooter(state: AppState, request: SeqDiagramRequest?, readOnly: Boolean, onClose: () -> Unit) {
     val tc = tc()
     val ready = state.seqDiagrams.preview.diagramOrNull?.messages?.isNotEmpty() == true
     val offlineSource = state.seqDiagrams.offlineLibraryRequest?.item?.parsed?.source
     val linkedPrimary = state.settings.diagramLinkedNotePrimary
+
     fun attach(link: Boolean) {
         val req = request ?: return
         // Attachments always reference a durable draft. Saving first also means a second attach
@@ -692,6 +859,6 @@ private fun DialogFooter(state: AppState, request: SeqDiagramRequest?, readOnly:
             val source = state.seqDiagrams.currentSource() ?: offlineSource.orEmpty()
             state.seqDiagrams.currentPng(tc.toDiagramTheme())?.let { state.copyImageToClipboard(it, source) }
         }
-        DialogActionButton("Cancel", active = false) { state.seqDiagrams.cancel() }
+        DialogActionButton("Close", active = false, onClick = onClose)
     }
 }

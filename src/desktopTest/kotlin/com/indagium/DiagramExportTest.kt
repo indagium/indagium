@@ -1,10 +1,10 @@
 package com.indagium
 
+import com.indagium.diagram.DiagramAttachmentMetadata
+import com.indagium.diagram.DiagramExportMode
 import com.indagium.diagram.DiagramMessage
 import com.indagium.diagram.DiagramParticipant
 import com.indagium.diagram.DiagramTheme
-import com.indagium.diagram.DiagramAttachmentMetadata
-import com.indagium.diagram.DiagramExportMode
 import com.indagium.diagram.MessageKind
 import com.indagium.diagram.ParticipantKind
 import com.indagium.diagram.SeqDiagram
@@ -36,6 +36,9 @@ import kotlin.test.assertTrue
  * something slightly wrong.
  */
 class DiagramExportTest {
+    private companion object {
+        const val EXAMPLE_ENTRY_ID = 1001
+    }
 
     private val participants = listOf(
         DiagramParticipant("BT", "BluetoothAdapter", ParticipantKind.TAG, tag = "BT"),
@@ -58,7 +61,9 @@ class DiagramExportTest {
         AnnBlock.Note(id, encodeDiagramNote(model.spec, "sequenceDiagram\n  BT->>BMS: enable() called", model, attachment))
 
     private fun tabWith(vararg blocks: AnnBlock, frameStamp: String? = null) = mkTab(
-        "t1", "bugreport.txt", listOf(LogEntry(1001, "10:00:00.000", LogLevel.I, "BT", "enable() called")),
+        "t1", "bugreport.txt", listOf(
+            LogEntry(EXAMPLE_ENTRY_ID, "10:00:00.000", LogLevel.I, "BT", "enable() called"),
+        ),
     ).let { it.copy(annotations = Annotations(blocks = blocks.toList(), frameStamp = frameStamp)) }
 
     // ── Filenames ────────────────────────────────────────────────────────────────────────────

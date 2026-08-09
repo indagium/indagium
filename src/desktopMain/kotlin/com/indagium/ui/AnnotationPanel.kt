@@ -11,7 +11,6 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -59,11 +58,10 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
-import com.indagium.diagram.ParsedDiagram
 import com.indagium.diagram.DiagramExportMode
+import com.indagium.diagram.DiagramTheme
+import com.indagium.diagram.ParsedDiagram
 import com.indagium.diagram.parseDiagramNote
-import com.indagium.diagram.stripDiagramSpecHeader
-import com.indagium.diagram.toPngBytes
 import com.indagium.diagram.updateDiagramNoteCaption
 import com.indagium.diagram.updateDiagramNoteExportMode
 import com.indagium.model.AnnBlock
@@ -79,6 +77,8 @@ import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.MarkdownTypography
 import com.mikepenz.markdown.model.rememberMarkdownState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.awt.FileDialog
 import java.awt.Frame
 import java.awt.Toolkit
@@ -99,12 +99,201 @@ private const val UNVERIFIED_RELINK_NOTICE_MS = 8_000L
 // what's really on screen the way a content-dependent guess (like textFieldDp for text) would.
 private const val IMAGE_BLOCK_THUMBNAIL_DP = 140f
 
-// Height-estimate inputs for a diagram note (see estimateBlockHeightPx). DIAGRAM_CHROME_DP covers
-// the participant headers, the gap above the first row and the stats/actions line below the
-// picture; DIAGRAM_ROW_DP is one message row's vertical pitch at 1x, matching the renderer's own
-// BASE_ROW_H. Both are deliberately generous — an over-estimate self-corrects.
-private const val DIAGRAM_CHROME_DP = 130f
-private const val DIAGRAM_ROW_DP = 44f
+/**
+ * The Notes column can contain many large diagram attachments.  A full [parseDiagramNote] decodes
+ * every carried message and participant, which is unnecessary just to draw a folded card header.
+ * This deliberately shallow extraction reads only the small top-level metadata it displays; the
+ * full, trusted parser remains the authority and runs only when a card is expanded or an action
+ * needs the model.
+ */
+internal data class DiagramNoteSummary(
+    val title: String,
+    val caption: String,
+    val exportMode: DiagramExportMode,
+    val scope: String,
+    val messageCount: Int?,
+    val revision: Long?,
+    /** Maximum number of input characters inspected to produce this summary. */
+    val inspectedChars: Int,
+)
+
+internal object DiagramNoteSummaryCache {
+    private const val MAX_ENTRIES = 48
+    internal const val MAX_INSPECTED_CHARS = 64 * 1024
+    private const val MAX_LEADING_WHITESPACE = 256
+    private const val DIAGRAM_MARKER = "<!-- indagium:diagram "
+    private const val HEADER_TERMINATOR = " -->"
+    private const val UNKNOWN_RANGE_ENDPOINT = "?"
+    private val supportedVersions = setOf("v1", "v2", "v3")
+    private val payloadKeys = listOf("\"snapshot\"", "\"model\"")
+    private val unicodeEscapeRegex = Regex("\\\\u([0-9a-fA-F]{4})")
+    private val rangeRegex = Regex("\\\"range\\\"\\s*:\\s*\\{([^}]*)}")
+
+    private data class Cached(val summary: DiagramNoteSummary?)
+
+    private data class BoundedMetadata(val text: String, val inspectedChars: Int)
+
+    // Identity keys are intentional. String.hashCode() scans the entire string the first time it
+    // is used, which would undo the bounded parser for a multi-megabyte note before parsing even
+    // began. Annotation text is immutable and Compose retains the same String instance between
+    // edits, so identity provides the cache semantics this UI path actually needs in O(1).
+    private val cache = java.util.IdentityHashMap<String, Cached>()
+    private val insertionOrder = java.util.ArrayDeque<String>()
+
+    fun summary(text: String): DiagramNoteSummary? {
+        synchronized(cache) {
+            if (cache.containsKey(text)) return cache[text]?.summary
+        }
+        val summary = parseSummary(text)
+        synchronized(cache) {
+            if (!cache.containsKey(text)) {
+                while (cache.size >= MAX_ENTRIES) cache.remove(insertionOrder.removeFirst())
+                insertionOrder.addLast(text)
+            }
+            cache[text] = Cached(summary)
+        }
+        return summary
+    }
+
+    private fun parseSummary(text: String): DiagramNoteSummary? {
+        val metadata = boundedMetadata(text) ?: return null
+        val header = metadata.text
+        return DiagramNoteSummary(
+            title = jsonString(header, "title").orEmpty(),
+            caption = jsonString(header, "caption").orEmpty(),
+            exportMode = exportModeFrom(header),
+            scope = scopeFrom(header),
+            // v1-v3 do not carry a compact count. Counting model objects would scan unbounded
+            // data and v1/v2 snapshots can duplicate them, so folded cards omit it honestly.
+            messageCount = null,
+            revision = jsonNumber(header, "revision"),
+            inspectedChars = metadata.inspectedChars,
+        )
+    }
+
+    private fun boundedMetadata(text: String): BoundedMetadata? {
+        val markerStart = markerStart(text) ?: return null
+        val headerStart = markerStart + DIAGRAM_MARKER.length
+        val inspectedEnd = minOf(text.length, headerStart + MAX_INSPECTED_CHARS)
+        val prefix = text.substring(headerStart, inspectedEnd)
+        val versionEnd = prefix.indexOf(' ')
+        val version = prefix.takeIf { versionEnd > 0 }?.substring(0, versionEnd)
+        if (version !in supportedVersions) return null
+        return BoundedMetadata(
+            text = prefix.substring(0, metadataEnd(prefix, versionEnd)),
+            inspectedChars = prefix.length,
+        )
+    }
+
+    private fun markerStart(text: String): Int? {
+        var start = 0
+        while (start < text.length && start < MAX_LEADING_WHITESPACE && text[start].isWhitespace()) start++
+        val excessiveWhitespace = start == MAX_LEADING_WHITESPACE && start < text.length && text[start].isWhitespace()
+        return start.takeUnless { excessiveWhitespace }
+            ?.takeIf { text.regionMatches(it, DIAGRAM_MARKER, 0, DIAGRAM_MARKER.length) }
+    }
+
+    private fun metadataEnd(prefix: String, searchStart: Int): Int {
+        val payloadStarts = payloadKeys.map { prefix.indexOf(it, searchStart) }.filter { it >= 0 }
+        val terminator = prefix.indexOf(HEADER_TERMINATOR, searchStart).takeIf { it >= 0 }
+        return (payloadStarts + listOfNotNull(terminator)).minOrNull() ?: prefix.length
+    }
+
+    private fun jsonString(text: String, name: String): String? {
+        val encoded = Regex("\\\"$name\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)\\\"")
+            .find(text)?.groupValues?.get(1) ?: return null
+        // This small unescaper covers JSON scalar escapes without decoding the carried model.
+        return encoded.replace("\\\\\"", "\"")
+            .replace("\\\\\\\\", "\\")
+            .replace("\\\\n", "\n")
+            .replace("\\\\r", "\r")
+            .replace("\\\\t", "\t")
+            .replace(unicodeEscapeRegex) { it.groupValues[1].toInt(16).toChar().toString() }
+    }
+
+    private fun jsonNumber(text: String, name: String): Long? =
+        Regex("\\\"$name\\\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1)?.toLongOrNull()
+
+    private fun exportModeFrom(header: String): DiagramExportMode =
+        if (jsonString(header, "exportMode") == DiagramExportMode.SOURCE.name) {
+            DiagramExportMode.SOURCE
+        } else {
+            DiagramExportMode.IMAGE
+        }
+
+    private fun scopeFrom(header: String): String {
+        val range = rangeRegex.find(header)?.groupValues?.get(1).orEmpty()
+        return when (jsonString(range, "kind")) {
+            "ids" -> "Lines ${jsonNumber(range, "from") ?: UNKNOWN_RANGE_ENDPOINT}–" +
+                "${jsonNumber(range, "to") ?: UNKNOWN_RANGE_ENDPOINT}"
+            "time" -> "${jsonString(range, "fromTs").orEmpty().ifBlank { "start" }}–" +
+                jsonString(range, "toTs").orEmpty().ifBlank { "end" }
+            "seqGroup" -> "Sequence group ${jsonString(range, "gid").orEmpty()}"
+            else -> "Current filtered view"
+        }
+    }
+
+    internal fun clearForTest() {
+        synchronized(cache) {
+            cache.clear()
+            insertionOrder.clear()
+        }
+    }
+}
+
+/** Full parser cache for the moment a folded card is expanded. */
+internal object DiagramNoteParseCache {
+    private const val MAX_ENTRIES = 48
+
+    private data class Cached(val parsed: ParsedDiagram?)
+
+    private val cache = object : LinkedHashMap<String, Cached>(MAX_ENTRIES, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Cached>?): Boolean = size > MAX_ENTRIES
+    }
+    private val parseCount = java.util.concurrent.atomic.AtomicInteger()
+
+    fun parse(text: String): ParsedDiagram? {
+        synchronized(cache) { cache[text] }?.let { return it.parsed }
+        parseCount.incrementAndGet()
+        val parsed = parseDiagramNote(text)
+        synchronized(cache) { cache[text] = Cached(parsed) }
+        return parsed
+    }
+
+    internal fun parseCountForTest(): Int = parseCount.get()
+
+    internal fun clearForTest() {
+        synchronized(cache) { cache.clear() }
+        parseCount.set(0)
+    }
+}
+
+private fun stripDiagramHeaderFast(text: String): String {
+    val start = text.indexOf("<!-- indagium:diagram ")
+    if (start < 0) return text
+    val end = text.indexOf(" -->", start)
+    return if (end < 0) text else text.substring(end + 4).trimStart('\r', '\n')
+}
+
+private data class ExpandedDiagram(val parsed: ParsedDiagram, val display: DiagramDisplay?)
+
+@Composable
+private fun rememberExpandedDiagram(
+    noteText: String,
+    theme: DiagramTheme,
+    expanded: Boolean,
+    allowSnapshotPreview: Boolean = false,
+): ExpandedDiagram? {
+    val result by produceState<ExpandedDiagram?>(initialValue = null, noteText, theme, expanded, allowSnapshotPreview) {
+        value = if (!expanded) null else withContext(Dispatchers.Default) {
+            DiagramNoteParseCache.parse(noteText)?.let { parsed ->
+                val model = if (allowSnapshotPreview) parsed.snapshotPreviewModel else parsed.model
+                ExpandedDiagram(parsed, model?.let { DiagramRenderCache.display(it, theme) })
+            }
+        }
+    }
+    return result
+}
 
 private data class DiagramScrollAnchor(
     val blockId: String,
@@ -305,19 +494,13 @@ fun AnnotationPanel(
         val outerChromeDp = 20f
         val dp = when (block) {
             is AnnBlock.Note -> {
-                // A diagram note draws a picture ABOVE its text field. Estimate the picture from
-                // the model's own message count (the one thing that drives its height) rather than
-                // rendering it here — this runs during layout for every block, and rasterizing to
-                // measure would be far too expensive. Erring high is safe per this function's own
-                // doc: an over-estimate self-corrects, an under-estimate causes the scroll clamp.
-                val diagramDp = parseDiagramNote(block.text)?.model?.let { model ->
-                    DIAGRAM_CHROME_DP + model.messages.size * DIAGRAM_ROW_DP
-                } ?: 0f
-                // Diagram source is deliberately not an editor field. It can be very large, and
-                // using it for this estimate used to reserve several screens of blank space for a
-                // collapsed card. The editable caption is the only user-visible text field.
-                val caption = parseDiagramNote(block.text)?.caption.orEmpty()
-                controlsDp + diagramDp + textFieldDp(caption, 20.7f, 40f) + outerChromeDp
+                // Folded diagram cards do not decode or draw their carried model.  The shallow
+                // summary gives us a stable header-height estimate without making a long Notes
+                // document pay an O(messages) parse during layout.
+                val summary = DiagramNoteSummaryCache.summary(block.text)
+                val collapsedDiagramDp = if (summary != null) 38f else 0f
+                val caption = summary?.caption.orEmpty()
+                controlsDp + collapsedDiagramDp + textFieldDp(caption, 20.7f, 40f) + outerChromeDp
             }
             is AnnBlock.LogRef -> {
                 val captionDp = textFieldDp(block.caption, 20.7f, 52f)
@@ -1381,17 +1564,22 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                     // Diagrams are drawn out-of-band from the Markdown renderer, the same way
                     // AnnBlock.Image is below — the renderer has no Mermaid support, and feeding it
                     // the note text raw would show a wall of spec-header JSON followed by source.
-                    val parsed = remember(block.text) { parseDiagramNote(block.text) }
+                    val summary = remember(block.text) { DiagramNoteSummaryCache.summary(block.text) }
                     // `model` is deliberately null for a v2 attachment whose visible source no
                     // longer hashes to its carried model. The Markdown preview is read-only, so
                     // it may present that retained model as an explicitly labelled snapshot;
                     // otherwise v2 attachments vanish between the surrounding log blocks.
                     // Editor and hit-test paths continue to use ParsedDiagram.model only.
-                    val diagramModel = parsed?.snapshotPreviewModel
-                    if (parsed != null && diagramModel != null) {
-                        val diagramTheme = tc.toDiagramTheme()
-                        val rendered = remember(diagramModel, diagramTheme) { DiagramRenderCache.render(diagramModel, diagramTheme) }
-                        val bitmap = remember(rendered) { rendered.toComposeBitmap() }
+                    val expandedDiagram = if (summary != null) {
+                        rememberExpandedDiagram(block.text, tc.toDiagramTheme(), expanded = true, allowSnapshotPreview = true)
+                    } else {
+                        null
+                    }
+                    val parsed = expandedDiagram?.parsed
+                    val display = expandedDiagram?.display
+                    if (parsed != null && display != null) {
+                        val rendered = display.rendered
+                        val bitmap = display.bitmap
                         // A sequence diagram needs every available horizontal pixel. The bounded
                         // viewport below owns vertical overflow, preserving readable text without
                         // shrinking the card to an arbitrary fraction of the prose column.
@@ -1456,11 +1644,16 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                             }
                         }
                         if (settings.numberAnnotationBlocks) blockNumber++
+                    } else if (summary != null && expandedDiagram == null) {
+                        // The dialog starts its diagram work asynchronously too.  Keep the rest of
+                        // the Markdown preview responsive while large attachments rasterize.
+                        AppText("Rendering ${summary.title.ifBlank { "sequence diagram" }}…", color = tc.td, fontSize = 11.sp)
+                        if (settings.numberAnnotationBlocks) blockNumber++
                     } else {
                         AnnotationMarkdownText(
                             // A diagram note with no drawable model still shouldn't leak its header
                             // into the preview; stripping is a no-op for an ordinary note.
-                            text = if (parsed != null) stripDiagramSpecHeader(block.text) else block.text,
+                            text = if (summary != null) stripDiagramHeaderFast(block.text) else block.text,
                             tc = tc,
                             numberPrefix = if (settings.numberAnnotationBlocks) "${blockNumber++}. " else null,
                         )
@@ -1629,8 +1822,8 @@ private fun NoteBlock(
     // Diagram notes are cards, not an exposed model header plus dialect source. Opening the
     // workspace is the only normal editing route, which keeps the rendered model and saved source
     // in sync. A malformed/non-diagram note remains the ordinary editable text control below.
-    val diagram = remember(block.text) { parseDiagramNote(block.text) }
-    var diagramExpanded by remember(diagram?.spec, diagram?.model) { mutableStateOf(false) }
+    val diagram = remember(block.text) { DiagramNoteSummaryCache.summary(block.text) }
+    var diagramExpanded by remember(block.id, block.text) { mutableStateOf(false) }
     Column(
         Modifier.fillMaxWidth()
             .border(BorderStroke(2.dp, if (focused) tc.ac else tc.ac.copy(.35f)))
@@ -1641,20 +1834,23 @@ private fun NoteBlock(
             tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, dragHandleModifier = dragHandleModifier,
             onNavigate = if (diagram != null) onEditDiagram else null,
             onNavigateTooltip = if (diagram != null) "Open diagram workspace" else null,
-            onCopyImage = diagram?.model?.let { model ->
+            onCopyImage = diagram?.let { summary ->
                 {
-                    val title = diagram.spec.title.ifBlank { "Sequence diagram" }
-                    onCopyDiagramImage(
-                        DiagramRenderCache.pngBytes(model, tc.toDiagramTheme()),
-                        "Sequence diagram: $title",
-                    )
+                    // Copy is an explicit action, so it is the right point to pay for parsing
+                    // and PNG encoding. A folded card itself stays model-free.
+                    DiagramNoteParseCache.parse(block.text)?.model?.let { model ->
+                        onCopyDiagramImage(
+                            DiagramRenderCache.pngBytes(model, tc.toDiagramTheme()),
+                            "Sequence diagram: ${summary.title.ifBlank { "Sequence diagram" }}",
+                        )
+                    }
                 }
             },
-            afterBadgeContent = diagram?.let { parsed ->
+            afterBadgeContent = diagram?.let { summary ->
                 {
                     DiagramExportModeSwitcher(
                         noteText = block.text,
-                        exportMode = parsed.exportMode,
+                        exportMode = summary.exportMode,
                         onUpdateDiagramText = onUpdate,
                     )
                 }
@@ -1664,7 +1860,7 @@ private fun NoteBlock(
         if (diagram != null) {
             DiagramNoteView(
                 noteText = block.text,
-                parsed = diagram,
+                summary = diagram,
                 tc = tc,
                 fieldFocusRequester = fieldFocusRequester,
                 onFieldFocusChanged = onFieldFocusChanged,
@@ -1698,20 +1894,12 @@ private fun NoteBlock(
 }
 
 @Composable
-private fun DiagramHeaderSummary(parsed: ParsedDiagram) {
-    val model = parsed.model
-    val selection = when (val range = parsed.spec.range) {
-        is com.indagium.diagram.DiagramRange.Ids -> "Lines ${range.from}–${range.to}"
-        is com.indagium.diagram.DiagramRange.Time -> "${range.fromTs.ifBlank { "start" }}–${range.toTs.ifBlank { "end" }}"
-        com.indagium.diagram.DiagramRange.VisibleView -> "Current filtered view"
-        is com.indagium.diagram.DiagramRange.SeqGroupRef -> "Sequence group ${range.gid}"
-    }
-    val metrics = model?.let {
-        "${it.messages.size} arrows · ${it.participants.size} lifelines" + if (it.truncated) " · truncated" else ""
-    }
+private fun DiagramHeaderSummary(summary: DiagramNoteSummary) {
+    val metrics = summary.messageCount?.let { "$it arrows" }
+    val revision = summary.revision?.let { "rev $it" }
     Column(Modifier.widthIn(max = 180.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
         AppText(
-            parsed.spec.title.ifBlank { "Sequence diagram" },
+            summary.title.ifBlank { "Sequence diagram" },
             color = tc().tx,
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
@@ -1719,7 +1907,7 @@ private fun DiagramHeaderSummary(parsed: ParsedDiagram) {
             overflow = TextOverflow.Ellipsis,
         )
         AppText(
-            listOfNotNull(selection, metrics).joinToString(" · ") + if (model == null) " · source only" else "",
+            listOfNotNull(summary.scope, metrics, revision).joinToString(" · "),
             color = tc().td,
             fontSize = 9.sp,
             maxLines = 1,
@@ -1791,6 +1979,7 @@ private fun DiagramExportModeSwitcher(
 }
 
 // ── Diagram note view ──────────────────────────────────────────────────
+
 /**
  * The picture half of a diagram note: the rendered sequence diagram, its stats line, and the
  * actions that only make sense for a diagram.
@@ -1803,7 +1992,7 @@ private fun DiagramExportModeSwitcher(
 @Composable
 private fun DiagramNoteView(
     noteText: String,
-    parsed: ParsedDiagram,
+    summary: DiagramNoteSummary,
     tc: ThemeColors,
     fieldFocusRequester: FocusRequester?,
     onFieldFocusChanged: (Boolean) -> Unit,
@@ -1812,9 +2001,8 @@ private fun DiagramNoteView(
     expanded: Boolean,
     onToggleExpanded: () -> Unit,
 ) {
-    val model = parsed.model
     BasicTextField(
-        value = parsed.caption,
+        value = summary.caption,
         onValueChange = { caption ->
             updateDiagramNoteCaption(noteText, caption)?.let(onUpdateDiagramText)
         },
@@ -1827,7 +2015,7 @@ private fun DiagramNoteView(
             .onFocusChanged { onFieldFocusChanged(it.isFocused) }
             .padding(8.dp).defaultMinSize(minHeight = 40.dp),
         decorationBox = { inner ->
-            if (parsed.caption.isEmpty()) AppText("Add a caption…", color = tc.td, fontSize = 12.sp)
+            if (summary.caption.isEmpty()) AppText("Add a caption…", color = tc.td, fontSize = 12.sp)
             inner()
         },
     )
@@ -1843,48 +2031,57 @@ private fun DiagramNoteView(
             Modifier.size(18.dp).background(tc.br.copy(.5f), CORNER_SM),
             contentAlignment = Alignment.Center,
         ) { AppText(if (expanded) "▾" else "▸", color = tc.ts, fontSize = 14.sp) }
-        DiagramHeaderSummary(parsed)
+        DiagramHeaderSummary(summary)
     }
-    // Render even while the preview is collapsed so the card can retain its current layout. PNG
-    // conversion for the header's Copy image action remains deferred until the action is clicked.
+    // Folded cards intentionally do no model decode, rasterization, or bitmap conversion.  An
+    // expansion starts the full parse/render pipeline on Dispatchers.Default and publishes its
+    // finished display artifact back to Compose.
     val theme = tc.toDiagramTheme()
-    val rendered = if (model != null) remember(model, theme) { DiagramRenderCache.render(model, theme) } else null
+    val expandedDiagram = rememberExpandedDiagram(noteText, theme, expanded)
     if (expanded) {
         Spacer(Modifier.height(6.dp))
-        if (rendered == null) {
-            // A diagram note written by an older build, or hand-authored: the fence still exports
-            // wherever Mermaid is supported, but there is no model to draw or click here.
-            AppText("Diagram source only — regenerate to see and click the picture.", color = tc.td, fontSize = 11.sp, maxLines = 2)
-        } else {
-            val bitmap = remember(rendered) { rendered.toComposeBitmap() }
-            // The renderer uses a generously sized editor canvas. A note card must not inherit
-            // that raw canvas size, so fit the visible preview within the available width and a
-            // fixed height while retaining the exact aspect ratio for hit testing.
-            BoxWithConstraints(Modifier.fillMaxWidth()) {
-                val maxPreviewHeight = 300.dp
-                val aspectRatio = rendered.widthPx.toFloat() / rendered.heightPx.coerceAtLeast(1)
-                val previewWidth = minOf(maxWidth, maxPreviewHeight * aspectRatio)
-                val previewHeight = previewWidth / aspectRatio
-                val density = LocalDensity.current.density
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Image(
-                        bitmap = bitmap,
-                        contentDescription = "Sequence diagram",
-                        modifier = Modifier
-                            .width(previewWidth)
-                            .height(previewHeight)
-                            .pointerInput(rendered, previewWidth, previewHeight) {
-                                detectTapGestures { offset ->
-                                    val displayWidthPx = previewWidth.value * density
-                                    val displayHeightPx = previewHeight.value * density
-                                    val ix = (offset.x / displayWidthPx * rendered.widthPx).toInt()
-                                    val iy = (offset.y / displayHeightPx * rendered.heightPx).toInt()
-                                    rendered.hits.firstOrNull { h ->
-                                        ix >= h.x && ix <= h.x + h.width && iy >= h.y && iy <= h.y + h.height
-                                    }?.let { if (it.entryId > 0) onNavigateLine(it.entryId) }
-                                }
-                            },
-                    )
+        when {
+            expandedDiagram == null -> {
+                AppText("Rendering diagram…", color = tc.td, fontSize = 11.sp)
+            }
+            expandedDiagram.display == null -> {
+                // A diagram note written by an older build, or hand-authored: the fence still exports
+                // wherever Mermaid is supported, but there is no model to draw or click here.
+                AppText("Diagram source only — regenerate to see and click the picture.", color = tc.td, fontSize = 11.sp, maxLines = 2)
+            }
+            else -> {
+                val display = expandedDiagram.display
+                val rendered = display.rendered
+                val bitmap = display.bitmap
+                // The renderer uses a generously sized editor canvas. A note card must not inherit
+                // that raw canvas size, so fit the visible preview within the available width and a
+                // fixed height while retaining the exact aspect ratio for hit testing.
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    val maxPreviewHeight = 300.dp
+                    val aspectRatio = rendered.widthPx.toFloat() / rendered.heightPx.coerceAtLeast(1)
+                    val previewWidth = minOf(maxWidth, maxPreviewHeight * aspectRatio)
+                    val previewHeight = previewWidth / aspectRatio
+                    val density = LocalDensity.current.density
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        Image(
+                            bitmap = bitmap,
+                            contentDescription = "Sequence diagram",
+                            modifier = Modifier
+                                .width(previewWidth)
+                                .height(previewHeight)
+                                .pointerInput(rendered, previewWidth, previewHeight) {
+                                    detectTapGestures { offset ->
+                                        val displayWidthPx = previewWidth.value * density
+                                        val displayHeightPx = previewHeight.value * density
+                                        val ix = (offset.x / displayWidthPx * rendered.widthPx).toInt()
+                                        val iy = (offset.y / displayHeightPx * rendered.heightPx).toInt()
+                                        rendered.hits.firstOrNull { h ->
+                                            ix >= h.x && ix <= h.x + h.width && iy >= h.y && iy <= h.y + h.height
+                                        }?.let { if (it.entryId > 0) onNavigateLine(it.entryId) }
+                                    }
+                                },
+                        )
+                    }
                 }
             }
         }
@@ -1934,7 +2131,7 @@ private fun LogRefBlock(
             ) { AppText("from ${block.sourceFilename}", color = tc.ac, fontSize = 9.sp, fontFamily = MONO) }
         }
         Spacer(Modifier.height(5.dp))
-    BasicTextField(
+        BasicTextField(
             value = block.caption,
             onValueChange = onUpdateCaption,
             textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
@@ -1948,8 +2145,8 @@ private fun LogRefBlock(
             decorationBox = { inner ->
                 if (block.caption.isEmpty()) AppText("Add a note or analysis…", color = tc.td, fontSize = 12.sp)
                 inner()
-        },
-    )
+            },
+        )
         Spacer(Modifier.height(6.dp))
 
         // Referenced log lines shown BELOW the text

@@ -13,6 +13,7 @@ import java.util.Base64
 // inside an escaped fragment is safe, but the risk of a mask rule's word-boundary regex matching
 // inside a base64 image payload (however unlikely) isn't worth it for a feature whose plain-text
 // fallback is already masked.
+
 /**
  * [renderDiagramPng] rasterizes a diagram note for inline embedding. It is injected rather than
  * called directly because rendering needs the active colour theme, which lives in `ui` — this

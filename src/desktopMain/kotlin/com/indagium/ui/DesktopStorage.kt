@@ -233,6 +233,13 @@ object DesktopStorage {
     private const val APP_DIR_NAME = "Indagium"
     private const val LEGACY_APP_DIR_NAME = "openLog2"
 
+    // This is deliberately process-local and is only installed by Main.kt after it has observed
+    // the ephemeral debug-control switch.  It is not a user setting and must never be restored
+    // from autosave: its sole purpose is letting an automation run keep its token, autosave,
+    // Recent list, caches, and single-instance files away from a developer's real app-data dir.
+    @Volatile
+    private var debugAppDataDirOverride: File? = null
+
     /** Outcome of the last [migrateAppDataDirIfNeeded] run this process, for later diagnostics. */
     @Volatile
     internal var lastMigrationOutcome: MigrationOutcome? = null
@@ -250,11 +257,102 @@ object DesktopStorage {
         }
     }
 
+    /**
+     * The process app-data directory. Production returns the platform default; a test-only,
+     * explicitly configured debug override may replace it for the lifetime of this process.
+     */
+    fun appDataDir(): File = debugAppDataDirOverride ?: platformDataDir(
+        APP_DIR_NAME,
+        System.getProperty("os.name").orEmpty(),
+        System.getProperty("user.home").orEmpty(),
+        System::getenv,
+    )
+
+    /** Explicit platform calculation kept separate so storage tests never observe process state. */
     fun appDataDir(
-        osName: String = System.getProperty("os.name").orEmpty(),
-        userHome: String = System.getProperty("user.home").orEmpty(),
-        getenv: (String) -> String? = System::getenv,
+        osName: String,
+        userHome: String,
+        getenv: (String) -> String?,
     ): File = platformDataDir(APP_DIR_NAME, osName, userHome, getenv)
+
+    /**
+     * Installs an isolated app-data directory for a debug-control process only.
+     *
+     * A caller must supply an absolute path and enable the ephemeral debug-control launch switch.
+     * Existing directories must be empty so the launch cannot restore a previous autosave or Recent
+     * list. Invalid requests fail closed rather than silently falling back to a user's normal
+     * app-data directory.
+     */
+    internal fun installDebugAppDataDirOverride(
+        requestedPath: String?,
+        debugControlEnabled: Boolean,
+    ): File? {
+        val isolated = resolveDebugAppDataDirOverride(requestedPath, debugControlEnabled)
+        debugAppDataDirOverride = isolated
+        return isolated
+    }
+
+    /** Pure launch-policy resolver; kept separate from installation for focused, state-free tests. */
+    internal fun resolveDebugAppDataDirOverride(
+        requestedPath: String?,
+        debugControlEnabled: Boolean,
+    ): File? {
+        if (requestedPath.isNullOrBlank()) {
+            return null
+        }
+        if (!debugControlEnabled) {
+            return null
+        }
+
+        val requested = File(requestedPath)
+        require(requested.isAbsolute) {
+            "INDAGIUM_DEBUG_APP_DATA_DIR must be an absolute path"
+        }
+        requireNoSymlinkInDebugAppDataPath(requested.toPath())
+        val isolated = requested.canonicalFile
+        require(!isolated.exists() || isolated.isDirectory) {
+            "INDAGIUM_DEBUG_APP_DATA_DIR must name a directory, not a file"
+        }
+        require(isUnderApprovedDebugTempRoot(isolated)) {
+            "INDAGIUM_DEBUG_APP_DATA_DIR must be inside the JVM temporary directory or a macOS /private temporary root"
+        }
+        require(!isolated.isDirectory || isolated.list()?.isEmpty() == true) {
+            "INDAGIUM_DEBUG_APP_DATA_DIR must be empty to prevent restoring autosave or Recent state"
+        }
+        return isolated
+    }
+
+    internal fun hasDebugAppDataDirOverride(): Boolean = debugAppDataDirOverride != null
+
+    /**
+     * Reject a symlink anywhere in the spelling supplied by the launcher, including an ancestor
+     * of a not-yet-created target. `canonicalFile` alone is insufficient: it would hide the link
+     * after following it, letting an apparently temporary test root write somewhere unexpected.
+     */
+    private fun requireNoSymlinkInDebugAppDataPath(requested: Path) {
+        var current = requireNotNull(requested.root) { "debug app-data path must be absolute" }
+        requested.forEach { segment ->
+            current = current.resolve(segment)
+            require(!Files.isSymbolicLink(current)) {
+                "INDAGIUM_DEBUG_APP_DATA_DIR must not contain symlinked path components"
+            }
+        }
+    }
+
+    /** Only a fresh directory beneath an OS/JVM temporary root is safe for automation isolation. */
+    private fun isUnderApprovedDebugTempRoot(candidate: File): Boolean {
+        val candidatePath = candidate.toPath()
+        return approvedDebugTempRoots().any { root -> candidatePath != root && candidatePath.startsWith(root) }
+    }
+
+    private fun approvedDebugTempRoots(): List<Path> {
+        val roots = mutableListOf(File(System.getProperty("java.io.tmpdir")).canonicalFile)
+        if (System.getProperty("os.name").orEmpty().contains("mac", ignoreCase = true)) {
+            roots += File("/private/tmp").canonicalFile
+            roots += File("/private/var/folders").canonicalFile
+        }
+        return roots.map(File::toPath).distinct()
+    }
 
     /** The pre-rename locations `appDataDir()` used to produce, for the one-time migration. */
     fun legacyAppDataDir(
@@ -287,8 +385,16 @@ object DesktopStorage {
     fun legacyNotesDir(userHome: String = System.getProperty("user.home").orEmpty()): File =
         File(userHome, ".openlog2/notes")
 
-    /** Wires the real [appDataDir] / [legacyAppDataDir] and runs the one-time copy. Call first in main(). */
+    /**
+     * Wires the real [appDataDir] / [legacyAppDataDir] and runs the one-time copy. Call first in
+     * main(). A debug-control process with an isolated app-data override intentionally skips this:
+     * migration would import the user's normal session into the test instance.
+     */
     fun migrateAppDataDirIfNeeded() {
+        if (hasDebugAppDataDirOverride()) {
+            lastMigrationOutcome = null
+            return
+        }
         migrateAppDataDir(appDataDir(), legacyAppDataDir())
     }
 

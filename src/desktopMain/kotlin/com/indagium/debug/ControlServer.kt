@@ -1289,18 +1289,22 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     McpTool(
         "build_sequence_diagram",
         "Build a UML sequence diagram from a range of a tab's log lines and return its Mermaid (or " +
-            "PlantUML) source. Log tags become participants (lifelines) and an arrow is drawn each " +
-            "time the logging tag changes, so this reads as a component-handoff diagram. Does NOT " +
-            "write anything: to put the result in the analysis notes, pass the returned source to " +
-            "add_text_note. Curate hard — pick 4-8 meaningful tags and a tight line range; a diagram " +
-            "over an unfiltered log is unreadable. Returns the source plus participants, messageCount, " +
-            "truncated and any warnings.",
+            "PlantUML) source. The default Component flow groups tag changes into component handoffs. " +
+            "Use components to give one or more raw tags a stable lifeline; tags outside enabled " +
+            "components are hidden unless unmappedTagPolicy=groupAsOther. This is read-only: pass " +
+            "returned source to add_text_note to store it. Legacy tags/actors/entryActor/exitActor " +
+            "remain supported. Returns participants, messages, evidence, coverage, truncation and warnings.",
         schema(
             "tabId" to "string",
             "tags" to "array",
+            "components" to "array",
+            "mergedTags" to "object",
             "actors" to "array",
             "entryActor" to "string",
             "exitActor" to "string",
+            "unmappedTagPolicy" to "string",
+            "sourceEnrichment" to "boolean",
+            "activationPolicy" to "string",
             "startLineId" to "integer",
             "endLineId" to "integer",
             "dialect" to "string",
@@ -1311,20 +1315,34 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             required = listOf("tabId"),
             enums = mapOf(
                 "dialect" to listOf("mermaid", "plantuml"),
-                "mode" to listOf("tagTransition", "timeline"),
+                "mode" to listOf("componentFlow", "tagTransition", "timeline", "rules"),
+                "unmappedTagPolicy" to listOf("hide", "groupAsOther"),
+                "activationPolicy" to listOf("evidenceBacked", "none"),
             ),
             descriptions = mapOf(
-                "tags" to "Log tags to draw as participants, in the column order you want. " +
-                    "Omit to auto-pick the busiest tags in range (capped at 12).",
-                "actors" to "External entities that are not log tags (e.g. \"User\", \"Server\") to add as actor lifelines.",
-                "entryActor" to "One of `actors`, to originate the diagram's first arrow.",
-                "exitActor" to "One of `actors`, to receive the diagram's final return arrow.",
+                "tags" to "Legacy flat tag participant list. Prefer components for new calls. " +
+                    "Omit both tags and components to auto-pick in-range tags. Maximum 128 tags; each id is at most 256 characters.",
+                "components" to "Preferred component list: objects {id, displayName, tagIds: string[], enabled?: boolean}. " +
+                    "One component may own multiple raw log tags. Maximum 64 components, 128 tags per component and 1,024 tag references total.",
+                "mergedTags" to "Compatibility shorthand object mapping component display names or ids to raw tag arrays; " +
+                    "mergedTags is applied with components when both are supplied. Maximum 64 entries and 1,024 tag references.",
+                "actors" to "Actor strings (legacy) or objects {id, label, mirrorComponentId?: string, " +
+                    "mirrorDirection?: inbound|outbound|both}. Maximum 64 actors. IDs must be unique across actors/components. " +
+                    "A mirror duplicates each non-self edge adjacent to its original.",
+                "entryActor" to "Legacy one-way actor: one of legacy actor strings, to originate the first arrow.",
+                "exitActor" to "Legacy one-way actor: one of legacy actor strings, to receive the final return arrow.",
+                "unmappedTagPolicy" to "hide (default) omits tags not owned by enabled components; groupAsOther sends all " +
+                    "unmapped in-range tags to a single Other lifeline.",
+                "sourceEnrichment" to "When true, use the loaded source index to add only >=0.7-confidence one-hop inferred calls " +
+                    "and declared return types. A missing index/components is reported explicitly in warnings.",
+                "activationPolicy" to "evidenceBacked (default) shows activations only for correlated call/return evidence; " +
+                    "none suppresses activation spans.",
                 "startLineId" to "First log line id of the range (inclusive). Omit both ids to use the whole filtered view.",
                 "endLineId" to "Last log line id of the range (inclusive).",
                 "dialect" to "Output syntax. Defaults to mermaid.",
-                "mode" to "tagTransition (default) draws an arrow when the tag changes; " +
-                    "timeline draws every line as an event on its own tag's lifeline.",
-                "maxMessages" to "Arrow cap; the result reports truncated=true when it bites. Defaults to 120.",
+                "mode" to "componentFlow (default; legacy name tagTransition) draws an arrow when the active component changes; " +
+                    "timeline draws every line as an event. rules uses configured interaction rules when available.",
+                "maxMessages" to "Arrow cap; values are clamped to the hard maximum of 400 and truncated=true reports clipping. Defaults to 60.",
                 "collapseRepeats" to "Fold consecutive identical messages into one with a repeat count. Defaults to true.",
             ),
         ),

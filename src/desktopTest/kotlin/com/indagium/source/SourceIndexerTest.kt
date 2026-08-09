@@ -2,12 +2,16 @@ package com.indagium.source
 
 import com.indagium.model.SourceLogConfiguration
 import com.indagium.model.SourceWrapperRule
+import org.junit.Assume.assumeNoException
+import java.io.IOException
+import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -18,6 +22,142 @@ private fun Path.write(relPath: String, content: String) {
 }
 
 class SourceIndexerTest {
+    @Test
+    fun canonicalRootRejectsDirectoryAndFileSymlinksThatEscapeBeforeReading() {
+        val root = createTempDirectory("openlog-src-contained")
+        val outside = createTempDirectory("openlog-src-outside")
+        root.write("Inside.kt", "class Inside { fun run() { Log.d(\"Inside\", \"allowed\") } }")
+        outside.write("Outside.kt", "class Outside { fun run() { Log.d(\"Outside\", \"secret\") } }")
+        createSymlinkOrSkip(root.resolve("linked-outside"), outside)
+        createSymlinkOrSkip(root.resolve("Leaked.kt"), outside.resolve("Outside.kt"))
+
+        val nonCanonicalRoot = root.resolve(".").toFile()
+        val index = SourceIndexer.build(listOf(nonCanonicalRoot))
+
+        assertEquals(listOf(root.toFile().canonicalPath), index.roots)
+        assertEquals(setOf("Inside"), index.sites.mapNotNull { it.tag }.toSet())
+        assertEquals(setOf(root.resolve("Inside.kt").toFile().canonicalPath), index.fileMeta.keys)
+        assertFalse(index.sites.any { it.filePath.startsWith(outside.toFile().canonicalPath) })
+    }
+
+    @Test
+    fun indexedSitesExposeOwningMethodReturnTypeAndUniqueDirectCall() {
+        val dir = createTempDirectory("openlog-src-enrichment")
+        dir.write(
+            "Flow.kt",
+            """
+            package demo
+
+            class NetworkService {
+                fun fetch(id: String): ApiResult {
+                    Log.d("Network", "fetch ${'$'}id")
+                    return ApiResult()
+                }
+            }
+
+            class Screen(private val service: NetworkService) {
+                fun refresh(id: String): UiState {
+                    service.fetch(id)
+                    Log.d("Screen", "refresh ${'$'}id")
+                    return UiState()
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+        val network = index.sites.single { it.tag == "Network" }
+        val screen = index.sites.single { it.tag == "Screen" }
+
+        assertEquals("demo.NetworkService", network.owningType)
+        assertEquals("fun fetch(id: String): ApiResult", network.methodSignature)
+        assertEquals("ApiResult", network.declaredReturnType)
+        assertEquals("demo.Screen", screen.owningType)
+        assertEquals("UiState", screen.declaredReturnType)
+        assertEquals(1, screen.directCalls.size)
+        assertEquals("demo.NetworkService", screen.directCalls.single().targetOwnerType)
+        assertEquals("fetch", screen.directCalls.single().targetMethodName)
+        assertEquals("ApiResult", screen.directCalls.single().targetDeclaredReturnType)
+        assertEquals(network, SourceEnrichmentResolver(index).inferOneHop(screen, network)?.to)
+        val oneHop = SourceEnrichmentResolver(index).resolveOneHop("Screen", "refresh 42").single()
+        assertEquals("demo.Screen", oneHop.sourceOwnerType)
+        assertEquals("demo.NetworkService", oneHop.targetOwnerType)
+        assertEquals("ApiResult", oneHop.declaredReturnType)
+    }
+
+    @Test
+    fun ambiguousSimpleOwnerDoesNotProduceASourceInferredCall() {
+        val dir = createTempDirectory("openlog-src-enrichment-ambiguous")
+        dir.write(
+            "One.kt",
+            """
+            package one
+            class Service { fun fetch(id: String): String { Log.d("One", "fetch ${'$'}id"); return id } }
+            """.trimIndent(),
+        )
+        dir.write(
+            "Two.kt",
+            """
+            package two
+            class Service { fun fetch(id: String): String { Log.d("Two", "fetch ${'$'}id"); return id } }
+            """.trimIndent(),
+        )
+        dir.write(
+            "Screen.kt",
+            """
+            package ui
+            class Screen(private val service: Service) {
+                fun refresh(id: String) { service.fetch(id); Log.d("Screen", "refresh ${'$'}id") }
+            }
+            """.trimIndent(),
+        )
+
+        val screen = SourceIndexer.build(listOf(dir.toFile())).sites.single { it.tag == "Screen" }
+
+        assertFalse(screen.directCalls.any { it.targetMethodName == "fetch" })
+    }
+
+    @Test
+    fun javaMethodsExposeDeclaredReturnTypeAndOneHopCalls() {
+        val dir = createTempDirectory("openlog-src-java-enrichment")
+        dir.write(
+            "Flow.java",
+            """
+            package demo;
+
+            class Api {
+                String fetch(String id) {
+                    Log.d("Api", "fetch=" + id);
+                    return id;
+                }
+            }
+
+            class Controller {
+                private final Api api;
+
+                Controller(Api api) { this.api = api; }
+
+                Result refresh(String id) {
+                    api.fetch(id);
+                    Log.d("Controller", "refresh=" + id);
+                    return null;
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+        val api = index.sites.single { it.tag == "Api" }
+        val controller = index.sites.single { it.tag == "Controller" }
+
+        assertEquals("demo.Api", api.owningType)
+        assertEquals("String", api.declaredReturnType)
+        assertEquals("demo.Controller", controller.owningType)
+        assertEquals("Result", controller.declaredReturnType)
+        assertEquals("demo.Api", controller.directCalls.single().targetOwnerType)
+        assertEquals("String", controller.directCalls.single().targetDeclaredReturnType)
+    }
+
     @Test
     fun localTagConstantsAreNotShadowedByAnotherFilesTag() {
         val dir = createTempDirectory("openlog-src-local-tag-scope")
@@ -1320,5 +1460,17 @@ class SourceIndexerTest {
         // must be treated as literal text (\Q...\E-quoted), not interpreted as a regex group.
         val matches = LogSourceResolver(index).resolve("Cost", "price ($5) is high")
         assertEquals(1, matches.size)
+    }
+}
+
+private fun createSymlinkOrSkip(link: Path, target: Path) {
+    try {
+        Files.createSymbolicLink(link, target)
+    } catch (error: IOException) {
+        assumeNoException(error)
+    } catch (error: UnsupportedOperationException) {
+        assumeNoException(error)
+    } catch (error: SecurityException) {
+        assumeNoException(error)
     }
 }
