@@ -527,6 +527,31 @@ class DiagramBuilderTest {
     }
 
     @Test
+    fun candidatesCarryTheDistinctPidsThatLoggedEachTagInRange() {
+        val tab = mkTab(
+            "t1", "app.log", listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "A", "a", pid = 100),
+                LogEntry(2, "10:00:00.100", LogLevel.I, "A", "a", pid = 200),
+                LogEntry(3, "10:00:00.200", LogLevel.I, "B", "b", pid = 300),
+                LogEntry(4, "10:00:00.300", LogLevel.I, "A", "a", pid = 100),
+                LogEntry(5, "10:00:00.400", LogLevel.I, "A", "a", pid = 1),
+                LogEntry(6, "10:00:00.500", LogLevel.I, "A", "a", pid = 2),
+                LogEntry(7, "10:00:00.600", LogLevel.I, "A", "a", pid = 3),
+                LogEntry(8, "10:00:00.700", LogLevel.I, "A", "a", pid = 4),
+                LogEntry(9, "10:00:00.800", LogLevel.I, "A", "a", pid = 5),
+                LogEntry(10, "10:00:00.900", LogLevel.I, "A", "a", pid = 6),
+            ),
+        )
+        val spec = SeqDiagramSpec(range = DiagramRange.Ids(1, 10), options = plainOptions())
+
+        val candidates = diagramParticipantCandidates(tab, spec).associateBy { it.tag }
+        assertEquals(setOf(300), candidates.getValue("B").pids)
+        // Nine distinct pids logged tag A (100, 200, 1..6) but the field caps at
+        // MAX_CANDIDATE_PIDS = 8 rather than growing unbounded over a 10M-line range.
+        assertEquals(8, candidates.getValue("A").pids.size, "distinct A pids: ${candidates.getValue("A").pids}")
+    }
+
+    @Test
     fun componentsMergeTagsAndGlobalUnmappedPolicyControlsOther() {
         val tab = mkTab("t1", "app.log", listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "A", "start"),

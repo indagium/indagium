@@ -363,8 +363,16 @@ class SeqDiagramCoordinator(
      */
     fun begin(tabId: String, seedIds: Set<Int> = emptySet()) {
         val tab = appState.tab(tabId) ?: return
-        val range = if (seedIds.isNotEmpty()) {
-            com.indagium.diagram.DiagramRange.Ids(seedIds.min(), seedIds.max())
+        // "Select a collapsed block" must mean what uncollapsing it and selecting the same lines by
+        // hand would mean (expandSelectionThroughCollapsedBlocks, utils/Filter.kt) — widened BEFORE
+        // deriving either the range or the seeded components below, so one expansion fixes both: the
+        // range spans the whole fold, and the interior's own tags become enabled components instead
+        // of falling into unmappedTagPolicy's HIDE default. Only the seed path does this — updateSpec
+        // and requestCandidates never re-derive from a raw selection, so a user-typed range survives
+        // verbatim.
+        val effective = com.indagium.utils.expandSelectionThroughCollapsedBlocks(tab, seedIds)
+        val range = if (effective.isNotEmpty()) {
+            com.indagium.diagram.DiagramRange.Ids(effective.min(), effective.max())
         } else {
             com.indagium.diagram.DiagramRange.VisibleView
         }
@@ -373,8 +381,8 @@ class SeqDiagramCoordinator(
         val base = lastSpecByTab[tabId] ?: SeqDiagramSpec()
         // A non-empty selection, including exactly one row, is an inclusive range.  Its exact
         // tags start enabled; tags discovered elsewhere in the filtered view stay opt-in.
-        val selectedTags = seedIds.mapNotNull(tab.rmap::get).map { it.tag }.distinct()
-        val seededComponents = if (seedIds.isNotEmpty()) selectedTags.map { tag ->
+        val selectedTags = effective.mapNotNull(tab.rmap::get).map { it.tag }.distinct()
+        val seededComponents = if (effective.isNotEmpty()) selectedTags.map { tag ->
             com.indagium.diagram.DiagramComponent(tag, tag, setOf(tag), enabled = true)
         } else base.components.ifEmpty {
             // Keeps a brand-new no-selection workspace in explicit component mode from its first
@@ -385,6 +393,18 @@ class SeqDiagramCoordinator(
         openWorkspace(tabId, SeqDiagramRequest(tabId, spec), DiagramPreviewState.NotComputed)
         requestCandidates(tabId, spec)
         requestPreview(tabId, spec)
+    }
+
+    /** The exact [com.indagium.diagram.DiagramRange.Ids] that `begin(tabId, tab.selected)` would
+     *  seed right now — expanded through any collapsed fold the same way `begin` itself does, so the
+     *  Selection pill (SeqDiagramDialog.kt's RangeSection) and the initial seed can never disagree
+     *  about what clicking the pill will produce. Null when there's nothing selected, matching the
+     *  pill's own guard. */
+    fun selectionRange(tabId: String): com.indagium.diagram.DiagramRange.Ids? {
+        val tab = appState.tab(tabId) ?: return null
+        val effective = com.indagium.utils.expandSelectionThroughCollapsedBlocks(tab, tab.selected)
+        if (effective.isEmpty()) return null
+        return com.indagium.diagram.DiagramRange.Ids(effective.min(), effective.max())
     }
 
     /** Opens the dialog on an existing diagram note, repopulated from the spec its header carries.

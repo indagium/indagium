@@ -135,6 +135,9 @@ data class DiagramParticipantCandidate(
     val errorCount: Int,
     val representation: DiagramParticipantRepresentation,
     val participant: DiagramParticipant? = null,
+    /** Distinct pids that logged this tag inside the resolved range, capped at MAX_CANDIDATE_PIDS.
+     *  Runtime-only, like the counts above — never persisted. */
+    val pids: Set<Int> = emptySet(),
 )
 
 /** Explicit accounting for the source rows selected for a diagram.  Grouped rows are represented
