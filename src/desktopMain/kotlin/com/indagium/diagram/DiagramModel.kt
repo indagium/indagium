@@ -23,6 +23,11 @@ enum class DiagramDialect { MERMAID, PLANTUML }
  *  explicitly via its `fromTemplate`/`toTemplate`. */
 enum class ParticipantKind { TAG, ACTOR }
 
+/** How a tag from the resolved diagram range is represented.  TAG entries marked [SHOW] keep
+ * their own lifeline, [OTHER] share the generated `Other` lifeline, and [HIDE] are deliberately
+ * omitted.  It is meaningful only for TAG participants; actors are always shown. */
+enum class DiagramParticipantRepresentation { SHOW, OTHER, HIDE }
+
 /** How [SeqDiagramBuilder.buildSequenceDiagram] turns a scanned entry into an arrow.
  *  [TAG_TRANSITION] (the default) infers a CALL whenever the active tag changes and a SELF
  *  message when it repeats — no configuration needed, works on any log. [RULES] matches each
@@ -60,7 +65,40 @@ data class DiagramParticipant(
     val isEntryPoint: Boolean = false,
     // ACTOR only: a synthetic closing RETURN is appended from the last active tag to this actor.
     val isExitPoint: Boolean = false,
+    /** A user-selected display name. This never changes [id] or [tag], which remain provenance
+     * identities used by range selection, rules and regeneration. */
+    val alias: String? = null,
+    /** Per-tag presentation choice.  [SHOW] preserves the legacy behaviour. */
+    val representation: DiagramParticipantRepresentation = DiagramParticipantRepresentation.SHOW,
 )
+
+/** The human-facing name for a lifeline.  An alias wins only when it contains visible text, so
+ * clearing an alias reliably restores the generated/legacy [DiagramParticipant.label]. */
+val DiagramParticipant.displayName: String
+    get() = alias?.trim().takeUnless { it.isNullOrEmpty() } ?: label
+
+/** Counts used by the participant inspector.  All counts are computed from the same resolved,
+ * filtered range that generation scans; they must never be substituted with whole-tab counts. */
+data class DiagramParticipantCandidate(
+    val tag: String,
+    val entryCount: Int,
+    /** Number of tag boundaries touching this tag in the selected range. */
+    val transitionCount: Int,
+    val errorCount: Int,
+    val representation: DiagramParticipantRepresentation,
+    val participant: DiagramParticipant? = null,
+)
+
+/** Explicit accounting for the source rows selected for a diagram.  Grouped rows are represented
+ * by the generated Other lifeline; hidden rows are intentionally absent from messages. */
+data class DiagramCoverage(
+    val scannedEntries: Int = 0,
+    val shownEntries: Int = 0,
+    val groupedEntries: Int = 0,
+    val hiddenEntries: Int = 0,
+) {
+    val representedEntries: Int get() = shownEntries + groupedEntries
+}
 
 /** How a [SeqDiagram] selects which of a tab's entries to scan. All four are resolved against
  *  `utils.visibleEntries(tab, applyFilter = true)` — the same "what the user currently sees" set
@@ -111,14 +149,16 @@ data class DiagramOptions(
     // A hard cap on the diagram's own size (not the scanned range's size) — a sequence diagram
     // with thousands of arrows is unreadable regardless of how it was produced. See
     // SeqDiagram.truncated.
-    val maxMessages: Int = 120,
+    val maxMessages: Int = 60,
     val labelMaxChars: Int = 60,
     val labelSource: LabelSource = LabelSource.MESSAGE,
     val showTimestamps: Boolean = false,
     val showElapsed: Boolean = true,
     // Wrap each auto-detected sequence group (Filter's SeqGroup/NestedSeqGroup, one level of
     // nesting) that overlaps the diagram's range as a DiagramFrame.
-    val seqGroupFrames: Boolean = true,
+    // A range-wide frame is visually louder than the interactions it is meant to organize.
+    // Keep frames available, but let a newly-created diagram begin with the readable view.
+    val seqGroupFrames: Boolean = false,
     // LogLevel.E/A entries also get a DiagramNoteMark, regardless of arrow mode.
     val notesForErrors: Boolean = true,
 )
@@ -202,6 +242,8 @@ data class SeqDiagram(
     // How many entries the resolved range actually covered, before the TAG-participant filter and
     // before collapsing/capping — lets a caller show "N lines summarized into M messages".
     val scannedEntries: Int = 0,
+    /** Coverage of entries before arrow collapsing/truncation. */
+    val coverage: DiagramCoverage = DiagramCoverage(scannedEntries = scannedEntries),
     // Never fatal — a malformed rule, an unresolvable seq-group-ref range, or a tab with no
     // parseable timestamps for a Time range all degrade to an empty-ish diagram plus an entry
     // here, rather than throwing. See SeqDiagramBuilder's own doc for the full list of cases.

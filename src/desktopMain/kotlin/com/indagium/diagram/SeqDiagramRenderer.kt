@@ -139,7 +139,7 @@ private const val BASE_FRAME_INSET_PER_DEPTH = 10f
 private const val BASE_FRAME_PAD_V = 10f
 private const val BASE_FRAME_LABEL_H = 16f
 private const val BASE_FRAME_ARC = 10f
-private const val BASE_FRAME_WASH_ALPHA = 40
+private const val BASE_FRAME_WASH_ALPHA = 18
 private const val BASE_FRAME_BORDER_ALPHA = 150
 
 private const val BASE_NOTE_FONT = 11f
@@ -552,7 +552,7 @@ private fun paint(g: Graphics2D, diagram: SeqDiagram, theme: DiagramTheme, layou
     g.color = theme.background
     g.fillRect(0, 0, layout.widthPx, layout.heightPx)
 
-    layout.frames.forEach { paintFrame(g, it, theme) }
+    layout.frames.forEach { paintFrame(g, it, layout, theme) }
     paintLifelines(g, layout, theme)
     layout.participants.forEach { paintParticipantHeader(g, it, layout, theme) }
     diagram.messages.forEachIndexed { i, m -> layout.rows.getOrNull(i)?.let { paintMessage(g, m, it, layout, theme) } }
@@ -685,16 +685,17 @@ private fun paintSelfMessage(g: Graphics2D, geo: MsgGeom, text: String, fm: Font
     g.drawString(clipped, xOut + metrics.labelGapAboveLine, (yTop + yBot) / 2 + fm.ascent / 2)
 }
 
-private fun paintFrame(g: Graphics2D, fl: FrameLayout, theme: DiagramTheme) {
+private fun paintFrame(g: Graphics2D, fl: FrameLayout, layout: DiagramLayout, theme: DiagramTheme) {
     val base = fl.frame.colorArgb?.let { Color(it, true) } ?: theme.frame
     val w = fl.right - fl.left
     val h = fl.bottom - fl.top
     val arc = 10
-    // Low, fixed alpha regardless of what the source color's own alpha channel was — a frame is a
-    // background WASH behind message rows, never a solid block that would hide them (see the task
-    // spec's own note on this).
-    g.color = Color(base.red, base.green, base.blue, BASE_FRAME_WASH_ALPHA)
-    g.fillRoundRect(fl.left, fl.top, w, h, arc, arc)
+    // A frame spanning most of the canvas gives no grouping cue and used to turn the whole
+    // preview into a tinted slab. Keep its border/label, but reserve the wash for local groups.
+    if (h < layout.heightPx * .72f) {
+        g.color = Color(base.red, base.green, base.blue, BASE_FRAME_WASH_ALPHA)
+        g.fillRoundRect(fl.left, fl.top, w, h, arc, arc)
+    }
     g.color = Color(base.red, base.green, base.blue, BASE_FRAME_BORDER_ALPHA)
     g.stroke = BasicStroke(1.5f)
     g.drawRoundRect(fl.left, fl.top, w, h, arc, arc)

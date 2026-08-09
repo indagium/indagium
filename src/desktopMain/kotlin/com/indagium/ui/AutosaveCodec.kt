@@ -632,6 +632,8 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("copyRowNumber", copyRowNumber)
     put("copyTimeDelta", copyTimeDelta)
     put("autoScrollWhileTailing", autoScrollWhileTailing)
+    put("diagramLinkedNotePrimary", diagramLinkedNotePrimary)
+    put("diagramDefaultExportMode", diagramDefaultExportMode.name)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -922,6 +924,10 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         // Default-on: a legacy blob predating this field should behave exactly like a fresh
         // AppSettings() — following the tail is the point of live-watching a file.
         autoScrollWhileTailing = o.boolOrDefault("autoScrollWhileTailing", true),
+        diagramLinkedNotePrimary = o.boolOrDefault("diagramLinkedNotePrimary", false),
+        diagramDefaultExportMode = o.stringOrNull("diagramDefaultExportMode")
+            ?.let { raw -> runCatching { com.indagium.diagram.DiagramExportMode.valueOf(raw) }.getOrNull() }
+            ?: com.indagium.diagram.DiagramExportMode.IMAGE,
     )
 }.getOrNull()
 

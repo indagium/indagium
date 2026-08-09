@@ -6,6 +6,7 @@ import com.indagium.debug.int
 import com.indagium.debug.mapList
 import com.indagium.debug.str
 import com.indagium.model.LogLevel
+import java.security.MessageDigest
 
 // ── On-disk convention for a diagram note ───────────────────────────────────────────────────
 //
@@ -30,23 +31,68 @@ import com.indagium.model.LogLevel
 
 private const val MARKER_HEAD = "<!-- indagium:diagram "
 private const val MARKER_TAIL = " -->"
-private const val SUPPORTED_SPEC_VERSION = "v1"
+private const val LEGACY_SPEC_VERSION = "v1"
+private const val CURRENT_SPEC_VERSION = "v2"
 
 private fun fenceLanguage(dialect: DiagramDialect): String = when (dialect) {
     DiagramDialect.MERMAID -> "mermaid"
     DiagramDialect.PLANTUML -> "plantuml"
 }
 
-/** [model], when supplied, is recorded in the header so the note can render its own picture (and
- *  keep its clickable log-line links) later without the original log being attached — see
- *  modelToMap's doc for why the fenced text alone is not enough. */
-fun encodeDiagramNote(spec: SeqDiagramSpec, source: String, model: SeqDiagram? = null): String {
-    val json = Json.encode(specToMap(spec) + mapOf("model" to model?.let(::modelToMap)))
+enum class DiagramAttachmentMode { SNAPSHOT, LINKED }
+
+/** How an attached diagram is represented outside Indagium.  IMAGE is deliberately the default:
+ * it works in Markdown and Jira even when the receiving system has no Mermaid/PlantUML support.
+ * SOURCE is kept for reviews where the editable dialect text is the useful artifact. */
+enum class DiagramExportMode { IMAGE, SOURCE }
+
+/** Optional identity of the durable diagram this note was attached from.  The codec only records
+ * metadata; resolving a linked diagram remains the library/UI's responsibility. */
+data class DiagramAttachmentMetadata(
+    val diagramId: String? = null,
+    val mode: DiagramAttachmentMode = DiagramAttachmentMode.SNAPSHOT,
+    val revision: Long? = null,
+    val attachedAtEpochMs: Long? = null,
+    /** Display label shown immediately above the exported/previewed attachment. */
+    val caption: String = "",
+    /** The export representation. Missing metadata on a legacy v1 note means [IMAGE]. */
+    val exportMode: DiagramExportMode = DiagramExportMode.IMAGE,
+)
+
+/** Self-contained source/model fallback preserved with a v2 attachment.  It is intentionally
+ * exposed even when the current fenced source was edited, but its [model] is never promoted to
+ * [ParsedDiagram.model] unless its hash proves it still describes that source. */
+data class DiagramNoteSnapshot(
+    val source: String,
+    val sourceHash: String,
+    val model: SeqDiagram? = null,
+)
+
+/** [model] is stored inside a v2 source snapshot and guarded by a SHA-256 hash of the fenced
+ * source.  An advanced source edit can therefore never leave a clickable stale model on screen.
+ * [snapshot] is primarily for attachment/import callers; the default snapshots [source]/[model]. */
+fun encodeDiagramNote(
+    spec: SeqDiagramSpec,
+    source: String,
+    model: SeqDiagram? = null,
+    attachment: DiagramAttachmentMetadata? = null,
+    snapshot: DiagramNoteSnapshot? = null,
+): String {
+    val normalizedSource = source.trimEnd('\n')
+    val sourceHash = diagramSourceHash(normalizedSource)
+    val normalizedSnapshot = snapshot ?: DiagramNoteSnapshot(normalizedSource, sourceHash, model)
+    val json = Json.encode(
+        specToMap(spec) + mapOf(
+            "sourceHash" to sourceHash,
+            "attachment" to attachment?.let(::attachmentToMap),
+            "snapshot" to snapshotToMap(normalizedSnapshot),
+        ),
+    )
     val lang = fenceLanguage(spec.dialect)
     return buildString {
-        append(MARKER_HEAD).append(SUPPORTED_SPEC_VERSION).append(' ').append(json).append(MARKER_TAIL).append('\n')
+        append(MARKER_HEAD).append(CURRENT_SPEC_VERSION).append(' ').append(json).append(MARKER_TAIL).append('\n')
         append("```").append(lang).append('\n')
-        append(source.trimEnd('\n')).append('\n')
+        append(normalizedSource).append('\n')
         append("```").append('\n')
     }
 }
@@ -59,16 +105,68 @@ data class ParsedDiagram(
      *  written by an older build, or hand-authored — such a note still shows its fenced source and
      *  still exports correctly, it just can't be drawn or clicked until it is regenerated. */
     val model: SeqDiagram?,
+    /** v2 only. Null for a trusted v1 note, false when source was edited after generation. */
+    val sourceHashMatches: Boolean? = null,
+    val sourceHash: String? = null,
+    val attachment: DiagramAttachmentMetadata? = null,
+    /** The retained v2 snapshot. Its model is intentionally not rendered automatically when
+     * [sourceHashMatches] is false; a UI may offer an explicit restore/detach action instead. */
+    val snapshot: DiagramNoteSnapshot? = null,
+    val warning: String? = null,
     // Index into the ORIGINAL text one past the header comment's closing "-->" (and its trailing
     // newline, if any) — stripDiagramSpecHeader's whole implementation is `text.substring(this)`.
     val headerEndIndex: Int,
     // The fenced block's full extent in the ORIGINAL text, opening ``` through closing ``` line
     // inclusive.
     val fenceRange: IntRange,
-)
+) {
+    /** Attachment caption, with an empty caption for v1/pre-attachment notes. */
+    val caption: String get() = attachment?.caption.orEmpty()
+
+    /** Export representation.  This compatibility default makes every v1 diagram image-first. */
+    val exportMode: DiagramExportMode get() = attachment?.exportMode ?: DiagramExportMode.IMAGE
+
+    /**
+     * The immutable picture that a read-only preview may show.  This intentionally differs from
+     * [model]: the latter is only non-null when it is safe to treat the model as the current,
+     * editable fenced source.  A v2 attachment retains its last known-good model in [snapshot],
+     * and the Markdown Preview should still show that attachment as a clearly labelled snapshot
+     * rather than silently dropping the whole diagram card.
+     *
+     * Interactive/editor surfaces must continue to use [model], so a manually edited fence can
+     * never be presented as a current clickable diagram.
+     */
+    val snapshotPreviewModel: SeqDiagram?
+        get() = model ?: snapshot?.model
+}
+
+/** Returns [noteText] rewritten as a current v2 diagram note with a new attachment caption, or
+ * null when [noteText] is not a valid diagram note.  The visible source and retained snapshot are
+ * preserved verbatim; this is intentionally the only codec boundary UI code needs for metadata
+ * edits. */
+fun updateDiagramNoteCaption(noteText: String, caption: String): String? =
+    updateDiagramAttachment(noteText) { copy(caption = caption) }
+
+/** Returns [noteText] rewritten with [exportMode], or null for a non-diagram note. */
+fun updateDiagramNoteExportMode(noteText: String, exportMode: DiagramExportMode): String? =
+    updateDiagramAttachment(noteText) { copy(exportMode = exportMode) }
+
+private fun updateDiagramAttachment(
+    noteText: String,
+    change: DiagramAttachmentMetadata.() -> DiagramAttachmentMetadata,
+): String? {
+    val parsed = parseDiagramNote(noteText) ?: return null
+    return encodeDiagramNote(
+        spec = parsed.spec,
+        source = parsed.source,
+        model = parsed.model,
+        attachment = (parsed.attachment ?: DiagramAttachmentMetadata()).change(),
+        snapshot = parsed.snapshot,
+    )
+}
 
 /** Parses a diagram note produced by [encodeDiagramNote]. Returns null — never throws — for
- *  anything not a complete, version-[SUPPORTED_SPEC_VERSION] header immediately followed by a
+ *  anything not a complete, version-supported header immediately followed by a
  *  matching fenced code block: a plain user-written Note, a header with garbled/truncated JSON, a
  *  header with no fence after it, or a header stamped with a future version this build doesn't
  *  understand. Every one of those is expected input (any Note in the .ann format can reach this
@@ -81,7 +179,7 @@ fun parseDiagramNote(text: String): ParsedDiagram? {
     val spaceIdx = afterHead.indexOf(' ')
     if (spaceIdx <= 0) return null
     val version = afterHead.substring(0, spaceIdx)
-    if (version != SUPPORTED_SPEC_VERSION) return null
+    if (version != LEGACY_SPEC_VERSION && version != CURRENT_SPEC_VERSION) return null
     val rest = afterHead.substring(spaceIdx + 1)
     val tailIdx = rest.indexOf(MARKER_TAIL)
     if (tailIdx < 0) return null
@@ -111,11 +209,32 @@ fun parseDiagramNote(text: String): ParsedDiagram? {
     val fenceCloseLineEnd = text.indexOf('\n', closeFenceIdx + 1).let { if (it < 0) text.length else it + 1 }
     val source = text.substring(afterOpenLine + 1, closeFenceIdx)
 
+    val declaredHash = map.str("sourceHash")
+    val snapshot = if (version == CURRENT_SPEC_VERSION) subMap(map, "snapshot")?.let { snapshotFromMap(it, spec) } else null
+    // v1 did not carry a source fingerprint and remains trusted for backward compatibility. v2
+    // only exposes its model when the header's hash and snapshot both describe the visible fence.
+    val hashMatches = if (version == CURRENT_SPEC_VERSION) declaredHash != null && declaredHash == diagramSourceHash(source) else null
+    val snapshotMatchesHeader = snapshot?.let { it.sourceHash == declaredHash && it.source == source } == true
+    val model = when {
+        version == LEGACY_SPEC_VERSION -> subMap(map, "model")?.let { modelFromMap(it, spec) }
+        hashMatches == true && snapshotMatchesHeader -> snapshot.model
+        else -> null
+    }
+    val warning = if (version == CURRENT_SPEC_VERSION && model == null && snapshot?.model != null) {
+        "Diagram source has changed since this snapshot was generated; showing source only."
+    } else {
+        null
+    }
     return ParsedDiagram(
         spec = spec,
         source = source,
         dialect = spec.dialect,
-        model = subMap(map, "model")?.let { modelFromMap(it, spec) },
+        model = model,
+        sourceHashMatches = hashMatches,
+        sourceHash = declaredHash,
+        attachment = subMap(map, "attachment")?.let(::attachmentFromMap),
+        snapshot = snapshot,
+        warning = warning,
         headerEndIndex = headerEndIndex,
         fenceRange = fenceOpenStart until fenceCloseLineEnd,
     )
@@ -140,6 +259,41 @@ fun stripDiagramSpecHeader(text: String): String {
 
 private inline fun <reified E : Enum<E>> enumFromName(name: String?): E? =
     name?.let { n -> enumValues<E>().firstOrNull { it.name == n } }
+
+/** Stable lowercase hexadecimal SHA-256 for the exact fenced source body. */
+fun diagramSourceHash(source: String): String = MessageDigest.getInstance("SHA-256")
+    .digest(source.toByteArray(Charsets.UTF_8))
+    .joinToString(separator = "") { byte -> "%02x".format(byte) }
+
+private fun attachmentToMap(a: DiagramAttachmentMetadata): Map<String, Any?> = mapOf(
+    "diagramId" to a.diagramId,
+    "mode" to a.mode.name,
+    "revision" to a.revision,
+    "attachedAtEpochMs" to a.attachedAtEpochMs,
+    "caption" to a.caption,
+    "exportMode" to a.exportMode.name,
+)
+
+private fun attachmentFromMap(map: Map<String, Any?>): DiagramAttachmentMetadata = DiagramAttachmentMetadata(
+    diagramId = map.str("diagramId"),
+    mode = enumFromName<DiagramAttachmentMode>(map.str("mode")) ?: DiagramAttachmentMode.SNAPSHOT,
+    revision = (map["revision"] as? Number)?.toLong(),
+    attachedAtEpochMs = (map["attachedAtEpochMs"] as? Number)?.toLong(),
+    caption = map.str("caption") ?: "",
+    exportMode = enumFromName<DiagramExportMode>(map.str("exportMode")) ?: DiagramExportMode.IMAGE,
+)
+
+private fun snapshotToMap(snapshot: DiagramNoteSnapshot): Map<String, Any?> = mapOf(
+    "source" to snapshot.source,
+    "sourceHash" to snapshot.sourceHash,
+    "model" to snapshot.model?.let(::modelToMap),
+)
+
+private fun snapshotFromMap(map: Map<String, Any?>, spec: SeqDiagramSpec): DiagramNoteSnapshot? {
+    val source = map.str("source") ?: return null
+    val sourceHash = map.str("sourceHash") ?: return null
+    return DiagramNoteSnapshot(source, sourceHash, subMap(map, "model")?.let { modelFromMap(it, spec) })
+}
 
 // ── The built model, carried alongside the spec ─────────────────────────────────────────────
 //
@@ -174,6 +328,12 @@ private fun modelToMap(d: SeqDiagram): Map<String, Any?> = mapOf(
     },
     "truncated" to d.truncated,
     "scanned" to d.scannedEntries,
+    "coverage" to mapOf(
+        "scanned" to d.coverage.scannedEntries,
+        "shown" to d.coverage.shownEntries,
+        "grouped" to d.coverage.groupedEntries,
+        "hidden" to d.coverage.hiddenEntries,
+    ),
 )
 
 /** Rebuilds the model recorded by [modelToMap]. [spec] is threaded back in rather than stored
@@ -206,6 +366,8 @@ private fun modelFromMap(map: Map<String, Any?>, spec: SeqDiagramSpec): SeqDiagr
         val a = n.int("a") ?: return@mapNotNull null
         DiagramNoteMark(p, a, n.str("t") ?: "", n.bool("e") ?: false)
     }.orEmpty()
+    val scannedEntries = map.int("scanned") ?: 0
+    val coverageMap = subMap(map, "coverage")
     return SeqDiagram(
         spec = spec,
         participants = participants,
@@ -213,7 +375,15 @@ private fun modelFromMap(map: Map<String, Any?>, spec: SeqDiagramSpec): SeqDiagr
         frames = frames,
         notes = notes,
         truncated = map.bool("truncated") ?: false,
-        scannedEntries = map.int("scanned") ?: 0,
+        scannedEntries = scannedEntries,
+        coverage = coverageMap?.let {
+            DiagramCoverage(
+                scannedEntries = it.int("scanned") ?: scannedEntries,
+                shownEntries = it.int("shown") ?: 0,
+                groupedEntries = it.int("grouped") ?: 0,
+                hiddenEntries = it.int("hidden") ?: 0,
+            )
+        } ?: DiagramCoverage(scannedEntries = scannedEntries),
     )
 }
 
@@ -235,6 +405,8 @@ private fun participantToMap(p: DiagramParticipant): Map<String, Any?> = mapOf(
     "tag" to p.tag,
     "isEntryPoint" to p.isEntryPoint,
     "isExitPoint" to p.isExitPoint,
+    "alias" to p.alias,
+    "representation" to p.representation.name,
 )
 
 private fun ruleToMap(r: DiagramMessageRule): Map<String, Any?> = mapOf(
@@ -290,6 +462,9 @@ private fun participantFromMap(m: Map<String, Any?>): DiagramParticipant? {
         tag = m.str("tag"),
         isEntryPoint = m.bool("isEntryPoint") ?: false,
         isExitPoint = m.bool("isExitPoint") ?: false,
+        alias = m.str("alias"),
+        representation = enumFromName<DiagramParticipantRepresentation>(m.str("representation"))
+            ?: DiagramParticipantRepresentation.SHOW,
     )
 }
 

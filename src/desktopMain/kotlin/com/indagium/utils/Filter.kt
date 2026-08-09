@@ -3,6 +3,7 @@ package com.indagium.utils
 import androidx.compose.ui.graphics.Color
 import com.indagium.model.*
 import com.indagium.diagram.DiagramDialect
+import com.indagium.diagram.DiagramExportMode
 import com.indagium.diagram.ParsedDiagram
 import com.indagium.diagram.parseDiagramNote
 import com.indagium.ui.DANGER_RED
@@ -788,15 +789,11 @@ private fun StringBuilder.appendLogRefBlock(tab: LogTab, settings: AppSettings, 
  * A diagram note's export form, which differs sharply by target — this is the whole reason
  * [AnnotationLogBlockStyle] reaches into diagram rendering at all.
  *
- * INDENTED (real Markdown): emit the fenced block verbatim. GitHub, GitLab and most Markdown
- * viewers render a ```mermaid fence into an actual picture, so the text IS the diagram there and
- * an image would be strictly worse (it can't be diffed, searched or edited).
+ * IMAGE (the default): emit an attachment reference. This is portable across Markdown/Jira
+ * renderers and matches the PNG AppState writes alongside the export.
  *
- * JIRA_JAVA: Jira's wiki renderer understands neither Mermaid nor ``` fences, so emit a
- * `!diagram-0N.png!` attachment anchor — the same mechanism screenshots already use, resolved by
- * the PNG AppState.writeAnnotationFrameImages() drops into the sibling `_frames/` folder under the
- * name annotationDiagramFileName() forms. The source goes below it in a `{code}` block so the
- * diagram stays reproducible from the ticket alone even though Jira won't draw it.
+ * SOURCE: retain the previous dialect-source behavior — Mermaid/PlantUML fences in Markdown and
+ * a Jira `{code}` block. Source mode intentionally does not reference or write a PNG.
  *
  * The spec/model header is stripped in both cases: it's machine state for reopening the note (see
  * diagram/DiagramSpecCodec.kt), and would otherwise show up as a stray HTML comment — or, in Jira,
@@ -814,18 +811,30 @@ private fun StringBuilder.appendDiagramNote(
         DiagramDialect.MERMAID -> "mermaid"
         DiagramDialect.PLANTUML -> "plantuml"
     }
-    when (settings.annotationLogBlockStyle) {
-        AnnotationLogBlockStyle.INDENTED -> {
-            appendLine("```$fenceLanguage")
-            appendLine(diagram.source.trimEnd('\n'))
-            appendLine("```")
+    if (diagram.caption.isNotBlank()) appendLine(diagram.caption)
+    when (diagram.exportMode) {
+        DiagramExportMode.IMAGE -> when (settings.annotationLogBlockStyle) {
+            AnnotationLogBlockStyle.INDENTED -> {
+                val fileName = annotationDiagramFileName(diagramOrdinal, frameStamp)
+                appendLine("![${diagram.caption.ifBlank { "Sequence diagram" }}]($fileName)")
+            }
+
+            AnnotationLogBlockStyle.JIRA_JAVA ->
+                appendLine("!${annotationDiagramFileName(diagramOrdinal, frameStamp)}!")
         }
 
-        AnnotationLogBlockStyle.JIRA_JAVA -> {
-            appendLine("!${annotationDiagramFileName(diagramOrdinal, frameStamp)}!")
-            appendLine("{code}")
-            appendLine(diagram.source.trimEnd('\n'))
-            appendLine("{code}")
+        DiagramExportMode.SOURCE -> when (settings.annotationLogBlockStyle) {
+            AnnotationLogBlockStyle.INDENTED -> {
+                appendLine("```$fenceLanguage")
+                appendLine(diagram.source.trimEnd('\n'))
+                appendLine("```")
+            }
+
+            AnnotationLogBlockStyle.JIRA_JAVA -> {
+                appendLine("{code}")
+                appendLine(diagram.source.trimEnd('\n'))
+                appendLine("{code}")
+            }
         }
     }
 }

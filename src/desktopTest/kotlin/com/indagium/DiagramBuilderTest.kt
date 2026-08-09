@@ -5,11 +5,13 @@ import com.indagium.diagram.ArrowMode
 import com.indagium.diagram.DiagramMessageRule
 import com.indagium.diagram.DiagramOptions
 import com.indagium.diagram.DiagramParticipant
+import com.indagium.diagram.DiagramParticipantRepresentation
 import com.indagium.diagram.DiagramRange
 import com.indagium.diagram.MessageKind
 import com.indagium.diagram.ParticipantKind
 import com.indagium.diagram.SeqDiagramSpec
 import com.indagium.diagram.buildSequenceDiagram
+import com.indagium.diagram.diagramParticipantCandidates
 import com.indagium.diagram.toMermaid
 import com.indagium.model.Filter
 import com.indagium.model.LogEntry
@@ -479,5 +481,42 @@ class DiagramBuilderTest {
 
         assertEquals(1, diagram.scannedEntries, "the filter hides tag B entirely, so the diagram never sees it")
         assertNull(diagram.participants.firstOrNull { it.tag == "B" })
+    }
+
+    @Test
+    fun participantCandidatesAndCoverageUseTheResolvedRangeAndPreserveOtherVsHide() {
+        val tab = mkTab(
+            "t1", "app.log", listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "A", "a"),
+                LogEntry(2, "10:00:00.100", LogLevel.E, "B", "b"),
+                LogEntry(3, "10:00:00.200", LogLevel.I, "C", "c"),
+                LogEntry(4, "10:00:00.300", LogLevel.I, "B", "b again"),
+                LogEntry(5, "10:00:00.400", LogLevel.I, "D", "outside"),
+            ),
+        )
+        val spec = SeqDiagramSpec(
+            range = DiagramRange.Ids(1, 4),
+            participants = listOf(
+                DiagramParticipant("A", "A", ParticipantKind.TAG, tag = "A"),
+                DiagramParticipant("B", "B", ParticipantKind.TAG, tag = "B", representation = DiagramParticipantRepresentation.OTHER),
+                DiagramParticipant("C", "C", ParticipantKind.TAG, tag = "C", representation = DiagramParticipantRepresentation.HIDE),
+            ),
+            options = plainOptions(),
+        )
+
+        val candidates = diagramParticipantCandidates(tab, spec).associateBy { it.tag }
+        assertEquals(2, candidates.getValue("B").entryCount)
+        assertEquals(1, candidates.getValue("B").errorCount)
+        assertEquals(DiagramParticipantRepresentation.HIDE, candidates.getValue("C").representation)
+        assertNull(candidates["D"], "candidate discovery must not leak rows outside the Id range")
+
+        val diagram = buildSequenceDiagram(tab, spec)
+        assertEquals(4, diagram.coverage.scannedEntries)
+        assertEquals(1, diagram.coverage.shownEntries)
+        assertEquals(2, diagram.coverage.groupedEntries)
+        assertEquals(1, diagram.coverage.hiddenEntries)
+        assertTrue(diagram.participants.any { it.label == "Other" })
+        assertFalse(diagram.participants.any { it.tag == "B" || it.tag == "C" })
+        assertEquals(2, diagram.messages.size, "A→Other plus Other self; hidden C produces no arrow")
     }
 }

@@ -22,7 +22,7 @@ import kotlin.math.roundToInt
 // was produced — caps the auto-derive path (resolveTagParticipants) the same way
 // DiagramOptions.maxMessages caps the arrow count. Deliberately not configurable: a caller who
 // wants more control supplies spec.participants explicitly instead (which is never capped here).
-private const val DEFAULT_MAX_AUTO_PARTICIPANTS = 12
+private const val DEFAULT_MAX_AUTO_PARTICIPANTS = 8
 
 /**
  * Builds a [SeqDiagram] from a range of [tab]'s entries. Always scans over
@@ -54,8 +54,8 @@ fun buildSequenceDiagram(
     val resolved = resolveRange(tab, spec.range, allVisible, cancellationCheck, warnings)
     val candidateEntries = resolved.entries
 
-    val (baseParticipants, filteredEntries) = resolveTagParticipants(spec.participants, candidateEntries)
-    val registry = ParticipantRegistry(baseParticipants)
+    val participantResolution = resolveTagParticipants(spec.participants, candidateEntries)
+    val registry = ParticipantRegistry(participantResolution.participants, participantResolution.groupedTags)
     val entryPointIdx = spec.participants
         .firstOrNull { it.kind == ParticipantKind.ACTOR && it.isEntryPoint }
         ?.let { registry.indexForId(it.id) }
@@ -71,15 +71,15 @@ fun buildSequenceDiagram(
 
     when (spec.mode) {
         ArrowMode.TAG_TRANSITION -> runTagTransition(
-            filteredEntries, registry, entryPointIdx, exitPointIdx, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
+            participantResolution.representedEntries, registry, entryPointIdx, exitPointIdx, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
         )
 
         ArrowMode.RULES -> runRules(
-            filteredEntries, registry, spec.rules, spec.options, resolveLabel, firstTs, regexContext, cancellationCheck, gen, warnings,
+            participantResolution.representedEntries, registry, spec.rules, spec.options, resolveLabel, firstTs, regexContext, cancellationCheck, gen, warnings,
         )
 
         ArrowMode.LINE_PER_MESSAGE -> runLinePerMessage(
-            filteredEntries, registry, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
+            participantResolution.representedEntries, registry, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
         )
     }
 
@@ -106,6 +106,7 @@ fun buildSequenceDiagram(
         notes = notes,
         truncated = truncated,
         scannedEntries = candidateEntries.size,
+        coverage = participantResolution.coverage,
         warnings = warnings,
     )
 }
@@ -250,32 +251,107 @@ private fun resolveSeqGroupRange(
 // tag frequency, capped at DEFAULT_MAX_AUTO_PARTICIPANTS) — see SeqDiagramSpec.participants' doc.
 // The returned entry list drops anything whose tag isn't among the resulting TAG participants, so
 // every downstream mode only ever sees entries with a home lifeline.
+private data class ParticipantResolution(
+    val participants: List<DiagramParticipant>,
+    val representedEntries: List<LogEntry>,
+    val groupedTags: Set<String>,
+    val coverage: DiagramCoverage,
+)
+
+/** Returns range-correct candidates for the participant inspector.  It resolves [spec.range]
+ * through the active filter first, exactly as [buildSequenceDiagram] does. */
+fun diagramParticipantCandidates(
+    tab: LogTab,
+    spec: SeqDiagramSpec,
+    cancellationCheck: CancellationCheck = CancellationCheck {},
+): List<DiagramParticipantCandidate> {
+    val warnings = mutableListOf<String>()
+    val resolved = resolveRange(tab, spec.range, visibleEntries(tab, applyFilter = true), cancellationCheck, warnings)
+    val configured = spec.participants.filter { it.kind == ParticipantKind.TAG && it.tag != null }.associateBy { it.tag!! }
+    var previousTag: String? = null
+    val counts = LinkedHashMap<String, Int>()
+    val transitions = HashMap<String, Int>()
+    val errors = HashMap<String, Int>()
+    for (entry in resolved.entries) {
+        counts[entry.tag] = (counts[entry.tag] ?: 0) + 1
+        if (errorLevel(entry.level)) errors[entry.tag] = (errors[entry.tag] ?: 0) + 1
+        previousTag?.takeIf { it != entry.tag }?.let { prior ->
+            transitions[prior] = (transitions[prior] ?: 0) + 1
+            transitions[entry.tag] = (transitions[entry.tag] ?: 0) + 1
+        }
+        previousTag = entry.tag
+    }
+    val automaticallyShown = if (configured.isEmpty()) {
+        counts.entries.sortedByDescending { it.value }.take(DEFAULT_MAX_AUTO_PARTICIPANTS).map { it.key }.toSet()
+    } else {
+        emptySet()
+    }
+    return counts.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key }).map { (tag, count) ->
+        val participant = configured[tag]
+        DiagramParticipantCandidate(
+            tag = tag,
+            entryCount = count,
+            transitionCount = transitions[tag] ?: 0,
+            errorCount = errors[tag] ?: 0,
+            representation = participant?.representation
+                ?: when {
+                    configured.isNotEmpty() -> DiagramParticipantRepresentation.HIDE
+                    tag !in automaticallyShown -> DiagramParticipantRepresentation.OTHER
+                    else -> DiagramParticipantRepresentation.SHOW
+                },
+            participant = participant,
+        )
+    }
+}
+
 private fun resolveTagParticipants(
     specParticipants: List<DiagramParticipant>,
     candidateEntries: List<LogEntry>,
-): Pair<List<DiagramParticipant>, List<LogEntry>> {
+): ParticipantResolution {
     val actors = specParticipants.filter { it.kind == ParticipantKind.ACTOR }
     val givenTags = specParticipants.filter { it.kind == ParticipantKind.TAG }
-    val tagParticipants = if (givenTags.isNotEmpty()) {
-        givenTags
+    val tagParticipants: List<DiagramParticipant>
+    val groupedTags: Set<String>
+    val hiddenTags: Set<String>
+    if (givenTags.isNotEmpty()) {
+        tagParticipants = givenTags.filter { it.representation == DiagramParticipantRepresentation.SHOW }
+        groupedTags = givenTags.filter { it.representation == DiagramParticipantRepresentation.OTHER }.mapNotNull { it.tag }.toSet()
+        // A supplied TAG list is an explicit curation. Tags not in it retain the legacy meaning:
+        // they are hidden rather than silently becoming lifelines again.
+        hiddenTags = candidateEntries.asSequence().map { it.tag }.filter { tag ->
+            givenTags.none { it.tag == tag && it.representation != DiagramParticipantRepresentation.HIDE }
+        }.toSet() + givenTags.filter { it.representation == DiagramParticipantRepresentation.HIDE }.mapNotNull { it.tag }
     } else {
-        candidateEntries.asSequence()
+        val rankedTags = candidateEntries.asSequence()
             .groupingBy { it.tag }
             .eachCount()
             .entries
             .sortedByDescending { it.value }
-            .take(DEFAULT_MAX_AUTO_PARTICIPANTS)
+        tagParticipants = rankedTags.take(DEFAULT_MAX_AUTO_PARTICIPANTS)
             .map { (tag, _) -> DiagramParticipant(id = tag, label = tag, kind = ParticipantKind.TAG, tag = tag) }
+        groupedTags = rankedTags.drop(DEFAULT_MAX_AUTO_PARTICIPANTS).map { it.key }.toSet()
+        hiddenTags = emptySet()
     }
-    val allowedTags = tagParticipants.mapNotNull { it.tag }.toHashSet()
-    val filteredEntries = candidateEntries.filter { it.tag in allowedTags }
-    return (actors + tagParticipants) to filteredEntries
+    val other = groupedTags.takeIf { it.isNotEmpty() }?.let {
+        val ids = (actors + tagParticipants).map { p -> p.id }.toHashSet()
+        val id = generateSequence("Other") { "${it}_" }.first { candidate -> candidate !in ids }
+        DiagramParticipant(id = id, label = "Other", kind = ParticipantKind.TAG, representation = DiagramParticipantRepresentation.OTHER)
+    }
+    val shownTags = tagParticipants.mapNotNull { it.tag }.toSet()
+    val representedEntries = candidateEntries.filter { it.tag in shownTags || it.tag in groupedTags }
+    val coverage = DiagramCoverage(
+        scannedEntries = candidateEntries.size,
+        shownEntries = candidateEntries.count { it.tag in shownTags },
+        groupedEntries = candidateEntries.count { it.tag in groupedTags },
+        hiddenEntries = candidateEntries.count { it.tag in hiddenTags || (it.tag !in shownTags && it.tag !in groupedTags) },
+    )
+    return ParticipantResolution(actors + tagParticipants + listOfNotNull(other), representedEntries, groupedTags, coverage)
 }
 
 // Mutable participant list threaded through a scan — a TAG participant is fixed up front, but an
 // ACTOR referenced by an unrecognized RULES-mode from/to name is only discovered mid-scan, so the
 // final SeqDiagram.participants list can't be known until the scan completes.
-private class ParticipantRegistry(initial: List<DiagramParticipant>) {
+private class ParticipantRegistry(initial: List<DiagramParticipant>, groupedTags: Set<String> = emptySet()) {
     val list: MutableList<DiagramParticipant> = initial.toMutableList()
     private val idxByTag = HashMap<String, Int>()
     private val idxById = HashMap<String, Int>()
@@ -285,6 +361,8 @@ private class ParticipantRegistry(initial: List<DiagramParticipant>) {
             if (p.kind == ParticipantKind.TAG && p.tag != null) idxByTag[p.tag] = i
             idxById[p.id] = i
         }
+        val otherIdx = list.indexOfFirst { it.kind == ParticipantKind.TAG && it.representation == DiagramParticipantRepresentation.OTHER }
+        if (otherIdx >= 0) groupedTags.forEach { idxByTag[it] = otherIdx }
     }
 
     fun indexForTag(tag: String): Int? = idxByTag[tag]
