@@ -3,6 +3,8 @@ package com.indagium
 import com.indagium.diagram.DiagramMessage
 import com.indagium.diagram.DiagramParticipant
 import com.indagium.diagram.DiagramTheme
+import com.indagium.diagram.DiagramAttachmentMetadata
+import com.indagium.diagram.DiagramExportMode
 import com.indagium.diagram.MessageKind
 import com.indagium.diagram.ParticipantKind
 import com.indagium.diagram.SeqDiagram
@@ -49,8 +51,11 @@ class DiagramExportTest {
         ),
     )
 
-    private fun diagramNote(id: String = "n1"): AnnBlock.Note =
-        AnnBlock.Note(id, encodeDiagramNote(model.spec, "sequenceDiagram\n  BT->>BMS: enable() called", model))
+    private fun diagramNote(
+        id: String = "n1",
+        attachment: DiagramAttachmentMetadata? = null,
+    ): AnnBlock.Note =
+        AnnBlock.Note(id, encodeDiagramNote(model.spec, "sequenceDiagram\n  BT->>BMS: enable() called", model, attachment))
 
     private fun tabWith(vararg blocks: AnnBlock, frameStamp: String? = null) = mkTab(
         "t1", "bugreport.txt", listOf(LogEntry(1001, "10:00:00.000", LogLevel.I, "BT", "enable() called")),
@@ -76,8 +81,11 @@ class DiagramExportTest {
     // ── Markdown form ────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun markdownStyleEmitsTheFenceVerbatimSoGithubRendersTheDiagram() {
-        val md = buildMd(tabWith(diagramNote()), AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED))
+    fun sourceModeEmitsTheFenceVerbatimSoGithubRendersTheDiagram() {
+        val md = buildMd(
+            tabWith(diagramNote(attachment = DiagramAttachmentMetadata(exportMode = DiagramExportMode.SOURCE))),
+            AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED),
+        )
 
         assertTrue(md.contains("```mermaid"), "the fence must survive so a Markdown viewer renders it; got:\n$md")
         assertTrue(md.contains("sequenceDiagram"), "the diagram body must survive")
@@ -89,16 +97,40 @@ class DiagramExportTest {
     // ── Jira form ────────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun jiraStyleEmitsAnAttachmentAnchorMatchingTheFileTheExporterWrites() {
+    fun imageModeEmitsAnAttachmentReferenceMatchingTheFileTheExporterWrites() {
         // Jira renders neither Mermaid nor ``` fences, so the picture has to arrive as an
         // attachment. The anchor and the written filename come from one shared helper precisely so
         // this can't drift — assert they agree.
         val md = buildMd(tabWith(diagramNote()), AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.JIRA_JAVA))
 
         assertTrue(md.contains("!${annotationDiagramFileName(1)}!"), "expected a Jira attachment anchor; got:\n$md")
-        assertTrue(md.contains("{code}"), "the source belongs in a code block so the diagram stays reproducible from the ticket")
-        assertTrue(md.contains("sequenceDiagram"))
+        assertFalse(md.contains("{code}"), "image mode must not also emit the source")
+        assertFalse(md.contains("sequenceDiagram"))
         assertFalse(md.contains("indagium:diagram"), "the spec header must never reach a Jira comment")
+    }
+
+    @Test
+    fun imageModeUsesAMarkdownImageReferenceAndCaptionByDefault() {
+        val md = buildMd(
+            tabWith(diagramNote(attachment = DiagramAttachmentMetadata(caption = "Bluetooth startup"))),
+            AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED),
+        )
+
+        assertTrue(md.contains("Bluetooth startup"), "the persisted caption should label the attachment; got:\n$md")
+        assertTrue(md.contains("![Bluetooth startup](${annotationDiagramFileName(1)})"), "got:\n$md")
+        assertFalse(md.contains("```mermaid"), "default image mode should not emit dialect source")
+    }
+
+    @Test
+    fun sourceModeUsesJiraCodeWithoutAnImageAnchor() {
+        val md = buildMd(
+            tabWith(diagramNote(attachment = DiagramAttachmentMetadata(exportMode = DiagramExportMode.SOURCE))),
+            AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.JIRA_JAVA),
+        )
+
+        assertTrue(md.contains("{code}"))
+        assertTrue(md.contains("sequenceDiagram"))
+        assertFalse(md.contains("!${annotationDiagramFileName(1)}!"))
     }
 
     @Test

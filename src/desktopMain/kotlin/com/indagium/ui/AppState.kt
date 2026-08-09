@@ -5834,6 +5834,7 @@ class AppState(
         if (diagrams.isEmpty()) return
         val diagramTheme = themeColors(settings.theme).toDiagramTheme()
         diagrams.forEachIndexed { index, (_, parsed) ->
+            if (parsed.exportMode != com.indagium.diagram.DiagramExportMode.IMAGE) return@forEachIndexed
             val model = parsed.model ?: return@forEachIndexed
             runCatching { DiagramRenderCache.pngBytes(model, diagramTheme) }
                 .onSuccess { bytes ->
@@ -5962,7 +5963,7 @@ class AppState(
     }
 
     /**
-     * Writes every Notes image, ONLY the images (no `.md`, no `.ann`), as `frame-0N.jpg` — or
+     * Writes every Notes image and IMAGE-mode diagram, but no `.md`/`.ann`, as `frame-0N.jpg` — or
      * `frame-<stamp>-0N.jpg` once the analysis has a [com.indagium.model.Annotations.frameStamp] —
      * (see [annotationImageFileName], the SAME ordinal+stamp buildMd's JIRA_JAVA style uses for its
      * wiki anchors), into a `<logname>_frames` subfolder of a user-chosen folder. Paired with a
@@ -5974,7 +5975,11 @@ class AppState(
     fun exportAnnotationFrames(tabId: String) {
         val t = tab(tabId) ?: return
         val images = t.annotations.blocks.filterIsInstance<AnnBlock.Image>()
-        if (images.isEmpty()) return
+        val allDiagrams = t.diagramNotes()
+        val imageDiagramCount = allDiagrams.count { (_, parsed) ->
+            parsed.exportMode == com.indagium.diagram.DiagramExportMode.IMAGE
+        }
+        if (images.isEmpty() && imageDiagramCount == 0) return
         val dir = pickDirectory("Export Frames", settings.defaultSaveDir?.let(::File)) ?: return
         settings = settings.copy(defaultSaveDir = dir.absolutePath)
         val framesDir = File(dir, "${t.filename.substringBeforeLast('.')}_frames")
@@ -5986,8 +5991,13 @@ class AppState(
                 images.forEachIndexed { index, image ->
                     File(framesDir, annotationImageFileName(index + 1, image.format, t.annotations.frameStamp)).writeBytes(image.bytes)
                 }
+                // Pass all notes, not only IMAGE notes: the ordinal must remain document-order
+                // aligned with buildMd when SOURCE and IMAGE diagrams are interleaved.
+                writeAnnotationDiagramImages(t, framesDir, allDiagrams)
             }.fold(
-                onSuccess = { AppLogger.info("export", "Exported ${images.size} frame image(s) to ${framesDir.absolutePath}") },
+                onSuccess = {
+                    AppLogger.info("export", "Exported ${images.size + imageDiagramCount} frame image(s) to ${framesDir.absolutePath}")
+                },
                 onFailure = { e -> AppLogger.error("export", "Failed to export frame images to ${framesDir.absolutePath}", e) },
             )
         }

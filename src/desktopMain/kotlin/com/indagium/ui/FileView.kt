@@ -289,6 +289,7 @@ internal fun FileView(
                         onToggleMd = { state.toggleMd(tab.id) },
                         onCopy = { state.copyAnn(tab.id) },
                         onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
+                        onCopyDiagramImage = { png, fallback -> state.copyImageToClipboard(png, fallback) },
                         onCopyRichPreview = { state.copyRichPreview(tab.id) },
                         onExportFrames = { state.exportAnnotationFrames(tab.id) },
                         onSave = { state.saveAnalysis(tab.id) },
@@ -312,6 +313,10 @@ internal fun FileView(
                         onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it) },
                         onEditDiagram = { blockId -> state.seqDiagrams.beginEdit(tab.id, blockId) },
                         onNavigateDiagramLine = { entryId -> state.navigateToLogLine(tab.id, entryId) },
+                        diagramLibraryItems = state.seqDiagrams.libraryForTab(tab),
+                        onCreateDiagram = { state.seqDiagrams.begin(tab.id, tab.selected) },
+                        onOpenDiagramLibraryItem = { id -> state.seqDiagrams.openLibraryItem(id, tab.id) },
+                        onDeleteDiagramLibraryItem = { id -> state.seqDiagrams.deleteLibraryItem(id) },
                         width = state.annotationPanelWidth,
                         focusRequester = annotationFr,
                         onPanelFocusChanged = { focused ->

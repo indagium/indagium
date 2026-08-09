@@ -48,6 +48,7 @@ import com.indagium.ai.CustomAiCommand
 import com.indagium.ai.ModelDiscoveryResult
 import com.indagium.ai.OpenAiCompatibleProvider
 import com.indagium.ai.normalizeAiProviderProfiles
+import com.indagium.diagram.DiagramExportMode
 import com.indagium.generated.BuildInfo
 import com.indagium.model.*
 import com.indagium.voice.VoiceLanguageCatalog
@@ -771,6 +772,55 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     )
                 }
             },
+        )
+
+        EditorBehaviorGridRow(
+            first = {
+                CompactSettingWithTooltip(
+                    label = "Diagram note action",
+                    tooltip = "The sequence-diagram workspace always offers snapshot and linked notes. " +
+                        "This chooses which half of the split action is primary.",
+                ) {
+                    SegmentedControl(
+                        options = listOf("Snapshot", "Link"),
+                        selectedIndices = setOf(if (state.settings.diagramLinkedNotePrimary) 1 else 0),
+                        onToggle = { idx -> state.updateSettings { it.copy(diagramLinkedNotePrimary = idx == 1) } },
+                    )
+                }
+            },
+            second = {},
+            third = {},
+            fourth = {},
+        )
+
+        EditorBehaviorGridRow(
+            first = {
+                CompactSettingWithTooltip(
+                    label = "Diagram export",
+                    tooltip = "Sets the representation for newly added sequence-diagram notes. " +
+                        "Image works in Markdown and Jira without Mermaid or PlantUML support; " +
+                        "Src keeps the editable diagram text. Existing notes keep their own choice.",
+                ) {
+                    SegmentedControl(
+                        options = listOf("Img", "Src"),
+                        selectedIndices = setOf(if (state.settings.diagramDefaultExportMode == DiagramExportMode.IMAGE) 0 else 1),
+                        onToggle = { index ->
+                            state.updateSettings {
+                                it.copy(
+                                    diagramDefaultExportMode = if (index == 0) {
+                                        DiagramExportMode.IMAGE
+                                    } else {
+                                        DiagramExportMode.SOURCE
+                                    },
+                                )
+                            }
+                        },
+                    )
+                }
+            },
+            second = {},
+            third = {},
+            fourth = {},
         )
 
         // Reserve an identical two-line label area in every track.  This keeps the controls

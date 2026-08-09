@@ -116,7 +116,7 @@ fun SeqDiagram.toMermaid(): String {
         participants.forEachIndexed { i, p ->
             val keyword = if (p.kind == ParticipantKind.ACTOR) "actor" else "participant"
             append("    ").append(keyword).append(' ').append(aliases[i])
-                .append(" as ").append(mermaidEscape(p.label)).append('\n')
+                .append(" as ").append(mermaidEscape(p.displayName)).append('\n')
         }
         messages.forEachIndexed { i, msg ->
             opens[i]?.sortedBy { it.depth }?.forEach { f ->
@@ -210,7 +210,7 @@ fun SeqDiagram.toPlantUml(): String {
         if (spec.title.isNotBlank()) append("title ").append(plantUmlEscape(spec.title)).append('\n')
         participants.forEachIndexed { i, p ->
             val keyword = if (p.kind == ParticipantKind.ACTOR) "actor" else "participant"
-            append(keyword).append(" \"").append(plantUmlEscape(p.label)).append("\" as ").append(aliases[i]).append('\n')
+            append(keyword).append(" \"").append(plantUmlEscape(p.displayName)).append("\" as ").append(aliases[i]).append('\n')
         }
         messages.forEachIndexed { i, msg ->
             // group/end genuinely nests in PlantUML (unlike Mermaid's Note-based stand-in above),

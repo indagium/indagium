@@ -60,8 +60,12 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.diagram.ParsedDiagram
+import com.indagium.diagram.DiagramExportMode
 import com.indagium.diagram.parseDiagramNote
 import com.indagium.diagram.stripDiagramSpecHeader
+import com.indagium.diagram.toPngBytes
+import com.indagium.diagram.updateDiagramNoteCaption
+import com.indagium.diagram.updateDiagramNoteExportMode
 import com.indagium.model.AnnBlock
 import com.indagium.model.AppSettings
 import com.indagium.model.LogTab
@@ -156,6 +160,9 @@ fun AnnotationPanel(
     onToggleMd: () -> Unit,
     onCopy: () -> Unit,
     onCopyImage: (AnnBlock.Image) -> Unit,
+    // Diagram PNGs are rendered from the model in the active theme. The app owns the platform
+    // clipboard; the panel only supplies bytes plus useful plain-text fallback.
+    onCopyDiagramImage: (png: ByteArray, fallbackText: String) -> Unit = { _, _ -> },
     onCopyRichPreview: () -> Unit,
     onExportFrames: () -> Unit,
     onSave: () -> Unit,
@@ -196,6 +203,12 @@ fun AnnotationPanel(
     // diagram, never a broken one.
     onEditDiagram: (blockId: String) -> Unit = {},
     onNavigateDiagramLine: (entryId: Int) -> Unit = {},
+    // The panel deliberately receives library data/actions rather than reaching into AppState:
+    // it stays a UI leaf and the caller owns source-identity scoping and workspace transitions.
+    diagramLibraryItems: List<DiagramLibraryItem> = emptyList(),
+    onCreateDiagram: () -> Unit = {},
+    onOpenDiagramLibraryItem: (id: String) -> Unit = {},
+    onDeleteDiagramLibraryItem: (id: String) -> Unit = {},
     width: Float,
     focusRequester: FocusRequester? = null,
     onPanelFocusChanged: (Boolean) -> Unit = {},
@@ -222,6 +235,10 @@ fun AnnotationPanel(
     var suffixFocused by remember { mutableStateOf(false) }
     // Session-only, not persisted — only the text itself needs to survive a restart.
     var issueDescExpanded by remember(tab.id) { mutableStateOf(false) }
+    // The library is supporting material rather than the primary Notes workflow. Start it
+    // folded on every tab, like Issue description, and let a reader opt into its list.
+    var diagramLibraryExpanded by remember(tab.id) { mutableStateOf(false) }
+    var pendingDiagramLibraryDeleteId by remember(tab.id) { mutableStateOf<String?>(null) }
     var blockFieldFocused by remember { mutableStateOf(false) }
     var activeBlockFieldId by remember(tab.id) { mutableStateOf<String?>(null) }
     var navIndex by remember(tab.id) { mutableStateOf(0) }
@@ -290,7 +307,11 @@ fun AnnotationPanel(
                 val diagramDp = parseDiagramNote(block.text)?.model?.let { model ->
                     DIAGRAM_CHROME_DP + model.messages.size * DIAGRAM_ROW_DP
                 } ?: 0f
-                controlsDp + diagramDp + textFieldDp(block.text, 20.7f, 60f) + outerChromeDp
+                // Diagram source is deliberately not an editor field. It can be very large, and
+                // using it for this estimate used to reserve several screens of blank space for a
+                // collapsed card. The editable caption is the only user-visible text field.
+                val caption = parseDiagramNote(block.text)?.caption.orEmpty()
+                controlsDp + diagramDp + textFieldDp(caption, 20.7f, 40f) + outerChromeDp
             }
             is AnnBlock.LogRef -> {
                 val captionDp = textFieldDp(block.caption, 20.7f, 52f)
@@ -635,6 +656,18 @@ fun AnnotationPanel(
         }
         Box(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 8.dp)) {
+                // This is intentionally above Issue description: saved diagrams are log-specific
+                // workspace artifacts, while the issue description is private free-form context.
+                // The coordinator has already filtered the list by path + content fingerprint.
+                DiagramLibrarySection(
+                    items = diagramLibraryItems,
+                    expanded = diagramLibraryExpanded,
+                    onToggle = { diagramLibraryExpanded = !diagramLibraryExpanded },
+                    onCreate = onCreateDiagram,
+                    onOpen = onOpenDiagramLibraryItem,
+                    onRequestDelete = { pendingDiagramLibraryDeleteId = it },
+                )
+                Divider()
                 // Issue description — a private working note, persisted in the .ann sidecar and
                 // autosave, but deliberately never rendered into the Markdown preview/export/MCP
                 // markdown so it stays out of anything shared or copied as the issue writeup.
@@ -722,6 +755,7 @@ fun AnnotationPanel(
                             dragHandleModifier = dragHandleModifier,
                             onEditDiagram = { onEditDiagram(block.id) },
                             onNavigateDiagramLine = onNavigateDiagramLine,
+                            onCopyDiagramImage = onCopyDiagramImage,
                         )
                         is AnnBlock.LogRef -> LogRefBlock(
                             block = block, tab = tab, settings = settings, mono = mono, tc = tc,
@@ -918,6 +952,154 @@ fun AnnotationPanel(
                 modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
                 style = appScrollbarStyle(tc),
             )
+        }
+
+        pendingDiagramLibraryDeleteId?.let { id ->
+            val item = diagramLibraryItems.firstOrNull { it.id == id }
+            if (item == null) {
+                pendingDiagramLibraryDeleteId = null
+            } else {
+                DiagramLibraryDeleteDialog(
+                    title = item.title,
+                    onConfirm = {
+                        // Deletion is intentionally confined to this explicit confirmation
+                        // action; a row's Delete button only opens this dialog.
+                        onDeleteDiagramLibraryItem(id)
+                        pendingDiagramLibraryDeleteId = null
+                    },
+                    onDismiss = { pendingDiagramLibraryDeleteId = null },
+                )
+            }
+        }
+    }
+}
+
+private const val DIAGRAM_LIBRARY_PANEL_ROW_DP = 42
+private const val DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP = 168
+
+@Composable
+private fun DiagramLibrarySection(
+    items: List<DiagramLibraryItem>,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onCreate: () -> Unit,
+    onOpen: (String) -> Unit,
+    onRequestDelete: (String) -> Unit,
+) {
+    val tc = tc()
+    SectionHeader(
+        "Diagram library",
+        trailing = {
+            AppText(items.size.toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+            Spacer(Modifier.width(8.dp))
+            LabelIconButton("+ diagram", fontSize = 10.sp, onClick = onCreate)
+        },
+        expanded = expanded,
+        onToggle = onToggle,
+    )
+    if (!expanded) return
+
+    // AnnotationPanel's outer Column is itself vertically scrollable, so use a bounded fixed
+    // viewport rather than heightIn(max): Compose otherwise receives an unbounded height and the
+    // inner scrollbar cannot become useful.
+    // The viewport keeps four dp of breathing room above and below each library list. Include
+    // those in the measured section height so the 42-dp item and its related range line are not
+    // clipped by the padded Box.
+    val listHeight = (items.size * DIAGRAM_LIBRARY_PANEL_ROW_DP)
+        .coerceIn(DIAGRAM_LIBRARY_PANEL_ROW_DP, DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP).dp
+        .plus(8.dp)
+    val listScroll = rememberScrollState()
+    val needsScrollbar = items.size * DIAGRAM_LIBRARY_PANEL_ROW_DP > DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP
+    Box(Modifier.fillMaxWidth().height(listHeight).padding(vertical = 4.dp)) {
+        if (items.isEmpty()) {
+            AppText(
+                "No saved diagrams for this log.",
+                color = tc.td,
+                fontSize = 10.sp,
+                modifier = Modifier.align(Alignment.CenterStart).padding(horizontal = 12.dp),
+            )
+        } else {
+            Column(
+                Modifier.fillMaxSize()
+                    .verticalScroll(listScroll)
+                    .padding(end = if (needsScrollbar) 8.dp else 0.dp),
+            ) {
+                items.forEachIndexed { index, item ->
+                    Row(
+                        Modifier.fillMaxWidth().height(DIAGRAM_LIBRARY_PANEL_ROW_DP.dp)
+                            .clickable { onOpen(item.id) },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth()
+                                .fillMaxHeight()
+                                .padding(start = 12.dp, end = if (needsScrollbar) 20.dp else 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Column(
+                                Modifier.weight(1f).fillMaxHeight(),
+                                verticalArrangement = Arrangement.spacedBy(1.dp, Alignment.CenterVertically),
+                            ) {
+                                AppText(
+                                    item.title.ifBlank { "Untitled diagram" },
+                                    color = tc.tx,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                AppText(
+                                    item.parsed?.let { parsed -> diagramLibraryRangeSummary(parsed.spec) } ?: "Unavailable diagram data",
+                                    color = tc.td,
+                                    fontSize = 9.sp,
+                                    maxLines = 1,
+                                )
+                            }
+                            AppButton("Delete", { onRequestDelete(item.id) }, variant = ButtonVariant.Ghost)
+                        }
+                    }
+                    if (index != items.lastIndex) Divider()
+                }
+            }
+            if (needsScrollbar) {
+                VerticalScrollbar(
+                    adapter = rememberScrollbarAdapter(listScroll),
+                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+                    style = appScrollbarStyle(tc),
+                )
+            }
+        }
+    }
+}
+
+private fun diagramLibraryRangeSummary(spec: com.indagium.diagram.SeqDiagramSpec): String = when (val range = spec.range) {
+    is com.indagium.diagram.DiagramRange.VisibleView -> "Current filtered view"
+    is com.indagium.diagram.DiagramRange.Ids -> "Lines ${minOf(range.from, range.to)}–${maxOf(range.from, range.to)}"
+    is com.indagium.diagram.DiagramRange.Time -> "${range.fromTs.ifBlank { "start" }}–${range.toTs.ifBlank { "end" }}"
+    is com.indagium.diagram.DiagramRange.SeqGroupRef -> "Sequence group ${range.gid}"
+}
+
+@Composable
+private fun DiagramLibraryDeleteDialog(title: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    val tc = tc()
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.width(360.dp).background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            AppText("Delete saved diagram?", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            AppText(
+                "\"${title.ifBlank { "Untitled diagram" }}\" will be removed from the diagram library. Existing note snapshots are unchanged.",
+                color = tc.td,
+                fontSize = 11.sp,
+                maxLines = 3,
+            )
+            Spacer(Modifier.height(6.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
+                DialogActionButton("Delete", active = true, danger = true, onClick = onConfirm)
+                DialogActionButton("Cancel", active = false, onClick = onDismiss)
+            }
         }
     }
 }
@@ -1165,18 +1347,79 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                     // AnnBlock.Image is below — the renderer has no Mermaid support, and feeding it
                     // the note text raw would show a wall of spec-header JSON followed by source.
                     val parsed = remember(block.text) { parseDiagramNote(block.text) }
-                    val diagramModel = parsed?.model
-                    if (diagramModel != null) {
+                    // `model` is deliberately null for a v2 attachment whose visible source no
+                    // longer hashes to its carried model. The Markdown preview is read-only, so
+                    // it may present that retained model as an explicitly labelled snapshot;
+                    // otherwise v2 attachments vanish between the surrounding log blocks.
+                    // Editor and hit-test paths continue to use ParsedDiagram.model only.
+                    val diagramModel = parsed?.snapshotPreviewModel
+                    if (parsed != null && diagramModel != null) {
                         val diagramTheme = tc.toDiagramTheme()
                         val rendered = remember(diagramModel, diagramTheme) { DiagramRenderCache.render(diagramModel, diagramTheme) }
                         val bitmap = remember(rendered) { rendered.toComposeBitmap() }
-                        Image(
-                            bitmap = bitmap,
-                            contentDescription = "Sequence diagram",
-                            modifier = Modifier
-                                .width((rendered.widthPx / rendered.scale).dp)
-                                .height((rendered.heightPx / rendered.scale).dp),
-                        )
+                        // A sequence diagram needs every available horizontal pixel. The bounded
+                        // viewport below owns vertical overflow, preserving readable text without
+                        // shrinking the card to an arbitrary fraction of the prose column.
+                        BoxWithConstraints(Modifier.fillMaxWidth()) {
+                            val previewWidth = maxWidth
+                            val aspectRatio = rendered.widthPx.toFloat() / rendered.heightPx.coerceAtLeast(1)
+                            // The card's 10.dp padding is outside the image viewport, so size
+                            // from the actual drawable width to keep the raster ratio exact.
+                            val imageWidth = (previewWidth - 20.dp).coerceAtLeast(1.dp)
+                            val renderedHeight = imageWidth / aspectRatio
+                            // Keep the full-width raster at its natural aspect ratio and scroll
+                            // it inside a deliberately bounded viewport. This is keyed by the
+                            // note text so every diagram preview has its own resize setting.
+                            var viewportHeight by remember(block.text) { mutableStateOf(280.dp) }
+                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+                                Column(
+                                    Modifier.fillMaxWidth()
+                                        .background(tc.bg, CORNER_SM)
+                                        .border(1.dp, tc.br, CORNER_SM)
+                                        .padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    AppText(
+                                        parsed.spec.title.ifBlank { "Sequence diagram" },
+                                        color = tc.ts,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                    // A retained model whose source has changed is safe to show,
+                                    // but must remain distinguishable from a current rendering.
+                                    if (parsed.model == null) {
+                                        AppText("Saved snapshot — source changed", color = tc.td, fontSize = 10.sp)
+                                    }
+                                    // Do not fit the raster into the viewport height: a sequence
+                                    // diagram stays readable only when it fills the card width.
+                                    // The viewport owns the vertical scrolling instead, so a tall
+                                    // image never turns the surrounding Markdown preview into one
+                                    // long scroll.
+                                    val imageScroll = remember(block.text) { ScrollState(0) }
+                                    Box(
+                                        Modifier.fillMaxWidth().height(viewportHeight).clip(CORNER_SM),
+                                    ) {
+                                        Box(Modifier.fillMaxSize().verticalScroll(imageScroll)) {
+                                            Image(
+                                                bitmap = bitmap,
+                                                contentDescription = "Sequence diagram",
+                                                modifier = Modifier.fillMaxWidth().height(renderedHeight),
+                                                contentScale = ContentScale.FillWidth,
+                                            )
+                                        }
+                                        VerticalScrollbar(
+                                            adapter = rememberScrollbarAdapter(imageScroll),
+                                            modifier = Modifier.align(Alignment.CenterEnd)
+                                                .fillMaxHeight().padding(vertical = 3.dp).width(6.dp),
+                                            style = appScrollbarStyle(tc),
+                                        )
+                                    }
+                                    VDivider { delta ->
+                                        viewportHeight = (viewportHeight + delta.dp).coerceIn(160.dp, 700.dp)
+                                    }
+                                }
+                            }
+                        }
                         if (settings.numberAnnotationBlocks) blockNumber++
                     } else {
                         AnnotationMarkdownText(
@@ -1345,11 +1588,13 @@ private fun NoteBlock(
     dragHandleModifier: Modifier = Modifier,
     onEditDiagram: () -> Unit = {},
     onNavigateDiagramLine: (Int) -> Unit = {},
+    onCopyDiagramImage: (png: ByteArray, fallbackText: String) -> Unit = { _, _ -> },
 ) {
-    // A diagram note is still a text note underneath: the picture is rendered ABOVE the editable
-    // source rather than replacing it, so the fenced Mermaid/PlantUML stays hand-editable (and an
-    // older build, or one with a corrupt header, degrades to exactly the plain text field).
+    // Diagram notes are cards, not an exposed model header plus dialect source. Opening the
+    // workspace is the only normal editing route, which keeps the rendered model and saved source
+    // in sync. A malformed/non-diagram note remains the ordinary editable text control below.
     val diagram = remember(block.text) { parseDiagramNote(block.text) }
+    var diagramExpanded by remember(diagram?.spec, diagram?.model) { mutableStateOf(false) }
     Column(
         Modifier.fillMaxWidth()
             .border(BorderStroke(2.dp, if (focused) tc.ac else tc.ac.copy(.35f)))
@@ -1358,28 +1603,151 @@ private fun NoteBlock(
         BlockControls(
             if (diagram != null) "diagram" else "text",
             tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, dragHandleModifier = dragHandleModifier,
+            onNavigate = if (diagram != null) onEditDiagram else null,
+            onNavigateTooltip = if (diagram != null) "Open diagram workspace" else null,
+            onCopyImage = diagram?.model?.let { model ->
+                {
+                    val title = diagram.spec.title.ifBlank { "Sequence diagram" }
+                    onCopyDiagramImage(
+                        DiagramRenderCache.pngBytes(model, tc.toDiagramTheme()),
+                        "Sequence diagram: $title",
+                    )
+                }
+            },
+            afterBadgeContent = diagram?.let { parsed ->
+                {
+                    DiagramExportModeSwitcher(
+                        noteText = block.text,
+                        exportMode = parsed.exportMode,
+                        onUpdateDiagramText = onUpdate,
+                    )
+                }
+            },
         )
         Spacer(Modifier.height(5.dp))
         if (diagram != null) {
-            DiagramNoteView(diagram, tc, onEditDiagram, onNavigateDiagramLine)
-            Spacer(Modifier.height(6.dp))
+            DiagramNoteView(
+                noteText = block.text,
+                parsed = diagram,
+                tc = tc,
+                fieldFocusRequester = fieldFocusRequester,
+                onFieldFocusChanged = onFieldFocusChanged,
+                onUpdateDiagramText = onUpdate,
+                onNavigateLine = onNavigateDiagramLine,
+                expanded = diagramExpanded,
+                onToggleExpanded = { diagramExpanded = !diagramExpanded },
+            )
+        } else {
+            BasicTextField(
+                value = block.text,
+                onValueChange = onUpdate,
+                textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
+                cursorBrush = SolidColor(tc.ac),
+                modifier = Modifier.fillMaxWidth()
+                    .background(tc.bg, CORNER_SM)
+                    .border(1.dp, tc.br, CORNER_SM)
+                    .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
+                    .onFocusChanged { onFieldFocusChanged(it.isFocused) }
+                    .padding(8.dp).defaultMinSize(minHeight = 60.dp),
+                decorationBox = { inner ->
+                    if (block.text.isEmpty()) AppText("Write your note here…", color = tc.td, fontSize = 12.sp)
+                    inner()
+                },
+            )
         }
-        BasicTextField(
-            value = block.text,
-            onValueChange = onUpdate,
-            textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
-            cursorBrush = SolidColor(tc.ac),
-            modifier = Modifier.fillMaxWidth()
-                .background(tc.bg, CORNER_SM)
-                .border(1.dp, tc.br, CORNER_SM)
-                .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
-                .onFocusChanged { onFieldFocusChanged(it.isFocused) }
-                .padding(8.dp).defaultMinSize(minHeight = 60.dp),
-            decorationBox = { inner ->
-                if (block.text.isEmpty()) AppText("Write your note here…", color = tc.td, fontSize = 12.sp)
-                inner()
-            },
+    }
+}
+
+@Composable
+private fun RowScope.DiagramHeaderSummary(parsed: ParsedDiagram) {
+    val model = parsed.model
+    val selection = when (val range = parsed.spec.range) {
+        is com.indagium.diagram.DiagramRange.Ids -> "Lines ${range.from}–${range.to}"
+        is com.indagium.diagram.DiagramRange.Time -> "${range.fromTs.ifBlank { "start" }}–${range.toTs.ifBlank { "end" }}"
+        com.indagium.diagram.DiagramRange.VisibleView -> "Current filtered view"
+        is com.indagium.diagram.DiagramRange.SeqGroupRef -> "Sequence group ${range.gid}"
+    }
+    val metrics = model?.let {
+        "${it.messages.size} arrows · ${it.participants.size} lifelines" + if (it.truncated) " · truncated" else ""
+    }
+    Column(Modifier.widthIn(max = 180.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        AppText(
+            parsed.spec.title.ifBlank { "Sequence diagram" },
+            color = tc().tx,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
+        AppText(
+            listOfNotNull(selection, metrics).joinToString(" · ") + if (model == null) " · source only" else "",
+            color = tc().td,
+            fontSize = 9.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun DiagramExportModeSwitcher(
+    noteText: String,
+    exportMode: DiagramExportMode,
+    onUpdateDiagramText: (String) -> Unit,
+) {
+    val tc = tc()
+    val shape = RoundedCornerShape(6.dp)
+    Row(
+        modifier = Modifier.height(18.dp).border(0.5.dp, tc.br, shape).clip(shape),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TooltipArea(
+            tooltip = { ToolbarTooltip("Img exports this diagram as a PNG/image attachment.") },
+        ) {
+            Box(
+                Modifier.defaultMinSize(minWidth = 30.dp)
+                    .fillMaxHeight()
+                    .background(if (exportMode == DiagramExportMode.IMAGE) tc.ac.copy(.2f) else Color.Transparent)
+                    .clickable {
+                        if (exportMode != DiagramExportMode.IMAGE) {
+                            updateDiagramNoteExportMode(noteText, DiagramExportMode.IMAGE)?.let(onUpdateDiagramText)
+                        }
+                    }
+                    .padding(horizontal = 7.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                AppText(
+                    "Img",
+                    color = if (exportMode == DiagramExportMode.IMAGE) tc.ac else tc.ts,
+                    fontSize = 10.sp,
+                    fontWeight = if (exportMode == DiagramExportMode.IMAGE) FontWeight.Medium else FontWeight.Normal,
+                )
+            }
+        }
+        Box(Modifier.width(0.5.dp).fillMaxHeight().background(tc.br))
+        TooltipArea(
+            tooltip = { ToolbarTooltip("Src exports this diagram as Mermaid/PlantUML source.") },
+        ) {
+            Box(
+                Modifier.defaultMinSize(minWidth = 30.dp)
+                    .fillMaxHeight()
+                    .background(if (exportMode == DiagramExportMode.SOURCE) tc.ac.copy(.2f) else Color.Transparent)
+                    .clickable {
+                        if (exportMode != DiagramExportMode.SOURCE) {
+                            updateDiagramNoteExportMode(noteText, DiagramExportMode.SOURCE)?.let(onUpdateDiagramText)
+                        }
+                    }
+                    .padding(horizontal = 7.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                AppText(
+                    "Src",
+                    color = if (exportMode == DiagramExportMode.SOURCE) tc.ac else tc.ts,
+                    fontSize = 10.sp,
+                    fontWeight = if (exportMode == DiagramExportMode.SOURCE) FontWeight.Medium else FontWeight.Normal,
+                )
+            }
+        }
     }
 }
 
@@ -1395,53 +1763,84 @@ private fun NoteBlock(
  */
 @Composable
 private fun DiagramNoteView(
+    noteText: String,
     parsed: ParsedDiagram,
     tc: ThemeColors,
-    onEdit: () -> Unit,
+    fieldFocusRequester: FocusRequester?,
+    onFieldFocusChanged: (Boolean) -> Unit,
+    onUpdateDiagramText: (String) -> Unit,
     onNavigateLine: (Int) -> Unit,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
 ) {
     val model = parsed.model
-    if (model == null) {
-        // A diagram note written by an older build, or hand-authored: the fence still exports and
-        // still renders wherever Mermaid is supported, there's just no model to draw or click.
-        AppText("Diagram source only — regenerate to see and click the picture.", color = tc.td, fontSize = 11.sp, maxLines = 2)
-        AppButton("Edit diagram…", onEdit, variant = ButtonVariant.Secondary)
-        return
+    BasicTextField(
+        value = parsed.caption,
+        onValueChange = { caption ->
+            updateDiagramNoteCaption(noteText, caption)?.let(onUpdateDiagramText)
+        },
+        textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
+        cursorBrush = SolidColor(tc.ac),
+        modifier = Modifier.fillMaxWidth()
+            .background(tc.bg, CORNER_SM)
+            .border(1.dp, tc.br, CORNER_SM)
+            .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
+            .onFocusChanged { onFieldFocusChanged(it.isFocused) }
+            .padding(8.dp).defaultMinSize(minHeight = 40.dp),
+        decorationBox = { inner ->
+            if (parsed.caption.isEmpty()) AppText("Add a caption…", color = tc.td, fontSize = 12.sp)
+            inner()
+        },
+    )
+    Spacer(Modifier.height(6.dp))
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        AppButton(if (expanded) "▾" else "▸", onToggleExpanded, variant = ButtonVariant.Ghost)
+        DiagramHeaderSummary(parsed)
     }
+    // Render even while the preview is collapsed so the card can retain its current layout. PNG
+    // conversion for the header's Copy image action remains deferred until the action is clicked.
     val theme = tc.toDiagramTheme()
-    val rendered = remember(model, theme) { DiagramRenderCache.render(model, theme) }
-    val bitmap = remember(rendered) { rendered.toComposeBitmap() }
-    val density = LocalDensity.current.density
-
-    Box(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-    ) {
-        Image(
-            bitmap = bitmap,
-            contentDescription = "Sequence diagram",
-            modifier = Modifier
-                .width((rendered.widthPx / rendered.scale).dp)
-                .height((rendered.heightPx / rendered.scale).dp)
-                .pointerInput(rendered) {
-                    detectTapGestures { offset ->
-                        // Compose hands pointer coordinates in PIXELS; the hit boxes are in image
-                        // pixels, which are (logical dp * density-independent render scale). Convert
-                        // through both: pixels -> dp (/ density) -> image px (* rendered.scale).
-                        val ix = (offset.x / density * rendered.scale).toInt()
-                        val iy = (offset.y / density * rendered.scale).toInt()
-                        rendered.hits.firstOrNull { h ->
-                            ix >= h.x && ix <= h.x + h.width && iy >= h.y && iy <= h.y + h.height
-                        }?.let { if (it.entryId > 0) onNavigateLine(it.entryId) }
-                    }
-                },
-        )
-    }
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        AppText(
-            "${model.messages.size} arrows · ${model.participants.size} lifelines" + if (model.truncated) " · truncated" else "",
-            color = tc.td, fontSize = 10.sp, modifier = Modifier.weight(1f),
-        )
-        AppButton("Edit…", onEdit, variant = ButtonVariant.Ghost)
+    val rendered = if (model != null) remember(model, theme) { DiagramRenderCache.render(model, theme) } else null
+    if (expanded) {
+        Spacer(Modifier.height(6.dp))
+        if (rendered == null) {
+            // A diagram note written by an older build, or hand-authored: the fence still exports
+            // wherever Mermaid is supported, but there is no model to draw or click here.
+            AppText("Diagram source only — regenerate to see and click the picture.", color = tc.td, fontSize = 11.sp, maxLines = 2)
+        } else {
+            val bitmap = remember(rendered) { rendered.toComposeBitmap() }
+            // The renderer uses a generously sized editor canvas. A note card must not inherit
+            // that raw canvas size, so fit the visible preview within the available width and a
+            // fixed height while retaining the exact aspect ratio for hit testing.
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val maxPreviewHeight = 300.dp
+                val aspectRatio = rendered.widthPx.toFloat() / rendered.heightPx.coerceAtLeast(1)
+                val previewWidth = minOf(maxWidth, maxPreviewHeight * aspectRatio)
+                val previewHeight = previewWidth / aspectRatio
+                val density = LocalDensity.current.density
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Image(
+                        bitmap = bitmap,
+                        contentDescription = "Sequence diagram",
+                        modifier = Modifier
+                            .width(previewWidth)
+                            .height(previewHeight)
+                            .pointerInput(rendered, previewWidth, previewHeight) {
+                                detectTapGestures { offset ->
+                                    val displayWidthPx = previewWidth.value * density
+                                    val displayHeightPx = previewHeight.value * density
+                                    val ix = (offset.x / displayWidthPx * rendered.widthPx).toInt()
+                                    val iy = (offset.y / displayHeightPx * rendered.heightPx).toInt()
+                                    rendered.hits.firstOrNull { h ->
+                                        ix >= h.x && ix <= h.x + h.width && iy >= h.y && iy <= h.y + h.height
+                                    }?.let { if (it.entryId > 0) onNavigateLine(it.entryId) }
+                                }
+                            },
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
     }
 }
 
@@ -1487,7 +1886,7 @@ private fun LogRefBlock(
             ) { AppText("from ${block.sourceFilename}", color = tc.ac, fontSize = 9.sp, fontFamily = MONO) }
         }
         Spacer(Modifier.height(5.dp))
-        BasicTextField(
+    BasicTextField(
             value = block.caption,
             onValueChange = onUpdateCaption,
             textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
@@ -1501,8 +1900,8 @@ private fun LogRefBlock(
             decorationBox = { inner ->
                 if (block.caption.isEmpty()) AppText("Add a note or analysis…", color = tc.td, fontSize = 12.sp)
                 inner()
-            },
-        )
+        },
+    )
         Spacer(Modifier.height(6.dp))
 
         // Referenced log lines shown BELOW the text
@@ -1630,7 +2029,9 @@ private fun BlockControls(
     onRemove: () -> Unit,
     onAddBelow: () -> Unit,
     onNavigate: (() -> Unit)? = null,
+    onNavigateTooltip: String? = null,
     onCopyImage: (() -> Unit)? = null,
+    afterBadgeContent: (@Composable () -> Unit)? = null,
     dragHandleModifier: Modifier = Modifier,
 ) {
     val badgeShape = CORNER_SM
@@ -1661,29 +2062,38 @@ private fun BlockControls(
             fontSize = 12.sp,
             modifier = dragHandleModifier.pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR))),
         )
-        Box(
-            badgeModifier,
-            contentAlignment = Alignment.Center,
-        ) {
-            if (isNavigationBadge) {
-                androidx.compose.material3.Text(
-                    "$typeLabel ↗",
-                    color = typeColor,
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    textDecoration = TextDecoration.Underline,
-                    maxLines = 1,
-                )
-            } else {
-                AppText(
-                    typeLabel,
-                    color = typeColor,
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Medium,
-                )
+        val badge: @Composable () -> Unit = {
+            Box(
+                badgeModifier,
+                contentAlignment = Alignment.Center,
+            ) {
+                if (isNavigationBadge) {
+                    androidx.compose.material3.Text(
+                        "$typeLabel ↗",
+                        color = typeColor,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        textDecoration = TextDecoration.Underline,
+                        maxLines = 1,
+                    )
+                } else {
+                    AppText(
+                        typeLabel,
+                        color = typeColor,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
             }
         }
-
+        if (onNavigateTooltip != null) {
+            TooltipArea(tooltip = { ToolbarTooltip(onNavigateTooltip) }) { badge() }
+        } else {
+            badge()
+        }
+        afterBadgeContent?.let {
+            it()
+        }
         Spacer(Modifier.weight(1f))
 
         if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp)

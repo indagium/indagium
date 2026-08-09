@@ -2,6 +2,9 @@ package com.indagium
 
 import com.indagium.diagram.ArrowMode
 import com.indagium.diagram.DiagramDialect
+import com.indagium.diagram.DiagramAttachmentMetadata
+import com.indagium.diagram.DiagramAttachmentMode
+import com.indagium.diagram.DiagramExportMode
 import com.indagium.diagram.DiagramFrame
 import com.indagium.diagram.DiagramMessage
 import com.indagium.diagram.DiagramMessageRule
@@ -17,6 +20,8 @@ import com.indagium.diagram.SeqDiagramSpec
 import com.indagium.diagram.encodeDiagramNote
 import com.indagium.diagram.parseDiagramNote
 import com.indagium.diagram.stripDiagramSpecHeader
+import com.indagium.diagram.updateDiagramNoteCaption
+import com.indagium.diagram.updateDiagramNoteExportMode
 import com.indagium.model.LogLevel
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -177,7 +182,7 @@ class DiagramSpecCodecTest {
 
     @Test
     fun parseDiagramNoteReturnsNullForAnUnsupportedFutureVersion() {
-        val futureVersion = "<!-- indagium:diagram v2 {\"dialect\":\"mermaid\"} -->\n```mermaid\nsequenceDiagram\n```\n"
+        val futureVersion = "<!-- indagium:diagram v3 {\"dialect\":\"mermaid\"} -->\n```mermaid\nsequenceDiagram\n```\n"
         assertNull(parseDiagramNote(futureVersion))
     }
 
@@ -251,5 +256,72 @@ class DiagramSpecCodecTest {
 
         assertNull(parsed.model, "a model with no participants is not renderable and must read as absent")
         assertEquals("T", parsed.spec.title, "the spec must survive a bad model record")
+    }
+
+    @Test
+    fun v2GuardsTheCarriedModelAgainstSourceEditsAndRetainsAttachmentSnapshotMetadata() {
+        val participants = listOf(DiagramParticipant("App", "App", ParticipantKind.TAG, tag = "App"))
+        val model = SeqDiagram(
+            spec = fullSpec.copy(participants = participants), participants = participants,
+            messages = listOf(DiagramMessage(0, 0, "original", 7, "10:00:00.000", LogLevel.I, MessageKind.SELF)),
+        )
+        val attachment = DiagramAttachmentMetadata("draft-42", DiagramAttachmentMode.LINKED, revision = 8, attachedAtEpochMs = 1234)
+        val encoded = encodeDiagramNote(model.spec, source, model, attachment)
+        val trusted = assertNotNull(parseDiagramNote(encoded))
+        assertTrue(trusted.sourceHashMatches == true)
+        assertNotNull(trusted.model)
+        assertEquals(attachment, trusted.attachment)
+
+        val edited = encoded.replace("App->>App: hi", "App->>App: manually edited")
+        val parsed = assertNotNull(parseDiagramNote(edited))
+        assertEquals(false, parsed.sourceHashMatches)
+        assertNull(parsed.model, "a stale carried model must never render after source editing")
+        assertNotNull(parsed.snapshot, "the original attachment snapshot remains available for explicit recovery")
+        assertNotNull(
+            parsed.snapshotPreviewModel,
+            "read-only Markdown Preview can still show the retained v2 attachment as a snapshot",
+        )
+        assertNotNull(parsed.warning)
+        assertEquals(attachment, parsed.attachment)
+    }
+
+    @Test
+    fun v1CarriedModelsRemainReadableWithoutASourceHash() {
+        val note = "<!-- indagium:diagram v1 {\"dialect\":\"mermaid\",\"model\":{\"participants\":[{\"id\":\"A\",\"label\":\"A\",\"kind\":\"TAG\",\"tag\":\"A\"}],\"messages\":[]}} -->\n" +
+            "```mermaid\nsequenceDiagram\n```\n"
+        val parsed = assertNotNull(parseDiagramNote(note))
+        assertNotNull(parsed.model)
+        assertNotNull(parsed.snapshotPreviewModel, "v1's carried model remains previewable")
+        assertNull(parsed.sourceHashMatches)
+    }
+
+    @Test
+    fun attachmentCaptionAndExportModeRoundTripAndLegacyV1DefaultsToImage() {
+        val attachment = DiagramAttachmentMetadata(caption = "Bluetooth startup", exportMode = DiagramExportMode.SOURCE)
+        val parsed = assertNotNull(parseDiagramNote(encodeDiagramNote(fullSpec, source, attachment = attachment)))
+
+        assertEquals("Bluetooth startup", parsed.caption)
+        assertEquals(DiagramExportMode.SOURCE, parsed.exportMode)
+
+        val v1 = assertNotNull(parseDiagramNote(
+            "<!-- indagium:diagram v1 {\"dialect\":\"mermaid\"} -->\n```mermaid\nsequenceDiagram\n```\n",
+        ))
+        assertEquals("", v1.caption)
+        assertEquals(DiagramExportMode.IMAGE, v1.exportMode)
+    }
+
+    @Test
+    fun attachmentMetadataRewriteApisUpgradeLegacyNotesWithoutChangingTheirSource() {
+        val v1 = "<!-- indagium:diagram v1 {\"dialect\":\"mermaid\"} -->\n```mermaid\nsequenceDiagram\n```\n"
+
+        val captioned = assertNotNull(updateDiagramNoteCaption(v1, "Startup sequence"))
+        val sourceMode = assertNotNull(updateDiagramNoteExportMode(captioned, DiagramExportMode.SOURCE))
+        val parsed = assertNotNull(parseDiagramNote(sourceMode))
+
+        assertTrue(sourceMode.startsWith("<!-- indagium:diagram v2 "))
+        assertEquals("Startup sequence", parsed.caption)
+        assertEquals(DiagramExportMode.SOURCE, parsed.exportMode)
+        assertEquals("sequenceDiagram", parsed.source)
+        assertNull(updateDiagramNoteCaption("ordinary note", "nope"))
     }
 }

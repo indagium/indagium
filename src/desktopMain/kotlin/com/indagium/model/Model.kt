@@ -1,6 +1,7 @@
 package com.indagium.model
 
 import androidx.compose.ui.graphics.Color
+import com.indagium.diagram.DiagramExportMode
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.video.formatVideoTime
 
@@ -1079,6 +1080,13 @@ data class AppSettings(
     // transient per-session viewport state (LogViewerScrollStateStore.followTailState), never
     // written back here — only an explicit flip of this toggle changes the standing preference.
     val autoScrollWhileTailing: Boolean = true,
+    // The split "add diagram note" action always exposes both snapshot and linked attachment;
+    // this only chooses the primary half. Snapshot stays the default because an exported report
+    // must retain the exact diagram that supported it at the time it was written.
+    val diagramLinkedNotePrimary: Boolean = false,
+    // Applied only as a diagram note is created. Each note carries its own export metadata, so
+    // changing this never rewrites or changes the representation of an existing diagram.
+    val diagramDefaultExportMode: DiagramExportMode = DiagramExportMode.IMAGE,
 )
 
 enum class ThemePreset(val label: String) {
