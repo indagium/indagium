@@ -32,6 +32,12 @@ import kotlin.math.roundToInt
 // rendering differences between CI and a dev machine, exactly the trap the task spec calls out.
 // Both phases share one [Metrics] bundle (every layout constant already multiplied by [scale]) so
 // a distance computed while measuring and the same distance used while painting can never drift.
+//
+// measure()/paint()/buildHits() share one more thing beyond Metrics: every message's WRAPPED,
+// SUFFIXED label text and its measured line widths are computed exactly once, in measure()'s
+// measureLabels() pass, and carried on each row's own RowLayout. paint() and buildHits() only ever
+// read row.lines/row.lineW — neither one re-wraps or re-measures a label — which is what keeps the
+// three phases from silently drifting apart the way recomputing the same wrap twice invites.
 
 /** Plain java.awt.Color so this package stays Compose-free — Phase 3 builds one of these from the
  *  app's active ui.Theme.ThemeColors at the call site. The LIGHT/DARK defaults below loosely mirror
@@ -122,11 +128,28 @@ private const val BASE_ACTOR_BODY_H = 14f
 private const val BASE_ACTOR_LIMB_SPAN = 10f
 private const val BASE_ACTOR_LABEL_GAP = 4f
 
-private const val BASE_COLUMN_GAP = 70f // clear space between adjacent lifeline columns
+private const val BASE_COLUMN_GAP = 70f // minimum clear space between adjacent lifeline columns
 
-private const val BASE_ROW_H = 42f // vertical pitch of one non-SELF message row
-private const val BASE_SELF_EXTRA = 26f // extra pitch a SELF row's loop needs, reserved AFTER its arrow y
+// Per-gap ceiling: without one, a single pathological label could push widthPx past
+// MAX_IMAGE_DIM_PX and trigger the global shrink in renderSequenceDiagram, making EVERY label
+// smaller — the opposite of what widening a gap for one wide label is meant to achieve. A label
+// that still doesn't fit its capped gap was already wrapped/ellipsized against BASE_LABEL_MAX_W
+// (comfortably under this cap — see solveColumnGaps' own doc), so hitting the cap in practice
+// means unusually wide PARTICIPANT boxes between the two ends, not an unwrapped label.
+private const val BASE_COLUMN_GAP_MAX = 420f
+
+// Wrap width budget for a MESSAGE label (participant labels use wrapTwoLines/BASE_PARTICIPANT_BOX_MAX_W
+// instead). Deliberately independent of any one message's actual column gap — measureLabels() runs
+// BEFORE column positions are solved, and solveColumnGaps() widens gaps to fit what this already
+// decided, never the other way around. Kept a PLAIN scaled constant (not participant/gap-derived) so
+// wrap width stays exactly proportional to scale — see DiagramRendererTest's scale-doubling test.
+private const val BASE_LABEL_MAX_W = 320f
+private const val BASE_LABEL_PAD = 6f // clear space between a label's text and the arrow/loop it labels
+
+private const val BASE_ROW_H = 42f // minimum vertical pitch of one non-SELF message row
+private const val BASE_SELF_EXTRA = 26f // minimum pitch a SELF row's loop needs, reserved AFTER its arrow y
 private const val BASE_SELF_LOOP_W = 46f // how far a SELF loop bows out from its lifeline
+private const val BASE_MIN_SELF_LOOP_H = 10f
 
 private const val BASE_ARROWHEAD_LEN = 9f
 private const val BASE_ARROWHEAD_W = 7f
@@ -166,6 +189,11 @@ private const val BASE_PLACEHOLDER_FONT = 13f
  *  scales down together, so a clamped diagram is smaller and crisper, never just cropped. */
 private const val MAX_IMAGE_DIM_PX = 8000
 
+// Mirrors DiagramSpecCodec's own MAX_LABEL_LINES (that file validates it on *decode*; this is the
+// renderer's own defensive clamp for a SeqDiagram built directly in-process, e.g. by a test, that
+// never went through the codec at all).
+private const val RENDERER_MAX_LABEL_LINES = 8
+
 private const val ACTIVATION_BAR_WIDTH_MULTIPLIER = 5
 private const val MIN_ACTIVATION_BAR_WIDTH = 4
 private const val ACTIVATION_HIGHLIGHT_ALPHA = 72
@@ -182,7 +210,7 @@ private const val ELLIPSIS = "…"
 // `scale` must be a property, not a plain constructor parameter: a constructor parameter is in
 // scope for property initializers but NOT for member function bodies, and s()/sf() below are
 // member functions called from those initializers.
-private class Metrics(val scale: Float) {
+internal class Metrics(val scale: Float) {
     private fun s(v: Float): Int = (v * scale).roundToInt()
 
     private fun sf(v: Float): Float = max(1f, v * scale) // stroke widths/dash lengths must stay > 0
@@ -207,16 +235,15 @@ private class Metrics(val scale: Float) {
     val actorFigureH = s(BASE_ACTOR_HEAD_R) * 2 + s(BASE_ACTOR_BODY_H)
 
     val columnGap = s(BASE_COLUMN_GAP)
+    val columnGapMax = s(BASE_COLUMN_GAP_MAX)
+    val labelMaxW = s(BASE_LABEL_MAX_W)
+    val labelPad = s(BASE_LABEL_PAD)
 
     val rowH = s(BASE_ROW_H)
     val selfExtra = s(BASE_SELF_EXTRA)
     val selfLoopW = s(BASE_SELF_LOOP_W)
     val hitInset = s(BASE_HIT_INSET)
-
-    // Reserve headroom on both ends of the loop (its top sits at the row's own arrowY, same as any
-    // other row) so the SELF hit box (loopH + hitInset tall) never reaches into the NEXT row's own
-    // reserved space, which starts exactly selfExtra below this row's arrowY.
-    val selfLoopH = (selfExtra - 2 * hitInset).coerceAtLeast(s(10f))
+    val minSelfLoopH = s(BASE_MIN_SELF_LOOP_H)
 
     val arrowheadLen = s(BASE_ARROWHEAD_LEN)
     val arrowheadW = s(BASE_ARROWHEAD_W)
@@ -254,7 +281,21 @@ private class ParticipantLayout(
     val kind: ParticipantKind,
 )
 
-private class RowLayout(val arrowY: Int, val kind: MessageKind)
+/** One message row's vertical geometry AND its already-wrapped/suffixed label — see this file's
+ *  header doc for why paint()/buildHits() must only ever read [lines]/[lineW] from here rather
+ *  than re-deriving them. [above] is the space this row reserves ABOVE its own [arrowY] (room for
+ *  a direct message's stacked label lines, or a fixed minimum for a self message); [below] is the
+ *  space reserved AFTER it (0 for a direct message, room for the loop + its label for a self one).
+ *  [loopH] is only meaningful for a SELF row. */
+private class RowLayout(
+    val arrowY: Int,
+    val kind: MessageKind,
+    val lines: List<String>,
+    val lineW: Int,
+    val above: Int,
+    val below: Int,
+    val loopH: Int,
+)
 
 private class FrameLayout(val frame: DiagramFrame, val left: Int, val top: Int, val right: Int, val bottom: Int)
 
@@ -325,9 +366,32 @@ private fun wrapTwoLines(label: String, fm: FontMetrics, maxWidth: Int): List<St
     return listOf(line1, ellipsize(rest, fm, maxWidth))
 }
 
-// General word-wrap up to [maxLines], used for notes and the empty-diagram placeholder — unlike
-// wrapTwoLines this greedily fills as many lines as it's given rather than always splitting near
-// the middle, since a note's text is prose-length, not a short participant label.
+// Cuts a single unbreakable token into as many maxWidth-wide pieces as it takes, the same
+// grow-until-it-doesn't-fit-then-back-off loop wrapTwoLines uses for its own hard-break case.
+// wrapLines' greedy fill (below) calls this only when a lone word already exceeds maxWidth on an
+// otherwise-empty line — without it, that one word would sail past maxWidth as a single
+// over-length line rather than actually wrapping, which is exactly the gap this closes.
+private fun hardBreakWord(word: String, fm: FontMetrics, maxWidth: Int): List<String> {
+    if (word.isEmpty() || maxWidth <= 0) return listOf(word)
+    val pieces = mutableListOf<String>()
+    var remaining = word
+    while (fm.stringWidth(remaining) > maxWidth && remaining.length > 1) {
+        var cut = 1
+        while (cut < remaining.length && fm.stringWidth(remaining.substring(0, cut)) <= maxWidth) cut++
+        val safeCut = (cut - 1).coerceAtLeast(1)
+        pieces += remaining.substring(0, safeCut)
+        remaining = remaining.substring(safeCut)
+    }
+    pieces += remaining
+    return pieces
+}
+
+// General word-wrap up to [maxLines], used for message labels, notes, and the empty-diagram
+// placeholder — greedily fills as many lines as it's given rather than always splitting near the
+// middle (wrapTwoLines' own strategy), since these are prose-length texts, not a short participant
+// label. A lone word that alone exceeds [maxWidth] is hard-broken via [hardBreakWord] rather than
+// left to overflow its line — see that function's own doc for why this is necessary.
+@Suppress("CyclomaticComplexMethod")
 private fun wrapLines(text: String, fm: FontMetrics, maxWidth: Int, maxLines: Int): List<String> {
     val words = text.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
     if (words.isEmpty()) return listOf("")
@@ -336,6 +400,16 @@ private fun wrapLines(text: String, fm: FontMetrics, maxWidth: Int, maxLines: In
     var idx = 0
     while (idx < words.size && lines.size < maxLines) {
         val w = words[idx]
+        if (current.isEmpty() && fm.stringWidth(w) > maxWidth) {
+            val pieces = hardBreakWord(w, fm, maxWidth)
+            for (i in 0 until pieces.size - 1) {
+                if (lines.size >= maxLines) break
+                lines += pieces[i]
+            }
+            current = if (lines.size < maxLines) StringBuilder(pieces.last()) else StringBuilder()
+            idx++
+            continue
+        }
         val candidate = if (current.isEmpty()) w else "$current $w"
         if (current.isEmpty() || fm.stringWidth(candidate) <= maxWidth) {
             current = StringBuilder(candidate)
@@ -384,14 +458,107 @@ private fun applyRenderingHints(g: Graphics2D) {
 
 private fun frameLabelText(f: DiagramFrame): String = f.label.ifBlank { "sequence" }
 
-// '×' is appended after any width/ellipsis measurement of the base label — this only ever wraps
-// the fold count collapseRepeats produced in the builder, never arbitrary user text.
-private fun withRepeatSuffix(m: DiagramMessage): String = if (m.repeatCount > 1) "${m.label} ×${m.repeatCount}" else m.label
+// The label text BEFORE any repeat-count suffix, and the suffix itself, kept as two functions
+// (rather than the one withRepeatSuffix used to be) so measureLabels can wrap/ellipsize the BASE
+// text first and append the suffix to the last wrapped line afterward — appending before
+// ellipsizing (the old order) meant the repeat count was the first thing an over-long label lost.
+// DiagramEmitters.kt's own labelBase-shaped `msg.label` / repeatSuffix(count) already gets this
+// split right for dialect text, which carries no width budget; this is the same split adapted to
+// one that does.
+private fun labelBase(m: DiagramMessage): String = m.label
+
+private fun repeatSuffixText(m: DiagramMessage): String = if (m.repeatCount > 1) " ×${m.repeatCount}" else ""
+
+// ── Label wrapping (Part of measure — see this file's header doc) ────────────────────────────
+
+/** [lines] is the message's final, already-suffixed label text, one entry per wrapped/ellipsized
+ *  line; [maxLineW] is the widest of those lines' pixel widths — what solveColumnGaps and the
+ *  self-message hit box both need, and what RowLayout carries forward for paint(). */
+internal class LabelMeasure(val lines: List<String>, val maxLineW: Int)
+
+// Wraps every message's label exactly once, up front, against a FIXED width budget
+// (metrics.labelMaxW) — independent of any one message's actual column gap, which is solved
+// AFTER this (see solveColumnGaps). The repeat-count suffix (if any) is reserved for on the LAST
+// line's budget before wrapping, then appended to it afterward, so a long-but-repeated label can
+// never lose its "×N" the way the pre-Part-2 single ellipsize(label + " ×N", …) call could.
+internal fun measureLabels(messages: List<DiagramMessage>, fm: FontMetrics, maxLines: Int, maxWidthPx: Int): List<LabelMeasure> {
+    val clampedMaxLines = maxLines.coerceIn(1, RENDERER_MAX_LABEL_LINES)
+    return messages.map { m ->
+        val suffix = repeatSuffixText(m)
+        val suffixW = if (suffix.isEmpty()) 0 else fm.stringWidth(suffix)
+        val budget = (maxWidthPx - suffixW).coerceAtLeast(fm.stringWidth(ELLIPSIS))
+        val wrapped = wrapLines(labelBase(m), fm, budget, clampedMaxLines)
+        val withSuffix = if (suffix.isEmpty()) {
+            wrapped
+        } else {
+            wrapped.toMutableList().also { it[it.lastIndex] = it.last() + suffix }
+        }
+        val maxLineW = withSuffix.maxOfOrNull { fm.stringWidth(it) } ?: 0
+        LabelMeasure(withSuffix, maxLineW)
+    }
+}
+
+/** [gaps] is one entry per adjacent-column gap (size participantCount - 1), each already widened
+ *  (never shrunk) to fit every message that spans it, and clamped to [Metrics.columnGapMax].
+ *  [lastColumnSelfExtra] is the extra clear space a self message on the RIGHTMOST participant
+ *  needs to its right — there is no gap to widen for that column, so this is folded into the
+ *  canvas width directly in measure() instead (this is specifically the "self loop clipped off
+ *  the right edge of the image" bug this task fixes). */
+internal class SolvedGaps(val gaps: IntArray, val lastColumnSelfExtra: Int)
+
+// Widens each column gap to fit every message that crosses it, distributing one message's own
+// requirement evenly across however many gaps it spans (k = |toIdx - fromIdx|), and NEVER shrinks
+// a gap a previous message already widened — order of iteration therefore never changes the
+// result, only ever grows it further.
+internal fun solveColumnGaps(
+    messages: List<DiagramMessage>,
+    labelMeasures: List<LabelMeasure>,
+    boxWidths: IntArray,
+    metrics: Metrics,
+): SolvedGaps {
+    val n = boxWidths.size
+    val gaps = IntArray((n - 1).coerceAtLeast(0)) { metrics.columnGap }
+    var lastColumnSelfExtra = 0
+    messages.forEachIndexed { i, m ->
+        val measure = labelMeasures.getOrNull(i) ?: return@forEachIndexed
+        if (m.fromIdx !in 0 until n || m.toIdx !in 0 until n) return@forEachIndexed
+        if (m.kind == MessageKind.SELF) {
+            val c = m.fromIdx
+            val need = metrics.selfLoopW + metrics.labelPad + measure.maxLineW
+            if (c == n - 1) {
+                lastColumnSelfExtra = max(lastColumnSelfExtra, need)
+            } else if (c in 0 until n - 1) {
+                val required = need - boxWidths[c] / 2
+                if (required > gaps[c]) gaps[c] = required
+            }
+            return@forEachIndexed
+        }
+        val a = min(m.fromIdx, m.toIdx)
+        val b = max(m.fromIdx, m.toIdx)
+        if (a == b) return@forEachIndexed
+        val k = b - a
+        val required = measure.maxLineW + 2 * metrics.labelPad + metrics.arrowheadLen
+        var fixed = boxWidths[a] / 2 + boxWidths[b] / 2
+        for (c in a + 1 until b) fixed += boxWidths[c]
+        var currentSum = 0
+        for (j in a until b) currentSum += gaps[j]
+        val deficit = required - fixed - currentSum
+        if (deficit > 0) {
+            val base = deficit / k
+            val extra = deficit % k
+            for (offset in 0 until k) gaps[a + offset] += base + if (offset < extra) 1 else 0
+        }
+    }
+    for (j in gaps.indices) gaps[j] = gaps[j].coerceAtMost(metrics.columnGapMax)
+    return SolvedGaps(gaps, lastColumnSelfExtra)
+}
 
 // ── Measure ────────────────────────────────────────────────────────────────────────────────────
 
 // Measurement has coordinated branches for every renderable construct; splitting it would make
-// the shared coordinate system less auditable than retaining this single layout pass.
+// the shared coordinate system less auditable than retaining this single layout pass. The two
+// genuinely independent sub-problems (label wrapping, column-gap solving) ARE split out, above,
+// into measureLabels/solveColumnGaps — both callable and testable on their own.
 @Suppress("CyclomaticComplexMethod", "LongMethod")
 private fun measure(diagram: SeqDiagram, scale: Float): DiagramLayout {
     val metrics = Metrics(scale)
@@ -404,7 +571,7 @@ private fun measure(diagram: SeqDiagram, scale: Float): DiagramLayout {
 
     val scratch = scratchGraphics()
     try {
-        // ── Participant columns ──
+        // ── Participant box sizes (prelim only — x-positions are solved after label widths) ──
         val pFm = scratch.getFontMetrics(participantFont)
         val maxTextW = metrics.participantBoxMaxW - 2 * metrics.participantPadH
 
@@ -434,28 +601,66 @@ private fun measure(diagram: SeqDiagram, scale: Float): DiagramLayout {
         val titleY = if (diagram.spec.title.isNotBlank()) metrics.margin + scratch.getFontMetrics(titleFont).ascent else -1
         val headerTop = metrics.margin + titleH
 
+        // ── Message label wrapping + per-gap column widths ──
+        // Must run BEFORE column x-positions are fixed: a wide label may need to widen every gap
+        // it spans (see solveColumnGaps' own doc).
+        val labelFm = scratch.getFontMetrics(labelFont)
+        val maxLabelLines = diagram.spec.options.labelMaxLines
+        val labelMeasures = measureLabels(diagram.messages, labelFm, maxLabelLines, metrics.labelMaxW)
+        val boxWidths = IntArray(prelim.size) { prelim[it].boxWidth }
+        val solvedGaps = solveColumnGaps(diagram.messages, labelMeasures, boxWidths, metrics)
+
+        // A gap is added after EVERY box, including the last one (a fallback baseline value, since
+        // solvedGaps.gaps has no real entry past the last real inter-column gap) — then subtracted
+        // back off once at the end. This mirrors the pre-Part-2 renderer's own "always add
+        // columnGap, subtract the trailing one" shape exactly, just per-gap instead of constant;
+        // getting the trailing subtraction wrong here previously clipped the whole canvas short by
+        // one real (possibly widened) gap width instead of the unused fallback one.
         var cursorX = metrics.margin
         val participantLayouts = diagram.participants.mapIndexed { i, p ->
             val pr = prelim[i]
             val boxLeft = cursorX
             val centerX = boxLeft + pr.boxWidth / 2
-            cursorX = boxLeft + pr.boxWidth + metrics.columnGap
+            val gap = solvedGaps.gaps.getOrElse(i) { metrics.columnGap }
+            cursorX = boxLeft + pr.boxWidth + gap
             ParticipantLayout(centerX, boxLeft, headerTop, pr.boxWidth, pr.headerH, pr.lines, p.kind)
         }
-        val contentRight = if (participantLayouts.isNotEmpty()) cursorX - metrics.columnGap else metrics.margin
+        val trailingGap = solvedGaps.gaps.getOrElse(participantLayouts.size - 1) { metrics.columnGap }
+        val contentRight = if (participantLayouts.isNotEmpty()) cursorX - trailingGap else metrics.margin
+        // This is the fix for a self message on the LAST lifeline being clipped off the image: with
+        // no gap to its right to widen, the loop+label's own required width instead extends the
+        // canvas directly (folded into widthPx below), rather than being silently cut off.
+        val maxSelfLabelRight = if (participantLayouts.isNotEmpty() && solvedGaps.lastColumnSelfExtra > 0) {
+            participantLayouts.last().centerX + solvedGaps.lastColumnSelfExtra
+        } else {
+            0
+        }
 
-        // ── Message rows ──
-        // arrowY[i] = messagesTop + (sum of every prior row's own pitch) + rowH: every row reserves
-        // rowH of space ABOVE its own arrow line (room for the label), and a SELF row additionally
-        // reserves selfExtra BELOW its own line (room for the loop) before the next row's "above"
-        // space begins. This is what keeps arrowY strictly increasing by at least rowH regardless of
-        // which rows are SELF, and keeps a SELF loop from ever reaching into its neighbor's hit box.
+        // ── Message rows (variable pitch) ──
+        // arrowY[i] = messagesTop + (sum of every prior row's own pitch) + above[i]: every row
+        // reserves `above` space ABOVE its own arrow line (room for a direct label's stacked
+        // lines, or a fixed minimum for a self row) and `below` space AFTER it (0 for a direct
+        // message; room for a self row's loop AND its label, whichever needs more). Uniform rowH
+        // is not an option once labels can wrap onto more than one line — see RowLayout's own doc.
         val messagesTop = headerTop + maxHeaderHeight + metrics.headerToRowsGap
         var acc = 0
-        val rows = diagram.messages.map { m ->
-            val row = RowLayout(messagesTop + acc + metrics.rowH, m.kind)
-            acc += metrics.rowH + if (m.kind == MessageKind.SELF) metrics.selfExtra else 0
-            row
+        val rows = diagram.messages.mapIndexed { i, m ->
+            val measured = labelMeasures.getOrElse(i) { LabelMeasure(listOf(""), 0) }
+            val above: Int
+            val below: Int
+            val loopH: Int
+            if (m.kind == MessageKind.SELF) {
+                above = metrics.rowH
+                below = max(metrics.selfExtra, labelFm.height * measured.lines.size + 2 * metrics.hitInset)
+                loopH = (below - 2 * metrics.hitInset).coerceAtLeast(metrics.minSelfLoopH)
+            } else {
+                above = max(metrics.rowH, labelFm.height * measured.lines.size + metrics.labelGapAboveLine + labelFm.descent)
+                below = 0
+                loopH = 0
+            }
+            val arrowY = messagesTop + acc + above
+            acc += above + below
+            RowLayout(arrowY, m.kind, measured.lines, measured.maxLineW, above, below, loopH)
         }
         val lifelineBottom = messagesTop + acc
 
@@ -471,8 +676,16 @@ private fun measure(diagram: SeqDiagram, scale: Float): DiagramLayout {
             val depthInset = f.depth * metrics.frameInsetPerDepth
             val left = min(loX, hiX) - metrics.columnGap / 3 + depthInset
             val right = max(loX, hiX) + metrics.columnGap / 3 - depthInset
-            val top = rows[f.firstMsg].arrowY - metrics.rowH / 2 - metrics.framePadV - metrics.frameLabelH + depthInset / 2
-            val bottom = rows[f.lastMsg].arrowY + metrics.rowH / 2 + metrics.framePadV - depthInset / 2
+            val firstRow = rows[f.firstMsg]
+            val lastRow = rows[f.lastMsg]
+            var top = firstRow.arrowY - firstRow.above / 2 - metrics.framePadV - metrics.frameLabelH + depthInset / 2
+            var bottom = lastRow.arrowY + max(lastRow.below, metrics.rowH / 2) + metrics.framePadV - depthInset / 2
+            // Clamped exactly like a hit box (buildHits below): a frame edge must never reach into
+            // the reserved space of the row just outside its own span.
+            val topLimit = if (f.firstMsg > 0) rows[f.firstMsg - 1].let { it.arrowY + it.below } else Int.MIN_VALUE
+            val bottomLimit = if (f.lastMsg < rows.lastIndex) rows[f.lastMsg + 1].let { it.arrowY - it.above } else Int.MAX_VALUE
+            top = max(top, topLimit)
+            bottom = min(bottom, bottomLimit)
             FrameLayout(f, left, top, max(left + 1, right), max(top + 1, bottom))
         }
 
@@ -500,13 +713,25 @@ private fun measure(diagram: SeqDiagram, scale: Float): DiagramLayout {
             // A note simply widens the canvas rather than being clamped into the existing width:
             // maxNoteRight below folds it into widthPx. Clamping instead would push a note left over
             // its own participant's lifeline, which reads far worse than a slightly wider image.
-            val x = px + metrics.noteGapFromLifeline
-            val y = rows[n.afterMsg].arrowY - h / 2
+            val row = rows[n.afterMsg]
+            // A self label now occupies the same strip (centerX + noteGap) a note would anchor at
+            // when they share a row and participant — push the note clear of the label instead of
+            // overlapping it.
+            val afterMsgObj = diagram.messages.getOrNull(n.afterMsg)
+            val selfCollision = row.kind == MessageKind.SELF && afterMsgObj?.fromIdx == n.participantIdx
+            val baseX = px + metrics.noteGapFromLifeline
+            val x = if (selfCollision) {
+                val selfLabelRight = px + metrics.selfLoopW + metrics.labelPad + row.lineW
+                max(baseX, selfLabelRight + metrics.notePad)
+            } else {
+                baseX
+            }
+            val y = row.arrowY - h / 2
             NoteLayout(n, x, y, metrics.noteW, h, lines)
         }
 
         val maxNoteRight = noteLayouts.maxOfOrNull { it.x + it.width } ?: 0
-        val widthPx = max(contentRight, maxNoteRight) + metrics.margin
+        val widthPx = maxOf(contentRight, maxNoteRight, maxSelfLabelRight) + metrics.margin
 
         var heightPx = lifelineBottom + metrics.bottomMargin
         val footerY = if (diagram.truncated) {
@@ -551,7 +776,7 @@ private fun messageGeometry(m: DiagramMessage, row: RowLayout, layout: DiagramLa
     val fromP = layout.participants.getOrNull(m.fromIdx) ?: return null
     val toP = layout.participants.getOrNull(m.toIdx) ?: return null
     return if (m.kind == MessageKind.SELF) {
-        MsgGeom(true, fromP.centerX, fromP.centerX + layout.metrics.selfLoopW, row.arrowY, layout.metrics.selfLoopH)
+        MsgGeom(true, fromP.centerX, fromP.centerX + layout.metrics.selfLoopW, row.arrowY, row.loopH)
     } else {
         MsgGeom(false, fromP.centerX, toP.centerX, row.arrowY, 0)
     }
@@ -563,20 +788,21 @@ private fun buildHits(diagram: SeqDiagram, layout: DiagramLayout): List<ArrowHit
         val row = layout.rows.getOrNull(i) ?: return@mapIndexedNotNull null
         val geo = messageGeometry(m, row, layout) ?: return@mapIndexedNotNull null
         if (geo.isSelf) {
-            // A SELF loop hangs BELOW its arrowY (that's what selfExtra reserves), so its box starts
-            // at the line and covers the loop.
-            ArrowHit(i, m.entryId, geo.x1, geo.y - hitInset / 2, geo.x2 - geo.x1, geo.loopH + hitInset)
+            // The box now covers the loop AND its label — the label is what users actually click,
+            // and row.lineW already reflects the wrapped/suffixed text this row settled on.
+            val width = layout.metrics.selfLoopW + layout.metrics.labelPad + row.lineW
+            ArrowHit(i, m.entryId, geo.x1, geo.y - hitInset / 2, width, row.loopH + hitInset)
         } else {
-            // Centered on the arrow line rather than hanging below it, because a direct message's
-            // LABEL is drawn above the line (see paintDirectMessage) and clicking the label text is
-            // the gesture users actually make. Safe on both sides: the box top sits rowH/2 above the
-            // line, which clears a preceding SELF row's loop (that loop ends selfExtra - 2*hitInset
-            // below ITS line, and the next arrowY is a full rowH + selfExtra further down), and the
-            // box bottom sits rowH/2 above the next row's line, so consecutive boxes never touch.
+            // Clamped into the REAL gap between this row's neighbors (row pitch is no longer
+            // uniform once labels can wrap), inset by hitInset so consecutive boxes never touch.
+            val topLimit = layout.rows.getOrNull(i - 1)?.let { it.arrowY + it.below } ?: (row.arrowY - row.above)
+            val bottomLimit = layout.rows.getOrNull(i + 1)?.let { it.arrowY - it.above }
+                ?: (row.arrowY + max(row.below, layout.metrics.rowH / 2))
+            val top = topLimit + hitInset
+            val bottom = (bottomLimit - hitInset).coerceAtLeast(top + 1)
             val x = min(geo.x1, geo.x2)
             val w = abs(geo.x2 - geo.x1)
-            val h = (layout.metrics.rowH - hitInset).coerceAtLeast(layout.metrics.rowH / 2)
-            ArrowHit(i, m.entryId, x, geo.y - h / 2, w, h)
+            ArrowHit(i, m.entryId, x, top, w, bottom - top)
         }
     }
 }
@@ -682,15 +908,14 @@ private fun paintMessage(g: Graphics2D, m: DiagramMessage, row: RowLayout, layou
     val geo = messageGeometry(m, row, layout) ?: return
     g.font = layout.labelFont
     val fm = g.fontMetrics
-    val text = withRepeatSuffix(m)
-    if (geo.isSelf) paintSelfMessage(g, geo, text, fm, layout, theme) else paintDirectMessage(g, m, geo, text, fm, layout, theme)
+    if (geo.isSelf) paintSelfMessage(g, geo, row, fm, layout, theme) else paintDirectMessage(g, m, geo, row, fm, layout, theme)
 }
 
 private fun paintDirectMessage(
     g: Graphics2D,
     m: DiagramMessage,
     geo: MsgGeom,
-    text: String,
+    row: RowLayout,
     fm: FontMetrics,
     layout: DiagramLayout,
     theme: DiagramTheme,
@@ -709,14 +934,21 @@ private fun paintDirectMessage(
     val pointingRight = x2 > x1
     drawArrowhead(g, x2, y, pointingRight, filled = m.kind != MessageKind.RETURN, metrics, theme.arrow)
 
-    val avail = (abs(x2 - x1) - metrics.arrowheadLen).coerceAtLeast(metrics.arrowheadLen)
-    val clipped = ellipsize(text, fm, avail)
-    val tw = fm.stringWidth(clipped)
+    // row.lines is the wrapped/suffixed label measure() already settled on — never re-wrapped or
+    // re-ellipsized here, so what's drawn can never disagree with the row pitch/column gap that
+    // was solved around it. Stacked UPWARD from the arrow line, so the last (bottom) line sits
+    // closest to the arrow, matching a direct message's label always having sat just above its line.
     g.color = theme.label
-    g.drawString(clipped, (x1 + x2) / 2 - tw / 2, y - metrics.labelGapAboveLine - fm.descent)
+    val centerX = (x1 + x2) / 2
+    var lineY = y - metrics.labelGapAboveLine - fm.descent
+    for (line in row.lines.asReversed()) {
+        val tw = fm.stringWidth(line)
+        g.drawString(line, centerX - tw / 2, lineY)
+        lineY -= fm.height
+    }
 }
 
-private fun paintSelfMessage(g: Graphics2D, geo: MsgGeom, text: String, fm: FontMetrics, layout: DiagramLayout, theme: DiagramTheme) {
+private fun paintSelfMessage(g: Graphics2D, geo: MsgGeom, row: RowLayout, fm: FontMetrics, layout: DiagramLayout, theme: DiagramTheme) {
     val metrics = layout.metrics
     val x0 = geo.x1
     val xOut = geo.x2
@@ -729,10 +961,18 @@ private fun paintSelfMessage(g: Graphics2D, geo: MsgGeom, text: String, fm: Font
     g.drawLine(xOut, yBot, x0, yBot)
     drawArrowhead(g, x0, yBot, pointingRight = false, filled = true, m = metrics, color = theme.arrow)
 
-    val avail = (metrics.columnGap - metrics.selfLoopW).coerceAtLeast(metrics.arrowheadLen * 2)
-    val clipped = ellipsize(text, fm, avail)
+    // Left-aligned at the loop's outer edge, block vertically centered on the loop — same
+    // row.lines measure() already settled on, never re-measured here (see paintDirectMessage's
+    // own comment). This is where the reported "+0.123 …" clipping bug is actually fixed: the
+    // available width now comes from the column gap solveColumnGaps widened for this exact label,
+    // not a fixed columnGap-minus-loop-width budget that a timestamp prefix alone could exhaust.
     g.color = theme.label
-    g.drawString(clipped, xOut + metrics.labelGapAboveLine, (yTop + yBot) / 2 + fm.ascent / 2)
+    val totalTextH = fm.height * row.lines.size
+    var lineY = (yTop + yBot) / 2 - totalTextH / 2 + fm.ascent
+    for (line in row.lines) {
+        g.drawString(line, xOut + metrics.labelPad, lineY)
+        lineY += fm.height
+    }
 }
 
 private fun paintFrame(g: Graphics2D, fl: FrameLayout, layout: DiagramLayout, theme: DiagramTheme) {

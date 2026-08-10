@@ -314,7 +314,13 @@ fun App(
                             AppText("No files open — click Open to add a log", color = tc.ts, fontSize = 14.sp)
                         }
 
-                    activeSurface is ActiveSurface.Diagram -> SeqDiagramWorkspace(state, activeSurface.workspaceId)
+                    // Keyed on the workspace id — matching the log path's key(activeTab.id) just
+                    // below — so DiagramPreviewPane's remembered viewport/scroll/focus state
+                    // (SeqDiagramWorkspace.kt) is fully per-workspace instead of leaking whatever
+                    // the previously active diagram tab left behind (Part B task note).
+                    activeSurface is ActiveSurface.Diagram -> key(activeSurface.workspaceId) {
+                        SeqDiagramWorkspace(state, activeSurface.workspaceId)
+                    }
                     state.compareMode -> CompareView(
                         state = state,
                         requestedPanelFocus = pendingPanelFocus,

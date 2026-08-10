@@ -1918,6 +1918,14 @@ private fun SourceFolderRow(state: AppState, path: String) {
                 variant = ButtonVariant.Secondary,
                 enabled = File(path).absolutePath !in state.indexingFolders,
             )
+            if (File(path).absolutePath in state.indexingFolders) {
+                AppButton(
+                    "Cancel",
+                    onClick = { state.cancelReindexSources(path) },
+                    variant = ButtonVariant.Secondary,
+                    enabled = File(path).absolutePath !in state.cancelledIndexingFolders,
+                )
+            }
             AppButton(
                 "Info",
                 onClick = { state.sourceFolderInfoEditorTarget = path },

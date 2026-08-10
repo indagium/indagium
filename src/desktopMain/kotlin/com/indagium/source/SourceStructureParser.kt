@@ -307,7 +307,7 @@ private class StructureScanner(private val text: String, private val isJavaFile:
 
     private fun normalizeHeader(header: String, startOffset: Int): String = buildString(header.length) {
         header.forEachIndexed { index, char -> append(if (mask.isCode[startOffset + index]) char else ' ') }
-    }.replace(Regex("\\s+"), " ").trim()
+    }.replace(WHITESPACE_RUN_RE, " ").trim()
 
     private fun javaCallable(header: String): String? {
         if (header.contains("->")) return null
@@ -330,3 +330,4 @@ private val KOTLIN_PROPERTY_RE = Regex("""\b(?:val|var)\s+([A-Za-z_]\w*)""")
 private val JAVA_CALLABLE_RE = Regex("""([A-Za-z_]\w*)\s*\([^()]*\)\s*(?:throws\s+[\w.,\s<>\[\]]+)?$""")
 private val JAVA_FIELD_RE = Regex("""(?:^|\s)([A-Za-z_]\w*)\s*(?:=.*)?$""")
 private val JAVA_CONTROL_WORDS = setOf("if", "for", "while", "switch", "catch", "synchronized", "try", "do")
+private val WHITESPACE_RUN_RE = Regex("\\s+")

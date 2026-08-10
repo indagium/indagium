@@ -16,6 +16,7 @@ import com.indagium.utils.formatDelta
 import com.indagium.utils.parseMillisOfDay
 import com.indagium.utils.visibleEntries
 import java.util.Arrays
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 // A tag participant list longer than this stops being a readable diagram regardless of how it
@@ -46,6 +47,23 @@ private const val MAX_CANDIDATE_PIDS = 8
  * parseable timestamp for a Time range) degrades to a smaller-than-expected diagram plus an
  * entry in [SeqDiagram.warnings], exactly like the rest of this codebase's regex/filter layer
  * (see utils/TextMatch.kt's own "never throw on a bad pattern" posture).
+ *
+ * ## Arrow modes and the "evidence, not guessing" rule
+ *
+ * [ArrowMode.EVIDENCE_FLOW] (the default, `runEvidenceFlow` below) draws a cross-lifeline arrow
+ * ONLY where the log itself carries actual evidence of one: a user-declared entry-point actor's
+ * opening call, an opt-in same-thread (pid+tid, bounded time gap) handoff, or — for
+ * [ArrowMode.RULES]' own fallthrough, which shares the same decision via `emitEvidenceMessage` —
+ * nothing else. Every entry that clears neither test renders as a [MessageKind.SELF] event on its
+ * own lifeline rather than a guessed CALL. This deliberately replaces the old "draw a CALL
+ * whenever the active tag differs from the previous surviving line's" heuristic (once named
+ * `TAG_TRANSITION`), which had no pid/tid, stack, or call/return correlation behind it at all —
+ * three unrelated adjacent lines from tags A, B, C used to render as "A called B, B called C",
+ * which was simply false. [ArrowMode.RULES] matched lines remain the one place a CALL is drawn
+ * from genuine structure (`runRulesMatched`, untouched by this change: a rule naming `from`/`to`
+ * IS the evidence). [ArrowMode.LINE_PER_MESSAGE] is the same "one SELF per line" shape
+ * `EVIDENCE_FLOW`'s own uncorrelated fallback now shares, made explicit as its own mode for a
+ * caller who wants that flat view unconditionally.
  */
 fun buildSequenceDiagram(
     tab: LogTab,
@@ -85,7 +103,7 @@ fun buildSequenceDiagram(
     val firstTs = candidateEntries.firstOrNull()?.ts
 
     when (spec.mode) {
-        ArrowMode.TAG_TRANSITION -> runTagTransition(
+        ArrowMode.EVIDENCE_FLOW -> runEvidenceFlow(
             participantResolution.representedEntries, registry, entryPointIdx, exitPointIdx, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
         )
 
@@ -96,6 +114,16 @@ fun buildSequenceDiagram(
         ArrowMode.LINE_PER_MESSAGE -> runLinePerMessage(
             participantResolution.representedEntries, registry, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
         )
+    }
+    // EVIDENCE_FLOW's whole point is to stop guessing arrows — but a diagram that is ENTIRELY
+    // self-events (no entry-point actor declared, no thread handoffs on, no correlation found at
+    // all) can read as "the feature is broken" rather than "this log has no correlatable
+    // structure". Checked on the mode's own raw output, before source enrichment/actor mirrors
+    // (which have their own, separate warnings) — this is specifically about EVIDENCE_FLOW's own
+    // inference finding nothing to draw.
+    if (spec.mode == ArrowMode.EVIDENCE_FLOW && gen.messages.isNotEmpty() && gen.messages.none { it.fromIdx != it.toIdx }) {
+        warnings += "No correlated interactions found — every line is shown as an event. " +
+            "Enable same-thread handoffs or add interaction rules to draw arrows."
     }
 
     val sourceResult = if (spec.sourceEnrichment.enabled) {
@@ -114,15 +142,25 @@ fun buildSequenceDiagram(
     val rawMessages = applyActorMirrors(
         (gen.messages + sourceResult.messages).sortedBy { it.entryId }, registry, spec.actors,
     )
-    val collapsed = if (spec.options.collapseRepeats) collapseRepeats(rawMessages) else identityCollapse(rawMessages)
+    // showSelfMessages/showSourceInferred drop messages BEFORE collapsing — buildNotes/buildFrames
+    // still address messages by their position in rawMessages (an index space neither the filter
+    // nor collapseRepeats can be allowed to desync), so filterMessages hands back a mapping from
+    // every raw index to where that message (or, for a dropped one, the nearest SURVIVING message
+    // that comes after it) landed post-filter, composed below with collapseRepeats' own raw(now
+    // filtered)-to-collapsed mapping. See filterMessages' own doc for the out-of-range sentinel.
+    val filterResult = filterMessages(rawMessages, spec.options)
+    val collapsed = if (spec.options.collapseRepeats) collapseRepeats(filterResult.messages) else identityCollapse(filterResult.messages)
     val truncated = collapsed.messages.size > spec.options.maxMessages || sourceResult.truncated
     val cappedMessages = if (truncated) collapsed.messages.subList(0, spec.options.maxMessages).toList() else collapsed.messages
-    val notes = buildNotes(gen.notes, collapsed.rawToCollapsedIndex, cappedMessages.size)
+    val finalMapping = IntArray(rawMessages.size) { i ->
+        collapsed.rawToCollapsedIndex.getOrElse(filterResult.rawToFiltered[i]) { collapsed.messages.size }
+    }
+    val notes = buildNotes(gen.notes, finalMapping, cappedMessages.size)
 
     val frames = if (spec.options.seqGroupFrames) {
         buildFrames(
             tab, allVisible, resolved.startIdx, resolved.endIdxExclusive,
-            rawMessages, collapsed.rawToCollapsedIndex, cappedMessages.size, cancellationCheck,
+            rawMessages, finalMapping, cappedMessages.size, cancellationCheck,
         )
     } else {
         emptyList()
@@ -525,8 +563,63 @@ private class RawGen(
     val notes: MutableList<PendingNote> = mutableListOf(),
 )
 
+// Two thread-pool tasks reusing a recycled tid minutes or hours apart are not a call — this bounds
+// runEvidenceFlow's opt-in same-thread handoff correlation to a gap short enough that it can only
+// plausibly be one synchronous call chain still running on the same OS thread. Not user-tunable:
+// a caller who needs a different bound has interaction rules (ArrowMode.RULES) available instead.
+private const val THREAD_HANDOFF_MAX_GAP_MS = 250L
+
+/** The single place that decides CALL-with-evidence vs. bare SELF for one entry, shared by
+ *  [runEvidenceFlow] and [runRulesFallthrough] so the decision can never diverge between the two
+ *  callers — see this file's own header doc for the "evidence, not guessing" rule this encodes. */
+private class EvidenceEdge(val fromIdx: Int, val kind: MessageKind, val evidence: MessageEvidence)
+
 @Suppress("LongParameterList")
-private fun runTagTransition(
+private fun resolveEvidenceEdge(
+    idx: Int,
+    entry: LogEntry,
+    emittedAny: Boolean,
+    entryPointIdx: Int?,
+    prevIdx: Int?,
+    prevEntry: LogEntry?,
+    options: DiagramOptions,
+): EvidenceEdge = when {
+    // The entry-point actor is user-declared configuration, not inference — it is always genuine
+    // evidence for exactly the one arrow that opens the diagram.
+    !emittedAny && entryPointIdx != null -> EvidenceEdge(entryPointIdx, MessageKind.CALL, MessageEvidence.LOG)
+    // Same-thread handoff, opt-in: a real (non-zero) pid+tid match within a short time bound is
+    // actual OS-level evidence that this line is a continuation of the previous one's call chain.
+    // entry.tid != 0 is non-negotiable: LogEntry.pid/tid both default to 0, so brief/RAW logcat
+    // (which carries neither) would otherwise correlate an entire log into one fake thread —
+    // exactly reproducing the bug this mode exists to remove.
+    options.threadHandoffArrows && prevIdx != null && prevEntry != null && prevIdx != idx &&
+        entry.tid != 0 && entry.tid == prevEntry.tid && entry.pid == prevEntry.pid &&
+        deltaMillis(prevEntry.ts, entry.ts)?.let { abs(it) <= THREAD_HANDOFF_MAX_GAP_MS } == true ->
+        EvidenceEdge(prevIdx, MessageKind.CALL, MessageEvidence.THREAD_HANDOFF)
+    // No correlation found — an honest event on its own lifeline, never a guessed CALL.
+    else -> EvidenceEdge(idx, MessageKind.SELF, MessageEvidence.LOG)
+}
+
+@Suppress("LongParameterList")
+private fun emitEvidenceMessage(
+    idx: Int,
+    entry: LogEntry,
+    label: String,
+    emittedAny: Boolean,
+    entryPointIdx: Int?,
+    prevIdx: Int?,
+    prevEntry: LogEntry?,
+    options: DiagramOptions,
+    gen: RawGen,
+): Int {
+    val edge = resolveEvidenceEdge(idx, entry, emittedAny, entryPointIdx, prevIdx, prevEntry, options)
+    gen.messages += DiagramMessage(edge.fromIdx, idx, label, entry.id, entry.ts, entry.level, edge.kind, evidence = edge.evidence)
+    if (options.notesForErrors && errorLevel(entry.level)) gen.notes += PendingNote(gen.messages.lastIndex, idx, label)
+    return idx
+}
+
+@Suppress("LongParameterList")
+private fun runEvidenceFlow(
     entries: List<LogEntry>,
     registry: ParticipantRegistry,
     entryPointIdx: Int?,
@@ -537,32 +630,27 @@ private fun runTagTransition(
     cancellationCheck: CancellationCheck,
     gen: RawGen,
 ) {
-    // Seeding `current` with the entry-point actor (rather than null + a special "first message"
-    // branch) means the very first transition — actor to the range's first tag — falls out of the
-    // exact same CALL/SELF logic as every later one; no first-entry special case needed.
-    var current: Int? = entryPointIdx
+    // With no chain to seed, there is nothing to bootstrap — every entry with a resolvable
+    // lifeline now produces a message (a CALL when evidenced, a SELF event otherwise), unlike the
+    // old TAG_TRANSITION bootstrap that silently swallowed the range's very first entry.
+    var prevIdx: Int? = null
+    var prevEntry: LogEntry? = null
+    var emittedAny = false
     var sinceCancellationCheck = 0
     for (entry in entries) {
         if (++sinceCancellationCheck >= CANCELLATION_CHECK_INTERVAL) {
             sinceCancellationCheck = 0
             cancellationCheck()
         }
-        val tagIdx = registry.indexForTag(entry.tag) ?: continue
-        val cur = current
-        if (cur == null) {
-            // Bootstrap: no entry-point actor and this is the range's first entry — nothing exists
-            // yet to draw an arrow FROM, so this entry only establishes the starting lifeline.
-            current = tagIdx
-            continue
-        }
+        val idx = registry.indexForTag(entry.tag) ?: continue
         val label = buildLabel(entry, resolveLabel, options, firstTs)
-        val kind = if (tagIdx == cur) MessageKind.SELF else MessageKind.CALL
-        gen.messages += DiagramMessage(cur, tagIdx, label, entry.id, entry.ts, entry.level, kind)
-        if (options.notesForErrors && errorLevel(entry.level)) gen.notes += PendingNote(gen.messages.lastIndex, tagIdx, label)
-        current = tagIdx
+        emitEvidenceMessage(idx, entry, label, emittedAny, entryPointIdx, prevIdx, prevEntry, options, gen)
+        emittedAny = true
+        prevIdx = idx
+        prevEntry = entry
     }
     val last = entries.lastOrNull()
-    val cur = current
+    val cur = prevIdx
     if (exitPointIdx != null && cur != null && last != null) {
         gen.messages += DiagramMessage(cur, exitPointIdx, "", last.id, last.ts, last.level, MessageKind.RETURN)
     }
@@ -583,8 +671,9 @@ private fun runRules(
 ) {
     val enabledRules = rules.filter { it.enabled && it.pattern.isNotBlank() }
     var current: Int? = null
+    var currentEntry: LogEntry? = null
     var sinceCancellationCheck = 0
-    for ((entryIndex, entry) in entries.withIndex()) {
+    for (entry in entries) {
         if (++sinceCancellationCheck >= CANCELLATION_CHECK_INTERVAL) {
             sinceCancellationCheck = 0
             cancellationCheck()
@@ -593,28 +682,37 @@ private fun runRules(
         val match = enabledRules.firstNotNullOfOrNull { rule ->
             firstRegexMatchResult(entry.msg, rule.pattern, regexContext = regexContext)?.let { rule to it }
         }
-        current = if (match == null) {
-            runRulesFallthrough(entry, registry, current, label, options, gen)
+        val result = if (match == null) {
+            runRulesFallthrough(entry, registry, current, currentEntry, label, options, gen)
         } else {
             runRulesMatched(entry, match.first, match.second, registry, label, options, gen, warnings)
+        }
+        if (result != null) {
+            current = result.first
+            currentEntry = result.second
         }
     }
 }
 
+// Shares emitEvidenceMessage with runEvidenceFlow (this file's header doc) so an unmatched line
+// gets exactly the same CALL-vs-SELF decision an EVIDENCE_FLOW-mode entry would: never a guessed
+// CALL from a bare tag change. No entry-point actor concept applies to RULES mode (that reads as
+// EVIDENCE_FLOW-specific configuration), so entryPointIdx is always null here.
 private fun runRulesFallthrough(
     entry: LogEntry,
     registry: ParticipantRegistry,
     current: Int?,
+    currentEntry: LogEntry?,
     label: String,
     options: DiagramOptions,
     gen: RawGen,
-): Int? {
-    val tagIdx = registry.indexForTag(entry.tag) ?: return current
-    if (current == null) return tagIdx
-    val kind = if (tagIdx == current) MessageKind.SELF else MessageKind.CALL
-    gen.messages += DiagramMessage(current, tagIdx, label, entry.id, entry.ts, entry.level, kind)
-    if (options.notesForErrors && errorLevel(entry.level)) gen.notes += PendingNote(gen.messages.lastIndex, tagIdx, label)
-    return tagIdx
+): Pair<Int, LogEntry>? {
+    val tagIdx = registry.indexForTag(entry.tag) ?: return null
+    emitEvidenceMessage(
+        tagIdx, entry, label, emittedAny = true, entryPointIdx = null,
+        prevIdx = current, prevEntry = currentEntry, options = options, gen = gen,
+    )
+    return tagIdx to entry
 }
 
 @Suppress("LongParameterList")
@@ -627,7 +725,7 @@ private fun runRulesMatched(
     options: DiagramOptions,
     gen: RawGen,
     warnings: MutableList<String>,
-): Int {
+): Pair<Int, LogEntry> {
     val fromName = substituteTemplate(rule.fromTemplate, matchResult, entry)
     val toName = substituteTemplate(rule.toTemplate, matchResult, entry)
     val rawLabel = substituteTemplate(rule.labelTemplate, matchResult, entry).ifBlank { fallbackLabel }
@@ -639,7 +737,7 @@ private fun runRulesMatched(
     val kind = if (fromIdx == toIdx) MessageKind.SELF else MessageKind.CALL
     gen.messages += DiagramMessage(fromIdx, toIdx, label, entry.id, entry.ts, entry.level, kind, evidence = MessageEvidence.RULE)
     if (options.notesForErrors && errorLevel(entry.level)) gen.notes += PendingNote(gen.messages.lastIndex, toIdx, label)
-    return toIdx
+    return toIdx to entry
 }
 
 private fun runLinePerMessage(
@@ -755,6 +853,42 @@ private fun applyActorMirrors(
             }
         }
     }
+}
+
+// ── Message filters (showSelfMessages / showSourceInferred) ──────────────────────────────────
+
+/** [rawToFiltered] is sized to the RAW (pre-filter) message list: `rawToFiltered[i]` is the index
+ *  message `i` landed at in [messages] when it survived, or the index of the nearest SURVIVING
+ *  message that comes AFTER it when it was dropped — never before, so a note/frame boundary
+ *  anchored on a dropped message still lands at-or-after where that message used to be, matching
+ *  entryId order. `filtered.size` (i.e. [messages].size) when nothing survives after it; callers
+ *  compose this with collapseRepeats' own mapping and rely on that same out-of-range convention
+ *  (buildNotes/addFrame already drop an index `>= cappedSize`). */
+private class FilterResult(val messages: List<DiagramMessage>, val rawToFiltered: IntArray)
+
+private fun filterMessages(raw: List<DiagramMessage>, options: DiagramOptions): FilterResult {
+    if (options.showSelfMessages && options.showSourceInferred) {
+        return FilterResult(raw, IntArray(raw.size) { it })
+    }
+    val kept = BooleanArray(raw.size)
+    val filtered = ArrayList<DiagramMessage>(raw.size)
+    val filteredIndexIfKept = IntArray(raw.size) { -1 }
+    raw.forEachIndexed { i, m ->
+        val dropSelf = !options.showSelfMessages && m.kind == MessageKind.SELF
+        val dropSourceInferred = !options.showSourceInferred && m.evidence == MessageEvidence.SOURCE_INFERRED
+        if (!dropSelf && !dropSourceInferred) {
+            kept[i] = true
+            filteredIndexIfKept[i] = filtered.size
+            filtered += m
+        }
+    }
+    val rawToFiltered = IntArray(raw.size)
+    var nextSurviving = filtered.size
+    for (i in raw.indices.reversed()) {
+        if (kept[i]) nextSurviving = filteredIndexIfKept[i]
+        rawToFiltered[i] = nextSurviving
+    }
+    return FilterResult(filtered, rawToFiltered)
 }
 
 /** Activations are emitted only for correlated call/return pairs, never for a bare transition. */
@@ -878,6 +1012,7 @@ private fun collapseRepeats(raw: List<DiagramMessage>): CollapseResult {
             val cand = raw[j]
             val sameInteraction = cand.fromIdx == first.fromIdx &&
                 cand.toIdx == first.toIdx &&
+                cand.kind == first.kind &&
                 cand.evidence == first.evidence &&
                 normalizeForRepeatCollapse(cand.label) == normFirst
             if (sameInteraction) {

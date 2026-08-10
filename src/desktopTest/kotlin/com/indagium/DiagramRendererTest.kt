@@ -3,15 +3,20 @@ package com.indagium
 import com.indagium.diagram.DiagramFrame
 import com.indagium.diagram.DiagramMessage
 import com.indagium.diagram.DiagramNoteMark
+import com.indagium.diagram.DiagramOptions
 import com.indagium.diagram.DiagramParticipant
 import com.indagium.diagram.DiagramTheme
+import com.indagium.diagram.MessageEvidence
 import com.indagium.diagram.MessageKind
 import com.indagium.diagram.ParticipantKind
 import com.indagium.diagram.SeqDiagram
 import com.indagium.diagram.SeqDiagramSpec
+import com.indagium.diagram.measureLabels
 import com.indagium.diagram.renderSequenceDiagram
 import com.indagium.diagram.toPngBytes
 import com.indagium.model.LogLevel
+import java.awt.Font
+import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import javax.imageio.ImageIO
 import kotlin.math.abs
@@ -337,6 +342,175 @@ class DiagramRendererTest {
         )
 
         assertTrue(noted.widthPx > plain.widthPx, "a note must extend the canvas (${noted.widthPx} vs ${plain.widthPx})")
+    }
+
+    // ── Measured labels + per-gap columns (Parts 1-2) ────────────────────────────────────────
+
+    @Test
+    fun repeatSuffixSurvivesOnALabelLongEnoughToWrapAndEllipsize() {
+        // Direct unit test of measureLabels (internal — visible to this same-module test, see
+        // DiagramSpecCodec.kt's MAX_CODEC_COMPONENTS for the same cross-package precedent):
+        // appending the "×N" suffix BEFORE ellipsizing (the pre-Part-2 bug) would lose it on any
+        // label long enough to need truncation; measureLabels reserves room for it instead.
+        val img = BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB)
+        val g = img.createGraphics()
+        val fm = g.getFontMetrics(Font(Font.SANS_SERIF, Font.PLAIN, 12))
+        val longLabel = "a very long repeated operation that will not fit on a single short line at all"
+        val message = DiagramMessage(0, 1, longLabel, 1, "10:00:00.000", LogLevel.I, MessageKind.CALL, repeatCount = 7)
+
+        val measured = measureLabels(listOf(message), fm, maxLines = 1, maxWidthPx = 120).single()
+
+        assertTrue(measured.lines.last().endsWith("×7"), "the repeat suffix must survive on the last line: ${measured.lines}")
+    }
+
+    @Test
+    fun labelMaxLinesOneAlwaysProducesASingleLineRegardlessOfTextLength() {
+        val img = BufferedImage(1, 1, BufferedImage.TYPE_INT_ARGB)
+        val g = img.createGraphics()
+        val fm = g.getFontMetrics(Font(Font.SANS_SERIF, Font.PLAIN, 12))
+        val longLabel = "this label has plenty of words and would normally wrap onto several lines"
+        val message = DiagramMessage(0, 1, longLabel, 1, "10:00:00.000", LogLevel.I, MessageKind.CALL)
+
+        val measured = measureLabels(listOf(message), fm, maxLines = 1, maxWidthPx = 120).single()
+
+        assertEquals(1, measured.lines.size, "${measured.lines}")
+    }
+
+    @Test
+    fun aLongSelfLabelOnTheRightmostLifelineWidensTheCanvasInsteadOfClippingItsHitBox() {
+        // The direct regression test for the reported bug: a self message on the LAST column has
+        // no gap to its right to widen, so its required width must instead extend widthPx itself.
+        val participants = listOf(tag(0), tag(1))
+        val shortLabel = msg(1, 1, entryId = 1, label = "ok")
+        val longLabel = msg(
+            1, 1, entryId = 1,
+            label = "waiting for a very long-winded response that keeps going and going and going",
+        )
+        val short = renderSequenceDiagram(
+            SeqDiagram(spec = SeqDiagramSpec(participants = participants), participants = participants, messages = listOf(shortLabel)),
+            theme,
+        )
+        val long = renderSequenceDiagram(
+            SeqDiagram(spec = SeqDiagramSpec(participants = participants), participants = participants, messages = listOf(longLabel)),
+            theme,
+        )
+
+        assertTrue(long.widthPx > short.widthPx, "a long self label on the last column must widen the canvas (${long.widthPx} vs ${short.widthPx})")
+        long.hits.forEach { h ->
+            assertTrue(h.x + h.width <= long.widthPx, "hit ${h.messageIndex} overflows width ${long.widthPx} (x=${h.x} w=${h.width})")
+        }
+    }
+
+    @Test
+    fun aSelfArrowHitCoversTheLoopPlusItsLabelNotJustTheLoop() {
+        val participants = listOf(tag(0), tag(1), tag(2))
+
+        fun render(label: String) = renderSequenceDiagram(
+            SeqDiagram(
+                spec = SeqDiagramSpec(participants = participants),
+                participants = participants,
+                messages = listOf(msg(0, 0, entryId = 1, label = label)),
+            ),
+            theme,
+        )
+
+        val shortHit = render("hi").hits.single()
+        val longHit = render("a substantially longer self-message label than the short one above").hits.single()
+
+        assertTrue(longHit.width > shortHit.width, "a longer self label must produce a wider hit box (${longHit.width} vs ${shortHit.width})")
+    }
+
+    @Test
+    fun aWrappingLabelWidensOnlyItsOwnRowAndPushesLaterRowsDownWithoutChangingTheirOwnPitch() {
+        // labelMaxLines=6 with a genuinely long label: two wrapped lines alone don't exceed the
+        // BASE_ROW_H floor at this font size (a shorter wrap would leave pitch unchanged, which is
+        // correct but not what this test is checking), so this needs enough words to wrap onto
+        // several lines and actually grow past that floor.
+        val optionsWithWrap = DiagramOptions(labelMaxLines = 6)
+        val participants = listOf(tag(0), tag(1))
+        val longLabel = "this particular label has quite a few separate words in it and will wrap onto " +
+            "several lines of text rather than staying on just one or two lines like the others around it"
+        val baseline = listOf(msg(0, 1, 1, label = "hi"), msg(1, 0, 2, label = "hi"), msg(0, 1, 3, label = "hi"))
+        val wrapped = listOf(
+            msg(0, 1, 1, label = "hi"),
+            msg(1, 0, 2, label = longLabel),
+            msg(0, 1, 3, label = "hi"),
+        )
+        val base = renderSequenceDiagram(
+            SeqDiagram(spec = SeqDiagramSpec(participants = participants, options = optionsWithWrap), participants = participants, messages = baseline),
+            theme,
+        )
+        val long = renderSequenceDiagram(
+            SeqDiagram(spec = SeqDiagramSpec(participants = participants, options = optionsWithWrap), participants = participants, messages = wrapped),
+            theme,
+        )
+
+        // A direct hit box's TOP is pinned to the PRECEDING row's reserved space (buildHits'
+        // neighbor-clamped shape), so a row's own pitch growth shows up as that row's hit growing
+        // TALLER, not as its top moving — row 1's hit box must grow to make room for its own wrap.
+        assertTrue(long.hits[1].height > base.hits[1].height, "row 1's own hit must grow taller (${long.hits[1].height} vs ${base.hits[1].height})")
+
+        // Row 2's own pitch (its hit box's OWN height) is unaffected by row 1's wrap...
+        assertEquals(base.hits[2].height, long.hits[2].height, "row 2's own pitch must be unaffected by row 1's wrap")
+        // ...even though row 2 is still pushed further down the canvas overall.
+        assertTrue(long.hits[2].y > base.hits[2].y, "row 2 must be pushed down overall (${long.hits[2].y} vs ${base.hits[2].y})")
+    }
+
+    @Test
+    fun mixedOneLineAndFourLineLabelsKeepHitBoxesOrderedAndNonOverlapping() {
+        val participants = listOf(tag(0), tag(1))
+        val messages = listOf(
+            msg(0, 1, 1, label = "short"),
+            msg(1, 0, 2, label = "a much longer label with many separate words that will wrap across several lines of text"),
+            msg(0, 1, 3, label = "short again"),
+            msg(1, 1, 4, label = "and a self message with its own reasonably long label attached to it as well"),
+            msg(0, 1, 5, label = "short"),
+        )
+        val d = SeqDiagram(
+            spec = SeqDiagramSpec(participants = participants, options = DiagramOptions(labelMaxLines = 4)),
+            participants = participants,
+            messages = messages,
+        )
+
+        val hits = renderSequenceDiagram(d, theme).hits
+
+        assertEquals(messages.size, hits.size)
+        hits.zipWithNext { a, b ->
+            assertTrue(a.y < b.y, "hit ${a.messageIndex} must sit above ${b.messageIndex}")
+            assertTrue(a.y + a.height <= b.y, "hit ${a.messageIndex} bottom must not reach into ${b.messageIndex} top")
+        }
+    }
+
+    @Test
+    fun aFiveThousandCharacterLabelDoesNotForceAGlobalDownscale() {
+        val participants = listOf(tag(0), tag(1))
+        val hugeLabel = "word ".repeat(1000).trim()
+        val d = SeqDiagram(
+            spec = SeqDiagramSpec(participants = participants),
+            participants = participants,
+            messages = listOf(msg(0, 1, 1, label = hugeLabel)),
+        )
+
+        val rendered = renderSequenceDiagram(d, theme, scale = 2f)
+
+        assertEquals(2f, rendered.scale, "a pathological label must be wrapped/ellipsized within its own bounded budget, never shrink the whole diagram")
+        assertTrue(rendered.widthPx in 1..MAX_DIM)
+        assertTrue(rendered.heightPx in 1..MAX_DIM)
+    }
+
+    @Test
+    fun sourceInferredEvidenceStillRendersAsADashedLine() {
+        // Not a new behavior — a regression guard that paintDirectMessage's dashed-stroke branch
+        // (SOURCE_INFERRED, or kind RETURN) still compiles/renders after the Part 3 label-drawing
+        // rewrite. Asserted structurally (a valid, non-empty hit) since this file never inspects
+        // pixels.
+        val participants = listOf(tag(0), tag(1))
+        val message = msg(0, 1, 1, kind = MessageKind.CALL).copy(evidence = MessageEvidence.SOURCE_INFERRED)
+        val d = SeqDiagram(spec = SeqDiagramSpec(participants = participants), participants = participants, messages = listOf(message))
+
+        val hit = renderSequenceDiagram(d, theme).hits.single()
+
+        assertTrue(hit.width > 0 && hit.height > 0)
     }
 
     private fun assertWithinPercent(expected: Int, actual: Int, tolerancePercent: Int, what: String) {

@@ -1289,7 +1289,10 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     McpTool(
         "build_sequence_diagram",
         "Build a UML sequence diagram from a range of a tab's log lines and return its Mermaid (or " +
-            "PlantUML) source. The default Component flow groups tag changes into component handoffs. " +
+            "PlantUML) source. The default Component flow (evidenceFlow) draws an arrow only where the " +
+            "log carries actual evidence of one — a declared entry actor, an opt-in same-thread handoff, " +
+            "or a matched rule/source edge — and shows every other line as an event on its own lifeline " +
+            "rather than guessing a call from a bare tag change. " +
             "Use components to give one or more raw tags a stable lifeline; tags outside enabled " +
             "components are hidden unless unmappedTagPolicy=groupAsOther. This is read-only: pass " +
             "returned source to add_text_note to store it. Legacy tags/actors/entryActor/exitActor " +
@@ -1315,7 +1318,7 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             required = listOf("tabId"),
             enums = mapOf(
                 "dialect" to listOf("mermaid", "plantuml"),
-                "mode" to listOf("componentFlow", "tagTransition", "timeline", "rules"),
+                "mode" to listOf("componentFlow", "evidenceFlow", "tagTransition", "timeline", "rules"),
                 "unmappedTagPolicy" to listOf("hide", "groupAsOther"),
                 "activationPolicy" to listOf("evidenceBacked", "none"),
             ),
@@ -1340,8 +1343,11 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                 "startLineId" to "First log line id of the range (inclusive). Omit both ids to use the whole filtered view.",
                 "endLineId" to "Last log line id of the range (inclusive).",
                 "dialect" to "Output syntax. Defaults to mermaid.",
-                "mode" to "componentFlow (default; legacy name tagTransition) draws an arrow when the active component changes; " +
-                    "timeline draws every line as an event. rules uses configured interaction rules when available.",
+                "mode" to "componentFlow (default; also accepted as evidenceFlow, or the legacy name tagTransition) draws an " +
+                    "arrow only where the log carries actual evidence of one — a declared entry actor, an opt-in same-thread " +
+                    "(pid+tid) handoff, or a matched rule/source edge; every other line becomes an event on its own " +
+                    "lifeline rather than a guessed call. timeline draws every line as an event unconditionally. rules " +
+                    "uses configured interaction rules when available, falling through to the same evidence-only behavior.",
                 "maxMessages" to "Arrow cap; values are clamped to the hard maximum of 400 and truncated=true reports clipping. Defaults to 60.",
                 "collapseRepeats" to "Fold consecutive identical messages into one with a repeat count. Defaults to true.",
             ),

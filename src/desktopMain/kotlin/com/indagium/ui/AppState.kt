@@ -31,6 +31,7 @@ import com.indagium.source.SourceCodeView
 import com.indagium.source.SourceFileSnapshot
 import com.indagium.source.SourceIndex
 import com.indagium.source.SourceIndexBuildOptions
+import com.indagium.source.SourceIndexCancelledException
 import com.indagium.source.SourceIndexStatus
 import com.indagium.source.SourceIndexStore
 import com.indagium.source.SourceIndexer
@@ -1452,6 +1453,13 @@ class AppState(
     // (absolute) currently have a scan in flight, purely so the Settings UI can disable that
     // folder's own "Reindex" button and no other's while a build runs.
     var indexingFolders by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    // Folders whose in-flight scan has been asked to stop early via the Settings "Cancel" button
+    // (cancelReindexSources). Read by the cancellationCheck lambda passed into SourceIndexer.build,
+    // which polls it between phases and per file; cleared alongside indexingFolders once the build
+    // actually finishes (cancelled or not) so a later Reindex click always starts clean.
+    var cancelledIndexingFolders by mutableStateOf<Set<String>>(emptySet())
         private set
     private var sourceResolver: LogSourceResolver? = null
 
@@ -7454,6 +7462,7 @@ class AppState(
                 false
             } else {
                 indexingFolders = indexingFolders + rootAbs
+                cancelledIndexingFolders = cancelledIndexingFolders - rootAbs
                 true
             }
         }
@@ -7475,8 +7484,18 @@ class AppState(
                                 settings.sourceAutoDiscoveryEnabled,
                             ),
                         ),
+                        // Cancellation bails out of build() via SourceIndexCancelledException,
+                        // caught below like any other build failure — partial stays null, so the
+                        // merge/save block is skipped and nothing partial is ever persisted.
+                        cancellationCheck = { rootAbs in cancelledIndexingFolders },
                     )
-                }.onFailure { error -> AppLogger.error("source-index", "Source reindex failed", error) }.getOrNull()
+                }.onFailure { error ->
+                    if (error is SourceIndexCancelledException) {
+                        AppLogger.info("source-index", "Source reindex cancelled")
+                    } else {
+                        AppLogger.error("source-index", "Source reindex failed", error)
+                    }
+                }.getOrNull()
                 if (partial != null) {
                     val mergedAt = System.currentTimeMillis()
                     val merged = synchronized(stateLock) {
@@ -7515,9 +7534,22 @@ class AppState(
                     }
                 }
             } finally {
-                synchronized(stateLock) { indexingFolders = indexingFolders - rootAbs }
+                synchronized(stateLock) {
+                    indexingFolders = indexingFolders - rootAbs
+                    cancelledIndexingFolders = cancelledIndexingFolders - rootAbs
+                }
                 finishLoading()
             }
+        }
+    }
+
+    // Settings "Cancel" button beside a folder's "Reindex" — a no-op unless that folder's scan is
+    // actually in flight. The scan itself notices via cancellationCheck (polled between phases and
+    // per file inside SourceIndexer.build) and unwinds without writing a partial store.
+    fun cancelReindexSources(folder: String) {
+        val rootAbs = canonicalSourcePath(folder)
+        synchronized(stateLock) {
+            if (rootAbs in indexingFolders) cancelledIndexingFolders = cancelledIndexingFolders + rootAbs
         }
     }
 

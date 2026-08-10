@@ -45,7 +45,11 @@ data class DiagramComponent(
 /** Direction(s) in which an actor mirrors the component it represents. */
 enum class MirrorDirection { INBOUND, OUTBOUND, BOTH }
 
-/** A workspace actor.  A mirrored actor duplicates, rather than replaces, component edges. */
+/** A workspace actor.  A mirrored actor duplicates, rather than replaces, component edges — it
+ *  never invents one. Under [ArrowMode.EVIDENCE_FLOW], a component with no evidenced (non-SELF)
+ *  arrow touching it has nothing for a mirroring actor to duplicate either, so that actor
+ *  correctly renders with no messages of its own; this is a consequence of
+ *  `applyActorMirrors` skipping same-endpoint messages, not a bug. */
 data class DiagramActor(
     val id: String,
     val label: String,
@@ -53,8 +57,10 @@ data class DiagramActor(
     val mirrorDirection: MirrorDirection = MirrorDirection.BOTH,
 )
 
-/** Provenance for an interaction.  Renderer and emitters preserve this in the in-app model. */
-enum class MessageEvidence { LOG, RULE, SOURCE_INFERRED, ACTOR_MIRROR }
+/** Provenance for an interaction.  Renderer and emitters preserve this in the in-app model.
+ *  [THREAD_HANDOFF] is appended last (see this file's own "append last" convention) so existing
+ *  persisted `.name` tokens are untouched — see [DiagramOptions.threadHandoffArrows]. */
+enum class MessageEvidence { LOG, RULE, SOURCE_INFERRED, ACTOR_MIRROR, THREAD_HANDOFF }
 
 /** When activation bars are included in the built model. */
 enum class ActivationPolicy { NONE, EVIDENCE_BACKED }
@@ -77,14 +83,18 @@ data class DiagramSourceInteraction(
 )
 
 /** How [SeqDiagramBuilder.buildSequenceDiagram] turns a scanned entry into an arrow.
- *  [TAG_TRANSITION] (the default) infers a CALL whenever the active tag changes and a SELF
- *  message when it repeats — no configuration needed, works on any log. [RULES] matches each
+ *  [EVIDENCE_FLOW] (the default) draws an arrow only where the log actually carries evidence of
+ *  one — a declared entry-point actor's opening call, an optional same-thread (pid+tid) handoff,
+ *  or a matched rule/source-index edge — and represents every other line as a [MessageKind.SELF]
+ *  event on its own lifeline rather than guessing who talked to whom from a mere tag change (that
+ *  guess is exactly what the old `TAG_TRANSITION` name described, and exactly what this mode
+ *  deliberately no longer does — see the builder's `runEvidenceFlow` doc). [RULES] matches each
  *  entry's message against [SeqDiagramSpec.rules] and lets the matched rule name the exact
- *  endpoints and label; an entry matched by no enabled rule falls through to TAG_TRANSITION
- *  behavior for that one entry (see the builder's own doc). [LINE_PER_MESSAGE] emits one SELF
- *  message per entry on its own tag's lifeline — a flat "everything that happened, in order"
- *  view with no attempt to infer who talked to whom. */
-enum class ArrowMode { TAG_TRANSITION, RULES, LINE_PER_MESSAGE }
+ *  endpoints and label; an entry matched by no enabled rule falls through to the same
+ *  evidence-only SELF behavior for that one entry. [LINE_PER_MESSAGE] emits one SELF message per
+ *  entry on its own tag's lifeline — a flat "everything that happened, in order" view with no
+ *  attempt to infer who talked to whom, which `EVIDENCE_FLOW`'s own fallback now shares. */
+enum class ArrowMode { EVIDENCE_FLOW, RULES, LINE_PER_MESSAGE }
 
 /** What text an arrow's label is built from. [SOURCE_METHOD] needs a `resolveLabel` callback
  *  (see the builder) — when that returns null for a given entry (no source index, or no call
@@ -92,8 +102,11 @@ enum class ArrowMode { TAG_TRANSITION, RULES, LINE_PER_MESSAGE }
  *  producing a blank arrow. */
 enum class LabelSource { MESSAGE, SOURCE_METHOD, BOTH }
 
-/** CALL = a tag change (A talked to B); RETURN = the synthetic closing arrow to an exit-point
- *  ACTOR (see [ArrowMode.TAG_TRANSITION]'s doc); SELF = the same tag/participant twice in a row. */
+/** CALL = an EVIDENCED interaction — an entry-point actor's opening call, a same-thread handoff,
+ *  or a matched rule/source-index edge (see [ArrowMode.EVIDENCE_FLOW]'s doc), never a bare tag
+ *  change; RETURN = the synthetic closing arrow to an exit-point ACTOR, or a source-inferred
+ *  return; SELF = a single line shown as an event on its own participant's lifeline — the default
+ *  shape for any entry [ArrowMode.EVIDENCE_FLOW] finds no evidence of a correlation for. */
 enum class MessageKind { CALL, RETURN, SELF }
 
 data class DiagramParticipant(
@@ -130,7 +143,11 @@ val DiagramParticipant.displayName: String
 data class DiagramParticipantCandidate(
     val tag: String,
     val entryCount: Int,
-    /** Number of tag boundaries touching this tag in the selected range. */
+    /** Number of ADJACENT-LINE boundaries touching this tag in the selected range — a raw
+     *  co-occurrence count, not a count of arrows [ArrowMode.EVIDENCE_FLOW] will actually draw
+     *  (which needs real correlation: an entry-point actor, a same-thread handoff, or a matched
+     *  rule/source edge). Kept for relative "how chatty is this tag" ranking in the inspector;
+     *  callers must not present it as an arrow/interaction count. */
     val transitionCount: Int,
     val errorCount: Int,
     val representation: DiagramParticipantRepresentation,
@@ -214,6 +231,22 @@ data class DiagramOptions(
     val notesForErrors: Boolean = true,
     /** Do not invent activations from unrelated transitions. */
     val activationPolicy: ActivationPolicy = ActivationPolicy.EVIDENCE_BACKED,
+    // ── Appended fields below: append-only, see this file's own codec-versioning discipline
+    // (DiagramSpecCodec.kt's optionsToMap/optionsFromMap already default every missing key off
+    // this class's own defaults, so a v1/v2/v3 note with none of these keys decodes cleanly). ──
+    // How many lines a message label may wrap onto before it is ellipsized. 1 reproduces the
+    // pre-wrapping single-line layout exactly (see SeqDiagramRenderer's own compatibility note).
+    val labelMaxLines: Int = 2,
+    /** Opt-in [ArrowMode.EVIDENCE_FLOW] correlation: draw a CALL between two consecutive entries
+     *  that share a real (non-zero) pid+tid within a short time bound, evidenced as
+     *  [MessageEvidence.THREAD_HANDOFF]. Off by default — see the builder's own guard doc for why
+     *  a brief/RAW-format log (pid==tid==0 for every row) must never correlate under this option. */
+    val threadHandoffArrows: Boolean = false,
+    /** When false, every [MessageKind.SELF] message is dropped from the built diagram — the
+     *  "just show me the evidenced arrows" view. */
+    val showSelfMessages: Boolean = true,
+    /** When false, every [MessageEvidence.SOURCE_INFERRED] message is dropped. */
+    val showSourceInferred: Boolean = true,
 )
 
 data class SeqDiagramSpec(
@@ -225,7 +258,7 @@ data class SeqDiagramSpec(
     // whether TAG participants were supplied or derived.
     val participants: List<DiagramParticipant> = emptyList(),
     val range: DiagramRange = DiagramRange.VisibleView,
-    val mode: ArrowMode = ArrowMode.TAG_TRANSITION,
+    val mode: ArrowMode = ArrowMode.EVIDENCE_FLOW,
     val rules: List<DiagramMessageRule> = emptyList(),
     val options: DiagramOptions = DiagramOptions(),
     // The log file this spec was built from (LogTab.filename), persisted purely so a later

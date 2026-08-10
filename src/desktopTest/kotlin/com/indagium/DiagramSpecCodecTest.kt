@@ -435,4 +435,73 @@ class DiagramSpecCodecTest {
 
         assertNull(parseDiagramNote(encodeDiagramNote(spec, source)), "the EMPTY_COMPONENT_ID-shaped sentinel must never reach the wire")
     }
+
+    // ── ArrowMode rename: the one back-compat boundary ──────────────────────────────────────
+
+    @Test
+    fun aV1NoteWithTheLegacyTagTransitionModeTokenDecodesToEvidenceFlow() {
+        val note = "<!-- indagium:diagram v1 {\"dialect\":\"mermaid\",\"mode\":\"TAG_TRANSITION\"} -->\n" +
+            "```mermaid\nsequenceDiagram\n```\n"
+
+        val parsed = assertNotNull(parseDiagramNote(note))
+
+        assertEquals(ArrowMode.EVIDENCE_FLOW, parsed.spec.mode)
+    }
+
+    @Test
+    fun aCurrentEvidenceFlowModeTokenRoundTripsUnchanged() {
+        val spec = SeqDiagramSpec(mode = ArrowMode.EVIDENCE_FLOW)
+        val parsed = assertNotNull(parseDiagramNote(encodeDiagramNote(spec, source)))
+        assertEquals(ArrowMode.EVIDENCE_FLOW, parsed.spec.mode)
+    }
+
+    // ── New DiagramOptions fields (Part 4) ───────────────────────────────────────────────────
+
+    @Test
+    fun theFourNewOptionsFieldsRoundTrip() {
+        val spec = SeqDiagramSpec(
+            options = DiagramOptions(
+                labelMaxLines = 3,
+                threadHandoffArrows = true,
+                showSelfMessages = false,
+                showSourceInferred = false,
+            ),
+        )
+
+        val parsed = assertNotNull(parseDiagramNote(encodeDiagramNote(spec, source)))
+
+        assertEquals(3, parsed.spec.options.labelMaxLines)
+        assertTrue(parsed.spec.options.threadHandoffArrows)
+        assertFalse(parsed.spec.options.showSelfMessages)
+        assertFalse(parsed.spec.options.showSourceInferred)
+    }
+
+    @Test
+    fun aV3NoteWrittenWithoutTheNewOptionKeysDecodesToTheirSafeDefaults() {
+        // Simulates a v3 note written by a build that predates these four fields entirely — no
+        // "labelMaxLines"/"threadHandoffArrows"/"showSelfMessages"/"showSourceInferred" keys at all.
+        val note = "<!-- indagium:diagram v3 {\"dialect\":\"mermaid\",\"options\":{\"maxMessages\":42}} -->\n" +
+            "```mermaid\nsequenceDiagram\n```\n"
+
+        val parsed = assertNotNull(parseDiagramNote(note))
+
+        val defaults = DiagramOptions()
+        assertEquals(42, parsed.spec.options.maxMessages)
+        assertEquals(defaults.labelMaxLines, parsed.spec.options.labelMaxLines)
+        assertEquals(defaults.threadHandoffArrows, parsed.spec.options.threadHandoffArrows)
+        assertEquals(defaults.showSelfMessages, parsed.spec.options.showSelfMessages)
+        assertEquals(defaults.showSourceInferred, parsed.spec.options.showSourceInferred)
+    }
+
+    @Test
+    fun labelMaxLinesOutsideTheValidRangeIsRejectedByValidSpec() {
+        val tooFew = SeqDiagramSpec(options = DiagramOptions(labelMaxLines = 0))
+        assertNull(parseDiagramNote(encodeDiagramNote(tooFew, source)), "0 lines is below the 1..MAX_LABEL_LINES range")
+
+        val tooMany = SeqDiagramSpec(options = DiagramOptions(labelMaxLines = 9))
+        assertNull(parseDiagramNote(encodeDiagramNote(tooMany, source)), "9 lines is one over MAX_LABEL_LINES (8)")
+
+        val atTheEdge = SeqDiagramSpec(options = DiagramOptions(labelMaxLines = 8))
+        assertNotNull(parseDiagramNote(encodeDiagramNote(atTheEdge, source)), "8 is the inclusive upper bound")
+    }
 }
