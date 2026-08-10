@@ -722,7 +722,7 @@ private fun ModeSection(spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) 
     val tc = tc()
     SectionHeader("Interactions")
     val modeSelected = when (spec.mode) {
-        ArrowMode.TAG_TRANSITION -> setOf(0)
+        ArrowMode.EVIDENCE_FLOW -> setOf(0)
         ArrowMode.RULES -> setOf(1)
         ArrowMode.LINE_PER_MESSAGE -> setOf(2)
     }
@@ -732,7 +732,7 @@ private fun ModeSection(spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) 
             onSpec(
                 spec.copy(
                     mode = when (idx) {
-                        0 -> ArrowMode.TAG_TRANSITION
+                        0 -> ArrowMode.EVIDENCE_FLOW
                         1 -> ArrowMode.RULES
                         else -> ArrowMode.LINE_PER_MESSAGE
                     },
@@ -741,17 +741,24 @@ private fun ModeSection(spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) 
         },
         modifier = Modifier.padding(horizontal = 12.dp),
     )
+    // Neither explanation claims an arrow from a bare tag change anymore — EVIDENCE_FLOW draws one
+    // only where the log actually carries evidence of it (see DiagramModel.kt's ArrowMode doc);
+    // everything else renders as an event on its own lifeline, same as Timeline's own shape.
     val explanation = when (spec.mode) {
-        ArrowMode.TAG_TRANSITION -> "An arrow whenever the logging tag changes."
-        ArrowMode.RULES -> "Regex rules with (?<from>) (?<to>) (?<msg>) groups; unmatched lines fall back to tag handoff."
+        ArrowMode.EVIDENCE_FLOW -> "An arrow only where the log has real evidence of one — a declared entry actor below, " +
+            "an optional same-thread handoff, or a matched rule. Every other line is an event on its own lifeline."
+        ArrowMode.RULES -> "Regex rules with (?<from>) (?<to>) (?<msg>) groups; an unmatched line falls back to an event " +
+            "on its own lifeline (same fallback Component flow uses)."
         ArrowMode.LINE_PER_MESSAGE -> "Every line as an event on its own tag's lifeline."
     }
-    AppText(explanation, color = tc.td, fontSize = 10.sp, maxLines = 3, modifier = Modifier.padding(horizontal = 12.dp))
-    val enabledComponents = spec.components.count { it.enabled && it.tagIds.isNotEmpty() }
+    AppText(explanation, color = tc.td, fontSize = 10.sp, maxLines = 4, modifier = Modifier.padding(horizontal = 12.dp))
+    // A single enabled component is a perfectly good evidence-flow diagram now (it just has no
+    // OTHER lifeline to draw a cross-component arrow to) — only a genuinely empty one-row scope has
+    // nothing at all to show.
     val oneRow = (spec.range as? DiagramRange.Ids)?.let { it.from == it.to } == true
-    if (spec.mode == ArrowMode.TAG_TRANSITION && (oneRow || enabledComponents == 1)) {
+    if (spec.mode == ArrowMode.EVIDENCE_FLOW && oneRow) {
         AppText(
-            if (oneRow) "A one-row scope has no component handoff." else "One enabled component has no component handoff.",
+            "A one-row scope has nothing to correlate.",
             color = tc.td, fontSize = 10.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 12.dp),
         )
         AppButton(
@@ -762,6 +769,11 @@ private fun ModeSection(spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) 
     CheckRow(checked = spec.sourceEnrichment.enabled, onToggle = {
         onSpec(spec.copy(sourceEnrichment = spec.sourceEnrichment.copy(enabled = !spec.sourceEnrichment.enabled)))
     }) { AppText("Add one-hop source calls", fontSize = 10.sp) }
+    // An interaction-evidence choice, not a presentation one — sits beside source-call enrichment
+    // rather than down in OptionsSection's presentation toggles.
+    CheckRow(checked = spec.options.threadHandoffArrows, onToggle = {
+        onSpec(spec.copy(options = spec.options.copy(threadHandoffArrows = !spec.options.threadHandoffArrows)))
+    }) { AppText("Infer arrows from same-thread handoffs (pid + tid)", fontSize = 10.sp) }
     if (spec.mode == ArrowMode.RULES) DiagramRulesEditor(spec, onSpec)
 }
 
@@ -913,6 +925,19 @@ private fun OptionsSection(state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDi
         }
         onSpec(spec.copy(options = o.copy(activationPolicy = next)))
     }) { AppText("Evidence-backed activations", fontSize = 11.sp) }
+    CheckRow(checked = o.showSelfMessages, onToggle = {
+        onSpec(spec.copy(options = o.copy(showSelfMessages = !o.showSelfMessages)))
+    }) { AppText("Show self events", fontSize = 11.sp) }
+    if (spec.sourceEnrichment.enabled) {
+        CheckRow(checked = o.showSourceInferred, onToggle = {
+            onSpec(spec.copy(options = o.copy(showSourceInferred = !o.showSourceInferred)))
+        }) { AppText("Show inferred source calls", fontSize = 11.sp) }
+    } else {
+        AppText(
+            "Show inferred source calls — needs one-hop source calls enabled above.", color = tc.td, fontSize = 10.sp, maxLines = 2,
+            modifier = Modifier.padding(horizontal = 12.dp),
+        )
+    }
 
     Row(
         Modifier.padding(horizontal = 12.dp),
@@ -923,6 +948,23 @@ private fun OptionsSection(state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDi
             o.maxMessages.toString(),
             { v -> v.toIntOrNull()?.takeIf { it > 0 }?.let { onSpec(spec.copy(options = o.copy(maxMessages = it))) } },
             "", Modifier.width(70.dp), fontSize = 11.sp,
+        )
+        AppText("Max label length", fontSize = 11.sp)
+        InlineField(
+            o.labelMaxChars.toString(),
+            { v -> v.toIntOrNull()?.coerceIn(10, 400)?.let { onSpec(spec.copy(options = o.copy(labelMaxChars = it))) } },
+            "", Modifier.width(70.dp), fontSize = 11.sp,
+        )
+    }
+    Row(
+        Modifier.padding(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AppText("Label lines", fontSize = 11.sp)
+        SegmentedControl(
+            listOf("1", "2", "3", "4"),
+            setOf((o.labelMaxLines - 1).coerceIn(0, 3)),
+            onToggle = { idx -> onSpec(spec.copy(options = o.copy(labelMaxLines = idx + 1))) },
         )
     }
     Row(

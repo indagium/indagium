@@ -878,7 +878,11 @@ internal class IndagiumToolOperations(
             mode = when (args.str("mode")?.lowercase()) {
                 "timeline" -> ArrowMode.LINE_PER_MESSAGE
                 "rules" -> ArrowMode.RULES
-                else -> ArrowMode.TAG_TRANSITION
+                // "tagtransition"/"componentflow" are pre-rename aliases (see DiagramModel.kt's
+                // ArrowMode doc) — kept so an existing MCP caller's saved "mode" value keeps
+                // working; all three (plus the omitted/default case) now resolve to the same
+                // evidence-only builder path, not the old tag-change guess.
+                else -> ArrowMode.EVIDENCE_FLOW
             },
             options = DiagramOptions(
                 collapseRepeats = args.bool("collapseRepeats") ?: true,

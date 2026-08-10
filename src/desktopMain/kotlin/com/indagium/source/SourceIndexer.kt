@@ -7,67 +7,186 @@ import java.nio.file.Files
 
 // ── Public entry point ───────────────────────────────────────────────────
 
+/** Thrown by [SourceIndexer.build] when its `cancellationCheck` reports a cancellation between
+ *  phases or mid-phase. Callers that want cooperative cancellation (see `AppState.reindexSources`)
+ *  should treat this the same as any other build failure: discard the partial result and don't
+ *  persist anything — never surfaced as a normal return value, so a caller that never cancels
+ *  (the default `{ false }`) never sees it. */
+class SourceIndexCancelledException : RuntimeException("Source index build was cancelled")
+
+// Reports (scanned, total) progress across every phase of build() — file reads, whole-project
+// analysis, per-file declaration scanning, direct-call resolution, and final extraction — not
+// just the last one, so the UI doesn't sit on a bare "Indexing source…" for most of the run. Each
+// phase contributes `totalFiles` units to the total. Emits are throttled to roughly every 100ms
+// or every 25 units so a large tree doesn't turn into one Compose state write per file (today's
+// behaviour for the one phase that reported anything at all). advance() is called concurrently
+// from parallel per-file phases; the throttle guards race harmlessly on the CAS below — worst
+// case a couple of extra or skipped intermediate emits, never a wrong final value, since the
+// last unit of the last phase always satisfies `done >= total` and emits unconditionally.
+private class ProgressTracker(totalFiles: Int, phaseCount: Int, private val onProgress: ((Int, Int) -> Unit)?) {
+    private val total = totalFiles * phaseCount
+    private val scanned = java.util.concurrent.atomic.AtomicInteger(0)
+    private val lastEmitAtNanos = java.util.concurrent.atomic.AtomicLong(0)
+    private val lastEmitScanned = java.util.concurrent.atomic.AtomicInteger(0)
+
+    fun advance(n: Int = 1) {
+        if (n <= 0) return
+        val done = scanned.addAndGet(n)
+        val cb = onProgress ?: return
+        val now = System.nanoTime()
+        val previousEmit = lastEmitAtNanos.get()
+        val sinceCount = done - lastEmitScanned.get()
+        val due = done >= total || sinceCount >= EMIT_EVERY_N_UNITS || now - previousEmit >= EMIT_INTERVAL_NANOS
+        if (due && lastEmitAtNanos.compareAndSet(previousEmit, now)) {
+            lastEmitScanned.set(done)
+            cb(done.coerceAtMost(total), total)
+        }
+    }
+
+    private companion object {
+        const val EMIT_EVERY_N_UNITS = 25
+        const val EMIT_INTERVAL_NANOS = 100_000_000L
+    }
+}
+
 /** Builds a [SourceIndex] by scanning `.kt`/`.java` files under [roots] for android.util.Log
  *  and Timber call sites — pure text/regex/brace-matching, no compiler or parser dependency
- *  (see class-level notes in each private helper below for the specific heuristics used). */
+ *  (see class-level notes in each private helper below for the specific heuristics used).
+ *
+ *  Every phase below that scales with the number of source files runs on a bounded parallel
+ *  stream (this is a plain non-suspend function invoked from `ioScope.launch`, not a coroutine,
+ *  so `java.util.stream` rather than structured concurrency). Each phase's per-file work is
+ *  independent — file reads are pure I/O, per-file declaration/table scanning only reads that
+ *  file's own text, and direct-call resolution only reads that file's own text plus the
+ *  project-wide lookup tables built once up front. `parallelStream().map{}.collect(toList())`
+ *  preserves encounter (source) order in its result regardless of which thread finished first, so
+ *  every merge below just walks that ordered result list sequentially — reproducing the exact
+ *  same [files] order (and therefore the exact same [SourceIndex.sites] order and global-constant
+ *  collision tie-breaks) the old sequential loops produced, without any manual synchronization. */
 object SourceIndexer {
     private val SOURCE_EXTENSIONS = setOf("kt", "java")
     private val SKIP_DIR_NAMES = setOf("build", ".git", ".gradle", ".idea", "node_modules", "out")
+
+    // read, whole-project analysis (constants + wrapper discovery), declarations/tables, direct
+    // calls, extraction — see the phase-by-phase comments in build() below.
+    private const val PHASE_COUNT = 6
 
     fun build(
         roots: List<File>,
         progress: ((scanned: Int, total: Int) -> Unit)? = null,
         options: SourceIndexBuildOptions = SourceIndexBuildOptions(),
+        cancellationCheck: () -> Boolean = { false },
     ): SourceIndex {
         val canonicalRoots = roots.mapNotNull(::canonicalFileOrNull).distinctBy { it.path }
         val files = canonicalRoots.flatMap { collectSourceFiles(it) }.distinctBy { it.path }
-        val sites = mutableListOf<LogCallSite>()
-        val fileMeta = mutableMapOf<String, FileMeta>()
-        val texts = mutableMapOf<String, String>()
+        val tracker = ProgressTracker(files.size, PHASE_COUNT, progress)
 
-        files.forEach { candidate ->
+        fun checkCancelled() {
+            if (cancellationCheck()) throw SourceIndexCancelledException()
+        }
+
+        checkCancelled()
+
+        // Phase 1/6: read every file's text (pure I/O, independent per file).
+        val readResults = files.parallelStream().map { candidate ->
+            checkCancelled()
             // Re-resolve and re-check immediately before reading. collectSourceFiles already
             // returns canonical contained files, but keeping the authorization at the read
             // boundary prevents a future traversal refactor from weakening this invariant.
-            val file = canonicalFileUnderRoots(candidate, canonicalRoots) ?: return@forEach
-            runCatching { texts[file.path] = file.readText() }
-                .onFailure { e -> AppLogger.error("source-index", "Failed to read source file", e) }
-        }
-        val globalConstants = buildGlobalConstants(texts)
-        val discoveredRules = if (options.autoDiscover) discoverWrapperRules(texts) else emptyList()
-        val wrapperRules = (options.wrapperRules + discoveredRules).distinct()
-        // Parse declarations before extracting log sites.  The same lightweight scanner powers
-        // source navigation, and lets a site carry only direct calls whose target can be resolved
-        // uniquely inside this indexed source set.
-        val methodsByFile = texts.mapValues { (path, source) ->
-            indexedMethods(path, source, path.endsWith(".java", ignoreCase = true))
-        }
-        val directCallsByMethod = resolveDirectCalls(texts, methodsByFile)
+            val pathAndText = runCatching {
+                val file = canonicalFileUnderRoots(candidate, canonicalRoots) ?: return@runCatching null
+                file.path to file.readText()
+            }.onFailure { e -> AppLogger.error("source-index", "Failed to read source file", e) }.getOrNull()
+            tracker.advance()
+            pathAndText
+        }.collect(java.util.stream.Collectors.toList())
+        checkCancelled()
 
-        files.forEachIndexed { idx, candidate ->
-            runCatching {
-                val file = canonicalFileUnderRoots(candidate, canonicalRoots) ?: return@runCatching
-                val text = texts[file.path] ?: return@runCatching
-                fileMeta[file.path] = FileMeta(mtime = file.lastModified(), size = file.length())
-                sites += extractCallSites(
+        val texts = LinkedHashMap<String, String>()
+        readResults.forEach { pair -> if (pair != null) texts[pair.first] = pair.second }
+
+        // Phase 2-3/6: whole-project analysis. A global constant or a wrapper rule discovered in
+        // one file can apply to a call site in another, so — unlike every other phase below —
+        // these stay single sequential passes over every file's text, same as before; only
+        // progress reporting is new.
+        val globalConstants = buildGlobalConstants(texts) { tracker.advance() }
+        checkCancelled()
+        val discoveredRules = if (options.autoDiscover) {
+            discoverWrapperRules(texts) { tracker.advance() }
+        } else {
+            tracker.advance(texts.size)
+            emptyList()
+        }
+        checkCancelled()
+        val wrapperRules = (options.wrapperRules + discoveredRules).distinct()
+
+        // Phase 4/6: per-file declaration scanning (parallel — a pure function of one file's own
+        // text). Parses declarations before extracting log sites: the same lightweight scanner
+        // powers source navigation, and lets a site carry only direct calls whose target can be
+        // resolved uniquely inside this indexed source set. declarationTables (task 1b) is the
+        // per-file "declared name -> (offset, type)" lookup that backs declaredOwnerCandidates.
+        val declarationResults = texts.entries.toList().parallelStream().map { (path, source) ->
+            checkCancelled()
+            val isJavaFile = path.endsWith(".java", ignoreCase = true)
+            val result = Triple(path, indexedMethods(path, source, isJavaFile), buildDeclarationTables(source))
+            tracker.advance()
+            result
+        }.collect(java.util.stream.Collectors.toList())
+        checkCancelled()
+
+        val methodsByFile = LinkedHashMap<String, List<IndexedMethod>>()
+        val declarationTablesByFile = LinkedHashMap<String, DeclarationTables>()
+        declarationResults.forEach { (path, methods, tables) ->
+            methodsByFile[path] = methods
+            declarationTablesByFile[path] = tables
+        }
+
+        // Phase 5/6: direct-call resolution (parallel per file — see resolveDirectCalls).
+        val directCallsByMethod = resolveDirectCalls(texts, methodsByFile, declarationTablesByFile, tracker, ::checkCancelled)
+        checkCancelled()
+
+        // Phase 6/6: call-site extraction (parallel per file). Each file contributes its own
+        // ordered sites list (its own Log/Timber sites, then its own wrapper sites — same order
+        // extractCallSites-then-extractWrapperCallSites always produced), and those per-file
+        // lists are concatenated back in `files` order in the sequential forEach below, never
+        // interleaved — reproducing today's sequential-loop order exactly.
+        val extractionResults = files.parallelStream().map { candidate ->
+            checkCancelled()
+            val result = runCatching {
+                val file = canonicalFileUnderRoots(candidate, canonicalRoots) ?: return@runCatching null
+                val text = texts[file.path] ?: return@runCatching null
+                val isJavaFile = file.extension.equals("java", true)
+                val fileSites = extractCallSites(
                     file.path,
                     text,
-                    isJavaFile = file.extension.equals("java", true),
+                    isJavaFile = isJavaFile,
                     globalConstants = globalConstants,
                     sourceMethods = methodsByFile[file.path].orEmpty(),
                     directCallsByMethod = directCallsByMethod,
-                )
-                sites += extractWrapperCallSites(
+                ) + extractWrapperCallSites(
                     file.path,
                     text,
-                    isJavaFile = file.extension.equals("java", true),
+                    isJavaFile = isJavaFile,
                     wrapperRules = wrapperRules,
                     globalConstants = globalConstants,
                     sourceMethods = methodsByFile[file.path].orEmpty(),
                     directCallsByMethod = directCallsByMethod,
+                    declarationTables = declarationTablesByFile[file.path] ?: DeclarationTables.EMPTY,
                 )
-            }.onFailure { e -> AppLogger.error("source-index", "Failed to index source file", e) }
-            progress?.invoke(idx + 1, files.size)
+                FileExtractionResult(file.path, fileSites, FileMeta(mtime = file.lastModified(), size = file.length()))
+            }.onFailure { e -> AppLogger.error("source-index", "Failed to index source file", e) }.getOrNull()
+            tracker.advance()
+            result
+        }.collect(java.util.stream.Collectors.toList())
+        checkCancelled()
+
+        val sites = mutableListOf<LogCallSite>()
+        val fileMeta = mutableMapOf<String, FileMeta>()
+        extractionResults.forEach { result ->
+            if (result != null) {
+                sites += result.sites
+                fileMeta[result.filePath] = result.meta
+            }
         }
 
         return SourceIndex(
@@ -124,6 +243,8 @@ data class SourceIndexBuildOptions(
     val autoDiscover: Boolean = false,
     val configurationFingerprint: String? = null,
 )
+
+private data class FileExtractionResult(val filePath: String, val sites: List<LogCallSite>, val meta: FileMeta)
 
 // ── Character classification (opaque = string/char literal or comment) ────
 
@@ -686,7 +807,7 @@ private fun resolveTag(
     return null
 }
 
-private fun buildGlobalConstants(texts: Map<String, String>): Map<String, String> {
+private fun buildGlobalConstants(texts: Map<String, String>, onFile: () -> Unit = {}): Map<String, String> {
     val result = linkedMapOf<String, String>()
     texts.forEach { (_, text) ->
         val mask = CodeMask(text)
@@ -703,6 +824,7 @@ private fun buildGlobalConstants(texts: Map<String, String>): Map<String, String
                 }
             }
         }
+        onFile()
     }
     return result
 }
@@ -924,38 +1046,56 @@ private fun declarationParameterCount(signature: String): Int {
     return count
 }
 
+// Runs both call-shaped regexes across a file's ENTIRE text only once (task 1a): the old code ran
+// them per-method, over the whole file, every time — O(methods x fileLength) x 2. The offset-sorted
+// match arrays below are then sliced per method via binary search instead. `resolveDirectCalls`
+// itself parallelises the per-file body (task 1d) — every file's body only reads that one file's
+// own text/tables plus the two project-wide lookup tables built once, up front, below.
 private fun resolveDirectCalls(
     texts: Map<String, String>,
     methodsByFile: Map<String, List<IndexedMethod>>,
+    declarationTablesByFile: Map<String, DeclarationTables>,
+    tracker: ProgressTracker,
+    checkCancelled: () -> Unit,
 ): Map<String, List<SourceDirectCall>> {
     val allMethods = methodsByFile.values.flatten()
     val byOwnerAndName = allMethods.filter { it.owningType != null }
         .groupBy { it.owningType!! to it.name }
     val ownersBySimple = allMethods.mapNotNull { it.owningType }.distinct().groupBy { it.substringAfterLast('.') }
+    val knownOwners = byOwnerAndName.keys.mapTo(linkedSetOf()) { it.first }
 
-    return methodsByFile.flatMap { (filePath, methods) ->
-        val text = texts[filePath] ?: return@flatMap emptyList()
-        val mask = CodeMask(text)
-        val lines = LineIndex(text)
-        val packageName = findFilePackage(text, mask)
-        val context = DirectCallContext(
-            text = text,
-            mask = mask,
-            lines = lines,
-            packageName = packageName,
-            byOwnerAndName = byOwnerAndName,
-            knownOwners = byOwnerAndName.keys.mapTo(linkedSetOf()) { it.first },
-            ownersBySimple = ownersBySimple,
-        )
-        methods.map { method ->
-            method.id to directCallsInMethod(method, context)
+    val perFileResults = methodsByFile.entries.toList().parallelStream().map { (filePath, methods) ->
+        checkCancelled()
+        val text = texts[filePath]
+        val result: List<Pair<String, List<SourceDirectCall>>> = if (text == null || methods.isEmpty()) {
+            emptyList()
+        } else {
+            val mask = CodeMask(text)
+            val context = DirectCallContext(
+                text = text,
+                mask = mask,
+                lines = LineIndex(text),
+                packageName = findFilePackage(text, mask),
+                byOwnerAndName = byOwnerAndName,
+                knownOwners = knownOwners,
+                ownersBySimple = ownersBySimple,
+                memberCallMatches = DIRECT_MEMBER_CALL_RE.findAll(text).toList(),
+                localCallMatches = DIRECT_LOCAL_CALL_RE.findAll(text).toList(),
+                declarationTables = declarationTablesByFile[filePath] ?: DeclarationTables.EMPTY,
+            )
+            methods.map { method -> method.id to directCallsInMethod(method, context) }
         }
-    }.toMap()
+        tracker.advance()
+        result
+    }.collect(java.util.stream.Collectors.toList())
+
+    return perFileResults.asSequence().flatten().toMap()
 }
 
 private val DIRECT_MEMBER_CALL_RE = Regex("""\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)?)\s*\.\s*([A-Za-z_]\w*)\s*\(""")
 private val DIRECT_LOCAL_CALL_RE = Regex("""\b([A-Za-z_]\w*)\s*\(""")
 private val DIRECT_CALL_KEYWORDS = setOf("if", "for", "while", "when", "catch", "return", "throw", "super", "this")
+private val WHITESPACE_RE = Regex("\\s+")
 
 private data class DirectCallContext(
     val text: String,
@@ -965,6 +1105,13 @@ private data class DirectCallContext(
     val byOwnerAndName: Map<Pair<String, String>, List<IndexedMethod>>,
     val knownOwners: Set<String>,
     val ownersBySimple: Map<String, List<String>>,
+    // Every DIRECT_MEMBER_CALL_RE / DIRECT_LOCAL_CALL_RE match in the whole file, offset-sorted
+    // (findAll's non-overlapping matches are already produced in ascending-offset order, so no
+    // extra sort is needed) — see directCallsInMethod's use of sliceByOffset.
+    val memberCallMatches: List<MatchResult>,
+    val localCallMatches: List<MatchResult>,
+    // Per-file "declared name -> (offset, type)" table backing declaredOwnerCandidates (task 1b).
+    val declarationTables: DeclarationTables,
 )
 
 private fun directCallsInMethod(method: IndexedMethod, context: DirectCallContext): List<SourceDirectCall> {
@@ -974,10 +1121,13 @@ private fun directCallsInMethod(method: IndexedMethod, context: DirectCallContex
     val bodyStart = context.text.indexOf('{', method.startOffset)
         .takeIf { it in method.startOffset until method.endOffsetExclusive }
         ?.plus(1) ?: method.startOffset
-    val memberCalls = DIRECT_MEMBER_CALL_RE.findAll(context.text)
-        .mapNotNull { directMemberCall(it, method, bodyStart, context) }
-    val localCalls = DIRECT_LOCAL_CALL_RE.findAll(context.text)
-        .mapNotNull { directLocalCall(it, method, bodyStart, context) }
+    val memberCalls = context.memberCallMatches.sliceByOffset(bodyStart, method.endOffsetExclusive)
+        .asSequence().mapNotNull { directMemberCall(it, method, bodyStart, context) }
+    val localCalls = context.localCallMatches.sliceByOffset(bodyStart, method.endOffsetExclusive)
+        .asSequence().mapNotNull { directLocalCall(it, method, bodyStart, context) }
+    // Member calls first, then local calls, deduped preserving first-occurrence order — same
+    // contract as the old (memberCalls + localCalls).distinct(), just fed from the pre-sliced
+    // per-method match ranges above instead of a whole-file findAll filtered by isDirectCallInBody.
     return (memberCalls + localCalls).distinct().toList()
 }
 
@@ -989,12 +1139,12 @@ private fun directMemberCall(
 ): SourceDirectCall? {
     val offset = match.range.first
     if (!isDirectCallInBody(offset, bodyStart, method, context.mask)) return null
-    val receiver = match.groupValues[1].replace(Regex("\\s+"), "")
+    val receiver = match.groupValues[1].replace(WHITESPACE_RE, "")
     if (receiver == "Log" || receiver == "Timber") return null
     val owners = if (receiver == "this") {
         setOfNotNull(method.owningType)
     } else {
-        declaredOwnerCandidates(receiver, context.text, offset, context.packageName)
+        declaredOwnerCandidates(receiver, context.declarationTables, offset, context.packageName)
     }
     val target = directCallTarget(owners, match.groupValues[2], match.range.last, context) ?: return null
     return target.toDirectCall(context.lines, offset)
@@ -1009,10 +1159,40 @@ private fun directLocalCall(
     val offset = match.range.first
     if (!isDirectCallInBody(offset, bodyStart, method, context.mask)) return null
     val name = match.groupValues[1]
-    if (name in DIRECT_CALL_KEYWORDS || context.text.substring(0, offset).trimEnd().endsWith('.')) return null
+    if (name in DIRECT_CALL_KEYWORDS || precededByDotSkippingWhitespace(context.text, offset)) return null
     val owners = setOfNotNull(method.owningType)
     val target = directCallTarget(owners, name, match.range.last, context) ?: return null
     return target.toDirectCall(context.lines, offset)
+}
+
+// Equivalent to `text.substring(0, offset).trimEnd().endsWith('.')` (task 1c) without the O(offset)
+// substring allocation + scan: walk backwards from [offset] over whitespace and test one char.
+// `trimEnd()` with no arguments trims characters satisfying [Char.isWhitespace], matched below.
+// When only whitespace (or nothing) precedes [offset], `i` runs past the start of the string and
+// this correctly returns false, same as `"".endsWith('.')` / an all-whitespace prefix's trimEnd().
+private fun precededByDotSkippingWhitespace(text: String, offset: Int): Boolean {
+    var i = offset - 1
+    while (i >= 0 && text[i].isWhitespace()) i--
+    return i >= 0 && text[i] == '.'
+}
+
+// Binary search over an offset-sorted (ascending, from findAll) match list for the slice covering
+// [fromInclusive, toExclusive) — the set of matches inside one method's body (task 1a).
+private fun List<MatchResult>.sliceByOffset(fromInclusive: Int, toExclusive: Int): List<MatchResult> {
+    val start = lowerBoundOffset(fromInclusive)
+    val end = lowerBoundOffset(toExclusive)
+    return if (start >= end) emptyList() else subList(start, end)
+}
+
+// First index whose match starts at or after [target] (i.e. the standard "lower bound").
+private fun List<MatchResult>.lowerBoundOffset(target: Int): Int {
+    var lo = 0
+    var hi = size
+    while (lo < hi) {
+        val mid = (lo + hi) ushr 1
+        if (this[mid].range.first < target) lo = mid + 1 else hi = mid
+    }
+    return lo
 }
 
 private fun isDirectCallInBody(offset: Int, bodyStart: Int, method: IndexedMethod, mask: CodeMask): Boolean =
@@ -1196,52 +1376,103 @@ private val KOTLIN_FUNCTION_DECL_RE = Regex("""\bfun\s+(\w+)\s*\(([^)]*)\)""")
 private val JAVA_METHOD_DECL_RE = Regex(
     """(?m)^\s*(?:(?:public|private|protected|static|final|synchronized)\s+)*[\w<>,.?\[\]]+\s+(\w+)\s*\(([^)]*)\)\s*\{""",
 )
+private val JAVA_PARAM_NAME_RE = Regex("""([A-Za-z_]\w*)\s*$""")
+private val KOTLIN_PARAM_NAME_RE = Regex("""([A-Za-z_]\w*)\s*(?::|$)""")
 
 private fun parameterNames(raw: String, isJavaFile: Boolean): List<String> = raw.split(',').mapNotNull { parameter ->
     val cleaned = parameter.substringBefore('=').trim()
     if (cleaned.isBlank()) return@mapNotNull null
-    if (isJavaFile) Regex("""([A-Za-z_]\w*)\s*$""").find(cleaned)?.groupValues?.get(1)
-    else Regex("""([A-Za-z_]\w*)\s*(?::|$)""").find(cleaned)?.groupValues?.get(1)
+    if (isJavaFile) JAVA_PARAM_NAME_RE.find(cleaned)?.groupValues?.get(1)
+    else KOTLIN_PARAM_NAME_RE.find(cleaned)?.groupValues?.get(1)
 }
 
-private fun enclosingFunctionParameters(text: String, callOffset: Int, methodName: String, isJavaFile: Boolean): List<String> {
-    val declarations = if (isJavaFile) JAVA_METHOD_DECL_RE.findAll(text).toList() else KOTLIN_FUNCTION_DECL_RE.findAll(text).toList()
+// [declarations] is the whole file's function-declaration match list (JAVA_METHOD_DECL_RE or
+// KOTLIN_FUNCTION_DECL_RE, matching [isJavaFile]) — computed once per file by the caller (task 1c)
+// instead of re-running findAll(text).toList() for every wrapper-discovery call site.
+private fun enclosingFunctionParameters(callOffset: Int, methodName: String, isJavaFile: Boolean, declarations: List<MatchResult>): List<String> {
     val declaration = declarations.lastOrNull { it.range.first < callOffset && it.groupValues[1] == methodName } ?: return emptyList()
     return parameterNames(declaration.groupValues[2], isJavaFile)
 }
 
-private fun declaredOwnerCandidates(receiver: String, text: String, beforeOffset: Int, filePackage: String?): Set<String> {
+// Per-file "declared name -> (offset, type)" lookup tables backing declaredOwnerCandidates (task
+// 1b), sorted ascending by offset within each name's bucket — findAll's matches are already
+// produced in ascending-offset order, and appending preserves that per-bucket, so no extra sort is
+// needed. Built once per file with four whole-file, NON-interpolated regexes (as opposed to the old
+// code's four interpolated-per-receiver Regex(...) compilations over a fresh text.substring(0, N)
+// copy on every single call-site lookup).
+private data class DeclarationTables(
+    val kotlinDeclarations: Map<String, List<Pair<Int, String>>>,
+    val kotlinParameters: Map<String, List<Pair<Int, String>>>,
+    val javaFields: Map<String, List<Pair<Int, String>>>,
+    val javaParameters: Map<String, List<Pair<Int, String>>>,
+) {
+    companion object {
+        val EMPTY = DeclarationTables(emptyMap(), emptyMap(), emptyMap(), emptyMap())
+    }
+}
+
+// Same four patterns as the old per-receiver interpolated regexes, generalised to capture the
+// declared NAME as a group instead of splicing it in as a literal. Group order differs between the
+// Kotlin pair (name, type) and the Java pair (type, name) — see the nameGroup/typeGroup arguments
+// at each buildOffsetTable call site below, which match the original capture-group numbering.
+private val KOTLIN_DECLARATION_TABLE_RE = Regex(
+    """(?m)\b(?:public\s+|private\s+|protected\s+|internal\s+|final\s+|override\s+)*""" +
+        """(?:val|var)\s+([A-Za-z_]\w*)\s*:\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)""",
+)
+private val KOTLIN_PARAMETER_TABLE_RE = Regex("""\b([A-Za-z_]\w*)\s*:\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)""")
+private val JAVA_FIELD_TABLE_RE = Regex(
+    """(?m)\b(?:public\s+|private\s+|protected\s+|static\s+|final\s+|volatile\s+)*""" +
+        """([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+([A-Za-z_]\w*)\s*(?:=|;)""",
+)
+private val JAVA_PARAMETER_TABLE_RE = Regex("""\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+([A-Za-z_]\w*)\s*(?:[,)]|$)""")
+
+private fun buildOffsetTable(text: String, regex: Regex, nameGroup: Int, typeGroup: Int): Map<String, List<Pair<Int, String>>> {
+    val table = LinkedHashMap<String, MutableList<Pair<Int, String>>>()
+    regex.findAll(text).forEach { m ->
+        table.getOrPut(m.groupValues[nameGroup]) { mutableListOf() } += m.range.first to m.groupValues[typeGroup]
+    }
+    return table
+}
+
+private fun buildDeclarationTables(text: String): DeclarationTables = DeclarationTables(
+    kotlinDeclarations = buildOffsetTable(text, KOTLIN_DECLARATION_TABLE_RE, nameGroup = 1, typeGroup = 2),
+    kotlinParameters = buildOffsetTable(text, KOTLIN_PARAMETER_TABLE_RE, nameGroup = 1, typeGroup = 2),
+    javaFields = buildOffsetTable(text, JAVA_FIELD_TABLE_RE, nameGroup = 2, typeGroup = 1),
+    javaParameters = buildOffsetTable(text, JAVA_PARAMETER_TABLE_RE, nameGroup = 2, typeGroup = 1),
+)
+
+// Last (offset, type) entry strictly before [beforeOffset] — the same "nearest preceding
+// declaration wins" tie-break as the old `.findAll(text.substring(0, beforeOffset)).lastOrNull()`,
+// via binary search instead of a truncated-copy rescan.
+private fun List<Pair<Int, String>>.lastTypeBefore(beforeOffset: Int): String? {
+    var lo = 0
+    var hi = size
+    while (lo < hi) {
+        val mid = (lo + hi) ushr 1
+        if (this[mid].first < beforeOffset) lo = mid + 1 else hi = mid
+    }
+    val idx = lo - 1
+    return if (idx >= 0) this[idx].second else null
+}
+
+// Insertion order is load-bearing downstream (directCallTarget flatMaps over this set and
+// ownerMatches checks membership): normalizedReceiver, simpleReceiver, then val/var declaration
+// (+ package-qualified form), then Kotlin parameter, then Java field, then Java parameter — same
+// order the old sequential four-regex version produced (task 1b).
+private fun declaredOwnerCandidates(receiver: String, tables: DeclarationTables, beforeOffset: Int, filePackage: String?): Set<String> {
     val normalizedReceiver = receiver.replace(" ", "")
     val simpleReceiver = normalizedReceiver.substringAfterLast('.')
     val candidates = linkedSetOf(normalizedReceiver, simpleReceiver)
-    val declaration = Regex(
-        """(?m)\b(?:public\s+|private\s+|protected\s+|internal\s+|final\s+|override\s+)*""" +
-            """(?:val|var)\s+$simpleReceiver\s*:\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)""",
-    ).findAll(text.substring(0, beforeOffset)).lastOrNull()
-    declaration?.groupValues?.getOrNull(1)?.let {
-        candidates += it
-        if (!filePackage.isNullOrBlank() && !it.contains('.')) candidates += "$filePackage.$it"
+
+    fun addType(type: String?) {
+        type ?: return
+        candidates += type
+        if (!filePackage.isNullOrBlank() && !type.contains('.')) candidates += "$filePackage.$type"
     }
-    val parameter = Regex("""\b$simpleReceiver\s*:\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)""")
-        .findAll(text.substring(0, beforeOffset)).lastOrNull()
-    parameter?.groupValues?.getOrNull(1)?.let {
-        candidates += it
-        if (!filePackage.isNullOrBlank() && !it.contains('.')) candidates += "$filePackage.$it"
-    }
-    val javaField = Regex(
-        """(?m)\b(?:public\s+|private\s+|protected\s+|static\s+|final\s+|volatile\s+)*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+$simpleReceiver\s*(?:=|;)""",
-    ).findAll(text.substring(0, beforeOffset)).lastOrNull()
-    javaField?.groupValues?.getOrNull(1)?.let {
-        candidates += it
-        if (!filePackage.isNullOrBlank() && !it.contains('.')) candidates += "$filePackage.$it"
-    }
-    val javaParameter = Regex(
-        """\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s+$simpleReceiver\s*(?:[,)]|$)""",
-    ).findAll(text.substring(0, beforeOffset)).lastOrNull()
-    javaParameter?.groupValues?.getOrNull(1)?.let {
-        candidates += it
-        if (!filePackage.isNullOrBlank() && !it.contains('.')) candidates += "$filePackage.$it"
-    }
+    addType(tables.kotlinDeclarations[simpleReceiver]?.lastTypeBefore(beforeOffset))
+    addType(tables.kotlinParameters[simpleReceiver]?.lastTypeBefore(beforeOffset))
+    addType(tables.javaFields[simpleReceiver]?.lastTypeBefore(beforeOffset))
+    addType(tables.javaParameters[simpleReceiver]?.lastTypeBefore(beforeOffset))
     return candidates
 }
 
@@ -1260,6 +1491,7 @@ private fun extractWrapperCallSites(
     globalConstants: Map<String, String>,
     sourceMethods: List<IndexedMethod> = emptyList(),
     directCallsByMethod: Map<String, List<SourceDirectCall>> = emptyMap(),
+    declarationTables: DeclarationTables = DeclarationTables.EMPTY,
 ): List<LogCallSite> {
     if (wrapperRules.isEmpty()) return emptyList()
     val mask = CodeMask(text)
@@ -1269,9 +1501,9 @@ private fun extractWrapperCallSites(
     return CUSTOM_CALL_RE.findAll(text).mapNotNull { match ->
         val startIdx = match.range.first
         if (!mask.isCode.getOrElse(startIdx) { false }) return@mapNotNull null
-        val receiver = match.groupValues[1].replace(Regex("\\s+"), "")
+        val receiver = match.groupValues[1].replace(WHITESPACE_RE, "")
         val methodName = match.groupValues[2]
-        val candidates = declaredOwnerCandidates(receiver, text, startIdx, filePackage)
+        val candidates = declaredOwnerCandidates(receiver, declarationTables, startIdx, filePackage)
         val rule = wrapperRules.firstOrNull { it.methodName == methodName && ownerMatches(it, candidates) }
             ?: return@mapNotNull null
         val args = parseArgs(text, mask, match.range.last).args
@@ -1294,21 +1526,26 @@ private fun extractWrapperCallSites(
     }.toList()
 }
 
-private fun discoverWrapperRules(texts: Map<String, String>): List<SourceWrapperRule> {
+private fun discoverWrapperRules(texts: Map<String, String>, onFile: () -> Unit = {}): List<SourceWrapperRule> {
     val discovered = linkedSetOf<SourceWrapperRule>()
     texts.forEach { (filePath, text) ->
         val mask = CodeMask(text)
+        val lines = LineIndex(text) // hoisted out of the match loop below (task 1c)
         val pkg = findFilePackage(text, mask)
         val isJavaFile = filePath.endsWith(".java", ignoreCase = true)
+        val declarations = if (isJavaFile) JAVA_METHOD_DECL_RE.findAll(text).toList() else KOTLIN_FUNCTION_DECL_RE.findAll(text).toList()
+        // implementedTypes compiles two interpolated regexes; several Log/Timber call sites in the
+        // same class share the same enclosing owner, so memoise per (file, owner) (task 1c).
+        val implementedTypesCache = HashMap<String, List<String>>()
         CALL_RE.findAll(text).forEach { match ->
             if (!mask.isCode.getOrElse(match.range.first) { false }) return@forEach
             val receiver = match.groupValues[1]
             if (receiver != "Log" && receiver != "Timber") return@forEach
             val args = parseArgs(text, mask, match.range.last).args
             if (args.size < 2) return@forEach
-            val method = findEnclosingMethod(text, mask, LineIndex(text), match.range.first, isJavaFile)
+            val method = findEnclosingMethod(text, mask, lines, match.range.first, isJavaFile)
             if (method.name == "<file>") return@forEach
-            val params = enclosingFunctionParameters(text, match.range.first, method.name, isJavaFile)
+            val params = enclosingFunctionParameters(match.range.first, method.name, isJavaFile, declarations)
             val tagIndex = params.indexOf(args[0].trim()).takeIf { it >= 0 } ?: return@forEach
             val messageIndex = params.indexOf(args[1].trim()).takeIf { it >= 0 } ?: return@forEach
             val owner = findEnclosingNamedType(text, mask, match.range.first) ?: return@forEach
@@ -1320,11 +1557,12 @@ private fun discoverWrapperRules(texts: Map<String, String>): List<SourceWrapper
             // typed receivers and add the simple spelling so auto-discovery handles that common
             // call form too.
             discovered += rule.copy(ownerType = owner)
-            implementedTypes(text, owner).forEach { interfaceName ->
+            implementedTypesCache.getOrPut(owner) { implementedTypes(text, owner) }.forEach { interfaceName ->
                 discovered += rule.copy(ownerType = interfaceName)
                 if (!pkg.isNullOrBlank()) discovered += rule.copy(ownerType = "$pkg.$interfaceName")
             }
         }
+        onFile()
     }
     return discovered.toList()
 }

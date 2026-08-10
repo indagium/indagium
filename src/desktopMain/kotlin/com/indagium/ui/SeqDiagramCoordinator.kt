@@ -65,6 +65,13 @@ sealed interface ActiveSurface {
     data class Diagram(val workspaceId: String) : ActiveSurface
 }
 
+/** How [DiagramWorkspaceSession.zoom] is currently being driven. FIT and FIT_WIDTH are "sticky"
+ *  modes: the canvas keeps recomputing and reapplying that fit on every rebuild (a spec edit, a
+ *  window resize) instead of the one-shot behaviour the three `SegmentedControl` entries used to
+ *  have. MANUAL means the user (stepper, ctrl/cmd-wheel) owns the zoom value and nothing should
+ *  touch it until they pick a mode again. */
+enum class DiagramZoomMode { MANUAL, FIT, FIT_WIDTH }
+
 /** A diagram is an independent working document.  Keeping the last rendered model here is what
  * makes it possible to close a source log yet continue inspecting/copying its diagram. */
 data class DiagramWorkspaceSession(
@@ -80,6 +87,11 @@ data class DiagramWorkspaceSession(
     val dirty: Boolean = false,
     val inspectorOpen: Boolean = true,
     val inspectorWidth: Float = 330f,
+    /** Canvas viewport. FIT is the default so a freshly opened workspace auto-fits exactly once,
+     *  the same first-render behaviour the old always-refit LaunchedEffect gave every workspace —
+     *  see [SeqDiagramWorkspace]'s DiagramPreviewPane for how the mode is applied. */
+    val zoom: Float = 1f,
+    val zoomMode: DiagramZoomMode = DiagramZoomMode.FIT,
 )
 
 sealed class DiagramCandidateState {
@@ -161,6 +173,19 @@ class SeqDiagramCoordinator(
         workspaces = workspaces.map { if (it.id == id) transform(it) else it }
     }
 
+    /** Rebuilds [workspaces] into [orderedIds]' order — the diagram-tab-strip counterpart of
+     *  [AppState.reorderTabs]. Unknown ids in [orderedIds] are ignored (a stale drag computed
+     *  against an order that has since changed must never invent a workspace), and any live
+     *  workspace whose id was left out of [orderedIds] is appended rather than dropped, so a
+     *  partial/stale order can never silently close a tab. Neither [activeWorkspaceId] nor
+     *  [appState.activeSurface] is touched — reordering never changes what's selected. */
+    fun reorderWorkspaces(orderedIds: List<String>) {
+        val byId = workspaces.associateBy { it.id }
+        val reordered = orderedIds.mapNotNull(byId::get)
+        val omitted = workspaces.filter { it.id !in orderedIds }
+        workspaces = reordered + omitted
+    }
+
     /** Selects an existing diagram surface without changing AppState.tabs. */
     fun activateWorkspace(id: String): Boolean {
         val workspace = workspaces.firstOrNull { it.id == id } ?: return false
@@ -200,6 +225,19 @@ class SeqDiagramCoordinator(
                     INSPECTOR_MIN_WIDTH,
                     INSPECTOR_MAX_WIDTH,
                 ),
+            )
+        }
+    }
+
+    /** Canvas viewport counterpart of [updateInspector] — same shape (resolve the active
+     *  workspace, [replaceWorkspace], coerce inputs), stored per-workspace so switching diagram
+     *  tabs never leaks one workspace's zoom/mode into another's. */
+    fun updateViewport(zoom: Float? = null, mode: DiagramZoomMode? = null) {
+        val id = activeWorkspaceId ?: return
+        replaceWorkspace(id) { current ->
+            current.copy(
+                zoom = (zoom ?: current.zoom).coerceIn(VIEWPORT_MIN_ZOOM, VIEWPORT_MAX_ZOOM),
+                zoomMode = mode ?: current.zoomMode,
             )
         }
     }
@@ -880,6 +918,8 @@ class SeqDiagramCoordinator(
         const val EMPTY_COMPONENT_ID = "__indagium_empty_component__"
         const val INSPECTOR_MIN_WIDTH = 220f
         const val INSPECTOR_MAX_WIDTH = 520f
+        const val VIEWPORT_MIN_ZOOM = .15f
+        const val VIEWPORT_MAX_ZOOM = 2.5f
         const val MIN_SOURCE_CONFIDENCE = 0.7
         const val SOURCE_CACHE_MAX_ENTRIES = 256
     }

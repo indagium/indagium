@@ -43,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -62,13 +63,15 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.diagram.ArrowHit
 import com.indagium.diagram.DiagramRange
-import com.indagium.diagram.SeqDiagram
+import com.indagium.diagram.RenderedDiagram
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.exp
 import kotlin.math.roundToInt
+import java.awt.Cursor as AwtCursor
 
 private data class CanvasZoomAnchor(val content: Offset, val pointer: Offset)
 
@@ -142,7 +145,7 @@ fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
                 }
                 HDivider { delta -> state.seqDiagrams.updateInspector(width = session.inspectorWidth + delta) }
             }
-            DiagramPreviewPane(state, Modifier.weight(1f).fillMaxHeight())
+            DiagramPreviewPane(state, session, Modifier.weight(1f).fillMaxHeight())
         }
 
         WorkspaceFooter(state, req, readOnly)
@@ -210,8 +213,52 @@ private fun CanvasZoomStepper(zoom: Float, onZoom: (Float) -> Unit) {
     }
 }
 
+// A plain left-drag starts panning only once the pointer has moved this many RAW (device) pixels
+// from its Press position — short of that, Release is treated as a click and hit-tested against
+// the canvas (see resolveCanvasClickHit). Compared directly against another raw-pixel Offset, so
+// (unlike a dp-based layout size) this needs no LocalDensity conversion — see CLAUDE.md's own note
+// that pointer positions/deltas are already in raw pixels.
+private const val CANVAS_PAN_SLOP_PX = 5f
+
+/**
+ * Maps a canvas pointer position to the underlying [RenderedDiagram]'s own image-pixel space and
+ * resolves the [ArrowHit] under it, if any — the click-to-navigate counterpart of
+ * `AnnotationPanel.kt`'s read-only `DiagramNoteView` tap handler, generalized to account for BOTH
+ * pan (scroll offset) and zoom, which that simpler note-card preview never has (it always shows
+ * the whole image at a fitted size, with no scrolling).
+ *
+ * The canvas `Image` is laid out at `(rendered.widthPx / rendered.scale * zoom).dp` inside a
+ * `verticalScroll`/`horizontalScroll` pair. [clickPositionPx] and the two `ScrollState.value`s are
+ * already in the SAME raw-device-pixel frame (Compose scroll offsets are pixels, exactly like
+ * pointer positions — see CLAUDE.md), so they can be added directly with no density conversion;
+ * [density] is only needed to convert the Image's `*.dp*` on-screen size into that same pixel
+ * frame, and [RenderedDiagram.scale] then converts from there down to the image's OWN pixel grid —
+ * the one [RenderedDiagram.hits] is expressed in. So, in order:
+ * `contentPx = clickPositionPx + scrollPx` (undo pan) → `contentPx / density / zoom` (undo the
+ * `.dp` zoom-scaled layout size, landing in the SAME "1x" unit `rendered.widthPx / rendered.scale`
+ * is in) → `* rendered.scale` (undo the renderer's own 2x/etc raster scale, landing in image
+ * pixels).
+ */
+internal fun resolveCanvasClickHit(
+    rendered: RenderedDiagram,
+    clickPositionPx: Offset,
+    horizontalScrollPx: Float,
+    verticalScrollPx: Float,
+    zoom: Float,
+    density: Float,
+): ArrowHit? {
+    if (zoom <= 0f || density <= 0f) return null
+    val contentX = clickPositionPx.x + horizontalScrollPx
+    val contentY = clickPositionPx.y + verticalScrollPx
+    val imageX = (contentX / density / zoom * rendered.scale).roundToInt()
+    val imageY = (contentY / density / zoom * rendered.scale).roundToInt()
+    return rendered.hits.firstOrNull { h ->
+        imageX >= h.x && imageX <= h.x + h.width && imageY >= h.y && imageY <= h.y + h.height
+    }
+}
+
 @Composable
-private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
+private fun DiagramPreviewPane(state: AppState, session: DiagramWorkspaceSession, modifier: Modifier) {
     val tc = tc()
     val theme = tc.toDiagramTheme()
     val preview = state.seqDiagrams.preview
@@ -219,18 +266,26 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
     val display by produceState<DiagramDisplay?>(initialValue = null, key1 = diagram, key2 = theme) {
         value = withContext(Dispatchers.Default) { diagram?.let { DiagramRenderCache.display(it, theme) } }
     }
-    var zoom by remember { mutableStateOf(1f) }
+    val zoom = session.zoom
     var fitZoom by remember { mutableStateOf(1f) }
     var fitWidthZoom by remember { mutableStateOf(1f) }
-    // A newly built diagram must never inherit a previous diagram's 100% viewport.  Keep the
-    // current user's viewport intact while inspecting it, but auto-fit each new render once.
-    var autoFittedDiagram by remember { mutableStateOf<SeqDiagram?>(null) }
+    // Guards ONLY the one-time scroll-to-origin a freshly mounted workspace gets. This composable
+    // is remounted per diagram tab (App.kt keys SeqDiagramWorkspace on the workspace id), so "this
+    // composable's first LaunchedEffect run" and "the workspace's first render" are the same event
+    // — switching back to an already-visited workspace mounts a fresh Box/ScrollState anyway, so
+    // there is no stale scroll position to preserve. Every LATER effect run in the same mount (a
+    // spec edit rebuilding the diagram, a window resize) still reapplies a sticky FIT/FIT_WIDTH
+    // zoom, but must not also yank the user's scroll position back to (0,0).
+    var hasFittedOnce by remember { mutableStateOf(false) }
     var zoomAnchor by remember { mutableStateOf<CanvasZoomAnchor?>(null) }
     var spaceHeld by remember { mutableStateOf(false) }
     val vertical = rememberScrollState()
     val horizontal = rememberScrollState()
     val scope = rememberCoroutineScope()
     val canvasFocusRequester = remember { FocusRequester() }
+    val density = LocalDensity.current.density
+
+    fun setZoom(next: Float) = state.seqDiagrams.updateViewport(zoom = next, mode = DiagramZoomMode.MANUAL)
 
     Column(modifier.background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM)) {
         Row(
@@ -238,18 +293,22 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
             horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
         ) {
             AppText("Canvas", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-            CanvasZoomStepper(zoom) { zoom = it }
+            CanvasZoomStepper(zoom) { setZoom(it) }
             SegmentedControl(
                 listOf("Fit", "Fit width", "Reset"),
-                // None of the three is ever "selected" — these are one-shot actions grouped into
-                // a single control, not a persistent mode choice, so selectedIndices stays empty.
-                selectedIndices = emptySet(),
+                // Fit/Fit width are now sticky modes (Part B), reflected here for real; Reset stays
+                // a one-shot action that drops back to MANUAL, so it never shows as "selected".
+                selectedIndices = when (session.zoomMode) {
+                    DiagramZoomMode.FIT -> setOf(0)
+                    DiagramZoomMode.FIT_WIDTH -> setOf(1)
+                    DiagramZoomMode.MANUAL -> emptySet()
+                },
                 onToggle = { idx ->
                     when (idx) {
-                        0 -> zoom = fitZoom
-                        1 -> zoom = fitWidthZoom
+                        0 -> state.seqDiagrams.updateViewport(mode = DiagramZoomMode.FIT)
+                        1 -> state.seqDiagrams.updateViewport(mode = DiagramZoomMode.FIT_WIDTH)
                         else -> {
-                            zoom = 1f
+                            state.seqDiagrams.updateViewport(zoom = 1f, mode = DiagramZoomMode.MANUAL)
                             zoomAnchor = null
                             scope.launch { vertical.scrollTo(0); horizontal.scrollTo(0) }
                         }
@@ -266,17 +325,29 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
                 BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                     // Fit shows an orienting overview even for a long trace.  At that scale the
                     // diagram remains navigable through the always-visible scrollbars; Fit width
-                    // is available when reading labels is the priority.
-                    LaunchedEffect(rendered, maxWidth, maxHeight) {
+                    // is available when reading labels is the priority. Re-runs on every rebuild
+                    // (spec edit → new `rendered`) AND on a window resize (maxWidth/maxHeight), and
+                    // on an explicit mode switch (session.zoomMode) — each time, it recomputes both
+                    // candidate fits (needed so a resize doesn't let fitWidthZoom quietly go stale
+                    // while a sticky Fit-width selection keeps showing the OLD value) and applies
+                    // whichever one the current mode calls for; MANUAL leaves the user's own zoom
+                    // alone entirely.
+                    LaunchedEffect(rendered, maxWidth, maxHeight, session.zoomMode) {
+                        if (maxWidth.value <= 0f || maxHeight.value <= 0f) return@LaunchedEffect
                         val imageWidth = rendered.widthPx / rendered.scale
                         val imageHeight = rendered.heightPx / rendered.scale
                         val calculatedFit = minOf(maxWidth.value / imageWidth, maxHeight.value / imageHeight)
                             .coerceIn(.15f, 1.5f)
                         fitZoom = calculatedFit
                         fitWidthZoom = (maxWidth.value / imageWidth).coerceIn(.15f, 2.5f)
-                        if (autoFittedDiagram != diagram && maxWidth.value > 0f && maxHeight.value > 0f) {
-                            zoom = calculatedFit
-                            autoFittedDiagram = diagram
+                        val target = when (session.zoomMode) {
+                            DiagramZoomMode.FIT -> calculatedFit
+                            DiagramZoomMode.FIT_WIDTH -> fitWidthZoom
+                            DiagramZoomMode.MANUAL -> null
+                        }
+                        if (target != null && target != session.zoom) state.seqDiagrams.updateViewport(zoom = target)
+                        if (!hasFittedOnce) {
+                            hasFittedOnce = true
                             vertical.scrollTo(0)
                             horizontal.scrollTo(0)
                         }
@@ -291,9 +362,16 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
                             zoomAnchor = null
                         }
                     }
+                    // spaceHeld (onPreviewKeyEvent below) only ever changes while this Box holds
+                    // keyboard focus, which used to require an in-canvas click first — request it
+                    // as soon as the pane appears so space-to-pan works immediately, and drop it on
+                    // focus loss so a held key can never get stuck "on" for a pane that can no
+                    // longer see key events at all.
+                    LaunchedEffect(Unit) { runCatching { canvasFocusRequester.requestFocus() } }
                     Box(
                         Modifier.fillMaxWidth().fillMaxHeight()
                             .focusRequester(canvasFocusRequester).focusable()
+                            .onFocusChanged { if (!it.isFocused) spaceHeld = false }
                             .onPreviewKeyEvent { event ->
                                 if (event.key == Key.Spacebar) {
                                     spaceHeld = event.type == KeyEventType.KeyDown
@@ -304,9 +382,19 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
                                     false
                                 }
                             }
-                            .pointerInput(zoom, spaceHeld) {
+                            // MOVE_CURSOR (the same "draggable" affordance AnnotationPanel's own
+                            // reorder handle uses) rather than a literal open/closed hand — java.awt
+                            // has no distinct grab/grabbing pair to switch between on press.
+                            .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR)))
+                            .pointerInput(zoom, spaceHeld, rendered) {
                                 awaitPointerEventScope {
                                     var panning = false
+                                    // Armed on a plain left Press, resolved into either a pan (once
+                                    // movement crosses CANVAS_PAN_SLOP_PX) or a click (on Release
+                                    // while still below it) — see this file's own doc on
+                                    // resolveCanvasClickHit for the click side.
+                                    var pendingPan = false
+                                    var downPosition = Offset.Zero
                                     var lastPosition = Offset.Zero
                                     while (true) {
                                         val event = awaitPointerEvent(PointerEventPass.Initial)
@@ -324,7 +412,7 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
                                                             ),
                                                             pointer = change.position,
                                                         )
-                                                        zoom = nextZoom
+                                                        setZoom(nextZoom)
                                                     }
                                                     event.changes.forEach { it.consume() }
                                                 }
@@ -334,20 +422,68 @@ private fun DiagramPreviewPane(state: AppState, modifier: Modifier) {
 
                                             PointerEventType.Press -> {
                                                 canvasFocusRequester.requestFocus()
-                                                panning = spaceHeld || event.buttons.isTertiaryPressed
+                                                downPosition = change.position
                                                 lastPosition = change.position
-                                                if (panning) event.changes.forEach { it.consume() }
+                                                when {
+                                                    spaceHeld || event.buttons.isTertiaryPressed -> {
+                                                        panning = true
+                                                        pendingPan = false
+                                                        event.changes.forEach { it.consume() }
+                                                    }
+                                                    event.buttons.isPrimaryPressed -> {
+                                                        // Don't consume yet: a plain press that never
+                                                        // moves must still resolve as a click below.
+                                                        panning = false
+                                                        pendingPan = true
+                                                    }
+                                                    else -> {
+                                                        panning = false
+                                                        pendingPan = false
+                                                    }
+                                                }
                                             }
 
-                                            PointerEventType.Move -> if (panning) {
-                                                val delta = change.position - lastPosition
-                                                horizontal.dispatchRawDelta(-delta.x)
-                                                vertical.dispatchRawDelta(-delta.y)
-                                                lastPosition = change.position
-                                                event.changes.forEach { it.consume() }
+                                            PointerEventType.Move -> {
+                                                if (panning) {
+                                                    val delta = change.position - lastPosition
+                                                    horizontal.dispatchRawDelta(-delta.x)
+                                                    vertical.dispatchRawDelta(-delta.y)
+                                                    lastPosition = change.position
+                                                    event.changes.forEach { it.consume() }
+                                                } else if (pendingPan) {
+                                                    val moved = change.position - downPosition
+                                                    if (moved.getDistance() > CANVAS_PAN_SLOP_PX) {
+                                                        panning = true
+                                                        pendingPan = false
+                                                        lastPosition = change.position
+                                                        event.changes.forEach { it.consume() }
+                                                    }
+                                                }
                                             }
 
-                                            PointerEventType.Release -> panning = false
+                                            PointerEventType.Release -> {
+                                                if (pendingPan && !panning) {
+                                                    val hit = resolveCanvasClickHit(
+                                                        rendered = rendered,
+                                                        clickPositionPx = change.position,
+                                                        horizontalScrollPx = horizontal.value.toFloat(),
+                                                        verticalScrollPx = vertical.value.toFloat(),
+                                                        zoom = zoom,
+                                                        density = density,
+                                                    )
+                                                    // Matches AnnotationPanel's DiagramNoteView guard
+                                                    // (entryId > 0); a null sourceTabId means either
+                                                    // an offline/library workspace or one whose log
+                                                    // was closed — navigateToLogLine no-ops safely on
+                                                    // a missing tab either way, so this never crashes.
+                                                    if (hit != null && hit.entryId > 0) {
+                                                        session.sourceTabId?.let { tabId -> state.navigateToLogLine(tabId, hit.entryId) }
+                                                    }
+                                                }
+                                                panning = false
+                                                pendingPan = false
+                                            }
+
                                             else -> Unit
                                         }
                                     }

@@ -46,6 +46,11 @@ internal const val MAX_CODEC_COMPONENTS = 128
 private const val MAX_CODEC_ACTORS = 128
 internal const val MAX_CODEC_TAG_IDS = 512
 private const val MAX_CODEC_RULES = 128
+
+// validSpec only runs on *decode* (see this file's own note on MAX_CODEC_COMPONENTS above) — the
+// options-panel SegmentedControl (ui/SeqDiagramInspector.kt) offers exactly "1".."4", well inside
+// this, but the bound itself is deliberately generous rather than tied to that UI's own choices.
+private const val MAX_LABEL_LINES = 8
 private const val MAX_CODEC_HEADER_CHARS = 512 * 1024
 private const val MAX_CODEC_SOURCE_CHARS = 2 * 1024 * 1024
 private const val MAX_CODEC_STRING_CHARS = 16 * 1024
@@ -295,6 +300,14 @@ fun stripDiagramSpecHeader(text: String): String {
 
 private inline fun <reified E : Enum<E>> enumFromName(name: String?): E? =
     name?.let { n -> enumValues<E>().firstOrNull { it.name == n } }
+
+// The one back-compat boundary for the ArrowMode rename (DiagramModel.kt's own doc): a note saved
+// before EVIDENCE_FLOW existed carries the literal string "TAG_TRANSITION" as its persisted "mode"
+// token. Saved library diagrams keep displaying identically either way — the BUILT model rides in
+// the header's own "model" snapshot (modelFromMap) — only future REGENERATION picks up the new
+// evidence-only shape, which is the intended fix.
+private fun arrowModeFromName(name: String?): ArrowMode? =
+    if (name == "TAG_TRANSITION") ArrowMode.EVIDENCE_FLOW else enumFromName<ArrowMode>(name)
 
 /** Stable lowercase hexadecimal SHA-256 for the exact fenced source body. */
 fun diagramSourceHash(source: String): String = MessageDigest.getInstance("SHA-256")
@@ -568,6 +581,7 @@ private fun validSpec(spec: SeqDiagramSpec): Boolean {
     if (!validRules(spec.rules)) return false
     return spec.options.maxMessages in 1..MAX_DIAGRAM_MESSAGES &&
         spec.options.labelMaxChars in 1..MAX_CODEC_STRING_CHARS &&
+        spec.options.labelMaxLines in 1..MAX_LABEL_LINES &&
         spec.sourceEnrichment.directCallDepth == 1
 }
 
@@ -604,6 +618,13 @@ private fun optionsToMap(o: DiagramOptions): Map<String, Any?> = mapOf(
     "seqGroupFrames" to o.seqGroupFrames,
     "notesForErrors" to o.notesForErrors,
     "activationPolicy" to o.activationPolicy.name,
+    // Appended last — see DiagramOptions' own "appended fields" note. A v1/v2/v3 note written
+    // before these existed simply lacks these keys; optionsFromMap defaults every one of them off
+    // DiagramOptions()'s own defaults below, so it decodes cleanly either way.
+    "labelMaxLines" to o.labelMaxLines,
+    "threadHandoffArrows" to o.threadHandoffArrows,
+    "showSelfMessages" to o.showSelfMessages,
+    "showSourceInferred" to o.showSourceInferred,
 )
 
 private fun rangeToMap(r: DiagramRange): Map<String, Any?> = when (r) {
@@ -638,7 +659,7 @@ private fun specFromMap(map: Map<String, Any?>): SeqDiagramSpec? {
         title = map.str("title") ?: d.title,
         participants = safeParticipants,
         range = subMap(map, "range")?.let(::rangeFromMap) ?: d.range,
-        mode = enumFromName<ArrowMode>(map.str("mode")) ?: d.mode,
+        mode = arrowModeFromName(map.str("mode")) ?: d.mode,
         rules = rules.filterNotNull(),
         options = subMap(map, "options")?.let(::optionsFromMap) ?: d.options,
         sourceFile = map.str("sourceFile"),
@@ -721,6 +742,10 @@ private fun optionsFromMap(m: Map<String, Any?>): DiagramOptions {
         seqGroupFrames = m.bool("seqGroupFrames") ?: d.seqGroupFrames,
         notesForErrors = m.bool("notesForErrors") ?: d.notesForErrors,
         activationPolicy = enumFromName<ActivationPolicy>(m.str("activationPolicy")) ?: d.activationPolicy,
+        labelMaxLines = m.int("labelMaxLines") ?: d.labelMaxLines,
+        threadHandoffArrows = m.bool("threadHandoffArrows") ?: d.threadHandoffArrows,
+        showSelfMessages = m.bool("showSelfMessages") ?: d.showSelfMessages,
+        showSourceInferred = m.bool("showSourceInferred") ?: d.showSourceInferred,
     )
 }
 
