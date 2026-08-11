@@ -46,6 +46,7 @@ internal const val MAX_CODEC_COMPONENTS = 128
 private const val MAX_CODEC_ACTORS = 128
 internal const val MAX_CODEC_TAG_IDS = 512
 private const val MAX_CODEC_RULES = 128
+private const val MAX_CODEC_OVERRIDES = 512
 
 // validSpec only runs on *decode* (see this file's own note on MAX_CODEC_COMPONENTS above) — the
 // options-panel SegmentedControl (ui/SeqDiagramInspector.kt) offers exactly "1".."4", well inside
@@ -368,7 +369,7 @@ private fun modelToMap(d: SeqDiagram): Map<String, Any?> = mapOf(
         mapOf(
             "f" to m.fromIdx, "t" to m.toIdx, "l" to m.label, "e" to m.entryId,
             "ts" to m.ts, "v" to m.level.name, "k" to m.kind.name, "r" to m.repeatCount,
-            "x" to m.evidence.name,
+            "x" to m.evidence.name, "o" to m.edgeOrdinal,
         )
     },
     "frames" to d.frames.map { f ->
@@ -417,6 +418,7 @@ private fun modelFromMap(map: Map<String, Any?>, spec: SeqDiagramSpec): SeqDiagr
             kind = enumFromName<MessageKind>(m.str("k")) ?: MessageKind.CALL,
             repeatCount = m.int("r") ?: 1,
             evidence = enumFromName<MessageEvidence>(m.str("x")) ?: MessageEvidence.LOG,
+            edgeOrdinal = m.int("o") ?: 0,
         )
     }
     if (messages.any { it == null }) return null
@@ -487,14 +489,24 @@ private fun specToMap(spec: SeqDiagramSpec): Map<String, Any?> = mapOf(
     "actors" to spec.actors.map(::actorToMap),
     "unmappedTagPolicy" to spec.unmappedTagPolicy.name,
     "sourceEnrichment" to sourceEnrichmentToMap(spec.sourceEnrichment),
+    "callOverrides" to spec.callOverrides.map(::callOverrideToMap),
 )
 
 private fun componentToMap(c: DiagramComponent): Map<String, Any?> = mapOf(
     "id" to c.id, "displayName" to c.displayName, "tagIds" to c.tagIds.toList(), "enabled" to c.enabled,
+    "sourceOwnerTypes" to c.sourceOwnerTypes.toList(),
 )
 
 private fun actorToMap(a: DiagramActor): Map<String, Any?> = mapOf(
     "id" to a.id, "label" to a.label, "mirrorComponentId" to a.mirrorComponentId, "mirrorDirection" to a.mirrorDirection.name,
+    "mirrorComponentIds" to a.mirrorComponentIds.toList(),
+)
+
+private fun callOverrideToMap(o: DiagramCallOverride): Map<String, Any?> = mapOf(
+    "entryId" to o.entryId,
+    "edgeOrdinal" to o.edgeOrdinal,
+    "fromParticipantId" to o.fromParticipantId,
+    "toParticipantId" to o.toParticipantId,
 )
 
 private fun sourceEnrichmentToMap(s: DiagramSourceEnrichment): Map<String, Any?> = mapOf(
@@ -526,6 +538,7 @@ private fun validMessage(message: DiagramMessage, participantCount: Int): Boolea
     message.fromIdx in 0 until participantCount &&
         message.toIdx in 0 until participantCount &&
         message.entryId >= 0 &&
+        message.edgeOrdinal >= 0 &&
         message.repeatCount in 1..MAX_DIAGRAM_MESSAGES &&
         validString(message.label) && validString(message.ts)
 
@@ -547,14 +560,25 @@ private fun validActivation(span: DiagramActivationSpan, participantCount: Int, 
 private fun validComponents(components: List<DiagramComponent>, ids: List<String>): Boolean =
     ids.toSet().size == ids.size && components.all { component ->
         validId(component.id) && validString(component.displayName) &&
-            component.tagIds.isNotEmpty() && component.tagIds.all(::validId)
+            component.tagIds.isNotEmpty() && component.tagIds.all(::validId) &&
+            component.sourceOwnerTypes.size <= MAX_CODEC_TAG_IDS && component.sourceOwnerTypes.all(::validId)
     }
 
 private fun validActors(actors: List<DiagramActor>, ids: List<String>, componentIds: List<String>): Boolean =
     ids.toSet().size == ids.size && actors.all { actor ->
-        validId(actor.id) && validString(actor.label) &&
+            validId(actor.id) && validString(actor.label) &&
             validString(actor.mirrorComponentId) &&
-            (actor.mirrorComponentId == null || actor.mirrorComponentId in componentIds)
+            (actor.mirrorComponentId == null || actor.mirrorComponentId in componentIds) &&
+            actor.mirrorComponentIds.size <= MAX_CODEC_COMPONENTS && actor.mirrorComponentIds.all { it in componentIds }
+    }
+
+private fun validCallOverrides(overrides: List<DiagramCallOverride>): Boolean =
+    overrides.size <= MAX_CODEC_OVERRIDES && overrides.all {
+        it.entryId >= 0 && it.edgeOrdinal >= 0 && validId(it.fromParticipantId) && validId(it.toParticipantId) &&
+            // A rule may create an actor lazily during generation. Keep a valid correction for it
+            // rather than rejecting the whole note; the builder safely ignores it if that actor is
+            // not recreated by the current mode/spec.
+            it.fromParticipantId.length <= MAX_CODEC_STRING_CHARS && it.toParticipantId.length <= MAX_CODEC_STRING_CHARS
     }
 
 private fun validRules(rules: List<DiagramMessageRule>): Boolean =
@@ -579,9 +603,12 @@ private fun validSpec(spec: SeqDiagramSpec): Boolean {
     val actorIds = spec.actors.map { it.id }
     if (!validActors(spec.actors, actorIds, componentIds)) return false
     if (!validRules(spec.rules)) return false
+    if (!validCallOverrides(spec.callOverrides)) return false
     return spec.options.maxMessages in 1..MAX_DIAGRAM_MESSAGES &&
         spec.options.labelMaxChars in 1..MAX_CODEC_STRING_CHARS &&
         spec.options.labelMaxLines in 1..MAX_LABEL_LINES &&
+        spec.options.participantLabelMaxChars in 1..MAX_CODEC_STRING_CHARS &&
+        spec.options.participantLabelMaxLines in 1..MAX_LABEL_LINES &&
         spec.sourceEnrichment.directCallDepth == 1
 }
 
@@ -625,6 +652,9 @@ private fun optionsToMap(o: DiagramOptions): Map<String, Any?> = mapOf(
     "threadHandoffArrows" to o.threadHandoffArrows,
     "showSelfMessages" to o.showSelfMessages,
     "showSourceInferred" to o.showSourceInferred,
+    "includeRowsHiddenByFilter" to o.includeRowsHiddenByFilter,
+    "participantLabelMaxChars" to o.participantLabelMaxChars,
+    "participantLabelMaxLines" to o.participantLabelMaxLines,
 )
 
 private fun rangeToMap(r: DiagramRange): Map<String, Any?> = when (r) {
@@ -654,6 +684,9 @@ private fun specFromMap(map: Map<String, Any?>): SeqDiagramSpec? {
     val ruleMaps = strictMapListOrEmpty(map, "rules", MAX_CODEC_RULES) ?: return null
     val rules = ruleMaps.map(::ruleFromMap)
     if (rules.any { it == null }) return null
+    val overrideMaps = strictMapListOrEmpty(map, "callOverrides", MAX_CODEC_OVERRIDES) ?: return null
+    val callOverrides = overrideMaps.map(::callOverrideFromMap)
+    if (callOverrides.any { it == null }) return null
     val spec = SeqDiagramSpec(
         dialect = enumFromName<DiagramDialect>(map.str("dialect")) ?: d.dialect,
         title = map.str("title") ?: d.title,
@@ -672,6 +705,7 @@ private fun specFromMap(map: Map<String, Any?>): SeqDiagramSpec? {
                 d.unmappedTagPolicy
             },
         sourceEnrichment = subMap(map, "sourceEnrichment")?.let(::sourceEnrichmentFromMap) ?: d.sourceEnrichment,
+        callOverrides = callOverrides.filterNotNull(),
     )
     return spec.takeIf(::validSpec)
 }
@@ -681,16 +715,26 @@ private fun componentFromMap(m: Map<String, Any?>): DiagramComponent? {
 
     @Suppress("UNCHECKED_CAST")
     val tags = (m["tagIds"] as? List<*>)?.mapNotNull { it as? String }?.toSet() ?: emptySet()
-    return DiagramComponent(id, m.str("displayName") ?: id, tags, m.bool("enabled") ?: true)
+    val owners = (m["sourceOwnerTypes"] as? List<*>)?.mapNotNull { it as? String }?.toSet() ?: emptySet()
+    return DiagramComponent(id, m.str("displayName") ?: id, tags, m.bool("enabled") ?: true, owners)
 }
 
 private fun actorFromMap(m: Map<String, Any?>): DiagramActor? {
     val id = m.str("id") ?: return null
-    return DiagramActor(id, m.str("label") ?: id, m.str("mirrorComponentId"), enumFromName<MirrorDirection>(m.str("mirrorDirection")) ?: MirrorDirection.BOTH)
+    val mirrors = (m["mirrorComponentIds"] as? List<*>)?.mapNotNull { it as? String }?.toSet() ?: emptySet()
+    return DiagramActor(id, m.str("label") ?: id, m.str("mirrorComponentId"), enumFromName<MirrorDirection>(m.str("mirrorDirection")) ?: MirrorDirection.BOTH, mirrors)
+}
+
+private fun callOverrideFromMap(m: Map<String, Any?>): DiagramCallOverride? {
+    val entryId = m.int("entryId") ?: return null
+    val ordinal = m.int("edgeOrdinal") ?: return null
+    val from = m.str("fromParticipantId") ?: return null
+    val to = m.str("toParticipantId") ?: return null
+    return DiagramCallOverride(entryId, ordinal, from, to)
 }
 
 private fun sourceEnrichmentFromMap(m: Map<String, Any?>): DiagramSourceEnrichment = DiagramSourceEnrichment(
-    enabled = m.bool("enabled") ?: false,
+    enabled = m.bool("enabled") ?: DiagramSourceEnrichment().enabled,
     directCallDepth = 1,
     addReturnArrows = m.bool("addReturnArrows") ?: true,
 )
@@ -746,6 +790,9 @@ private fun optionsFromMap(m: Map<String, Any?>): DiagramOptions {
         threadHandoffArrows = m.bool("threadHandoffArrows") ?: d.threadHandoffArrows,
         showSelfMessages = m.bool("showSelfMessages") ?: d.showSelfMessages,
         showSourceInferred = m.bool("showSourceInferred") ?: d.showSourceInferred,
+        includeRowsHiddenByFilter = m.bool("includeRowsHiddenByFilter") ?: d.includeRowsHiddenByFilter,
+        participantLabelMaxChars = m.int("participantLabelMaxChars") ?: d.participantLabelMaxChars,
+        participantLabelMaxLines = m.int("participantLabelMaxLines") ?: d.participantLabelMaxLines,
     )
 }
 

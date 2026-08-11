@@ -14,7 +14,9 @@ import kotlin.test.assertTrue
  * a `this.` member call, a bare local call, Java field/parameter receivers, wrapper-rule
  * auto-discovery, and a file with no `package` declaration. The expected values below were captured
  * from the UNOPTIMISED implementation — if a later change to the resolution algorithms alters any of
- * them, that is a real behaviour change and this test must fail.
+ * them, that is a real behaviour change and this test must fail. The expected direct-call lists
+ * also include the new unambiguous incoming caller edges used to connect a callee's log site back
+ * to the class that invokes it.
  */
 private data class DC(val owner: String, val method: String, val returnType: String?, val callLine: Int)
 
@@ -138,11 +140,9 @@ class SourceIndexerGoldenTest {
         )
     }
 
-    // Captured verbatim from the pre-optimisation implementation (see task 1a/1b in the
-    // performance pass) — this is the "today's output" baseline the optimisation must match
-    // exactly. File order below is whatever collectSourceFiles' (unspecified-order) directory walk
-    // produced for this fixture on the machine the baseline was captured on; the optimisation must
-    // reproduce it exactly since it reuses the same traversal.
+    // File order below is whatever collectSourceFiles' (unspecified-order) directory walk produced
+    // for this fixture on the machine the baseline was captured on; the indexer must reproduce it
+    // exactly since it reuses the same traversal.
     @Suppress("MagicNumber") // literal line numbers are the expected data itself, not tunables
     private fun expectedGoldenSites(): List<S> = listOf(
         S(
@@ -154,9 +154,24 @@ class SourceIndexerGoldenTest {
                 DC("demo.Alpha", "selfCall", null, 11),
             ),
         ),
-        S("Alpha.kt", "Alpha", "selfCall", "demo.Alpha", 16, false, emptyList()),
-        S("Alpha.kt", "Helper", "assist", "demo.Helper", 30, false, emptyList()),
-        S("Alpha.kt", "Local", "process", "demo.Local", 36, false, emptyList()),
+        S(
+            "Alpha.kt", "Alpha", "selfCall", "demo.Alpha", 16, false,
+            listOf(
+                DC("demo.Alpha", "selfCall", null, 10),
+                DC("demo.Alpha", "selfCall", null, 11),
+            ),
+        ),
+        S(
+            "Alpha.kt", "Helper", "assist", "demo.Helper", 30, false,
+            listOf(
+                DC("demo.Helper", "assist", null, 8),
+                DC("demo.Helper", "assist", null, 20),
+            ),
+        ),
+        S(
+            "Alpha.kt", "Local", "process", "demo.Local", 36, false,
+            listOf(DC("demo.Local", "process", null, 9)),
+        ),
         S(
             "Wrapper.kt", "Delta", "run", "demo.Delta", 11, true,
             listOf(DC("demo.Logger", "logError", null, 11)),
@@ -169,7 +184,13 @@ class SourceIndexerGoldenTest {
                 DC("demo.Gamma", "act", null, 8),
             ),
         ),
-        S("Beta.java", "Gamma", "act", "demo.Gamma", 15, false, emptyList()),
+        S(
+            "Beta.java", "Gamma", "act", "demo.Gamma", 15, false,
+            listOf(
+                DC("demo.Gamma", "act", null, 7),
+                DC("demo.Gamma", "act", null, 8),
+            ),
+        ),
     )
 
     @Test

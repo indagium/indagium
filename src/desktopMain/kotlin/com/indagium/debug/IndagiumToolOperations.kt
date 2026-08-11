@@ -243,6 +243,7 @@ internal class IndagiumToolOperations(
         },
         "get_project_info" to { a -> getProjectInfoRoute(a.anyInt("maxContentChars")) },
         "set_highlighters" to { a -> setHighlightersRoute(a.str("tabId") ?: "", a) },
+        "register_source_folder" to { a -> appState.registerSourceFolder(a.str("path") ?: "") },
         "reindex_sources" to { a -> reindexSourcesRoute(a.str("folder")) },
         "add_manual_collapse" to { a ->
             addManualCollapseRoute(a.str("tabId") ?: "", a.anyInt("startLineId"), a.anyInt("endLineId"))
@@ -1022,6 +1023,7 @@ internal class IndagiumToolOperations(
             validateRequiredString(value["id"], "components[$index].id", MAX_DIAGRAM_ID_CHARS),
             validateOptionalString(value["displayName"], "components[$index].displayName", MAX_DIAGRAM_LABEL_CHARS),
             validateStringList(value["tagIds"], "components[$index].tagIds", MAX_DIAGRAM_TAGS_PER_COMPONENT),
+            validateStringList(value["sourceOwnerTypes"], "components[$index].sourceOwnerTypes", MAX_DIAGRAM_TAGS_PER_COMPONENT),
         ).firstOrNull()
     }
 
@@ -1070,11 +1072,13 @@ internal class IndagiumToolOperations(
             val id = raw.str("id")?.trim().orEmpty()
             if (id.isEmpty()) return@mapNotNull null
             val tags = raw.strList("tagIds").orEmpty().map(String::trim).filter(String::isNotEmpty).toSet()
+            val sourceOwnerTypes = raw.strList("sourceOwnerTypes").orEmpty().map(String::trim).filter(String::isNotEmpty).toSet()
             DiagramComponent(
                 id = id,
                 displayName = raw.str("displayName")?.trim().takeUnless { it.isNullOrEmpty() } ?: id,
                 tagIds = tags,
                 enabled = raw.anyBool("enabled") ?: true,
+                sourceOwnerTypes = sourceOwnerTypes,
             )
         }
         val merged = (args["mergedTags"] as? Map<*, *>)
@@ -1150,34 +1154,78 @@ internal class IndagiumToolOperations(
         val cache = DiagramSourceLruCache<List<DiagramSourceInteraction>>(MAX_MCP_DIAGRAM_SOURCE_CACHE_ENTRIES)
 
         fun componentId(owner: String?): String? {
-            val simple = owner?.substringAfterLast('.')?.trim().orEmpty()
-            return spec.components.firstOrNull { component ->
+            val cleanOwner = owner?.trim().orEmpty()
+            if (cleanOwner.isEmpty()) return null
+            val normalized = cleanOwner.substringBefore('$')
+            val explicit = spec.components.filter { component ->
+                component.enabled && (cleanOwner in component.sourceOwnerTypes || normalized in component.sourceOwnerTypes)
+            }.distinctBy { it.id }
+            if (explicit.size == 1) return explicit.single().id
+            if (explicit.size > 1) return null
+            val simple = normalized.substringAfterLast('.')
+            val heuristic = spec.components.filter { component ->
                 component.enabled && (
-                    component.id == owner || component.displayName == owner ||
+                    component.id == cleanOwner || component.id == normalized ||
+                        component.displayName == cleanOwner || component.displayName == normalized ||
                         component.displayName.substringAfterLast('.') == simple ||
-                        component.tagIds.any { tag -> tag == owner || tag.substringAfterLast('.') == simple }
+                        component.tagIds.any { tag ->
+                            tag == cleanOwner || tag == normalized || tag.substringAfterLast('.') == simple
+                        }
                 )
-            }?.id
+            }.distinctBy { it.id }
+            return heuristic.singleOrNull()?.id
         }
+        data class StackFrame(val ownerType: String, val methodName: String, val fileName: String, val line: Int)
+        val stackFramePattern = Regex(
+            """^\s*at\s+(com\.[\w$]+(?:\.[\w$]+)*)\.([\w$<>]+)\(([^():]+\.(?:java|kt)):(\d+)\)\s*$""",
+        )
+        var previousStackFrame: StackFrame? = null
         return { entry ->
-            val key = diagramSourceCacheKey(entry.tag, entry.msg)
-            cache[key] ?: resolver.resolveOneHop(entry, limit = MAX_SOURCE_INTERACTIONS_PER_ENTRY)
-                .mapNotNull { call ->
-                    if (call.confidence < MIN_DIAGRAM_SOURCE_CONFIDENCE) return@mapNotNull null
-                    val from = componentId(call.sourceOwnerType)
-                    val to = componentId(call.targetOwnerType)
-                    if (from == null || to == null) null else DiagramSourceInteraction(
-                        fromComponentId = from,
-                        toComponentId = to,
-                        label = "${call.targetOwnerType}.${call.targetMethodSignature}".take(MAX_DIAGRAM_LABEL_CHARS),
-                        returnLabel = call.declaredReturnType
-                            ?.takeIf { spec.sourceEnrichment.addReturnArrows }
-                            ?.take(MAX_DIAGRAM_LABEL_CHARS),
+            val stackFrame = stackFramePattern.matchEntire(entry.msg)?.let { match ->
+                StackFrame(
+                    match.groupValues[1], match.groupValues[2], match.groupValues[3],
+                    match.groupValues[4].toIntOrNull() ?: return@let null,
+                )
+            }
+            if (stackFrame != null) {
+                val callee = previousStackFrame
+                previousStackFrame = stackFrame
+                if (callee == null) {
+                    emptyList()
+                } else {
+                    val from = componentId(stackFrame.ownerType)
+                    val to = componentId(callee.ownerType)
+                    if (from == null || to == null) emptyList() else listOf(
+                        DiagramSourceInteraction(
+                            fromComponentId = from,
+                            toComponentId = to,
+                            label = "${callee.ownerType}.${callee.methodName}(${callee.fileName}:${callee.line})",
+                            allowSelfCall = stackFrame.ownerType == callee.ownerType &&
+                                stackFrame.methodName == callee.methodName,
+                        ),
                     )
                 }
-                .distinct()
-                .take(MAX_SOURCE_INTERACTIONS_PER_ENTRY)
-                .also { cache[key] = it }
+            } else {
+                previousStackFrame = null
+                val key = diagramSourceCacheKey(entry.tag, entry.msg)
+                cache[key] ?: resolver.resolveOneHop(entry, limit = MAX_SOURCE_INTERACTIONS_PER_ENTRY)
+                    .mapNotNull { call ->
+                        if (call.confidence < MIN_DIAGRAM_SOURCE_CONFIDENCE) return@mapNotNull null
+                        val from = componentId(call.sourceOwnerType)
+                        val to = componentId(call.targetOwnerType)
+                        if (from == null || to == null) null else DiagramSourceInteraction(
+                            fromComponentId = from,
+                            toComponentId = to,
+                            label = "${call.targetOwnerType}.${call.targetMethodSignature}".take(MAX_DIAGRAM_LABEL_CHARS),
+                            returnLabel = (call.observedReturnLabel ?: call.declaredReturnType)
+                                ?.takeIf { spec.sourceEnrichment.addReturnArrows }
+                                ?.take(MAX_DIAGRAM_LABEL_CHARS),
+                        )
+                    }
+                    .distinct()
+                    .take(MAX_SOURCE_INTERACTIONS_PER_ENTRY)
+                    .also { cache[key] = it }
+            }
         }
     }
 

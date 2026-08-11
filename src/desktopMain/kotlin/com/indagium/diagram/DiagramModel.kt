@@ -40,6 +40,8 @@ data class DiagramComponent(
     val displayName: String,
     val tagIds: Set<String>,
     val enabled: Boolean = true,
+    /** Fully-qualified source types explicitly owned by this component. */
+    val sourceOwnerTypes: Set<String> = emptySet(),
 )
 
 /** Direction(s) in which an actor mirrors the component it represents. */
@@ -55,19 +57,24 @@ data class DiagramActor(
     val label: String,
     val mirrorComponentId: String? = null,
     val mirrorDirection: MirrorDirection = MirrorDirection.BOTH,
+    /** New multi-mirror representation; the legacy single ID remains for old callers/notes. */
+    val mirrorComponentIds: Set<String> = emptySet(),
 )
 
 /** Provenance for an interaction.  Renderer and emitters preserve this in the in-app model.
  *  [THREAD_HANDOFF] is appended last (see this file's own "append last" convention) so existing
  *  persisted `.name` tokens are untouched — see [DiagramOptions.threadHandoffArrows]. */
-enum class MessageEvidence { LOG, RULE, SOURCE_INFERRED, ACTOR_MIRROR, THREAD_HANDOFF }
+enum class MessageEvidence { LOG, RULE, SOURCE_INFERRED, ACTOR_MIRROR, THREAD_HANDOFF, MANUAL_OVERRIDE }
 
 /** When activation bars are included in the built model. */
 enum class ActivationPolicy { NONE, EVIDENCE_BACKED }
 
 /** Source-index enrichment is deliberately bounded to one direct edge. */
 data class DiagramSourceEnrichment(
-    val enabled: Boolean = false,
+    // Source ownership is the primary call-direction evidence when an index is available. The
+    // UI still exposes this as an opt-out because source resolution remains conservative and
+    // bounded to one hop.
+    val enabled: Boolean = true,
     val directCallDepth: Int = 1,
     val addReturnArrows: Boolean = true,
 )
@@ -80,6 +87,8 @@ data class DiagramSourceInteraction(
     val label: String,
     /** Usually a declared return type. Runtime values must not be placed here by source-only code. */
     val returnLabel: String? = null,
+    /** Stack traces can prove a recursive self-call; ordinary source inference must not invent one. */
+    val allowSelfCall: Boolean = false,
 )
 
 /** How [SeqDiagramBuilder.buildSequenceDiagram] turns a scanned entry into an arrow.
@@ -135,11 +144,57 @@ data class DiagramParticipant(
 
 /** The human-facing name for a lifeline.  An alias wins only when it contains visible text, so
  * clearing an alias reliably restores the generated/legacy [DiagramParticipant.label]. */
-val DiagramParticipant.displayName: String
-    get() = alias?.trim().takeUnless { it.isNullOrEmpty() } ?: label
+fun shortDiagramName(value: String): String {
+    val clean = value.trim()
+    if (clean.isEmpty()) return clean
+    return clean.substringAfterLast('.').substringAfterLast('$').ifBlank { clean }
+}
 
-/** Counts used by the participant inspector.  All counts are computed from the same resolved,
- * filtered range that generation scans; they must never be substituted with whole-tab counts. */
+val DiagramParticipant.displayName: String
+    get() = alias?.trim().takeUnless { it.isNullOrEmpty() }
+        ?: if (kind == ParticipantKind.TAG) shortDiagramName(label) else label
+
+/**
+ * Resolves labels shown in a diagram while retaining raw participant identity in the model.
+ * Simple names are the default; colliding unaliased tag participants receive the smallest
+ * distinct package suffix, such as `client.Service` and `server.Service`.
+ */
+fun participantDisplayNames(participants: List<DiagramParticipant>): List<String> {
+    val base = participants.map { it.displayName }
+    val result = base.toMutableList()
+    base.withIndex().groupBy { it.value }.values.filter { it.size > 1 }.forEach { group ->
+        val indices = group.map { it.index }.toSet()
+        val candidates = group.map { indexed ->
+            val participant = participants[indexed.index]
+            if (participant.kind != ParticipantKind.TAG || !participant.alias.isNullOrBlank()) {
+                null
+            } else {
+                val raw = participant.label.trim()
+                val parts = raw.split('.')
+                (2..parts.size).map { count -> parts.takeLast(count).joinToString(".") } + raw
+            }
+        }
+        if (candidates.any { it == null }) return@forEach
+        val outsideNames = base.withIndex().filter { it.index !in indices }.map { it.value }.toSet()
+        val maxDepth = candidates.maxOf { it!!.size }
+        val chosen = (0 until maxDepth).firstOrNull { depth ->
+            val values = candidates.map { options -> options!![depth.coerceAtMost(options.lastIndex)] }
+            values.distinct().size == values.size && values.none { it in outsideNames }
+        }?.let { depth ->
+            candidates.map { options -> options!![depth.coerceAtMost(options.lastIndex)] }
+        }
+        if (chosen != null) {
+            group.forEachIndexed { offset, indexed -> result[indexed.index] = chosen[offset] }
+        } else if (group.all { participants[it.index].kind == ParticipantKind.TAG }) {
+            group.forEach { indexed -> result[indexed.index] = "${base[indexed.index]} (${participants[indexed.index].id})" }
+        }
+    }
+    return result
+}
+
+/** Counts used by the participant inspector. All counts are computed from the same resolved range
+ * and raw-or-filtered source list that generation scans; they must never be substituted with
+ * whole-tab counts. */
 data class DiagramParticipantCandidate(
     val tag: String,
     val entryCount: Int,
@@ -247,6 +302,19 @@ data class DiagramOptions(
     val showSelfMessages: Boolean = true,
     /** When false, every [MessageEvidence.SOURCE_INFERRED] message is dropped. */
     val showSourceInferred: Boolean = true,
+    /** Diagrams may deliberately include rows hidden by the log filter. */
+    val includeRowsHiddenByFilter: Boolean = true,
+    /** Participant labels have independent limits from message labels. */
+    val participantLabelMaxChars: Int = 40,
+    val participantLabelMaxLines: Int = 2,
+)
+
+/** A durable correction for one generated edge belonging to one log entry. */
+data class DiagramCallOverride(
+    val entryId: Int,
+    val edgeOrdinal: Int,
+    val fromParticipantId: String,
+    val toParticipantId: String,
 )
 
 data class SeqDiagramSpec(
@@ -271,6 +339,7 @@ data class SeqDiagramSpec(
     val actors: List<DiagramActor> = emptyList(),
     val unmappedTagPolicy: UnmappedTagPolicy = UnmappedTagPolicy.HIDE,
     val sourceEnrichment: DiagramSourceEnrichment = DiagramSourceEnrichment(),
+    val callOverrides: List<DiagramCallOverride> = emptyList(),
 )
 
 data class DiagramMessage(
@@ -289,6 +358,8 @@ data class DiagramMessage(
     // > 1 when collapseRepeats folded a run of identical-shape consecutive messages into this one.
     val repeatCount: Int = 1,
     val evidence: MessageEvidence = MessageEvidence.LOG,
+    /** Deterministic generated-edge ordinal within the originating entry. */
+    val edgeOrdinal: Int = 0,
 )
 
 /** A correlated call/return activation interval, inclusive message indices. */

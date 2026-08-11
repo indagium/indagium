@@ -1,5 +1,8 @@
 package com.indagium
 
+import com.indagium.diagram.DiagramParticipant
+import com.indagium.diagram.ParticipantKind
+import com.indagium.diagram.participantDisplayNames
 import com.indagium.ui.commonPackagePrefix
 import com.indagium.ui.proposeComponentName
 import kotlin.test.Test
@@ -59,5 +62,16 @@ class DiagramComponentNamingTest {
         // indistinguishable from the tag it's meant to name.
         assertNull(commonPackagePrefix(setOf("A", "A.B")))
         assertNull(proposeComponentName(setOf("A", "A.B"), pidsByTag = emptyMap(), processNames = emptyMap()))
+    }
+
+    @Test
+    fun collidingSimpleNamesKeepTheSmallestDistinctPackageSuffix() {
+        val names = participantDisplayNames(
+            listOf(
+                DiagramParticipant("a", "com.example.client.Service", ParticipantKind.TAG),
+                DiagramParticipant("b", "com.example.server.Service", ParticipantKind.TAG),
+            ),
+        )
+        assertEquals(listOf("client.Service", "server.Service"), names)
     }
 }

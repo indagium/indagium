@@ -70,7 +70,7 @@ class IndagiumToolGatewayTest {
             "delete_note_block", "clear_all_notes", "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing", "resolve_log_source",
             "get_source_file", "list_source_declarations", "get_source_declarations",
-            "get_project_info", "set_highlighters", "reindex_sources", "add_manual_collapse", "add_sequence",
+            "get_project_info", "set_highlighters", "register_source_folder", "reindex_sources", "add_manual_collapse", "add_sequence",
             "save_filter_preset", "search_similar_cases", "get_case",
             "build_sequence_diagram", "set_case_metadata", "reindex_cases",
             "get_video_frame", "get_follow_diagnostics",
@@ -805,7 +805,10 @@ class IndagiumToolGatewayTest {
                 targetMethodName = "fetch$index",
                 targetMethodSignature = "fun fetch$index(): ApiResult",
                 targetDeclaredReturnType = "ApiResult",
-                callLine = 12 + index,
+                // Keep the synthetic calls on the log statement's source line so this
+                // test continues to exercise the per-entry interaction cap. Calls on
+                // unrelated lines are intentionally rejected by source-site matching.
+                callLine = 10,
             )
         }
         val sourceIndex = SourceIndex(

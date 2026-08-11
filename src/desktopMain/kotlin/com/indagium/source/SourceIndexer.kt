@@ -143,6 +143,10 @@ object SourceIndexer {
 
         // Phase 5/6: direct-call resolution (parallel per file — see resolveDirectCalls).
         val directCallsByMethod = resolveDirectCalls(texts, methodsByFile, declarationTablesByFile, tracker, ::checkCancelled)
+        // Preserve the direct call graph's incoming edges as well. A log often lives in the
+        // callee (NetworkSimulator, CrashScenarios, a worker, or a callback body), while the
+        // interesting caller is the class that owns the field/parameter invoking that method.
+        val callsByMethodForSites = addIncomingCallerCalls(methodsByFile, directCallsByMethod)
         checkCancelled()
 
         // Phase 6/6: call-site extraction (parallel per file). Each file contributes its own
@@ -162,7 +166,7 @@ object SourceIndexer {
                     isJavaFile = isJavaFile,
                     globalConstants = globalConstants,
                     sourceMethods = methodsByFile[file.path].orEmpty(),
-                    directCallsByMethod = directCallsByMethod,
+                    directCallsByMethod = callsByMethodForSites,
                 ) + extractWrapperCallSites(
                     file.path,
                     text,
@@ -170,7 +174,7 @@ object SourceIndexer {
                     wrapperRules = wrapperRules,
                     globalConstants = globalConstants,
                     sourceMethods = methodsByFile[file.path].orEmpty(),
-                    directCallsByMethod = directCallsByMethod,
+                    directCallsByMethod = callsByMethodForSites,
                     declarationTables = declarationTablesByFile[file.path] ?: DeclarationTables.EMPTY,
                 )
                 FileExtractionResult(file.path, fileSites, FileMeta(mtime = file.lastModified(), size = file.length()))
@@ -1092,7 +1096,30 @@ private fun resolveDirectCalls(
     return perFileResults.asSequence().flatten().toMap()
 }
 
-private val DIRECT_MEMBER_CALL_RE = Regex("""\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)?)\s*\.\s*([A-Za-z_]\w*)\s*\(""")
+private fun addIncomingCallerCalls(
+    methodsByFile: Map<String, List<IndexedMethod>>,
+    directCallsByMethod: Map<String, List<SourceDirectCall>>,
+): Map<String, List<SourceDirectCall>> {
+    val methods = methodsByFile.values.flatten()
+    val byTarget = methods.groupBy {
+        listOf(it.filePath, it.owningType.orEmpty(), it.name, it.signature)
+    }
+    val incoming = HashMap<String, MutableList<SourceDirectCall>>()
+    methods.forEach { caller ->
+        directCallsByMethod[caller.id].orEmpty().forEach { call ->
+            val target = byTarget[listOf(call.targetFilePath, call.targetOwnerType, call.targetMethodName, call.targetMethodSignature)]
+                ?.singleOrNull()
+                ?: return@forEach
+            if (target.id == caller.id) return@forEach
+            incoming.getOrPut(target.id) { mutableListOf() } += call.copy(isCallback = true)
+        }
+    }
+    return methods.associate { method ->
+        method.id to (directCallsByMethod[method.id].orEmpty() + incoming[method.id].orEmpty()).distinct()
+    }
+}
+
+private val DIRECT_MEMBER_CALL_RE = Regex("""\b([A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*\.\s*([A-Za-z_]\w*)\s*\(""")
 private val DIRECT_LOCAL_CALL_RE = Regex("""\b([A-Za-z_]\w*)\s*\(""")
 private val DIRECT_CALL_KEYWORDS = setOf("if", "for", "while", "when", "catch", "return", "throw", "super", "this")
 private val WHITESPACE_RE = Regex("\\s+")
@@ -1147,7 +1174,7 @@ private fun directMemberCall(
         declaredOwnerCandidates(receiver, context.declarationTables, offset, context.packageName)
     }
     val target = directCallTarget(owners, match.groupValues[2], match.range.last, context) ?: return null
-    return target.toDirectCall(context.lines, offset)
+    return target.toDirectCall(context.text, context.lines, offset, method.owningType)
 }
 
 private fun directLocalCall(
@@ -1162,7 +1189,7 @@ private fun directLocalCall(
     if (name in DIRECT_CALL_KEYWORDS || precededByDotSkippingWhitespace(context.text, offset)) return null
     val owners = setOfNotNull(method.owningType)
     val target = directCallTarget(owners, name, match.range.last, context) ?: return null
-    return target.toDirectCall(context.lines, offset)
+    return target.toDirectCall(context.text, context.lines, offset, method.owningType)
 }
 
 // Equivalent to `text.substring(0, offset).trimEnd().endsWith('.')` (task 1c) without the O(offset)
@@ -1219,13 +1246,30 @@ private fun directCallTarget(
         .singleOrNull()
 }
 
-private fun IndexedMethod.toDirectCall(lines: LineIndex, offset: Int): SourceDirectCall? = SourceDirectCall(
+private val ASSIGNED_RESULT_RE = Regex(
+    """(?:\bval\s+|\bvar\s+)?([A-Za-z_]\w*)\s*(?::\s*[^=]+)?=\s*$""",
+)
+
+private fun assignedResultVariable(text: String, callOffset: Int): String? {
+    val lineStart = text.lastIndexOf('\n', (callOffset - 1).coerceAtLeast(0)) + 1
+    val prefix = text.substring(lineStart, callOffset).trimStart()
+    return ASSIGNED_RESULT_RE.find(prefix)?.groupValues?.get(1)
+}
+
+private fun IndexedMethod.toDirectCall(
+    text: String,
+    lines: LineIndex,
+    offset: Int,
+    sourceOwnerType: String?,
+): SourceDirectCall? = SourceDirectCall(
     targetFilePath = filePath,
     targetOwnerType = owningType ?: return null,
     targetMethodName = name,
     targetMethodSignature = signature,
     targetDeclaredReturnType = declaredReturnType,
     callLine = lines.lineOf(offset),
+    resultVariable = assignedResultVariable(text, offset),
+    sourceOwnerType = sourceOwnerType,
 )
 
 // ── Call-site extraction ──────────────────────────────────────────────────────
@@ -1249,6 +1293,27 @@ private fun findChainedTimberCall(text: String, mask: CodeMask, afterCloseParenI
     i = skipNonCode(text, mask, i)
     if (i >= text.length || text[i] != '(') return null
     return ChainCall(ident, i)
+}
+
+private val LOGGED_IDENTIFIER_RE = Regex(
+    """\b[A-Za-z_]\w*\b""",
+)
+private val LOG_INTERPOLATION_RE = Regex(
+    """\$\{\s*([A-Za-z_]\w*)[^}]*}|\$([A-Za-z_]\w*)""",
+)
+
+/** Keeps the source names embedded in a log expression so return values can be matched later. */
+private fun loggedValueNames(expression: String): Set<String> {
+    val mask = CodeMask(expression)
+    val names = LOGGED_IDENTIFIER_RE.findAll(expression)
+        .filter { match -> mask.isCode.getOrElse(match.range.first) { false } }
+        .map { it.value }
+        .toSet()
+        .toMutableSet()
+    LOG_INTERPOLATION_RE.findAll(expression).forEach { match ->
+        names += match.groupValues[1].ifBlank { match.groupValues[2] }
+    }
+    return names
 }
 
 private fun buildSite(
@@ -1284,6 +1349,7 @@ private fun buildSite(
         methodSignature = indexedMethod?.signature.orEmpty(),
         declaredReturnType = indexedMethod?.declaredReturnType,
         directCalls = indexedMethod?.let { directCallsByMethod[it.id].orEmpty() }.orEmpty(),
+        loggedValueNames = loggedValueNames(msgExprRaw),
     )
 }
 
@@ -1397,17 +1463,19 @@ private fun enclosingFunctionParameters(callOffset: Int, methodName: String, isJ
 // Per-file "declared name -> (offset, type)" lookup tables backing declaredOwnerCandidates (task
 // 1b), sorted ascending by offset within each name's bucket — findAll's matches are already
 // produced in ascending-offset order, and appending preserves that per-bucket, so no extra sort is
-// needed. Built once per file with four whole-file, NON-interpolated regexes (as opposed to the old
+// needed. Built once per file with six whole-file, NON-interpolated regexes (as opposed to the old
 // code's four interpolated-per-receiver Regex(...) compilations over a fresh text.substring(0, N)
 // copy on every single call-site lookup).
 private data class DeclarationTables(
     val kotlinDeclarations: Map<String, List<Pair<Int, String>>>,
+    val kotlinInferred: Map<String, List<Pair<Int, String>>>,
+    val kotlinDelegated: Map<String, List<Pair<Int, String>>>,
     val kotlinParameters: Map<String, List<Pair<Int, String>>>,
     val javaFields: Map<String, List<Pair<Int, String>>>,
     val javaParameters: Map<String, List<Pair<Int, String>>>,
 ) {
     companion object {
-        val EMPTY = DeclarationTables(emptyMap(), emptyMap(), emptyMap(), emptyMap())
+        val EMPTY = DeclarationTables(emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap())
     }
 }
 
@@ -1418,6 +1486,15 @@ private data class DeclarationTables(
 private val KOTLIN_DECLARATION_TABLE_RE = Regex(
     """(?m)\b(?:public\s+|private\s+|protected\s+|internal\s+|final\s+|override\s+)*""" +
         """(?:val|var)\s+([A-Za-z_]\w*)\s*:\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)""",
+)
+private val KOTLIN_INFERRED_DECLARATION_TABLE_RE = Regex(
+    """(?m)\b(?:public\s+|private\s+|protected\s+|internal\s+|final\s+|override\s+)*""" +
+        """(?:val|var)\s+([A-Za-z_]\w*)\s*=\s*([A-Z][A-Za-z0-9_.]*)\s*(?:\(|\{)""",
+)
+private val KOTLIN_DELEGATED_DECLARATION_TABLE_RE = Regex(
+    """(?m)\b(?:public\s+|private\s+|protected\s+|internal\s+|final\s+|override\s+)*""" +
+        """(?:val|var)\s+([A-Za-z_]\w*)\s*(?::\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*))?\s+by\s+""" +
+        """(?:lazy\s*\{\s*)?([A-Z][A-Za-z0-9_.]*)\s*(?:\(|\.)?""",
 )
 private val KOTLIN_PARAMETER_TABLE_RE = Regex("""\b([A-Za-z_]\w*)\s*:\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)""")
 private val JAVA_FIELD_TABLE_RE = Regex(
@@ -1436,10 +1513,21 @@ private fun buildOffsetTable(text: String, regex: Regex, nameGroup: Int, typeGro
 
 private fun buildDeclarationTables(text: String): DeclarationTables = DeclarationTables(
     kotlinDeclarations = buildOffsetTable(text, KOTLIN_DECLARATION_TABLE_RE, nameGroup = 1, typeGroup = 2),
+    kotlinInferred = buildOffsetTable(text, KOTLIN_INFERRED_DECLARATION_TABLE_RE, nameGroup = 1, typeGroup = 2),
+    kotlinDelegated = buildDelegatedOffsetTable(text),
     kotlinParameters = buildOffsetTable(text, KOTLIN_PARAMETER_TABLE_RE, nameGroup = 1, typeGroup = 2),
     javaFields = buildOffsetTable(text, JAVA_FIELD_TABLE_RE, nameGroup = 2, typeGroup = 1),
     javaParameters = buildOffsetTable(text, JAVA_PARAMETER_TABLE_RE, nameGroup = 2, typeGroup = 1),
 )
+
+private fun buildDelegatedOffsetTable(text: String): Map<String, List<Pair<Int, String>>> {
+    val table = LinkedHashMap<String, MutableList<Pair<Int, String>>>()
+    KOTLIN_DELEGATED_DECLARATION_TABLE_RE.findAll(text).forEach { match ->
+        val type = match.groupValues[2].ifBlank { match.groupValues[3] }
+        if (type.isNotBlank()) table.getOrPut(match.groupValues[1]) { mutableListOf() } += match.range.first to type
+    }
+    return table
+}
 
 // Last (offset, type) entry strictly before [beforeOffset] — the same "nearest preceding
 // declaration wins" tie-break as the old `.findAll(text.substring(0, beforeOffset)).lastOrNull()`,
@@ -1455,10 +1543,17 @@ private fun List<Pair<Int, String>>.lastTypeBefore(beforeOffset: Int): String? {
     return if (idx >= 0) this[idx].second else null
 }
 
+// A declaration after a use is legal in Kotlin.  Keep the existing nearest-preceding rule for
+// shadowing, but allow a forward reference only when this name has exactly one type in the file;
+// that preserves the conservative ambiguity guard while covering class properties declared below
+// the method that uses them.
+private fun List<Pair<Int, String>>.uniqueType(): String? =
+    asSequence().map { it.second }.distinct().singleOrNull()
+
 // Insertion order is load-bearing downstream (directCallTarget flatMaps over this set and
 // ownerMatches checks membership): normalizedReceiver, simpleReceiver, then val/var declaration
-// (+ package-qualified form), then Kotlin parameter, then Java field, then Java parameter — same
-// order the old sequential four-regex version produced (task 1b).
+// (+ package-qualified form), then Kotlin parameter, then Java field, then Java parameter. The
+// declared tables retain this order so directCallTarget's ambiguity behavior stays unchanged.
 private fun declaredOwnerCandidates(receiver: String, tables: DeclarationTables, beforeOffset: Int, filePackage: String?): Set<String> {
     val normalizedReceiver = receiver.replace(" ", "")
     val simpleReceiver = normalizedReceiver.substringAfterLast('.')
@@ -1469,10 +1564,16 @@ private fun declaredOwnerCandidates(receiver: String, tables: DeclarationTables,
         candidates += type
         if (!filePackage.isNullOrBlank() && !type.contains('.')) candidates += "$filePackage.$type"
     }
-    addType(tables.kotlinDeclarations[simpleReceiver]?.lastTypeBefore(beforeOffset))
-    addType(tables.kotlinParameters[simpleReceiver]?.lastTypeBefore(beforeOffset))
-    addType(tables.javaFields[simpleReceiver]?.lastTypeBefore(beforeOffset))
-    addType(tables.javaParameters[simpleReceiver]?.lastTypeBefore(beforeOffset))
+    fun addDeclaredType(table: Map<String, List<Pair<Int, String>>>) {
+        val declarations = table[simpleReceiver] ?: return
+        addType(declarations.lastTypeBefore(beforeOffset) ?: declarations.uniqueType())
+    }
+    addDeclaredType(tables.kotlinDeclarations)
+    addDeclaredType(tables.kotlinInferred)
+    addDeclaredType(tables.kotlinDelegated)
+    addDeclaredType(tables.kotlinParameters)
+    addDeclaredType(tables.javaFields)
+    addDeclaredType(tables.javaParameters)
     return candidates
 }
 

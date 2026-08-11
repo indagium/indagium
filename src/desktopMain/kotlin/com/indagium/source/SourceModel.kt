@@ -8,10 +8,15 @@ import java.security.MessageDigest
  *  changes in a way that makes a previously-persisted index stale. Task 1 doesn't persist
  *  anything yet, but later tasks compare this against a saved value to decide whether a cached
  *  index must be rebuilt rather than merely refreshed. */
-const val SOURCE_INDEX_VERSION = 10
+const val SOURCE_INDEX_VERSION = 13
 
 /** Generic message matchers are capped at 0.3, so this admits only specific tagged resolution. */
 const val MIN_SOURCE_ENRICHMENT_CONFIDENCE = 0.4
+
+// A log statement and a source call in the same method are associated only when the call is
+// immediately before the statement. Looking at every call in the enclosing method made a log in
+// another branch (for example UsbEventMonitor's "detached" branch) inherit bindDeviceProfile().
+private const val MAX_SOURCE_CALL_LOG_DISTANCE_LINES = 2
 
 /**
  * A conservative, statically-resolved call made directly by an indexed method.
@@ -27,6 +32,12 @@ data class SourceDirectCall(
     val targetMethodSignature: String,
     val targetDeclaredReturnType: String?,
     val callLine: Int,
+    /** Variable assigned from this call when the source uses `val result = receiver.call()`. */
+    val resultVariable: String? = null,
+    /** Lexical owner of the method that made this call. */
+    val sourceOwnerType: String? = null,
+    /** True when this edge was discovered from a caller of the log-owning method. */
+    val isCallback: Boolean = false,
 )
 
 /** One Android logging call site discovered by [SourceIndexer.build].
@@ -60,6 +71,8 @@ data class LogCallSite(
     val declaredReturnType: String? = null,
     /** High-confidence direct calls made by the enclosing method. */
     val directCalls: List<SourceDirectCall> = emptyList(),
+    /** Identifiers whose values are interpolated/concatenated into this log message. */
+    val loggedValueNames: Set<String> = emptySet(),
 )
 
 /** Snapshot of a source file's on-disk state at index-build time, used by later tasks to detect
@@ -113,6 +126,8 @@ data class SourceOneHopCall(
     val targetMethodSignature: String,
     val declaredReturnType: String?,
     val callLine: Int,
+    /** The actual caller log message when it prints the value assigned by this call. */
+    val observedReturnLabel: String? = null,
     /** Confidence of the log-to-source resolution; the direct source call itself is exact. */
     val confidence: Double,
 )
@@ -144,27 +159,89 @@ class SourceEnrichmentResolver(index: SourceIndex) {
 
     /** Resolves [entry] to source and returns only direct calls that were uniquely indexed. */
     fun resolveOneHop(entry: LogEntry, limit: Int = 10): List<SourceOneHopCall> =
-        resolveOneHop(entry.tag, entry.msg, limit)
+        uniquelyResolvedMatches(entry.tag, entry.msg, limit)
+            .filter { it.confidence >= MIN_SOURCE_ENRICHMENT_CONFIDENCE }
+            .flatMap { match ->
+                toOneHopCalls(match, directCallsNearLogSite(match.site), entry.msg)
+            }
+            .take(limit)
 
     /** Tag/message variant for callers that intentionally do not hold a [LogEntry]. */
-    fun resolveOneHop(tag: String?, message: String, limit: Int = 10): List<SourceOneHopCall> = logResolver
-        .resolve(tag, message, limit)
+    fun resolveOneHop(tag: String?, message: String, limit: Int = 10): List<SourceOneHopCall> = uniquelyResolvedMatches(tag, message, limit)
         .filter { it.confidence >= MIN_SOURCE_ENRICHMENT_CONFIDENCE }
-        .flatMap { match ->
-            match.site.directCalls.map { call ->
-                SourceOneHopCall(
-                    sourceSite = match.site,
-                    sourceOwnerType = match.site.owningType,
-                    targetOwnerType = call.targetOwnerType,
-                    targetMethodName = call.targetMethodName,
-                    targetMethodSignature = call.targetMethodSignature,
-                    declaredReturnType = call.targetDeclaredReturnType,
-                    callLine = call.callLine,
-                    confidence = match.confidence,
-                )
-            }
-        }
+        .flatMap { match -> toOneHopCalls(match, match.site.directCalls) }
         .take(limit)
+
+    private fun directCallsNearLogSite(site: LogCallSite): List<SourceDirectCall> {
+        // A log can mark either side of the call:
+        //   val value = service.fetch(); Log.d(..., "value=$value")
+        // or:
+        //   Log.d(..., "starting"); service.fetch()
+        // Restricting this to preceding calls made the second, very common form disappear.
+        val callbackCalls = site.directCalls.filter { it.isCallback }
+            .distinctBy { it.sourceOwnerType to (it.targetOwnerType to it.targetMethodSignature) }
+        val localCalls = site.directCalls.filterNot { it.isCallback }
+        // A logged assigned value is stronger evidence than line proximity. The caller may do
+        // validation, mapping, or another small operation between `service.fetch()` and the log;
+        // retain the exact call that produced the identifier instead of attaching the log to the
+        // nearest unrelated call. Only calls before the log qualify: a log must observe a value
+        // that has already been produced in the caller's execution path.
+        val loggedResultCalls = localCalls.filter { call ->
+            call.resultVariable != null &&
+                call.resultVariable in site.loggedValueNames &&
+                call.callLine <= site.callLine
+        }
+        if (loggedResultCalls.isNotEmpty()) {
+            return (loggedResultCalls + callbackCalls).distinct()
+        }
+        val nearestLine = localCalls
+            .asSequence()
+            .minByOrNull { kotlin.math.abs(it.callLine - site.callLine) }
+            ?.callLine
+        val nearbyLocalCalls = nearestLine
+            ?.takeIf { kotlin.math.abs(site.callLine - it) <= MAX_SOURCE_CALL_LOG_DISTANCE_LINES }
+            ?.let { line -> localCalls.filter { it.callLine == line } }
+            .orEmpty()
+        // Incoming calls are method-level callback/caller evidence. Their line belongs to the
+        // caller file, so it is intentionally not compared with the callee's log line.
+        return (nearbyLocalCalls + callbackCalls).distinct()
+    }
+
+    private fun toOneHopCalls(
+        match: SourceMatch,
+        calls: List<SourceDirectCall>,
+        message: String? = null,
+    ): List<SourceOneHopCall> = calls.map { call ->
+        SourceOneHopCall(
+            sourceSite = match.site,
+            sourceOwnerType = call.sourceOwnerType ?: match.site.owningType,
+            targetOwnerType = call.targetOwnerType,
+            targetMethodName = call.targetMethodName,
+            targetMethodSignature = call.targetMethodSignature,
+            declaredReturnType = call.targetDeclaredReturnType,
+            callLine = call.callLine,
+            observedReturnLabel = call.resultVariable
+                ?.takeIf { it in match.site.loggedValueNames }
+                ?.let { message },
+            confidence = match.confidence,
+        )
+    }
+
+    /**
+     * Source calls are only useful as diagram evidence when the log row identifies one source
+     * site. A ranked tie is still ambiguous even when the tied sites have different owners, so
+     * do not turn it into a guessed endpoint. A strictly stronger match is safe to use; the
+     * existing resolver's tag and literal-length scoring remains the single ranking authority.
+     */
+    private fun uniquelyResolvedMatches(tag: String?, message: String, limit: Int): List<SourceMatch> {
+        // Always fetch one extra candidate for the ambiguity check. A caller asking for one
+        // output still must not make a tied second source site invisible.
+        val matches = logResolver.resolve(tag, message, maxOf(limit, 2))
+        val best = matches.firstOrNull() ?: return emptyList()
+        val second = matches.getOrNull(1)
+        if (second != null && second.confidence == best.confidence) return emptyList()
+        return listOf(best)
+    }
 }
 
 /** Host state for the source-code popup (Task 4): the resolved candidates for whichever log row

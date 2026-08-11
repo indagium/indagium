@@ -104,12 +104,15 @@ private fun mermaidNoteSpan(f: DiagramFrame, messages: List<DiagramMessage>, ali
 
 fun SeqDiagram.toMermaid(): String {
     val aliases = sanitizedAliases(participants)
+    val participantNames = participantDisplayNames(participants)
 
     fun aliasOf(idx: Int): String = aliases.getOrElse(idx) { "p$idx" }
 
     val opens = frames.groupBy { it.firstMsg }
     val closes = frames.groupBy { it.lastMsg }
     val errorNotesByMsg = notes.groupBy { it.afterMsg }
+    val activationStarts = activationSpans.groupBy { it.startMessage }
+    val activationEnds = activationSpans.groupBy { it.endMessage }
 
     return buildString {
         append("sequenceDiagram\n")
@@ -117,9 +120,12 @@ fun SeqDiagram.toMermaid(): String {
         participants.forEachIndexed { i, p ->
             val keyword = if (p.kind == ParticipantKind.ACTOR) "actor" else "participant"
             append("    ").append(keyword).append(' ').append(aliases[i])
-                .append(" as ").append(mermaidEscape(p.displayName)).append('\n')
+                .append(" as ").append(mermaidEscape(participantNames[i])).append('\n')
         }
         messages.forEachIndexed { i, msg ->
+            activationStarts[i]?.forEach { span ->
+                append("    activate ").append(aliasOf(span.participantIdx)).append('\n')
+            }
             opens[i]?.sortedBy { it.depth }?.forEach { f ->
                 append("    Note over ").append(mermaidNoteSpan(f, messages, aliases)).append(": ")
                     .append("  ".repeat(f.depth)).append("▶ ").append(mermaidEscape(frameLabel(f))).append('\n')
@@ -130,6 +136,9 @@ fun SeqDiagram.toMermaid(): String {
             append("    ").append(aliasOf(msg.fromIdx)).append(arrow).append(aliasOf(msg.toIdx)).append(": ").append(label).append('\n')
             errorNotesByMsg[i]?.forEach { note ->
                 append("    Note over ").append(aliasOf(note.participantIdx)).append(": ").append(mermaidEscape(note.text)).append('\n')
+            }
+            activationEnds[i]?.sortedByDescending { it.startMessage }?.forEach { span ->
+                append("    deactivate ").append(aliasOf(span.participantIdx)).append('\n')
             }
             closes[i]?.sortedByDescending { it.depth }?.forEach { f ->
                 append("    Note over ").append(mermaidNoteSpan(f, messages, aliases)).append(": ")
@@ -200,6 +209,7 @@ private fun normalizeFramesForNesting(frames: List<DiagramFrame>): List<DiagramF
 
 fun SeqDiagram.toPlantUml(): String {
     val aliases = sanitizedAliases(participants)
+    val participantNames = participantDisplayNames(participants)
 
     fun aliasOf(idx: Int): String = aliases.getOrElse(idx) { "p$idx" }
 
@@ -207,15 +217,20 @@ fun SeqDiagram.toPlantUml(): String {
     val opens = normalizedFrames.groupBy { it.firstMsg }
     val closes = normalizedFrames.groupBy { it.lastMsg }
     val errorNotesByMsg = notes.groupBy { it.afterMsg }
+    val activationStarts = activationSpans.groupBy { it.startMessage }
+    val activationEnds = activationSpans.groupBy { it.endMessage }
 
     return buildString {
         append("@startuml\n")
         if (spec.title.isNotBlank()) append("title ").append(plantUmlEscape(spec.title)).append('\n')
         participants.forEachIndexed { i, p ->
             val keyword = if (p.kind == ParticipantKind.ACTOR) "actor" else "participant"
-            append(keyword).append(" \"").append(plantUmlEscape(p.displayName)).append("\" as ").append(aliases[i]).append('\n')
+            append(keyword).append(" \"").append(plantUmlEscape(participantNames[i])).append("\" as ").append(aliases[i]).append('\n')
         }
         messages.forEachIndexed { i, msg ->
+            activationStarts[i]?.forEach { span ->
+                append("activate ").append(aliasOf(span.participantIdx)).append('\n')
+            }
             // group/end genuinely nests in PlantUML (unlike Mermaid's Note-based stand-in above),
             // so opens close in strict reverse (innermost first) to keep the block structure valid.
             opens[i]?.sortedBy { it.depth }?.forEach { f ->
@@ -226,6 +241,9 @@ fun SeqDiagram.toPlantUml(): String {
             append(aliasOf(msg.fromIdx)).append(' ').append(arrow).append(' ').append(aliasOf(msg.toIdx)).append(": ").append(label).append('\n')
             errorNotesByMsg[i]?.forEach { note ->
                 append("note right of ").append(aliasOf(note.participantIdx)).append(": ").append(plantUmlEscape(note.text)).append('\n')
+            }
+            activationEnds[i]?.sortedByDescending { it.startMessage }?.forEach { span ->
+                append("deactivate ").append(aliasOf(span.participantIdx)).append('\n')
             }
             closes[i]?.sortedByDescending { it.depth }?.forEach { append("end\n") }
         }

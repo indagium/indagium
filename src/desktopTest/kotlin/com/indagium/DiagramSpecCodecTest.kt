@@ -5,6 +5,7 @@ import com.indagium.diagram.DiagramActivationSpan
 import com.indagium.diagram.DiagramActor
 import com.indagium.diagram.DiagramAttachmentMetadata
 import com.indagium.diagram.DiagramAttachmentMode
+import com.indagium.diagram.DiagramCallOverride
 import com.indagium.diagram.DiagramComponent
 import com.indagium.diagram.DiagramDialect
 import com.indagium.diagram.DiagramExportMode
@@ -340,9 +341,10 @@ class DiagramSpecCodecTest {
     @Test
     fun v3RoundTripsComponentsActorsEvidenceAndActivationSpans() {
         val spec = SeqDiagramSpec(
-            components = listOf(DiagramComponent("app", "App", setOf("A", "B"))),
-            actors = listOf(DiagramActor("client", "Client", "app", MirrorDirection.OUTBOUND)),
+            components = listOf(DiagramComponent("app", "App", setOf("A", "B"), sourceOwnerTypes = setOf("com.example.App"))),
+            actors = listOf(DiagramActor("client", "Client", "app", MirrorDirection.OUTBOUND, mirrorComponentIds = setOf("app"))),
             unmappedTagPolicy = UnmappedTagPolicy.GROUP_AS_OTHER,
+            callOverrides = listOf(DiagramCallOverride(9, 0, "app", "client")),
         )
         val participants = listOf(
             DiagramParticipant("app", "App", ParticipantKind.TAG),
@@ -350,11 +352,14 @@ class DiagramSpecCodecTest {
         )
         val model = SeqDiagram(
             spec, participants,
-            listOf(DiagramMessage(0, 1, "call", 9, "10:00:00", LogLevel.I, MessageKind.CALL, evidence = MessageEvidence.SOURCE_INFERRED)),
+            listOf(DiagramMessage(0, 1, "call", 9, "10:00:00", LogLevel.I, MessageKind.CALL, evidence = MessageEvidence.SOURCE_INFERRED, edgeOrdinal = 0)),
             activationSpans = listOf(DiagramActivationSpan(1, 0, 0, MessageEvidence.SOURCE_INFERRED)),
         )
         val parsed = assertNotNull(parseDiagramNote(encodeDiagramNote(spec, source, model)))
         assertEquals(spec, parsed.spec)
+        assertEquals(setOf("com.example.App"), parsed.spec.components.single().sourceOwnerTypes)
+        assertEquals(setOf("app"), parsed.spec.actors.single().mirrorComponentIds)
+        assertEquals(spec.callOverrides, parsed.spec.callOverrides)
         assertEquals(MessageEvidence.SOURCE_INFERRED, parsed.model?.messages?.single()?.evidence)
         assertEquals(model.activationSpans, parsed.model?.activationSpans)
     }
