@@ -222,10 +222,10 @@ class ControlServerMcpTest {
             "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing",
             "resolve_log_source", "get_source_file", "list_source_declarations", "get_source_declarations", "get_project_info",
-            "set_highlighters", "reindex_sources", "add_manual_collapse", "add_sequence", "save_filter_preset",
+            "set_highlighters", "register_source_folder", "reindex_sources", "add_manual_collapse", "add_sequence", "save_filter_preset",
             "search_similar_cases", "get_case", "set_case_metadata", "reindex_cases",
         )
-        assertEquals(54, expected.size)
+        assertEquals(55, expected.size)
         expected.forEach { name -> assertTrue(body.contains("\"$name\""), "tools/list missing $name:\n$body") }
     }
 

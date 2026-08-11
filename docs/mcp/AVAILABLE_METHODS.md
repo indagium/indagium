@@ -59,8 +59,10 @@ Recent state; file-open calls must still use explicit approved fixture paths.
 
 ## Source, cases, and video
 
-- `resolve_log_source`, `get_source_file`, `list_source_declarations`, `get_source_declarations`,
-  `get_project_info`, and `reindex_sources` connect log calls to registered Kotlin/Java source.
+- `register_source_folder`, `resolve_log_source`, `get_source_file`, `list_source_declarations`,
+  `get_source_declarations`, `get_project_info`, and `reindex_sources` connect log calls to
+  registered Kotlin/Java source. `register_source_folder` accepts one canonical source directory
+  and is useful for isolated automation runs where opening Settings is not practical.
   Start with a resolved source path, list its declarations, then request only the class or method
   body needed. `get_source_file` is line-paginated (default 400, maximum 2,000 lines); use its
   `nextStartLine` to read broader context without flooding the conversation. Source navigation is

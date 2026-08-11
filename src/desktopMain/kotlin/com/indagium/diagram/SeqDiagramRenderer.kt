@@ -196,8 +196,6 @@ private const val RENDERER_MAX_LABEL_LINES = 8
 
 private const val ACTIVATION_BAR_WIDTH_MULTIPLIER = 5
 private const val MIN_ACTIVATION_BAR_WIDTH = 4
-private const val ACTIVATION_HIGHLIGHT_ALPHA = 72
-private const val ACTIVATION_DEFAULT_ALPHA = 64
 private const val FRAME_LOCAL_HEIGHT_RATIO = .72f
 private const val FRAME_BORDER_STROKE = 1.5f
 private const val NOTE_FILL_ALPHA = 50
@@ -337,33 +335,12 @@ private fun ellipsize(s: String, fm: FontMetrics, maxWidth: Int): String {
     return if (end <= 0) ELLIPSIS else s.substring(0, end) + ELLIPSIS
 }
 
-// Wraps to at most 2 lines, splitting at the space closest to the string's midpoint rather than the
-// first space that crosses the width limit — "ServiceManager" style single tokens with no good split
-// point hard-break instead of overflowing.
-private fun wrapTwoLines(label: String, fm: FontMetrics, maxWidth: Int): List<String> {
+// Bounds the rendered participant label by characters and lines, then wraps at the actual rendered
+// width. Single-token names are hard-broken rather than allowed to overflow the participant box.
+private fun wrapParticipantLines(label: String, fm: FontMetrics, maxWidth: Int, maxChars: Int, maxLines: Int): List<String> {
     if (label.isEmpty()) return listOf("")
-    if (fm.stringWidth(label) <= maxWidth) return listOf(label)
-    val mid = label.length / 2
-    var splitAt = -1
-    var bestDist = Int.MAX_VALUE
-    label.forEachIndexed { i, c ->
-        if (c == ' ') {
-            val d = abs(i - mid)
-            if (d < bestDist) {
-                bestDist = d
-                splitAt = i
-            }
-        }
-    }
-    val (line1, rest) = if (splitAt >= 0) {
-        label.substring(0, splitAt) to label.substring(splitAt + 1)
-    } else {
-        var cut = 1
-        while (cut < label.length && fm.stringWidth(label.substring(0, cut)) <= maxWidth) cut++
-        val safeCut = (cut - 1).coerceAtLeast(1)
-        label.substring(0, safeCut) to label.substring(safeCut)
-    }
-    return listOf(line1, ellipsize(rest, fm, maxWidth))
+    val bounded = if (label.length > maxChars) label.take(maxChars.coerceAtLeast(1)) + ELLIPSIS else label
+    return wrapLines(bounded, fm, maxWidth, maxLines.coerceIn(1, RENDERER_MAX_LABEL_LINES))
 }
 
 // Cuts a single unbreakable token into as many maxWidth-wide pieces as it takes, the same
@@ -577,17 +554,36 @@ private fun measure(diagram: SeqDiagram, scale: Float): DiagramLayout {
 
         data class Prelim(val lines: List<String>, val boxWidth: Int, val headerH: Int)
 
-        val prelim = diagram.participants.map { p ->
-            val lines = wrapTwoLines(p.label, pFm, maxTextW)
+        val participantNames = participantDisplayNames(diagram.participants)
+        val participantMaxChars = diagram.spec.options.participantLabelMaxChars.coerceAtLeast(1)
+        val participantMaxLines = diagram.spec.options.participantLabelMaxLines.coerceAtLeast(1)
+        // A one-line label is an explicit request not to wrap. Let its lifeline box grow to the
+        // configured character budget instead of silently ellipsizing at the old compact-box cap.
+        val oneLineTextW = if (participantMaxLines == 1) {
+            pFm.stringWidth("W".repeat(participantMaxChars))
+        } else {
+            0
+        }
+        val prelim = diagram.participants.mapIndexed { index, p ->
+            val lines = wrapParticipantLines(
+                participantNames[index],
+                pFm,
+                max(maxTextW, oneLineTextW),
+                participantMaxChars,
+                participantMaxLines,
+            )
             val textW = lines.maxOf { pFm.stringWidth(it) }
             when (p.kind) {
                 ParticipantKind.TAG -> {
-                    val boxW = (textW + 2 * metrics.participantPadH).coerceIn(metrics.participantBoxMinW, metrics.participantBoxMaxW)
+                    val measured = textW + 2 * metrics.participantPadH
+                    val boxW = if (participantMaxLines == 1) measured.coerceAtLeast(metrics.participantBoxMinW)
+                    else measured.coerceIn(metrics.participantBoxMinW, metrics.participantBoxMaxW)
                     val boxH = 2 * metrics.participantPadV + metrics.participantLineH * lines.size
                     Prelim(lines, boxW, boxH)
                 }
                 ParticipantKind.ACTOR -> {
-                    val labelW = (textW + 2 * metrics.participantPadH).coerceAtMost(metrics.participantBoxMaxW)
+                    val labelW = if (participantMaxLines == 1) textW + 2 * metrics.participantPadH
+                    else (textW + 2 * metrics.participantPadH).coerceAtMost(metrics.participantBoxMaxW)
                     val boxW = max(metrics.actorFigureW, labelW).coerceAtLeast(metrics.participantBoxMinW)
                     val labelH = metrics.participantLineH * lines.size
                     val headerH = metrics.actorFigureH + metrics.actorLabelGap + labelH
@@ -824,17 +820,15 @@ private fun paint(g: Graphics2D, diagram: SeqDiagram, theme: DiagramTheme, layou
 }
 
 private fun paintActivation(g: Graphics2D, activation: ActivationLayout, theme: DiagramTheme) {
-    val color = when (activation.span.evidence) {
-        MessageEvidence.SOURCE_INFERRED -> Color(
-            theme.frame.red, theme.frame.green, theme.frame.blue, ACTIVATION_HIGHLIGHT_ALPHA,
-        )
-        MessageEvidence.RULE -> Color(
-            theme.note.red, theme.note.green, theme.note.blue, ACTIVATION_HIGHLIGHT_ALPHA,
-        )
-        else -> Color(theme.arrow.red, theme.arrow.green, theme.arrow.blue, ACTIVATION_DEFAULT_ALPHA)
-    }
-    g.color = color
-    g.fillRect(activation.x, activation.top, activation.width, (activation.bottom - activation.top).coerceAtLeast(1))
+    val height = (activation.bottom - activation.top).coerceAtLeast(1)
+    // Activation bars are UML execution markers, not evidence/highlighter swatches. Keep the
+    // body empty so source/rule evidence is communicated by the arrow style and tooltip, while
+    // the neutral outline remains visible over the participant lifeline.
+    g.color = theme.background
+    g.fillRect(activation.x, activation.top, activation.width, height)
+    g.color = theme.arrow
+    g.stroke = BasicStroke(1f)
+    g.drawRect(activation.x, activation.top, (activation.width - 1).coerceAtLeast(1), height)
 }
 
 private fun paintLifelines(g: Graphics2D, layout: DiagramLayout, theme: DiagramTheme) {

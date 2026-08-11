@@ -654,10 +654,12 @@ class SeqDiagramCoordinator(
         val tab = appState.tab(tabId) ?: return
         candidateJobs.remove(workspaceId)?.cancel()
         publishCandidates(workspaceId, DiagramCandidateState.Computing(candidatePreview.valuesOrEmpty))
+        // Candidate search is intentionally independent of the main log filter. Selecting one of
+        // these candidates is the explicit opt-in that makes its rows part of the diagram; the
+        // persisted option remains only as a compatibility field for older callers.
         val sourceSpec = spec.copy(
-            range = com.indagium.diagram.DiagramRange.VisibleView,
-            components = emptyList(),
-            participants = emptyList(),
+            components = emptyList(), participants = emptyList(),
+            options = spec.options.copy(includeRowsHiddenByFilter = true),
         )
         val logRef = System.identityHashCode(tab.logData)
         val filterRef = System.identityHashCode(tab.filter)
@@ -781,8 +783,9 @@ class SeqDiagramCoordinator(
         if (spec.options.labelSource == com.indagium.diagram.LabelSource.MESSAGE) return { null }
         return { entry ->
             appState.resolveLogSource(entry.tag, entry.msg, limit = 1).firstOrNull()?.let { match ->
-                val cls = File(match.site.filePath).name.substringBeforeLast('.')
-                "$cls#${match.site.methodName}()"
+                val owner = match.site.owningType?.substringAfterLast('.')
+                    ?: File(match.site.filePath).name.substringBeforeLast('.')
+                "$owner#${match.site.methodName}()"
             }
         }
     }
@@ -797,28 +800,67 @@ class SeqDiagramCoordinator(
         val cache = BoundedSourceInteractionCache(SOURCE_CACHE_MAX_ENTRIES)
 
         fun componentId(owner: String?): String? {
-            val simple = owner?.substringAfterLast('.')?.trim().orEmpty()
-            return spec.components.firstOrNull { component ->
+            val cleanOwner = owner?.trim().orEmpty()
+            if (cleanOwner.isEmpty()) return null
+            val normalized = cleanOwner.substringBefore('$')
+            val explicit = spec.components.filter {
+                it.enabled && (cleanOwner in it.sourceOwnerTypes || normalized in it.sourceOwnerTypes)
+            }
+            if (explicit.size == 1) return explicit.single().id
+            if (explicit.size > 1) return null
+            val simple = normalized.substringAfterLast('.')
+            val heuristic = spec.components.filter { component ->
                 component.enabled && (
-                    component.id == owner || component.displayName == owner ||
+                    component.id == cleanOwner || component.id == normalized ||
+                        component.displayName == cleanOwner || component.displayName == normalized ||
                         component.displayName.substringAfterLast('.') == simple ||
-                        component.tagIds.any { tag -> tag == owner || tag.substringAfterLast('.') == simple }
+                        component.tagIds.any { tag ->
+                            tag == cleanOwner || tag == normalized || tag.substringAfterLast('.') == simple
+                        }
                 )
-            }?.id
+            }.distinctBy { it.id }
+            return heuristic.singleOrNull()?.id
         }
+        data class StackFrame(val ownerType: String, val methodName: String, val location: String)
+        val dollar = '$'
+        val stackFramePattern = Regex("^\\s*at\\s+([A-Za-z0-9_.${dollar}]+)\\.([A-Za-z0-9_${dollar}<>]+)\\(([^)]*)\\)\\s*\\z")
+        var previousStackFrame: StackFrame? = null
         return { entry ->
-            cache.getOrPut(sourceCacheKey(entry)) {
-                resolver.resolveOneHop(entry).mapNotNull { call ->
-                    if (call.confidence < MIN_SOURCE_CONFIDENCE) return@mapNotNull null
-                    val from = componentId(call.sourceOwnerType)
-                    val to = componentId(call.targetOwnerType)
-                    if (from == null || to == null) null else DiagramSourceInteraction(
-                        fromComponentId = from,
-                        toComponentId = to,
-                        label = "${call.targetOwnerType}.${call.targetMethodSignature}",
-                        returnLabel = call.declaredReturnType?.takeIf { spec.sourceEnrichment.addReturnArrows },
+            val stackFrame = stackFramePattern.matchEntire(entry.msg)?.let { match ->
+                StackFrame(match.groupValues[1], match.groupValues[2], match.groupValues[3])
+            }
+            if (stackFrame != null) {
+                val callee = previousStackFrame
+                previousStackFrame = stackFrame
+                if (callee == null) emptyList() else {
+                    val from = componentId(stackFrame.ownerType)
+                    val to = componentId(callee.ownerType)
+                    if (from == null || to == null) emptyList() else listOf(
+                        DiagramSourceInteraction(
+                            fromComponentId = from,
+                            toComponentId = to,
+                            label = "${callee.ownerType}.${callee.methodName} (${callee.location})",
+                            allowSelfCall = from == to,
+                        ),
                     )
-                }.distinct()
+                }
+            } else {
+                previousStackFrame = null
+                cache.getOrPut(sourceCacheKey(entry)) {
+                    resolver.resolveOneHop(entry).mapNotNull { call ->
+                        if (call.confidence < MIN_SOURCE_CONFIDENCE) return@mapNotNull null
+                        val from = componentId(call.sourceOwnerType)
+                        val to = componentId(call.targetOwnerType)
+                        if (from == null || to == null) null else DiagramSourceInteraction(
+                            fromComponentId = from,
+                            toComponentId = to,
+                            label = "${call.targetOwnerType}.${call.targetMethodSignature}",
+                            returnLabel = (
+                                call.observedReturnLabel ?: call.declaredReturnType
+                            )?.takeIf { spec.sourceEnrichment.addReturnArrows },
+                        )
+                    }.distinct()
+                }
             }
         }
     }

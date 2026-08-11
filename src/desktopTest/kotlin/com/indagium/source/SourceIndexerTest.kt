@@ -2,6 +2,8 @@ package com.indagium.source
 
 import com.indagium.model.SourceLogConfiguration
 import com.indagium.model.SourceWrapperRule
+import com.indagium.model.LogEntry
+import com.indagium.model.LogLevel
 import org.junit.Assume.assumeNoException
 import java.io.IOException
 import java.nio.file.Files
@@ -115,6 +117,284 @@ class SourceIndexerTest {
         val screen = SourceIndexer.build(listOf(dir.toFile())).sites.single { it.tag == "Screen" }
 
         assertFalse(screen.directCalls.any { it.targetMethodName == "fetch" })
+    }
+
+    @Test
+    fun delegatedReceiverResolvesToItsUniqueOwner() {
+        val dir = createTempDirectory("openlog-src-enrichment-delegated")
+        dir.write(
+            "Flow.kt",
+            """
+            package demo
+
+            class NetworkService {
+                fun fetch(): ApiResult {
+                    Log.d("Network", "fetch complete")
+                    return ApiResult()
+                }
+            }
+
+            class Screen {
+                private val service: NetworkService by lazy { NetworkService() }
+
+                fun refresh() {
+                    service.fetch()
+                    Log.d("Screen", "refresh complete")
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val screen = SourceIndexer.build(listOf(dir.toFile())).sites.single { it.tag == "Screen" }
+
+        assertEquals("demo.NetworkService", screen.directCalls.single().targetOwnerType)
+        assertEquals("fetch", screen.directCalls.single().targetMethodName)
+    }
+
+    @Test
+    fun sourceCallResolutionDoesNotReuseADifferentBranchCallForTheLogSite() {
+        val dir = createTempDirectory("openlog-src-log-branch")
+        dir.write(
+            "Monitor.kt",
+            """
+            package demo
+            import android.util.Log
+            class DeviceManager {
+                fun bind() { Log.d("DeviceManager", "bound") }
+            }
+            class Monitor(private val manager: DeviceManager) {
+                fun poll(attached: Boolean) {
+                    if (attached) {
+                        manager.bind()
+                        Log.d("Monitor", "attached")
+                    } else {
+                        Log.d("Monitor", "detached")
+                    }
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+        val resolver = SourceEnrichmentResolver(index)
+        val attached = LogEntry(1, "10:00:00.000", LogLevel.I, "Monitor", "attached")
+        val detached = LogEntry(2, "10:00:00.010", LogLevel.I, "Monitor", "detached")
+        assertEquals("demo.DeviceManager", resolver.resolveOneHop(attached).single().targetOwnerType)
+        assertTrue(resolver.resolveOneHop(detached).isEmpty())
+    }
+
+    @Test
+    fun sourceCallBeforeLogResolvesThroughConstructorMemberAndLoggedReturnValue() {
+        val dir = createTempDirectory("openlog-src-call-before-log")
+        dir.write(
+            "Flow.kt",
+            """
+            package demo
+            import android.util.Log
+            class Service {
+                fun fetch() = "ok"
+            }
+            class Controller(private val service: Service) {
+                fun run() {
+                    Log.d("Controller", "starting fetch")
+                    val result = service.fetch()
+                    val rendered = result.trim()
+                    Log.d("Controller", "fetch result=${'$'}result")
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+        val controllerSites = index.sites.filter { it.tag == "Controller" }
+        val resolver = SourceEnrichmentResolver(index)
+
+        val starting = resolver.resolveOneHop(LogEntry(1, "10:00:00.000", LogLevel.I, "Controller", "starting fetch"))
+        assertEquals("demo.Service", starting.single().targetOwnerType)
+        assertEquals("fetch", starting.single().targetMethodName)
+
+        val result = resolver.resolveOneHop(LogEntry(2, "10:00:00.010", LogLevel.I, "Controller", "fetch result=ok"))
+        assertEquals("fetch result=ok", result.single().observedReturnLabel)
+        assertNull(result.single().declaredReturnType)
+        assertEquals("result", controllerSites.last().loggedValueNames.single())
+    }
+
+    @Test
+    fun sourceCallWithoutAssignmentStillUsesNearestFollowingLogBoundary() {
+        val dir = createTempDirectory("openlog-src-call-after-log")
+        dir.write(
+            "Flow.kt",
+            """
+            package demo
+            import android.util.Log
+            class Service { fun refresh() { } }
+            class Controller(private val service: Service) {
+                fun run() {
+                    Log.d("Controller", "refresh requested")
+                    service.refresh()
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val resolver = SourceEnrichmentResolver(SourceIndexer.build(listOf(dir.toFile())))
+        val calls = resolver.resolveOneHop(LogEntry(1, "10:00:00.000", LogLevel.I, "Controller", "refresh requested"))
+        assertEquals("demo.Service", calls.single().targetOwnerType)
+        assertEquals("refresh", calls.single().targetMethodName)
+    }
+
+    @Test
+    fun incomingMemberCallLinksCallerToCalleeLogWithoutPidTidEvidence() {
+        val dir = createTempDirectory("openlog-src-incoming-member-call")
+        dir.write(
+            "Flow.kt",
+            """
+            package demo
+            import android.util.Log
+            class Service {
+                fun run() {
+                    Log.d("Service", "service run started")
+                }
+            }
+            class Controller(private val service: Service) {
+                fun start() {
+                    service.run()
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+        val calls = SourceEnrichmentResolver(index).resolveOneHop(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Service", "service run started"),
+        )
+
+        assertEquals(1, calls.size)
+        assertEquals("demo.Controller", calls.single().sourceOwnerType)
+        assertEquals("demo.Service", calls.single().targetOwnerType)
+        assertEquals("run", calls.single().targetMethodName)
+    }
+
+    @Test
+    fun uniqueReceiverTypeCanBeDeclaredAfterTheCaller() {
+        val dir = createTempDirectory("openlog-src-enrichment-forward-receiver")
+        dir.write(
+            "Flow.kt",
+            """
+            package demo
+
+            class NetworkService {
+                fun fetch(): String {
+                    Log.d("Network", "fetch complete")
+                    return "ok"
+                }
+            }
+
+            class Screen {
+                fun refresh() {
+                    service.fetch()
+                    Log.d("Screen", "refresh complete")
+                }
+
+                private val service: NetworkService = NetworkService()
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+        val screen = index.sites.single { it.tag == "Screen" }
+        val call = screen.directCalls.single()
+
+        assertEquals("demo.Screen", screen.owningType)
+        assertEquals("demo.NetworkService", call.targetOwnerType)
+        assertEquals("fetch", call.targetMethodName)
+        assertEquals("demo.NetworkService", SourceEnrichmentResolver(index)
+            .resolveOneHop("Screen", "refresh complete").single().targetOwnerType)
+    }
+
+    @Test
+    fun inferredReceiverChainProducesAnOwnerToOwnerOneHop() {
+        val dir = createTempDirectory("openlog-src-enrichment-inferred-chain")
+        dir.write(
+            "Flow.kt",
+            """
+            package demo
+
+            class NetworkService {
+                fun fetch(): String {
+                    Log.d("Network", "fetch complete")
+                    return "ok"
+                }
+            }
+
+            class Holder(val service: NetworkService)
+
+            class Screen {
+                private val holder = Holder(NetworkService())
+
+                fun refresh() {
+                    holder.service.fetch()
+                    Log.d("Screen", "refresh complete")
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+        val screen = index.sites.single { it.tag == "Screen" }
+        val call = screen.directCalls.single()
+
+        assertEquals("demo.Screen", screen.owningType)
+        assertEquals("demo.NetworkService", call.targetOwnerType)
+        assertEquals("demo.NetworkService", SourceEnrichmentResolver(index)
+            .resolveOneHop("Screen", "refresh complete").single().targetOwnerType)
+    }
+
+    @Test
+    fun tiedSourceSitesDoNotProduceAnInferredCall() {
+        val dir = createTempDirectory("openlog-src-enrichment-tied-sites")
+        dir.write(
+            "One.kt",
+            """
+            package demo
+
+            class One {
+                fun refresh(service: Service) {
+                    service.fetch()
+                    Log.d("Shared", "refresh completed")
+                }
+            }
+            """.trimIndent(),
+        )
+        dir.write(
+            "Two.kt",
+            """
+            package demo
+
+            class Two {
+                fun refresh(service: Service) {
+                    service.fetch()
+                    Log.d("Shared", "refresh completed")
+                }
+            }
+            """.trimIndent(),
+        )
+        dir.write(
+            "Service.kt",
+            """
+            package demo
+
+            class Service {
+                fun fetch(): String = "ok"
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+
+        val resolver = SourceEnrichmentResolver(index)
+        assertTrue(resolver.resolveOneHop("Shared", "refresh completed").isEmpty())
+        assertTrue(resolver.resolveOneHop("Shared", "refresh completed", limit = 1).isEmpty())
     }
 
     @Test
@@ -1460,6 +1740,58 @@ class SourceIndexerTest {
         // must be treated as literal text (\Q...\E-quoted), not interpreted as a regex group.
         val matches = LogSourceResolver(index).resolve("Cost", "price ($5) is high")
         assertEquals(1, matches.size)
+    }
+
+    @Test
+    fun fixtureStyleActivityMemberAndCallbackCallsAreIndexed() {
+        val dir = createTempDirectory("openlog-src-fixture-style")
+        dir.write(
+            "Fixture.kt",
+            """
+            package demo
+
+            class DeviceManager {
+                fun register(key: String) { Log.i("DeviceManager", "registered key=${'$'}key") }
+            }
+
+            class Worker {
+                fun start() { Log.d("Worker", "worker started") }
+            }
+
+            class Activity {
+                private val manager = DeviceManager()
+                private val worker = Worker()
+
+                fun onCreate() {
+                    Log.d("Activity", "created")
+                    manager.register("one")
+                    worker.start()
+                    CrashCallbacks.trigger(manager, worker)
+                }
+            }
+
+            object CrashCallbacks {
+                fun trigger(manager: DeviceManager, worker: Worker) {
+                    Log.d("CrashCallbacks", "triggering callback")
+                    manager.register("callback")
+                    worker.start()
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+        val activity = index.sites.first { it.tag == "DeviceManager" && it.owningType == "demo.DeviceManager" }
+        val callback = index.sites.single { it.tag == "CrashCallbacks" }
+        val activityCalls = index.sites
+            .filter { it.owningType == "demo.Activity" }
+            .flatMap { it.directCalls }
+
+        assertTrue(activityCalls.any { it.sourceOwnerType == "demo.Activity" && it.targetOwnerType == "demo.DeviceManager" && it.targetMethodName == "register" })
+        assertTrue(activityCalls.any { it.sourceOwnerType == "demo.Activity" && it.targetOwnerType == "demo.Worker" && it.targetMethodName == "start" })
+        assertTrue(activityCalls.any { it.sourceOwnerType == "demo.Activity" && it.targetOwnerType == "demo.CrashCallbacks" && it.targetMethodName == "trigger" })
+        assertTrue(activity.directCalls.any { it.isCallback && it.sourceOwnerType == "demo.Activity" && it.targetMethodName == "register" })
+        assertTrue(callback.directCalls.any { it.sourceOwnerType == "demo.CrashCallbacks" && it.targetOwnerType == "demo.DeviceManager" && it.targetMethodName == "register" })
     }
 }
 

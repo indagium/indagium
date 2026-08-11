@@ -1121,6 +1121,18 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         ),
     ),
     McpTool(
+        "register_source_folder",
+        "Register an existing absolute Kotlin/Java source folder for this authenticated Indagium " +
+            "session. This changes Settings → Source code but does not index files; call " +
+            "reindex_sources afterward. The folder must already exist and is canonicalized before it " +
+            "is stored.",
+        schema(
+            "path" to "string",
+            required = listOf("path"),
+            descriptions = mapOf("path" to "Absolute source folder path to register."),
+        ),
+    ),
+    McpTool(
         "reindex_sources",
         "Rebuild the source-code index that resolve_log_source and get_project_info depend on. Pass " +
             "a single folder path to reindex just that registered source folder, or omit folder to " +
@@ -1399,6 +1411,7 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/tail/stop", "stop_tailing"),
     Triple(HttpMethod.Post, "/resolve_log_source", "resolve_log_source"),
     Triple(HttpMethod.Get, "/source/file", "get_source_file"),
+    Triple(HttpMethod.Post, "/source-folders", "register_source_folder"),
     Triple(HttpMethod.Get, "/source/declarations", "list_source_declarations"),
     Triple(HttpMethod.Post, "/source/declarations", "get_source_declarations"),
     Triple(HttpMethod.Post, "/highlighters", "set_highlighters"),

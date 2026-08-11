@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.diagram.DiagramDialect
+import com.indagium.diagram.DiagramActivationSpan
 import com.indagium.diagram.DiagramFrame
 import com.indagium.diagram.DiagramMessage
 import com.indagium.diagram.DiagramNoteMark
@@ -288,5 +289,22 @@ class DiagramEmitterTest {
 
         assertTrue(diagram.toSource().startsWith("@startuml"), "default dialect (PLANTUML here) must be used")
         assertTrue(diagram.toSource(DiagramDialect.MERMAID).startsWith("sequenceDiagram"), "explicit override must win")
+    }
+
+    @Test
+    fun evidenceBackedActivationSpansAreEmittedInBothDialects() {
+        val call = msg(label = "work()", kind = MessageKind.CALL)
+        val returnMessage = msg(from = 1, to = 0, label = "done", kind = MessageKind.RETURN)
+        val span = DiagramActivationSpan(1, 0, 1, com.indagium.diagram.MessageEvidence.LOG)
+        val diagram = SeqDiagram(
+            spec = SeqDiagramSpec(participants = listOf(tagA, tagB)),
+            participants = listOf(tagA, tagB),
+            messages = listOf(call, returnMessage),
+            activationSpans = listOf(span),
+        )
+        assertTrue(diagram.toMermaid().contains("activate B"))
+        assertTrue(diagram.toMermaid().contains("deactivate B"))
+        assertTrue(diagram.toPlantUml().contains("activate B"))
+        assertTrue(diagram.toPlantUml().contains("deactivate B"))
     }
 }

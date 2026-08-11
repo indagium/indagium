@@ -32,11 +32,10 @@ private const val DEFAULT_MAX_AUTO_PARTICIPANTS = 8
 private const val MAX_CANDIDATE_PIDS = 8
 
 /**
- * Builds a [SeqDiagram] from a range of [tab]'s entries. Always scans over
- * `utils.visibleEntries(tab, applyFilter = true)` — the exact set the filter panel currently
- * shows — so a generated diagram never includes a line the user has filtered away, and a
- * `DiagramRange.SeqGroupRef`'s indices (computed against that same call, see Filter.kt's
- * computeItems) line up without re-deriving them.
+ * Builds a [SeqDiagram] from a range of [tab]'s entries. New specs scan the raw log by default so
+ * explicit diagram selections can include rows hidden by the active filter; setting
+ * [DiagramOptions.includeRowsHiddenByFilter] to false retains the legacy filtered-view behavior.
+ * Range indices are always resolved against the exact list selected for that build.
  *
  * [resolveLabel] backs `DiagramOptions.labelSource == SOURCE_METHOD`/`BOTH` — Phase 1 has no
  * opinion on where a label comes from (source-index resolution lives in the `source` package,
@@ -73,7 +72,10 @@ fun buildSequenceDiagram(
     resolveSourceInteractions: (LogEntry) -> List<DiagramSourceInteraction> = { emptyList() },
 ): SeqDiagram {
     val warnings = mutableListOf<String>()
-    val allVisible = visibleEntries(tab, applyFilter = true)
+    // A diagram range is an explicit data-selection surface. New specs include rows hidden by
+    // the log filter so selecting a tag never makes its rows disappear from the diagram. The
+    // option remains persisted for callers that need the legacy filtered-view behavior.
+    val allVisible = if (spec.options.includeRowsHiddenByFilter) tab.logData else visibleEntries(tab, applyFilter = true)
     val regexContext = RegexEvaluationContext()
 
     val resolved = resolveRange(tab, spec.range, allVisible, cancellationCheck, warnings)
@@ -127,21 +129,36 @@ fun buildSequenceDiagram(
     }
 
     val sourceResult = if (spec.sourceEnrichment.enabled) {
-        // Runtime interactions retain priority: enrichment may supplement only the remaining
-        // ordered output capacity, never force an unbounded source scan or displace them.
-        val remainingSourceBudget = (spec.options.maxMessages - gen.messages.size).coerceAtLeast(0)
+        // Resolve the same bounded entry window even when runtime fallbacks already fill the
+        // message cap. A uniquely resolved source call can replace that entry's SELF event, so
+        // budgeting source work against the unused capacity would make source enrichment silently
+        // disappear on every ordinary (60-line) diagram.
+        val sourceBudget = spec.options.maxMessages
+        val stackInteractions = inferStackInteractions(candidateEntries, spec.components)
         buildSourceInteractions(
-            participantResolution.representedEntries, registry, spec.options, spec.sourceEnrichment,
-            resolveSourceInteractions, cancellationCheck, warnings, remainingSourceBudget,
+            participantResolution.representedEntries, candidateEntries, stackInteractions,
+            registry, spec.options, spec.sourceEnrichment,
+            resolveSourceInteractions, cancellationCheck, warnings, sourceBudget,
         )
     } else {
         SourceInteractionResult()
     }
+    // The initial evidence-flow pass can only see pid/tid handoffs and actors.  Source enrichment
+    // is a second, stronger evidence pass, so an all-self warning produced before it ran would be
+    // false for a source-backed diagram (and was particularly confusing in the inspector).
+    if (sourceResult.messages.any { it.fromIdx != it.toIdx }) {
+        warnings.removeAll { it.startsWith("No correlated interactions found") }
+    }
     // Frames rely on entry-id order; sorting is stable, so source edges for one entry stay after
     // that entry's runtime edge while no longer being appended after the whole range.
-    val rawMessages = applyActorMirrors(
-        (gen.messages + sourceResult.messages).sortedBy { it.entryId }, registry, spec.actors,
-    )
+    // A uniquely resolved source relationship is stronger evidence than the fallback SELF that
+    // evidence-flow emits for a line. Promote only one source CALL per entry; if the source
+    // resolver returns several candidates, keep the original SELF and leave the enrichment
+    // messages supplemental rather than choosing an arbitrary endpoint.
+    val mergedMessages = promoteUniqueSourceCalls(gen.messages, sourceResult.messages, spec.options)
+    val orderedMessages = assignEdgeOrdinals(mergedMessages.sortedBy { it.entryId })
+    val correctedMessages = applyCallOverrides(orderedMessages, spec.callOverrides, registry)
+    val rawMessages = applyActorMirrors(correctedMessages, registry, spec.actors)
     // showSelfMessages/showSourceInferred drop messages BEFORE collapsing — buildNotes/buildFrames
     // still address messages by their position in rawMessages (an index space neither the filter
     // nor collapseRepeats can be allowed to desync), so filterMessages hands back a mapping from
@@ -204,6 +221,63 @@ private fun resolveRange(
     is DiagramRange.Ids -> resolveIdsRange(allVisible, range)
     is DiagramRange.Time -> resolveTimeRange(tab, allVisible, range, warnings)
     is DiagramRange.SeqGroupRef -> resolveSeqGroupRange(tab, allVisible, range, cancellationCheck, warnings)
+}
+
+private fun assignEdgeOrdinals(messages: List<DiagramMessage>): List<DiagramMessage> {
+    val next = HashMap<Int, Int>()
+    return messages.map { message ->
+        val ordinal = next[message.entryId] ?: 0
+        next[message.entryId] = ordinal + 1
+        message.copy(edgeOrdinal = ordinal)
+    }
+}
+
+private fun applyCallOverrides(
+    messages: List<DiagramMessage>,
+    overrides: List<DiagramCallOverride>,
+    registry: ParticipantRegistry,
+): List<DiagramMessage> {
+    if (overrides.isEmpty()) return messages
+    val byKey = overrides.associateBy { it.entryId to it.edgeOrdinal }
+    return messages.map { message ->
+        val override = byKey[message.entryId to message.edgeOrdinal] ?: return@map message
+        val from = registry.indexForId(override.fromParticipantId) ?: return@map message
+        val to = registry.indexForId(override.toParticipantId) ?: return@map message
+        message.copy(
+            fromIdx = from,
+            toIdx = to,
+            kind = if (from == to) MessageKind.SELF else MessageKind.CALL,
+            evidence = MessageEvidence.MANUAL_OVERRIDE,
+        )
+    }
+}
+
+private fun promoteUniqueSourceCalls(
+    runtimeMessages: List<DiagramMessage>,
+    sourceMessages: List<DiagramMessage>,
+    options: DiagramOptions,
+): List<DiagramMessage> {
+    if (!options.showSourceInferred || sourceMessages.isEmpty()) return runtimeMessages + sourceMessages
+
+    val sourceByEntry = sourceMessages.groupBy { it.entryId }
+    val promotable = sourceByEntry.mapNotNull { (entryId, messages) ->
+        val calls = messages.filter { it.kind == MessageKind.CALL }
+        val call = calls.singleOrNull()
+        call?.let { entryId to messages }
+    }.toMap()
+    if (promotable.isEmpty()) return runtimeMessages + sourceMessages
+
+    val promoted = mutableSetOf<DiagramMessage>()
+    val correctedRuntime = runtimeMessages.flatMap { runtime ->
+        if (runtime.kind != MessageKind.SELF) return@flatMap listOf(runtime)
+        val sourceEdges = promotable[runtime.entryId] ?: return@flatMap listOf(runtime)
+        // Replace a genuine fallback SELF with the complete source interaction for that entry.
+        // Keeping its CALL/RETURN pair together is important: the final message cap must not
+        // discard the return and thereby erase the evidence-backed activation span.
+        promoted += sourceEdges
+        sourceEdges
+    }
+    return correctedRuntime + sourceMessages.filterNot { it in promoted }
 }
 
 private fun resolveIdsRange(allVisible: List<LogEntry>, range: DiagramRange.Ids): RangeResolution {
@@ -334,15 +408,17 @@ private data class ParticipantResolution(
     val tagToParticipantId: Map<String, String> = emptyMap(),
 )
 
-/** Returns range-correct candidates for the participant inspector.  It resolves [spec.range]
- * through the active filter first, exactly as [buildSequenceDiagram] does. */
+/** Returns range-correct candidates for the participant inspector. It resolves [spec.range] against
+ * the same raw-or-filtered source list selected by [DiagramOptions.includeRowsHiddenByFilter] as
+ * [buildSequenceDiagram]. */
 fun diagramParticipantCandidates(
     tab: LogTab,
     spec: SeqDiagramSpec,
     cancellationCheck: CancellationCheck = CancellationCheck {},
 ): List<DiagramParticipantCandidate> {
     val warnings = mutableListOf<String>()
-    val resolved = resolveRange(tab, spec.range, visibleEntries(tab, applyFilter = true), cancellationCheck, warnings)
+    val sourceEntries = if (spec.options.includeRowsHiddenByFilter) tab.logData else visibleEntries(tab, applyFilter = true)
+    val resolved = resolveRange(tab, spec.range, sourceEntries, cancellationCheck, warnings)
     if (spec.components.isNotEmpty()) return componentCandidates(spec, resolved.entries, cancellationCheck)
     val configured = spec.participants.filter { it.kind == ParticipantKind.TAG && it.tag != null }.associateBy { it.tag!! }
     val stats = tagStats(resolved.entries, cancellationCheck)
@@ -767,11 +843,104 @@ private data class SourceInteractionResult(
     val truncated: Boolean = false,
 )
 
+/** Crash/watchdog markers prove that a source call did not complete in this selected window. */
+private fun isTerminalFailure(entry: LogEntry): Boolean {
+    val message = entry.msg
+    return message.contains("FATAL EXCEPTION", ignoreCase = true) ||
+        message.contains("ANR in", ignoreCase = true) ||
+        message.contains("StackOverflowError", ignoreCase = true) ||
+        message.contains("stack overflow", ignoreCase = true) ||
+        message.contains("Fatal signal", ignoreCase = true)
+}
+
+private data class StackFrame(
+    val ownerType: String,
+    val methodName: String,
+    val fileName: String,
+    val line: Int,
+)
+
+private data class StackInteraction(
+    val entryId: Int,
+    val interaction: DiagramSourceInteraction,
+)
+
+// Android's Java/Kotlin renderer emits the innermost frame first. Restricting this parser to
+// application-looking `com.*` owners and real .java/.kt locations keeps ordinary log prose,
+// native frames, and framework frames out of source inference.
+private val ANDROID_SOURCE_FRAME = Regex(
+    """^\s*at\s+(com\.[\w$]+(?:\.[\w$]+)*)\.([\w$<>]+)\(([^():]+\.(?:java|kt)):(\d+)\)\s*$""",
+)
+
+private fun parseStackFrame(message: String): StackFrame? {
+    val match = ANDROID_SOURCE_FRAME.matchEntire(message) ?: return null
+    return StackFrame(
+        ownerType = match.groupValues[1],
+        methodName = match.groupValues[2],
+        fileName = match.groupValues[3],
+        line = match.groupValues[4].toIntOrNull() ?: return null,
+    )
+}
+
+private fun componentForSourceOwner(ownerType: String, components: List<DiagramComponent>): String? {
+    val exact = components.filter { component ->
+        component.enabled && component.sourceOwnerTypes.any { it == ownerType }
+    }.singleOrNull()
+    if (exact != null) return exact.id
+
+    // Keep old component specs useful when callers used the fully-qualified type as an id/name.
+    val simple = ownerType.substringAfterLast('.')
+    return components.filter { component ->
+        component.enabled && listOf(component.id, component.displayName).any { value ->
+            value == ownerType || value == simple
+        }
+    }.singleOrNull()?.id
+}
+
+private fun inferStackInteractions(
+    entries: List<LogEntry>,
+    components: List<DiagramComponent>,
+): List<StackInteraction> {
+    if (entries.size < 2 || components.none { it.enabled }) return emptyList()
+    val result = mutableListOf<StackInteraction>()
+    val run = mutableListOf<Pair<LogEntry, StackFrame>>()
+
+    fun flush() {
+        for (index in 0 until run.lastIndex) {
+            val (calleeEntry, callee) = run[index]
+            val (callerEntry, caller) = run[index + 1]
+            val from = componentForSourceOwner(caller.ownerType, components) ?: continue
+            val to = componentForSourceOwner(callee.ownerType, components) ?: continue
+            val recursive = caller.ownerType == callee.ownerType && caller.methodName == callee.methodName
+            if (from == to && !recursive) continue
+            result += StackInteraction(
+                entryId = callerEntry.id,
+                interaction = DiagramSourceInteraction(
+                    fromComponentId = from,
+                    toComponentId = to,
+                    label = "${callee.ownerType}.${callee.methodName}(${callee.fileName}:${callee.line})",
+                    allowSelfCall = recursive,
+                ),
+            )
+        }
+        run.clear()
+    }
+
+    entries.forEach { entry ->
+        val frame = parseStackFrame(entry.msg)
+        if (frame == null) flush() else run += entry to frame
+    }
+    flush()
+    return result
+}
+
 // Budget and provenance validation are intentionally co-located so every callback is bounded
 // before it can append a message; extracting the loop would obscure that security invariant.
 @Suppress("CyclomaticComplexMethod", "LoopWithTooManyJumpStatements")
 private fun buildSourceInteractions(
     entries: List<LogEntry>,
+    selectedEntries: List<LogEntry>,
+    stackInteractions: List<StackInteraction>,
     registry: ParticipantRegistry,
     options: DiagramOptions,
     enrichment: DiagramSourceEnrichment,
@@ -787,14 +956,29 @@ private fun buildSourceInteractions(
     val messages = ArrayList<DiagramMessage>(messageBudget)
     var truncated = entries.size > messageBudget
     var attempts = 0
-    for ((entryIndex, entry) in entries.withIndex()) {
+    val stackByEntry = stackInteractions.groupBy { it.entryId }
+    val representedIds = entries.mapTo(HashSet()) { it.id }
+    val stackIds = stackInteractions.mapTo(HashSet()) { it.entryId }
+    val sourceEntries = selectedEntries.filter { it.id in representedIds || it.id in stackIds }
+    val selectedIndexById = selectedEntries.withIndex().associate { it.value.id to it.index }
+    val terminalFailureAfter = BooleanArray(selectedEntries.size)
+    var terminalFailureSeen = false
+    for (index in selectedEntries.indices.reversed()) {
+        terminalFailureAfter[index] = terminalFailureSeen
+        terminalFailureSeen = terminalFailureSeen || isTerminalFailure(selectedEntries[index])
+    }
+    for ((entryIndex, entry) in sourceEntries.withIndex()) {
         if (attempts >= messageBudget || messages.size >= messageBudget) {
             truncated = true
             break
         }
         attempts++
         if (entryIndex % CANCELLATION_CHECK_INTERVAL == 0) cancellationCheck()
-        val interactions = resolveSourceInteractions(entry)
+        val interactions = buildList {
+            addAll(stackByEntry[entry.id].orEmpty().map { it.interaction })
+            if (entry.id in representedIds) addAll(resolveSourceInteractions(entry))
+        }.distinct()
+        val selectedIndex = selectedIndexById[entry.id] ?: -1
         if (interactions.size > MAX_SOURCE_INTERACTIONS_PER_ENTRY) truncated = true
         for (interaction in interactions.take(MAX_SOURCE_INTERACTIONS_PER_ENTRY)) {
             val from = registry.indexForId(interaction.fromComponentId)
@@ -803,8 +987,13 @@ private fun buildSourceInteractions(
                 warnings += "Source interaction '${interaction.fromComponentId}' → '${interaction.toComponentId}' does not match an enabled component."
                 continue
             }
-            if (from == to) continue
-            val needsReturn = enrichment.addReturnArrows && !interaction.returnLabel.isNullOrBlank()
+            if (from == to && !interaction.allowSelfCall) continue
+            // A declared return type is source metadata, not proof that the call returned. Keep
+            // return arrows for completed windows, but never draw a synthetic return across a
+            // later fatal exception, ANR, or stack overflow in the selected range.
+            val needsReturn = enrichment.addReturnArrows &&
+                !interaction.returnLabel.isNullOrBlank() &&
+                (selectedIndex < 0 || !terminalFailureAfter[selectedIndex])
             val messageCost = if (needsReturn) 2 else 1
             if (messages.size + messageCost > messageBudget) {
                 truncated = true
@@ -812,7 +1001,9 @@ private fun buildSourceInteractions(
             }
             messages += DiagramMessage(
                 from, to, truncateLabel(collapseWhitespace(interaction.label), options.labelMaxChars),
-                entry.id, entry.ts, entry.level, MessageKind.CALL, evidence = MessageEvidence.SOURCE_INFERRED,
+                entry.id, entry.ts, entry.level,
+                if (from == to) MessageKind.SELF else MessageKind.CALL,
+                evidence = MessageEvidence.SOURCE_INFERRED,
             )
             if (needsReturn) {
                 messages += DiagramMessage(
@@ -833,10 +1024,13 @@ private fun applyActorMirrors(
     registry: ParticipantRegistry,
     actors: List<DiagramActor>,
 ): List<DiagramMessage> {
-    val mirrors = actors.mapNotNull { actor ->
-        val component = actor.mirrorComponentId?.let(registry::indexForId) ?: return@mapNotNull null
-        val actorIdx = registry.indexForId(actor.id) ?: return@mapNotNull null
-        Triple(component, actorIdx, actor.mirrorDirection)
+    val mirrors = actors.flatMap { actor ->
+        val componentIds = (actor.mirrorComponentIds + listOfNotNull(actor.mirrorComponentId)).distinct()
+        val actorIdx = registry.indexForId(actor.id) ?: return@flatMap emptyList()
+        componentIds.mapNotNull { componentId ->
+            val component = registry.indexForId(componentId) ?: return@mapNotNull null
+            Triple(component, actorIdx, actor.mirrorDirection)
+        }
     }
     if (mirrors.isEmpty()) return messages
     return buildList(messages.size + mirrors.size) {
@@ -891,7 +1085,7 @@ private fun filterMessages(raw: List<DiagramMessage>, options: DiagramOptions): 
     return FilterResult(filtered, rawToFiltered)
 }
 
-/** Activations are emitted only for correlated call/return pairs, never for a bare transition. */
+/** Activations are emitted for correlated pairs and for source calls proven to remain active at a failure. */
 private fun buildActivationSpans(messages: List<DiagramMessage>): List<DiagramActivationSpan> {
     data class OpenCall(val from: Int, val to: Int, val index: Int, val evidence: MessageEvidence)
     val open = ArrayDeque<OpenCall>()
@@ -901,7 +1095,10 @@ private fun buildActivationSpans(messages: List<DiagramMessage>): List<DiagramAc
             message.kind == MessageKind.CALL && message.fromIdx != message.toIdx && message.evidence != MessageEvidence.ACTOR_MIRROR ->
                 open.addLast(OpenCall(message.fromIdx, message.toIdx, index, message.evidence))
             message.kind == MessageKind.RETURN && message.evidence != MessageEvidence.ACTOR_MIRROR -> {
-                val match = open.lastOrNull { it.from == message.toIdx && it.to == message.fromIdx && it.evidence == message.evidence }
+                val match = open.lastOrNull {
+                    it.from == message.toIdx && it.to == message.fromIdx &&
+                        (it.evidence == message.evidence || it.evidence == MessageEvidence.MANUAL_OVERRIDE || message.evidence == MessageEvidence.MANUAL_OVERRIDE)
+                }
                 if (match != null) {
                     while (open.isNotEmpty() && open.last() != match) open.removeLast()
                     open.removeLast()
@@ -910,8 +1107,31 @@ private fun buildActivationSpans(messages: List<DiagramMessage>): List<DiagramAc
             }
         }
     }
-    return spans
+    // A source-inferred call without a return is still an evidence-backed activation, but do not
+    // stretch it over the entire window when the caller visibly makes progress. A subsequent
+    // caller self-event or another call is the nearest observable indication that the missing
+    // return happened. If no such boundary exists, the bounded log window remains the conservative
+    // end of the activation (important for ANR and recursive-stack ranges).
+    if (messages.isNotEmpty()) {
+        open.filter { it.evidence == MessageEvidence.SOURCE_INFERRED }.forEach { call ->
+            val callerProgress = (call.index + 1 until messages.size).firstOrNull { index ->
+                val message = messages[index]
+                message.evidence != MessageEvidence.ACTOR_MIRROR &&
+                    (message.fromIdx == call.from && message.toIdx == call.from ||
+                        message.kind == MessageKind.CALL && message.fromIdx == call.from)
+            }
+            val endMessage = callerProgress ?: messages.lastIndex
+            spans += DiagramActivationSpan(call.to, call.index, endMessage, call.evidence)
+        }
+    }
+    return spans.distinctBy { Triple(it.participantIdx, it.startMessage, it.endMessage) }
 }
+
+private fun isTerminalFailureLabel(label: String): Boolean =
+    label.contains("FATAL EXCEPTION", ignoreCase = true) ||
+        label.contains("ANR in ", ignoreCase = true) ||
+        label.contains("StackOverflowError", ignoreCase = true) ||
+        label.contains("NullPointerException", ignoreCase = true)
 
 // ── Label formatting ──────────────────────────────────────────────────────────────────────────
 

@@ -40,6 +40,7 @@ private fun LogCallSite.toLine(): String = listOf(
     methodSignature.fieldToken(),
     declaredReturnType.orEmpty().fieldToken(),
     directCalls.fieldToken(),
+    loggedValueNames.fieldToken(),
 ).joinToString("\t")
 
 // Direct-call fields use base64-url too, so ':' and ';' are safe structural separators.  Keeping
@@ -53,14 +54,23 @@ private fun List<SourceDirectCall>.fieldToken(): String = if (isEmpty()) "~" els
         call.targetMethodSignature.fieldToken(),
         call.targetDeclaredReturnType.orEmpty().fieldToken(),
         call.callLine.toString(),
+        call.resultVariable.orEmpty().fieldToken(),
+        call.sourceOwnerType.orEmpty().fieldToken(),
+        call.isCallback.toString(),
     ).joinToString(":")
 }
+
+private fun Set<String>.fieldToken(): String =
+    if (isEmpty()) "~" else joinToString(";") { it.fieldToken() }
+
+private fun String.loggedValueNamesFieldValue(): Set<String> =
+    if (this == "~" || isBlank()) emptySet() else split(';').map { it.fieldValue() }.toSet()
 
 private fun String.directCallsFieldValue(): List<SourceDirectCall> {
     if (this == "~" || isBlank()) return emptyList()
     return split(';').mapNotNull { token ->
         val fields = token.split(':')
-        if (fields.size != 6) return@mapNotNull null
+        if (fields.size < 6) return@mapNotNull null
         runCatching {
             SourceDirectCall(
                 targetFilePath = fields[0].fieldValue(),
@@ -69,6 +79,9 @@ private fun String.directCallsFieldValue(): List<SourceDirectCall> {
                 targetMethodSignature = fields[3].fieldValue(),
                 targetDeclaredReturnType = fields[4].fieldValue().takeIf { it.isNotBlank() },
                 callLine = fields[5].toInt(),
+                resultVariable = fields.getOrNull(6)?.fieldValue()?.takeIf { it.isNotBlank() },
+                sourceOwnerType = fields.getOrNull(7)?.fieldValue()?.takeIf { it.isNotBlank() },
+                isCallback = fields.getOrNull(8)?.toBooleanStrictOrNull() ?: false,
             )
         }.getOrNull()
     }
@@ -91,6 +104,7 @@ private fun parseSiteLine(rest: String): LogCallSite? {
         methodSignature = parts[10].fieldValue(),
         declaredReturnType = parts[11].fieldValue().takeIf { it.isNotBlank() },
         directCalls = parts[12].directCallsFieldValue(),
+        loggedValueNames = parts.getOrNull(13)?.loggedValueNamesFieldValue().orEmpty(),
     )
 }
 

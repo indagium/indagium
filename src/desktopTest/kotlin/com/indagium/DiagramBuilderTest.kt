@@ -3,6 +3,7 @@ package com.indagium
 import androidx.compose.ui.graphics.Color
 import com.indagium.diagram.ArrowMode
 import com.indagium.diagram.DiagramActor
+import com.indagium.diagram.DiagramCallOverride
 import com.indagium.diagram.DiagramComponent
 import com.indagium.diagram.DiagramMessageRule
 import com.indagium.diagram.DiagramOptions
@@ -340,7 +341,7 @@ class DiagramBuilderTest {
         ).copy(filter = Filter(activeTags = setOf("A")))
         val diagram = buildSequenceDiagram(
             tab,
-            SeqDiagramSpec(range = DiagramRange.Time("10:00:00.000", "10:00:00.200"), options = plainOptions()),
+            SeqDiagramSpec(range = DiagramRange.Time("10:00:00.000", "10:00:00.200"), options = plainOptions().copy(includeRowsHiddenByFilter = false)),
         )
 
         assertEquals(
@@ -537,10 +538,27 @@ class DiagramBuilderTest {
                 LogEntry(2, "10:00:00.100", LogLevel.I, "B", "b"),
             ),
         ).copy(filter = Filter(activeTags = setOf("A")))
-        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(options = plainOptions()))
+        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(options = plainOptions().copy(includeRowsHiddenByFilter = false)))
 
         assertEquals(1, diagram.scannedEntries, "the filter hides tag B entirely, so the diagram never sees it")
         assertNull(diagram.participants.firstOrNull { it.tag == "B" })
+    }
+
+    @Test
+    fun explicitSelectionCanIncludeRowsHiddenByTheActiveFilter() {
+        val tab = mkTab(
+            "t1", "app.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "A", "a"),
+                LogEntry(2, "10:00:00.100", LogLevel.I, "B", "b"),
+            ),
+        ).copy(filter = Filter(activeTags = setOf("A")))
+        val diagram = buildSequenceDiagram(
+            tab,
+            SeqDiagramSpec(range = DiagramRange.Ids(1, 2), options = plainOptions()),
+        )
+        assertEquals(2, diagram.scannedEntries)
+        assertTrue(diagram.participants.any { it.tag == "B" })
     }
 
     @Test
@@ -661,7 +679,44 @@ class DiagramBuilderTest {
     }
 
     @Test
-    fun enabledSourceEnrichmentAddsDashedEvidenceBackedCallAndDeclaredReturn() {
+    fun manualCallOverrideRewritesTheExactGeneratedEdge() {
+        val tab = mkTab("t1", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "invoke"),
+        ))
+        val diagram = buildSequenceDiagram(
+            tab,
+            SeqDiagramSpec(
+                components = listOf(
+                    DiagramComponent("a", "A", setOf("A")),
+                    DiagramComponent("b", "B", setOf("B")),
+                ),
+                callOverrides = listOf(DiagramCallOverride(1, 0, "a", "b")),
+                options = plainOptions(),
+            ),
+        )
+        assertEquals(1, diagram.messages.size)
+        assertEquals(MessageKind.CALL, diagram.messages.single().kind)
+        assertEquals(MessageEvidence.MANUAL_OVERRIDE, diagram.messages.single().evidence)
+        assertEquals("a", diagram.participants[diagram.messages.single().fromIdx].id)
+        assertEquals("b", diagram.participants[diagram.messages.single().toIdx].id)
+    }
+
+    @Test
+    fun actorCanMirrorMultipleComponents() {
+        val tab = mkTab("t1", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "start", pid = 7, tid = 42),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "B", "handoff", pid = 7, tid = 42),
+        ))
+        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(
+            components = listOf(DiagramComponent("a", "A", setOf("A")), DiagramComponent("b", "B", setOf("B"))),
+            actors = listOf(DiagramActor("client", "Client", mirrorComponentIds = setOf("a", "b"))),
+            options = plainOptions(threadHandoffArrows = true),
+        ))
+        assertEquals(2, diagram.messages.count { it.evidence == MessageEvidence.ACTOR_MIRROR })
+    }
+
+    @Test
+    fun uniquelyResolvedSourceEnrichmentPromotesSelfToCallAndKeepsDeclaredReturn() {
         val tab = mkTab("t1", "app.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "A", "invoke")))
         val diagram = buildSequenceDiagram(
             tab,
@@ -672,12 +727,15 @@ class DiagramBuilderTest {
             ),
             resolveSourceInteractions = { listOf(DiagramSourceInteraction("a", "b", "B.work()", "String")) },
         )
-        // The single scanned entry is ALSO its own uncorrelated SELF event now (no bootstrap
-        // suppression) — evidence LOG — ahead of the two source-inferred runtime messages.
+        // The source relationship is stronger evidence than the fallback SELF, so it supplies the
+        // actual component endpoints even though same-thread handoff inference is disabled.
         assertEquals(
-            listOf(MessageEvidence.LOG, MessageEvidence.SOURCE_INFERRED, MessageEvidence.SOURCE_INFERRED),
+            listOf(MessageEvidence.SOURCE_INFERRED, MessageEvidence.SOURCE_INFERRED),
             diagram.messages.map { it.evidence },
         )
+        assertEquals(MessageKind.CALL, diagram.messages.first().kind)
+        assertEquals("a", diagram.participants[diagram.messages.first().fromIdx].id)
+        assertEquals("b", diagram.participants[diagram.messages.first().toIdx].id)
         assertEquals(MessageKind.RETURN, diagram.messages.last().kind)
         assertEquals("String", diagram.messages.last().label)
         assertEquals(1, diagram.activationSpans.size)
@@ -685,7 +743,162 @@ class DiagramBuilderTest {
     }
 
     @Test
-    fun sourceEnrichmentStopsResolverWorkOnceRuntimeOutputReachesTheMessageCap() {
+    fun sourceCallWithoutObservedReturnKeepsActivationOpenToTheEndOfTheWindow() {
+        val tab = mkTab("t1", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "invoke"),
+            LogEntry(2, "10:00:00.010", LogLevel.I, "B", "work started"),
+        ))
+        val diagram = buildSequenceDiagram(
+            tab,
+            SeqDiagramSpec(
+                components = listOf(
+                    DiagramComponent("a", "A", setOf("A")),
+                    DiagramComponent("b", "B", setOf("B")),
+                ),
+                sourceEnrichment = DiagramSourceEnrichment(enabled = true),
+                options = plainOptions(),
+            ),
+            resolveSourceInteractions = { entry ->
+                if (entry.id == 1) listOf(DiagramSourceInteraction("a", "b", "B.work()")) else emptyList()
+            },
+        )
+
+        assertEquals(listOf(MessageKind.CALL, MessageKind.SELF), diagram.messages.map { it.kind })
+        assertEquals(1, diagram.activationSpans.size)
+        val span = diagram.activationSpans.single()
+        assertEquals("b", diagram.participants[span.participantIdx].id)
+        assertEquals(0, span.startMessage)
+        assertEquals(1, span.endMessage)
+        assertTrue(diagram.warnings.none { it.contains("No correlated interactions found") })
+    }
+
+    @Test
+    fun sourceActivationClosesWhenCallerProducesTheNextObservableEvent() {
+        val tab = mkTab("t1", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "invoke"),
+            LogEntry(2, "10:00:00.010", LogLevel.I, "B", "work started"),
+            LogEntry(3, "10:00:00.020", LogLevel.I, "A", "invoke complete"),
+        ))
+        val diagram = buildSequenceDiagram(
+            tab,
+            SeqDiagramSpec(
+                components = listOf(
+                    DiagramComponent("a", "A", setOf("A")),
+                    DiagramComponent("b", "B", setOf("B")),
+                ),
+                sourceEnrichment = DiagramSourceEnrichment(enabled = true),
+                options = plainOptions(),
+            ),
+            resolveSourceInteractions = { entry ->
+                if (entry.id == 1) listOf(DiagramSourceInteraction("a", "b", "B.work()")) else emptyList()
+            },
+        )
+
+        val span = diagram.activationSpans.single()
+        assertEquals(0, span.startMessage)
+        assertEquals(2, span.endMessage)
+    }
+
+    @Test
+    fun ambiguousSourceInteractionsDoNotReplaceTheFallbackSelf() {
+        val tab = mkTab("t1", "app.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "A", "invoke")))
+        val diagram = buildSequenceDiagram(
+            tab,
+            SeqDiagramSpec(
+                components = listOf(
+                    DiagramComponent("a", "A", setOf("A")),
+                    DiagramComponent("b", "B", setOf("B")),
+                    DiagramComponent("c", "C", setOf("C")),
+                ),
+                sourceEnrichment = DiagramSourceEnrichment(enabled = true),
+                options = plainOptions(),
+            ),
+            resolveSourceInteractions = {
+                listOf(
+                    DiagramSourceInteraction("a", "b", "B.work()"),
+                    DiagramSourceInteraction("a", "c", "C.work()"),
+                )
+            },
+        )
+
+        assertEquals(MessageKind.SELF, diagram.messages.first().kind)
+        assertEquals(MessageEvidence.LOG, diagram.messages.first().evidence)
+    }
+
+    @Test
+    fun consecutiveAndroidStackFramesInferCallerToCalleeEdgesAndIgnoreUnmatchedRuns() {
+        val tab = mkTab("t1", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "    at com.example.Callee.work(Callee.kt:10)"),
+            LogEntry(2, "10:00:00.010", LogLevel.E, "AndroidRuntime", "    at com.example.Caller.handle(Caller.kt:20)"),
+            LogEntry(3, "10:00:00.020", LogLevel.E, "AndroidRuntime", "not a frame"),
+            LogEntry(4, "10:00:00.030", LogLevel.E, "AndroidRuntime", "    at com.example.Other.run(Other.java:30)"),
+        ))
+        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(
+            components = listOf(
+                DiagramComponent("caller", "Caller", emptySet(), sourceOwnerTypes = setOf("com.example.Caller")),
+                DiagramComponent("callee", "Callee", emptySet(), sourceOwnerTypes = setOf("com.example.Callee")),
+                DiagramComponent("other", "Other", emptySet(), sourceOwnerTypes = setOf("com.example.Other")),
+            ),
+            options = plainOptions(),
+        ))
+
+        assertEquals(1, diagram.messages.size, "a non-frame breaks the consecutive evidence run")
+        val message = diagram.messages.single()
+        assertEquals(MessageKind.CALL, message.kind)
+        assertEquals(MessageEvidence.SOURCE_INFERRED, message.evidence)
+        assertEquals(2, message.entryId, "the caller frame owns the caller-to-callee evidence")
+        assertEquals("caller", diagram.participants[message.fromIdx].id)
+        assertEquals("callee", diagram.participants[message.toIdx].id)
+        assertTrue(message.label.contains("Callee.work(Callee.kt:10)"))
+    }
+
+    @Test
+    fun identicalAdjacentStackFramesProduceConservativeRecursiveSelfEvidence() {
+        val tab = mkTab("t1", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.E, "AndroidRuntime", "at com.example.Tree.walk(Tree.kt:10)"),
+            LogEntry(2, "10:00:00.010", LogLevel.E, "AndroidRuntime", "at com.example.Tree.walk(Tree.kt:11)"),
+        ))
+        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(
+            components = listOf(DiagramComponent(
+                "tree", "Tree", emptySet(), sourceOwnerTypes = setOf("com.example.Tree"),
+            )),
+            options = plainOptions(),
+        ))
+
+        val message = diagram.messages.single()
+        assertEquals(MessageKind.SELF, message.kind)
+        assertEquals(MessageEvidence.SOURCE_INFERRED, message.evidence)
+        assertEquals(message.fromIdx, message.toIdx)
+        assertEquals(2, message.entryId)
+    }
+
+    @Test
+    fun sourceReturnIsSuppressedWhenSelectedRangeHasLaterTerminalFailureMarker() {
+        listOf("FATAL EXCEPTION: main", "ActivityManager: ANR in com.example", "java.lang.StackOverflowError").forEach { marker ->
+            val tab = mkTab("t1", "app.log", listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "A", "invoke"),
+                LogEntry(2, "10:00:00.010", LogLevel.E, "AndroidRuntime", marker),
+            ))
+            val diagram = buildSequenceDiagram(
+                tab,
+                SeqDiagramSpec(
+                    components = listOf(
+                        DiagramComponent("a", "A", setOf("A")),
+                        DiagramComponent("b", "B", emptySet()),
+                    ),
+                    options = plainOptions(),
+                ),
+                resolveSourceInteractions = {
+                    listOf(DiagramSourceInteraction("a", "b", "B.work()", returnLabel = "String"))
+                },
+            )
+
+            assertEquals(listOf(MessageKind.CALL), diagram.messages.map { it.kind }, "marker=$marker")
+        }
+    }
+
+    @Test
+    fun sourceEnrichmentBoundsResolverWorkWhenRuntimeOutputReachesTheMessageCap() {
         val maxMessages = 12
         val tab = mkTab(
             "t1", "app.log",
@@ -708,7 +921,7 @@ class DiagramBuilderTest {
         )
 
         assertTrue(resolverCalls <= maxMessages, "source resolver must remain bounded by output capacity")
-        assertEquals(0, resolverCalls, "runtime interactions already consume the available output budget")
+        assertEquals(maxMessages, resolverCalls, "source resolution may replace fallback self events but remains bounded")
         assertTrue(diagram.truncated)
         assertTrue(diagram.warnings.any { it.contains("Source enrichment") })
     }

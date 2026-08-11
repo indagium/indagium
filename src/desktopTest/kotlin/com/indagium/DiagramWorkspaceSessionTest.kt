@@ -125,14 +125,14 @@ class DiagramWorkspaceSessionTest {
     }
 
     @Test
-    fun candidatePipelineKeepsAllFilteredViewTagsAcrossRapidRangeChanges() {
+    fun candidatePipelineFollowsTheExplicitRangeAcrossRapidChanges() {
         val state = state()
         state.seqDiagrams.begin("log", setOf(1))
         val spec = state.seqDiagrams.request!!.spec
         state.seqDiagrams.updateSpec(spec.copy(range = DiagramRange.Ids(2, 2)))
         await {
             (state.seqDiagrams.candidatePreview as? DiagramCandidateState.Computed)
-                ?.values?.map { it.tag }?.toSet() == setOf("one", "two")
+                ?.values?.map { it.tag }?.toSet() == setOf("two")
         }
         assertEquals(2, (state.seqDiagrams.request!!.spec.range as DiagramRange.Ids).from)
     }

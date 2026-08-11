@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,6 +24,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
@@ -64,8 +66,11 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.diagram.ArrowHit
+import com.indagium.diagram.DiagramCallOverride
+import com.indagium.diagram.MessageKind
 import com.indagium.diagram.DiagramRange
 import com.indagium.diagram.RenderedDiagram
+import com.indagium.diagram.displayName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -74,6 +79,13 @@ import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
 private data class CanvasZoomAnchor(val content: Offset, val pointer: Offset)
+
+private data class CallCorrectionDraft(
+    val entryId: Int,
+    val edgeOrdinal: Int,
+    val fromId: String,
+    val toId: String,
+)
 
 /**
  * Dedicated sequence-diagram editor surface.  It is intentionally not a Dialog: the log tab bar
@@ -93,7 +105,18 @@ fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
     val tab = req?.let { request -> state.tab(request.tabId) }
     val spec = req?.spec ?: offline?.spec ?: session.spec
     val readOnly = req == null || tab == null || state.seqDiagrams.libraryOpenReadOnly
+    // Source indexing is asynchronous.  A workspace can be opened before the index finishes,
+    // which previously left its preview permanently in the source-free/self-event state until
+    // the user changed an unrelated inspector option.  Rebuild when a new index snapshot is
+    // published, even when the inspector is collapsed.
+    val sourceIndexBuiltAt = state.sourceIndex?.builtAt
+    LaunchedEffect(workspaceId, sourceIndexBuiltAt) {
+        if (!readOnly && sourceIndexBuiltAt != null) {
+            state.seqDiagrams.requestPreview(tab.id, spec)
+        }
+    }
     val tc = tc()
+    var correction by remember(workspaceId) { mutableStateOf<CallCorrectionDraft?>(null) }
 
     fun requestClose() {
         state.seqDiagrams.requestCloseWorkspace(workspaceId)
@@ -103,7 +126,11 @@ fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
         Modifier.fillMaxSize().background(tc.p).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 AppText(
                     if (readOnly) "Diagram workspace · cached" else if (req.editingBlockId != null) "Diagram workspace" else "New diagram workspace",
@@ -120,16 +147,23 @@ fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
                 }
                 AppText("${rangeSummary(spec.range)} · ${spec.sourceFile ?: "current log"}", color = tc.td, fontSize = 10.sp)
             }
-            ToolbarBtn(
-                "Inspector",
-                icon = Icons.Outlined.Tune,
-                showLabel = !state.settings.toolbarIconOnlyButtons,
-                tooltip = "Toggle diagram inspector panel",
-                active = session.inspectorOpen,
-                modifier = Modifier.height(28.dp),
-            ) { state.seqDiagrams.updateInspector(open = !session.inspectorOpen) }
-            Spacer(Modifier.width(4.dp))
-            CloseButton(onClick = ::requestClose)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ToolbarBtn(
+                    "Inspector",
+                    icon = Icons.Outlined.Tune,
+                    showLabel = false,
+                    tooltip = "Toggle diagram inspector panel",
+                    active = session.inspectorOpen,
+                    // CloseButton owns a 24.dp hit box; use the same box with no vertical offset
+                    // so the two controls share one center line.
+                    modifier = Modifier.size(24.dp),
+                    contentPadding = PaddingValues(0.dp),
+                ) { state.seqDiagrams.updateInspector(open = !session.inspectorOpen) }
+                CloseButton(onClick = ::requestClose)
+            }
         }
 
         Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -145,10 +179,45 @@ fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
                 }
                 HDivider { delta -> state.seqDiagrams.updateInspector(width = session.inspectorWidth + delta) }
             }
-            DiagramPreviewPane(state, session, Modifier.weight(1f).fillMaxHeight())
+            DiagramPreviewPane(state, session, Modifier.weight(1f).fillMaxHeight()) { hit, message ->
+                val from = session.preview.diagramOrNull?.participants?.getOrNull(message.fromIdx)?.id ?: return@DiagramPreviewPane
+                val to = session.preview.diagramOrNull?.participants?.getOrNull(message.toIdx)?.id ?: return@DiagramPreviewPane
+                correction = CallCorrectionDraft(hit.entryId, message.edgeOrdinal, from, to)
+            }
         }
 
         WorkspaceFooter(state, req, readOnly)
+    }
+    if (correction != null && !readOnly) {
+        val current = correction!!
+        val previewDiagram = session.preview.diagramOrNull
+        if (previewDiagram != null) {
+            CallCorrectionDialog(
+                diagram = previewDiagram,
+                draft = current,
+                existing = spec.callOverrides.firstOrNull { it.entryId == current.entryId && it.edgeOrdinal == current.edgeOrdinal },
+                onSave = { from, to ->
+                    val override = DiagramCallOverride(current.entryId, current.edgeOrdinal, from, to)
+                    state.seqDiagrams.updateSpec(
+                        spec.copy(
+                            callOverrides = spec.callOverrides.filterNot {
+                                it.entryId == current.entryId && it.edgeOrdinal == current.edgeOrdinal
+                            } + override,
+                        ),
+                    )
+                    correction = null
+                },
+                onRemove = {
+                    state.seqDiagrams.updateSpec(
+                        spec.copy(callOverrides = spec.callOverrides.filterNot {
+                            it.entryId == current.entryId && it.edgeOrdinal == current.edgeOrdinal
+                        }),
+                    )
+                    correction = null
+                },
+                onDismiss = { correction = null },
+            )
+        }
     }
     if (state.seqDiagrams.pendingCloseWorkspaceId == workspaceId) {
         Dialog(onDismissRequest = { state.seqDiagrams.cancelWorkspaceClose() }, properties = DialogProperties(dismissOnClickOutside = false)) {
@@ -181,7 +250,7 @@ fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
 internal fun rangeSummary(range: DiagramRange): String = when (range) {
     is DiagramRange.Ids -> "Lines ${range.from}–${range.to}"
     is DiagramRange.Time -> "${range.fromTs.ifBlank { "start" }}–${range.toTs.ifBlank { "end" }}"
-    DiagramRange.VisibleView -> "Current filtered view"
+    DiagramRange.VisibleView -> "Whole log range"
     is DiagramRange.SeqGroupRef -> "Sequence group ${range.gid}"
 }
 
@@ -258,7 +327,12 @@ internal fun resolveCanvasClickHit(
 }
 
 @Composable
-private fun DiagramPreviewPane(state: AppState, session: DiagramWorkspaceSession, modifier: Modifier) {
+private fun DiagramPreviewPane(
+    state: AppState,
+    session: DiagramWorkspaceSession,
+    modifier: Modifier,
+    onCorrection: (ArrowHit, com.indagium.diagram.DiagramMessage) -> Unit,
+) {
     val tc = tc()
     val theme = tc.toDiagramTheme()
     val preview = state.seqDiagrams.preview
@@ -420,12 +494,27 @@ private fun DiagramPreviewPane(state: AppState, session: DiagramWorkspaceSession
                                                 // normal vertical/horizontal scroll modifiers run.
                                             }
 
-                                            PointerEventType.Press -> {
-                                                canvasFocusRequester.requestFocus()
-                                                downPosition = change.position
-                                                lastPosition = change.position
-                                                when {
-                                                    spaceHeld || event.buttons.isTertiaryPressed -> {
+                            PointerEventType.Press -> {
+                                canvasFocusRequester.requestFocus()
+                                downPosition = change.position
+                                lastPosition = change.position
+                                when {
+                                    event.buttons.isSecondaryPressed -> {
+                                        val hit = resolveCanvasClickHit(
+                                            rendered = rendered,
+                                            clickPositionPx = change.position,
+                                            horizontalScrollPx = horizontal.value.toFloat(),
+                                            verticalScrollPx = vertical.value.toFloat(),
+                                            zoom = zoom,
+                                            density = density,
+                                        )
+                                        val message = hit?.messageIndex?.let { diagram.messages.getOrNull(it) }
+                                        if (hit != null && message != null && message.kind != MessageKind.RETURN) onCorrection(hit, message)
+                                        event.changes.forEach { it.consume() }
+                                        pendingPan = false
+                                        panning = false
+                                    }
+                                    spaceHeld || event.buttons.isTertiaryPressed -> {
                                                         panning = true
                                                         pendingPan = false
                                                         event.changes.forEach { it.consume() }
@@ -463,7 +552,7 @@ private fun DiagramPreviewPane(state: AppState, session: DiagramWorkspaceSession
 
                                             PointerEventType.Release -> {
                                                 if (pendingPan && !panning) {
-                                                    val hit = resolveCanvasClickHit(
+                                                val hit = resolveCanvasClickHit(
                                                         rendered = rendered,
                                                         clickPositionPx = change.position,
                                                         horizontalScrollPx = horizontal.value.toFloat(),
@@ -538,6 +627,72 @@ private fun DiagramPreviewPane(state: AppState, session: DiagramWorkspaceSession
 private fun CenteredHint(text: String, color: androidx.compose.ui.graphics.Color) {
     Box(Modifier.fillMaxWidth().heightIn(min = 260.dp), contentAlignment = Alignment.Center) {
         AppText(text, color = color, fontSize = 11.sp, maxLines = 3)
+    }
+}
+
+@Composable
+private fun CallCorrectionDialog(
+    diagram: com.indagium.diagram.SeqDiagram,
+    draft: CallCorrectionDraft,
+    existing: DiagramCallOverride?,
+    onSave: (String, String) -> Unit,
+    onRemove: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val tc = tc()
+    var fromId by remember(draft) { mutableStateOf(draft.fromId) }
+    var toId by remember(draft) { mutableStateOf(draft.toId) }
+    var fromSearch by remember(draft) { mutableStateOf("") }
+    var toSearch by remember(draft) { mutableStateOf("") }
+    val participants = diagram.participants
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            Modifier.width(620.dp).background(tc.p, RoundedCornerShape(8.dp)).border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            AppText("Correct rendered call", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            AppText("Entry ${draft.entryId}, generated edge ${draft.edgeOrdinal}. Choose the exact lifelines for this edge.", color = tc.td, fontSize = 10.sp, maxLines = 2)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                CallCorrectionParticipantPicker("Begin component", fromId, fromSearch, participants, Modifier.weight(1f), { fromSearch = it }, { fromId = it })
+                CallCorrectionParticipantPicker("End component", toId, toSearch, participants, Modifier.weight(1f), { toSearch = it }, { toId = it })
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                if (existing != null) AppButton("Remove correction", onRemove, variant = ButtonVariant.Ghost)
+                AppButton("Cancel", onDismiss, variant = ButtonVariant.Ghost)
+                AppButton("Save correction", { onSave(fromId, toId) }, variant = ButtonVariant.Primary, enabled = fromId.isNotBlank() && toId.isNotBlank())
+            }
+        }
+    }
+}
+
+@Composable
+private fun CallCorrectionParticipantPicker(
+    title: String,
+    selectedId: String,
+    search: String,
+    participants: List<com.indagium.diagram.DiagramParticipant>,
+    modifier: Modifier,
+    onSearch: (String) -> Unit,
+    onSelect: (String) -> Unit,
+) {
+    val tc = tc()
+    val filtered = participants.filter {
+        search.isBlank() || it.id.contains(search.trim(), true) || it.displayName.contains(search.trim(), true)
+    }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        AppText(title, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+        InlineField(search, onSearch, "Search lifelines…", Modifier.fillMaxWidth(), fontSize = 10.sp)
+        BoundedScrollBoxDp(150) {
+            filtered.forEach { participant ->
+                AppButton(
+                    if (participant.id == selectedId) "✓ ${participant.displayName}" else participant.displayName,
+                    { onSelect(participant.id) },
+                    variant = if (participant.id == selectedId) ButtonVariant.Primary else ButtonVariant.Ghost,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+        AppText(selectedId, color = tc.td, fontSize = 9.sp, fontFamily = MONO, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
     }
 }
 

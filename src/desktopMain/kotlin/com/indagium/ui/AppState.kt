@@ -7266,6 +7266,24 @@ class AppState(
         updateSettings { it.copy(sourceFolders = (it.sourceFolders + canonical).distinct()) }
     }
 
+    /** Register a source root for authenticated automation clients without requiring the native
+     * Settings dialog. The MCP control server calls this only after authentication; indexing stays
+     * a separate explicit operation so a caller can register several roots before doing one scan. */
+    fun registerSourceFolder(path: String): Map<String, Any?> {
+        val raw = path.trim()
+        if (raw.isBlank()) return mapOf("ok" to false, "error" to "source folder path is blank")
+        val canonical = runCatching { File(raw).canonicalFile }.getOrElse {
+            return mapOf("ok" to false, "error" to (it.message ?: "source folder path is invalid"))
+        }
+        if (!canonical.isDirectory) {
+            return mapOf("ok" to false, "error" to "source folder is not a directory: ${canonical.path}")
+        }
+        val canonicalPath = canonical.path
+        val next = (settings.sourceFolders + canonicalPath).distinct()
+        updateSettings { it.copy(sourceFolders = next) }
+        return mapOf("ok" to true, "folder" to canonicalPath, "folders" to next)
+    }
+
     fun removeSourceFolder(path: String) {
         val rootAbs = canonicalSourcePath(path)
         updateSettings {
