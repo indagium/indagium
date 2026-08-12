@@ -31,6 +31,17 @@ private const val DEFAULT_MAX_AUTO_PARTICIPANTS = 8
 // idBitSet exist to avoid, so pid collection stops the moment a tag's set reaches this cap.
 private const val MAX_CANDIDATE_PIDS = 8
 
+// Bounds TagStats.threadPeers per tag (see signalScore) — a tag realistically shares a thread with
+// only a handful of others; this just stops the bonus from growing unbounded on a pathological log.
+private const val MAX_THREAD_PEER_TAGS = 5
+
+// Weight per distinct tag a tag shares a real pid+tid with — deliberately large enough to outrank
+// signalScore's own min(count, 10) ceiling (see its doc), so a tag resolveEvidenceEdge's
+// thread-handoff branch would actually draw a CALL for can't be pushed into the shared "Other"
+// lifeline purely for having modest error/template diversity. See signalScore's own doc for why
+// this bonus exists at all.
+private const val THREAD_PEER_SCORE_WEIGHT = 3
+
 /**
  * Builds a [SeqDiagram] from a range of [tab]'s entries. New specs scan the raw log by default so
  * explicit diagram selections can include rows hidden by the active filter; setting
@@ -50,8 +61,8 @@ private const val MAX_CANDIDATE_PIDS = 8
  * ## Arrow modes and the "evidence, not guessing" rule
  *
  * [ArrowMode.EVIDENCE_FLOW] (the default, `runEvidenceFlow` below) draws a cross-lifeline arrow
- * ONLY where the log itself carries actual evidence of one: a user-declared entry-point actor's
- * opening call, an opt-in same-thread (pid+tid, bounded time gap) handoff, or — for
+ * ONLY where the log itself carries actual evidence of one: a user-declared or transient
+ * entry-point actor's opening call, a same-thread (pid+tid, bounded time gap) handoff, or — for
  * [ArrowMode.RULES]' own fallthrough, which shares the same decision via `emitEvidenceMessage` —
  * nothing else. Every entry that clears neither test renders as a [MessageKind.SELF] event on its
  * own lifeline rather than a guessed CALL. This deliberately replaces the old "draw a CALL
@@ -74,20 +85,13 @@ fun buildSequenceDiagram(
     resolveTrace: ((List<LogEntry>) -> DiagramResolvedTrace)? = null,
 ): SeqDiagram {
     val warnings = mutableListOf<String>()
-    // A diagram range is an explicit data-selection surface. New specs include rows hidden by
-    // the log filter so selecting a tag never makes its rows disappear from the diagram. The
-    // option remains persisted for callers that need the legacy filtered-view behavior.
-    val allVisible = if (spec.options.includeRowsHiddenByFilter) tab.logData else visibleEntries(tab, applyFilter = true)
     val regexContext = RegexEvaluationContext()
 
-    val resolved = resolveRange(tab, spec.range, allVisible, cancellationCheck, warnings)
-    val candidateEntries = resolved.entries
-
-    val participantResolution = if (spec.components.isNotEmpty()) {
-        resolveComponentParticipants(spec, candidateEntries)
-    } else {
-        resolveTagParticipants(spec.participants, candidateEntries)
-    }
+    val range = resolveRangeAndParticipants(tab, spec, cancellationCheck, warnings)
+    val allVisible = range.allVisible
+    val resolved = range.resolved
+    val candidateEntries = range.candidateEntries
+    val participantResolution = range.participantResolution
     // Accepted manual interactions are a complete authored document.  Deliberately stop before
     // source resolution, actor mirroring, inferred overrides, and trace participant synthesis:
     // none may mutate a manual diagram behind the user's back.
@@ -100,6 +104,135 @@ fun buildSequenceDiagram(
             warnings = warnings,
         )
     }
+    val traceReg = resolveTraceAndRegistry(spec, resolveTrace, participantResolution, warnings)
+    val projectedTrace = traceReg.projectedTrace
+    val traceParticipantResolution = traceReg.traceParticipantResolution
+    val sourceTraceUsable = traceReg.sourceTraceUsable
+    val sourceTraceComplete = traceReg.sourceTraceComplete
+    val registry = traceReg.registry
+    val entryPointIdx = traceReg.entryPointIdx
+    val exitPointIdx = traceReg.exitPointIdx
+
+    val gen = RawGen()
+    // Elapsed-time labels anchor to the RANGE's own first entry, not filteredEntries' first — a
+    // tag excluded by the diagram-specific participant filter should not shift what "+0.000"
+    // means for everything that survived the filter.
+    val firstTs = candidateEntries.firstOrNull()?.ts
+
+    if (!sourceTraceUsable) {
+        runArrowModeAndCheckAllSelf(
+            spec, traceParticipantResolution.representedEntries, registry, entryPointIdx, exitPointIdx,
+            resolveLabel, firstTs, regexContext, cancellationCheck, gen, warnings,
+        )
+    }
+
+    val sourceResult = resolveLegacySourceResult(
+        spec, candidateEntries, traceParticipantResolution.representedEntries, registry,
+        resolveTrace, resolveSourceInteractions, cancellationCheck, warnings,
+    )
+    // Frames rely on entry-id order; sorting is stable, so source edges for one entry stay after
+    // that entry's runtime edge while no longer being appended after the whole range.
+    // A uniquely resolved source relationship is stronger evidence than the fallback SELF that
+    // evidence-flow emits for a line. Promote only one source CALL per entry; if the source
+    // resolver returns several candidates, keep the original SELF and leave the enrichment
+    // messages supplemental rather than choosing an arbitrary endpoint.
+    val sourceResolution = resolveDiagramSourceResult(
+        projectedTrace, sourceTraceUsable, sourceTraceComplete, traceParticipantResolution.representedEntries,
+        registry, spec, resolveLabel, firstTs, warnings, sourceResult, entryPointIdx,
+    )
+    val selectedSourceResult = sourceResolution.selectedSourceResult
+    val selectedResultWithTransientCaller = sourceResolution.withTransientCaller
+    appendTraceDiagnosticWarnings(projectedTrace, warnings)
+    val mergedMessages = when {
+        sourceTraceUsable -> selectedResultWithTransientCaller.messages
+        // A source resolver was present but could not reconstruct a compatible trace: explicit
+        // log/evidence fallback, with no one-hop overlay semantics.
+        resolveTrace != null -> gen.messages
+        else -> promoteUniqueSourceCalls(gen.messages, selectedSourceResult.messages, spec.options)
+    }
+    val postProcessed = postProcessDiagramMessages(
+        mergedMessages, spec, registry, gen.notes, traceParticipantResolution.representedEntries, warnings,
+    )
+    val rawMessages = postProcessed.rawMessages
+    val cappedMessages = postProcessed.cappedMessages
+    val truncated = postProcessed.cappingTruncated || selectedResultWithTransientCaller.truncated
+    val finalMapping = postProcessed.finalMapping
+    val notes = postProcessed.notes
+
+    val frames = buildDiagramFrames(spec, tab, allVisible, resolved, rawMessages, finalMapping, cappedMessages.size, cancellationCheck)
+    val activations = buildDiagramActivations(spec, sourceTraceUsable, projectedTrace, rawMessages, finalMapping, cappedMessages)
+
+    return reorderDiagramLifelines(SeqDiagram(
+        spec = spec,
+        participants = registry.list.toList(),
+        messages = cappedMessages,
+        frames = frames,
+        notes = notes,
+        activationSpans = activations,
+        truncated = truncated,
+        scannedEntries = candidateEntries.size,
+        coverage = traceParticipantResolution.coverage,
+        warnings = warnings,
+        resolvedTrace = projectedTrace,
+        traceMode = when {
+            sourceTraceComplete -> SourceTraceMode.SOURCE_TRACE
+            sourceTraceUsable -> SourceTraceMode.PARTIAL_SOURCE_TRACE
+            spec.sourceEnrichment.enabled -> SourceTraceMode.FALLBACK
+            else -> SourceTraceMode.DISABLED
+        },
+    ), spec.lifelineOrder)
+}
+
+// The helpers below carry buildSequenceDiagram's own range/participant resolution, trace/registry
+// resolution, arrow-mode dispatch, legacy source-result resolution, entry-point resolution,
+// source-result resolution (trace vs. legacy fallback, plus the transient-caller opening-call
+// promotion), and message post-processing pipeline (ordinals through notes) — pulled out purely to
+// keep buildSequenceDiagram's own complexity/length down; each does exactly what its inline block
+// used to, over the exact same inputs buildSequenceDiagram already resolved at that point.
+
+private class RangeAndParticipants(
+    val allVisible: List<LogEntry>,
+    val resolved: RangeResolution,
+    val candidateEntries: List<LogEntry>,
+    val participantResolution: ParticipantResolution,
+)
+
+private fun resolveRangeAndParticipants(
+    tab: LogTab,
+    spec: SeqDiagramSpec,
+    cancellationCheck: CancellationCheck,
+    warnings: MutableList<String>,
+): RangeAndParticipants {
+    // A diagram range is an explicit data-selection surface. New specs include rows hidden by
+    // the log filter so selecting a tag never makes its rows disappear from the diagram. The
+    // option remains persisted for callers that need the legacy filtered-view behavior.
+    val allVisible = if (spec.options.includeRowsHiddenByFilter) tab.logData else visibleEntries(tab, applyFilter = true)
+    val resolved = resolveRange(tab, spec.range, allVisible, cancellationCheck, warnings)
+    val candidateEntries = resolved.entries
+    val participantResolution = if (spec.components.isNotEmpty()) {
+        resolveComponentParticipants(spec, candidateEntries)
+    } else {
+        resolveTagParticipants(spec.participants, candidateEntries, cancellationCheck)
+    }
+    return RangeAndParticipants(allVisible, resolved, candidateEntries, participantResolution)
+}
+
+private class TraceRegistryResolution(
+    val projectedTrace: DiagramResolvedTrace?,
+    val traceParticipantResolution: ParticipantResolution,
+    val sourceTraceUsable: Boolean,
+    val sourceTraceComplete: Boolean,
+    val registry: ParticipantRegistry,
+    val entryPointIdx: Int?,
+    val exitPointIdx: Int?,
+)
+
+private fun resolveTraceAndRegistry(
+    spec: SeqDiagramSpec,
+    resolveTrace: ((List<LogEntry>) -> DiagramResolvedTrace)?,
+    participantResolution: ParticipantResolution,
+    warnings: MutableList<String>,
+): TraceRegistryResolution {
     val resolvedTrace = if (spec.sourceEnrichment.enabled && resolveTrace != null) {
         // Source reconstruction must see exactly the rows represented by configured lifelines.
         // An intentionally hidden/unmapped row cannot invalidate an otherwise verifiable trace.
@@ -113,7 +246,9 @@ fun buildSequenceDiagram(
     val traceParticipantResolution = addTraceParticipants(participantResolution, spec, projectedTrace)
     // A complete source trace is a separate semantic model from evidence flow.  It must not be
     // seeded with legacy log arrows and then patched with source calls afterwards.
-    val sourceTraceActive = projectedTrace != null && traceParticipantResolution.representedEntries.isNotEmpty() &&
+    val sourceTraceUsable = projectedTrace != null && projectedTrace.events.isNotEmpty() &&
+        traceParticipantResolution.representedEntries.isNotEmpty()
+    val sourceTraceComplete = sourceTraceUsable &&
         projectedTrace.events.map { it.entryId }.toSet() == traceParticipantResolution.representedEntries.map { it.id }.toSet() &&
         projectedTrace.diagnostics.diagnostics.none { diagnostic ->
             diagnostic.reason in SOURCE_TRACE_HARD_FAILURES
@@ -124,30 +259,44 @@ fun buildSequenceDiagram(
         traceParticipantResolution.tagToParticipantId,
         sourceOwnerBindings(spec, traceParticipantResolution.participants),
     )
-    val entryPointIdx = spec.participants
-        .firstOrNull { it.kind == ParticipantKind.ACTOR && it.isEntryPoint }
-        ?.let { registry.indexForId(it.id) }
+    val entryPointIdx = resolveEntryPointIdx(spec, registry, sourceTraceComplete, traceParticipantResolution.representedEntries)
     val exitPointIdx = spec.participants
         .firstOrNull { it.kind == ParticipantKind.ACTOR && it.isExitPoint }
         ?.let { registry.indexForId(it.id) }
+    return TraceRegistryResolution(
+        projectedTrace, traceParticipantResolution, sourceTraceUsable, sourceTraceComplete, registry, entryPointIdx, exitPointIdx,
+    )
+}
 
-    val gen = RawGen()
-    // Elapsed-time labels anchor to the RANGE's own first entry, not filteredEntries' first — a
-    // tag excluded by the diagram-specific participant filter should not shift what "+0.000"
-    // means for everything that survived the filter.
-    val firstTs = candidateEntries.firstOrNull()?.ts
-
-    if (!sourceTraceActive) when (spec.mode) {
+// Only ever called when !sourceTraceUsable (see the call site), so — unlike the pre-extraction
+// inline code — neither this dispatch nor the all-self warning check below needs to repeat that
+// condition themselves.
+@Suppress("LongParameterList")
+private fun runArrowModeAndCheckAllSelf(
+    spec: SeqDiagramSpec,
+    entries: List<LogEntry>,
+    registry: ParticipantRegistry,
+    entryPointIdx: Int?,
+    exitPointIdx: Int?,
+    resolveLabel: (LogEntry) -> String?,
+    firstTs: String?,
+    regexContext: RegexEvaluationContext,
+    cancellationCheck: CancellationCheck,
+    gen: RawGen,
+    warnings: MutableList<String>,
+) {
+    when (spec.mode) {
         ArrowMode.EVIDENCE_FLOW -> runEvidenceFlow(
-            traceParticipantResolution.representedEntries, registry, entryPointIdx, exitPointIdx, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
+            entries, registry, entryPointIdx, exitPointIdx, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
         )
 
         ArrowMode.RULES -> runRules(
-            traceParticipantResolution.representedEntries, registry, spec.rules, spec.options, resolveLabel, firstTs, regexContext, cancellationCheck, gen, warnings,
+            entries, registry, spec.rules, spec.options, resolveLabel,
+            firstTs, regexContext, cancellationCheck, gen, warnings,
         )
 
         ArrowMode.LINE_PER_MESSAGE -> runLinePerMessage(
-            traceParticipantResolution.representedEntries, registry, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
+            entries, registry, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
         )
     }
     // EVIDENCE_FLOW's whole point is to stop guessing arrows — but a diagram that is ENTIRELY
@@ -156,15 +305,27 @@ fun buildSequenceDiagram(
     // structure". Checked on the mode's own raw output, before source enrichment/actor mirrors
     // (which have their own, separate warnings) — this is specifically about EVIDENCE_FLOW's own
     // inference finding nothing to draw.
-    if (!sourceTraceActive && spec.mode == ArrowMode.EVIDENCE_FLOW && gen.messages.isNotEmpty() && gen.messages.none { it.fromIdx != it.toIdx }) {
+    if (spec.mode == ArrowMode.EVIDENCE_FLOW && gen.messages.isNotEmpty() && gen.messages.none { it.fromIdx != it.toIdx }) {
         warnings += "No correlated interactions found — every line is shown as an event. " +
             "Enable same-thread handoffs or add interaction rules to draw arrows."
     }
+}
 
-    // A source-enabled diagram with a trace resolver has one semantic owner. If that resolver
-    // cannot produce a compatible path, use the ordinary log/evidence fallback; do not mix its
-    // partial result with the legacy one-hop overlay. The callback-only legacy adapter remains for
-    // non-source-trace callers and existing explicit component tests.
+// A source-enabled diagram with a trace resolver has one semantic owner. If that resolver
+// cannot produce a compatible path, use the ordinary log/evidence fallback; do not mix its
+// partial result with the legacy one-hop overlay. The callback-only legacy adapter remains for
+// non-source-trace callers and existing explicit component tests.
+@Suppress("LongParameterList")
+private fun resolveLegacySourceResult(
+    spec: SeqDiagramSpec,
+    candidateEntries: List<LogEntry>,
+    representedEntries: List<LogEntry>,
+    registry: ParticipantRegistry,
+    resolveTrace: ((List<LogEntry>) -> DiagramResolvedTrace)?,
+    resolveSourceInteractions: (LogEntry) -> List<DiagramSourceInteraction>,
+    cancellationCheck: CancellationCheck,
+    warnings: MutableList<String>,
+): SourceInteractionResult {
     val sourceResult = if (spec.sourceEnrichment.enabled && resolveTrace == null) {
         // Resolve the same bounded entry window even when runtime fallbacks already fill the
         // message cap. A uniquely resolved source call can replace that entry's SELF event, so
@@ -173,7 +334,7 @@ fun buildSequenceDiagram(
         val sourceBudget = spec.options.maxMessages
         val stackInteractions = inferStackInteractions(candidateEntries, spec.components)
         buildSourceInteractions(
-        traceParticipantResolution.representedEntries, candidateEntries, stackInteractions,
+            representedEntries, candidateEntries, stackInteractions,
             registry, spec.options, spec.sourceEnrichment,
             resolveSourceInteractions, cancellationCheck, warnings, sourceBudget,
         )
@@ -186,33 +347,135 @@ fun buildSequenceDiagram(
     if (sourceResult.messages.any { it.fromIdx != it.toIdx }) {
         warnings.removeAll { it.startsWith("No correlated interactions found") }
     }
+    return sourceResult
+}
+
+private fun appendTraceDiagnosticWarnings(projectedTrace: DiagramResolvedTrace?, warnings: MutableList<String>) {
+    if (projectedTrace == null) return
+    projectedTrace.diagnostics.droppedByReason.forEach { (reason, count) ->
+        warnings += "Source trace dropped $count candidate(s): ${reason.name.lowercase()}"
+    }
+    projectedTrace.diagnostics.diagnostics.take(32).forEach { diagnostic ->
+        val entry = diagnostic.entryId?.let { " entry $it" }.orEmpty()
+        val detail = diagnostic.detail?.let { ": $it" }.orEmpty()
+        warnings += "Source trace ${diagnostic.reason.name.lowercase()}$entry$detail"
+    }
+}
+
+@Suppress("LongParameterList")
+private fun buildDiagramFrames(
+    spec: SeqDiagramSpec,
+    tab: LogTab,
+    allVisible: List<LogEntry>,
+    resolved: RangeResolution,
+    rawMessages: List<DiagramMessage>,
+    finalMapping: IntArray,
+    cappedMessageCount: Int,
+    cancellationCheck: CancellationCheck,
+): List<DiagramFrame> {
+    if (!spec.options.seqGroupFrames) return emptyList()
+    return buildFrames(tab, allVisible, resolved.startIdx, resolved.endIdxExclusive, rawMessages, finalMapping, cappedMessageCount, cancellationCheck)
+}
+
+private fun buildDiagramActivations(
+    spec: SeqDiagramSpec,
+    sourceTraceUsable: Boolean,
+    projectedTrace: DiagramResolvedTrace?,
+    rawMessages: List<DiagramMessage>,
+    finalMapping: IntArray,
+    cappedMessages: List<DiagramMessage>,
+): List<DiagramActivationSpan> {
+    if (spec.options.activationPolicy != ActivationPolicy.EVIDENCE_BACKED) return emptyList()
+    // sourceTraceUsable already implies projectedTrace != null (see resolveTraceAndRegistry); the
+    // explicit null-check here is only to satisfy the compiler, since that implication doesn't
+    // hold as a directly-inlined boolean expression once the two live in separate parameters.
+    if (sourceTraceUsable && projectedTrace != null) {
+        return buildTraceActivationSpansFromTrace(rawMessages, projectedTrace.calls, finalMapping, cappedMessages.size)
+    }
+    return buildLegacyActivationSpans(cappedMessages)
+}
+
+private fun resolveEntryPointIdx(
+    spec: SeqDiagramSpec,
+    registry: ParticipantRegistry,
+    sourceTraceComplete: Boolean,
+    representedEntries: List<LogEntry>,
+): Int? {
+    val explicitEntryPointIdx = spec.participants
+        .firstOrNull { it.kind == ParticipantKind.ACTOR && it.isEntryPoint }
+        ?.let { registry.indexForId(it.id) }
+    if (explicitEntryPointIdx != null) return explicitEntryPointIdx
+    val shouldCreateTransientCaller = spec.authoringMode == DiagramAuthoringMode.INFERRED &&
+        spec.mode == ArrowMode.EVIDENCE_FLOW &&
+        !sourceTraceComplete &&
+        representedEntries.any { registry.indexForTag(it.tag) != null }
+    return if (shouldCreateTransientCaller) registry.resolveOrCreateTransientCaller() else null
+}
+
+private class DiagramSourceResolution(val selectedSourceResult: SourceInteractionResult, val withTransientCaller: SourceInteractionResult)
+
+@Suppress("LongParameterList")
+private fun resolveDiagramSourceResult(
+    projectedTrace: DiagramResolvedTrace?,
+    sourceTraceUsable: Boolean,
+    sourceTraceComplete: Boolean,
+    representedEntries: List<LogEntry>,
+    registry: ParticipantRegistry,
+    spec: SeqDiagramSpec,
+    resolveLabel: (LogEntry) -> String?,
+    firstTs: String?,
+    warnings: MutableList<String>,
+    fallbackSourceResult: SourceInteractionResult,
+    entryPointIdx: Int?,
+): DiagramSourceResolution {
     // Frames rely on entry-id order; sorting is stable, so source edges for one entry stay after
     // that entry's runtime edge while no longer being appended after the whole range.
     // A uniquely resolved source relationship is stronger evidence than the fallback SELF that
     // evidence-flow emits for a line. Promote only one source CALL per entry; if the source
     // resolver returns several candidates, keep the original SELF and leave the enrichment
     // messages supplemental rather than choosing an arbitrary endpoint.
-    val traceResult = projectedTrace?.takeIf { sourceTraceActive }?.let {
-        buildTraceMessages(it, traceParticipantResolution.representedEntries, registry, spec.options, warnings)
+    val traceResult = projectedTrace?.takeIf { sourceTraceUsable }?.let {
+        buildTraceMessages(it, representedEntries, registry, spec.options, resolveLabel, firstTs, warnings)
     }
-    val selectedSourceResult = traceResult ?: sourceResult
-    if (projectedTrace != null) {
-        projectedTrace.diagnostics.droppedByReason.forEach { (reason, count) ->
-            warnings += "Source trace dropped $count candidate(s): ${reason.name.lowercase()}"
+    val selectedSourceResult = traceResult ?: fallbackSourceResult
+    val withTransientCaller = if (
+        !sourceTraceComplete && entryPointIdx != null && selectedSourceResult.messages.isNotEmpty()
+    ) {
+        val firstPrimary = selectedSourceResult.messages.indexOfFirst { it.primary }
+        if (firstPrimary >= 0) {
+            selectedSourceResult.copy(messages = selectedSourceResult.messages.toMutableList().also { messages ->
+                val first = messages[firstPrimary]
+                messages[firstPrimary] = first.copy(
+                    fromIdx = entryPointIdx,
+                    kind = MessageKind.CALL,
+                    evidence = MessageEvidence.LOG,
+                )
+            })
+        } else {
+            selectedSourceResult
         }
-        projectedTrace.diagnostics.diagnostics.take(32).forEach { diagnostic ->
-            val entry = diagnostic.entryId?.let { " entry $it" }.orEmpty()
-            val detail = diagnostic.detail?.let { ": $it" }.orEmpty()
-            warnings += "Source trace ${diagnostic.reason.name.lowercase()}$entry$detail"
-        }
+    } else {
+        selectedSourceResult
     }
-    val mergedMessages = when {
-        sourceTraceActive -> selectedSourceResult.messages
-        // A source resolver was present but could not reconstruct a compatible trace: explicit
-        // log/evidence fallback, with no one-hop overlay semantics.
-        resolveTrace != null -> gen.messages
-        else -> promoteUniqueSourceCalls(gen.messages, selectedSourceResult.messages, spec.options)
-    }
+    return DiagramSourceResolution(selectedSourceResult, withTransientCaller)
+}
+
+private class MessagePostProcessResult(
+    val rawMessages: List<DiagramMessage>,
+    val cappedMessages: List<DiagramMessage>,
+    val cappingTruncated: Boolean,
+    val notes: List<DiagramNoteMark>,
+    val finalMapping: IntArray,
+)
+
+private fun postProcessDiagramMessages(
+    mergedMessages: List<DiagramMessage>,
+    spec: SeqDiagramSpec,
+    registry: ParticipantRegistry,
+    pendingNotes: List<PendingNote>,
+    representedEntries: List<LogEntry>,
+    warnings: MutableList<String>,
+): MessagePostProcessResult {
     val orderedMessages = assignEdgeOrdinals(mergedMessages.sortedWith(
         compareBy<DiagramMessage> { it.entryId }
             .thenBy { if (!it.primary && it.kind == MessageKind.CALL) 0 else 1 },
@@ -237,8 +500,8 @@ fun buildSequenceDiagram(
     val structuralBudget = (spec.options.maxMessages - primaryMessages.size).coerceAtLeast(0)
     val retainedStructural = overrideResult.messages.filterNot { it.primary }.take(structuralBudget).toSet()
     val cappedMessages = overrideResult.messages.filter { it.primary || it in retainedStructural }
-    val truncated = cappedMessages.size < overrideResult.messages.size || selectedSourceResult.truncated
-    val expectedPrimaryIds = traceParticipantResolution.representedEntries.mapTo(linkedSetOf()) { it.id }
+    val cappingTruncated = cappedMessages.size < overrideResult.messages.size
+    val expectedPrimaryIds = representedEntries.mapTo(linkedSetOf()) { it.id }
     val actualPrimaryIds = cappedMessages.filter { it.primary }.flatMapTo(linkedSetOf()) { it.representedEntryIds }
     if (actualPrimaryIds != expectedPrimaryIds) {
         warnings += "Primary event invariant failed; falling back to the represented log rows."
@@ -248,44 +511,8 @@ fun buildSequenceDiagram(
             collapsed.rawToCollapsedIndex.getOrElse(filterResult.rawToFiltered[i]) { collapsed.messages.size },
         ) { overrideResult.messages.size }
     }
-    val notes = buildNotes(gen.notes, finalMapping, cappedMessages.size)
-
-    val frames = if (spec.options.seqGroupFrames) {
-        buildFrames(
-            tab, allVisible, resolved.startIdx, resolved.endIdxExclusive,
-            rawMessages, finalMapping, cappedMessages.size, cancellationCheck,
-        )
-    } else {
-        emptyList()
-    }
-    val activations = if (spec.options.activationPolicy == ActivationPolicy.EVIDENCE_BACKED) {
-        if (sourceTraceActive) {
-            buildTraceActivationSpansFromTrace(rawMessages, projectedTrace.calls, finalMapping, cappedMessages.size)
-        } else {
-            buildLegacyActivationSpans(cappedMessages)
-        }
-    } else {
-        emptyList()
-    }
-
-    return reorderDiagramLifelines(SeqDiagram(
-        spec = spec,
-        participants = registry.list.toList(),
-        messages = cappedMessages,
-        frames = frames,
-        notes = notes,
-        activationSpans = activations,
-        truncated = truncated,
-        scannedEntries = candidateEntries.size,
-        coverage = traceParticipantResolution.coverage,
-        warnings = warnings,
-        resolvedTrace = projectedTrace,
-        traceMode = when {
-            sourceTraceActive -> SourceTraceMode.SOURCE_TRACE
-            spec.sourceEnrichment.enabled -> SourceTraceMode.FALLBACK
-            else -> SourceTraceMode.DISABLED
-        },
-    ), spec.lifelineOrder)
+    val notes = buildNotes(pendingNotes, finalMapping, cappedMessages.size)
+    return MessagePostProcessResult(rawMessages, cappedMessages, cappingTruncated, notes, finalMapping)
 }
 
 private val SOURCE_TRACE_HARD_FAILURES = setOf(
@@ -429,43 +656,65 @@ private fun promoteUniqueSourceCalls(
 
     val overlaidMessages = mutableSetOf<DiagramMessage>()
     val correctedRuntime = runtimeMessages.map { runtime ->
-        val sourceEdges = sourceByEntry[runtime.entryId].orEmpty()
-        val call = promotableCalls[runtime.entryId]
-        val outcome = sourceEdges.singleOrNull { it.kind == MessageKind.RETURN }
-        val overlay = when {
-            // A source trace can contain only a selected result row.  Its inferred call is
-            // supplemental structure, while the selected row remains the primary return.
-            call != null && outcome?.traceStatus != null -> outcome
-            call != null -> call
-            outcome?.invocationId in promotableInvocationIds -> outcome
-            else -> null
-        } ?: return@map runtime
-        overlaidMessages += overlay
-        // The log row is immutable primary evidence. Source inference may improve its endpoints
-        // and provenance, but must retain its original label, entry id, timestamp and severity.
-        runtime.copy(
-            fromIdx = overlay.fromIdx,
-            toIdx = overlay.toIdx,
-            kind = when (overlay.kind) {
-                MessageKind.RETURN -> MessageKind.RETURN
-                else -> if (overlay.fromIdx == overlay.toIdx) MessageKind.SELF else MessageKind.CALL
-            },
-            evidence = overlay.evidence,
-            invocationId = overlay.invocationId,
-            traceStatus = overlay.traceStatus,
-            invocationKind = overlay.invocationKind,
-            primary = runtime.primary,
-        )
+        overlayRuntimeMessage(runtime, sourceByEntry, promotableCalls, promotableInvocationIds, overlaidMessages)
     }
-    // A tie is not supplemental evidence: emitting both candidates would draw every possible
-    // caller. Retain a return only when its matching call was uniquely resolved.
     return correctedRuntime + sourceMessages.filter { source ->
-        val isUniqueCall = promotableCalls[source.entryId] === source
-        val isOutcomeForUniqueCall = source.kind == MessageKind.RETURN &&
-            (promotableCalls.containsKey(source.entryId) ||
-                (source.invocationId != null && source.invocationId in promotableInvocationIds))
-        (isUniqueCall || isOutcomeForUniqueCall) && source !in overlaidMessages
+        isRetainableSourceMessage(source, promotableCalls, promotableInvocationIds, overlaidMessages)
     }
+}
+
+// Extracted from promoteUniqueSourceCalls's own per-runtime overlay resolution and per-source-
+// message retention check — pulled out purely to keep the caller's own complexity down; each
+// does exactly what its inline block used to.
+private fun overlayRuntimeMessage(
+    runtime: DiagramMessage,
+    sourceByEntry: Map<Int, List<DiagramMessage>>,
+    promotableCalls: Map<Int, DiagramMessage>,
+    promotableInvocationIds: Set<String>,
+    overlaidMessages: MutableSet<DiagramMessage>,
+): DiagramMessage {
+    val sourceEdges = sourceByEntry[runtime.entryId].orEmpty()
+    val call = promotableCalls[runtime.entryId]
+    val outcome = sourceEdges.singleOrNull { it.kind == MessageKind.RETURN }
+    val overlay = when {
+        // A source trace can contain only a selected result row.  Its inferred call is
+        // supplemental structure, while the selected row remains the primary return.
+        call != null && outcome?.traceStatus != null -> outcome
+        call != null -> call
+        outcome?.invocationId in promotableInvocationIds -> outcome
+        else -> null
+    } ?: return runtime
+    overlaidMessages += overlay
+    // The log row is immutable primary evidence. Source inference may improve its endpoints
+    // and provenance, but must retain its original label, entry id, timestamp and severity.
+    return runtime.copy(
+        fromIdx = overlay.fromIdx,
+        toIdx = overlay.toIdx,
+        kind = when (overlay.kind) {
+            MessageKind.RETURN -> MessageKind.RETURN
+            else -> if (overlay.fromIdx == overlay.toIdx) MessageKind.SELF else MessageKind.CALL
+        },
+        evidence = overlay.evidence,
+        invocationId = overlay.invocationId,
+        traceStatus = overlay.traceStatus,
+        invocationKind = overlay.invocationKind,
+        primary = runtime.primary,
+    )
+}
+
+// A tie is not supplemental evidence: emitting both candidates would draw every possible
+// caller. Retain a return only when its matching call was uniquely resolved.
+private fun isRetainableSourceMessage(
+    source: DiagramMessage,
+    promotableCalls: Map<Int, DiagramMessage>,
+    promotableInvocationIds: Set<String>,
+    overlaidMessages: Set<DiagramMessage>,
+): Boolean {
+    val isUniqueCall = promotableCalls[source.entryId] === source
+    val isOutcomeForUniqueCall = source.kind == MessageKind.RETURN &&
+        (promotableCalls.containsKey(source.entryId) ||
+            (source.invocationId != null && source.invocationId in promotableInvocationIds))
+    return (isUniqueCall || isOutcomeForUniqueCall) && source !in overlaidMessages
 }
 
 private fun resolveIdsRange(allVisible: List<LogEntry>, range: DiagramRange.Ids): RangeResolution {
@@ -685,11 +934,11 @@ fun diagramParticipantCandidates(
     val configured = spec.participants.filter { it.kind == ParticipantKind.TAG && it.tag != null }.associateBy { it.tag!! }
     val stats = tagStats(resolved.entries, cancellationCheck)
     val automaticallyShown = if (configured.isEmpty()) {
-        stats.counts.entries.sortedByDescending { it.value }.take(DEFAULT_MAX_AUTO_PARTICIPANTS).map { it.key }.toSet()
+        stats.counts.entries.sortedWith(tagScoreComparator(stats)).take(DEFAULT_MAX_AUTO_PARTICIPANTS).map { it.key }.toSet()
     } else {
         emptySet()
     }
-    return stats.counts.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key }).map { (tag, count) ->
+    return stats.counts.entries.sortedWith(tagScoreComparator(stats)).map { (tag, count) ->
         val participant = configured[tag]
         DiagramParticipantCandidate(
             tag = tag,
@@ -704,6 +953,7 @@ fun diagramParticipantCandidates(
                 },
             participant = participant,
             pids = stats.pids[tag]?.toSet() ?: emptySet(),
+            signalScore = stats.signalScore(tag),
         )
     }
 }
@@ -718,15 +968,33 @@ private class TagStats {
     val transitions = HashMap<String, Int>()
     val errors = HashMap<String, Int>()
     val pids = HashMap<String, MutableSet<Int>>()
+    val templates = HashMap<String, MutableSet<String>>()
+
+    // Tags observed sharing a real (non-zero) pid+tid with this tag — the exact evidence
+    // resolveEvidenceEdge's thread-handoff branch requires to draw a CALL. Without this signal, a
+    // high-volume/low-diversity tag that is genuinely part of a pid/tid call chain scores low on
+    // errors/templates alone and gets ranked into the shared "Other" lifeline; if both ends of a
+    // handoff land in "Other", fromIdx == toIdx and the CALL silently degrades into a same-lifeline
+    // SELF. See signalScore.
+    val threadPeers = HashMap<String, MutableSet<String>>()
+
+    fun signalScore(tag: String): Int =
+        4 * (errors[tag] ?: 0) + 2 * (templates[tag]?.size ?: 0) +
+            THREAD_PEER_SCORE_WEIGHT * (threadPeers[tag]?.size ?: 0) + minOf(counts[tag] ?: 0, 10)
 }
 
 private fun tagStats(entries: List<LogEntry>, cancellationCheck: CancellationCheck): TagStats {
     val stats = TagStats()
     var previous: String? = null
+    // Distinct real (pid, tid) pairs seen, each mapped to the tags observed under it. Cardinality is
+    // bounded by actual thread diversity (not entry count), so this stays cheap even at this file's
+    // documented large-range scale.
+    val tagsByThread = HashMap<Pair<Int, Int>, MutableSet<String>>()
     entries.forEachIndexed { index, entry ->
         if (index % CANCELLATION_CHECK_INTERVAL == 0) cancellationCheck()
         stats.counts[entry.tag] = (stats.counts[entry.tag] ?: 0) + 1
         if (errorLevel(entry.level)) stats.errors[entry.tag] = (stats.errors[entry.tag] ?: 0) + 1
+        stats.templates.getOrPut(entry.tag) { linkedSetOf() }.add(normalizeMessageTemplate(entry.msg))
         previous?.takeIf { it != entry.tag }?.let { prior ->
             stats.transitions[prior] = (stats.transitions[prior] ?: 0) + 1
             stats.transitions[entry.tag] = (stats.transitions[entry.tag] ?: 0) + 1
@@ -734,9 +1002,36 @@ private fun tagStats(entries: List<LogEntry>, cancellationCheck: CancellationChe
         previous = entry.tag
         val pidsForTag = stats.pids.getOrPut(entry.tag) { HashSet() }
         if (pidsForTag.size < MAX_CANDIDATE_PIDS) pidsForTag.add(entry.pid)
+        if (entry.pid != 0 && entry.tid != 0) {
+            tagsByThread.getOrPut(entry.pid to entry.tid) { HashSet() }.add(entry.tag)
+        }
+    }
+    tagsByThread.values.forEach { threadTags ->
+        if (threadTags.size < 2) return@forEach
+        threadTags.forEach { tag ->
+            val peers = stats.threadPeers.getOrPut(tag) { HashSet() }
+            if (peers.size < MAX_THREAD_PEER_TAGS) peers += (threadTags - tag).take(MAX_THREAD_PEER_TAGS - peers.size)
+        }
     }
     return stats
 }
+
+private fun tagScoreComparator(stats: TagStats): Comparator<Map.Entry<String, Int>> =
+    compareByDescending<Map.Entry<String, Int>> { stats.signalScore(it.key) }
+        .thenByDescending { it.value }
+        .thenBy { it.key }
+
+private val TEMPLATE_UUID_RE = Regex("""(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b""")
+private val TEMPLATE_HEX_RE = Regex("""(?i)\b[0-9a-f]{16,}\b""")
+private val TEMPLATE_NUMBER_RE = Regex("""\b\d+(?:\.\d+)?\b""")
+
+private fun normalizeMessageTemplate(message: String): String = message
+    .lowercase()
+    .replace(TEMPLATE_UUID_RE, "<uuid>")
+    .replace(TEMPLATE_HEX_RE, "<hex>")
+    .replace(TEMPLATE_NUMBER_RE, "<num>")
+    .replace(Regex("\\s+"), " ")
+    .trim()
 
 private fun componentCandidates(
     spec: SeqDiagramSpec,
@@ -767,6 +1062,7 @@ private fun componentCandidates(
 private fun resolveTagParticipants(
     specParticipants: List<DiagramParticipant>,
     candidateEntries: List<LogEntry>,
+    cancellationCheck: CancellationCheck,
 ): ParticipantResolution {
     val actors = specParticipants.filter { it.kind == ParticipantKind.ACTOR }
     val givenTags = specParticipants.filter { it.kind == ParticipantKind.TAG }
@@ -782,11 +1078,8 @@ private fun resolveTagParticipants(
             givenTags.none { it.tag == tag && it.representation != DiagramParticipantRepresentation.HIDE }
         }.toSet() + givenTags.filter { it.representation == DiagramParticipantRepresentation.HIDE }.mapNotNull { it.tag }
     } else {
-        val rankedTags = candidateEntries.asSequence()
-            .groupingBy { it.tag }
-            .eachCount()
-            .entries
-            .sortedByDescending { it.value }
+        val stats = tagStats(candidateEntries, cancellationCheck)
+        val rankedTags = stats.counts.entries.sortedWith(tagScoreComparator(stats))
         tagParticipants = rankedTags.take(DEFAULT_MAX_AUTO_PARTICIPANTS)
             .map { (tag, _) -> DiagramParticipant(id = tag, label = tag, kind = ParticipantKind.TAG, tag = tag) }
         groupedTags = rankedTags.drop(DEFAULT_MAX_AUTO_PARTICIPANTS).map { it.key }.toSet()
@@ -923,6 +1216,21 @@ private class ParticipantRegistry(
         idxById[key] = idx
         return idx
     }
+
+    /** Adds the inferred opening actor only to this build's registry, never to the durable spec. */
+    fun resolveOrCreateTransientCaller(): Int {
+        val id = generateSequence("Caller") { "${it}_" }.first { it !in idxById }
+        val participant = DiagramParticipant(
+            id = id,
+            label = "Caller",
+            kind = ParticipantKind.ACTOR,
+            isEntryPoint = true,
+            inferred = true,
+        )
+        list += participant
+        idxById[id] = list.lastIndex
+        return list.lastIndex
+    }
 }
 
 // ── Message generation ────────────────────────────────────────────────────────────────────────
@@ -937,7 +1245,7 @@ private class RawGen(
 )
 
 // Two thread-pool tasks reusing a recycled tid minutes or hours apart are not a call — this bounds
-// runEvidenceFlow's opt-in same-thread handoff correlation to a gap short enough that it can only
+// runEvidenceFlow's same-thread handoff correlation to a gap short enough that it can only
 // plausibly be one synchronous call chain still running on the same OS thread. Not user-tunable:
 // a caller who needs a different bound has interaction rules (ArrowMode.RULES) available instead.
 private const val THREAD_HANDOFF_MAX_GAP_MS = 250L
@@ -946,6 +1254,26 @@ private const val THREAD_HANDOFF_MAX_GAP_MS = 250L
  *  [runEvidenceFlow] and [runRulesFallthrough] so the decision can never diverge between the two
  *  callers — see this file's own header doc for the "evidence, not guessing" rule this encodes. */
 private class EvidenceEdge(val fromIdx: Int, val kind: MessageKind, val evidence: MessageEvidence)
+
+// Same-thread handoff, opt-in: a real (non-zero) pid+tid match within a short time bound is
+// actual OS-level evidence that this line is a continuation of the previous one's call chain.
+// entry.tid != 0 is non-negotiable: LogEntry.pid/tid both default to 0, so brief/RAW logcat
+// (which carries neither) would otherwise correlate an entire log into one fake thread —
+// exactly reproducing the bug this mode exists to remove. Extracted (along with the two
+// conditions below) purely to keep resolveEvidenceEdge's own complexity down.
+private fun isThreadHandoff(idx: Int, entry: LogEntry, options: DiagramOptions, prevIdx: Int?, prevEntry: LogEntry?): Boolean =
+    options.threadHandoffArrows && prevIdx != null && prevEntry != null && prevIdx != idx &&
+        entry.pid != 0 && entry.tid != 0 && prevEntry.pid != 0 && prevEntry.tid != 0 &&
+        entry.tid == prevEntry.tid && entry.pid == prevEntry.pid &&
+        deltaMillis(prevEntry.ts, entry.ts)?.let { abs(it) <= THREAD_HANDOFF_MAX_GAP_MS } == true
+
+// A token is weaker than an OS-thread handoff and is intentionally limited to the immediately
+// preceding represented row. Parsed timestamps are mandatory: a brief/RAW row must never make
+// a repeated identifier look like a causal edge.
+private fun hasSharedCorrelationToken(idx: Int, entry: LogEntry, prevIdx: Int?, prevEntry: LogEntry?): Boolean =
+    prevIdx != null && prevEntry != null && prevIdx != idx &&
+        deltaMillis(prevEntry.ts, entry.ts)?.let { abs(it) <= THREAD_HANDOFF_MAX_GAP_MS } == true &&
+        sharedCorrelationToken(prevEntry.msg, entry.msg) != null
 
 @Suppress("LongParameterList")
 private fun resolveEvidenceEdge(
@@ -960,15 +1288,10 @@ private fun resolveEvidenceEdge(
     // The entry-point actor is user-declared configuration, not inference — it is always genuine
     // evidence for exactly the one arrow that opens the diagram.
     !emittedAny && entryPointIdx != null -> EvidenceEdge(entryPointIdx, MessageKind.CALL, MessageEvidence.LOG)
-    // Same-thread handoff, opt-in: a real (non-zero) pid+tid match within a short time bound is
-    // actual OS-level evidence that this line is a continuation of the previous one's call chain.
-    // entry.tid != 0 is non-negotiable: LogEntry.pid/tid both default to 0, so brief/RAW logcat
-    // (which carries neither) would otherwise correlate an entire log into one fake thread —
-    // exactly reproducing the bug this mode exists to remove.
-    options.threadHandoffArrows && prevIdx != null && prevEntry != null && prevIdx != idx &&
-        entry.tid != 0 && entry.tid == prevEntry.tid && entry.pid == prevEntry.pid &&
-        deltaMillis(prevEntry.ts, entry.ts)?.let { abs(it) <= THREAD_HANDOFF_MAX_GAP_MS } == true ->
-        EvidenceEdge(prevIdx, MessageKind.CALL, MessageEvidence.THREAD_HANDOFF)
+    isThreadHandoff(idx, entry, options, prevIdx, prevEntry) ->
+        EvidenceEdge(prevIdx!!, MessageKind.CALL, MessageEvidence.THREAD_HANDOFF)
+    hasSharedCorrelationToken(idx, entry, prevIdx, prevEntry) ->
+        EvidenceEdge(prevIdx!!, MessageKind.CALL, MessageEvidence.CORRELATION_TOKEN)
     // No correlation found — an honest event on its own lifeline, never a guessed CALL.
     else -> EvidenceEdge(idx, MessageKind.SELF, MessageEvidence.LOG)
 }
@@ -1186,6 +1509,8 @@ private fun buildTraceMessages(
     entries: List<LogEntry>,
     registry: ParticipantRegistry,
     options: DiagramOptions,
+    resolveLabel: (LogEntry) -> String?,
+    firstTs: String?,
     warnings: MutableList<String>,
 ): SourceInteractionResult {
     val entriesById = entries.associateBy { it.id }
@@ -1197,106 +1522,139 @@ private fun buildTraceMessages(
     val callsByEntry = trace.calls.groupBy { it.callEntryId }
     val returnsByEntry = trace.calls.filter { it.returnEntryId != null }.groupBy { it.returnEntryId!! }
     val messages = ArrayList<DiagramMessage>(entries.size + trace.calls.size * 2)
-    fun addCall(call: DiagramTraceCall) {
-        val from = registry.indexForSourceOwner(call.callerOwnerType)
-        val to = registry.indexForSourceOwner(call.calleeOwnerType)
-        if (from == null) {
-            warnings += "Source trace caller '${call.callerOwnerType}' is not bound to a participant."
-            return
-        }
-        if (to == null) {
-            warnings += "Source trace callee '${call.calleeOwnerType}' is not bound to a participant."
-            return
-        }
-        val callEntry = entriesById[call.callEntryId]
-        if (callEntry == null) {
-            warnings += "Source trace call ${call.invocationId} points outside the selected range."
-            return
-        }
-        val callLabel = truncateLabel(collapseWhitespace(call.callLabel), options.labelMaxChars)
-        messages += DiagramMessage(
-            fromIdx = from,
-            toIdx = to,
-            label = callLabel,
-            entryId = callEntry.id,
-            ts = callEntry.ts,
-            level = callEntry.level,
-            kind = when {
-                from == to -> MessageKind.SELF
-                call.invocationKind in ASYNC_INVOCATION_KINDS -> MessageKind.ASYNC
-                else -> MessageKind.CALL
-            },
-            evidence = MessageEvidence.SOURCE_INFERRED,
-            invocationId = call.invocationId,
-            traceStatus = call.status,
-            invocationKind = call.invocationKind,
-            primary = false,
-            sourceOperationId = operationsByInvocation[call.invocationId]
-                ?.firstOrNull { it.kind == TraceOperationKind.SOURCE_CALL || it.kind == TraceOperationKind.ASYNC_HANDOFF }
-                ?.id,
-        )
-
-    }
-    fun addReturn(call: DiagramTraceCall) {
-        val from = registry.indexForSourceOwner(call.callerOwnerType)
-        val to = registry.indexForSourceOwner(call.calleeOwnerType)
-        val returnEntry = call.returnEntryId?.let(entriesById::get)
-        if (from != null && to != null && returnEntry != null && call.status in setOf(
-                TraceCallStatus.RETURNED,
-                TraceCallStatus.THREW,
-                TraceCallStatus.TERMINAL_FAILURE,
-            )) {
-            val outcomeEntry = returnEntry
-            val outcomeLabel = when (call.status) {
-                TraceCallStatus.THREW -> call.returnLabel ?: "throws"
-                TraceCallStatus.TERMINAL_FAILURE -> call.returnLabel ?: "failure"
-                else -> call.returnLabel ?: "return"
-            }
-            messages += DiagramMessage(
-                fromIdx = to,
-                toIdx = from,
-                label = truncateLabel(collapseWhitespace(outcomeLabel), options.labelMaxChars),
-                entryId = outcomeEntry.id,
-                ts = outcomeEntry.ts,
-                level = outcomeEntry.level,
-                kind = if (from == to) MessageKind.SELF else MessageKind.RETURN,
-                evidence = MessageEvidence.SOURCE_INFERRED,
-                invocationId = call.invocationId,
-                traceStatus = call.status,
-                invocationKind = call.invocationKind,
-                primary = false,
-                sourceOperationId = operationsByInvocation[call.invocationId]
-                    ?.firstOrNull { it.kind == TraceOperationKind.SOURCE_RETURN || it.kind == TraceOperationKind.THROW }
-                    ?.id,
-            )
-        }
-    }
     // Preserve the selected runtime order. Entry IDs are per-tab counters and are not a semantic
     // clock after merged logs or explicit selections.
     entries.forEach { entry ->
-        callsByEntry[entry.id].orEmpty().sortedBy { it.invocationId }.forEach(::addCall)
-        returnsByEntry[entry.id].orEmpty().sortedBy { it.invocationId }.forEach(::addReturn)
-        val event = eventsByEntry[entry.id]
-        val target = event?.ownerType?.let(registry::indexForSourceOwner) ?: registry.indexForTag(entry.tag)
-        if (target == null) {
-            warnings += "Source trace log ${entry.id} has no bound participant."
-        } else {
-            messages += DiagramMessage(
-                fromIdx = target,
-                toIdx = target,
-                label = truncateLabel(collapseWhitespace(entry.msg), options.labelMaxChars),
-                entryId = entry.id,
-                ts = entry.ts,
-                level = entry.level,
-                kind = MessageKind.SELF,
-                evidence = MessageEvidence.LOG,
-                primary = true,
-                sourceLogSiteId = event?.sourceLogSiteId,
-                sourceOperationId = logOperationByEntry[entry.id]?.id,
-            )
+        callsByEntry[entry.id].orEmpty().sortedBy { it.invocationId }.forEach { call ->
+            addTraceCallMessage(call, registry, options, entriesById, operationsByInvocation, warnings, messages)
         }
+        returnsByEntry[entry.id].orEmpty().sortedBy { it.invocationId }.forEach { call ->
+            addTraceReturnMessage(call, registry, options, entriesById, operationsByInvocation, messages)
+        }
+        addTraceLogMessage(entry, eventsByEntry[entry.id], registry, options, resolveLabel, firstTs, logOperationByEntry, warnings, messages)
     }
     return SourceInteractionResult(messages)
+}
+
+// The three helpers below carry buildTraceMessages' own per-call/per-return/per-log-event
+// message construction — pulled out purely to keep the caller's own complexity down; each does
+// exactly what its inline block used to.
+@Suppress("LongParameterList")
+private fun addTraceCallMessage(
+    call: DiagramTraceCall,
+    registry: ParticipantRegistry,
+    options: DiagramOptions,
+    entriesById: Map<Int, LogEntry>,
+    operationsByInvocation: Map<String?, List<DiagramTraceOperation>>,
+    warnings: MutableList<String>,
+    messages: MutableList<DiagramMessage>,
+) {
+    val from = registry.indexForSourceOwner(call.callerOwnerType)
+    val to = registry.indexForSourceOwner(call.calleeOwnerType)
+    if (from == null) {
+        warnings += "Source trace caller '${call.callerOwnerType}' is not bound to a participant."
+        return
+    }
+    if (to == null) {
+        warnings += "Source trace callee '${call.calleeOwnerType}' is not bound to a participant."
+        return
+    }
+    val callEntry = entriesById[call.callEntryId]
+    if (callEntry == null) {
+        warnings += "Source trace call ${call.invocationId} points outside the selected range."
+        return
+    }
+    val callLabel = truncateLabel(collapseWhitespace(call.callLabel), options.labelMaxChars)
+    messages += DiagramMessage(
+        fromIdx = from,
+        toIdx = to,
+        label = callLabel,
+        entryId = callEntry.id,
+        ts = callEntry.ts,
+        level = callEntry.level,
+        kind = when {
+            from == to -> MessageKind.SELF
+            call.invocationKind in ASYNC_INVOCATION_KINDS -> MessageKind.ASYNC
+            else -> MessageKind.CALL
+        },
+        evidence = MessageEvidence.SOURCE_INFERRED,
+        invocationId = call.invocationId,
+        traceStatus = call.status,
+        invocationKind = call.invocationKind,
+        primary = false,
+        sourceOperationId = operationsByInvocation[call.invocationId]
+            ?.firstOrNull { it.kind == TraceOperationKind.SOURCE_CALL || it.kind == TraceOperationKind.ASYNC_HANDOFF }
+            ?.id,
+    )
+}
+
+private fun addTraceReturnMessage(
+    call: DiagramTraceCall,
+    registry: ParticipantRegistry,
+    options: DiagramOptions,
+    entriesById: Map<Int, LogEntry>,
+    operationsByInvocation: Map<String?, List<DiagramTraceOperation>>,
+    messages: MutableList<DiagramMessage>,
+) {
+    val from = registry.indexForSourceOwner(call.callerOwnerType)
+    val to = registry.indexForSourceOwner(call.calleeOwnerType)
+    val returnEntry = call.returnEntryId?.let(entriesById::get)
+    if (from == null || to == null || returnEntry == null) return
+    if (call.status !in setOf(TraceCallStatus.RETURNED, TraceCallStatus.THREW, TraceCallStatus.TERMINAL_FAILURE)) return
+    val outcomeLabel = when (call.status) {
+        TraceCallStatus.THREW -> call.returnLabel ?: "throws"
+        TraceCallStatus.TERMINAL_FAILURE -> call.returnLabel ?: "failure"
+        else -> call.returnLabel ?: "return"
+    }
+    messages += DiagramMessage(
+        fromIdx = to,
+        toIdx = from,
+        label = truncateLabel(collapseWhitespace(outcomeLabel), options.labelMaxChars),
+        entryId = returnEntry.id,
+        ts = returnEntry.ts,
+        level = returnEntry.level,
+        kind = if (from == to) MessageKind.SELF else MessageKind.RETURN,
+        evidence = MessageEvidence.SOURCE_INFERRED,
+        invocationId = call.invocationId,
+        traceStatus = call.status,
+        invocationKind = call.invocationKind,
+        primary = false,
+        sourceOperationId = operationsByInvocation[call.invocationId]
+            ?.firstOrNull { it.kind == TraceOperationKind.SOURCE_RETURN || it.kind == TraceOperationKind.THROW }
+            ?.id,
+    )
+}
+
+@Suppress("LongParameterList")
+private fun addTraceLogMessage(
+    entry: LogEntry,
+    event: DiagramTraceEvent?,
+    registry: ParticipantRegistry,
+    options: DiagramOptions,
+    resolveLabel: (LogEntry) -> String?,
+    firstTs: String?,
+    logOperationByEntry: Map<Int, DiagramTraceOperation>,
+    warnings: MutableList<String>,
+    messages: MutableList<DiagramMessage>,
+) {
+    val target = event?.ownerType?.let(registry::indexForSourceOwner) ?: registry.indexForTag(entry.tag)
+    if (target == null) {
+        warnings += "Source trace log ${entry.id} has no bound participant."
+        return
+    }
+    messages += DiagramMessage(
+        fromIdx = target,
+        toIdx = target,
+        label = buildLabel(entry, { resolveLabel(entry) ?: event?.methodName }, options, firstTs),
+        entryId = entry.id,
+        ts = entry.ts,
+        level = entry.level,
+        kind = MessageKind.SELF,
+        evidence = MessageEvidence.LOG,
+        primary = true,
+        sourceLogSiteId = event?.sourceLogSiteId,
+        sourceOperationId = logOperationByEntry[entry.id]?.id,
+    )
 }
 
 /** Crash/watchdog markers prove that a source call did not complete in this selected window. */
@@ -1353,6 +1711,30 @@ private fun componentForSourceOwner(ownerType: String, components: List<DiagramC
     }.singleOrNull()?.id
 }
 
+// Extracted from inferStackInteractions' own flush() loop body — pulled out purely to replace two
+// `continue` statements with early returns, which detekt counts against the loop itself; behavior
+// (skip an unresolvable component, skip a same-component non-recursive pair) is unchanged.
+private fun stackInteractionForPair(
+    callerEntry: LogEntry,
+    caller: StackFrame,
+    callee: StackFrame,
+    components: List<DiagramComponent>,
+): StackInteraction? {
+    val from = componentForSourceOwner(caller.ownerType, components) ?: return null
+    val to = componentForSourceOwner(callee.ownerType, components) ?: return null
+    val recursive = caller.ownerType == callee.ownerType && caller.methodName == callee.methodName
+    if (from == to && !recursive) return null
+    return StackInteraction(
+        entryId = callerEntry.id,
+        interaction = DiagramSourceInteraction(
+            fromComponentId = from,
+            toComponentId = to,
+            label = "${callee.ownerType}.${callee.methodName}(${callee.fileName}:${callee.line})",
+            allowSelfCall = recursive,
+        ),
+    )
+}
+
 private fun inferStackInteractions(
     entries: List<LogEntry>,
     components: List<DiagramComponent>,
@@ -1365,19 +1747,7 @@ private fun inferStackInteractions(
         for (index in 0 until run.lastIndex) {
             val (calleeEntry, callee) = run[index]
             val (callerEntry, caller) = run[index + 1]
-            val from = componentForSourceOwner(caller.ownerType, components) ?: continue
-            val to = componentForSourceOwner(callee.ownerType, components) ?: continue
-            val recursive = caller.ownerType == callee.ownerType && caller.methodName == callee.methodName
-            if (from == to && !recursive) continue
-            result += StackInteraction(
-                entryId = callerEntry.id,
-                interaction = DiagramSourceInteraction(
-                    fromComponentId = from,
-                    toComponentId = to,
-                    label = "${callee.ownerType}.${callee.methodName}(${callee.fileName}:${callee.line})",
-                    allowSelfCall = recursive,
-                ),
-            )
+            stackInteractionForPair(callerEntry, caller, callee, components)?.let { result += it }
         }
         run.clear()
     }
@@ -1592,47 +1962,67 @@ private fun buildTraceActivationSpansFromTrace(
     }.distinctBy { Triple(it.participantIdx, it.startMessage, it.endMessage) }
 }
 
+private data class OpenActivationCall(val from: Int, val to: Int, val index: Int, val evidence: MessageEvidence)
+
 private fun buildLegacyActivationSpans(messages: List<DiagramMessage>): List<DiagramActivationSpan> {
-    data class OpenCall(val from: Int, val to: Int, val index: Int, val evidence: MessageEvidence)
-    val open = ArrayDeque<OpenCall>()
+    val open = ArrayDeque<OpenActivationCall>()
     val spans = mutableListOf<DiagramActivationSpan>()
-    messages.forEachIndexed { index, message ->
-        when {
-            message.invocationId == null && message.kind == MessageKind.CALL && message.fromIdx != message.toIdx && message.evidence != MessageEvidence.ACTOR_MIRROR ->
-                open.addLast(OpenCall(message.fromIdx, message.toIdx, index, message.evidence))
-            message.invocationId == null && message.kind == MessageKind.RETURN && message.evidence != MessageEvidence.ACTOR_MIRROR -> {
-                val match = open.lastOrNull {
-                    it.from == message.toIdx && it.to == message.fromIdx &&
-                        (it.evidence == message.evidence || it.evidence == MessageEvidence.MANUAL_OVERRIDE || message.evidence == MessageEvidence.MANUAL_OVERRIDE)
-                }
-                if (match != null) {
-                    while (open.isNotEmpty() && open.last() != match) open.removeLast()
-                    open.removeLast()
-                    spans += DiagramActivationSpan(match.to, match.index, index, match.evidence)
-                }
-            }
-        }
-    }
-    // A source-inferred call without a return is still an evidence-backed activation, but do not
-    // stretch it over the entire window when the caller visibly makes progress. A subsequent
-    // caller self-event or another call is the nearest observable indication that the missing
-    // return happened. If no such boundary exists, the bounded log window remains the conservative
-    // end of the activation (important for ANR and recursive-stack ranges).
-    if (messages.isNotEmpty()) {
-        open.filter { it.evidence == MessageEvidence.SOURCE_INFERRED }.forEach { call ->
-            val callerProgress = (call.index + 1 until messages.size).firstOrNull { index ->
-                val message = messages[index]
-                message.evidence != MessageEvidence.ACTOR_MIRROR &&
-                    (message.fromIdx == call.from && message.toIdx == call.from ||
-                        message.kind == MessageKind.CALL && message.fromIdx == call.from)
-            }
-            val endMessage = callerProgress ?: messages.lastIndex
-            if (endMessage > call.index) {
-                spans += DiagramActivationSpan(call.to, call.index, endMessage, call.evidence)
-            }
-        }
-    }
+    messages.forEachIndexed { index, message -> processLegacyActivationMessage(open, spans, index, message) }
+    closeUnmatchedSourceInferredActivations(open, spans, messages)
     return spans.distinctBy { Triple(it.participantIdx, it.startMessage, it.endMessage) }
+}
+
+// The two helpers below carry buildLegacyActivationSpans' own per-message matching and its
+// trailing unclosed-call handling — pulled out purely to keep the caller's own complexity down;
+// each does exactly what its inline block used to.
+private fun processLegacyActivationMessage(
+    open: ArrayDeque<OpenActivationCall>,
+    spans: MutableList<DiagramActivationSpan>,
+    index: Int,
+    message: DiagramMessage,
+) {
+    when {
+        message.invocationId == null && message.kind == MessageKind.CALL &&
+            message.fromIdx != message.toIdx && message.evidence != MessageEvidence.ACTOR_MIRROR ->
+            open.addLast(OpenActivationCall(message.fromIdx, message.toIdx, index, message.evidence))
+        message.invocationId == null && message.kind == MessageKind.RETURN && message.evidence != MessageEvidence.ACTOR_MIRROR -> {
+            val match = open.lastOrNull {
+                it.from == message.toIdx && it.to == message.fromIdx &&
+                    (it.evidence == message.evidence || it.evidence == MessageEvidence.MANUAL_OVERRIDE ||
+                        message.evidence == MessageEvidence.MANUAL_OVERRIDE)
+            }
+            if (match != null) {
+                while (open.isNotEmpty() && open.last() != match) open.removeLast()
+                open.removeLast()
+                spans += DiagramActivationSpan(match.to, match.index, index, match.evidence)
+            }
+        }
+    }
+}
+
+// A source-inferred call without a return is still an evidence-backed activation, but do not
+// stretch it over the entire window when the caller visibly makes progress. A subsequent
+// caller self-event or another call is the nearest observable indication that the missing
+// return happened. If no such boundary exists, the bounded log window remains the conservative
+// end of the activation (important for ANR and recursive-stack ranges).
+private fun closeUnmatchedSourceInferredActivations(
+    open: ArrayDeque<OpenActivationCall>,
+    spans: MutableList<DiagramActivationSpan>,
+    messages: List<DiagramMessage>,
+) {
+    if (messages.isEmpty()) return
+    open.filter { it.evidence == MessageEvidence.SOURCE_INFERRED }.forEach { call ->
+        val callerProgress = (call.index + 1 until messages.size).firstOrNull { index ->
+            val message = messages[index]
+            message.evidence != MessageEvidence.ACTOR_MIRROR &&
+                (message.fromIdx == call.from && message.toIdx == call.from ||
+                    message.kind == MessageKind.CALL && message.fromIdx == call.from)
+        }
+        val endMessage = callerProgress ?: messages.lastIndex
+        if (endMessage > call.index) {
+            spans += DiagramActivationSpan(call.to, call.index, endMessage, call.evidence)
+        }
+    }
 }
 
 // ── Label formatting ──────────────────────────────────────────────────────────────────────────

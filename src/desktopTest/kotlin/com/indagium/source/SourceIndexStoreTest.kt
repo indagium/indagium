@@ -58,6 +58,34 @@ class SourceIndexStoreTest {
     }
 
     @Test
+    fun syntheticCallbackMethodsAndCallsRoundTripThroughStore() {
+        val sourceDir = createTempDirectory("openlog-src-store-callback-src")
+        sourceDir.write(
+            "Callback.kt",
+            """
+            package demo
+
+            class Screen {
+                fun start() {
+                    api.enqueue(object : Callback<String> {
+                        override fun onResponse() { Log.d("Http", "success") }
+                        override fun onFailure() { Log.e("Http", "failure") }
+                    })
+                }
+            }
+            """.trimIndent(),
+        )
+        val index = SourceIndexer.build(listOf(sourceDir.toFile()))
+        assertTrue(index.methods.any { it.synthetic })
+        assertTrue(index.calls.any { it.candidateCalleeMethodIds.size == 1 })
+
+        val file = File(createTempDirectory("openlog-src-store-callback-out").toFile(), "source-index")
+        SourceIndexStore.save(index, file)
+
+        assertEquals(index, SourceIndexStore.load(file))
+    }
+
+    @Test
     fun loadOfMissingFileReturnsNull() {
         val dir = createTempDirectory("openlog-src-store-missing").toFile()
         val missing = File(dir, "does-not-exist")

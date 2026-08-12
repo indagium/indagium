@@ -34,8 +34,12 @@ enum class TraceOperationKind {
 enum class SourceTraceMode {
     DISABLED,
     SOURCE_TRACE,
+
     /** Reserved for a future per-lane trace projection; never fabricated from a global fallback. */
     PARTIAL_VERIFIED,
+
+    /** Verified source segments are shown; unverified selected rows remain log events. */
+    PARTIAL_SOURCE_TRACE,
     FALLBACK,
 }
 

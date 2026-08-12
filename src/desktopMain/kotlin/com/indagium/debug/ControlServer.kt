@@ -1353,7 +1353,8 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                 "maxMessages" to "Arrow cap; values are clamped to the hard maximum of 400 and truncated=true reports clipping. Defaults to 60.",
                 "collapseRepeats" to "Fold consecutive identical messages into one with a repeat count. Defaults to true.",
                 "lifelineOrder" to "Optional full ordered list of participant IDs. Unknown/stale IDs are ignored by rendering; duplicate IDs are rejected.",
-                "manualDocument" to "Manual authoring document with interactions, groups, notes, and activations. Interaction IDs are unique and endpoints must name participants.",
+                "manualDocument" to "Manual authoring document with interactions, groups, notes, and activations. " +
+                    "Interaction IDs are unique and endpoints must name participants.",
             ),
         ),
     ),

@@ -8,6 +8,7 @@ import com.indagium.diagram.DiagramParticipant
 import com.indagium.diagram.DiagramTheme
 import com.indagium.diagram.MessageEvidence
 import com.indagium.diagram.MessageKind
+import com.indagium.diagram.MessageOriginKey
 import com.indagium.diagram.ParticipantKind
 import com.indagium.diagram.SeqDiagram
 import com.indagium.diagram.SeqDiagramSpec
@@ -88,6 +89,26 @@ class DiagramRendererTest {
         assertEquals(d.messages.size, rendered.hits.size)
         assertContentEquals(d.messages.indices.toList(), rendered.hits.map { it.messageIndex })
         assertContentEquals(d.messages.map { it.entryId }, rendered.hits.map { it.entryId })
+    }
+
+    @Test
+    fun targetlessMessageGetsClickableStubHitWithStableManualIdentity() {
+        val participants = listOf(tag(0))
+        val message = DiagramMessage(
+            0, 0, "queued", 41, "10:00:00.000", LogLevel.W, MessageKind.CALL,
+            evidence = MessageEvidence.MANUAL_OVERRIDE,
+            originKeys = setOf(MessageOriginKey(41, manualInteractionId = "m-41")),
+            targetless = true, manualGroupKey = "queue",
+        )
+        val rendered = renderSequenceDiagram(
+            SeqDiagram(SeqDiagramSpec(participants = participants), participants, listOf(message)), theme,
+        )
+
+        val hit = rendered.hits.single()
+        assertTrue(hit.width > 0)
+        assertEquals("m-41", hit.manualInteractionId)
+        assertEquals("m-41", hit.interactionId)
+        assertEquals("queue", hit.groupKey)
     }
 
     @Test

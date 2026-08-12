@@ -89,7 +89,21 @@ data class DiagramTheme(
  *  render scale) — [x]/[y] is the hit-box's top-left corner, the same convention java.awt.Rectangle
  *  uses. Phase 3 hit-tests a click (converted to image pixels the same way it already loaded the
  *  bitmap) against these to jump to [entryId]. */
-data class ArrowHit(val messageIndex: Int, val entryId: Int, val x: Int, val y: Int, val width: Int, val height: Int)
+data class ArrowHit(
+    val messageIndex: Int,
+    val entryId: Int,
+    val x: Int,
+    val y: Int,
+    val width: Int,
+    val height: Int,
+    /** Stable durable identity for a manual occurrence, independent of rendered list position. */
+    val manualInteractionId: String? = null,
+    /** Stable grouped-row identity, when the message represents a repeated manual group. */
+    val groupKey: String? = null,
+) {
+    /** Alias used by workspace association code when it does not need to distinguish legacy hits. */
+    val interactionId: String? get() = manualInteractionId
+}
 
 data class RenderedDiagram(
     val image: BufferedImage,
@@ -149,6 +163,7 @@ private const val BASE_LABEL_PAD = 6f // clear space between a label's text and 
 private const val BASE_ROW_H = 42f // minimum vertical pitch of one non-SELF message row
 private const val BASE_SELF_EXTRA = 26f // minimum pitch a SELF row's loop needs, reserved AFTER its arrow y
 private const val BASE_SELF_LOOP_W = 46f // how far a SELF loop bows out from its lifeline
+private const val BASE_TARGETLESS_STUB_W = 38f // short unresolved outgoing stub, not a lifeline
 private const val BASE_MIN_SELF_LOOP_H = 10f
 
 private const val BASE_ARROWHEAD_LEN = 9f
@@ -240,6 +255,7 @@ internal class Metrics(val scale: Float) {
     val rowH = s(BASE_ROW_H)
     val selfExtra = s(BASE_SELF_EXTRA)
     val selfLoopW = s(BASE_SELF_LOOP_W)
+    val targetlessStubW = s(BASE_TARGETLESS_STUB_W)
     val hitInset = s(BASE_HIT_INSET)
     val minSelfLoopH = s(BASE_MIN_SELF_LOOP_H)
 
@@ -265,6 +281,7 @@ internal class Metrics(val scale: Float) {
     val strokeThick = sf(1.6f)
     val dashLifeline = floatArrayOf(sf(4f), sf(4f))
     val dashReturn = floatArrayOf(sf(6f), sf(4f))
+
     // A short dash makes non-blocking dispatch visually distinct from both a filled CALL and
     // the longer-dashed RETURN, while the open arrowhead below provides a second clear cue.
     val dashAsync = floatArrayOf(sf(3f), sf(3f))
@@ -445,7 +462,8 @@ private fun frameLabelText(f: DiagramFrame): String = f.label.ifBlank { "sequenc
 // DiagramEmitters.kt's own labelBase-shaped `msg.label` / repeatSuffix(count) already gets this
 // split right for dialect text, which carries no width budget; this is the same split adapted to
 // one that does.
-private fun labelBase(m: DiagramMessage): String = m.label
+private fun labelBase(m: DiagramMessage): String =
+    if (m.targetless) "${m.label} · needs target" else m.label
 
 private fun repeatSuffixText(m: DiagramMessage): String = if (m.repeatCount > 1) " ×${m.repeatCount}" else ""
 
@@ -502,6 +520,17 @@ internal fun solveColumnGaps(
     messages.forEachIndexed { i, m ->
         val measure = labelMeasures.getOrNull(i) ?: return@forEachIndexed
         if (m.fromIdx !in 0 until n || m.toIdx !in 0 until n) return@forEachIndexed
+        if (m.targetless) {
+            val c = m.fromIdx
+            val need = metrics.targetlessStubW + metrics.labelPad + measure.maxLineW
+            if (c == n - 1) {
+                lastColumnSelfExtra = max(lastColumnSelfExtra, need)
+            } else if (c in 0 until n - 1) {
+                val required = need - boxWidths[c] / 2
+                if (required > gaps[c]) gaps[c] = required
+            }
+            return@forEachIndexed
+        }
         if (m.kind == MessageKind.SELF) {
             val c = m.fromIdx
             val need = metrics.selfLoopW + metrics.labelPad + measure.maxLineW
@@ -769,15 +798,24 @@ private fun measure(diagram: SeqDiagram, scale: Float): DiagramLayout {
 // One function computing "where does this arrow actually live" so the pixels drawn and the pixels
 // reported as clickable can never disagree — see the file header's "one drawing routine" doc.
 
-private class MsgGeom(val isSelf: Boolean, val x1: Int, val x2: Int, val y: Int, val loopH: Int)
+private class MsgGeom(
+    val isSelf: Boolean,
+    val isTargetless: Boolean,
+    val x1: Int,
+    val x2: Int,
+    val y: Int,
+    val loopH: Int,
+)
 
 private fun messageGeometry(m: DiagramMessage, row: RowLayout, layout: DiagramLayout): MsgGeom? {
     val fromP = layout.participants.getOrNull(m.fromIdx) ?: return null
     val toP = layout.participants.getOrNull(m.toIdx) ?: return null
-    return if (m.kind == MessageKind.SELF) {
-        MsgGeom(true, fromP.centerX, fromP.centerX + layout.metrics.selfLoopW, row.arrowY, row.loopH)
+    return if (m.targetless) {
+        MsgGeom(false, true, fromP.centerX, fromP.centerX + layout.metrics.targetlessStubW, row.arrowY, 0)
+    } else if (m.kind == MessageKind.SELF) {
+        MsgGeom(true, false, fromP.centerX, fromP.centerX + layout.metrics.selfLoopW, row.arrowY, row.loopH)
     } else {
-        MsgGeom(false, fromP.centerX, toP.centerX, row.arrowY, 0)
+        MsgGeom(false, false, fromP.centerX, toP.centerX, row.arrowY, 0)
     }
 }
 
@@ -786,11 +824,20 @@ private fun buildHits(diagram: SeqDiagram, layout: DiagramLayout): List<ArrowHit
     return diagram.messages.mapIndexedNotNull { i, m ->
         val row = layout.rows.getOrNull(i) ?: return@mapIndexedNotNull null
         val geo = messageGeometry(m, row, layout) ?: return@mapIndexedNotNull null
-        if (geo.isSelf) {
+        if (geo.isTargetless) {
+            val width = abs(geo.x2 - geo.x1) + layout.metrics.labelPad + row.lineW
+            ArrowHit(i, m.entryId, geo.x1, geo.y - hitInset / 2, width, row.above + row.below + hitInset,
+                manualInteractionId = m.originKeys.firstNotNullOfOrNull { it.manualInteractionId },
+                groupKey = m.manualGroupKey,
+            )
+        } else if (geo.isSelf) {
             // The box now covers the loop AND its label — the label is what users actually click,
             // and row.lineW already reflects the wrapped/suffixed text this row settled on.
             val width = layout.metrics.selfLoopW + layout.metrics.labelPad + row.lineW
-            ArrowHit(i, m.entryId, geo.x1, geo.y - hitInset / 2, width, row.loopH + hitInset)
+            ArrowHit(i, m.entryId, geo.x1, geo.y - hitInset / 2, width, row.loopH + hitInset,
+                manualInteractionId = m.originKeys.firstNotNullOfOrNull { it.manualInteractionId },
+                groupKey = m.manualGroupKey,
+            )
         } else {
             // Clamped into the REAL gap between this row's neighbors (row pitch is no longer
             // uniform once labels can wrap), inset by hitInset so consecutive boxes never touch.
@@ -801,7 +848,10 @@ private fun buildHits(diagram: SeqDiagram, layout: DiagramLayout): List<ArrowHit
             val bottom = (bottomLimit - hitInset).coerceAtLeast(top + 1)
             val x = min(geo.x1, geo.x2)
             val w = abs(geo.x2 - geo.x1)
-            ArrowHit(i, m.entryId, x, top, w, bottom - top)
+            ArrowHit(i, m.entryId, x, top, w, bottom - top,
+                manualInteractionId = m.originKeys.firstNotNullOfOrNull { it.manualInteractionId },
+                groupKey = m.manualGroupKey,
+            )
         }
     }
 }
@@ -905,7 +955,33 @@ private fun paintMessage(g: Graphics2D, m: DiagramMessage, row: RowLayout, layou
     val geo = messageGeometry(m, row, layout) ?: return
     g.font = layout.labelFont
     val fm = g.fontMetrics
-    if (geo.isSelf) paintSelfMessage(g, geo, row, fm, layout, theme) else paintDirectMessage(g, m, geo, row, fm, layout, theme)
+    when {
+        geo.isSelf -> paintSelfMessage(g, geo, row, fm, layout, theme)
+        geo.isTargetless -> paintTargetlessMessage(g, geo, row, fm, layout, theme)
+        else -> paintDirectMessage(g, m, geo, row, fm, layout, theme)
+    }
+}
+
+private fun paintTargetlessMessage(
+    g: Graphics2D,
+    geo: MsgGeom,
+    row: RowLayout,
+    fm: FontMetrics,
+    layout: DiagramLayout,
+    theme: DiagramTheme,
+) {
+    val metrics = layout.metrics
+    g.color = theme.errorAccent
+    g.stroke = BasicStroke(metrics.strokeThin, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 10f, metrics.dashReturn, 0f)
+    g.drawLine(geo.x1, geo.y, geo.x2, geo.y)
+    g.drawOval(geo.x2 - metrics.arrowheadW, geo.y - metrics.arrowheadW, metrics.arrowheadW * 2, metrics.arrowheadW * 2)
+    g.font = layout.labelFont
+    g.color = theme.errorAccent
+    var lineY = geo.y - metrics.labelGapAboveLine - fm.descent
+    for (line in row.lines.asReversed()) {
+        g.drawString(line, geo.x1 + metrics.labelPad, lineY)
+        lineY -= fm.height
+    }
 }
 
 private fun paintDirectMessage(

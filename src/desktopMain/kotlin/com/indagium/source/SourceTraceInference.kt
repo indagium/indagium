@@ -14,6 +14,11 @@ import com.indagium.diagram.TraceOperationKind
 import com.indagium.model.LogEntry
 import com.indagium.utils.CancellationCheck
 
+// Floating-point equality tolerance for "is this score really the same as the best one" — scores
+// are sums of a handful of confidence/bonus terms, so anything this close is a genuine tie, not
+// float noise.
+private const val SCORE_TIE_EPSILON = 0.000_001
+
 /**
  * Source-first interprocedural trace reconstruction.
  *
@@ -61,56 +66,99 @@ class SourceTraceInferenceEngine(
             if (index % CANCELLATION_INTERVAL == 0) cancellationCheck()
             resolveAnchorCandidates(entry, overrides[entry.id], diagnostics)
         }
-        if (candidatesByEntry.any { it.isEmpty() }) return ExecutionTrace(diagnostics = diagnostics.value)
+        val events = mutableListOf<ExecutionTraceEvent>()
+        val invocations = mutableListOf<ExecutionInvocation>()
+        var cursor = 0
+        while (cursor < entries.size) {
+            if (cursor % CANCELLATION_INTERVAL == 0) cancellationCheck()
+            val firstCandidates = candidatesByEntry[cursor]
+            if (firstCandidates.isEmpty()) {
+                cursor++
+                continue
+            }
+            val initial = pruneStates(initialStates(firstCandidates))
+            if (initial.isEmpty()) {
+                cursor++
+                continue
+            }
+            val segment = searchSegmentFrom(cursor, entries, candidatesByEntry, initial, diagnostics, cancellationCheck)
+            val restartAfter = commitSegment(segment.states, cursor, segment.restartAfter, diagnostics, events, invocations)
+            // A failed middle anchor is intentionally not consumed as part of the previous
+            // segment. The next loop iteration skips it when necessary and starts a fresh search
+            // at the next viable anchor, preserving both verified prefix and suffix segments.
+            cursor = maxOf(restartAfter, cursor + 1)
+        }
+        return ExecutionTrace(events = events, invocations = invocations, diagnostics = diagnostics.value)
+    }
 
-        var states = initialStates(candidatesByEntry.first())
-        if (states.isEmpty()) return ExecutionTrace(diagnostics = diagnostics.value)
+    // The two helpers below carry reconstruct()'s own inner "extend the segment as far as
+    // possible" search loop and its "commit the best state found to events/invocations" step —
+    // pulled out purely to keep reconstruct()'s own complexity down; each does exactly what its
+    // inline block used to, over the exact same per-cursor state reconstruct() already resolved.
+    private class SegmentSearchResult(val states: List<PathState>, val restartAfter: Int)
 
-        for (index in 1 until entries.size) {
-            if (index % CANCELLATION_INTERVAL == 0) cancellationCheck()
+    private fun searchSegmentFrom(
+        cursor: Int,
+        entries: List<LogEntry>,
+        candidatesByEntry: List<List<AnchorCandidate>>,
+        initialStates: List<PathState>,
+        diagnostics: Diagnostics,
+        cancellationCheck: CancellationCheck,
+    ): SegmentSearchResult {
+        var states = initialStates
+        var segmentEnd = cursor
+        var restartAfter = segmentEnd + 1
+        var failedMiddle = false
+        var nextIndex = cursor + 1
+        while (nextIndex < entries.size && candidatesByEntry[nextIndex].isNotEmpty()) {
+            if (nextIndex % CANCELLATION_INTERVAL == 0) cancellationCheck()
             val nextStates = states.flatMap { state ->
-                candidatesByEntry[index].flatMap { candidate ->
-                    advance(state, candidate, entries[index - 1], diagnostics)
+                candidatesByEntry[nextIndex].flatMap { candidate ->
+                    advance(state, candidate, entries[nextIndex - 1], diagnostics)
                 }
             }
-            states = pruneStates(nextStates)
-            if (states.isEmpty()) {
+            val pruned = pruneStates(nextStates)
+            if (pruned.isEmpty()) {
                 diagnostics.add(
                     TraceDiagnosticReason.BRANCH_INCOMPATIBLE,
-                    entries[index].id,
-                    "no invocation-stack path reaches the selected source log",
+                    entries[nextIndex].id,
+                    "no invocation-stack path reaches the selected source log; restarting at the next viable anchor",
                 )
-                return ExecutionTrace(diagnostics = diagnostics.value)
+                restartAfter = nextIndex + 1
+                failedMiddle = true
+                break
             }
+            states = pruned
+            segmentEnd = nextIndex
+            nextIndex++
         }
+        if (!failedMiddle) restartAfter = segmentEnd + 1
+        return SegmentSearchResult(states, restartAfter)
+    }
 
-        val ranked = states.map { state ->
-            val completed = state.copyMutable()
-            completed.calls.filter {
-                it.returnEntryId == null && it.invocationKind == TraceInvocationKind.SYNCHRONOUS
-            }.forEach { it.status = TraceCallStatus.INCOMPLETE_WINDOW }
-            completed
-        }.sortedByDescending { it.score }
-        val best = ranked.first()
-        // Candidate sites are allowed to survive until the whole ordered path has been tested.
-        // Only a tie between different complete paths is ambiguous; rejecting a repeated log
-        // template before later anchors are considered throws away valid source traces.
-        val tied = ranked.drop(1).filter { kotlin.math.abs(it.score - best.score) < 0.000_001 }
-        val differentTie = tied.firstOrNull { other ->
-            other.anchors.map { it.site.id } != best.anchors.map { it.site.id }
+    private fun commitSegment(
+        states: List<PathState>,
+        cursor: Int,
+        restartAfter: Int,
+        diagnostics: Diagnostics,
+        events: MutableList<ExecutionTraceEvent>,
+        invocations: MutableList<ExecutionInvocation>,
+    ): Int {
+        val selection = bestSegmentState(states, diagnostics) ?: return restartAfter
+        val best = selection.state
+        val completed = if (selection.ambiguousAtIndex == null) {
+            best.copyMutable()
+        } else {
+            // An ambiguous anchor is not source evidence. Emit only the verified prefix;
+            // the outer loop restarts after the ambiguous row so a verified suffix can be
+            // reconstructed independently. Calls introduced by the omitted anchor are
+            // removed, while calls started in the prefix remain as incomplete windows.
+            best.prefixBefore(selection.ambiguousAtIndex)
         }
-        if (differentTie != null) {
-            val differing = best.anchors.zip(differentTie.anchors)
-                .firstOrNull { (left, right) -> left.site.id != right.site.id }?.first
-            diagnostics.add(
-                TraceDiagnosticReason.AMBIGUOUS_SOURCE_SITE,
-                differing?.entry?.id,
-                "multiple compatible source paths remain",
-            )
-            return ExecutionTrace(diagnostics = diagnostics.value)
-        }
-
-        val events = best.anchors.map { anchor ->
+        completed.calls.filter {
+            it.returnEntryId == null && it.invocationKind == TraceInvocationKind.SYNCHRONOUS
+        }.forEach { it.status = TraceCallStatus.INCOMPLETE_WINDOW }
+        events += completed.anchors.map { anchor ->
             ExecutionTraceEvent(
                 entryId = anchor.entry.id,
                 sourceLogSiteId = anchor.site.id.takeIf(String::isNotBlank),
@@ -125,11 +173,29 @@ class SourceTraceInferenceEngine(
                 confidence = anchor.match.confidence,
             )
         }
-        return ExecutionTrace(
-            events = events,
-            invocations = best.calls.map(MutableInvocation::freeze),
-            diagnostics = diagnostics.value,
-        )
+        invocations += completed.calls.map(MutableInvocation::freeze)
+        return selection.ambiguousAtIndex?.let { ambiguousIndex -> minOf(restartAfter, cursor + ambiguousIndex + 1) } ?: restartAfter
+    }
+
+    private fun bestSegmentState(states: List<PathState>, diagnostics: Diagnostics): SegmentSelection? {
+        if (states.isEmpty()) return null
+        val ranked = states.sortedByDescending { it.score }
+        val best = ranked.first()
+        val differentTie = ranked.drop(1)
+            .filter { kotlin.math.abs(it.score - best.score) < SCORE_TIE_EPSILON }
+            .firstOrNull { other -> other.anchors.map { it.site.id } != best.anchors.map { it.site.id } }
+        val ambiguousAtIndex = differentTie?.let { other ->
+            best.anchors.zip(other.anchors).indexOfFirst { (left, right) -> left.site.id != right.site.id }
+                .takeIf { it >= 0 }
+        }
+        if (ambiguousAtIndex != null) {
+            diagnostics.add(
+                TraceDiagnosticReason.AMBIGUOUS_SOURCE_SITE,
+                best.anchors.getOrNull(ambiguousAtIndex)?.entry?.id,
+                "multiple compatible source paths remain in this verified segment",
+            )
+        }
+        return SegmentSelection(best, ambiguousAtIndex)
     }
 
     private fun resolveAnchorCandidates(
@@ -186,62 +252,134 @@ class SourceTraceInferenceEngine(
     ): List<PathState> {
         val base = original.copyMutable()
         val nextLane = lane(next.entry)
-        val stack = base.stacksByLane[nextLane]
-        // A different thread has a distinct execution stack.  The source index cannot prove an
-        // arbitrary handoff from row order alone.  It may, however, render one explicitly indexed
-        // async dispatch whose target has an observed first log on this new lane.  That edge never
-        // joins either synchronous stack and therefore cannot create a blocking return/activation.
-        if (stack == null) {
-            val previousStack = base.stacksByLane[lane(previousEntry)]
-            val handoffs = previousStack?.lastOrNull()?.let { findAsyncHandoffs(it, next) }.orEmpty()
-            if (handoffs.size == 1) {
-                val call = handoffs.single()
-                val parent = previousStack?.lastOrNull()?.invocationIndex?.let { base.calls[it].invocationId }
-                base.calls += invocationFor(call, next.entry, base.calls.size, parent)
-            }
-            base.stacksByLane[nextLane] = mutableListOf(next.frame())
-            base.anchors += next
-            base.score += next.match.confidence
-            return listOf(base)
-        }
+        val stack = base.stacksByLane[nextLane] ?: return advanceAcrossLane(base, nextLane, next, previousEntry)
         val current = stack.lastOrNull() ?: return emptyList()
         val targetMethodId = next.method.id
         val continuity = continuityScore(previousEntry, next.entry, base.anchors.last())
 
         if (targetMethodId == current.methodId) {
-            val resultCall = callsProducingLog(current, next, base.calls)
-            resultCall?.let { call ->
-                val parent = current.invocationIndex?.let { base.calls[it].invocationId }
-                val invocation = invocationFor(call, previousEntry, base.calls.size, parent)
-                invocation.returnEntryId = next.entry.id
-                invocation.returnLabel = next.entry.msg
-                invocation.status = TraceCallStatus.RETURNED
-                invocation.evidence += DiagramTraceEvidence.RUNTIME_RETURN_VALUE
-                base.calls += invocation
-            }
-            stack.last().moveTo(next)
-            base.anchors += next
-            base.score += next.match.confidence + continuity
-            return listOf(base)
+            return advanceSameFrame(base, stack, current, next, previousEntry, continuity)
         }
 
         val targetInStack = stack.indexOfLast { it.methodId == targetMethodId }
         if (targetInStack >= 0) {
-            while (stack.lastIndex > targetInStack) {
-                val frame = stack.removeLast()
-                frame.invocationIndex?.let { closeInvocation(base.calls[it], next) }
-            }
-            stack.last().moveTo(next)
-            base.anchors += next
-            base.score += next.match.confidence + continuity
-            return listOf(base)
+            return advanceUnwindToFrame(base, stack, targetInStack, next, continuity)
         }
 
+        return advanceViaCallPath(original, current, next, nextLane, continuity, diagnostics)
+    }
+
+    // The four helpers below carry advance()'s own four cases (cross-lane handoff, same-frame
+    // revisit, stack unwind, call-path search) — pulled out purely to keep advance()'s own
+    // complexity down; each does exactly what its inline block used to, over the exact same
+    // (base/original, stack, next, ...) inputs advance() already resolved.
+
+    // A different thread has a distinct execution stack.  The source index cannot prove an
+    // arbitrary handoff from row order alone.  It may, however, render one explicitly indexed
+    // async dispatch whose target has an observed first log on this new lane.  That edge never
+    // joins either synchronous stack and therefore cannot create a blocking return/activation.
+    private fun advanceAcrossLane(
+        base: PathState,
+        nextLane: String,
+        next: AnchorCandidate,
+        previousEntry: LogEntry,
+    ): List<PathState> {
+        val previousStack = base.stacksByLane[lane(previousEntry)]
+        val handoffs = previousStack?.lastOrNull()?.let { findAsyncHandoffs(it, next) }.orEmpty()
+        if (handoffs.size == 1) {
+            val call = handoffs.single()
+            val parent = previousStack?.lastOrNull()?.invocationIndex?.let { base.calls[it].invocationId }
+            val invocation = invocationFor(call, next.entry, base.calls.size, parent)
+            base.calls += invocation
+            callbackCompletionStatus(next.method.name)?.let { status ->
+                invocation.returnEntryId = next.entry.id
+                invocation.returnLabel = next.entry.msg
+                invocation.status = status
+                invocation.evidence += if (status == TraceCallStatus.THREW) {
+                    DiagramTraceEvidence.EXCEPTION_MARKER
+                } else {
+                    DiagramTraceEvidence.RUNTIME_RETURN_VALUE
+                }
+            }
+            val invocationIndex = base.calls.lastIndex
+            base.stacksByLane[nextLane] = mutableListOf(next.frame().copy(invocationIndex = invocationIndex))
+        } else {
+            base.stacksByLane[nextLane] = mutableListOf(next.frame())
+        }
+        base.anchors += next
+        base.score += next.match.confidence
+        return listOf(base)
+    }
+
+    private fun advanceSameFrame(
+        base: PathState,
+        stack: MutableList<StackFrame>,
+        current: StackFrame,
+        next: AnchorCandidate,
+        previousEntry: LogEntry,
+        continuity: Double,
+    ): List<PathState> {
+        val resultCall = callsProducingLog(current, next, base.calls)
+        resultCall?.let { call ->
+            val parent = current.invocationIndex?.let { base.calls[it].invocationId }
+            val invocation = invocationFor(call, previousEntry, base.calls.size, parent)
+            invocation.returnEntryId = next.entry.id
+            invocation.returnLabel = next.entry.msg
+            invocation.status = TraceCallStatus.RETURNED
+            invocation.evidence += DiagramTraceEvidence.RUNTIME_RETURN_VALUE
+            base.calls += invocation
+        }
+        current.invocationIndex?.let { invocationIndex ->
+            callbackCompletionStatus(next.method.name)?.let { status ->
+                val invocation = base.calls.getOrNull(invocationIndex)
+                if (invocation != null && invocation.returnEntryId == null) {
+                    invocation.returnEntryId = next.entry.id
+                    invocation.returnLabel = next.entry.msg
+                    invocation.status = status
+                    invocation.evidence += if (status == TraceCallStatus.THREW) {
+                        DiagramTraceEvidence.EXCEPTION_MARKER
+                    } else {
+                        DiagramTraceEvidence.RUNTIME_RETURN_VALUE
+                    }
+                }
+            }
+        }
+        stack.last().moveTo(next)
+        base.anchors += next
+        base.score += next.match.confidence + continuity
+        return listOf(base)
+    }
+
+    private fun advanceUnwindToFrame(
+        base: PathState,
+        stack: MutableList<StackFrame>,
+        targetInStack: Int,
+        next: AnchorCandidate,
+        continuity: Double,
+    ): List<PathState> {
+        while (stack.lastIndex > targetInStack) {
+            val frame = stack.removeLast()
+            frame.invocationIndex?.let { closeInvocation(base.calls[it], next) }
+        }
+        stack.last().moveTo(next)
+        base.anchors += next
+        base.score += next.match.confidence + continuity
+        return listOf(base)
+    }
+
+    private fun advanceViaCallPath(
+        original: PathState,
+        current: StackFrame,
+        next: AnchorCandidate,
+        nextLane: String,
+        continuity: Double,
+        diagnostics: Diagnostics,
+    ): List<PathState> {
         val paths = findCallPaths(current, next)
         if (paths.isEmpty()) return emptyList()
         if (paths.size != 1) {
             diagnostics.add(
-                TraceDiagnosticReason.BRANCH_INCOMPATIBLE,
+                TraceDiagnosticReason.AMBIGUOUS_SOURCE_SITE,
                 next.entry.id,
                 "multiple source call paths reach the selected log",
             )
@@ -335,10 +473,10 @@ class SourceTraceInferenceEngine(
     private fun findAsyncHandoffs(from: StackFrame, target: AnchorCandidate): List<IndexedSourceCall> =
         callsByCaller[from.methodId].orEmpty()
             .filter { it.invocationKind != InvocationKind.SYNCHRONOUS }
-            .filter { call -> verifiedCallAfter(from.methodId, from.sourceLogSiteId, call) }
+            .filter { call -> verifiedAsyncCallAfter(from.methodId, from.sourceLogSiteId, call) }
             .filter { call ->
                 call.candidateCalleeMethodIds.singleOrNull() == target.method.id &&
-                    verifiedMethodEntryToLog(target.method.id, target.site.id)
+                    verifiedAsyncMethodEntryToLog(target.method.id, target.site.id)
             }
             .distinctBy { it.id }
 
@@ -361,11 +499,37 @@ class SourceTraceInferenceEngine(
         }
     }
 
+    /** Async registration/dispatch may be inside a branch; syntax and source order still bound it
+     * to the enclosing method, but branch successor proof is intentionally not required here. */
+    private fun verifiedAsyncCallAfter(methodId: String, fromLogSiteId: String?, call: IndexedSourceCall): Boolean {
+        if (call.callerMethodId != methodId) return false
+        val fromLine = fromLogSiteId?.let { operationByLogSiteId[it]?.sourceLine }
+        return fromLine == null || call.callLine >= fromLine
+    }
+
     private fun verifiedMethodEntryToLog(methodId: String, logSiteId: String): Boolean {
         val operations = operationsByMethod[methodId].orEmpty()
         if (operations.isEmpty()) return true
         val log = operationByLogSiteId[logSiteId]?.takeIf { it.methodId == methodId } ?: return false
         return operationPathFromMethodEntryIsStraight(methodId, log.id)
+    }
+
+    private fun verifiedAsyncMethodEntryToLog(methodId: String, logSiteId: String): Boolean {
+        if (operationsByMethod[methodId].orEmpty().isEmpty()) return true
+        val log = operationByLogSiteId[logSiteId]?.takeIf { it.methodId == methodId } ?: return false
+        val first = operationsByMethod[methodId].orEmpty().minByOrNull { it.sourceOrder } ?: return true
+        return log.sourceOrder >= first.sourceOrder
+    }
+
+    private fun callbackCompletionStatus(methodName: String): TraceCallStatus? {
+        val normalized = methodName.lowercase()
+        return when {
+            normalized.contains("onsuccess") || normalized.contains("onresult") ||
+                normalized.contains("oncomplete") || normalized.contains("onresponse") -> TraceCallStatus.RETURNED
+            normalized.contains("onerror") || normalized.contains("onfailure") ||
+                normalized.contains("onexception") -> TraceCallStatus.THREW
+            else -> null
+        }
     }
 
     private fun operationPathFromMethodEntryIsStraight(methodId: String, targetOperationId: String): Boolean {
@@ -502,7 +666,28 @@ class SourceTraceInferenceEngine(
                 append(';')
             }
         }
+
+        fun prefixBefore(anchorIndex: Int): PathState {
+            val keptEntryIds = anchors.take(anchorIndex).mapTo(hashSetOf()) { it.entry.id }
+            val prefixCalls = calls.mapNotNull { invocation ->
+                if (invocation.callEntryId !in keptEntryIds) return@mapNotNull null
+                invocation.copy(
+                    returnEntryId = invocation.returnEntryId?.takeIf(keptEntryIds::contains),
+                    status = if (invocation.returnEntryId?.let(keptEntryIds::contains) == true) invocation.status else TraceCallStatus.INCOMPLETE_WINDOW,
+                    evidence = invocation.evidence.toMutableSet(),
+                )
+            }.toMutableList()
+            return copy(
+                anchors = anchors.take(anchorIndex).toMutableList(),
+                calls = prefixCalls,
+            )
+        }
     }
+
+    private data class SegmentSelection(
+        val state: PathState,
+        val ambiguousAtIndex: Int?,
+    )
 
     private data class MutableInvocation(
         val invocationId: String,
@@ -539,6 +724,7 @@ class SourceTraceInferenceEngine(
 
     private class Diagnostics {
         var value = DiagramTraceDiagnostics(); private set
+
         fun add(reason: TraceDiagnosticReason, entryId: Int? = null, detail: String? = null) {
             value = value.plus(reason, entryId, detail)
         }

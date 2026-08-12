@@ -768,6 +768,17 @@ It is never persisted and never leaves the process.
 
 ### 8.3 Sequence-diagram workspace model
 
+The manual message queue is a view over the durable occurrence document. It groups only by the
+existing grouping key and keeps every source entry independently addressable. A nullable target is
+derived as needs-target state; it is rendered as an evidence-backed dashed stub and never creates a
+participant. The append-only authoring marker distinguishes AUTO rows from EDITED/manual rows.
+
+Queue filtering and sorting are transient workspace views and never rewrite evidence order. Guided
+target resolution uses stable group ids, declared lifelines, bounded same-thread evidence, and
+explicit confirmation. Stable manual/group hit identities connect the themed raster canvas back to
+queue rows. Regeneration builds a review model first, then updates only safe AUTO occurrences while
+preserving edited occurrences and valid structural references through the existing undo snapshot.
+
 Diagram workspaces are deliberately separate from `LogTab`. `AppState.tabs` remains the list of open
 log files; `ActiveSurface` selects either a log tab or an independent `DiagramWorkspaceSession`.
 This keeps log lifecycle, compare view, and autosave semantics from acquiring diagram-only state.
@@ -782,7 +793,7 @@ The durable diagram spec is intentionally evidence-oriented:
 | `DiagramComponent` | Stable id, display name, enabled state, and one-or-more raw `tagIds`; replaces per-tag presentation states. |
 | `DiagramActor` | External participant; may mirror a component inbound, outbound, or both while retaining the original edge. |
 | `UnmappedTagPolicy` | Global `HIDE` (default) or `GROUP_AS_OTHER` for every otherwise-unmapped in-range tag. |
-| `DiagramMessage` | Endpoint, label, originating line, kind, and `MessageEvidence` (`LOG`, `RULE`, `SOURCE_INFERRED`, or `ACTOR_MIRROR`). |
+| `DiagramMessage` | Endpoint, label, originating line, kind, and `MessageEvidence` (`LOG`, `RULE`, `SOURCE_INFERRED`, `ACTOR_MIRROR`, `THREAD_HANDOFF`, or `CORRELATION_TOKEN`). |
 | `DiagramActivationSpan` | Inclusive call/return interval carrying the evidence that justified it. |
 | `SeqDiagramSpec` | Range, components, actors, interaction mode/rules, source-enrichment and presentation options. |
 | `ManualDiagramInteraction` | Durable enabled occurrence with editable endpoints, operation data, optional group/provenance metadata, and UML visibility. |
@@ -1251,7 +1262,7 @@ Everything is a plain file under one app-data directory, resolved per OS by
 | Path | Contents | Format |
 |---|---|---|
 | `autosave.cache` | Session: tabs, filters, settings, saved filters, recents | `indagium-cache-v1`, line-oriented (a load also accepts the legacy `openLog2-cache-v1` magic) |
-| `source-index` | Indexed `Log.*`/Timber call sites, semantic methods/calls/operations, and bounded source-trace metadata | `indagium-source-index-v1`, schema v18 (a load also accepts the legacy `openLog2-source-index-v1` magic) |
+| `source-index` | Indexed `Log.*`/Timber call sites, semantic methods/calls/operations, synthetic callback methods, and bounded source-trace metadata | `indagium-source-index-v1`, schema v19 (a load also accepts the legacy `openLog2-source-index-v1` magic) |
 | `case-index` | Similarity index over past analysis notes | `indagium-case-index-v1`, schema v1 (a load also accepts the legacy `openLog2-case-index-v1` magic) |
 | `control-token` | Bearer token for the control server | 32 hex chars, plaintext |
 | `notes/` | Saved analyses: `<base>_analysis.md` + `.ann` sidecar | Markdown + token format |
@@ -1378,9 +1389,9 @@ revision. Both forms can be viewed after their source log closes. The default at
 is image, which writes the diagram PNG and its Markdown/Jira image reference; source is an explicit
 opt-in format.
 
-The source index uses schema v18. In addition to methods, log sites, and resolved call edges, it
+The source index uses schema v19. In addition to methods, log sites, and resolved call edges, it
 persists source-ordered executable operations, branch/merge successors, continuations, returns,
-throws, receiver bindings, and async dispatch metadata. A non-v18 index is never partially
+throws, receiver bindings, and async dispatch metadata. A non-v19 index is never partially
 trusted: it is rebuilt before source-trace reconstruction is offered. Test roots remain excluded from
 runtime call candidates, and runtime values remain log evidence rather than index content.
 
@@ -1397,6 +1408,22 @@ invocation enter/exit boundaries. Stable origin keys survive mirroring and repea
 bulk edits address the represented interactions rather than fragile rendered indices. Typed rule
 endpoints must bind to configured lifelines unless an actor is explicitly requested.
 
+In inferred evidence-flow diagrams, the default experience includes a transient `Caller` opening
+actor when no explicit entry actor exists and the selected rows have usable lifelines. The actor is
+build-time state only: it is excluded from the durable spec, manual seed, and carried note model.
+Same non-zero PID/TID rows within 250 ms produce `THREAD_HANDOFF` evidence; adjacent rows on
+different lifelines may also produce `CORRELATION_TOKEN` evidence only for shared high-confidence
+UUID, long-hex, or recognised request/session/trace/correlation/span identifiers with parseable
+timestamps. `labelSource=BOTH` is the default, and source-method labels fall back to the original
+message when no method resolves.
+
+Source reconstruction is segment-based. A verified prefix or suffix is retained when a middle row
+is stale, ambiguous, low-confidence, or branch-incompatible; `PARTIAL_SOURCE_TRACE` distinguishes
+that projection from a complete trace, while unresolved selected rows remain primary log events.
+Synthetic callback methods for Kotlin trailing lambdas and Java/Kotlin anonymous callback bodies are
+stored with stable IDs and async registration edges. Only async paths may cross branch operations;
+synchronous call and return proof remains straight-line and conservative.
+
 Manual authoring stores ordered interactions, optional grouping keys, source method/site provenance,
 operation visibility, lifeline order, groups, notes, and explicit activation ranges in the v4
 diagram header. New workspaces default to Manual and asynchronously seed from an inferred preview;
@@ -1408,7 +1435,8 @@ preserve the document when inference fails. It snapshots proposals once and then
 independently of the source index; proposal refresh is non-destructive. Both UI and MCP use the same manual, typed-rule,
 override, trace, and provenance model. The persisted trace status vocabulary includes
 `PARTIAL_VERIFIED` for a future mixed-lane projection; the current builder selects `SOURCE_TRACE`
-only for a complete projected trace and otherwise uses conservative log-only `FALLBACK` output.
+only for a complete projected trace, `PARTIAL_SOURCE_TRACE` for verified segments, and `FALLBACK`
+when source reconstruction is unusable.
 
 ---
 

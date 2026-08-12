@@ -99,7 +99,7 @@ object DiagramProposalService {
         availableParticipants: List<DiagramParticipant>,
     ): DiagramManualSeedProposal {
         val ids = availableParticipants.mapTo(hashSetOf()) { it.id }
-        val missing = listOf(seed.fromParticipantId, seed.toParticipantId).filter { it !in ids }.distinct()
+        val missing = listOfNotNull(seed.fromParticipantId, seed.toParticipantId).filter { it !in ids }.distinct()
         return DiagramManualSeedProposal(seed, missing, applyBlocked = !seed.enabled || missing.isNotEmpty())
     }
 
@@ -185,8 +185,9 @@ object DiagramProposalService {
         }
         is DiagramRuleEndpoint.CapturedValue -> {
             val captured = capture(match, endpoint.captureName)
-            if (captured.isBlank()) unresolved(role, "Capture '${endpoint.captureName}' is empty or absent.")
-            else {
+            if (captured.isBlank()) {
+                unresolved(role, "Capture '${endpoint.captureName}' is empty or absent.")
+            } else {
                 val ids = endpoint.bindings.filter { it.capturedValue == captured }.map { it.participantId }.distinct()
                 when (ids.size) {
                     1 -> existingParticipant(ids.single(), role, participantIds)
@@ -221,7 +222,12 @@ object DiagramProposalService {
     )
 
     private fun ambiguous(role: String, captured: String, candidateIds: List<String>, captureName: String? = null) = EndpointResolution(
-        issues = listOf(DiagramProposalIssue("", null, DiagramProposalIssueKind.AMBIGUOUS_CAPTURE, "$role endpoint '$captured' resolves to ${candidateIds.joinToString()}.", captureName, captured, candidateIds)),
+        issues = listOf(
+            DiagramProposalIssue(
+                "", null, DiagramProposalIssueKind.AMBIGUOUS_CAPTURE,
+                "$role endpoint '$captured' resolves to ${candidateIds.joinToString()}.", captureName, captured, candidateIds,
+            ),
+        ),
     )
 
     private fun capture(match: MatchResult, name: String): String =

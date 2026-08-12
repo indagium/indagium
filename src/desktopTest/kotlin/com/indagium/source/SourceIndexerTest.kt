@@ -1805,6 +1805,156 @@ class SourceIndexerTest {
             it.sourceOwnerType == "demo.CrashCallbacks" && it.targetOwnerType == "demo.DeviceManager" && it.targetMethodName == "register"
         })
     }
+
+    @Test
+    fun kotlinTrailingLambdaGetsSyntheticOwnerAndSingleAsyncRegistrationCall() {
+        val dir = createTempDirectory("openlog-src-kotlin-callback")
+        dir.write(
+            "Activity.kt",
+            """
+            package demo
+
+            class Activity {
+                fun start() {
+                    Log.d("Activity", "started")
+                    setOnClickListener {
+                        Log.d("Click", "clicked")
+                    }
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+        assertTrue(index.methods.any { it.synthetic }, "methods=${index.methods}")
+        val callback = index.methods.single { it.synthetic }
+        val click = index.sites.single { it.tag == "Click" }
+        val activity = index.sites.single { it.tag == "Activity" }
+
+        assertEquals("demo.Activity", callback.ownerType)
+        assertEquals("setOnClickListener#lambda", callback.name)
+        assertTrue(callback.startOffset < click.sourceOffset && click.sourceOffset < callback.endOffsetExclusive)
+        assertEquals(callback.id, click.methodId)
+        val registration = activity.directCalls.single { it.targetMethodId == callback.id }
+        assertEquals(InvocationKind.CALLBACK_REGISTRATION, registration.invocationKind)
+        assertEquals(listOf(callback.id), index.calls.single { it.id == registration.callSiteId }.candidateCalleeMethodIds)
+    }
+
+    @Test
+    fun kotlinAndJavaAnonymousCallbackMethodsKeepStableRolesAndAsyncTargets() {
+        val dir = createTempDirectory("openlog-src-anonymous-callback")
+        dir.write(
+            "KotlinApi.kt",
+            """
+            package demo
+
+            class Screen {
+                fun start() {
+                    api.enqueue(object : Callback<String> {
+                        override fun onResponse() { Log.d("Http", "success") }
+                        override fun onFailure() { Log.e("Http", "failure") }
+                    })
+                }
+            }
+            """.trimIndent(),
+        )
+        dir.write(
+            "JavaApi.java",
+            """
+            package demo;
+
+            class JavaScreen {
+                void start() {
+                    api.enqueue(new Callback() {
+                        public void onResponse() { Log.d("JavaHttp", "success"); }
+                        public void onFailure() { Log.e("JavaHttp", "failure"); }
+                    });
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+        val callbackMethods = index.methods.filter { it.synthetic }
+        assertEquals(4, callbackMethods.size, "methods=$callbackMethods sites=${index.sites}")
+        assertEquals(
+            setOf("enqueue#onResponse", "enqueue#onFailure"),
+            callbackMethods.filter { it.ownerType == "demo.Screen" }.map { it.name }.toSet(),
+            "callbacks=$callbackMethods",
+        )
+        assertEquals(
+            setOf("enqueue#onResponse", "enqueue#onFailure"),
+            callbackMethods.filter { it.ownerType == "demo.JavaScreen" }.map { it.name }.toSet(),
+            "callbacks=$callbackMethods",
+        )
+        assertTrue(index.sites.filter { it.tag == "Http" || it.tag == "JavaHttp" }.all { site ->
+            site.methodId in callbackMethods.map { it.id }
+        })
+        val registrations = index.calls.filter { call ->
+            call.candidateCalleeMethodIds.singleOrNull() in callbackMethods.map { it.id }
+        }
+        assertEquals(4, registrations.size)
+        assertTrue(registrations.all { it.invocationKind == InvocationKind.EXECUTOR_DISPATCH })
+        assertEquals(registrations.map { it.id }.toSet().size, registrations.size)
+    }
+
+    @Test
+    fun commonAsyncDispatchNamesAreClassifiedWithoutChangingSynchronousCalls() {
+        val dir = createTempDirectory("openlog-src-invocation-kinds")
+        dir.write(
+            "Kinds.kt",
+            """
+            package demo
+
+            class Kinds {
+                fun postDelayed() {}
+                fun launchIn() {}
+                fun launchWhenStarted() {}
+                fun subscribeOn() {}
+                fun observeForever() {}
+                fun enqueueWith() {}
+                fun registerReceiver() {}
+                fun start() {}
+                fun collect() {}
+                fun collectLatest() {}
+                fun ordinary() {}
+                fun run() {
+                    postDelayed()
+                    launchIn()
+                    launchWhenStarted()
+                    subscribeOn()
+                    observeForever()
+                    enqueueWith()
+                    registerReceiver()
+                    start()
+                    collect()
+                    collectLatest()
+                    ordinary()
+                }
+            }
+            """.trimIndent(),
+        )
+
+        val index = SourceIndexer.build(listOf(dir.toFile()))
+        val calls = index.calls
+        val methods = index.methods.associateBy { it.id }
+        val kinds = calls.mapNotNull { call -> methods[call.candidateCalleeMethodIds.singleOrNull()]?.name?.let { it to call.invocationKind } }.toMap()
+
+        assertEquals(InvocationKind.EXECUTOR_DISPATCH, kinds["postDelayed"])
+        assertEquals(InvocationKind.COROUTINE_LAUNCH, kinds["launchIn"])
+        assertEquals(InvocationKind.COROUTINE_LAUNCH, kinds["launchWhenStarted"])
+        assertEquals(InvocationKind.CALLBACK_REGISTRATION, kinds["subscribeOn"])
+        assertEquals(InvocationKind.CALLBACK_REGISTRATION, kinds["observeForever"])
+        assertEquals(InvocationKind.EXECUTOR_DISPATCH, kinds["enqueueWith"])
+        assertEquals(InvocationKind.CALLBACK_REGISTRATION, kinds["registerReceiver"])
+        // "start" is an exact-match coroutine-launch trigger (see invocationKind's own doc) — it must
+        // not regress back to SYNCHRONOUS the way it did when the surrounding names were broadened to
+        // startsWith matching.
+        assertEquals(InvocationKind.COROUTINE_LAUNCH, kinds["start"])
+        assertEquals(InvocationKind.CALLBACK_REGISTRATION, kinds["collect"])
+        assertEquals(InvocationKind.CALLBACK_REGISTRATION, kinds["collectLatest"])
+        assertEquals(InvocationKind.SYNCHRONOUS, kinds["ordinary"])
+    }
 }
 
 private fun createSymlinkOrSkip(link: Path, target: Path) {

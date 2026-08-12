@@ -422,68 +422,82 @@ private fun selectTopLevelManualRanges(dataSize: Int, ranges: List<ManualRange>)
 fun expandSelectionThroughCollapsedBlocks(tab: LogTab, selected: Set<Int>, applyFilter: Boolean = true): Set<Int> {
     if (selected.isEmpty()) return selected
 
-    var expanded: MutableSet<Int>? = null
-    fun addAll(ids: Collection<Int>) {
-        if (ids.isEmpty()) return
-        (expanded ?: LinkedHashSet(selected).also { expanded = it }).addAll(ids)
-    }
-
     // Resolved at most once, and only if a fold actually needs it. Both the manual-block and the
-    // sequence-group branch below want the visible list, so asking each of them independently
+    // sequence-group phase below want the visible list, so asking each of them independently
     // would run a second full filter pass over the whole log whenever the cache is cold and both
-    // branches match.
+    // phases match.
     var visibleMemo: List<LogEntry>? = null
+
     fun visible(): List<LogEntry> =
         visibleMemo ?: (cachedVisibleEntriesFor(tab, applyFilter) ?: visibleEntries(tab, applyFilter)).also { visibleMemo = it }
 
-    // Stack traces: same access pattern as expansionAndIndexForEntry's largeFileMode branch
-    // (ui/LogViewer.kt) — analysis.stackTraceGroups already lists each group's member ids outright.
+    // Three independent phases, in the same order as before extraction (stack traces, then manual
+    // blocks, then sequence groups) — each just contributes ids to add, so splitting them out
+    // keeps this function's own complexity low without changing what gets expanded or when
+    // visible() first gets called.
+    val toAdd = stackTraceExpansionIds(tab, selected) +
+        manualBlockExpansionIds(tab, selected, ::visible) +
+        seqGroupExpansionIds(tab, selected, applyFilter, ::visible)
+
+    return if (toAdd.isEmpty()) selected else LinkedHashSet(selected).apply { addAll(toAdd) }
+}
+
+// Stack traces: same access pattern as expansionAndIndexForEntry's largeFileMode branch
+// (ui/LogViewer.kt) — analysis.stackTraceGroups already lists each group's member ids outright.
+private fun stackTraceExpansionIds(tab: LogTab, selected: Set<Int>): List<Int> {
+    val ids = mutableListOf<Int>()
     for (g in tab.analysis.stackTraceGroups) {
-        if (g.rid in selected && g.gid !in tab.expanded) addAll(g.memberIds)
+        if (g.rid in selected && g.gid !in tab.expanded) ids += g.memberIds
     }
+    return ids
+}
 
-    // Manual collapse blocks. Gather the collapsed candidates first — cheap, no visible-entry
-    // resolution needed — and only pay for indexOfId/manualRangesFor if any actually matched. In
-    // practice the cache below is warm: the user just clicked a collapsed header, which is what ran
-    // computeItems(tab, applyFilter) in the first place.
+// Manual collapse blocks. Gather the collapsed candidates first — cheap, no visible-entry
+// resolution needed — and only pay for indexOfId/manualRangesFor if any actually matched. In
+// practice the cache below is warm: the user just clicked a collapsed header, which is what ran
+// computeItems(tab, applyFilter) in the first place.
+private fun manualBlockExpansionIds(tab: LogTab, selected: Set<Int>, visible: () -> List<LogEntry>): List<Int> {
     val collapsedManual = tab.manualBlocks.filter { it.enabled && it.anchorId in selected && it.id !in tab.expanded }
-    if (collapsedManual.isNotEmpty()) {
-        val visible = visible()
-        val ids = IntArray(visible.size) { visible[it].id }
-        fun indexOfId(id: Int): Int? = java.util.Arrays.binarySearch(ids, id).takeIf { it >= 0 }
-        manualRangesFor(collapsedManual, visible.lastIndex, ::indexOfId).forEach { mr ->
-            addAll(mr.range.map { visible[it].id })
+    if (collapsedManual.isEmpty()) return emptyList()
+    val visibleEntries = visible()
+    val ids = IntArray(visibleEntries.size) { visibleEntries[it].id }
+
+    fun indexOfId(id: Int): Int? = java.util.Arrays.binarySearch(ids, id).takeIf { it >= 0 }
+    val result = mutableListOf<Int>()
+    manualRangesFor(collapsedManual, visibleEntries.lastIndex, ::indexOfId).forEach { mr ->
+        result += mr.range.map { visibleEntries[it].id }
+    }
+    return result
+}
+
+// Sequence groups, including nested children — only when sequence folding is on at all,
+// mirroring computeItems' own gate, so a tab with sequences disabled never pays for
+// computeSeqGroups just to answer this. cachedSeqGroupsFor null means "no cheap answer right
+// now," never "no groups exist" — fall back to computing fresh, exactly as resolveSeqGroupRange
+// (diagram/SeqDiagramBuilder.kt) already does for the same cache.
+private fun seqGroupExpansionIds(tab: LogTab, selected: Set<Int>, applyFilter: Boolean, visible: () -> List<LogEntry>): List<Int> {
+    if (!tab.filter.seqOn || tab.filter.sequences.none { it.enabled }) return emptyList()
+    val groups = cachedSeqGroupsFor(tab, applyFilter) ?: computeSeqGroups(visible(), tab.filter.sequences)
+    val result = mutableListOf<Int>()
+    for (sg in groups) {
+        if (sg.rid in selected && sg.gid !in tab.expanded) {
+            // A collapsed OUTER header hides its whole subtree unconditionally — including each
+            // nested group's own header row, not just its ch — matching computeItems' own
+            // totalCh accounting (plain.size + nested.sumOf { 1 [the ng.rid row] + ch.size }).
+            // Skipping ng.rid here would leave its tag unseeded even though the row is bound to
+            // land inside the resulting id range anyway (resolveIdsRange is a continuous
+            // min..max scan) — precisely the hiddenEntries regression this function exists to fix.
+            result += sg.plain
+            sg.nested.forEach { ng -> result += listOf(ng.rid) + ng.ch }
+        }
+        for (ng in sg.nested) {
+            // The nested header ITSELF collapsed while its parent is already open: only its own
+            // ch is hidden — nested groups are a single level deep, there's nothing further to
+            // recurse into.
+            if (ng.rid in selected && ng.gid !in tab.expanded) result += ng.ch
         }
     }
-
-    // Sequence groups, including nested children — only when sequence folding is on at all,
-    // mirroring computeItems' own gate, so a tab with sequences disabled never pays for
-    // computeSeqGroups just to answer this. cachedSeqGroupsFor null means "no cheap answer right
-    // now," never "no groups exist" — fall back to computing fresh, exactly as resolveSeqGroupRange
-    // (diagram/SeqDiagramBuilder.kt) already does for the same cache.
-    if (tab.filter.seqOn && tab.filter.sequences.any { it.enabled }) {
-        val groups = cachedSeqGroupsFor(tab, applyFilter) ?: computeSeqGroups(visible(), tab.filter.sequences)
-        for (sg in groups) {
-            if (sg.rid in selected && sg.gid !in tab.expanded) {
-                // A collapsed OUTER header hides its whole subtree unconditionally — including each
-                // nested group's own header row, not just its ch — matching computeItems' own
-                // totalCh accounting (plain.size + nested.sumOf { 1 [the ng.rid row] + ch.size }).
-                // Skipping ng.rid here would leave its tag unseeded even though the row is bound to
-                // land inside the resulting id range anyway (resolveIdsRange is a continuous
-                // min..max scan) — precisely the hiddenEntries regression this function exists to fix.
-                addAll(sg.plain)
-                sg.nested.forEach { ng -> addAll(listOf(ng.rid) + ng.ch) }
-            }
-            for (ng in sg.nested) {
-                // The nested header ITSELF collapsed while its parent is already open: only its own
-                // ch is hidden — nested groups are a single level deep, there's nothing further to
-                // recurse into.
-                if (ng.rid in selected && ng.gid !in tab.expanded) addAll(ng.ch)
-            }
-        }
-    }
-
-    return expanded ?: selected
+    return result
 }
 
 // Cooperative-cancellation hook for computeItems/computeSeqGroups (P-01). Both are plain,

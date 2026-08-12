@@ -8,7 +8,7 @@ import java.security.MessageDigest
  *  changes in a way that makes a previously-persisted index stale. Task 1 doesn't persist
  *  anything yet, but later tasks compare this against a saved value to decide whether a cached
  *  index must be rebuilt rather than merely refreshed. */
-const val SOURCE_INDEX_VERSION = 18
+const val SOURCE_INDEX_VERSION = 19
 
 enum class SourceSetKind {
     PRODUCTION,
@@ -50,11 +50,14 @@ enum class InvocationKind {
     UNKNOWN,
 }
 
+// Widens a signed Byte to its unsigned Int value before hex-formatting it.
+private const val BYTE_MASK = 0xff
+
 fun sourceStableId(kind: String, filePath: String, offset: Int, discriminator: String): String {
     val digest = MessageDigest.getInstance("SHA-256").digest(
         "$kind|$filePath|$offset|$discriminator".toByteArray(Charsets.UTF_8),
     )
-    return digest.take(12).joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+    return digest.take(12).joinToString("") { (it.toInt() and BYTE_MASK).toString(16).padStart(2, '0') }
 }
 
 /** Generic message matchers are capped at 0.3, so this admits only specific tagged resolution. */
@@ -107,6 +110,8 @@ data class IndexedSourceMethod(
     val startOffset: Int,
     val endOffsetExclusive: Int,
     val sourceSet: SourceSetKind = SourceSetKind.PRODUCTION,
+    /** True for a callback body synthesized by the lightweight source indexer. */
+    val synthetic: Boolean = false,
 )
 
 data class IndexedSourceCall(

@@ -15,8 +15,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -64,14 +64,8 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.diagram.ArrowHit
-import com.indagium.diagram.DiagramCallOverride
-import com.indagium.diagram.DiagramMessageOverride
-import com.indagium.diagram.DiagramParameter
-import com.indagium.diagram.MessageOriginKey
-import com.indagium.diagram.MessageKind
 import com.indagium.diagram.DiagramRange
 import com.indagium.diagram.RenderedDiagram
-import com.indagium.diagram.displayName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -83,15 +77,6 @@ private data class CanvasZoomAnchor(val content: Offset, val pointer: Offset)
 
 // Kept private for legacy snapshot utilities below; the workspace no longer exposes inferred
 // arrow correction or origin batch-editing controls.
-private data class CallCorrectionDraft(
-    val entryId: Int,
-    val edgeOrdinal: Int,
-    val fromId: String,
-    val toId: String,
-)
-
-private fun messageOrigins(message: com.indagium.diagram.DiagramMessage): Set<MessageOriginKey> =
-    message.originKeys.ifEmpty { setOf(MessageOriginKey(message.entryId, generatedOrdinal = message.edgeOrdinal)) }
 
 /**
  * Dedicated sequence-diagram editor surface.  It is intentionally not a Dialog: the log tab bar
@@ -189,6 +174,8 @@ fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
                         preview = session.preview.diagramOrNull,
                         selectedEntryIds = emptySet(),
                         onSpec = { state.seqDiagrams.updateSpec(it) },
+                        focusedManualInteractionId = session.focusedManualInteractionId,
+                        onFocusManualInteraction = { state.seqDiagrams.focusManualInteraction(it) },
                     )
                     else OfflineInspector(spec)
                 }
@@ -473,17 +460,17 @@ private fun DiagramPreviewPane(
                                                 // normal vertical/horizontal scroll modifiers run.
                                             }
 
-                            PointerEventType.Press -> {
-                                canvasFocusRequester.requestFocus()
-                                downPosition = change.position
-                                lastPosition = change.position
-                                when {
-                                    event.buttons.isSecondaryPressed -> {
-                                        event.changes.forEach { it.consume() }
-                                        pendingPan = false
-                                        panning = false
-                                    }
-                                    spaceHeld || event.buttons.isTertiaryPressed -> {
+                                            PointerEventType.Press -> {
+                                                canvasFocusRequester.requestFocus()
+                                                downPosition = change.position
+                                                lastPosition = change.position
+                                                when {
+                                                    event.buttons.isSecondaryPressed -> {
+                                                        event.changes.forEach { it.consume() }
+                                                        pendingPan = false
+                                                        panning = false
+                                                    }
+                                                    spaceHeld || event.buttons.isTertiaryPressed -> {
                                                         panning = true
                                                         pendingPan = false
                                                         event.changes.forEach { it.consume() }
@@ -521,7 +508,7 @@ private fun DiagramPreviewPane(
 
                                             PointerEventType.Release -> {
                                                 if (pendingPan && !panning) {
-                                                val hit = resolveCanvasClickHit(
+                                                    val hit = resolveCanvasClickHit(
                                                         rendered = rendered,
                                                         clickPositionPx = change.position,
                                                         horizontalScrollPx = horizontal.value.toFloat(),
@@ -534,6 +521,9 @@ private fun DiagramPreviewPane(
                                                     // an offline/library workspace or one whose log
                                                     // was closed — navigateToLogLine no-ops safely on
                                                     // a missing tab either way, so this never crashes.
+                                                    if (hit != null) {
+                                                        hit.manualInteractionId?.let { state.seqDiagrams.focusManualInteraction(it) }
+                                                    }
                                                     if (hit != null && hit.entryId > 0) {
                                                         session.sourceTabId?.let { tabId -> state.navigateToLogLine(tabId, hit.entryId) }
                                                     }
@@ -572,7 +562,8 @@ private fun DiagramPreviewPane(
                 val traceDiagnostics = diagram.resolvedTrace?.diagnostics
                 Column(Modifier.padding(6.dp)) {
                     AppText(
-                        "${diagram.traceMode.name.lowercase().replace('_', ' ')} · ${diagram.messages.size} shown / ${diagram.scannedEntries} scanned · ${diagram.participants.size} lifelines" +
+                        "${diagram.traceMode.name.lowercase().replace('_', ' ')} · ${diagram.messages.size} shown / " +
+                            "${diagram.scannedEntries} scanned · ${diagram.participants.size} lifelines" +
                             diagram.coverage.let { coverage ->
                                 buildString {
                                     if (coverage.groupedEntries > 0) append(" · ${coverage.groupedEntries} grouped")
@@ -584,7 +575,8 @@ private fun DiagramPreviewPane(
                     )
                     if (diagram.resolvedTrace != null) {
                         AppText(
-                            "Source mappings: ${diagram.resolvedTrace.events.size} logs · ${diagram.resolvedTrace.calls.size} invocations · ${diagram.resolvedTrace.operations.size} operations",
+                            "Source mappings: ${diagram.resolvedTrace.events.size} logs · " +
+                                "${diagram.resolvedTrace.calls.size} invocations · ${diagram.resolvedTrace.operations.size} operations",
                             color = tc.td,
                             fontSize = 10.sp,
                             maxLines = 1,
@@ -637,159 +629,6 @@ private fun CenteredHint(text: String, color: androidx.compose.ui.graphics.Color
     Box(Modifier.fillMaxWidth().heightIn(min = 260.dp), contentAlignment = Alignment.Center) {
         AppText(text, color = color, fontSize = 11.sp, maxLines = 3)
     }
-}
-
-@Composable
-private fun CallCorrectionDialog(
-    diagram: com.indagium.diagram.SeqDiagram,
-    draft: CallCorrectionDraft,
-    existing: DiagramCallOverride?,
-    onSave: (String, String) -> Unit,
-    onRemove: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val tc = tc()
-    var fromId by remember(draft) { mutableStateOf(draft.fromId) }
-    var toId by remember(draft) { mutableStateOf(draft.toId) }
-    var fromSearch by remember(draft) { mutableStateOf("") }
-    var toSearch by remember(draft) { mutableStateOf("") }
-    val participants = diagram.participants
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(
-            Modifier.width(620.dp).background(tc.p, RoundedCornerShape(8.dp)).border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            AppText("Correct rendered call", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            AppText("Entry ${draft.entryId}, generated edge ${draft.edgeOrdinal}. Choose the exact lifelines for this edge.", color = tc.td, fontSize = 10.sp, maxLines = 2)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                CallCorrectionParticipantPicker("Begin component", fromId, fromSearch, participants, Modifier.weight(1f), { fromSearch = it }, { fromId = it })
-                CallCorrectionParticipantPicker("End component", toId, toSearch, participants, Modifier.weight(1f), { toSearch = it }, { toId = it })
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                if (existing != null) AppButton("Remove correction", onRemove, variant = ButtonVariant.Ghost)
-                AppButton("Cancel", onDismiss, variant = ButtonVariant.Ghost)
-                AppButton("Save correction", { onSave(fromId, toId) }, variant = ButtonVariant.Primary, enabled = fromId.isNotBlank() && toId.isNotBlank())
-            }
-        }
-    }
-}
-
-@Composable
-private fun CallCorrectionParticipantPicker(
-    title: String,
-    selectedId: String,
-    search: String,
-    participants: List<com.indagium.diagram.DiagramParticipant>,
-    modifier: Modifier,
-    onSearch: (String) -> Unit,
-    onSelect: (String) -> Unit,
-) {
-    val tc = tc()
-    val filtered = participants.filter {
-        search.isBlank() || it.id.contains(search.trim(), true) || it.displayName.contains(search.trim(), true)
-    }
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        AppText(title, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-        InlineField(search, onSearch, "Search lifelines…", Modifier.fillMaxWidth(), fontSize = 10.sp)
-        BoundedScrollBoxDp(150) {
-            filtered.forEach { participant ->
-                AppButton(
-                    if (participant.id == selectedId) "✓ ${participant.displayName}" else participant.displayName,
-                    { onSelect(participant.id) },
-                    variant = if (participant.id == selectedId) ButtonVariant.Primary else ButtonVariant.Ghost,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        }
-        AppText(selectedId, color = tc.td, fontSize = 9.sp, fontFamily = MONO, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-    }
-}
-
-/** Bulk editor for stable message origins.  It is intentionally separate from the legacy
- * CallCorrectionDialog: one displayed arrow can represent many origins after repeat collapsing,
- * and a RETURN is a legitimate batch target. */
-@Composable
-private fun MessageBatchEditDialog(
-    diagram: com.indagium.diagram.SeqDiagram,
-    selectedOrigins: Set<MessageOriginKey>,
-    onSave: (String, String, String, MessageKind, List<DiagramParameter>) -> Unit,
-    onRequestReset: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val tc = tc()
-    val first = diagram.messages.firstOrNull { messageOrigins(it).any { origin -> origin in selectedOrigins } }
-    var fromId by remember(selectedOrigins) { mutableStateOf(first?.fromIdx?.let { diagram.participants.getOrNull(it)?.id }.orEmpty()) }
-    var toId by remember(selectedOrigins) { mutableStateOf(first?.toIdx?.let { diagram.participants.getOrNull(it)?.id }.orEmpty()) }
-    var label by remember(selectedOrigins) { mutableStateOf("") }
-    var parameters by remember(selectedOrigins) { mutableStateOf("") }
-    var kind by remember(selectedOrigins) { mutableStateOf(first?.kind ?: MessageKind.CALL) }
-    var confirmReset by remember(selectedOrigins) { mutableStateOf(false) }
-    val kinds = listOf(MessageKind.CALL, MessageKind.RETURN, MessageKind.SELF, MessageKind.ASYNC)
-
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(
-            Modifier.width(680.dp).background(tc.p, RoundedCornerShape(8.dp)).border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            AppText("Edit ${selectedOrigins.size} selected message${if (selectedOrigins.size == 1) "" else "s"}", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            AppText(
-                "Changes apply to every stable origin selected on the canvas, including every row represented by a collapsed arrow.",
-                color = tc.td, fontSize = 10.sp, maxLines = 2,
-            )
-            BatchParticipantPicker("From", fromId, diagram.participants) { fromId = it }
-            BatchParticipantPicker("To", toId, diagram.participants) { toId = it }
-            InlineField(label, { label = it }, "custom label (leave blank to keep generated label)", Modifier.fillMaxWidth(), fontSize = 10.sp)
-            InlineField(parameters, { parameters = it }, "parameters: name=value; …", Modifier.fillMaxWidth(), fontSize = 10.sp)
-            SegmentedControl(kinds.map { it.name.lowercase() }, setOf(kinds.indexOf(kind)), onToggle = { kind = kinds[it] })
-            if (confirmReset) {
-                AppText("Remove all saved edits for these selected messages?", color = DANGER_RED, fontSize = 10.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    AppButton("Cancel", { confirmReset = false }, variant = ButtonVariant.Ghost)
-                    AppButton("Reset selected", onRequestReset, variant = ButtonVariant.Secondary, isDanger = true)
-                }
-            } else {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                    AppButton("Reset selected", { confirmReset = true }, variant = ButtonVariant.Ghost, isDanger = true)
-                    AppButton("Cancel", onDismiss, variant = ButtonVariant.Ghost)
-                    AppButton(
-                        "Apply to selected",
-                        { onSave(fromId, toId, label, kind, parameters.parseBatchParameters()) },
-                        variant = ButtonVariant.Primary,
-                        enabled = fromId.isNotBlank() && toId.isNotBlank(),
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun BatchParticipantPicker(
-    title: String,
-    selectedId: String,
-    participants: List<com.indagium.diagram.DiagramParticipant>,
-    onSelect: (String) -> Unit,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        AppText(title, color = tc().td, fontSize = 9.sp)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            participants.forEach { participant ->
-                AppButton(
-                    participant.displayName,
-                    { onSelect(participant.id) },
-                    variant = if (participant.id == selectedId) ButtonVariant.Primary else ButtonVariant.Ghost,
-                )
-            }
-        }
-    }
-}
-
-private fun String.parseBatchParameters(): List<DiagramParameter> = split(';').mapNotNull { raw ->
-    val text = raw.trim()
-    if (text.isBlank()) return@mapNotNull null
-    val split = text.indexOf('=')
-    if (split < 0) DiagramParameter(value = text)
-    else DiagramParameter(text.substring(0, split).trim(), text.substring(split + 1).trim())
 }
 
 // ── Footer ───────────────────────────────────────────────────────────────────────────────────

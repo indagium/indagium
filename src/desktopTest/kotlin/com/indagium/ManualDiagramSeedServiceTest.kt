@@ -12,8 +12,8 @@ import com.indagium.diagram.manualDocumentFromDiagram
 import com.indagium.diagram.manualInteractionGroupKey
 import com.indagium.diagram.normalizeManualMessage
 import com.indagium.diagram.stripDiagramPresentationPrefixes
-import com.indagium.ui.manualKindAfterEndpointChange
 import com.indagium.model.LogLevel
+import com.indagium.ui.manualKindAfterEndpointChange
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
@@ -124,6 +124,7 @@ class ManualDiagramSeedServiceTest {
             DiagramParticipant("client", "Client", ParticipantKind.TAG, tag = "Client"),
             DiagramParticipant("service", "Service", ParticipantKind.TAG, tag = "Service"),
         )
+
         fun message(
             label: String,
             entryId: Int,
@@ -171,7 +172,10 @@ class ManualDiagramSeedServiceTest {
         assertEquals((0L..4L).toList(), document.interactions.map { it.order })
         assertEquals(document.interactions.size, document.interactions.map { it.id }.toSet().size)
         assertEquals(
-            listOf("10:00:00.000" to LogLevel.D, "10:00:00.001" to LogLevel.I, "10:00:00.002" to LogLevel.W, "10:00:00.003" to LogLevel.I, "10:00:00.004" to LogLevel.E),
+            listOf(
+                "10:00:00.000" to LogLevel.D, "10:00:00.001" to LogLevel.I, "10:00:00.002" to LogLevel.W,
+                "10:00:00.003" to LogLevel.I, "10:00:00.004" to LogLevel.E,
+            ),
             document.interactions.map { it.renderAnchorTs to it.renderAnchorLevel },
         )
     }

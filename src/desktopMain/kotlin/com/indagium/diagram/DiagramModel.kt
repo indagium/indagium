@@ -62,7 +62,17 @@ data class DiagramActor(
 /** Provenance for an interaction.  Renderer and emitters preserve this in the in-app model.
  *  [THREAD_HANDOFF] is appended last (see this file's own "append last" convention) so existing
  *  persisted `.name` tokens are untouched — see [DiagramOptions.threadHandoffArrows]. */
-enum class MessageEvidence { LOG, RULE, SOURCE_INFERRED, ACTOR_MIRROR, THREAD_HANDOFF, MANUAL_OVERRIDE }
+enum class MessageEvidence {
+    LOG,
+    RULE,
+    SOURCE_INFERRED,
+    ACTOR_MIRROR,
+    THREAD_HANDOFF,
+    MANUAL_OVERRIDE,
+
+    /** A high-confidence shared correlation token between adjacent log rows. */
+    CORRELATION_TOKEN,
+}
 
 /** When activation bars are included in the built model. */
 enum class ActivationPolicy { NONE, EVIDENCE_BACKED }
@@ -121,6 +131,9 @@ enum class MessageKind { CALL, RETURN, SELF, ASYNC }
 /** Visibility of a manually authored operation in UML-style labels. */
 enum class ManualOperationVisibility { UNSPECIFIED, PUBLIC, PROTECTED, PACKAGE, PRIVATE }
 
+/** Whether a manual interaction still follows its generated seed or contains authoring changes. */
+enum class ManualInteractionAuthoring { AUTO, EDITED }
+
 /** Whether a diagram is rebuilt from inference or from its durable user-authored document. */
 enum class DiagramAuthoringMode { INFERRED, MANUAL }
 
@@ -164,7 +177,7 @@ data class ManualDiagramInteraction(
     val id: String,
     val sourceEntryIds: Set<Int>,
     val fromParticipantId: String,
-    val toParticipantId: String,
+    val toParticipantId: String?,
     val operation: String = "",
     val parameters: List<DiagramParameter> = emptyList(),
     val result: String? = null,
@@ -185,6 +198,8 @@ data class ManualDiagramInteraction(
     val renderAnchorTs: String? = null,
     /** Severity retained alongside [renderAnchorTs] when no selected source row is available. */
     val renderAnchorLevel: LogLevel? = null,
+    /** Append-only authoring state; old notes/drafts decode as [ManualInteractionAuthoring.AUTO]. */
+    val authoring: ManualInteractionAuthoring = ManualInteractionAuthoring.AUTO,
 )
 
 /** A manually authored group/frame spanning its named interactions. */
@@ -320,6 +335,8 @@ data class DiagramParticipantCandidate(
     /** Distinct pids that logged this tag inside the resolved range, capped at MAX_CANDIDATE_PIDS.
      *  Runtime-only, like the counts above — never persisted. */
     val pids: Set<Int> = emptySet(),
+    /** Runtime-only deterministic signal score used by unconfigured lifeline ranking. */
+    val signalScore: Int = 0,
 )
 
 /** Explicit accounting for the source rows selected for a diagram.  Grouped rows are represented
@@ -376,11 +393,14 @@ data class DiagramRuleCaptureBinding(
  */
 sealed interface DiagramRuleEndpoint {
     data class ExistingParticipant(val participantId: String) : DiagramRuleEndpoint
+
     data object CurrentEntry : DiagramRuleEndpoint
+
     data class CapturedValue(
         val captureName: String,
         val bindings: List<DiagramRuleCaptureBinding>,
     ) : DiagramRuleEndpoint
+
     data class ExplicitActor(val id: String, val label: String) : DiagramRuleEndpoint
 }
 
@@ -413,7 +433,7 @@ data class DiagramOptions(
     // SeqDiagram.truncated.
     val maxMessages: Int = 60,
     val labelMaxChars: Int = 60,
-    val labelSource: LabelSource = LabelSource.MESSAGE,
+    val labelSource: LabelSource = LabelSource.BOTH,
     val showTimestamps: Boolean = false,
     /** Prefix generated messages with elapsed time from the first selected row. */
     val showElapsed: Boolean = false,
@@ -427,16 +447,16 @@ data class DiagramOptions(
     /** Do not invent activations from unrelated transitions. */
     val activationPolicy: ActivationPolicy = ActivationPolicy.EVIDENCE_BACKED,
     // ── Appended fields below: append-only, see this file's own codec-versioning discipline
-    // (DiagramSpecCodec.kt's optionsToMap/optionsFromMap already default every missing key off
+    // (DiagramSpecCodec.kt's optionsToMap/optionsFromMap already default every missing key from
     // this class's own defaults, so a v1/v2/v3 note with none of these keys decodes cleanly). ──
     // How many lines a message label may wrap onto before it is ellipsized. 1 reproduces the
     // pre-wrapping single-line layout exactly (see SeqDiagramRenderer's own compatibility note).
     val labelMaxLines: Int = 2,
-    /** Opt-in [ArrowMode.EVIDENCE_FLOW] correlation: draw a CALL between two consecutive entries
+    /** [ArrowMode.EVIDENCE_FLOW] correlation: draw a CALL between two consecutive entries
      *  that share a real (non-zero) pid+tid within a short time bound, evidenced as
-     *  [MessageEvidence.THREAD_HANDOFF]. Off by default — see the builder's own guard doc for why
-     *  a brief/RAW-format log (pid==tid==0 for every row) must never correlate under this option. */
-    val threadHandoffArrows: Boolean = false,
+     *  [MessageEvidence.THREAD_HANDOFF]. A brief/RAW-format log (pid==tid==0 for every row) is
+     *  still protected by the builder's non-zero identity guard and cannot correlate this way. */
+    val threadHandoffArrows: Boolean = true,
     /** When false, every [MessageKind.SELF] message is dropped from the built diagram — the
      *  "just show me the evidenced arrows" view. */
     val showSelfMessages: Boolean = true,
@@ -531,6 +551,10 @@ data class DiagramMessage(
     val sourceLogSiteId: String? = null,
     /** Stable source/authored provenance. Collapsed and mirrored messages retain all members. */
     val originKeys: Set<MessageOriginKey> = emptySet(),
+    /** True when the message has evidence for its source but no chosen destination yet. */
+    val targetless: Boolean = false,
+    /** Stable group identity for row/canvas association; null for legacy inferred messages. */
+    val manualGroupKey: String? = null,
 )
 
 /** A correlated call/return activation interval, inclusive message indices. */
