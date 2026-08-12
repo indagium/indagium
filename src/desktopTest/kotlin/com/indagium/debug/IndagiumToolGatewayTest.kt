@@ -682,7 +682,7 @@ class IndagiumToolGatewayTest {
     }
 
     @Test
-    fun sequenceDiagramAcceptsComponentsActorsPoliciesAndReturnsEvidenceCoverage() {
+    fun sequenceDiagramCreatesManualDraftWithCoverage() {
         state.tabs = listOf(
             mkTab("t1", "components.log", listOf(
                 LogEntry(1, "10:00:00.000", LogLevel.I, "Ui", "tap"),
@@ -698,9 +698,6 @@ class IndagiumToolGatewayTest {
                     mapOf("id" to "ui", "displayName" to "UI", "tagIds" to listOf("Ui")),
                     mapOf("id" to "svc", "displayName" to "Service", "tagIds" to listOf("Service")),
                 ),
-                "actors" to listOf(mapOf(
-                    "id" to "backend", "label" to "Backend", "mirrorComponentId" to "svc", "mirrorDirection" to "both",
-                )),
                 "unmappedTagPolicy" to "hide",
                 "activationPolicy" to "evidenceBacked",
             ),
@@ -708,8 +705,8 @@ class IndagiumToolGatewayTest {
 
         assertEquals(2, (result["coverage"] as Map<*, *>)["shownEntries"])
         assertEquals(1, (result["coverage"] as Map<*, *>)["hiddenEntries"])
-        assertTrue((result["participants"] as List<*>).any { (it as Map<*, *>)["id"] == "backend" })
-        assertTrue((result["messages"] as List<*>).all { (it as Map<*, *>)["evidence"] != null })
+        assertTrue((result["messages"] as List<*>).all { (it as Map<*, *>)["evidence"] == "manual_override" })
+        assertEquals(2, ((result["manualDocument"] as Map<*, *>)["interactions"] as List<*>).size)
         assertNotNull(result["activationSpans"])
     }
 
@@ -732,7 +729,7 @@ class IndagiumToolGatewayTest {
     }
 
     @Test
-    fun sequenceDiagramMcpRoundTripsManualDocumentOverridesAndTypedRules() {
+    fun sequenceDiagramMcpReturnsManualDocumentAndAcceptsLegacyFields() {
         val result = operations.toolGateway.execute("build_sequence_diagram", mapOf(
             "tabId" to "t1",
             "tags" to listOf("App", "Peer"),
@@ -761,10 +758,9 @@ class IndagiumToolGatewayTest {
         )) as Map<*, *>
 
         assertNull(result["error"])
-        assertEquals("manual", result["authoringMode"])
         assertEquals(listOf("App", "Peer"), result["lifelineOrder"])
-        assertEquals("route", ((result["messageOverrides"] as List<*>).single() as Map<*, *>)
-            .let { ((it["origin"] as Map<*, *>)["ruleId"]) })
+        assertNull(result["authoringMode"])
+        assertNull(result["messageOverrides"])
         assertEquals("m-1", (((result["manualDocument"] as Map<*, *>)["interactions"] as List<*>).single() as Map<*, *>)["id"])
     }
 
@@ -883,8 +879,8 @@ class IndagiumToolGatewayTest {
 
         val messages = result["messages"] as List<*>
         assertEquals(1, messages.size)
-        assertEquals("log", (messages.single() as Map<*, *>)["evidence"])
-        assertEquals(true, (result["sourceEnrichment"] as Map<*, *>)["available"])
+        assertEquals("manual_override", (messages.single() as Map<*, *>)["evidence"])
+        assertNull(result["sourceEnrichment"])
     }
 
     @Test
@@ -900,7 +896,7 @@ class IndagiumToolGatewayTest {
         )) as Map<*, *>
 
         assertTrue((result["warnings"] as List<*>).any { it.toString().contains("no source index") })
-        assertEquals(false, (result["sourceEnrichment"] as Map<*, *>)["available"])
+        assertNull(result["sourceEnrichment"])
     }
 
     @Test

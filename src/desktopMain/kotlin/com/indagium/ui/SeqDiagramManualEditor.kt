@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
@@ -31,6 +32,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -38,7 +40,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
-import com.indagium.diagram.DiagramAuthoringMode
 import com.indagium.diagram.DiagramParameter
 import com.indagium.diagram.ManualDiagramDocument
 import com.indagium.diagram.ManualDiagramActivation
@@ -56,8 +57,8 @@ import kotlin.math.roundToInt
 private val SEQUENCE_EDITOR_ROW_HEIGHT = 36.dp
 
 /**
- * Authoring controls deliberately edit only durable [SeqDiagramSpec] fields.  Generation remains
- * in SeqDiagramCoordinator's latest-only preview lane, so typing in this panel never runs the
+ * Editor controls deliberately update only durable [SeqDiagramSpec] fields. Preview rebuilding is
+ * handled by SeqDiagramCoordinator's latest-only lane, so typing in this panel never runs the
  * builder on the composition thread.
  */
 @Composable
@@ -78,49 +79,30 @@ internal fun DiagramAuthoringSection(
     seedBusy: Boolean,
     seedStatus: String?,
 ) {
-    val manual = spec.authoringMode == DiagramAuthoringMode.MANUAL
     var seedConfiguration by remember(workspaceKey) { mutableStateOf(ManualDiagramSeedConfiguration()) }
     var confirmApply by remember(workspaceKey) { mutableStateOf(false) }
-    SectionHeader("Authoring")
-    SegmentedControl(
-        listOf("Inferred", "Manual"),
-        if (spec.authoringMode == DiagramAuthoringMode.INFERRED) setOf(0) else setOf(1),
-        onToggle = { selected ->
-            val next = if (selected == 0) DiagramAuthoringMode.INFERRED else DiagramAuthoringMode.MANUAL
-            if (next != spec.authoringMode) {
-                val seeded = if (next == DiagramAuthoringMode.MANUAL && spec.manualDocument.interactions.isEmpty()) {
-                    preview?.let(::manualDocumentFromDiagram)
-                        ?: spec.manualDocument
-                } else spec.manualDocument
-                onSpec(spec.copy(authoringMode = next, manualDocument = seeded))
-            }
-        },
-        modifier = Modifier.padding(horizontal = 12.dp),
-    )
+    SectionHeader("Starting point")
     AppText(
-        if (spec.authoringMode == DiagramAuthoringMode.INFERRED)
-            "Adjust inferred messages below, or switch to Manual to keep a durable interaction document independent of source inference."
-        else
-            "Manual interactions are ordered and durable. Add lifelines in Participants, then select only those lifelines for each interaction.",
+        "Use the selected log rows to build an initial set of interactions. You can edit the result below; later builds replace it only when you apply them.",
         color = tc().td, fontSize = 10.sp, maxLines = 3, modifier = Modifier.padding(horizontal = 12.dp),
     )
-    if (manual) {
-        // Range is deliberately the first manual-mode content block after the mode switch.
-        rangeContent()
-        SectionHeader("Build starting point", trailing = {
-            if (seedBusy) AppText("working", color = tc().td, fontSize = 9.sp)
-        })
-        CheckRow(
+    // The range selects source rows for the next build; it never reorders or otherwise changes
+    // existing interactions.
+    rangeContent()
+    SectionHeader("Build from source", trailing = {
+            if (seedBusy) AppText("building", color = tc().td, fontSize = 9.sp)
+    })
+    CheckRow(
             checked = seedConfiguration.reconstructSourceTrace,
             onToggle = { seedConfiguration = seedConfiguration.copy(reconstructSourceTrace = !seedConfiguration.reconstructSourceTrace) },
-        ) { AppText("Reconstruct source execution trace", fontSize = 10.sp) }
-        CheckRow(
+    ) { AppText("Use verified source trace", fontSize = 10.sp) }
+    CheckRow(
             checked = seedConfiguration.inferThreadHandoffs,
             onToggle = { seedConfiguration = seedConfiguration.copy(inferThreadHandoffs = !seedConfiguration.inferThreadHandoffs) },
-        ) { AppText("Infer same-thread handoffs (PID + TID)", fontSize = 10.sp) }
-        Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+    ) { AppText("Include same-thread handoffs (PID + TID)", fontSize = 10.sp) }
+    Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             AppButton(
-                "Apply to manual lines",
+                "Apply to interactions",
                 {
                     if (seedNeedsConfirmation) confirmApply = true else onApplySeed(seedConfiguration, false)
                 },
@@ -128,30 +110,29 @@ internal fun DiagramAuthoringSection(
                 enabled = !seedBusy,
             )
             AppButton("Reset", onRevertSeed, variant = ButtonVariant.Ghost, enabled = canRevertSeed && !seedBusy)
-        }
-        if (confirmApply) {
-            AppText("This replaces manual edits made since the last seed.", color = DANGER_RED, fontSize = 9.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 12.dp))
+    }
+    if (confirmApply) {
+            AppText("This replaces edits made since the previous apply.", color = DANGER_RED, fontSize = 9.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 12.dp))
             Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 AppButton("Cancel", { confirmApply = false }, variant = ButtonVariant.Ghost)
-                AppButton("Replace manual lines", {
+                AppButton("Replace interactions", {
                     confirmApply = false
                     onApplySeed(seedConfiguration, true)
                 }, variant = ButtonVariant.Secondary, isDanger = true, enabled = !seedBusy)
             }
-        }
-        if (seedBusy || seedStatus != null) {
-            AppText(seedStatus ?: "Applying…", color = tc().td, fontSize = 9.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 12.dp))
-        }
-        var selectedInteractionIds by remember(workspaceKey) { mutableStateOf<Set<String>>(emptySet()) }
-        ManualInteractionEditor(
+    }
+    if (seedBusy || seedStatus != null) {
+            AppText(seedStatus ?: "Building…", color = tc().td, fontSize = 9.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 12.dp))
+    }
+    var selectedInteractionIds by remember(workspaceKey) { mutableStateOf<Set<String>>(emptySet()) }
+    ManualInteractionEditor(
             spec, lifelineIds, entries, anchorEntryIds, selectedInteractionIds,
             onSelectionChanged = { selectedInteractionIds = it }, onSpec = onSpec,
-        )
-        ManualDocumentAuxEditors(
+    )
+    ManualDocumentAuxEditors(
             spec, lifelineIds, selectedInteractionIds, workspaceKey, onSpec,
             onClearAll = onClearAllManual,
-        )
-    }
+    )
 }
 
 @Composable
@@ -166,10 +147,10 @@ private fun ManualInteractionEditor(
 ) {
     val document = spec.manualDocument
     var expanded by remember { mutableStateOf(true) }
-    SectionHeader("Manual interactions", expanded = expanded, onToggle = { expanded = !expanded })
+    SectionHeader("Interactions", expanded = expanded, onToggle = { expanded = !expanded })
     if (!expanded) return
     if (lifelineIds.isEmpty()) {
-        AppText("Manual interactions need at least one configured lifeline.", color = tc().td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp))
+        AppText("Add at least one lifeline before creating interactions.", color = tc().td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp))
         return
     }
     val groups = remember(document.interactions) {
@@ -180,9 +161,17 @@ private fun ManualInteractionEditor(
     val currentSpec = rememberUpdatedState(spec)
     val currentOnSpec = rememberUpdatedState(onSpec)
     val rowHeightPx = with(LocalDensity.current) { SEQUENCE_EDITOR_ROW_HEIGHT.toPx() }
-    val rowHeightDp = SEQUENCE_EDITOR_ROW_HEIGHT
+    val density = LocalDensity.current.density
+    val groupsByKey = groups.associateBy { it.groupKey() }
+    // Expanded groups contain a full card and their occurrences. Keep the measured height so
+    // adjacent groups begin below the entire card rather than at a fixed row-height multiple.
+    val groupHeights = remember { androidx.compose.runtime.mutableStateMapOf<String, Float>() }
+    fun estimateGroupHeight(key: String): Float {
+        val members = groupsByKey[key].orEmpty()
+        return if (key in expandedGroups) rowHeightPx * (12 + members.size) else rowHeightPx
+    }
+    fun groupHeightOf(key: String): Float = groupHeights[key] ?: estimateGroupHeight(key)
     var dragId by remember { mutableStateOf<String?>(null) }
-    var dragStartIndex by remember { mutableStateOf(-1) }
     var dragStartTopY by remember { mutableStateOf(0f) }
     var dragOffsetY by remember { mutableStateOf(0f) }
     var justReleasedId by remember { mutableStateOf<String?>(null) }
@@ -199,11 +188,18 @@ private fun ManualInteractionEditor(
     val visualGroupKeys = liveVisualGroupKeys.takeIf { it.toSet() == groupKeys.toSet() && it.size == groupKeys.size } ?: groupKeys
     val currentVisualGroupKeys = rememberUpdatedState(visualGroupKeys)
     val currentDragId = rememberUpdatedState(dragId)
-    val groupsByKey = groups.associateBy { it.groupKey() }
+    val groupTargetOffsets = cumulativeBlockOffsets(visualGroupKeys, ::groupHeightOf)
+    val groupStartOffsets = cumulativeBlockOffsets(groupKeys, ::groupHeightOf)
+    val currentGroupKeys = rememberUpdatedState(groupKeys)
+    val currentGroupStartOffsets = rememberUpdatedState(groupStartOffsets)
+    val totalGroupHeightPx = groupKeys.sumOf { groupHeightOf(it).toDouble() }.toFloat()
     BoundedScrollBoxDp(maxHeightDp = 8 * SEQUENCE_EDITOR_ROW_HEIGHT.value.toInt()) {
         Box(
-            Modifier.fillMaxWidth().height(rowHeightDp * groups.size)
-                .pointerInput(groupKeys, rowHeightPx) {
+            // A minimum reserves the cumulative group height without constraining an expanded
+            // card to it. The previous fixed height both under-reported the scrollable content
+            // and placed every group at index times the collapsed-row height.
+            Modifier.fillMaxWidth().heightIn(min = (totalGroupHeightPx / density).dp)
+                .pointerInput(groupKeys) {
                     var downPos = Offset.Zero
                     var downId: String? = null
                     var dragging = false
@@ -215,13 +211,16 @@ private fun ManualInteractionEditor(
                                 PointerEventType.Press -> {
                                     downPos = change.position
                                     dragging = false
-                                    downId = groupKeys.getOrNull((change.position.y / rowHeightPx).toInt())
+                                    downId = manualGroupKeyAtY(
+                                        currentGroupKeys.value,
+                                        change.position.y,
+                                        ::groupHeightOf,
+                                    )
                                 }
                                 PointerEventType.Move -> {
                                     if (downId != null && !dragging && (change.position - downPos).getDistance() > 8f) {
                                         dragId = downId
-                                        dragStartIndex = groupKeys.indexOf(downId)
-                                        dragStartTopY = dragStartIndex * rowHeightPx
+                                        dragStartTopY = currentGroupStartOffsets.value[downId] ?: 0f
                                         dragOffsetY = 0f
                                         justReleasedId = null
                                         liveVisualGroupKeys = groupKeys
@@ -230,7 +229,12 @@ private fun ManualInteractionEditor(
                                     if (dragging && dragId != null) {
                                         change.consume()
                                         dragOffsetY = change.position.y - downPos.y
-                                        liveVisualGroupKeys = sequenceOrderDuringDrag(groupKeys, dragId, dragStartIndex, dragOffsetY, rowHeightPx)
+                                        liveVisualGroupKeys = blockOrderDuringDrag(
+                                            visibleIds = currentGroupKeys.value,
+                                            draggedId = dragId,
+                                            dragOffsetY = dragOffsetY,
+                                            heightOf = ::groupHeightOf,
+                                        )
                                     }
                                 }
                                 PointerEventType.Release -> {
@@ -245,7 +249,6 @@ private fun ManualInteractionEditor(
                                         justReleasedId = releasedId
                                     }
                                     dragId = null
-                                    dragStartIndex = -1
                                     dragStartTopY = 0f
                                     dragOffsetY = 0f
                                     downId = null
@@ -261,8 +264,7 @@ private fun ManualInteractionEditor(
                 val members = groupsByKey[groupKey] ?: return@forEach
                 key(groupKey) {
                     val isDragging = dragId == groupKey
-                    val targetIndex = visualGroupKeys.indexOf(groupKey).coerceAtLeast(0)
-                    val targetY = targetIndex * rowHeightPx
+                    val targetY = groupTargetOffsets[groupKey] ?: 0f
                     val animatedY by animateFloatAsState(targetY, spring(stiffness = 650f, dampingRatio = 0.86f), label = "manual-group-y-$groupKey")
                     val y = sequenceRenderY(isDragging, justReleasedId == groupKey, dragStartTopY + dragOffsetY, targetY, animatedY)
                     ManualInteractionGroupRow(
@@ -274,6 +276,7 @@ private fun ManualInteractionEditor(
                     onToggleExpanded = {
                         val key = members.groupKey()
                         expandedGroups = if (key in expandedGroups) expandedGroups - key else expandedGroups + key
+                        groupHeights.remove(key)
                     },
                     lifelineIds = lifelineIds,
                     onToggleSelected = {
@@ -281,6 +284,9 @@ private fun ManualInteractionEditor(
                         onSelectionChanged(if (ids.all { it in selectedInteractionIds }) selectedInteractionIds - ids else selectedInteractionIds + ids)
                     },
                     entries = entries,
+                    onHeightChanged = { height ->
+                        if (groupHeights[groupKey] != height) groupHeights[groupKey] = height
+                    },
                     onGroupChange = { change ->
                         val ids = members.map { it.id }.toSet()
                         val changed = document.interactions.map { interaction ->
@@ -323,6 +329,21 @@ private fun groupedManualInteractions(document: ManualDiagramDocument): List<Lis
 private fun List<ManualDiagramInteraction>.groupKey(): String =
     firstOrNull()?.groupKey?.takeIf(String::isNotBlank) ?: "__individual:${firstOrNull()?.id.orEmpty()}"
 
+internal fun manualGroupKeyAtY(
+    groupKeys: List<String>,
+    y: Float,
+    heightOf: (String) -> Float,
+): String? {
+    if (y < 0f) return null
+    var top = 0f
+    for (groupKey in groupKeys) {
+        val bottom = top + heightOf(groupKey)
+        if (y < bottom) return groupKey
+        top = bottom
+    }
+    return null
+}
+
 @Composable
 private fun ManualRoundToggle(
     tooltip: String,
@@ -355,6 +376,7 @@ private fun ManualInteractionGroupRow(
     onGroupChange: ((ManualDiagramInteraction) -> ManualDiagramInteraction) -> Unit,
     dragging: Boolean,
     visualOffsetPx: Float,
+    onHeightChanged: (Float) -> Unit,
     onDelete: () -> Unit,
 ) {
     val representative = members.firstOrNull() ?: return
@@ -362,6 +384,7 @@ private fun ManualInteractionGroupRow(
     val someEnabled = members.any { it.enabled }
     Column(
         Modifier.fillMaxWidth()
+            .onSizeChanged { onHeightChanged(it.height.toFloat()) }
             .offset { IntOffset(0, visualOffsetPx.roundToInt()) }
             .zIndex(if (dragging) 1f else 0f)
             .graphicsLayer { if (dragging) { scaleX = 1.02f; scaleY = 1.02f } }
@@ -639,7 +662,7 @@ private fun ManualDocumentAuxEditors(
     }
 
     if (!confirmClear) {
-        AppButton("Clear all manual lines", { confirmClear = true }, variant = ButtonVariant.Ghost, isDanger = true, modifier = Modifier.padding(horizontal = 12.dp))
+        AppButton("Clear all interactions", { confirmClear = true }, variant = ButtonVariant.Ghost, isDanger = true, modifier = Modifier.padding(horizontal = 12.dp))
     } else {
         AppText("This removes interactions, frames, notes, and activations.", color = DANGER_RED, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 12.dp))
         Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {

@@ -77,7 +77,7 @@ internal fun OfflineInspector(spec: SeqDiagramSpec) {
         modifier = Modifier.padding(horizontal = 12.dp)
     )
     AppText(
-        "Open or relink ${spec.sourceFile ?: "the source log"} to edit, regenerate, save, or attach it.",
+        "Open or relink ${spec.sourceFile ?: "the source log"} to edit, rebuild, save, or attach it.",
         color = tc().td,
         fontSize = 10.sp,
         maxLines = 3,
@@ -120,17 +120,9 @@ internal fun WorkspaceInspector(
         seedStatus = state.seqDiagrams.manualSeedStatus,
     )
     Divider()
-    if (spec.authoringMode != com.indagium.diagram.DiagramAuthoringMode.MANUAL) {
-        RangeSection(tab, state, spec, onSpec)
-        Divider()
-    }
     ParticipantsSection(tab, state, spec, onSpec)
-    if (spec.authoringMode != com.indagium.diagram.DiagramAuthoringMode.MANUAL) {
-        Divider()
-        ModeSection(tab, spec, onSpec)
-    }
     Divider()
-    OptionsSection(state, spec, onSpec, manualMode = spec.authoringMode == com.indagium.diagram.DiagramAuthoringMode.MANUAL)
+    ManualPresentationSection(spec, onSpec)
 }
 
 // ── Participants ─────────────────────────────────────────────────────────────────────────────
@@ -508,13 +500,6 @@ private fun UnifiedLifelinesSection(
             AppText("${selectedIds.size} selected", color = tc.td, fontSize = 10.sp, modifier = Modifier.align(Alignment.CenterVertically))
         }
     }
-    // Keep actor-specific mirror configuration attached to the same selected lifeline row instead
-    // of maintaining a second actor list. The compact row stays reorderable; selecting it reveals
-    // the existing mirror editor immediately below the unified list.
-    spec.actors.filter { it.id in selectedIds }.forEach { actor ->
-        ActorRow(actor, components, onSpec, spec)
-    }
-
     (draft as? ComponentDraft.Component)?.let { componentDraft ->
         ComponentDraftEditor(componentDraft, candidates, ownerByTag, processNames, packagePrefixes, { draft = it }, ::commitDraft) { draft = null }
     }
@@ -1656,9 +1641,6 @@ private fun OptionsSection(state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDi
         )
     }
 
-    NumericSettingRow("Max arrows", o.maxMessages, 1..1000) {
-        onSpec(spec.copy(options = o.copy(maxMessages = it)))
-    }
     NumericSettingRow("Message label chars", o.labelMaxChars, 10..400) {
         onSpec(spec.copy(options = o.copy(labelMaxChars = it)))
     }
@@ -1704,14 +1686,11 @@ private fun ManualPresentationSection(spec: SeqDiagramSpec, onSpec: (SeqDiagramS
         onSpec(spec.copy(options = o.copy(
             activationPolicy = if (o.activationPolicy == ActivationPolicy.NONE) ActivationPolicy.EVIDENCE_BACKED else ActivationPolicy.NONE,
         )))
-    }) { AppText("Show manual activation spans", fontSize = 11.sp) }
+    }) { AppText("Show activation spans", fontSize = 11.sp) }
     AppText(
-        "Manual lines are authoritative. Only the settings below affect their build or shared canvas rendering.",
+        "Interactions are authoritative. Only the settings below affect their build or shared canvas rendering.",
         color = tc().td, fontSize = 10.sp, maxLines = 3, modifier = Modifier.padding(horizontal = 12.dp),
     )
-    NumericSettingRow("Max arrows", o.maxMessages, 1..1000) {
-        onSpec(spec.copy(options = o.copy(maxMessages = it)))
-    }
     NumericSettingRow("Message label chars", o.labelMaxChars, 10..400) {
         onSpec(spec.copy(options = o.copy(labelMaxChars = it)))
     }

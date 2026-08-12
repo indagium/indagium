@@ -92,6 +92,23 @@ class SourceTraceInferenceEngine(
             completed
         }.sortedByDescending { it.score }
         val best = ranked.first()
+        // Candidate sites are allowed to survive until the whole ordered path has been tested.
+        // Only a tie between different complete paths is ambiguous; rejecting a repeated log
+        // template before later anchors are considered throws away valid source traces.
+        val tied = ranked.drop(1).filter { kotlin.math.abs(it.score - best.score) < 0.000_001 }
+        val differentTie = tied.firstOrNull { other ->
+            other.anchors.map { it.site.id } != best.anchors.map { it.site.id }
+        }
+        if (differentTie != null) {
+            val differing = best.anchors.zip(differentTie.anchors)
+                .firstOrNull { (left, right) -> left.site.id != right.site.id }?.first
+            diagnostics.add(
+                TraceDiagnosticReason.AMBIGUOUS_SOURCE_SITE,
+                differing?.entry?.id,
+                "multiple compatible source paths remain",
+            )
+            return ExecutionTrace(diagnostics = diagnostics.value)
+        }
 
         val events = best.anchors.map { anchor ->
             ExecutionTraceEvent(
@@ -146,18 +163,9 @@ class SourceTraceInferenceEngine(
             diagnostics.add(reason, entry.id, "source log site has no usable indexed method")
             return emptyList()
         }
-        // A log template is not a runtime identity.  If more than one indexed site can explain a
-        // row, ranking by literal length/file position merely chooses a plausible story.  A user
-        // may disambiguate with an override; automatic source traces require one exact site.
-        if (override == null && candidates.size != 1) {
-            diagnostics.add(
-                TraceDiagnosticReason.AMBIGUOUS_SOURCE_SITE,
-                entry.id,
-                "${candidates.size} source log sites match this row",
-            )
-            return emptyList()
-        }
-        return candidates.take(1)
+        // Defer ambiguity to the interprocedural search. Later ordered anchors often make one
+        // candidate the only legal path; a surviving tie is reported after the complete search.
+        return candidates
     }
 
     private fun initialStates(firstCandidates: List<AnchorCandidate>): List<PathState> = firstCandidates.map { first ->

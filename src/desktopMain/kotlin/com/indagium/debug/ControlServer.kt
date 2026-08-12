@@ -1300,11 +1300,10 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     ),
     McpTool(
         "build_sequence_diagram",
-        "Build a UML sequence diagram from a range of a tab's log lines and return its Mermaid (or " +
-            "PlantUML) source. The default Component flow (evidenceFlow) draws an arrow only where the " +
-            "log carries actual evidence of one — a declared entry actor, an opt-in same-thread handoff, " +
-            "or a matched rule/source edge — and shows every other line as an event on its own lifeline " +
-            "rather than guessing a call from a bare tag change. " +
+        "Build a manual UML sequence-diagram draft from a range of a tab's log lines and return its Mermaid " +
+            "(or PlantUML) source and editable manual document. The seed retains every selected log event, " +
+            "adding only verified source calls, returns, and opt-in same-thread handoffs; it never guesses " +
+            "arrows from tag changes. " +
             "Use components to give one or more raw tags a stable lifeline; tags outside enabled " +
             "components are hidden unless unmappedTagPolicy=groupAsOther. This is read-only: pass " +
             "returned source to add_text_note to store it. Legacy tags/actors/entryActor/exitActor " +
@@ -1315,30 +1314,22 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "components" to "array",
             "mergedTags" to "object",
             "actors" to "array",
-            "entryActor" to "string",
-            "exitActor" to "string",
             "unmappedTagPolicy" to "string",
-            "sourceEnrichment" to "boolean",
+            "seed" to "object",
             "activationPolicy" to "string",
             "startLineId" to "integer",
             "endLineId" to "integer",
             "dialect" to "string",
-            "mode" to "string",
             "title" to "string",
             "maxMessages" to "integer",
             "collapseRepeats" to "boolean",
-            "rules" to "array",
-            "authoringMode" to "string",
             "lifelineOrder" to "array",
-            "messageOverrides" to "array",
             "manualDocument" to "object",
             required = listOf("tabId"),
             enums = mapOf(
                 "dialect" to listOf("mermaid", "plantuml"),
-                "mode" to listOf("componentFlow", "evidenceFlow", "tagTransition", "timeline", "rules"),
                 "unmappedTagPolicy" to listOf("hide", "groupAsOther"),
                 "activationPolicy" to listOf("evidenceBacked", "none"),
-                "authoringMode" to listOf("inferred", "manual"),
             ),
             descriptions = mapOf(
                 "tags" to "Legacy flat tag participant list. Prefer components for new calls. " +
@@ -1347,32 +1338,21 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                     "One component may own multiple raw log tags. Maximum 64 components, 128 tags per component and 1,024 tag references total.",
                 "mergedTags" to "Compatibility shorthand object mapping component display names or ids to raw tag arrays; " +
                     "mergedTags is applied with components when both are supplied. Maximum 64 entries and 1,024 tag references.",
-                "actors" to "Actor strings (legacy) or objects {id, label, mirrorComponentId?: string, " +
-                    "mirrorDirection?: inbound|outbound|both}. Maximum 64 actors. IDs must be unique across actors/components. " +
-                    "A mirror duplicates each non-self edge adjacent to its original.",
-                "entryActor" to "Legacy one-way actor: one of legacy actor strings, to originate the first arrow.",
-                "exitActor" to "Legacy one-way actor: one of legacy actor strings, to receive the final return arrow.",
+                "actors" to "Optional external lifelines as strings or {id, label} objects. Maximum 64 actors; " +
+                    "IDs must be unique across actors and components.",
                 "unmappedTagPolicy" to "hide (default) omits tags not owned by enabled components; groupAsOther sends all " +
                     "unmapped in-range tags to a single Other lifeline.",
-                "sourceEnrichment" to "When true, reconstruct a bounded source-first interprocedural trace from the loaded index, " +
-                    "including source calls, returns, log anchors, and invocation diagnostics. If reconstruction is not compatible, " +
-                    "the response explicitly reports fallback mode; PID/TID is only additional lane evidence.",
+                "seed" to "Optional {sourceTrace?: boolean, threadHandoffs?: boolean}. Defaults to sourceTrace=true. " +
+                    "The service creates a manual draft containing verified structure plus selected log events; unavailable or ambiguous " +
+                    "source evidence falls back to log events with diagnostics.",
                 "activationPolicy" to "evidenceBacked (default) shows activations only for correlated call/return evidence; " +
                     "none suppresses activation spans.",
                 "startLineId" to "First log line id of the range (inclusive). Omit both ids to use the whole filtered view.",
                 "endLineId" to "Last log line id of the range (inclusive).",
                 "dialect" to "Output syntax. Defaults to mermaid.",
-                "mode" to "componentFlow (default; also accepted as evidenceFlow, or the legacy name tagTransition) draws an " +
-                    "arrow only where the log carries actual evidence of one — a declared entry actor, an opt-in same-thread " +
-                    "(pid+tid) handoff, or a matched rule/source edge; every other line becomes an event on its own " +
-                    "lifeline rather than a guessed call. timeline draws every line as an event unconditionally. rules " +
-                    "uses configured interaction rules when available, falling through to the same evidence-only behavior.",
                 "maxMessages" to "Arrow cap; values are clamped to the hard maximum of 400 and truncated=true reports clipping. Defaults to 60.",
                 "collapseRepeats" to "Fold consecutive identical messages into one with a repeat count. Defaults to true.",
-                "rules" to "Optional interaction rules {id, pattern, fromTemplate?, toTemplate?, labelTemplate?, fromEndpoint?, toEndpoint?}. Typed endpoints use kind existing|currentEntry|captured|actor and only target declared participants except explicit actors.",
-                "authoringMode" to "inferred (default) reconstructs from the selected log range; manual renders the supplied manualDocument without source inference.",
                 "lifelineOrder" to "Optional full ordered list of participant IDs. Unknown/stale IDs are ignored by rendering; duplicate IDs are rejected.",
-                "messageOverrides" to "Bounded durable edits keyed by a stable origin object (entryId plus optional rule/source/invocation/manual IDs), rather than a rendered message index.",
                 "manualDocument" to "Manual authoring document with interactions, groups, notes, and activations. Interaction IDs are unique and endpoints must name participants.",
             ),
         ),

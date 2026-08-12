@@ -1189,6 +1189,74 @@ class DiagramBuilderTest {
     }
 
     @Test
+    fun manualInteractionRendersFromPersistedAnchorWhenCurrentRangeLacksItsSourceRow() {
+        val tab = mkTab("manual-anchor", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "original source"),
+            LogEntry(2, "10:00:01.000", LogLevel.D, "B", "current range row"),
+        ))
+        val spec = SeqDiagramSpec(
+            authoringMode = DiagramAuthoringMode.MANUAL,
+            range = DiagramRange.Ids(from = 2, to = 2, selectedIds = setOf(2)),
+            components = listOf(
+                DiagramComponent("a", "A", setOf("A")),
+                DiagramComponent("b", "B", setOf("B")),
+            ),
+            manualDocument = ManualDiagramDocument(interactions = listOf(
+                ManualDiagramInteraction(
+                    id = "anchored",
+                    sourceEntryIds = setOf(1),
+                    fromParticipantId = "a",
+                    toParticipantId = "b",
+                    operation = "persisted",
+                    renderAnchorTs = "09:59:59.123",
+                    renderAnchorLevel = LogLevel.E,
+                ),
+            )),
+        )
+
+        val diagram = buildSequenceDiagram(tab, spec)
+
+        assertEquals(1, diagram.messages.size)
+        assertEquals(1, diagram.messages.single().entryId)
+        assertEquals("09:59:59.123", diagram.messages.single().ts)
+        assertEquals(LogLevel.E, diagram.messages.single().level)
+        assertEquals(setOf(1), diagram.messages.single().representedEntryIds)
+    }
+
+    @Test
+    fun anchoredManualInteractionWithoutSourceIdsStillRenders() {
+        val tab = mkTab("manual-anchor-empty", "app.log", listOf(
+            LogEntry(2, "10:00:01.000", LogLevel.D, "B", "current range row"),
+        ))
+        val spec = SeqDiagramSpec(
+            authoringMode = DiagramAuthoringMode.MANUAL,
+            components = listOf(
+                DiagramComponent("a", "A", setOf("A")),
+                DiagramComponent("b", "B", setOf("B")),
+            ),
+            manualDocument = ManualDiagramDocument(interactions = listOf(
+                ManualDiagramInteraction(
+                    id = "anchor-without-source",
+                    sourceEntryIds = emptySet(),
+                    fromParticipantId = "a",
+                    toParticipantId = "b",
+                    operation = "persisted",
+                    renderAnchorTs = "09:59:59.123",
+                    renderAnchorLevel = LogLevel.W,
+                ),
+            )),
+        )
+
+        val diagram = buildSequenceDiagram(tab, spec)
+
+        assertEquals(1, diagram.messages.size)
+        assertEquals(0, diagram.messages.single().entryId)
+        assertEquals("09:59:59.123", diagram.messages.single().ts)
+        assertEquals(LogLevel.W, diagram.messages.single().level)
+        assertTrue(diagram.messages.single().representedEntryIds.isEmpty())
+    }
+
+    @Test
     fun sourceTraceReceivesOnlyRowsRepresentedByConfiguredLifelines() {
         val tab = mkTab("projection", "app.log", listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "A", "represented"),
@@ -1282,7 +1350,7 @@ class DiagramBuilderTest {
     }
 
     @Test
-    fun manualPresentationCapsArrowsAndStructuralLabels() {
+    fun manualPresentationKeepsAllInteractionsAndStructuralLabels() {
         val tab = mkTab("manual-presentation", "app.log", listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "A", "first"),
             LogEntry(2, "10:00:00.010", LogLevel.I, "A", "second"),
@@ -1302,9 +1370,9 @@ class DiagramBuilderTest {
 
         val diagram = buildSequenceDiagram(tab, spec)
 
-        assertEquals(1, diagram.messages.size)
-        assertTrue(diagram.truncated)
-        assertTrue(diagram.messages.single().label.length <= 8)
+        assertEquals(2, diagram.messages.size)
+        assertFalse(diagram.truncated)
+        assertTrue(diagram.messages.first().label.length <= 8)
     }
 
     @Test

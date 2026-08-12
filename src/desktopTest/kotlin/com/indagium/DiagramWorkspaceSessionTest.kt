@@ -95,7 +95,8 @@ class DiagramWorkspaceSessionTest {
         state.seqDiagrams.begin("log", setOf(1, 2))
         await {
             state.seqDiagrams.preview.diagramOrNull != null &&
-                state.seqDiagrams.candidatePreview is DiagramCandidateState.Computed
+                state.seqDiagrams.candidatePreview is DiagramCandidateState.Computed &&
+                state.seqDiagrams.request?.spec?.manualDocument?.interactions?.isNotEmpty() == true
         }
         val scans = state.seqDiagrams.candidateScanCount.get()
         val builds = state.seqDiagrams.previewBuildCount.get()
@@ -198,7 +199,10 @@ class DiagramWorkspaceSessionTest {
     fun missingSourceRegenerationKeepsCachedPreview() {
         val state = state()
         state.seqDiagrams.begin("log", setOf(1, 2))
-        await { state.seqDiagrams.preview.diagramOrNull != null }
+        await {
+            state.seqDiagrams.preview.diagramOrNull != null &&
+                state.seqDiagrams.request?.spec?.manualDocument?.interactions?.isNotEmpty() == true
+        }
         val spec = state.seqDiagrams.request!!.spec
         val cached = state.seqDiagrams.preview.diagramOrNull
         state.closeTab("log")

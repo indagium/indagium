@@ -430,70 +430,64 @@ A sequence diagram is a dedicated, closable tab rather than a modal dialog. Crea
 non-empty row selection to use that inclusive range, or start from the current filtered view. Its
 header shows the source log, scope and save state; **Back to source log** returns to the originating
 tab. You can keep several diagram tabs open at once. If the source log is closed, an existing
-diagram remains viewable from its cached model, but must be relinked before it can be regenerated.
+diagram remains viewable from its cached model, but must be relinked before it can be edited or
+rebuilt from source.
 
-The left inspector is collapsible and resizable. New diagrams open in **Manual** authoring mode and
-are seeded asynchronously from the best available inferred preview. Existing saved diagrams retain
-their persisted mode. The inspector groups the controls as **Scope**, **Components**, **Actors**,
-**Authoring**, **Interaction inference**, **Presentation**, and **Draft library**.
+The left inspector is collapsible and resizable. Every diagram is an editable interaction document;
+new diagrams are seeded asynchronously from the best available source evidence, which gives you a
+starting point rather than an automatic final result. The inspector groups the controls as **Scope**,
+**Lifelines**, **Starting point**, **Interactions**, **Advanced structure**, **Presentation**, and
+**Draft library**.
 The canvas supports pan, pointer-centred zoom, fit/reset, visible scrollbars, warnings, and coverage
 counts.
 
-#### Choose and organise components
+#### Choose and organise lifelines
 
-The Components section presents tags in three useful tiers:
+The Lifelines section presents tags in three useful tiers:
 
 - Tags on the selected rows are enabled initially.
 - Tags elsewhere in the current filtered view are available but disabled initially.
 - Tags outside that view are available only through search, with their analysis counts.
 
-Every enabled row is a named component. Rename a component for a useful diagram label, merge two or
-more raw tags into one component, inspect its tag membership, or unmerge it again. This replaces the
-old per-tag **Show / Other / Hide** choice: a component is simply enabled or disabled.
+Every enabled tag becomes a lifeline. Rename a lifeline for a useful diagram label, merge two or more
+raw tags into one lifeline, inspect its tag membership, or unmerge it again. Actors can also be added
+when the diagram needs a person, service, or hardware endpoint.
 
 The advanced **Group unmapped in-range tags as Other** switch is the only `Other` behaviour. It
 groups *all* otherwise-unmapped tags in the chosen scope into one `Other` lifeline. With it off
 (the default), unmapped tags are hidden. It never silently changes the status of tags that were not
 explicitly selected.
 
-With one row or one component there is no handoff to draw. The workspace explains that situation and
-offers the event-timeline view instead.
-
 #### Read and refine interactions
 
-#### Manual authoring
+#### Edit interactions
 
-Manual mode is a durable editor for the rendered interaction list. Lifeline order is bounded to
+The workspace is a durable editor for the rendered interaction list. Lifeline order is bounded to
 eight visible rows, scrollable, collapsible, and reorderable by drag and drop. Lifelines with no
 enabled interaction disappear from the rendered diagram but remain in the configured order, so
 they return automatically when an interaction is assigned to them again.
 
-Interactions seeded from inference are grouped by source method/site when available, otherwise by
-source, destination, line type, and message text with volatile parameter values removed. A group
-shows its occurrence count (for example, `×12`), can be collapsed, reordered, and edited as one
-entity. Expanding it shows the individual log rows; **Detach** makes one occurrence independently
-editable. Source, destination, line type, visibility, operation, result, label, and parameters are
-available in the editor.
+Interactions created from selected log rows are grouped by source method/site when available,
+otherwise by source, destination, line type, and message text with volatile parameter values
+removed. A group shows its occurrence count (for example, `×12`), can be collapsed, reordered, and
+edited as one entity. Expanding it shows the individual log rows; **Move out** makes one occurrence
+independently editable. Source, destination, line type, visibility, operation, result, label, and
+parameters are available in the editor.
 
-The Manual section also provides **Apply source execution trace**, **Apply same-thread handoffs**,
-and **Revert previous apply**. Applying a seed replaces the manual interactions only after a
-successful inference and keeps a one-step session undo; a failed inference preserves the current
-manual document.
+The **Starting point** section provides **Use verified source trace**, **Include same-thread
+handoffs**, **Apply to interactions**, and **Reset**. Applying a source build replaces the current
+interactions only after successful analysis and keeps a one-step session undo; a failed build
+preserves the existing document.
 
-**Component flow** is the default: it summarizes handoffs between enabled components. **Every event**
-and message-pattern rules live under Advanced when you need a literal timeline or explicit endpoints.
-Aliases remain display-only; the raw tag identity is retained for regeneration and line navigation.
+Aliases remain display-only; the raw tag identity is retained for source navigation. Presentation
+settings affect the authored interactions and shared canvas only; no separate inferred interaction
+mode is exposed.
 
-Actors can stand for people, services, or hardware. An actor can mirror a component inbound,
-outbound, or both (both is the default). Mirroring duplicates every applicable non-self edge beside
-the original edge; it does not replace or redirect the original evidence.
-
-Each message records why it exists: a log transition, a pattern rule, source inference, or actor
-mirroring. Source-inferred interactions are visibly dashed. Source enrichment is deliberately
-conservative: it follows only high-confidence direct calls one hop, shows declared return types, and
-surfaces ambiguous matches instead of guessing. Runtime return values appear only when the log or a
-rule supplied them. Activation bars appear only for correlated call/return evidence, never from an
-unrelated tag change.
+Each interaction remains linked to its selected log rows when evidence is available. Source
+enrichment is deliberately conservative: it follows only high-confidence direct calls one hop,
+shows declared return types, and surfaces ambiguous matches instead of guessing. Runtime return
+values appear only when the log or a rule supplied them. Activation bars appear only for correlated
+call/return evidence, never from an unrelated tag change.
 
 Arrows remain clickable: selecting one navigates to the log line that supplied it. Warnings and
 coverage identify hidden, grouped, truncated, or ambiguous evidence so the diagram does not look

@@ -94,13 +94,15 @@ class DiagramSpecCodecTest {
     // ── Round-trip ────────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun encodeThenParseRoundTripsTheFullSpecAndTheSourceExactly() {
+    fun sourceOnlyLegacyNotesRemainViewableWhileNewWritesOmitRetiredFields() {
         val note = encodeDiagramNote(fullSpec, source)
 
         val parsed = parseDiagramNote(note)
 
         assertTrue(parsed != null, "a note this codec itself produced must always parse back")
-        assertEquals(fullSpec, parsed.spec)
+        assertEquals(fullSpec.copy(mode = ArrowMode.EVIDENCE_FLOW, rules = emptyList()), parsed.spec)
+        assertFalse(note.contains("\"mode\""))
+        assertFalse(note.contains("\"rules\""))
         assertEquals(DiagramDialect.MERMAID, parsed.dialect)
         assertEquals(source.trimEnd('\n'), parsed.source.trimEnd('\n'))
     }
@@ -363,7 +365,7 @@ class DiagramSpecCodecTest {
     }
 
     @Test
-    fun v3RoundTripsComponentsActorsEvidenceAndActivationSpans() {
+    fun newModelBackedNotesNormalizeToManualAndRetireInferredFields() {
         val spec = SeqDiagramSpec(
             components = listOf(DiagramComponent("app", "App", setOf("A", "B"), sourceOwnerTypes = setOf("com.example.App"))),
             actors = listOf(DiagramActor("client", "Client", "app", MirrorDirection.OUTBOUND, mirrorComponentIds = setOf("app"))),
@@ -379,11 +381,16 @@ class DiagramSpecCodecTest {
             listOf(DiagramMessage(0, 1, "call", 9, "10:00:00", LogLevel.I, MessageKind.CALL, evidence = MessageEvidence.SOURCE_INFERRED, edgeOrdinal = 0)),
             activationSpans = listOf(DiagramActivationSpan(1, 0, 0, MessageEvidence.SOURCE_INFERRED)),
         )
-        val parsed = assertNotNull(parseDiagramNote(encodeDiagramNote(spec, source, model)))
-        assertEquals(spec, parsed.spec)
+        val encoded = encodeDiagramNote(spec, source, model)
+        val parsed = assertNotNull(parseDiagramNote(encoded))
+        assertEquals(DiagramAuthoringMode.MANUAL, parsed.spec.authoringMode)
+        assertTrue(parsed.spec.manualDocument.interactions.isNotEmpty())
         assertEquals(setOf("com.example.App"), parsed.spec.components.single().sourceOwnerTypes)
-        assertEquals(setOf("app"), parsed.spec.actors.single().mirrorComponentIds)
-        assertEquals(spec.callOverrides, parsed.spec.callOverrides)
+        assertTrue(parsed.spec.actors.single().mirrorComponentIds.isEmpty())
+        assertTrue(parsed.spec.callOverrides.isEmpty())
+        assertFalse(encoded.contains("\"authoringMode\""))
+        assertFalse(encoded.contains("\"callOverrides\""))
+        assertFalse(encoded.contains("\"mirrorComponentId\""))
         assertEquals(MessageEvidence.SOURCE_INFERRED, parsed.model?.messages?.single()?.evidence)
         assertEquals(model.activationSpans, parsed.model?.activationSpans)
     }
@@ -431,7 +438,12 @@ class DiagramSpecCodecTest {
         val parsed = assertNotNull(parseDiagramNote(encoded))
 
         assertTrue(encoded.startsWith("<!-- indagium:diagram v4 "))
-        assertEquals(spec, parsed.spec)
+        assertEquals(document, parsed.spec.manualDocument)
+        assertEquals(DiagramAuthoringMode.MANUAL, parsed.spec.authoringMode)
+        assertTrue(parsed.spec.rules.isEmpty())
+        assertTrue(parsed.spec.messageOverrides.isEmpty())
+        assertFalse(encoded.contains("\"rules\""))
+        assertFalse(encoded.contains("\"messageOverrides\""))
         assertEquals(model.messages.single().originKeys, parsed.model?.messages?.single()?.originKeys)
         assertEquals(trace, parsed.model?.resolvedTrace)
         assertEquals(SourceTraceMode.SOURCE_TRACE, parsed.model?.traceMode)

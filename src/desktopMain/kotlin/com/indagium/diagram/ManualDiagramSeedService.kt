@@ -34,12 +34,20 @@ data class ManualDiagramSeedConfiguration(
  */
 fun manualDocumentFromDiagram(diagram: SeqDiagram): ManualDiagramDocument {
     val interactions = buildList {
-        // A diagram may contain supplemental structural arrows in addition to the primary event
-        // for a log row (for example same-thread handoffs). They are useful for the inferred view,
-        // but seeding both representations creates duplicate manual rows for the same evidence.
-        // Manual authoring starts from one durable row per primary event; retain the old fallback
-        // for callers that construct structural-only diagrams.
-        val seedMessages = diagram.messages.filter { it.primary }.ifEmpty { diagram.messages }
+        // Keep the primary log event for every selected row, plus source-trace structure. A source
+        // trace's call/return/async arrows carry a real execution boundary and must not disappear
+        // merely because they supplement the log event for the same row. Other supplemental
+        // presentation (actor mirrors) remains inferred-only to avoid creating duplicate editable
+        // rows for the same ordinary log evidence. Same-thread handoffs are an explicit seed
+        // choice, so they become durable structure when present. Retain the old fallback for
+        // callers that construct structural-only diagrams.
+        val seedMessages = diagram.messages.filter {
+            it.primary ||
+                (it.evidence == MessageEvidence.SOURCE_INFERRED && it.kind != MessageKind.SELF) ||
+                (it.evidence == MessageEvidence.THREAD_HANDOFF && it.kind != MessageKind.SELF)
+        }
+            .ifEmpty { diagram.messages }
+        var nextOrder = 0L
         seedMessages.forEachIndexed { messageIndex, message ->
             val from = diagram.participants.getOrNull(message.fromIdx) ?: return@forEachIndexed
             val to = diagram.participants.getOrNull(message.toIdx) ?: return@forEachIndexed
@@ -75,11 +83,16 @@ fun manualDocumentFromDiagram(diagram: SeqDiagram): ManualDiagramDocument {
                         parameters = parameters,
                         label = label.takeUnless { isSourceCall },
                         kind = message.kind,
-                        order = messageIndex.toLong() * 100_000L + occurrenceIndex,
+                        // Each occurrence remains independently editable. Incrementing through the
+                        // already-ordered model produces stable, unique ordering even for a very
+                        // large collapsed run (where the old fixed stride could collide).
+                        order = nextOrder++,
                         groupKey = groupKey,
                         sourceMethodId = sourceMethodId,
                         sourceLogSiteId = sourceLogSiteId,
                         sourceOwnerType = from.sourceOwnerType,
+                        renderAnchorTs = message.ts,
+                        renderAnchorLevel = message.level,
                     ),
                 )
             }

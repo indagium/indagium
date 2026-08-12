@@ -506,9 +506,10 @@ class SeqDiagramCoordinator(
         // Seed the preview with the note's OWN carried model rather than immediately rebuilding:
         // the note may have been opened without its log (Case Library "notes only"), where a
         // rebuild would produce nothing. Regenerating is an explicit action from here.
+        val editableSpec = editableManualSpec(parsed.spec, parsed.model)
         openWorkspace(
-            tabId, SeqDiagramRequest(tabId, parsed.spec, editingBlockId = blockId),
-            parsed.model?.let { DiagramPreviewState.Computed(it) } ?: DiagramPreviewState.NotComputed,
+            tabId, SeqDiagramRequest(tabId, editableSpec, editingBlockId = blockId),
+            parsed.model?.let { DiagramPreviewState.Computed(it.copy(spec = editableSpec)) } ?: DiagramPreviewState.NotComputed,
         )
         return true
     }
@@ -554,19 +555,19 @@ class SeqDiagramCoordinator(
         val tab = appState.tab(currentRequest.tabId) ?: return
         val currentWorkspace = activeWorkspace() ?: return
         if (!configuration.enabled) {
-            replaceWorkspace(workspaceId) { it.copy(manualSeedStatus = "Choose at least one evidence source.") }
+            replaceWorkspace(workspaceId) { it.copy(manualSeedStatus = "Choose at least one source option.") }
             return
         }
         if (currentWorkspace.manualSeedEditsSinceApply && !force) {
             replaceWorkspace(workspaceId) {
-                it.copy(manualSeedStatus = "Apply would replace manual edits. Confirm Apply to continue.")
+                it.copy(manualSeedStatus = "Apply would replace your edits. Confirm to continue.")
             }
             return
         }
         val expectedSpec = currentRequest.spec
         val undo = ManualSeedUndoSnapshot(expectedSpec.manualDocument, expectedSpec.lifelineOrder)
         replaceWorkspace(workspaceId) {
-            it.copy(manualSeedBusy = true, manualSeedStatus = "Applying ${configuration.label}…")
+            it.copy(manualSeedBusy = true, manualSeedStatus = "Building ${configuration.label}…")
         }
         seedJobs.remove(workspaceId)?.cancel()
         val job = scope.launch {
@@ -592,7 +593,7 @@ class SeqDiagramCoordinator(
                 onSuccess = { (inferredDiagram, document) ->
                     if (document.interactions.isEmpty()) {
                         replaceWorkspace(workspaceId) {
-                            it.copy(manualSeedBusy = false, manualSeedStatus = "No interactions were inferred; manual content was preserved.")
+                            it.copy(manualSeedBusy = false, manualSeedStatus = "No interactions were found; existing content was preserved.")
                         }
                     } else {
                         val inferredParticipants = inferredDiagram.participants.map { it.id }
@@ -608,7 +609,7 @@ class SeqDiagramCoordinator(
                                 manualSeedUndo = undo,
                                 manualSeedEditsSinceApply = false,
                                 manualSeedBusy = false,
-                                manualSeedStatus = "Applied ${configuration.label}.",
+                                manualSeedStatus = "Applied ${configuration.label} to interactions.",
                             )
                         }
                         request = currentRequest.copy(spec = next)
@@ -621,7 +622,7 @@ class SeqDiagramCoordinator(
                         replaceWorkspace(workspaceId) {
                             it.copy(
                                 manualSeedBusy = false,
-                            manualSeedStatus = "Could not apply ${configuration.label}: ${error.message ?: "inference failed"}",
+                            manualSeedStatus = "Could not build ${configuration.label}: ${error.message ?: "source analysis failed"}",
                         )
                     }
                 },
@@ -658,7 +659,7 @@ class SeqDiagramCoordinator(
                 request = it.request?.copy(spec = restored),
                 manualSeedUndo = null,
                 manualSeedEditsSinceApply = false,
-                manualSeedStatus = "Reverted the previous apply.",
+                manualSeedStatus = "Restored the previous interactions.",
             )
         }
         request = current.copy(spec = restored)
@@ -909,7 +910,7 @@ class SeqDiagramCoordinator(
             spec.authoringMode == com.indagium.diagram.DiagramAuthoringMode.MANUAL &&
             spec.manualDocument.interactions.isEmpty()
         if (initialSeedPending) {
-            replaceWorkspace(workspaceId) { it.copy(manualSeedStatus = "Preparing manual interactions…") }
+            replaceWorkspace(workspaceId) { it.copy(manualSeedStatus = "Preparing interactions…") }
         }
         publishPreview(workspaceId, DiagramPreviewState.Computing(previous))
         val job = scope.launch {
@@ -923,7 +924,7 @@ class SeqDiagramCoordinator(
                     publishPreview(
                         workspaceId,
                         previous?.let(DiagramPreviewState::Computed)
-                            ?: DiagramPreviewState.Failed("This log is closed. Relink it to regenerate."),
+                            ?: DiagramPreviewState.Failed("This log is closed. Relink it to rebuild the preview."),
                     )
                 }
                 return@launch
@@ -1142,6 +1143,21 @@ class SeqDiagramCoordinator(
             )
         }
         return disabled.takeIf { it.isNotEmpty() }?.let { spec.copy(components = it) }
+    }
+
+    /** Old saved inferred documents remain readable, but opening one for editing creates the
+     * single manual contract from its own carried model. This never regenerates against a possibly
+     * different log, and a source-only legacy note remains view-only until explicit regeneration. */
+    private fun editableManualSpec(spec: SeqDiagramSpec, model: SeqDiagram?): SeqDiagramSpec {
+        if (spec.manualDocument.interactions.isNotEmpty()) {
+            return spec.copy(authoringMode = com.indagium.diagram.DiagramAuthoringMode.MANUAL)
+        }
+        val carried = model ?: return spec.copy(authoringMode = com.indagium.diagram.DiagramAuthoringMode.MANUAL)
+        return spec.withSeededParticipants(carried.participants).copy(
+            authoringMode = com.indagium.diagram.DiagramAuthoringMode.MANUAL,
+            manualDocument = manualDocumentFromDiagram(carried),
+            lifelineOrder = (spec.lifelineOrder + carried.participants.map { it.id }).distinct(),
+        )
     }
 
     // ── Writing the result into the notes ────────────────────────────────────────────────────

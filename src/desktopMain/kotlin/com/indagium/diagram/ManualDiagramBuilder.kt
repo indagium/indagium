@@ -18,31 +18,44 @@ internal fun buildManualSequenceDiagram(
     val candidateInteractions = spec.manualDocument.interactions.withIndex()
         .filter { it.value.enabled }
         .sortedWith(compareBy<IndexedValue<ManualDiagramInteraction>> { it.value.order }.thenBy { it.index })
-    val cappedInteractions = candidateInteractions.take(spec.options.maxMessages.coerceAtLeast(1))
-    val manualTruncated = cappedInteractions.size < candidateInteractions.size
-    if (manualTruncated) {
-        warnings += "Manual interactions truncated at ${spec.options.maxMessages} arrows."
-    }
-    val resolvedInteractions = cappedInteractions.mapNotNull { indexed ->
+    // A manual document is the authoritative user-authored model. In particular, its initial
+    // draft must retain every selected log event; the inferred builder's structural-arrow cap
+    // must not silently delete manual rows.
+    val resolvedInteractions = candidateInteractions.mapNotNull { indexed ->
         val interaction = indexed.value
         if (interaction.id.isBlank()) {
-            warnings += "Manual interaction with an empty id was ignored."
+            warnings += "Interaction with an empty id was ignored."
             return@mapNotNull null
         }
-        val represented = interaction.sourceEntryIds.filterTo(linkedSetOf()) { it in entryById }
-        if (represented.isEmpty()) {
-            warnings += "Manual interaction '${interaction.id}' has no selected log evidence."
+        val representedInRange = interaction.sourceEntryIds.filterTo(linkedSetOf()) { it in entryById }
+        if (representedInRange.size != interaction.sourceEntryIds.size && representedInRange.isNotEmpty()) {
+            warnings += "Interaction '${interaction.id}' references log rows outside the current selection."
+        }
+        val entry = entries.firstOrNull { it.id in representedInRange }
+        if (entry != null) {
+            return@mapNotNull ManualRenderItem(
+                interaction = interaction,
+                representedEntryIds = representedInRange,
+                entryId = entry.id,
+                ts = entry.ts,
+                level = entry.level,
+            )
+        }
+        val anchorTs = interaction.renderAnchorTs
+        val anchorLevel = interaction.renderAnchorLevel
+        if (anchorTs.isNullOrBlank() || anchorLevel == null) {
+            warnings += "Interaction '${interaction.id}' has no selected log evidence."
             return@mapNotNull null
         }
-        if (represented.size != interaction.sourceEntryIds.size) {
-            warnings += "Manual interaction '${interaction.id}' references log rows outside the current selection."
-        }
-        val entry = entries.firstOrNull { it.id in represented }
-        if (entry == null) {
-            warnings += "Manual interaction '${interaction.id}' has no selected log evidence."
-            return@mapNotNull null
-        }
-        ManualRenderItem(interaction, represented, entry)
+        // A durable manual interaction is authoritative. Its persisted anchor keeps it renderable
+        // after the current range/filter no longer contains its original log rows.
+        ManualRenderItem(
+            interaction = interaction,
+            representedEntryIds = interaction.sourceEntryIds,
+            entryId = interaction.sourceEntryIds.minOrNull() ?: 0,
+            ts = anchorTs,
+            level = anchorLevel,
+        )
     }
     val activeParticipantIds = resolvedInteractions.flatMap { item ->
         listOf(item.interaction.fromParticipantId, item.interaction.toParticipantId)
@@ -58,18 +71,18 @@ internal fun buildManualSequenceDiagram(
     resolvedInteractions.forEach { item ->
             val interaction = item.interaction
             if (interaction.id in indexByInteractionId) {
-                warnings += "Duplicate manual interaction '${interaction.id}' was ignored."
+                warnings += "Duplicate interaction '${interaction.id}' was ignored."
                 return@forEach
             }
             val from = indexById[interaction.fromParticipantId]
             val to = indexById[interaction.toParticipantId]
             if (from == null || to == null) {
-                warnings += "Manual interaction '${interaction.id}' references an unavailable lifeline."
+                warnings += "Interaction '${interaction.id}' references an unavailable lifeline."
                 return@forEach
             }
             val kind = if (from == to && interaction.kind != MessageKind.RETURN) MessageKind.SELF else interaction.kind
             val origin = MessageOriginKey(
-                entryId = item.entry.id,
+                entryId = item.entryId,
                 manualInteractionId = interaction.id,
             )
             indexByInteractionId[interaction.id] = messages.size
@@ -77,9 +90,9 @@ internal fun buildManualSequenceDiagram(
                 fromIdx = from,
                 toIdx = to,
                 label = manualLabel(interaction, spec.options.labelMaxChars),
-                entryId = item.entry.id,
-                ts = item.entry.ts,
-                level = item.entry.level,
+                entryId = item.entryId,
+                ts = item.ts,
+                level = item.level,
                 kind = kind,
                 evidence = MessageEvidence.MANUAL_OVERRIDE,
                 primary = true,
@@ -91,7 +104,7 @@ internal fun buildManualSequenceDiagram(
     val frames = spec.manualDocument.groups.filter { it.enabled }.mapNotNull { group ->
         val indices = group.interactionIds.mapNotNull(indexByInteractionId::get)
         if (indices.isEmpty()) {
-            warnings += "Manual group '${group.id}' has no enabled interactions."
+            warnings += "Group '${group.id}' has no enabled interactions."
             null
         } else {
             DiagramFrame(group.label, null, indices.min(), indices.max(), depth = 0)
@@ -101,7 +114,7 @@ internal fun buildManualSequenceDiagram(
         val participant = indexById[note.participantId]
         val after = indexByInteractionId[note.afterInteractionId]
         if (participant == null || after == null) {
-            warnings += "Manual note '${note.id}' has no available anchor."
+            warnings += "Note '${note.id}' has no available anchor."
             null
         } else {
             DiagramNoteMark(participant, after, note.text, note.isError)
@@ -113,7 +126,7 @@ internal fun buildManualSequenceDiagram(
             val start = indexByInteractionId[activation.startInteractionId]
             val end = indexByInteractionId[activation.endInteractionId]
             if (participant == null || start == null || end == null) {
-                warnings += "Manual activation '${activation.id}' has no available boundary."
+                warnings += "Activation '${activation.id}' has no available boundary."
                 null
             } else {
                 DiagramActivationSpan(participant, minOf(start, end), maxOf(start, end), MessageEvidence.MANUAL_OVERRIDE)
@@ -127,7 +140,7 @@ internal fun buildManualSequenceDiagram(
         frames = frames,
         notes = notes,
         activationSpans = activations,
-        truncated = manualTruncated,
+        truncated = false,
         scannedEntries = entries.size,
         coverage = coverage,
         warnings = warnings,
@@ -163,7 +176,9 @@ private fun truncateManualLabel(value: String, maxChars: Int): String {
 private data class ManualRenderItem(
     val interaction: ManualDiagramInteraction,
     val representedEntryIds: Set<Int>,
-    val entry: LogEntry,
+    val entryId: Int,
+    val ts: String,
+    val level: com.indagium.model.LogLevel,
 )
 
 /** Order every configured lifeline exactly once; unknown persisted ids are intentionally ignored. */
