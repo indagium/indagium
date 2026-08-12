@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.diagram.ActivationPolicy
@@ -137,6 +138,7 @@ internal fun WorkspaceInspector(
 // one that brings the data loss back.
 private const val MAX_UI_COMPONENTS = MAX_CODEC_COMPONENTS
 private const val MAX_UI_TAG_IDS = MAX_CODEC_TAG_IDS
+private val UNIFIED_LIFELINE_ROW_HEIGHT = 36.dp
 
 /** What the inline "Add alias"/"Add component"/"+" tag picker is currently building.  Alias is
  * always exactly one tag (its own name is the user's words, not a merge); Component supports any
@@ -223,6 +225,12 @@ private fun BlankGuardedNameField(name: String, placeholder: String, resetKey: A
 
 @Composable
 private fun ParticipantsSection(tab: LogTab, state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
+    UnifiedLifelinesSection(tab, state, spec, onSpec)
+}
+
+@Suppress("UNUSED_FUNCTION")
+@Composable
+private fun LegacyParticipantsSection(tab: LogTab, state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
     val tc = tc()
     val candidateState = state.seqDiagrams.candidatePreview
     val candidates = candidateState.valuesOrEmpty
@@ -513,6 +521,275 @@ private fun ParticipantsSection(tab: LogTab, state: AppState, spec: SeqDiagramSp
         }
         onSpec(spec.copy(unmappedTagPolicy = next))
     }) { AppText("Group unmapped as Other", fontSize = 10.sp) }
+}
+
+/**
+ * The participant editor deliberately has one durable concept: a lifeline.  Tags are the raw
+ * source identities behind a lifeline, aliases are its display name, grouped tags are a merge,
+ * and actors are another kind of lifeline.  Keeping those operations in one list makes the row
+ * selection affordance useful instead of making the user translate between four separate lists.
+ */
+@Composable
+private fun UnifiedLifelinesSection(
+    tab: LogTab,
+    state: AppState,
+    spec: SeqDiagramSpec,
+    onSpec: (SeqDiagramSpec) -> Unit,
+) {
+    val tc = tc()
+    val candidateState = state.seqDiagrams.candidatePreview
+    val candidates = candidateState.valuesOrEmpty
+    LaunchedEffect(tab.id, System.identityHashCode(tab.logData), System.identityHashCode(tab.filter), spec.range, spec.options.includeRowsHiddenByFilter) {
+        state.seqDiagrams.requestCandidates(tab.id, spec)
+    }
+    val components = remember(spec.components) { spec.components.filter { it.tagIds.isNotEmpty() } }
+    val ownerByTag = remember(components) {
+        components.flatMap { component -> component.tagIds.map { tag -> tag to component } }.toMap()
+    }
+    val multiTagComponents = remember(components) { components.filter { it.tagIds.size > 1 } }
+    val packagePrefixes = remember(multiTagComponents) {
+        multiTagComponents.mapNotNull { component -> commonPackagePrefix(component.tagIds) }.toSet()
+    }
+    val processNames = tab.analysis.processNames
+    var expanded by remember(tab.id) { mutableStateOf(true) }
+    var search by remember(tab.id) { mutableStateOf("") }
+    var selectedIds by remember(tab.id) { mutableStateOf(emptySet<String>()) }
+    var draft by remember(tab.id) { mutableStateOf<ComponentDraft?>(null) }
+    var newActor by remember(tab.id) { mutableStateOf("") }
+
+    val needle = search.trim()
+    val visibleComponents = remember(components, needle) {
+        if (needle.isBlank()) components else components.filter { component ->
+            component.displayName.contains(needle, ignoreCase = true) ||
+                component.tagIds.any { it.contains(needle, ignoreCase = true) }
+        }
+    }
+    val matchingNewTags = remember(candidates, ownerByTag, needle) {
+        if (needle.isBlank()) emptyList() else candidates.filter {
+            it.tag.contains(needle, ignoreCase = true) && ownerByTag[it.tag] == null
+        }
+    }
+    val totalTagIds = components.sumOf { it.tagIds.size }
+    val canAdd = components.size < MAX_UI_COMPONENTS && totalTagIds < MAX_UI_TAG_IDS
+
+    fun updateComponents(next: List<DiagramComponent>, nextSelectedIds: Set<String> = selectedIds) {
+        selectedIds = nextSelectedIds
+        onSpec(spec.copy(components = next, options = spec.options.copy(includeRowsHiddenByFilter = true)))
+    }
+
+    fun addTag(tag: String) {
+        if (ownerByTag[tag] != null || !canAdd) return
+        updateComponents(components + DiagramComponent(tag, tag, setOf(tag), enabled = true), nextSelectedIds = emptySet())
+    }
+
+    fun deleteComponent(component: DiagramComponent) {
+        val next = components.filterNot { it.id == component.id }
+        val actors = spec.actors.map { actor ->
+            val mirrors = mirrorComponentIds(actor) - component.id
+            actor.withMirrorComponentIds(mirrors)
+        }
+        selectedIds = selectedIds - component.id
+        onSpec(spec.copy(components = next, actors = actors))
+    }
+
+    fun mergeSelected() {
+        val selected = components.filter { it.id in selectedIds }
+        if (selected.size < 2) return
+        val primary = selected.first()
+        val removedIds = selected.drop(1).map { it.id }.toSet()
+        val merged = primary.copy(
+            tagIds = selected.flatMap { it.tagIds }.toSet(),
+            enabled = selected.any { it.enabled },
+        )
+        val next = components.map { component ->
+            when {
+                component.id == primary.id -> merged
+                component.id in removedIds -> null
+                else -> component
+            }
+        }.filterNotNull()
+        val actors = spec.actors.map { actor ->
+            val mirrors = mirrorComponentIds(actor).map { id -> if (id in removedIds) primary.id else id }.toSet()
+            actor.withMirrorComponentIds(mirrors)
+        }
+        selectedIds = setOf(primary.id)
+        onSpec(spec.copy(components = next, actors = actors))
+    }
+
+    fun unmerge(component: DiagramComponent) {
+        if (component.tagIds.size < 2) return
+        val tags = component.tagIds.sorted()
+        val split = tags.mapIndexed { index, tag ->
+            if (index == 0) component.copy(tagIds = setOf(tag))
+            else DiagramComponent(tag, tag, setOf(tag), enabled = component.enabled)
+        }
+        val next = components.flatMap { current -> if (current.id == component.id) split else listOf(current) }
+        selectedIds = split.map { it.id }.toSet()
+        onSpec(spec.copy(components = next))
+    }
+
+    fun commitDraft(component: DiagramComponent) {
+        val others = components.filter { it.id != component.id }
+            .map { it.copy(tagIds = it.tagIds - component.tagIds) }
+            .filter { it.tagIds.isNotEmpty() }
+        val next = others + component
+        if (next.size > MAX_UI_COMPONENTS || next.sumOf { it.tagIds.size } > MAX_UI_TAG_IDS) return
+        selectedIds = setOf(component.id)
+        onSpec(spec.copy(components = next, options = spec.options.copy(includeRowsHiddenByFilter = true)))
+        draft = null
+    }
+
+    val enabledCount = components.count { it.enabled }
+    SectionHeader(
+        "Lifelines",
+        trailing = { AppText("$enabledCount enabled · ${components.size + spec.actors.size} total", color = tc.td, fontSize = 10.sp) },
+        expanded = expanded,
+        onToggle = { expanded = !expanded },
+    )
+    if (!expanded) return
+
+    InlineField(
+        search,
+        { search = it },
+        "Search tags to add lifelines…",
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+        fontSize = 10.sp,
+        onClear = { search = "" },
+    )
+    if (candidateState is DiagramCandidateState.Computing) {
+        AppText("Refreshing tags…", color = tc.td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp))
+    } else if (candidateState is DiagramCandidateState.Failed) {
+        AppText(candidateState.message, color = DANGER_RED, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp))
+    }
+    if (visibleComponents.isEmpty() && matchingNewTags.isEmpty() && spec.actors.isEmpty()) {
+        AppText(
+            if (needle.isBlank()) "No lifelines yet. Search for a tag or add an actor." else "No matching lifelines or tags.",
+            color = tc.td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp),
+        )
+    }
+    visibleComponents.forEach { component ->
+        val isSelected = component.id in selectedIds
+        UnifiedLifelineRow(
+            component = component,
+            color = componentColor(component, multiTagComponents, tc),
+            selected = isSelected,
+            onToggleSelected = {
+                selectedIds = if (isSelected) selectedIds - component.id else selectedIds + component.id
+            },
+            onToggleEnabled = {
+                onSpec(spec.copy(components = components.map { if (it.id == component.id) it.copy(enabled = !it.enabled) else it }))
+            },
+            onRename = { name -> onSpec(spec.copy(components = components.map { if (it.id == component.id) it.copy(displayName = name) else it })) },
+            onUnmerge = { unmerge(component) },
+            onRemove = { deleteComponent(component) },
+            sourceOwnerTypes = indexedOwnerTypesForLog(state.sourceIndex, component.tagIds, tab.logData),
+            onSourceOwners = { owners -> onSpec(spec.copy(components = components.map { if (it.id == component.id) it.copy(sourceOwnerTypes = owners) else it })) },
+        )
+    }
+    matchingNewTags.forEach { candidate ->
+        UnifiedCandidateRow(candidate.tag, candidate.entryCount, onAdd = { addTag(candidate.tag) })
+    }
+    if (selectedIds.size >= 2) {
+        Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppButton("Merge selected lifelines", ::mergeSelected, variant = ButtonVariant.Primary)
+            AppText("${selectedIds.size} selected", color = tc.td, fontSize = 10.sp, modifier = Modifier.align(Alignment.CenterVertically))
+        }
+    }
+
+    (draft as? ComponentDraft.Component)?.let { componentDraft ->
+        ComponentDraftEditor(componentDraft, candidates, ownerByTag, processNames, packagePrefixes, { draft = it }, ::commitDraft) { draft = null }
+    }
+    (draft as? ComponentDraft.Alias)?.let { aliasDraft ->
+        ComponentDraftEditor(aliasDraft, candidates, ownerByTag, processNames, packagePrefixes, { draft = it }, ::commitDraft) { draft = null }
+    }
+
+    spec.actors.forEach { actor -> ActorRow(actor, components, onSpec, spec) }
+    spec.participants.filter { it.kind == ParticipantKind.ACTOR && spec.actors.none { actor -> actor.id == it.id } }
+        .forEach { LegacyActorRow(it, onSpec, spec) }
+
+    Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        InlineField(newActor, { newActor = it }, "Actor name…", Modifier.weight(1f), fontSize = 10.sp)
+        AppButton("Add actor", {
+            val label = newActor.trim()
+            if (label.isNotEmpty()) {
+                val id = "actor-${System.nanoTime()}"
+                onSpec(spec.copy(
+                    actors = spec.actors + DiagramActor(id, label),
+                    participants = spec.participants + com.indagium.diagram.DiagramParticipant(id, label, ParticipantKind.ACTOR),
+                ))
+                newActor = ""
+            }
+        }, enabled = newActor.isNotBlank())
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        AppButton("Add lifeline", { draft = ComponentDraft.Component(null, emptySet(), "", false) }, variant = ButtonVariant.Ghost, enabled = canAdd)
+        AppButton("Add alias", { draft = ComponentDraft.Alias("", "") }, variant = ButtonVariant.Ghost, enabled = canAdd)
+    }
+}
+
+@Composable
+private fun UnifiedLifelineRow(
+    component: DiagramComponent,
+    color: Color,
+    selected: Boolean,
+    onToggleSelected: () -> Unit,
+    onToggleEnabled: () -> Unit,
+    onRename: (String) -> Unit,
+    onUnmerge: () -> Unit,
+    onRemove: () -> Unit,
+    sourceOwnerTypes: List<String>,
+    onSourceOwners: (Set<String>) -> Unit,
+) {
+    val tc = tc()
+    var renaming by remember(component.id) { mutableStateOf(false) }
+    HoverBox(
+        modifier = Modifier.fillMaxWidth(),
+        baseBg = if (selected) tc.abg else Color.Transparent,
+    ) {
+        Row(
+            Modifier.fillMaxWidth().height(UNIFIED_LIFELINE_ROW_HEIGHT).padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            AppText("☷", color = tc.td, fontSize = 12.sp)
+            RoundIndicator(active = component.enabled, color = color, onClick = onToggleEnabled)
+            RoundIndicator(active = selected, color = tc.td, onClick = onToggleSelected)
+            if (renaming) {
+                BlankGuardedNameField(component.displayName, "lifeline alias", component.id, Modifier.weight(1f), onRename)
+            } else {
+                AppText(component.displayName, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            }
+            if (component.tagIds.size > 1) AppText("×${component.tagIds.size}", color = tc.td, fontSize = 10.sp)
+            SquareIconButton(if (renaming) "✓" else "✎", 12.sp, { renaming = !renaming })
+            if (component.tagIds.size > 1) SquareIconButton("↔", 12.sp, onUnmerge)
+            SquareIconButton("×", 12.sp, onRemove)
+        }
+    }
+    if (selected && sourceOwnerTypes.isNotEmpty()) {
+        SourceOwnerPicker(component.sourceOwnerTypes, sourceOwnerTypes, onSourceOwners)
+    }
+}
+
+@Composable
+private fun UnifiedCandidateRow(tag: String, count: Int, onAdd: () -> Unit) {
+    val tc = tc()
+    HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onAdd) {
+        Row(
+            Modifier.fillMaxWidth().height(UNIFIED_LIFELINE_ROW_HEIGHT).padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            AppText("☷", color = tc.td, fontSize = 12.sp)
+            RoundIndicator(active = false, color = tc.ac, onClick = {})
+            RoundIndicator(active = false, color = tc.td, onClick = {})
+            AppText(tag, fontSize = 11.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            AppText("$count", color = tc.td, fontSize = 9.sp)
+            AppText("+", color = tc.ac, fontSize = 14.sp)
+        }
+    }
 }
 
 @Composable

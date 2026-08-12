@@ -525,7 +525,11 @@ class SeqDiagramCoordinator(
         activeWorkspaceId?.let { workspaceId ->
             replaceWorkspace(workspaceId) { workspace ->
                 workspace.copy(
-                    initialManualSeedPending = false,
+                    // Metadata and inferred-build options may change while the first automatic
+                    // seed is running. Keep that seed eligible until the user edits manual rows;
+                    // otherwise the option change cancels the seed and renders an empty manual
+                    // document instead.
+                    initialManualSeedPending = workspace.initialManualSeedPending && !manualChanged,
                     manualSeedStatus = null,
                     manualSeedEditsSinceApply = workspace.manualSeedEditsSinceApply || manualChanged,
                 )
@@ -905,7 +909,7 @@ class SeqDiagramCoordinator(
             spec.authoringMode == com.indagium.diagram.DiagramAuthoringMode.MANUAL &&
             spec.manualDocument.interactions.isEmpty()
         if (initialSeedPending) {
-            replaceWorkspace(workspaceId) { it.copy(initialManualSeedPending = false, manualSeedStatus = "Preparing manual interactions…") }
+            replaceWorkspace(workspaceId) { it.copy(manualSeedStatus = "Preparing manual interactions…") }
         }
         publishPreview(workspaceId, DiagramPreviewState.Computing(previous))
         val job = scope.launch {
@@ -932,6 +936,12 @@ class SeqDiagramCoordinator(
                         manualDocument = ManualDiagramDocument(),
                     )
                     val inferred = buildPreviewDiagram(tab, inferredSpec, cancellation)
+                    // The inferred model is useful immediately. Keep it on the canvas while the
+                    // second pass converts it into the durable manual document; otherwise the
+                    // renderer shows its empty placeholder for the whole seed duration.
+                    if (previewGenerations[workspaceId]?.get() == generation && inferred.messages.isNotEmpty()) {
+                        publishPreview(workspaceId, DiagramPreviewState.Computing(inferred))
+                    }
                     val seeded = manualDocumentFromDiagram(inferred)
                     if (seeded.interactions.isEmpty()) {
                         spec
@@ -964,14 +974,18 @@ class SeqDiagramCoordinator(
             built.fold(
                 onSuccess = {
                     if (previewGenerations[workspaceId]?.get() == generation) {
-                        if (initialSeedPending) replaceWorkspace(workspaceId) { it.copy(manualSeedStatus = null) }
+                        if (initialSeedPending) replaceWorkspace(workspaceId) {
+                            it.copy(initialManualSeedPending = false, manualSeedStatus = null)
+                        }
                         publishPreview(workspaceId, DiagramPreviewState.Computed(it))
                     }
                 },
                 onFailure = { e ->
                     if (e is kotlinx.coroutines.CancellationException) throw e
                     if (previewGenerations[workspaceId]?.get() == generation) {
-                        if (initialSeedPending) replaceWorkspace(workspaceId) { it.copy(manualSeedStatus = null) }
+                        if (initialSeedPending) replaceWorkspace(workspaceId) {
+                            it.copy(initialManualSeedPending = false, manualSeedStatus = null)
+                        }
                         publishPreview(
                             workspaceId,
                             DiagramPreviewState.Failed(e.message ?: "Could not build this diagram."),
@@ -1220,10 +1234,11 @@ class SeqDiagramCoordinator(
 private fun SeqDiagramSpec.withSeededParticipants(
     participants: List<com.indagium.diagram.DiagramParticipant>,
 ): SeqDiagramSpec {
-    val configuredTagComponents = components.filter { it.tagIds.isNotEmpty() }
-    if (configuredTagComponents.isNotEmpty()) return this
+    val retainedComponents = components.filter { it.tagIds.isNotEmpty() || it.sourceOwnerTypes.isNotEmpty() }
+    val coveredTags = retainedComponents.flatMap { it.tagIds }.toSet()
     val inferredTagComponents = participants
         .filter { it.kind == com.indagium.diagram.ParticipantKind.TAG }
+        .filter { participant -> (participant.tag ?: participant.id) !in coveredTags }
         .map { participant ->
             com.indagium.diagram.DiagramComponent(
                 id = participant.id,
@@ -1233,7 +1248,7 @@ private fun SeqDiagramSpec.withSeededParticipants(
             )
         }
         .distinctBy { it.id }
-    return copy(components = inferredTagComponents)
+    return copy(components = (retainedComponents + inferredTagComponents).distinctBy { it.id })
 }
 
 /** Do not let the new-workspace opt-out placeholder hide every row from the initial inference. */
