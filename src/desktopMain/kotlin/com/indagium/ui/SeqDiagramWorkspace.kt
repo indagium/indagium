@@ -141,7 +141,10 @@ fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
     // published, even when the inspector is collapsed.
     val sourceIndexBuiltAt = state.sourceIndex?.builtAt
     LaunchedEffect(workspaceId, sourceIndexBuiltAt) {
-        if (!readOnly && sourceIndexBuiltAt != null) {
+        // The initial manual seed owns the first build. A source-index refresh can happen during
+        // that asynchronous conversion; restarting here with the still-empty manual document
+        // would cancel the seed and leave the canvas on the empty placeholder.
+        if (!readOnly && sourceIndexBuiltAt != null && !session.initialManualSeedPending) {
             state.seqDiagrams.requestPreview(tab.id, spec)
         }
     }

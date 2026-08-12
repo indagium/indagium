@@ -53,6 +53,8 @@ import com.indagium.diagram.manualDocumentFromDiagram
 import com.indagium.model.LogEntry
 import kotlin.math.roundToInt
 
+private val SEQUENCE_EDITOR_ROW_HEIGHT = 36.dp
+
 /**
  * Authoring controls deliberately edit only durable [SeqDiagramSpec] fields.  Generation remains
  * in SeqDiagramCoordinator's latest-only preview lane, so typing in this panel never runs the
@@ -171,8 +173,8 @@ private fun LifelineOrderEditor(spec: SeqDiagramSpec, lifelineIds: List<String>,
     var justReleasedId by remember { mutableStateOf<String?>(null) }
     var liveVisualIds by remember { mutableStateOf(emptyList<String>()) }
     val density = LocalDensity.current
-    val rowHeightPx = with(density) { 34.dp.toPx() }
-    val rowHeightDp = 34.dp
+    val rowHeightPx = with(density) { SEQUENCE_EDITOR_ROW_HEIGHT.toPx() }
+    val rowHeightDp = SEQUENCE_EDITOR_ROW_HEIGHT
     val currentSpec = rememberUpdatedState(spec)
     val currentOnSpec = rememberUpdatedState(onSpec)
     val currentOrdered = rememberUpdatedState(ordered)
@@ -196,21 +198,18 @@ private fun LifelineOrderEditor(spec: SeqDiagramSpec, lifelineIds: List<String>,
         ordered = nextOrdered
         currentOnSpec.value(currentSpec.value.copy(lifelineOrder = nextOrdered))
     }
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
-    ) {
-        AppText("Lifeline order", color = tc().td, fontSize = 10.sp, modifier = Modifier.weight(1f))
-        AppText("${visibleOrdered.size}", color = tc().td, fontSize = 9.sp)
-        AppButton(if (expanded) "Collapse" else "Expand", { expanded = !expanded }, variant = ButtonVariant.Ghost)
-    }
+    SectionHeader(
+        "Lifeline order",
+        trailing = { AppText("${visibleOrdered.size}", color = tc().td, fontSize = 9.sp) },
+        expanded = expanded,
+        onToggle = { expanded = !expanded },
+    )
     if (visibleOrdered.isEmpty()) {
         AppText("Enable a manual line to show its lifelines here.", color = tc().td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp))
         return
     }
     if (expanded) {
-        BoundedScrollBoxDp(maxHeightDp = 8 * 34) {
+        BoundedScrollBoxDp(maxHeightDp = 8 * SEQUENCE_EDITOR_ROW_HEIGHT.value.toInt()) {
             Box(
                 Modifier.fillMaxWidth()
                     .height(rowHeightDp * visibleIds.size)
@@ -275,7 +274,6 @@ private fun LifelineOrderEditor(spec: SeqDiagramSpec, lifelineIds: List<String>,
                         val targetY = targetIndex * rowHeightPx
                         val animatedY by animateFloatAsState(targetY, spring(stiffness = 650f, dampingRatio = 0.86f), label = "lifeline-y-$id")
                         val y = sequenceRenderY(isDragging, justReleasedId == id, dragStartTopY + dragOffsetY, targetY, animatedY)
-                        val index = ordered.indexOf(id)
                         Row(
                             Modifier.fillMaxWidth().height(rowHeightDp)
                                 .offset { IntOffset(0, y.roundToInt()) }
@@ -285,24 +283,19 @@ private fun LifelineOrderEditor(spec: SeqDiagramSpec, lifelineIds: List<String>,
                             horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically,
                         ) {
                             AppText("☷", color = if (isDragging) tc().ac else tc().td, fontSize = 12.sp)
-                            AppText("${targetIndex + 1}.", color = tc().td, fontSize = 10.sp)
-                            AppText(id, fontSize = 10.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            AppButton("↑", { ordered = ordered.swap(index, index - 1); currentOnSpec.value(currentSpec.value.copy(lifelineOrder = ordered)) }, variant = ButtonVariant.Ghost, enabled = index > 0)
-                            AppButton("↓", { ordered = ordered.swap(index, index + 1); currentOnSpec.value(currentSpec.value.copy(lifelineOrder = ordered)) }, variant = ButtonVariant.Ghost, enabled = index < ordered.lastIndex)
+                            AppText(
+                                id,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
                 }
             }
         }
-    }
-}
-
-private fun List<String>.swap(left: Int, right: Int): List<String> {
-    if (left !in indices || right !in indices) return this
-    return toMutableList().also { list ->
-        val value = list[left]
-        list[left] = list[right]
-        list[right] = value
     }
 }
 
@@ -317,7 +310,9 @@ private fun ManualInteractionEditor(
     onSpec: (SeqDiagramSpec) -> Unit,
 ) {
     val document = spec.manualDocument
-    SectionHeader("Manual interactions")
+    var expanded by remember { mutableStateOf(true) }
+    SectionHeader("Manual interactions", expanded = expanded, onToggle = { expanded = !expanded })
+    if (!expanded) return
     if (lifelineIds.isEmpty()) {
         AppText("Manual interactions need at least one configured lifeline.", color = tc().td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp))
         return
@@ -329,8 +324,8 @@ private fun ManualInteractionEditor(
     var expandedGroups by remember(groupKeys) { mutableStateOf(emptySet<String>()) }
     val currentSpec = rememberUpdatedState(spec)
     val currentOnSpec = rememberUpdatedState(onSpec)
-    val rowHeightPx = with(LocalDensity.current) { 42.dp.toPx() }
-    val rowHeightDp = 42.dp
+    val rowHeightPx = with(LocalDensity.current) { SEQUENCE_EDITOR_ROW_HEIGHT.toPx() }
+    val rowHeightDp = SEQUENCE_EDITOR_ROW_HEIGHT
     var dragId by remember { mutableStateOf<String?>(null) }
     var dragStartIndex by remember { mutableStateOf(-1) }
     var dragStartTopY by remember { mutableStateOf(0f) }
@@ -350,7 +345,7 @@ private fun ManualInteractionEditor(
     val currentVisualGroupKeys = rememberUpdatedState(visualGroupKeys)
     val currentDragId = rememberUpdatedState(dragId)
     val groupsByKey = groups.associateBy { it.groupKey() }
-    BoundedScrollBoxDp(maxHeightDp = 8 * 126) {
+    BoundedScrollBoxDp(maxHeightDp = 8 * SEQUENCE_EDITOR_ROW_HEIGHT.value.toInt()) {
         Box(
             Modifier.fillMaxWidth().height(rowHeightDp * groups.size)
                 .pointerInput(groupKeys, rowHeightPx) {
@@ -438,11 +433,6 @@ private fun ManualInteractionEditor(
                         }
                         onSpec(spec.copy(manualDocument = document.copy(interactions = changed)))
                     },
-                    onMove = { delta ->
-                        reorderManualGroupByKey(currentSpec.value, members.groupKey(), delta, currentOnSpec.value)
-                    },
-                    canMoveUp = targetIndex > 0,
-                    canMoveDown = targetIndex < groups.lastIndex,
                     onDelete = {
                         val ids = members.map { it.id }.toSet()
                         onSpec(spec.copy(manualDocument = document.copy(interactions = document.interactions.filterNot { it.id in ids })))
@@ -508,11 +498,8 @@ private fun ManualInteractionGroupRow(
     onToggleSelected: () -> Unit,
     entries: List<LogEntry>,
     onGroupChange: ((ManualDiagramInteraction) -> ManualDiagramInteraction) -> Unit,
-    onMove: (Int) -> Unit,
     dragging: Boolean,
     visualOffsetPx: Float,
-    canMoveUp: Boolean,
-    canMoveDown: Boolean,
     onDelete: () -> Unit,
 ) {
     val representative = members.firstOrNull() ?: return
@@ -523,10 +510,14 @@ private fun ManualInteractionGroupRow(
             .offset { IntOffset(0, visualOffsetPx.roundToInt()) }
             .zIndex(if (dragging) 1f else 0f)
             .graphicsLayer { if (dragging) { scaleX = 1.02f; scaleY = 1.02f } }
+            .background(if (selected) tc().abg else Color.Transparent, CORNER_SM)
             .padding(horizontal = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        Row(
+            Modifier.fillMaxWidth().height(SEQUENCE_EDITOR_ROW_HEIGHT),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
             AppText(
                 "☷",
                 color = if (dragging) tc().ac else tc().td,
@@ -553,8 +544,6 @@ private fun ManualInteractionGroupRow(
                 overflow = TextOverflow.Ellipsis,
             )
             if (members.size > 1) AppText("×${members.size}", color = tc().td, fontSize = 10.sp)
-            AppButton("↑", { onMove(-1) }, variant = ButtonVariant.Ghost, enabled = canMoveUp)
-            AppButton("↓", { onMove(1) }, variant = ButtonVariant.Ghost, enabled = canMoveDown)
             AppButton(if (expanded) "Collapse" else "Expand", onToggleExpanded, variant = ButtonVariant.Ghost)
             AppButton("×", onDelete, variant = ButtonVariant.Ghost)
         }
@@ -578,7 +567,6 @@ private fun ManualInteractionGroupRow(
                         )
                     }
                 },
-                onMoveUp = {}, onMoveDown = {}, canMoveUp = false, canMoveDown = false,
                 onDelete = onDelete, onDuplicate = {}, showActions = false,
             )
             AppText("Occurrences", color = tc().td, fontSize = 9.sp)
@@ -827,10 +815,6 @@ private fun ManualInteractionCard(
     interaction: ManualDiagramInteraction,
     lifelineIds: List<String>,
     onChange: (ManualDiagramInteraction) -> Unit,
-    onMoveUp: () -> Unit,
-    onMoveDown: () -> Unit,
-    canMoveUp: Boolean,
-    canMoveDown: Boolean,
     onDelete: () -> Unit,
     onDuplicate: () -> Unit,
     showActions: Boolean = true,
@@ -846,8 +830,6 @@ private fun ManualInteractionCard(
             )
             AppText(interaction.operation.ifBlank { "Untitled interaction" }, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f), maxLines = 1)
             if (showActions) {
-                AppButton("↑", onMoveUp, variant = ButtonVariant.Ghost, enabled = canMoveUp)
-                AppButton("↓", onMoveDown, variant = ButtonVariant.Ghost, enabled = canMoveDown)
                 AppButton("Duplicate", onDuplicate, variant = ButtonVariant.Ghost)
                 AppButton("×", onDelete, variant = ButtonVariant.Ghost)
             }
