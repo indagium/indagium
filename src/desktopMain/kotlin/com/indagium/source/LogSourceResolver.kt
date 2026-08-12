@@ -1,5 +1,8 @@
 package com.indagium.source
 
+import java.io.File
+import java.security.MessageDigest
+
 // Sites whose matcher literal content is shorter than this are "generic" (e.g. "done", "start")
 // — on their own they're too likely to coincidentally match unrelated log lines, so a specific
 // (non-generic) match always outranks them, and if only generic matches exist their confidence
@@ -24,6 +27,10 @@ class LogSourceResolver(index: SourceIndex) {
     private val byTag: Map<String?, List<CompiledSite>> = index.sites
         .mapNotNull { site -> runCatching { CompiledSite(site, Regex(site.matcher)) }.getOrNull() }
         .groupBy { it.site.tag }
+    private val fileMeta = index.fileMeta
+    private val currentMeta = object : LinkedHashMap<String, FileMeta?>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, FileMeta?>): Boolean = size > 256
+    }
 
     fun resolve(tag: String?, msg: String, limit: Int = 10): List<SourceMatch> {
         val normalizedTag = tag?.takeIf { it.isNotBlank() && it != RAW_TAG }
@@ -47,7 +54,11 @@ class LogSourceResolver(index: SourceIndex) {
         return kept
             .map { (c, raw) ->
                 val generic = c.site.literalLen < GENERIC_LITERAL_THRESHOLD
-                SourceMatch(c.site, if (generic) raw.coerceAtMost(GENERIC_CONFIDENCE_CAP) else raw)
+                SourceMatch(
+                    c.site,
+                    if (generic) raw.coerceAtMost(GENERIC_CONFIDENCE_CAP) else raw,
+                    stale = isStale(c.site),
+                )
             }
             .sortedWith(
                 compareByDescending<SourceMatch> { it.confidence }
@@ -62,5 +73,30 @@ class LogSourceResolver(index: SourceIndex) {
         val base = (site.literalLen.toDouble() / CONFIDENCE_LITERAL_DIVISOR).coerceAtMost(MAX_CONFIDENCE)
         val tagBoost = if (queryTag != null && site.tag == queryTag) TAG_MATCH_BOOST else 0.0
         return (base + tagBoost).coerceAtMost(MAX_CONFIDENCE)
+    }
+
+    private fun isStale(site: LogCallSite): Boolean {
+        // Synthetic/in-memory indexes used by callers and legacy tests may not carry file
+        // metadata. They are not stale merely because freshness cannot be checked; persisted
+        // indexes always include metadata and are rejected when the source file has changed.
+        val expected = fileMeta[site.filePath] ?: return false
+        val actual = currentMeta.getOrPut(site.filePath) {
+            val file = File(site.filePath)
+            if (!file.exists()) {
+                null
+            } else {
+                FileMeta(
+                    mtime = file.lastModified(),
+                    size = file.length(),
+                    sha256 = expected.sha256?.let {
+                        MessageDigest.getInstance("SHA-256")
+                            .digest(file.readBytes())
+                            .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+                    },
+                )
+            }
+        }
+        return actual == null || actual.mtime != expected.mtime || actual.size != expected.size ||
+            (expected.sha256 != null && actual.sha256 != expected.sha256)
     }
 }

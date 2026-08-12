@@ -4,6 +4,7 @@ import com.indagium.debug.AppLogger
 import com.indagium.model.SourceWrapperRule
 import java.io.File
 import java.nio.file.Files
+import java.security.MessageDigest
 
 // ── Public entry point ───────────────────────────────────────────────────
 
@@ -66,6 +67,9 @@ private class ProgressTracker(totalFiles: Int, phaseCount: Int, private val onPr
 object SourceIndexer {
     private val SOURCE_EXTENSIONS = setOf("kt", "java")
     private val SKIP_DIR_NAMES = setOf("build", ".git", ".gradle", ".idea", "node_modules", "out")
+    // Runtime inference must not learn callers from unit, instrumentation, or fixture code.
+    // Source navigation still accepts an explicitly selected test root as its root itself.
+    private val TEST_SOURCE_DIR_NAMES = setOf("test", "tests", "androidTest", "desktopTest", "testFixtures")
 
     // read, whole-project analysis (constants + wrapper discovery), declarations/tables, direct
     // calls, extraction — see the phase-by-phase comments in build() below.
@@ -177,7 +181,11 @@ object SourceIndexer {
                     directCallsByMethod = callsByMethodForSites,
                     declarationTables = declarationTablesByFile[file.path] ?: DeclarationTables.EMPTY,
                 )
-                FileExtractionResult(file.path, fileSites, FileMeta(mtime = file.lastModified(), size = file.length()))
+                FileExtractionResult(
+                    file.path,
+                    fileSites,
+                    FileMeta(mtime = file.lastModified(), size = file.length(), sha256 = sha256Hex(text)),
+                )
             }.onFailure { e -> AppLogger.error("source-index", "Failed to index source file", e) }.getOrNull()
             tracker.advance()
             result
@@ -193,6 +201,153 @@ object SourceIndexer {
             }
         }
 
+        val allMethods = methodsByFile.values.flatten()
+        val methods = allMethods.map { method ->
+            IndexedSourceMethod(
+                id = method.id,
+                filePath = method.filePath,
+                ownerType = method.owningType,
+                name = method.name,
+                signature = method.signature,
+                declaredReturnType = method.declaredReturnType,
+                startOffset = method.startOffset,
+                endOffsetExclusive = method.endOffsetExclusive,
+                sourceSet = sourceSetForPath(method.filePath),
+            )
+        }
+        val calls = callsByMethodForSites.values.asSequence()
+            .flatMap { it.asSequence() }
+            .mapNotNull { call ->
+                val caller = call.callerMethodId ?: return@mapNotNull null
+                val target = call.targetMethodId ?: return@mapNotNull null
+                IndexedSourceCall(
+                    id = call.callSiteId ?: sourceStableId(
+                        "call",
+                        call.targetFilePath,
+                        call.callOffset,
+                        "${call.targetMethodSignature}|${call.sourceOwnerType}|${call.callerMethodId}",
+                    ),
+                    callerMethodId = caller,
+                    candidateCalleeMethodIds = listOf(target),
+                    receiverExpression = call.receiverExpression,
+                    receiverVariable = call.receiverVariable,
+                    receiverDeclaredType = call.receiverDeclaredType,
+                    receiverRole = call.receiverRole,
+                    callOffset = call.callOffset,
+                    callLine = call.callLine,
+                    resultVariable = call.resultVariable,
+                    invocationKind = call.invocationKind,
+                    resolutionConfidence = call.resolutionConfidence,
+                )
+            }
+            .distinctBy { it.id }
+            .toList()
+        // The source scanner remains dependency-free, but the result is persisted as executable
+        // operations rather than only as per-log "nearby calls".  Return/throw/branch operations
+        // are recorded at their real source offsets; the solver can therefore reason about source
+        // order without mixing line numbers and character offsets.
+        val operationSeeds = buildList {
+            calls.forEach { call ->
+                add(
+                    IndexedSourceOperation(
+                        id = sourceStableId("operation-call", call.id, call.callOffset, call.callerMethodId),
+                        methodId = call.callerMethodId,
+                        kind = if (call.invocationKind == InvocationKind.SYNCHRONOUS) {
+                            SourceOperationKind.CALL
+                        } else {
+                            SourceOperationKind.ASYNC_DISPATCH
+                        },
+                         sourceOrder = call.callOffset.takeIf { it > 0 } ?: call.callLine,
+                         sourceLine = call.callLine,
+                         callSiteId = call.id,
+                     ),
+                )
+            }
+            sites.forEach { site ->
+                val methodId = site.methodId ?: return@forEach
+                add(
+                    IndexedSourceOperation(
+                        id = sourceStableId("operation-log", site.filePath, site.callLine, site.id),
+                        methodId = methodId,
+                        kind = SourceOperationKind.LOG,
+                        sourceOrder = site.sourceOffset.takeIf { it > 0 } ?: site.callLine,
+                        sourceLine = site.callLine,
+                        logSiteId = site.id.takeIf { it.isNotBlank() },
+                    ),
+                )
+            }
+            methods.forEach { method ->
+                val text = texts[method.filePath].orEmpty()
+                val mask = CodeMask(text)
+                val lines = LineIndex(text)
+                val returnOrThrow = Regex("\\b(return|throw)\\b").findAll(text)
+                    .filter { match ->
+                        match.range.first in method.startOffset until method.endOffsetExclusive &&
+                            mask.isCode.getOrElse(match.range.first) { false }
+                    }
+                    .map { match ->
+                        val kind = if (match.groupValues[1] == "throw") SourceOperationKind.THROW else SourceOperationKind.RETURN
+                        IndexedSourceOperation(
+                            id = sourceStableId("operation-${kind.name.lowercase()}", method.filePath, match.range.first, method.id),
+                            methodId = method.id,
+                            kind = kind,
+                            sourceOrder = match.range.first,
+                            sourceLine = lines.lineOf(match.range.first),
+                        )
+                    }
+                    .toList()
+                if (returnOrThrow.isNotEmpty()) {
+                    addAll(returnOrThrow)
+                } else {
+                    // A method with an implicit Kotlin/Java return still has a close boundary.
+                    add(
+                        IndexedSourceOperation(
+                            id = sourceStableId("operation-return", method.filePath, method.endOffsetExclusive, method.id),
+                            methodId = method.id,
+                            kind = SourceOperationKind.RETURN,
+                            sourceOrder = method.endOffsetExclusive,
+                            sourceLine = lines.lineOf(method.endOffsetExclusive.coerceAtLeast(1)),
+                        ),
+                    )
+                }
+                val branchMatches = Regex("\\b(if|when|for|while|catch)\\b").findAll(text)
+                    .filter { match ->
+                        match.range.first in method.startOffset until method.endOffsetExclusive &&
+                            mask.isCode.getOrElse(match.range.first) { false }
+                    }
+                    .map { match ->
+                        IndexedSourceOperation(
+                            id = sourceStableId("operation-branch", method.filePath, match.range.first, method.id),
+                            methodId = method.id,
+                            kind = SourceOperationKind.BRANCH,
+                            sourceOrder = match.range.first,
+                            sourceLine = lines.lineOf(match.range.first),
+                        )
+                    }
+                    .toList()
+                addAll(branchMatches)
+            }
+        }
+        val operations = operationSeeds.groupBy { it.methodId }.values.flatMap { methodOperations ->
+            val ordered = methodOperations.sortedWith(compareBy<IndexedSourceOperation> { it.sourceOrder }.thenBy { it.id })
+            ordered.mapIndexed { index, operation ->
+                operation.copy(successorIds = ordered.getOrNull(index + 1)?.let { listOf(it.id) }.orEmpty())
+            }
+        }
+        val builtAt = System.currentTimeMillis()
+        val revision = MessageDigest.getInstance("SHA-256").digest(
+            buildString {
+                append(SOURCE_INDEX_VERSION).append('|')
+                canonicalRoots.forEach { append(it.path).append(';') }
+                rootConfigFingerprintsForRevision(options, canonicalRoots).forEach { (root, fingerprint) ->
+                    append(root).append('|').append(fingerprint).append(';')
+                }
+                fileMeta.toSortedMap().forEach { (path, meta) ->
+                    append(path).append('|').append(meta.mtime).append('|').append(meta.size).append('|').append(meta.sha256.orEmpty()).append(';')
+                }
+            }.toByteArray(Charsets.UTF_8),
+        ).take(12).joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+
         return SourceIndex(
             version = SOURCE_INDEX_VERSION,
             roots = canonicalRoots.map { it.path },
@@ -207,11 +362,15 @@ object SourceIndexer {
                 )
             },
             fileMeta = fileMeta,
-            builtAt = System.currentTimeMillis(),
+            builtAt = builtAt,
             rootConfigFingerprints = canonicalRoots.associate { root ->
                 root.path to (options.configurationFingerprint
                     ?: sourceConfigurationFingerprint(emptyList(), options.autoDiscover))
             },
+            methods = methods,
+            calls = calls,
+            operations = operations,
+            revision = revision,
         )
     }
 
@@ -221,6 +380,7 @@ object SourceIndexer {
             .onEnter { directory ->
                 directory == root || (
                     directory.name !in SKIP_DIR_NAMES &&
+                        directory.name !in TEST_SOURCE_DIR_NAMES &&
                         !directory.name.startsWith(".") &&
                         !Files.isSymbolicLink(directory.toPath()) &&
                         canonicalFileUnderRoots(directory, listOf(root)) != null
@@ -242,11 +402,32 @@ object SourceIndexer {
     }
 }
 
+private fun rootConfigFingerprintsForRevision(
+    options: SourceIndexBuildOptions,
+    roots: List<File>,
+): Map<String, String> = roots.associate { root ->
+    root.path to (options.configurationFingerprint
+        ?: sourceConfigurationFingerprint(emptyList(), options.autoDiscover))
+}
+
+private fun sha256Hex(value: String): String = MessageDigest.getInstance("SHA-256")
+    .digest(value.toByteArray(Charsets.UTF_8))
+    .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+
 data class SourceIndexBuildOptions(
     val wrapperRules: List<SourceWrapperRule> = emptyList(),
     val autoDiscover: Boolean = false,
     val configurationFingerprint: String? = null,
 )
+
+private fun sourceSetForPath(path: String): SourceSetKind {
+    val segments = File(path).toPath().map { it.toString() }.map(String::lowercase)
+    return when {
+        segments.any { it in setOf("generated", "build", "out") } -> SourceSetKind.GENERATED
+        segments.any { it in setOf("test", "tests", "androidtest", "desktoptest", "testfixtures") } -> SourceSetKind.TEST
+        else -> SourceSetKind.PRODUCTION
+    }
+}
 
 private data class FileExtractionResult(val filePath: String, val sites: List<LogCallSite>, val meta: FileMeta)
 
@@ -976,6 +1157,7 @@ private data class IndexedMethod(
     val endLine: Int,
     val startOffset: Int,
     val endOffsetExclusive: Int,
+    val sourceSet: SourceSetKind,
 )
 
 private val SOURCE_TYPE_KINDS = setOf(
@@ -1004,7 +1186,7 @@ private fun indexedMethods(filePath: String, text: String, isJavaFile: Boolean):
         .filter { it.kind == "function" || it.kind == "method" || it.kind == "constructor" }
         .map { declaration ->
             IndexedMethod(
-                id = "$filePath:${declaration.startOffset}",
+                id = sourceStableId("method", filePath, declaration.startOffset, declaration.signature),
                 filePath = filePath,
                 owningType = ownerFor(declaration),
                 name = declaration.name,
@@ -1015,6 +1197,7 @@ private fun indexedMethods(filePath: String, text: String, isJavaFile: Boolean):
                 endLine = declaration.endLine,
                 startOffset = declaration.startOffset,
                 endOffsetExclusive = declaration.endOffsetExclusive,
+                sourceSet = sourceSetForPath(filePath),
             )
         }.toList()
 }
@@ -1174,7 +1357,16 @@ private fun directMemberCall(
         declaredOwnerCandidates(receiver, context.declarationTables, offset, context.packageName)
     }
     val target = directCallTarget(owners, match.groupValues[2], match.range.last, context) ?: return null
-    return target.toDirectCall(context.text, context.lines, offset, method.owningType)
+    return target.toDirectCall(
+        text = context.text,
+        lines = context.lines,
+        offset = offset,
+        sourceOwnerType = method.owningType,
+        callerMethodId = method.id,
+        receiverExpression = receiver,
+        receiverRole = receiverRole(receiver, context.declarationTables, method.startOffset, method.endOffsetExclusive),
+        invocationKind = invocationKind(target.name),
+    )
 }
 
 private fun directLocalCall(
@@ -1189,7 +1381,44 @@ private fun directLocalCall(
     if (name in DIRECT_CALL_KEYWORDS || precededByDotSkippingWhitespace(context.text, offset)) return null
     val owners = setOfNotNull(method.owningType)
     val target = directCallTarget(owners, name, match.range.last, context) ?: return null
-    return target.toDirectCall(context.text, context.lines, offset, method.owningType)
+    return target.toDirectCall(
+        text = context.text,
+        lines = context.lines,
+        offset = offset,
+        sourceOwnerType = method.owningType,
+        callerMethodId = method.id,
+        receiverExpression = "this",
+        receiverRole = ReceiverRole.THIS,
+        invocationKind = invocationKind(target.name),
+    )
+}
+
+private fun receiverRole(
+    receiver: String,
+    tables: DeclarationTables,
+    methodStartOffset: Int,
+    methodEndOffset: Int,
+): ReceiverRole = when {
+    receiver == "this" || receiver == "super" -> ReceiverRole.THIS
+    receiver.firstOrNull()?.isUpperCase() == true -> ReceiverRole.STATIC
+    tables.kotlinParameters[receiver]?.any { it.first in methodStartOffset..methodEndOffset } == true ||
+        tables.javaParameters[receiver]?.any { it.first in methodStartOffset..methodEndOffset } == true -> ReceiverRole.PARAMETER
+    tables.javaFields[receiver]?.any { it.first < methodStartOffset } == true -> ReceiverRole.FIELD
+    tables.kotlinDeclarations[receiver]?.any { it.first < methodStartOffset } == true ||
+        tables.kotlinDelegated[receiver]?.any { it.first < methodStartOffset } == true -> ReceiverRole.PROPERTY
+    receiver.contains('.') -> ReceiverRole.PROPERTY
+    else -> ReceiverRole.LOCAL
+}
+
+private fun invocationKind(methodName: String): InvocationKind {
+    val name = methodName.lowercase()
+    return when {
+        name in setOf("launch", "async", "start", "resume") -> InvocationKind.COROUTINE_LAUNCH
+        name in setOf("submit", "execute", "post", "dispatch", "enqueue") -> InvocationKind.EXECUTOR_DISPATCH
+        name.contains("callback") || name.contains("listener") || name in setOf("register", "subscribe", "observe") -> InvocationKind.CALLBACK_REGISTRATION
+        name.contains("binder") || name.contains("rpc") || name in setOf("transact", "call") -> InvocationKind.BINDER_OR_RPC
+        else -> InvocationKind.SYNCHRONOUS
+    }
 }
 
 // Equivalent to `text.substring(0, offset).trimEnd().endsWith('.')` (task 1c) without the O(offset)
@@ -1261,6 +1490,10 @@ private fun IndexedMethod.toDirectCall(
     lines: LineIndex,
     offset: Int,
     sourceOwnerType: String?,
+    callerMethodId: String?,
+    receiverExpression: String?,
+    receiverRole: ReceiverRole,
+    invocationKind: InvocationKind,
 ): SourceDirectCall? = SourceDirectCall(
     targetFilePath = filePath,
     targetOwnerType = owningType ?: return null,
@@ -1270,6 +1503,16 @@ private fun IndexedMethod.toDirectCall(
     callLine = lines.lineOf(offset),
     resultVariable = assignedResultVariable(text, offset),
     sourceOwnerType = sourceOwnerType,
+    callSiteId = sourceStableId("call", filePath, offset, signature),
+    callerMethodId = callerMethodId,
+    targetMethodId = id,
+    callOffset = offset,
+    receiverExpression = receiverExpression,
+    receiverVariable = receiverExpression?.takeIf { it.matches(Regex("[A-Za-z_]\\w*")) },
+    receiverDeclaredType = owningType,
+    receiverRole = receiverRole,
+    invocationKind = invocationKind,
+    resolutionConfidence = 1.0,
 )
 
 // ── Call-site extraction ──────────────────────────────────────────────────────
@@ -1350,6 +1593,10 @@ private fun buildSite(
         declaredReturnType = indexedMethod?.declaredReturnType,
         directCalls = indexedMethod?.let { directCallsByMethod[it.id].orEmpty() }.orEmpty(),
         loggedValueNames = loggedValueNames(msgExprRaw),
+        id = sourceStableId("log", filePath, callStartIdx, matcherInfo.pattern),
+        methodId = indexedMethod?.id,
+        sourceOffset = callStartIdx,
+        sourceSet = indexedMethod?.sourceSet ?: sourceSetForPath(filePath),
     )
 }
 

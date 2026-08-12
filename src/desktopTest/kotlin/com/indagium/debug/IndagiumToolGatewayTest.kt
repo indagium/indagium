@@ -732,6 +732,43 @@ class IndagiumToolGatewayTest {
     }
 
     @Test
+    fun sequenceDiagramMcpRoundTripsManualDocumentOverridesAndTypedRules() {
+        val result = operations.toolGateway.execute("build_sequence_diagram", mapOf(
+            "tabId" to "t1",
+            "tags" to listOf("App", "Peer"),
+            "authoringMode" to "manual",
+            "lifelineOrder" to listOf("App", "Peer"),
+            "rules" to listOf(mapOf(
+                "id" to "route", "pattern" to "to (?<peer>\\w+)",
+                "fromEndpoint" to mapOf("kind" to "existing", "participantId" to "App"),
+                "toEndpoint" to mapOf("kind" to "captured", "captureName" to "peer", "bindings" to listOf(
+                    mapOf("capturedValue" to "Peer", "participantId" to "Peer"),
+                )),
+            )),
+            "messageOverrides" to listOf(mapOf(
+                "origin" to mapOf("entryId" to 1, "ruleId" to "route", "sourceOperationId" to "op-1"),
+                "label" to "manual hello", "kind" to "async",
+            )),
+            "manualDocument" to mapOf(
+                "interactions" to listOf(mapOf(
+                    "id" to "m-1", "sourceEntryIds" to listOf(1), "fromParticipantId" to "App", "toParticipantId" to "Peer",
+                    "operation" to "hello", "kind" to "async",
+                )),
+                "groups" to listOf(mapOf("id" to "g-1", "label" to "manual", "interactionIds" to listOf("m-1"))),
+                "notes" to listOf(mapOf("id" to "n-1", "participantId" to "Peer", "afterInteractionId" to "m-1", "text" to "received")),
+                "activations" to listOf(mapOf("id" to "a-1", "participantId" to "Peer", "startInteractionId" to "m-1", "endInteractionId" to "m-1")),
+            ),
+        )) as Map<*, *>
+
+        assertNull(result["error"])
+        assertEquals("manual", result["authoringMode"])
+        assertEquals(listOf("App", "Peer"), result["lifelineOrder"])
+        assertEquals("route", ((result["messageOverrides"] as List<*>).single() as Map<*, *>)
+            .let { ((it["origin"] as Map<*, *>)["ruleId"]) })
+        assertEquals("m-1", (((result["manualDocument"] as Map<*, *>)["interactions"] as List<*>).single() as Map<*, *>)["id"])
+    }
+
+    @Test
     fun sequenceDiagramRejectsOversizedParticipantCollections() {
         fun call(extra: Map<String, Any?>): Map<*, *> = operations.toolGateway.execute(
             "build_sequence_diagram", mapOf("tabId" to "t1") + extra,
@@ -791,13 +828,13 @@ class IndagiumToolGatewayTest {
             mapOf("tabId" to "t1", "tags" to listOf("A", "B"), "collapseRepeats" to false, "maxMessages" to 50_000),
         ) as Map<*, *>
 
-        assertEquals(400, result["messageCount"])
-        assertEquals(true, result["truncated"])
-        assertEquals(400, (result["messages"] as List<*>).size)
+        assertEquals(450, result["messageCount"], "the hard cap limits optional structure, not selected log rows")
+        assertEquals(false, result["truncated"])
+        assertEquals(450, (result["messages"] as List<*>).size)
     }
 
     @Test
-    fun sequenceDiagramSourceEnrichmentUsesLoadedIndex() {
+    fun sequenceDiagramSourceEnrichmentDoesNotEmitEveryAmbiguousIndexedCall() {
         val directCalls = (0 until MAX_SOURCE_INTERACTIONS_PER_ENTRY * 2).map { index ->
             SourceDirectCall(
                 targetFilePath = "/fixture/NetworkService.kt",
@@ -845,11 +882,8 @@ class IndagiumToolGatewayTest {
         )) as Map<*, *>
 
         val messages = result["messages"] as List<*>
-        assertTrue(messages.any { (it as Map<*, *>)["evidence"] == "source_inferred" })
-        assertEquals(
-            MAX_SOURCE_INTERACTIONS_PER_ENTRY * 2,
-            messages.count { (it as Map<*, *>)["evidence"] == "source_inferred" },
-        )
+        assertEquals(1, messages.size)
+        assertEquals("log", (messages.single() as Map<*, *>)["evidence"])
         assertEquals(true, (result["sourceEnrichment"] as Map<*, *>)["available"])
     }
 

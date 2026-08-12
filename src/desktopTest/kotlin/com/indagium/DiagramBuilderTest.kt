@@ -5,13 +5,25 @@ import com.indagium.diagram.ArrowMode
 import com.indagium.diagram.DiagramActor
 import com.indagium.diagram.DiagramCallOverride
 import com.indagium.diagram.DiagramComponent
+import com.indagium.diagram.DiagramAuthoringMode
+import com.indagium.diagram.DiagramMessageOverride
 import com.indagium.diagram.DiagramMessageRule
 import com.indagium.diagram.DiagramOptions
 import com.indagium.diagram.DiagramParticipant
 import com.indagium.diagram.DiagramParticipantRepresentation
 import com.indagium.diagram.DiagramRange
+import com.indagium.diagram.DiagramRuleCaptureBinding
+import com.indagium.diagram.DiagramRuleEndpoint
+import com.indagium.diagram.DiagramResolvedTrace
 import com.indagium.diagram.DiagramSourceEnrichment
 import com.indagium.diagram.DiagramSourceInteraction
+import com.indagium.diagram.ManualDiagramActivation
+import com.indagium.diagram.ManualDiagramDocument
+import com.indagium.diagram.ManualDiagramGroup
+import com.indagium.diagram.ManualDiagramInteraction
+import com.indagium.diagram.ManualDiagramNote
+import com.indagium.diagram.ManualOperationVisibility
+import com.indagium.diagram.MessageOriginKey
 import com.indagium.diagram.MessageEvidence
 import com.indagium.diagram.MessageKind
 import com.indagium.diagram.ParticipantKind
@@ -19,6 +31,7 @@ import com.indagium.diagram.SeqDiagramSpec
 import com.indagium.diagram.UnmappedTagPolicy
 import com.indagium.diagram.buildSequenceDiagram
 import com.indagium.diagram.diagramParticipantCandidates
+import com.indagium.diagram.manualDocumentFromDiagram
 import com.indagium.diagram.toMermaid
 import com.indagium.model.Filter
 import com.indagium.model.LogEntry
@@ -248,7 +261,7 @@ class DiagramBuilderTest {
     // ── maxMessages truncation ────────────────────────────────────────────────────────────────
 
     @Test
-    fun maxMessagesCapsOutputAndSetsTruncated() {
+    fun maxMessagesNeverDropsPrimaryLogEvidence() {
         val entries = (0 until 10).map { i -> LogEntry(i + 1, "10:00:00.%03d".format(i), LogLevel.I, "A", "m$i") }
         val tab = mkTab("t1", "app.log", entries)
         val diagram = buildSequenceDiagram(
@@ -256,8 +269,9 @@ class DiagramBuilderTest {
             SeqDiagramSpec(mode = ArrowMode.LINE_PER_MESSAGE, options = plainOptions(maxMessages = 3)),
         )
 
-        assertEquals(3, diagram.messages.size)
-        assertTrue(diagram.truncated)
+        assertEquals(10, diagram.messages.size)
+        assertEquals((1..10).toSet(), diagram.primaryEntryIds)
+        assertTrue(diagram.truncated, "the cap records skipped optional enrichment, never omitted primary rows")
     }
 
     @Test
@@ -562,6 +576,24 @@ class DiagramBuilderTest {
     }
 
     @Test
+    fun exactSelectedIdsDoNotIncludeUnselectedRowsBetweenTheirBounds() {
+        val tab = mkTab("t1", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "first"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "B", "unselected"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "A", "last"),
+        ))
+        val diagram = buildSequenceDiagram(
+            tab,
+            SeqDiagramSpec(
+                range = DiagramRange.Ids(1, 3, selectedIds = setOf(1, 3)),
+                options = plainOptions(collapseRepeats = false),
+            ),
+        )
+        assertEquals(2, diagram.scannedEntries)
+        assertEquals(listOf(1, 3), diagram.messages.map { it.entryId })
+    }
+
+    @Test
     fun participantCandidatesAndCoverageUseTheResolvedRangeAndPreserveOtherVsHide() {
         val tab = mkTab(
             "t1", "app.log", listOf(
@@ -654,7 +686,7 @@ class DiagramBuilderTest {
     }
 
     @Test
-    fun mirroredActorDuplicatesOnlyNonSelfComponentEdgesAdjacentToOriginal() {
+    fun mirroredActorRelaysNonSelfComponentEdgesThroughTheMirroredComponent() {
         // A same-thread handoff is real evidence of a CALL from A to B — needed here so there is a
         // non-self edge for the mirrored actor to duplicate at all (see DiagramActor's own updated
         // doc: EVIDENCE_FLOW's whole point is that a component with no EVIDENCED arrow touching it
@@ -668,14 +700,16 @@ class DiagramBuilderTest {
             actors = listOf(DiagramActor("client", "Client", "a")),
             options = plainOptions(threadHandoffArrows = true),
         ))
-        // Entry 1 is ALSO its own SELF event now (no bootstrap suppression) ahead of the handoff
-        // CALL and its mirror.
+        // Entry 1 is its own SELF event; the handoff is relayed as Client → A → B.
         assertEquals(3, diagram.messages.size, "${diagram.messages}")
         assertEquals(MessageKind.SELF, diagram.messages[0].kind)
-        assertEquals(MessageKind.CALL, diagram.messages[1].kind)
-        assertEquals(MessageEvidence.THREAD_HANDOFF, diagram.messages[1].evidence)
-        assertEquals(MessageEvidence.ACTOR_MIRROR, diagram.messages[2].evidence)
-        assertEquals(diagram.messages[1].toIdx, diagram.messages[2].toIdx)
+        assertEquals(MessageEvidence.ACTOR_MIRROR, diagram.messages[1].evidence)
+        assertEquals("client", diagram.participants[diagram.messages[1].fromIdx].id)
+        assertEquals("a", diagram.participants[diagram.messages[1].toIdx].id)
+        assertEquals(MessageKind.CALL, diagram.messages[2].kind)
+        assertEquals(MessageEvidence.THREAD_HANDOFF, diagram.messages[2].evidence)
+        assertEquals("a", diagram.participants[diagram.messages[2].fromIdx].id)
+        assertEquals("b", diagram.participants[diagram.messages[2].toIdx].id)
     }
 
     @Test
@@ -736,8 +770,12 @@ class DiagramBuilderTest {
         assertEquals(MessageKind.CALL, diagram.messages.first().kind)
         assertEquals("a", diagram.participants[diagram.messages.first().fromIdx].id)
         assertEquals("b", diagram.participants[diagram.messages.first().toIdx].id)
+        assertEquals("invoke", diagram.messages.first().label)
         assertEquals(MessageKind.RETURN, diagram.messages.last().kind)
         assertEquals("String", diagram.messages.last().label)
+        assertEquals(setOf(1), diagram.primaryEntryIds)
+        assertTrue(diagram.messages.first().primary)
+        assertFalse(diagram.messages.last().primary)
         assertEquals(1, diagram.activationSpans.size)
         assertTrue(diagram.toMermaid().contains("-->>"))
     }
@@ -1024,13 +1062,12 @@ class DiagramBuilderTest {
     // ── Message filters (Part 6): index remapping must never desync notes/frames ─────────────
 
     @Test
-    fun showSelfMessagesFalsePreservesErrorNoteAnchorsAndSeqGroupFrameBracketsOnSurvivingMessages() {
+    fun showSelfMessagesFalseDoesNotHidePrimaryLogEvidence() {
         val tab = mkTab(
             "t1", "app.log",
             listOf(
                 LogEntry(1, "10:00:00.000", LogLevel.I, "A", "outer start", pid = 7, tid = 42),
-                // Error-level SELF entry — will itself be dropped by showSelfMessages=false, so its
-                // note must fall forward onto the next SURVIVING message (the handoff CALL below).
+                // Error-level SELF entry stays primary even when supplemental self structure is hidden.
                 LogEntry(2, "10:00:00.050", LogLevel.E, "A", "mid", pid = 7, tid = 42),
                 LogEntry(3, "10:00:00.100", LogLevel.I, "B", "outer end", pid = 7, tid = 42),
             ),
@@ -1051,18 +1088,17 @@ class DiagramBuilderTest {
             ),
         )
 
-        // Only the handoff CALL (A->B) survives; both SELF entries (including the error one) are
-        // dropped.
-        assertEquals(1, diagram.messages.size, "${diagram.messages}")
-        assertEquals(MessageKind.CALL, diagram.messages[0].kind)
-        assertEquals(MessageEvidence.THREAD_HANDOFF, diagram.messages[0].evidence)
+        assertEquals(3, diagram.messages.size, "${diagram.messages}")
+        assertEquals(setOf(1, 2, 3), diagram.primaryEntryIds)
+        assertEquals(listOf(MessageKind.SELF, MessageKind.SELF, MessageKind.CALL), diagram.messages.map { it.kind })
+        assertTrue(diagram.messages.all { it.primary })
 
         assertEquals(1, diagram.notes.size, "${diagram.notes}")
-        assertEquals(0, diagram.notes[0].afterMsg, "the error entry's dropped SELF must fall forward onto the surviving CALL")
+        assertEquals(1, diagram.notes[0].afterMsg)
 
         assertEquals(1, diagram.frames.size, "${diagram.frames}")
         assertEquals(0, diagram.frames[0].firstMsg)
-        assertEquals(0, diagram.frames[0].lastMsg)
+        assertEquals(2, diagram.frames[0].lastMsg)
     }
 
     @Test
@@ -1118,5 +1154,198 @@ class DiagramBuilderTest {
         assertEquals(1, diagram.messages.size)
         assertEquals(MessageKind.SELF, diagram.messages[0].kind)
         assertEquals(2, diagram.messages[0].repeatCount)
+    }
+
+    @Test
+    fun manualDocumentIsSourceIndependentAndPreservesEvidenceLifelineAndInteractionOrder() {
+        val tab = mkTab("manual", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "first"),
+            LogEntry(2, "10:00:00.010", LogLevel.I, "B", "ignored"),
+            LogEntry(3, "10:00:00.020", LogLevel.I, "B", "second"),
+        ))
+        val spec = SeqDiagramSpec(
+            authoringMode = DiagramAuthoringMode.MANUAL,
+            components = listOf(DiagramComponent("a", "A", setOf("A")), DiagramComponent("b", "B", setOf("B"))),
+            lifelineOrder = listOf("b", "a"),
+            manualDocument = ManualDiagramDocument(
+                interactions = listOf(
+                    ManualDiagramInteraction("later", setOf(1), "a", "b", operation = "later", order = 20),
+                    ManualDiagramInteraction("earlier", setOf(3), "b", "a", operation = "send", order = 10),
+                ),
+                groups = listOf(ManualDiagramGroup("g", "Flow", listOf("later", "earlier"))),
+                notes = listOf(ManualDiagramNote("n", "a", "later", "done")),
+                activations = listOf(ManualDiagramActivation("act", "a", "earlier", "later")),
+            ),
+        )
+        val diagram = buildSequenceDiagram(tab, spec, resolveTrace = { error("manual mode must not resolve source") })
+
+        assertEquals(listOf("b", "a"), diagram.participants.map { it.id })
+        assertEquals(listOf(3, 1), diagram.messages.map { it.entryId })
+        assertEquals(listOf("send()", "later()"), diagram.messages.map { it.label })
+        assertEquals(setOf(1, 3), diagram.primaryEntryIds)
+        assertEquals(1, diagram.frames.size)
+        assertEquals(1, diagram.notes.size)
+        assertEquals(1, diagram.activationSpans.size)
+    }
+
+    @Test
+    fun sourceTraceReceivesOnlyRowsRepresentedByConfiguredLifelines() {
+        val tab = mkTab("projection", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "represented"),
+            LogEntry(2, "10:00:00.010", LogLevel.I, "Hidden", "must not poison trace"),
+        ))
+        var resolvedEntryIds = emptyList<Int>()
+        buildSequenceDiagram(
+            tab,
+            SeqDiagramSpec(
+                components = listOf(DiagramComponent("a", "A", setOf("A"))),
+                sourceEnrichment = DiagramSourceEnrichment(enabled = true),
+                options = plainOptions(),
+            ),
+            resolveTrace = { entries ->
+                resolvedEntryIds = entries.map { it.id }
+                DiagramResolvedTrace()
+            },
+        )
+
+        assertEquals(listOf(1), resolvedEntryIds)
+    }
+
+    @Test
+    fun originAddressedOverrideEditsAndDisablesInferredMessagesWithoutLegacyOrdinals() {
+        val tab = mkTab("overrides", "app.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "A", "raw")))
+        val base = SeqDiagramSpec(
+            components = listOf(DiagramComponent("a", "A", setOf("A")), DiagramComponent("b", "B", setOf("B"))),
+            sourceEnrichment = DiagramSourceEnrichment(enabled = false),
+            options = plainOptions(),
+            messageOverrides = listOf(
+                DiagramMessageOverride(
+                    origin = MessageOriginKey(entryId = 1, generatedOrdinal = 0),
+                    fromParticipantId = "a", toParticipantId = "b", label = "edited",
+                ),
+            ),
+        )
+        val edited = buildSequenceDiagram(tab, base)
+        assertEquals("edited", edited.messages.single().label)
+        assertEquals(listOf("a", "b"), edited.messages.single().let { listOf(edited.participants[it.fromIdx].id, edited.participants[it.toIdx].id) })
+
+        val disabled = buildSequenceDiagram(tab, base.copy(messageOverrides = listOf(
+            DiagramMessageOverride(MessageOriginKey(1, generatedOrdinal = 0), enabled = false),
+        )))
+        assertTrue(disabled.messages.isEmpty())
+    }
+
+    @Test
+    fun collapsedAndMirroredMessagesRetainAllStableOrigins() {
+        val tab = mkTab("origins", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "same"),
+            LogEntry(2, "10:00:00.010", LogLevel.I, "A", "same"),
+        ))
+        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(mode = ArrowMode.LINE_PER_MESSAGE, options = plainOptions(collapseRepeats = true)))
+        assertEquals(1, diagram.messages.size)
+        assertEquals(setOf(1, 2), diagram.messages.single().originKeys.mapTo(mutableSetOf()) { it.entryId })
+        val manual = manualDocumentFromDiagram(diagram)
+        assertEquals(2, manual.interactions.size, "collapsed occurrences must remain independently editable")
+        assertEquals(1, manual.interactions.map { it.groupKey }.toSet().size)
+    }
+
+    @Test
+    fun manualBuilderGroupsRemainSeparateAndUnusedLifelinesReappear() {
+        val tab = mkTab("manual-groups", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "same id=1"),
+            LogEntry(2, "10:00:00.010", LogLevel.I, "A", "same id=2"),
+        ))
+        val components = listOf(
+            DiagramComponent("a", "A", setOf("A")),
+            DiagramComponent("b", "B", setOf("B")),
+            DiagramComponent("c", "C", setOf("C")),
+        )
+        val first = ManualDiagramInteraction("one", setOf(1), "a", "b", operation = "send", groupKey = "send")
+        val second = ManualDiagramInteraction("two", setOf(2), "a", "b", operation = "send", groupKey = "send", order = 1)
+        val spec = SeqDiagramSpec(
+            authoringMode = DiagramAuthoringMode.MANUAL,
+            components = components,
+            lifelineOrder = listOf("c", "a", "b"),
+            manualDocument = ManualDiagramDocument(interactions = listOf(first, second)),
+        )
+        val diagram = buildSequenceDiagram(tab, spec)
+        assertEquals(listOf("a", "b"), diagram.participants.map { it.id })
+        assertEquals(2, diagram.messages.size)
+
+        val reappeared = buildSequenceDiagram(tab, spec.copy(manualDocument = spec.manualDocument.copy(
+            interactions = listOf(first, second.copy(toParticipantId = "c")),
+        )))
+        assertEquals(listOf("c", "a", "b"), reappeared.participants.map { it.id })
+        assertEquals("+send()", buildSequenceDiagram(tab, spec.copy(manualDocument = spec.manualDocument.copy(
+            interactions = listOf(first.copy(visibility = ManualOperationVisibility.PUBLIC)),
+        ))).messages.single().label)
+    }
+
+    @Test
+    fun manualPresentationCapsArrowsAndStructuralLabels() {
+        val tab = mkTab("manual-presentation", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "first"),
+            LogEntry(2, "10:00:00.010", LogLevel.I, "A", "second"),
+        ))
+        val spec = SeqDiagramSpec(
+            authoringMode = DiagramAuthoringMode.MANUAL,
+            components = listOf(
+                DiagramComponent("a", "A", setOf("A")),
+                DiagramComponent("b", "B", setOf("B")),
+            ),
+            options = plainOptions(maxMessages = 1).copy(labelMaxChars = 8),
+            manualDocument = ManualDiagramDocument(interactions = listOf(
+                ManualDiagramInteraction("first", setOf(1), "a", "b", operation = "long-operation", order = 0),
+                ManualDiagramInteraction("second", setOf(2), "a", "b", operation = "second", order = 1),
+            )),
+        )
+
+        val diagram = buildSequenceDiagram(tab, spec)
+
+        assertEquals(1, diagram.messages.size)
+        assertTrue(diagram.truncated)
+        assertTrue(diagram.messages.single().label.length <= 8)
+    }
+
+    @Test
+    fun originOverrideFansOutAcrossACollapsedMessageAndLifelineOrderRemapsInferredOutput() {
+        val tab = mkTab("remap", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "same"),
+            LogEntry(2, "10:00:00.010", LogLevel.I, "A", "same"),
+        ))
+        val spec = SeqDiagramSpec(
+            mode = ArrowMode.LINE_PER_MESSAGE,
+            lifelineOrder = listOf("b", "a"),
+            components = listOf(DiagramComponent("a", "A", setOf("A")), DiagramComponent("b", "B", setOf("B"))),
+            options = plainOptions(collapseRepeats = true),
+        )
+        val ordered = buildSequenceDiagram(tab, spec)
+        assertEquals(listOf("b", "a"), ordered.participants.map { it.id })
+        assertEquals("a", ordered.participants[ordered.messages.single().fromIdx].id)
+        assertTrue(ordered.messages.single().originKeys.isNotEmpty(), "every primary log event receives a stable origin")
+
+        val disabled = buildSequenceDiagram(tab, spec.copy(messageOverrides = listOf(
+            DiagramMessageOverride(ordered.messages.single().originKeys.first { it.entryId == 2 }, enabled = false),
+        )))
+        assertTrue(disabled.messages.isEmpty(), "an override matched through a collapsed origin set removes that rendered interaction: ${disabled.messages}")
+    }
+
+    @Test
+    fun typedRuleEndpointsNeverCreateActorsUnlessTheRuleExplicitlyDeclaresOne() {
+        val tab = mkTab("rules", "app.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "A", "to remote")))
+        val unresolved = DiagramMessageRule(
+            id = "typed", pattern = "to (?<peer>\\w+)", fromTemplate = "", toTemplate = "", labelTemplate = "typed",
+            fromEndpoint = DiagramRuleEndpoint.CurrentEntry,
+            toEndpoint = DiagramRuleEndpoint.CapturedValue("peer", listOf(DiagramRuleCaptureBinding("other", "b"))),
+        )
+        val noActor = buildSequenceDiagram(tab, SeqDiagramSpec(mode = ArrowMode.RULES, rules = listOf(unresolved), options = plainOptions()))
+        assertTrue(noActor.participants.none { it.id == "remote" })
+        assertTrue(noActor.messages.isEmpty())
+
+        val explicit = unresolved.copy(toEndpoint = DiagramRuleEndpoint.ExplicitActor("remote", "Remote"))
+        val withActor = buildSequenceDiagram(tab, SeqDiagramSpec(mode = ArrowMode.RULES, rules = listOf(explicit), options = plainOptions()))
+        assertTrue(withActor.participants.any { it.id == "remote" })
+        assertEquals("typed", withActor.messages.single().label)
+        assertEquals("typed", withActor.messages.single().originKeys.single().ruleId)
     }
 }

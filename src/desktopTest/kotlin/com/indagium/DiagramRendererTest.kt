@@ -513,6 +513,33 @@ class DiagramRendererTest {
         assertTrue(hit.width > 0 && hit.height > 0)
     }
 
+    @Test
+    fun asyncMessageUsesDirectGeometryAndKeepsItsClickableHitBox() {
+        // Async rendering changes only the stroke/head treatment. It remains a direct message,
+        // so its hit region must cover the same source-to-target span and stay disjoint from its
+        // neighboring rows just as a normal CALL does.
+        val participants = listOf(tag(0), tag(1))
+        val messages = listOf(
+            msg(0, 1, 1, kind = MessageKind.CALL),
+            msg(1, 0, 2, kind = MessageKind.ASYNC, label = "dispatch"),
+            msg(0, 1, 3, kind = MessageKind.RETURN),
+        )
+        val rendered = renderSequenceDiagram(
+            SeqDiagram(spec = SeqDiagramSpec(participants = participants), participants = participants, messages = messages),
+            theme,
+        )
+
+        assertEquals(messages.indices.toList(), rendered.hits.map { it.messageIndex })
+        val asyncHit = rendered.hits[1]
+        assertEquals(2, asyncHit.entryId)
+        assertTrue(asyncHit.width > 0 && asyncHit.height > 0)
+        assertTrue(asyncHit.x >= 0 && asyncHit.x + asyncHit.width <= rendered.widthPx)
+        assertTrue(asyncHit.y >= 0 && asyncHit.y + asyncHit.height <= rendered.heightPx)
+        rendered.hits.zipWithNext { first, second ->
+            assertTrue(first.y + first.height <= second.y, "neighboring message hits must not overlap")
+        }
+    }
+
     private fun assertWithinPercent(expected: Int, actual: Int, tolerancePercent: Int, what: String) {
         val allowed = (expected * tolerancePercent / 100.0).coerceAtLeast(2.0)
         assertTrue(

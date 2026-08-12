@@ -1327,12 +1327,18 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "title" to "string",
             "maxMessages" to "integer",
             "collapseRepeats" to "boolean",
+            "rules" to "array",
+            "authoringMode" to "string",
+            "lifelineOrder" to "array",
+            "messageOverrides" to "array",
+            "manualDocument" to "object",
             required = listOf("tabId"),
             enums = mapOf(
                 "dialect" to listOf("mermaid", "plantuml"),
                 "mode" to listOf("componentFlow", "evidenceFlow", "tagTransition", "timeline", "rules"),
                 "unmappedTagPolicy" to listOf("hide", "groupAsOther"),
                 "activationPolicy" to listOf("evidenceBacked", "none"),
+                "authoringMode" to listOf("inferred", "manual"),
             ),
             descriptions = mapOf(
                 "tags" to "Legacy flat tag participant list. Prefer components for new calls. " +
@@ -1348,8 +1354,9 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                 "exitActor" to "Legacy one-way actor: one of legacy actor strings, to receive the final return arrow.",
                 "unmappedTagPolicy" to "hide (default) omits tags not owned by enabled components; groupAsOther sends all " +
                     "unmapped in-range tags to a single Other lifeline.",
-                "sourceEnrichment" to "When true, use the loaded source index to add only >=0.7-confidence one-hop inferred calls " +
-                    "and declared return types. A missing index/components is reported explicitly in warnings.",
+                "sourceEnrichment" to "When true, reconstruct a bounded source-first interprocedural trace from the loaded index, " +
+                    "including source calls, returns, log anchors, and invocation diagnostics. If reconstruction is not compatible, " +
+                    "the response explicitly reports fallback mode; PID/TID is only additional lane evidence.",
                 "activationPolicy" to "evidenceBacked (default) shows activations only for correlated call/return evidence; " +
                     "none suppresses activation spans.",
                 "startLineId" to "First log line id of the range (inclusive). Omit both ids to use the whole filtered view.",
@@ -1362,6 +1369,11 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                     "uses configured interaction rules when available, falling through to the same evidence-only behavior.",
                 "maxMessages" to "Arrow cap; values are clamped to the hard maximum of 400 and truncated=true reports clipping. Defaults to 60.",
                 "collapseRepeats" to "Fold consecutive identical messages into one with a repeat count. Defaults to true.",
+                "rules" to "Optional interaction rules {id, pattern, fromTemplate?, toTemplate?, labelTemplate?, fromEndpoint?, toEndpoint?}. Typed endpoints use kind existing|currentEntry|captured|actor and only target declared participants except explicit actors.",
+                "authoringMode" to "inferred (default) reconstructs from the selected log range; manual renders the supplied manualDocument without source inference.",
+                "lifelineOrder" to "Optional full ordered list of participant IDs. Unknown/stale IDs are ignored by rendering; duplicate IDs are rejected.",
+                "messageOverrides" to "Bounded durable edits keyed by a stable origin object (entryId plus optional rule/source/invocation/manual IDs), rather than a rendered message index.",
+                "manualDocument" to "Manual authoring document with interactions, groups, notes, and activations. Interaction IDs are unique and endpoints must name participants.",
             ),
         ),
     ),

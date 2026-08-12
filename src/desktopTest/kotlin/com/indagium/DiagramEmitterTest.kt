@@ -1,7 +1,7 @@
 package com.indagium
 
-import com.indagium.diagram.DiagramDialect
 import com.indagium.diagram.DiagramActivationSpan
+import com.indagium.diagram.DiagramDialect
 import com.indagium.diagram.DiagramFrame
 import com.indagium.diagram.DiagramMessage
 import com.indagium.diagram.DiagramNoteMark
@@ -129,6 +129,21 @@ class DiagramEmitterTest {
 
         assertTrue(diagram.toMermaid().contains("×4"))
         assertTrue(diagram.toPlantUml().contains("×4"))
+    }
+
+    @Test
+    fun asyncMessagesUseNativeAsyncArrowsInBothDialects() {
+        val diagram = SeqDiagram(
+            spec = SeqDiagramSpec(participants = listOf(tagA, tagB)),
+            participants = listOf(tagA, tagB),
+            messages = listOf(msg(label = "dispatch", kind = MessageKind.ASYNC)),
+        )
+
+        val mermaid = diagram.toMermaid()
+        val plantUml = diagram.toPlantUml()
+
+        assertTrue(mermaid.contains("A-)B: dispatch"), "Mermaid async dispatch must use an open arrowhead; got:\n$mermaid")
+        assertTrue(plantUml.contains("A ->> B: dispatch"), "PlantUML async dispatch must use a doubled arrowhead; got:\n$plantUml")
     }
 
     // ── Participant alias sanitization + dedupe ─────────────────────────────────────────────

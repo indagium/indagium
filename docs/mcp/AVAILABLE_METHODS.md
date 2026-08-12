@@ -78,7 +78,10 @@ Recent state; file-open calls must still use explicit approved fixture paths.
   Prefer `components`: each object is `{ id, displayName, tagIds, enabled }`, so a component can
   deliberately represent several raw tags. Components are not capped at eight participants; use a
   tight range and the returned coverage/warnings to judge readability. `tags` remains available for
-  legacy callers, and `mergedTags` is a shorthand map from component name/id to tag arrays. The MCP
+  legacy callers, and `mergedTags` is a shorthand map from component name/id to tag arrays. Use
+  `lifelineOrder` for an explicit participant order. Set `authoringMode` to `manual` and provide a
+  `manualDocument` for source-index-independent interactions, groups, notes, and activations. Stable
+  `messageOverrides` edit or disable interactions by origin rather than by rendered position. The MCP
   boundary accepts at most 64 components, 64 actors, 128 legacy tags, 128 tags per component, and
   1,024 component/merged tag references; IDs/tags are at most 256 characters and labels/titles at
   most 512. Component and actor IDs must be unique and cannot collide.
@@ -90,10 +93,12 @@ Recent state; file-open calls must still use explicit approved fixture paths.
 
   Tags outside enabled components are hidden by default. Set `unmappedTagPolicy` to `groupAsOther`
   only when grouping every remaining in-range tag into the single `Other` component is meaningful.
-  It is not a per-tag choice. `sourceEnrichment: true` adds only high-confidence, one-hop inferred
-  calls with at least 0.7 log-to-source confidence and declared return types; ambiguous targets
-  remain warnings. If no source index is loaded or no components are defined, the response reports
-  enrichment as unavailable instead of silently returning an unenriched result. `activationPolicy`
+  Interaction rules accept typed `fromEndpoint`/`toEndpoint` references. Captured values must have an
+  explicit value-to-participant binding; only an explicit `actor` endpoint may create a lifeline.
+  `sourceEnrichment: true` reconstructs a bounded, verified-only source execution trace;
+  structural calls and returns carry source operation IDs, while ambiguous or stale anchors remain
+  diagnostics. If no current source index is loaded, the response reports explicit fallback mode
+  instead of silently returning an unenriched result. `activationPolicy`
   defaults to `evidenceBacked` and emits activation spans only when correlated log/rule/source
   evidence supports them (`none` disables spans). The result includes per-message evidence (`log`,
   `rule`, `sourceInferred`, or `actorMirror`) and range coverage as well as `truncated` and up to 100

@@ -432,8 +432,10 @@ header shows the source log, scope and save state; **Back to source log** return
 tab. You can keep several diagram tabs open at once. If the source log is closed, an existing
 diagram remains viewable from its cached model, but must be relinked before it can be regenerated.
 
-The left inspector is collapsible and resizable. It groups the controls as **Scope**,
-**Components**, **Actors**, **Interaction inference**, **Presentation**, and **Draft library**.
+The left inspector is collapsible and resizable. New diagrams open in **Manual** authoring mode and
+are seeded asynchronously from the best available inferred preview. Existing saved diagrams retain
+their persisted mode. The inspector groups the controls as **Scope**, **Components**, **Actors**,
+**Authoring**, **Interaction inference**, **Presentation**, and **Draft library**.
 The canvas supports pan, pointer-centred zoom, fit/reset, visible scrollbars, warnings, and coverage
 counts.
 
@@ -458,6 +460,25 @@ With one row or one component there is no handoff to draw. The workspace explain
 offers the event-timeline view instead.
 
 #### Read and refine interactions
+
+#### Manual authoring
+
+Manual mode is a durable editor for the rendered interaction list. Lifeline order is bounded to
+eight visible rows, scrollable, collapsible, and reorderable by drag and drop. Lifelines with no
+enabled interaction disappear from the rendered diagram but remain in the configured order, so
+they return automatically when an interaction is assigned to them again.
+
+Interactions seeded from inference are grouped by source method/site when available, otherwise by
+source, destination, line type, and message text with volatile parameter values removed. A group
+shows its occurrence count (for example, `×12`), can be collapsed, reordered, and edited as one
+entity. Expanding it shows the individual log rows; **Detach** makes one occurrence independently
+editable. Source, destination, line type, visibility, operation, result, label, and parameters are
+available in the editor.
+
+The Manual section also provides **Apply source execution trace**, **Apply same-thread handoffs**,
+and **Revert previous apply**. Applying a seed replaces the manual interactions only after a
+successful inference and keeps a one-step session undo; a failed inference preserves the current
+manual document.
 
 **Component flow** is the default: it summarizes handoffs between enabled components. **Every event**
 and message-pattern rules live under Advanced when you need a literal timeline or explicit endpoints.

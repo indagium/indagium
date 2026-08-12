@@ -123,17 +123,22 @@ fun SeqDiagram.toMermaid(): String {
                 .append(" as ").append(mermaidEscape(participantNames[i])).append('\n')
         }
         messages.forEachIndexed { i, msg ->
-            activationStarts[i]?.forEach { span ->
-                append("    activate ").append(aliasOf(span.participantIdx)).append('\n')
-            }
             opens[i]?.sortedBy { it.depth }?.forEach { f ->
                 append("    Note over ").append(mermaidNoteSpan(f, messages, aliases)).append(": ")
                     .append("  ".repeat(f.depth)).append("▶ ").append(mermaidEscape(frameLabel(f))).append('\n')
             }
-            // Dashed arrows distinguish source-index inference from runtime/rule evidence.
-            val arrow = if (msg.kind == MessageKind.RETURN || msg.evidence == MessageEvidence.SOURCE_INFERRED) "-->>" else "->>"
+            // Mermaid's open arrowhead is the native non-blocking/asynchronous call notation;
+            // keep it distinct from both the filled CALL arrow and the dashed RETURN arrow.
+            val arrow = when (msg.kind) {
+                MessageKind.RETURN -> "-->>"
+                MessageKind.ASYNC -> "-)"
+                else -> "->>"
+            }
             val label = mermaidEscape(msg.label) + repeatSuffix(msg.repeatCount)
             append("    ").append(aliasOf(msg.fromIdx)).append(arrow).append(aliasOf(msg.toIdx)).append(": ").append(label).append('\n')
+            activationStarts[i]?.forEach { span ->
+                append("    activate ").append(aliasOf(span.participantIdx)).append('\n')
+            }
             errorNotesByMsg[i]?.forEach { note ->
                 append("    Note over ").append(aliasOf(note.participantIdx)).append(": ").append(mermaidEscape(note.text)).append('\n')
             }
@@ -228,17 +233,22 @@ fun SeqDiagram.toPlantUml(): String {
             append(keyword).append(" \"").append(plantUmlEscape(participantNames[i])).append("\" as ").append(aliases[i]).append('\n')
         }
         messages.forEachIndexed { i, msg ->
-            activationStarts[i]?.forEach { span ->
-                append("activate ").append(aliasOf(span.participantIdx)).append('\n')
-            }
             // group/end genuinely nests in PlantUML (unlike Mermaid's Note-based stand-in above),
             // so opens close in strict reverse (innermost first) to keep the block structure valid.
             opens[i]?.sortedBy { it.depth }?.forEach { f ->
                 append("group ").append(plantUmlEscape(frameLabel(f))).append('\n')
             }
-            val arrow = if (msg.kind == MessageKind.RETURN || msg.evidence == MessageEvidence.SOURCE_INFERRED) "-->" else "->"
+            // PlantUML's doubled arrowhead is its native asynchronous-message notation.
+            val arrow = when (msg.kind) {
+                MessageKind.RETURN -> "-->"
+                MessageKind.ASYNC -> "->>"
+                else -> "->"
+            }
             val label = plantUmlEscape(msg.label) + repeatSuffix(msg.repeatCount)
             append(aliasOf(msg.fromIdx)).append(' ').append(arrow).append(' ').append(aliasOf(msg.toIdx)).append(": ").append(label).append('\n')
+            activationStarts[i]?.forEach { span ->
+                append("activate ").append(aliasOf(span.participantIdx)).append('\n')
+            }
             errorNotesByMsg[i]?.forEach { note ->
                 append("note right of ").append(aliasOf(note.participantIdx)).append(": ").append(plantUmlEscape(note.text)).append('\n')
             }
