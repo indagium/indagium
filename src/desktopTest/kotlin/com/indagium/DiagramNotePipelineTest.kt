@@ -87,7 +87,7 @@ class DiagramNotePipelineTest {
 
         // The spec/model header is an HTML comment on line 1; everything a Markdown renderer
         // (GitHub, GitLab, a Jira Mermaid macro) actually acts on is the fence below it.
-        assertTrue(noteText.startsWith("<!-- indagium:diagram v3 "), "the guarded header must lead, so stripping it is a prefix cut")
+        assertTrue(noteText.startsWith("<!-- indagium:diagram v4 "), "the guarded header must lead, so stripping it is a prefix cut")
         assertTrue(noteText.contains("```mermaid\n"), "the fence must carry the dialect for renderers that key off it")
         assertTrue(noteText.contains("sequenceDiagram"), "the fence body must be real Mermaid")
         assertTrue(noteText.trimEnd().endsWith("```"), "the fence must be closed")

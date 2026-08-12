@@ -9,17 +9,25 @@ import com.indagium.diagram.DiagramDialect
 import com.indagium.diagram.DiagramExportMode
 import com.indagium.diagram.DiagramParticipantCandidate
 import com.indagium.diagram.DiagramSourceInteraction
+import com.indagium.diagram.DiagramResolvedTrace
 import com.indagium.diagram.DiagramTheme
+import com.indagium.diagram.ArrowMode
+import com.indagium.diagram.ManualDiagramDocument
+import com.indagium.diagram.ManualDiagramSeedConfiguration
+import com.indagium.diagram.ManualDiagramSeedStrategy
 import com.indagium.diagram.SeqDiagram
 import com.indagium.diagram.SeqDiagramSpec
 import com.indagium.diagram.buildSequenceDiagram
 import com.indagium.diagram.diagramParticipantCandidates
 import com.indagium.diagram.encodeDiagramNote
+import com.indagium.diagram.manualDocumentFromDiagram
 import com.indagium.diagram.parseDiagramNote
 import com.indagium.diagram.toSource
 import com.indagium.model.LogEntry
 import com.indagium.model.LogTab
 import com.indagium.source.SourceEnrichmentResolver
+import com.indagium.source.SourceTraceInferenceEngine
+import com.indagium.source.SOURCE_INDEX_VERSION
 import com.indagium.utils.CancellationCheck
 import com.indagium.utils.computeLogFingerprint
 import kotlinx.coroutines.CoroutineScope
@@ -72,6 +80,11 @@ sealed interface ActiveSurface {
  *  touch it until they pick a mode again. */
 enum class DiagramZoomMode { MANUAL, FIT, FIT_WIDTH }
 
+data class ManualSeedUndoSnapshot(
+    val document: ManualDiagramDocument,
+    val lifelineOrder: List<String>,
+)
+
 /** A diagram is an independent working document.  Keeping the last rendered model here is what
  * makes it possible to close a source log yet continue inspecting/copying its diagram. */
 data class DiagramWorkspaceSession(
@@ -92,6 +105,13 @@ data class DiagramWorkspaceSession(
      *  see [SeqDiagramWorkspace]'s DiagramPreviewPane for how the mode is applied. */
     val zoom: Float = 1f,
     val zoomMode: DiagramZoomMode = DiagramZoomMode.FIT,
+    /** Only new workspaces use this one-shot asynchronous inferred-to-manual seed. */
+    val initialManualSeedPending: Boolean = false,
+    val manualSeedUndo: ManualSeedUndoSnapshot? = null,
+    /** True when a user changed manual content or order after the last seed/reset. */
+    val manualSeedEditsSinceApply: Boolean = false,
+    val manualSeedBusy: Boolean = false,
+    val manualSeedStatus: String? = null,
 )
 
 sealed class DiagramCandidateState {
@@ -229,6 +249,23 @@ class SeqDiagramCoordinator(
         }
     }
 
+    /** Applies one drag delta to the current inspector width.
+     *
+     * The caller can outlive a recomposition while a pointer drag is in progress, so the current
+     * workspace must be read here rather than captured by the composable that owns the divider.
+     */
+    fun resizeInspectorBy(delta: Float) {
+        val id = activeWorkspaceId ?: return
+        replaceWorkspace(id) { current ->
+            current.copy(
+                inspectorWidth = (current.inspectorWidth + delta).coerceIn(
+                    INSPECTOR_MIN_WIDTH,
+                    INSPECTOR_MAX_WIDTH,
+                ),
+            )
+        }
+    }
+
     /** Canvas viewport counterpart of [updateInspector] — same shape (resolve the active
      *  workspace, [replaceWorkspace], coerce inputs), stored per-workspace so switching diagram
      *  tabs never leaks one workspace's zoom/mode into another's. */
@@ -245,12 +282,14 @@ class SeqDiagramCoordinator(
     private fun openWorkspace(
         sourceTabId: String?, request: SeqDiagramRequest?, preview: DiagramPreviewState,
         item: DiagramLibraryItem? = null, offline: OfflineDiagramLibraryRequest? = null,
+        initialManualSeedPending: Boolean = false,
     ) {
         persistActiveWorkspace()
         val id = "diagram-${java.util.UUID.randomUUID()}"
         val workspace = DiagramWorkspaceSession(
             id = id, sourceTabId = sourceTabId, spec = request?.spec ?: offline?.spec ?: SeqDiagramSpec(),
             request = request, preview = preview, openedLibraryItem = item, offlineRequest = offline,
+            initialManualSeedPending = initialManualSeedPending,
         )
         workspaces = workspaces + workspace
         activeWorkspaceId = id
@@ -288,6 +327,7 @@ class SeqDiagramCoordinator(
         if (pendingCloseWorkspaceId == id) pendingCloseWorkspaceId = null
         previewJobs.remove(id)?.cancel()
         candidateJobs.remove(id)?.cancel()
+        seedJobs.remove(id)?.cancel()
         previewGenerations.remove(id)
         candidateGenerations.remove(id)
         workspaces = workspaces.filterNot { it.id == id }
@@ -389,6 +429,7 @@ class SeqDiagramCoordinator(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val previewJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
     private val candidateJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+    private val seedJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
     private val previewGenerations = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
     private val candidateGenerations = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
 
@@ -410,7 +451,7 @@ class SeqDiagramCoordinator(
         // verbatim.
         val effective = com.indagium.utils.expandSelectionThroughCollapsedBlocks(tab, seedIds)
         val range = if (effective.isNotEmpty()) {
-            com.indagium.diagram.DiagramRange.Ids(effective.min(), effective.max())
+            com.indagium.diagram.DiagramRange.Ids(effective.min(), effective.max(), effective)
         } else {
             com.indagium.diagram.DiagramRange.VisibleView
         }
@@ -427,8 +468,19 @@ class SeqDiagramCoordinator(
             // build. Candidate tags discovered asynchronously remain disabled until chosen.
             listOf(com.indagium.diagram.DiagramComponent(EMPTY_COMPONENT_ID, "", emptySet(), enabled = false))
         }
-        val spec = base.copy(range = range, components = seededComponents, sourceFile = File(tab.filename).name)
-        openWorkspace(tabId, SeqDiagramRequest(tabId, spec), DiagramPreviewState.NotComputed)
+        val spec = base.copy(
+            range = range,
+            components = seededComponents,
+            sourceFile = File(tab.filename).name,
+            authoringMode = com.indagium.diagram.DiagramAuthoringMode.MANUAL,
+            manualDocument = ManualDiagramDocument(),
+        )
+        openWorkspace(
+            tabId,
+            SeqDiagramRequest(tabId, spec),
+            DiagramPreviewState.NotComputed,
+            initialManualSeedPending = true,
+        )
         requestCandidates(tabId, spec)
         requestPreview(tabId, spec)
     }
@@ -442,7 +494,7 @@ class SeqDiagramCoordinator(
         val tab = appState.tab(tabId) ?: return null
         val effective = com.indagium.utils.expandSelectionThroughCollapsedBlocks(tab, tab.selected)
         if (effective.isEmpty()) return null
-        return com.indagium.diagram.DiagramRange.Ids(effective.min(), effective.max())
+        return com.indagium.diagram.DiagramRange.Ids(effective.min(), effective.max(), effective)
     }
 
     /** Opens the dialog on an existing diagram note, repopulated from the spec its header carries.
@@ -467,12 +519,147 @@ class SeqDiagramCoordinator(
 
     fun updateSpec(spec: SeqDiagramSpec) {
         val current = request ?: return
+        val manualChanged = current.spec.manualDocument != spec.manualDocument ||
+            current.spec.lifelineOrder != spec.lifelineOrder
         request = current.copy(spec = spec)
+        activeWorkspaceId?.let { workspaceId ->
+            replaceWorkspace(workspaceId) { workspace ->
+                workspace.copy(
+                    initialManualSeedPending = false,
+                    manualSeedStatus = null,
+                    manualSeedEditsSinceApply = workspace.manualSeedEditsSinceApply || manualChanged,
+                )
+            }
+        }
         persistActiveWorkspace(dirty = true)
         // Text metadata and export dialect have no bearing on source rows or the diagram model.
         // Keeping them off this path prevents a title keystroke from starting an O(n) scan.
         if (requiresRebuild(current.spec, spec)) requestPreview(current.tabId, spec)
         if (current.spec.range != spec.range) requestCandidates(current.tabId, spec)
+    }
+
+    val canRevertManualSeed: Boolean get() = activeWorkspace()?.manualSeedUndo != null
+    val manualSeedNeedsConfirmation: Boolean get() = activeWorkspace()?.manualSeedEditsSinceApply == true
+    val manualSeedBusy: Boolean get() = activeWorkspace()?.manualSeedBusy == true
+    val manualSeedStatus: String? get() = activeWorkspace()?.manualSeedStatus
+
+    /** Replaces the current manual document with one inferred using independently selected evidence. */
+    fun applyManualSeed(configuration: ManualDiagramSeedConfiguration, force: Boolean = false) {
+        val workspaceId = activeWorkspaceId ?: return
+        val currentRequest = request ?: return
+        val tab = appState.tab(currentRequest.tabId) ?: return
+        val currentWorkspace = activeWorkspace() ?: return
+        if (!configuration.enabled) {
+            replaceWorkspace(workspaceId) { it.copy(manualSeedStatus = "Choose at least one evidence source.") }
+            return
+        }
+        if (currentWorkspace.manualSeedEditsSinceApply && !force) {
+            replaceWorkspace(workspaceId) {
+                it.copy(manualSeedStatus = "Apply would replace manual edits. Confirm Apply to continue.")
+            }
+            return
+        }
+        val expectedSpec = currentRequest.spec
+        val undo = ManualSeedUndoSnapshot(expectedSpec.manualDocument, expectedSpec.lifelineOrder)
+        replaceWorkspace(workspaceId) {
+            it.copy(manualSeedBusy = true, manualSeedStatus = "Applying ${configuration.label}…")
+        }
+        seedJobs.remove(workspaceId)?.cancel()
+        val job = scope.launch {
+            val cancellation = CancellationCheck { if (!isActive) throw kotlinx.coroutines.CancellationException() }
+            val inferredSpec = expectedSpec.forManualInference().copy(
+                authoringMode = com.indagium.diagram.DiagramAuthoringMode.INFERRED,
+                manualDocument = ManualDiagramDocument(),
+                mode = ArrowMode.EVIDENCE_FLOW,
+                sourceEnrichment = expectedSpec.sourceEnrichment.copy(enabled = configuration.reconstructSourceTrace),
+                options = expectedSpec.options.copy(threadHandoffArrows = configuration.inferThreadHandoffs),
+            )
+            val result = runCatching {
+                buildPreviewDiagram(tab, inferredSpec, cancellation).let { diagram ->
+                    diagram to manualDocumentFromDiagram(diagram)
+                }
+            }
+            coroutineContext.ensureActive()
+            if (activeWorkspaceId != workspaceId || request?.spec != expectedSpec) {
+                replaceWorkspace(workspaceId) { it.copy(manualSeedBusy = false, manualSeedStatus = null) }
+                return@launch
+            }
+            result.fold(
+                onSuccess = { (inferredDiagram, document) ->
+                    if (document.interactions.isEmpty()) {
+                        replaceWorkspace(workspaceId) {
+                            it.copy(manualSeedBusy = false, manualSeedStatus = "No interactions were inferred; manual content was preserved.")
+                        }
+                    } else {
+                        val inferredParticipants = inferredDiagram.participants.map { it.id }
+                        val next = expectedSpec.withSeededParticipants(inferredDiagram.participants).copy(
+                            authoringMode = com.indagium.diagram.DiagramAuthoringMode.MANUAL,
+                            manualDocument = document,
+                            lifelineOrder = (expectedSpec.lifelineOrder + inferredParticipants).distinct(),
+                        )
+                        replaceWorkspace(workspaceId) {
+                            it.copy(
+                                spec = next,
+                                request = it.request?.copy(spec = next),
+                                manualSeedUndo = undo,
+                                manualSeedEditsSinceApply = false,
+                                manualSeedBusy = false,
+                                manualSeedStatus = "Applied ${configuration.label}.",
+                            )
+                        }
+                        request = currentRequest.copy(spec = next)
+                        persistActiveWorkspace(dirty = true)
+                        requestPreview(currentRequest.tabId, next)
+                    }
+                },
+                onFailure = { error ->
+                    if (error is kotlinx.coroutines.CancellationException) throw error
+                        replaceWorkspace(workspaceId) {
+                            it.copy(
+                                manualSeedBusy = false,
+                            manualSeedStatus = "Could not apply ${configuration.label}: ${error.message ?: "inference failed"}",
+                        )
+                    }
+                },
+            )
+        }
+        seedJobs[workspaceId] = job
+    }
+
+    /** Compatibility adapter for callers and persisted-session tests using the old single-choice API. */
+    fun applyManualSeed(strategy: ManualDiagramSeedStrategy) = applyManualSeed(
+        when (strategy) {
+            ManualDiagramSeedStrategy.SOURCE_TRACE -> ManualDiagramSeedConfiguration(reconstructSourceTrace = true)
+            ManualDiagramSeedStrategy.THREAD_HANDOFFS -> ManualDiagramSeedConfiguration(
+                reconstructSourceTrace = false,
+                inferThreadHandoffs = true,
+            )
+        },
+    )
+
+    fun revertManualSeed() {
+        val workspaceId = activeWorkspaceId ?: return
+        val workspace = activeWorkspace() ?: return
+        if (workspace.manualSeedBusy) return
+        val undo = workspace.manualSeedUndo ?: return
+        val current = request ?: return
+        val restored = current.spec.copy(
+            authoringMode = com.indagium.diagram.DiagramAuthoringMode.MANUAL,
+            manualDocument = undo.document,
+            lifelineOrder = undo.lifelineOrder,
+        )
+        replaceWorkspace(workspaceId) {
+            it.copy(
+                spec = restored,
+                request = it.request?.copy(spec = restored),
+                manualSeedUndo = null,
+                manualSeedEditsSinceApply = false,
+                manualSeedStatus = "Reverted the previous apply.",
+            )
+        }
+        request = current.copy(spec = restored)
+        persistActiveWorkspace(dirty = true)
+        requestPreview(current.tabId, restored)
     }
 
     // ── Diagram library ─────────────────────────────────────────────────────────────────────
@@ -714,6 +901,12 @@ class SeqDiagramCoordinator(
         val generation = previewGenerations.computeIfAbsent(workspaceId) { java.util.concurrent.atomic.AtomicLong() }.incrementAndGet()
         previewJobs.remove(workspaceId)?.cancel()
         val previous = preview.diagramOrNull
+        val initialSeedPending = workspaces.firstOrNull { it.id == workspaceId }?.initialManualSeedPending == true &&
+            spec.authoringMode == com.indagium.diagram.DiagramAuthoringMode.MANUAL &&
+            spec.manualDocument.interactions.isEmpty()
+        if (initialSeedPending) {
+            replaceWorkspace(workspaceId) { it.copy(initialManualSeedPending = false, manualSeedStatus = "Preparing manual interactions…") }
+        }
         publishPreview(workspaceId, DiagramPreviewState.Computing(previous))
         val job = scope.launch {
             // Debounce: the dialog calls this on every keystroke/toggle, and a build is far more
@@ -732,25 +925,53 @@ class SeqDiagramCoordinator(
                 return@launch
             }
             val built = runCatching {
-                previewBuildCount.incrementAndGet()
-                buildSequenceDiagram(
-                    tab = tab,
-                    spec = spec,
-                    resolveLabel = sourceLabelResolver(spec),
-                    cancellationCheck = CancellationCheck { if (!isActive) throw kotlinx.coroutines.CancellationException() },
-                    resolveSourceInteractions = sourceInteractionResolver(spec),
-                )
+                val cancellation = CancellationCheck { if (!isActive) throw kotlinx.coroutines.CancellationException() }
+                val effectiveSpec = if (initialSeedPending) {
+                    val inferredSpec = spec.forManualInference().copy(
+                        authoringMode = com.indagium.diagram.DiagramAuthoringMode.INFERRED,
+                        manualDocument = ManualDiagramDocument(),
+                    )
+                    val inferred = buildPreviewDiagram(tab, inferredSpec, cancellation)
+                    val seeded = manualDocumentFromDiagram(inferred)
+                    if (seeded.interactions.isEmpty()) {
+                        spec
+                    } else {
+                        spec.withSeededParticipants(inferred.participants).copy(
+                            manualDocument = seeded,
+                            lifelineOrder = (spec.lifelineOrder + inferred.participants.map { it.id }).distinct(),
+                        ).also { seededSpec ->
+                            if (previewGenerations[workspaceId]?.get() == generation) {
+                                replaceWorkspace(workspaceId) { current ->
+                                    current.copy(
+                                        spec = seededSpec,
+                                        request = current.request?.copy(spec = seededSpec),
+                                        manualSeedEditsSinceApply = false,
+                                        manualSeedStatus = null,
+                                    )
+                                }
+                                if (activeWorkspaceId == workspaceId && request?.tabId == tabId) {
+                                    request = request?.copy(spec = seededSpec)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    spec
+                }
+                buildPreviewDiagram(tab, effectiveSpec, cancellation)
             }
             coroutineContext.ensureActive()
             built.fold(
                 onSuccess = {
                     if (previewGenerations[workspaceId]?.get() == generation) {
+                        if (initialSeedPending) replaceWorkspace(workspaceId) { it.copy(manualSeedStatus = null) }
                         publishPreview(workspaceId, DiagramPreviewState.Computed(it))
                     }
                 },
                 onFailure = { e ->
                     if (e is kotlinx.coroutines.CancellationException) throw e
                     if (previewGenerations[workspaceId]?.get() == generation) {
+                        if (initialSeedPending) replaceWorkspace(workspaceId) { it.copy(manualSeedStatus = null) }
                         publishPreview(
                             workspaceId,
                             DiagramPreviewState.Failed(e.message ?: "Could not build this diagram."),
@@ -760,6 +981,18 @@ class SeqDiagramCoordinator(
             )
         }
         previewJobs[workspaceId] = job
+    }
+
+    private fun buildPreviewDiagram(tab: LogTab, spec: SeqDiagramSpec, cancellation: CancellationCheck): SeqDiagram {
+        previewBuildCount.incrementAndGet()
+        return buildSequenceDiagram(
+            tab = tab,
+            spec = spec,
+            resolveLabel = sourceLabelResolver(spec),
+            cancellationCheck = cancellation,
+            resolveTrace = sourceTraceResolver(spec),
+            resolveSourceInteractions = sourceInteractionResolver(spec),
+        )
     }
 
     private fun publishPreview(workspaceId: String, state: DiagramPreviewState) {
@@ -790,9 +1023,19 @@ class SeqDiagramCoordinator(
         }
     }
 
-    /** Supplies one-hop source edges only for an explicitly enabled enrichment build.  Calls are
-     * cached by tag/message against one captured index revision and are dropped unless both ends
-     * already identify enabled components — no inferred actor is fabricated. */
+    /** Shared range-level trace adapter used by the UI builder. The resolver owns no UI state and
+     * therefore stays identical to the MCP path; cancellation is still enforced by the builder's
+     * range callback boundary. */
+    private fun sourceTraceResolver(spec: SeqDiagramSpec): ((List<LogEntry>) -> DiagramResolvedTrace)? {
+        if (!spec.sourceEnrichment.enabled) return null
+        val index = appState.sourceIndex ?: return null
+        if (index.version != SOURCE_INDEX_VERSION) return null
+        val engine = SourceTraceInferenceEngine(index)
+        return { entries -> engine.resolve(entries, sourceSiteOverrides = spec.sourceSiteOverrides) }
+    }
+
+    /** Legacy explicit interaction adapter used only when callers do not provide a source-trace
+     * resolver. Source-enabled UI builds use [sourceTraceResolver] as the single semantic owner. */
     private fun sourceInteractionResolver(spec: SeqDiagramSpec): (LogEntry) -> List<DiagramSourceInteraction> {
         if (!spec.sourceEnrichment.enabled || spec.components.isEmpty()) return { emptyList() }
         val index = appState.sourceIndex ?: return { emptyList() }
@@ -966,6 +1209,36 @@ class SeqDiagramCoordinator(
         const val SOURCE_CACHE_MAX_ENTRIES = 256
     }
 }
+
+/**
+ * A new no-selection workspace starts with an intentionally disabled placeholder component so
+ * candidate discovery does not opt every tag into the diagram. Once the first inferred model is
+ * available, the manual document still needs real component-backed lifelines or the authoritative
+ * manual builder will discard every interaction as unmapped. Replace only that placeholder (or an
+ * otherwise empty component palette) with the participants proved by the inferred model.
+ */
+private fun SeqDiagramSpec.withSeededParticipants(
+    participants: List<com.indagium.diagram.DiagramParticipant>,
+): SeqDiagramSpec {
+    val configuredTagComponents = components.filter { it.tagIds.isNotEmpty() }
+    if (configuredTagComponents.isNotEmpty()) return this
+    val inferredTagComponents = participants
+        .filter { it.kind == com.indagium.diagram.ParticipantKind.TAG }
+        .map { participant ->
+            com.indagium.diagram.DiagramComponent(
+                id = participant.id,
+                displayName = participant.label,
+                tagIds = setOf(participant.tag ?: participant.id),
+                enabled = false,
+            )
+        }
+        .distinctBy { it.id }
+    return copy(components = inferredTagComponents)
+}
+
+/** Do not let the new-workspace opt-out placeholder hide every row from the initial inference. */
+private fun SeqDiagramSpec.forManualInference(): SeqDiagramSpec =
+    if (components.any { it.enabled && it.tagIds.isNotEmpty() }) this else copy(components = emptyList())
 
 private class BoundedSourceInteractionCache(private val maxEntries: Int) {
     private val values = object : LinkedHashMap<String, List<DiagramSourceInteraction>>(maxEntries, 0.75f, true) {

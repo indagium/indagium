@@ -563,6 +563,7 @@ fun App(
                                 add(CtxMenuEntry.Action(Icons.Outlined.PlayArrow, "Set sequence start") { state.setSequenceStartFromCtx() })
                                 add(
                                     CtxMenuEntry.Action(Icons.Outlined.Schema, "Sequence diagram…") {
+                                        state.ctx = null
                                         state.seqDiagrams.begin(ctx.tabId, selectedIds.toSet())
                                     },
                                 )

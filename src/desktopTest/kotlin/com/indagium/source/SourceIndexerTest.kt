@@ -1,9 +1,9 @@
 package com.indagium.source
 
-import com.indagium.model.SourceLogConfiguration
-import com.indagium.model.SourceWrapperRule
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.model.SourceLogConfiguration
+import com.indagium.model.SourceWrapperRule
 import org.junit.Assume.assumeNoException
 import java.io.IOException
 import java.nio.file.Files
@@ -308,8 +308,10 @@ class SourceIndexerTest {
         assertEquals("demo.Screen", screen.owningType)
         assertEquals("demo.NetworkService", call.targetOwnerType)
         assertEquals("fetch", call.targetMethodName)
-        assertEquals("demo.NetworkService", SourceEnrichmentResolver(index)
-            .resolveOneHop("Screen", "refresh complete").single().targetOwnerType)
+        assertEquals(
+            "demo.NetworkService", SourceEnrichmentResolver(index)
+                .resolveOneHop("Screen", "refresh complete").single().targetOwnerType
+        )
     }
 
     @Test
@@ -346,8 +348,10 @@ class SourceIndexerTest {
 
         assertEquals("demo.Screen", screen.owningType)
         assertEquals("demo.NetworkService", call.targetOwnerType)
-        assertEquals("demo.NetworkService", SourceEnrichmentResolver(index)
-            .resolveOneHop("Screen", "refresh complete").single().targetOwnerType)
+        assertEquals(
+            "demo.NetworkService", SourceEnrichmentResolver(index)
+                .resolveOneHop("Screen", "refresh complete").single().targetOwnerType
+        )
     }
 
     @Test
@@ -1787,11 +1791,19 @@ class SourceIndexerTest {
             .filter { it.owningType == "demo.Activity" }
             .flatMap { it.directCalls }
 
-        assertTrue(activityCalls.any { it.sourceOwnerType == "demo.Activity" && it.targetOwnerType == "demo.DeviceManager" && it.targetMethodName == "register" })
-        assertTrue(activityCalls.any { it.sourceOwnerType == "demo.Activity" && it.targetOwnerType == "demo.Worker" && it.targetMethodName == "start" })
-        assertTrue(activityCalls.any { it.sourceOwnerType == "demo.Activity" && it.targetOwnerType == "demo.CrashCallbacks" && it.targetMethodName == "trigger" })
+        assertTrue(activityCalls.any {
+            it.sourceOwnerType == "demo.Activity" && it.targetOwnerType == "demo.DeviceManager" && it.targetMethodName == "register"
+        })
+        assertTrue(activityCalls.any {
+            it.sourceOwnerType == "demo.Activity" && it.targetOwnerType == "demo.Worker" && it.targetMethodName == "start"
+        })
+        assertTrue(activityCalls.any {
+            it.sourceOwnerType == "demo.Activity" && it.targetOwnerType == "demo.CrashCallbacks" && it.targetMethodName == "trigger"
+        })
         assertTrue(activity.directCalls.any { it.isCallback && it.sourceOwnerType == "demo.Activity" && it.targetMethodName == "register" })
-        assertTrue(callback.directCalls.any { it.sourceOwnerType == "demo.CrashCallbacks" && it.targetOwnerType == "demo.DeviceManager" && it.targetMethodName == "register" })
+        assertTrue(callback.directCalls.any {
+            it.sourceOwnerType == "demo.CrashCallbacks" && it.targetOwnerType == "demo.DeviceManager" && it.targetMethodName == "register"
+        })
     }
 }
 

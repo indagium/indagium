@@ -34,6 +34,7 @@ import com.indagium.diagram.DiagramComponent
 import com.indagium.diagram.DiagramDialect
 import com.indagium.diagram.DiagramParticipantCandidate
 import com.indagium.diagram.DiagramRange
+import com.indagium.diagram.DiagramRuleEndpoint
 import com.indagium.diagram.LabelSource
 import com.indagium.diagram.MirrorDirection
 import com.indagium.diagram.ParticipantKind
@@ -69,15 +70,51 @@ internal fun OfflineInspector(spec: SeqDiagramSpec) {
 }
 
 @Composable
-internal fun WorkspaceInspector(tab: LogTab, state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
-    SectionHeader("Scope")
-    RangeSection(tab, state, spec, onSpec)
+internal fun WorkspaceInspector(
+    tab: LogTab,
+    state: AppState,
+    spec: SeqDiagramSpec,
+    preview: com.indagium.diagram.SeqDiagram?,
+    selectedEntryIds: Set<Int>,
+    onSpec: (SeqDiagramSpec) -> Unit,
+) {
+    // The authoring editor must use durable participant identities, never display labels: labels
+    // can collide and inferred source labels can disappear on a later rebuild.  Components and
+    // actors are the user-owned lifeline set; legacy participants remain available for old notes.
+    val authoringLifelines = remember(spec.components, spec.actors, spec.participants) {
+        (spec.components.filter { it.id.isNotBlank() }.map { it.id } +
+            spec.actors.map { it.id } + spec.participants.map { it.id }).distinct()
+    }
+    val anchorEntryIds = selectedEntryIds.ifEmpty { preview?.primaryEntryIds.orEmpty() }
+    DiagramAuthoringSection(
+        spec = spec,
+        lifelineIds = authoringLifelines,
+        preview = preview,
+        entries = tab.logData,
+        anchorEntryIds = anchorEntryIds,
+        workspaceKey = state.seqDiagrams.activeWorkspaceId ?: tab.id,
+        rangeContent = { RangeSection(tab, state, spec, onSpec) },
+        onSpec = onSpec,
+        onApplySeed = { configuration, force -> state.seqDiagrams.applyManualSeed(configuration, force) },
+        onRevertSeed = { state.seqDiagrams.revertManualSeed() },
+        onClearAllManual = { onSpec(spec.copy(manualDocument = com.indagium.diagram.ManualDiagramDocument())) },
+        canRevertSeed = state.seqDiagrams.canRevertManualSeed,
+        seedNeedsConfirmation = state.seqDiagrams.manualSeedNeedsConfirmation,
+        seedBusy = state.seqDiagrams.manualSeedBusy,
+        seedStatus = state.seqDiagrams.manualSeedStatus,
+    )
     Divider()
+    if (spec.authoringMode != com.indagium.diagram.DiagramAuthoringMode.MANUAL) {
+        RangeSection(tab, state, spec, onSpec)
+        Divider()
+    }
     ParticipantsSection(tab, state, spec, onSpec)
+    if (spec.authoringMode != com.indagium.diagram.DiagramAuthoringMode.MANUAL) {
+        Divider()
+        ModeSection(tab, spec, onSpec)
+    }
     Divider()
-    ModeSection(spec, onSpec)
-    Divider()
-    OptionsSection(state, spec, onSpec)
+    OptionsSection(state, spec, onSpec, manualMode = spec.authoringMode == com.indagium.diagram.DiagramAuthoringMode.MANUAL)
 }
 
 // ── Participants ─────────────────────────────────────────────────────────────────────────────
@@ -203,7 +240,12 @@ private fun ParticipantsSection(tab: LogTab, state: AppState, spec: SeqDiagramSp
     // Plain single-tag components are the default participant records, not user-defined
     // components. Keep them in Active tags; showing a card for each one would expose a source
     // mapping control before the user has chosen to create a mapping/grouping.
-    val componentCards = remember(realComponents) { realComponents.filter { it.tagIds.size > 1 } }
+    // Default one-tag records are represented by the compact Active tags pills. Large cards are
+    // reserved for grouped lifelines and explicit source mappings; aliases already have their own
+    // compact section above and therefore do not get duplicated here.
+    val componentCards = realComponents.filter { component ->
+        component.tagIds.size > 1 || component.sourceOwnerTypes.isNotEmpty()
+    }
     val ownerByTag = remember(realComponents) {
         realComponents.flatMap { component -> component.tagIds.map { it to component } }.toMap()
     }
@@ -221,7 +263,7 @@ private fun ParticipantsSection(tab: LogTab, state: AppState, spec: SeqDiagramSp
     var tagsExpanded by remember(tab.id) { mutableStateOf(true) }
     var aliasesExpanded by remember(tab.id) { mutableStateOf(true) }
     var componentsExpanded by remember(tab.id) { mutableStateOf(true) }
-    var actorsExpanded by remember(tab.id) { mutableStateOf(true) }
+    var actorsExpanded by remember(tab.id) { mutableStateOf(spec.actors.isNotEmpty()) }
     var newActor by remember(tab.id) { mutableStateOf("") }
 
     val totalTagIds = realComponents.sumOf { it.tagIds.size }
@@ -366,13 +408,13 @@ private fun ParticipantsSection(tab: LogTab, state: AppState, spec: SeqDiagramSp
 
     // ── Components ───────────────────────────────────────────────────────────────────────────
     SectionHeader(
-        "Components",
+        "Lifeline customizations",
         trailing = { AppText("${componentCards.size}", color = tc.td, fontSize = 10.sp) },
         expanded = componentsExpanded,
         onToggle = { componentsExpanded = !componentsExpanded },
     )
     AppText(
-        "These cards are the diagram's lifelines. When you open a diagram from selected rows, their log tags are added here so those rows have a participant immediately. They are not source-code classes or extra project objects. Disable or delete a card to hide its lifeline; use Add component only when you want to group tags under one name.",
+        "Default one-tag lifelines stay in Active tags. These cards are only grouped lifelines or explicit source mappings; aliases are kept compact above.",
         color = tc.td, fontSize = 10.sp, maxLines = 5, modifier = Modifier.padding(horizontal = 12.dp),
     )
     if (componentsExpanded) {
@@ -426,6 +468,9 @@ private fun ParticipantsSection(tab: LogTab, state: AppState, spec: SeqDiagramSp
         spec.participants.filter { it.kind == ParticipantKind.ACTOR && spec.actors.none { a -> a.id == it.id } }.forEach { actor ->
             LegacyActorRow(actor, onSpec, spec)
         }
+    }
+    // Keep the creation affordance visible even when the empty Actors section is collapsed.
+    if (actorsExpanded || spec.actors.isEmpty()) {
         Row(
             Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(5.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -922,8 +967,8 @@ private enum class RangeEditorMode { SELECTION, WHOLE_VIEW, TIME }
 private fun RangeSection(tab: LogTab, state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
     val tc = tc()
     val range = spec.range
-    SectionHeader("Range")
     val workspaceKey = state.seqDiagrams.activeWorkspaceId ?: tab.id
+    var expanded by remember(workspaceKey) { mutableStateOf(true) }
     var editorMode by remember(workspaceKey) { mutableStateOf(rangeEditorMode(range)) }
     var selectionFrom by remember(workspaceKey) { mutableStateOf((range as? DiagramRange.Ids)?.from?.toString().orEmpty()) }
     var selectionTo by remember(workspaceKey) { mutableStateOf((range as? DiagramRange.Ids)?.to?.toString().orEmpty()) }
@@ -932,6 +977,16 @@ private fun RangeSection(tab: LogTab, state: AppState, spec: SeqDiagramSpec, onS
     var selectionError by remember(workspaceKey) { mutableStateOf<String?>(null) }
     var timeError by remember(workspaceKey) { mutableStateOf<String?>(null) }
 
+    val rangeSummary = when (range) {
+        is DiagramRange.Ids -> {
+            val count = if (range.selectedIds.isNotEmpty()) range.selectedIds.size
+            else tab.logData.count { it.id in minOf(range.from, range.to)..maxOf(range.from, range.to) }
+            "$count rows · ${range.from}–${range.to}"
+        }
+        is DiagramRange.Time -> "time · ${range.fromTs}–${range.toTs}"
+        is DiagramRange.SeqGroupRef -> "sequence group · ${range.gid}"
+        is DiagramRange.VisibleView -> "whole view · ${tab.logData.size} rows"
+    }
     // Switching the presentation mode alone must not rewrite the persisted range. This keeps the
     // preview stable while the user chooses whether to edit its bounds as rows or timestamps.
     LaunchedEffect(range) {
@@ -952,7 +1007,9 @@ private fun RangeSection(tab: LogTab, state: AppState, spec: SeqDiagramSpec, onS
     }
 
     fun idsForStoredRange(): Set<Int> = when (val stored = spec.range) {
-        is DiagramRange.Ids -> tab.logData.filter { it.id in minOf(stored.from, stored.to)..maxOf(stored.from, stored.to) }.map { it.id }.toSet()
+        is DiagramRange.Ids -> if (stored.selectedIds.isNotEmpty()) stored.selectedIds else {
+            tab.logData.filter { it.id in minOf(stored.from, stored.to)..maxOf(stored.from, stored.to) }.map { it.id }.toSet()
+        }
         is DiagramRange.Time -> rowsForTimeRange(tab, stored.fromTs, stored.toTs).selectedIds.toSet()
         else -> tab.selected
     }
@@ -986,6 +1043,14 @@ private fun RangeSection(tab: LogTab, state: AppState, spec: SeqDiagramSpec, onS
         onSpec(spec.copy(range = DiagramRange.Time(fromText, toText)))
     }
 
+    // Replace the simple header with a collapsible summary once all state used to derive it exists.
+    SectionHeader(
+        "Scope / Range",
+        trailing = { AppText(rangeSummary, color = tc.td, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        expanded = expanded,
+        onToggle = { expanded = !expanded },
+    )
+    if (!expanded) return
     val rangeSelected = when (editorMode) {
         RangeEditorMode.SELECTION -> setOf(0)
         RangeEditorMode.WHOLE_VIEW -> setOf(1)
@@ -1072,7 +1137,7 @@ private fun rangeEditorMode(range: DiagramRange): RangeEditorMode = when (range)
 // ── Mode ─────────────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun ModeSection(spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
+private fun ModeSection(tab: LogTab, spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
     val tc = tc()
     SectionHeader("Interactions")
     val modeSelected = when (spec.mode) {
@@ -1122,40 +1187,61 @@ private fun ModeSection(spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) 
     }
     CheckRow(checked = spec.sourceEnrichment.enabled, onToggle = {
         onSpec(spec.copy(sourceEnrichment = spec.sourceEnrichment.copy(enabled = !spec.sourceEnrichment.enabled)))
-    }) { AppText("Use indexed source calls (one hop)", fontSize = 10.sp) }
+    }) { AppText("Reconstruct source execution trace", fontSize = 10.sp) }
     // An interaction-evidence choice, not a presentation one — sits beside source-call enrichment
     // rather than down in OptionsSection's presentation toggles.
     CheckRow(checked = spec.options.threadHandoffArrows, onToggle = {
         onSpec(spec.copy(options = spec.options.copy(threadHandoffArrows = !spec.options.threadHandoffArrows)))
     }) { AppText("Infer arrows from same-thread handoffs (pid + tid)", fontSize = 10.sp) }
     AppText(
-        "Activation bars appear when a call has matching return evidence. Source calls, rules, or same-thread evidence can create those spans; unrelated self events do not.",
+        "Source trace mode derives call/return arrows and activations from the indexed invocation path. If the path is ambiguous or stale, the diagram reports fallback mode; PID/TID only refines lane selection.",
         color = tc.td, fontSize = 10.sp, maxLines = 3, modifier = Modifier.padding(horizontal = 12.dp),
     )
-    if (spec.mode == ArrowMode.RULES) DiagramRulesEditor(spec, onSpec)
+    if (spec.mode == ArrowMode.RULES) DiagramRulesEditor(tab, spec, onSpec)
 }
 
 @Composable
-private fun DiagramRulesEditor(spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
+private fun DiagramRulesEditor(tab: LogTab, spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
     var pattern by remember { mutableStateOf("") }
-    var from by remember { mutableStateOf("\${from}") }
-    var to by remember { mutableStateOf("\${to}") }
     var label by remember { mutableStateOf("\${msg}") }
+    var proposalRevision by remember(tab.id) { mutableStateOf(0) }
+    val lifelineIds = remember(spec.components, spec.actors, spec.participants) {
+        (spec.components.filter { it.enabled && it.id.isNotBlank() }.map { it.id } +
+            spec.actors.map { it.id } + spec.participants.map { it.id }).distinct()
+    }
+    val availableParticipants = remember(spec.components, spec.actors, spec.participants, lifelineIds) {
+        // Keep component tag bindings in this preview-only list.  The same component id can occur
+        // once per tag here; the proposal service uses tags for CurrentEntry and IDs for endpoint
+        // validity, while the actual builder still emits one lifeline per component.
+        val componentBindings = spec.components.filter { it.enabled }.flatMap { component ->
+            component.tagIds.map { tag -> com.indagium.diagram.DiagramParticipant(component.id, component.displayName, ParticipantKind.TAG, tag = tag) }
+        }
+        componentBindings + spec.actors.map { actor ->
+            com.indagium.diagram.DiagramParticipant(actor.id, actor.label, ParticipantKind.ACTOR)
+        } + spec.participants
+    }
+    var fromEndpoint by remember(lifelineIds) { mutableStateOf<DiagramRuleEndpoint>(DiagramRuleEndpoint.CurrentEntry) }
+    var toEndpoint by remember(lifelineIds) { mutableStateOf<DiagramRuleEndpoint?>(lifelineIds.firstOrNull()?.let(DiagramRuleEndpoint::ExistingParticipant)) }
 
     fun invalidPattern(value: String): String? = runCatching { Regex(value) }.exceptionOrNull()?.message
     val draftError = pattern.takeIf { it.isNotBlank() }?.let(::invalidPattern)
 
     AppText(
-        "Rules match each log message in order. Use named captures such as (?<from>…), (?<to>…), " +
-            "and (?<msg>…) in the pattern; templates expand those captures into participants and labels. " +
-            "Unmatched rows remain self events.",
+        "Rules match log messages in order. Endpoints are explicit diagram lifelines, so typed rules never invent a lifeline from captured text. " +
+            "Use captures in labels (for example \${msg}); unmatched rows remain self events.",
         color = tc().td, fontSize = 10.sp, maxLines = 4, modifier = Modifier.padding(horizontal = 12.dp),
     )
 
     spec.rules.forEach { rule ->
         val error = remember(rule.pattern) { invalidPattern(rule.pattern) }
+        val proposal = remember(rule, tab.logData, availableParticipants, proposalRevision) {
+            com.indagium.diagram.DiagramProposalService.evaluateRules(tab.logData, listOf(rule), availableParticipants).candidates.single()
+        }
         Column(Modifier.padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                CheckRow(checked = rule.enabled, onToggle = {
+                    onSpec(spec.copy(rules = spec.rules.map { if (it.id == rule.id) it.copy(enabled = !it.enabled) else it }))
+                }) {}
                 AppText(
                     rule.pattern,
                     fontSize = 10.sp,
@@ -1166,87 +1252,140 @@ private fun DiagramRulesEditor(spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) ->
                 )
                 AppButton("×", { onSpec(spec.copy(rules = spec.rules.filterNot { it.id == rule.id })) }, variant = ButtonVariant.Ghost)
             }
+            InlineField(rule.pattern, { value ->
+                onSpec(spec.copy(rules = spec.rules.map { if (it.id == rule.id) it.copy(pattern = value) else it }))
+            }, "regex", Modifier.fillMaxWidth(), fontSize = 10.sp)
+            RuleEndpointPicker("From", rule.fromEndpoint, lifelineIds) { endpoint ->
+                onSpec(spec.copy(rules = spec.rules.map { if (it.id == rule.id) it.copy(fromEndpoint = endpoint) else it }))
+            }
+            RuleEndpointPicker("To", rule.toEndpoint, lifelineIds) { endpoint ->
+                onSpec(spec.copy(rules = spec.rules.map { if (it.id == rule.id) it.copy(toEndpoint = endpoint) else it }))
+            }
+            InlineField(rule.labelTemplate, { value ->
+                onSpec(spec.copy(rules = spec.rules.map { if (it.id == rule.id) it.copy(labelTemplate = value) else it }))
+            }, "label (for example \${msg})", Modifier.fillMaxWidth(), fontSize = 10.sp)
+            AppText(
+                "${proposal.matchedEntryIds.size} matches · ${proposal.resolvedEndpointIds.joinToString().ifBlank { "no resolved lifelines" }}",
+                color = if (proposal.applyBlocked) DANGER_RED else tc().td, fontSize = 9.sp, maxLines = 2,
+            )
+            proposal.issues.take(2).forEach { issue -> AppText(issue.detail, color = DANGER_RED, fontSize = 9.sp, maxLines = 2) }
+            proposal.samples.firstOrNull()?.let { sample ->
+                AppText("Example ${sample.entryId}: ${sample.message}", color = tc().td, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            if (rule.fromEndpoint == null || rule.toEndpoint == null) {
+                AppText("Legacy rule: choose both lifelines before relying on it; unbound templates may create actors.", color = DANGER_RED, fontSize = 9.sp, maxLines = 2)
+            }
             if (error != null) AppText("Invalid regex: ${error.take(90)}", color = DANGER_RED, fontSize = 9.sp, maxLines = 2)
         }
     }
+    AppButton("Refresh rule proposals", { proposalRevision++ }, variant = ButtonVariant.Ghost, modifier = Modifier.padding(horizontal = 12.dp))
     InlineField(pattern, { pattern = it }, "regex with named groups…", Modifier.fillMaxWidth().padding(horizontal = 12.dp), fontSize = 10.sp)
-    Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        InlineField(from, { from = it }, "from", Modifier.weight(1f), fontSize = 10.sp)
-        InlineField(to, { to = it }, "to", Modifier.weight(1f), fontSize = 10.sp)
-        InlineField(label, { label = it }, "label", Modifier.weight(1f), fontSize = 10.sp)
-    }
+    RuleEndpointPicker("From", fromEndpoint, lifelineIds) { fromEndpoint = it ?: DiagramRuleEndpoint.CurrentEntry }
+    RuleEndpointPicker("To", toEndpoint, lifelineIds) { toEndpoint = it }
+    InlineField(label, { label = it }, "label (for example \${msg})", Modifier.fillMaxWidth().padding(horizontal = 12.dp), fontSize = 10.sp)
     if (draftError != null) {
         AppText(
             "Invalid regex: ${draftError.take(90)}", color = DANGER_RED, fontSize = 10.sp, maxLines = 2,
             modifier = Modifier.padding(horizontal = 12.dp),
         )
     }
+    val draftProposal = remember(pattern, fromEndpoint, toEndpoint, label, tab.logData, availableParticipants) {
+        if (pattern.isBlank() || draftError != null || toEndpoint == null) null else {
+            val rule = com.indagium.diagram.DiagramMessageRule(
+                id = "draft", pattern = pattern, fromTemplate = "", toTemplate = "", labelTemplate = label,
+                fromEndpoint = fromEndpoint, toEndpoint = toEndpoint,
+            )
+            com.indagium.diagram.DiagramProposalService.evaluateRules(tab.logData, listOf(rule), availableParticipants).candidates.single()
+        }
+    }
+    draftProposal?.let { proposal ->
+        AppText(
+            "Proposal: ${proposal.matchedEntryIds.size} matches · ${proposal.resolvedEndpointIds.joinToString().ifBlank { "no resolved lifelines" }}",
+            color = if (proposal.applyBlocked) DANGER_RED else tc().td, fontSize = 9.sp, maxLines = 2,
+            modifier = Modifier.padding(horizontal = 12.dp),
+        )
+        proposal.issues.take(2).forEach { issue ->
+            AppText(issue.detail, color = DANGER_RED, fontSize = 9.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 12.dp))
+        }
+    }
     AppButton(
         "Add rule", {
-            if (pattern.isNotBlank() && draftError == null) {
+            if (pattern.isNotBlank() && draftError == null && toEndpoint != null && draftProposal?.applyBlocked != true) {
                 onSpec(
                     spec.copy(
                         rules = spec.rules + com.indagium.diagram.DiagramMessageRule(
                             id = "dr${System.nanoTime()}", pattern = pattern,
-                            fromTemplate = from, toTemplate = to, labelTemplate = label,
+                            fromTemplate = "", toTemplate = "", labelTemplate = label,
+                            fromEndpoint = fromEndpoint, toEndpoint = toEndpoint,
                         ),
                     ),
                 )
                 pattern = ""
             }
         },
-        enabled = pattern.isNotBlank() && draftError == null, modifier = Modifier.padding(horizontal = 12.dp),
+        enabled = pattern.isNotBlank() && draftError == null && toEndpoint != null && draftProposal?.applyBlocked != true,
+        modifier = Modifier.padding(horizontal = 12.dp),
     )
+}
 
-    AppText("Suggested interactions", color = tc().td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp))
-    interactionTemplates.forEach { template ->
-        Row(
-            Modifier.padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
-            AppText(template.label, fontSize = 10.sp, modifier = Modifier.weight(1f))
-            AppButton("Add", {
-                // Suggestions are never inferred or injected silently. This click is the user's
-                // explicit confirmation to add ordinary editable DiagramMessageRule records.
-                onSpec(spec.copy(rules = spec.rules + template.rules.mapIndexed { index, draft ->
-                    com.indagium.diagram.DiagramMessageRule(
-                        id = "dr${System.nanoTime()}-$index", pattern = draft.pattern,
-                        fromTemplate = draft.from, toTemplate = draft.to, labelTemplate = draft.label,
-                    )
-                }))
-            }, variant = ButtonVariant.Ghost)
+@Composable
+private fun RuleEndpointPicker(
+    title: String,
+    selected: DiagramRuleEndpoint?,
+    lifelineIds: List<String>,
+    onSelect: (DiagramRuleEndpoint?) -> Unit,
+) {
+    Column(Modifier.padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        AppText(title, color = tc().td, fontSize = 9.sp)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            AppButton("This log row", { onSelect(DiagramRuleEndpoint.CurrentEntry) }, variant = if (selected == DiagramRuleEndpoint.CurrentEntry) ButtonVariant.Primary else ButtonVariant.Ghost)
+            lifelineIds.forEach { id ->
+                val endpoint = DiagramRuleEndpoint.ExistingParticipant(id)
+                AppButton(id, { onSelect(endpoint) }, variant = if (selected == endpoint) ButtonVariant.Primary else ButtonVariant.Ghost)
+            }
+            AppButton("Captured value", { onSelect(DiagramRuleEndpoint.CapturedValue("value", emptyList())) }, variant = if (selected is DiagramRuleEndpoint.CapturedValue) ButtonVariant.Primary else ButtonVariant.Ghost)
+            AppButton("Explicit actor", { onSelect(DiagramRuleEndpoint.ExplicitActor("actor", "Actor")) }, variant = if (selected is DiagramRuleEndpoint.ExplicitActor) ButtonVariant.Primary else ButtonVariant.Ghost)
+        }
+        when (selected) {
+            is DiagramRuleEndpoint.CapturedValue -> {
+                InlineField(selected.captureName, { capture ->
+                    onSelect(selected.copy(captureName = capture))
+                }, "capture name", Modifier.fillMaxWidth(), fontSize = 9.sp)
+                InlineField(selected.bindings.formatRuleBindings(), { text ->
+                    onSelect(selected.copy(bindings = text.parseRuleBindings(lifelineIds)))
+                }, "bindings: captured=lifeline id; …", Modifier.fillMaxWidth(), fontSize = 9.sp)
+            }
+            is DiagramRuleEndpoint.ExplicitActor -> {
+                InlineField(selected.id, { id -> onSelect(selected.copy(id = id)) }, "actor id", Modifier.fillMaxWidth(), fontSize = 9.sp)
+                InlineField(selected.label, { label -> onSelect(selected.copy(label = label)) }, "actor label", Modifier.fillMaxWidth(), fontSize = 9.sp)
+            }
+            else -> Unit
         }
     }
 }
 
-private data class InteractionRuleDraft(val pattern: String, val from: String = "\${from}", val to: String = "\${to}", val label: String = "\${msg}")
+private fun List<com.indagium.diagram.DiagramRuleCaptureBinding>.formatRuleBindings(): String =
+    joinToString("; ") { "${it.capturedValue}=${it.participantId}" }
 
-private data class InteractionTemplate(val label: String, val rules: List<InteractionRuleDraft>)
-
-/** Conservative starting points, deliberately offered as explicit Add actions rather than
- * automatic detection. Users can inspect and edit the resulting ordinary rules immediately. */
-private val interactionTemplates = listOf(
-    InteractionTemplate(
-        "HTTP request",
-        listOf(InteractionRuleDraft("(?i)(?<from>\\S+).*\\b(?<verb>GET|POST|PUT|DELETE|PATCH)\\s+(?<to>https?://\\S+)", label = "\${verb} \${msg}"))
-    ),
-    InteractionTemplate("RPC / Binder", listOf(InteractionRuleDraft("(?i)(?<from>\\S+).*\\b(?:rpc|binder)\\b.*\\bto\\s+(?<to>\\S+)"))),
-    InteractionTemplate("Broadcast", listOf(InteractionRuleDraft("(?i)(?<from>\\S+).*\\bbroadcast\\b.*\\bto\\s+(?<to>\\S+)"))),
-    InteractionTemplate("Worker / job", listOf(InteractionRuleDraft("(?i)(?<from>\\S+).*\\b(?:worker|job)\\b.*\\bto\\s+(?<to>\\S+)"))),
-    InteractionTemplate("Socket", listOf(InteractionRuleDraft("(?i)(?<from>\\S+).*\\bsocket\\b.*\\bto\\s+(?<to>\\S+)"))),
-    InteractionTemplate("Database", listOf(InteractionRuleDraft("(?i)(?<from>\\S+).*\\b(?:query|insert|update|delete)\\b.*\\b(?<to>database|db)\\b"))),
-    InteractionTemplate(
-        "Request / response", listOf(
-            InteractionRuleDraft("(?i)(?<from>\\S+).*\\brequest\\b.*\\bto\\s+(?<to>\\S+)"),
-            InteractionRuleDraft("(?i)(?<from>\\S+).*\\bresponse\\b.*\\bfrom\\s+(?<to>\\S+)"),
-        )
-    ),
-)
+private fun String.parseRuleBindings(lifelineIds: List<String>): List<com.indagium.diagram.DiagramRuleCaptureBinding> =
+    split(';').mapNotNull { raw ->
+        val pair = raw.trim()
+        val separator = pair.indexOf('=')
+        if (separator <= 0) return@mapNotNull null
+        val captured = pair.substring(0, separator).trim()
+        val participant = pair.substring(separator + 1).trim()
+        if (captured.isBlank() || participant !in lifelineIds) null
+        else com.indagium.diagram.DiagramRuleCaptureBinding(captured, participant)
+    }.distinct()
 
 // ── Options ──────────────────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun OptionsSection(state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
+private fun OptionsSection(state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit, manualMode: Boolean = false) {
+    if (manualMode) {
+        ManualPresentationSection(spec, onSpec)
+        return
+    }
     val tc = tc()
     val o = spec.options
     // SOURCE_METHOD/BOTH resolve each line against the source index; offering them with no folder
@@ -1264,7 +1403,7 @@ private fun OptionsSection(state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDi
         AppText("Note errors and crashes", fontSize = 11.sp)
     }
     CheckRow(checked = o.showElapsed, onToggle = { onSpec(spec.copy(options = o.copy(showElapsed = !o.showElapsed))) }) {
-        AppText("Show elapsed time", fontSize = 11.sp)
+        AppText("Show time delta", fontSize = 11.sp)
     }
     CheckRow(checked = o.showTimestamps, onToggle = { onSpec(spec.copy(options = o.copy(showTimestamps = !o.showTimestamps))) }) {
         AppText("Show timestamps", fontSize = 11.sp)
@@ -1303,7 +1442,7 @@ private fun OptionsSection(state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDi
         }) { AppText("Show inferred source calls", fontSize = 11.sp) }
     } else {
         AppText(
-            "Show inferred source calls — needs one-hop source calls enabled above.", color = tc.td, fontSize = 10.sp, maxLines = 2,
+            "Show source-trace structure — requires a current source index above.", color = tc.td, fontSize = 10.sp, maxLines = 2,
             modifier = Modifier.padding(horizontal = 12.dp),
         )
     }
@@ -1331,6 +1470,51 @@ private fun OptionsSection(state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDi
         "Component labels use these limits for their lifeline headers; raw tags remain available in the inspector.",
         color = tc.td, fontSize = 10.sp, maxLines = 3, modifier = Modifier.padding(horizontal = 12.dp),
     )
+    Row(
+        Modifier.padding(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AppText("Format", fontSize = 11.sp)
+        SegmentedControl(
+            listOf("Mermaid", "PlantUML"),
+            setOf(if (spec.dialect == DiagramDialect.MERMAID) 0 else 1),
+            onToggle = { idx -> onSpec(spec.copy(dialect = if (idx == 0) DiagramDialect.MERMAID else DiagramDialect.PLANTUML)) },
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+}
+
+/** Presentation controls audited against ManualDiagramBuilder and the shared renderer. Inferred
+ * filtering, repeat collapsing, source labels, and generated error notes are intentionally absent
+ * here because the manual document is already the semantic source of truth. */
+@Composable
+private fun ManualPresentationSection(spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
+    val o = spec.options
+    SectionHeader("Presentation")
+    CheckRow(checked = o.activationPolicy != ActivationPolicy.NONE, onToggle = {
+        onSpec(spec.copy(options = o.copy(
+            activationPolicy = if (o.activationPolicy == ActivationPolicy.NONE) ActivationPolicy.EVIDENCE_BACKED else ActivationPolicy.NONE,
+        )))
+    }) { AppText("Show manual activation spans", fontSize = 11.sp) }
+    AppText(
+        "Manual lines are authoritative. Only the settings below affect their build or shared canvas rendering.",
+        color = tc().td, fontSize = 10.sp, maxLines = 3, modifier = Modifier.padding(horizontal = 12.dp),
+    )
+    NumericSettingRow("Max arrows", o.maxMessages, 1..1000) {
+        onSpec(spec.copy(options = o.copy(maxMessages = it)))
+    }
+    NumericSettingRow("Message label chars", o.labelMaxChars, 10..400) {
+        onSpec(spec.copy(options = o.copy(labelMaxChars = it)))
+    }
+    NumericSettingRow("Label lines", o.labelMaxLines, 1..8) {
+        onSpec(spec.copy(options = o.copy(labelMaxLines = it)))
+    }
+    NumericSettingRow("Lifeline label chars", o.participantLabelMaxChars, 10..120) {
+        onSpec(spec.copy(options = o.copy(participantLabelMaxChars = it)))
+    }
+    NumericSettingRow("Lifeline label lines", o.participantLabelMaxLines, 1..4) {
+        onSpec(spec.copy(options = o.copy(participantLabelMaxLines = it)))
+    }
     Row(
         Modifier.padding(horizontal = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,

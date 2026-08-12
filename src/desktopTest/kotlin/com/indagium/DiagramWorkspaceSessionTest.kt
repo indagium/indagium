@@ -20,6 +20,8 @@ import com.indagium.ui.ActiveSurface
 import com.indagium.ui.AppState
 import com.indagium.ui.DiagramCandidateState
 import com.indagium.ui.DiagramZoomMode
+import com.indagium.diagram.DiagramAuthoringMode
+import com.indagium.diagram.ManualDiagramSeedStrategy
 import com.indagium.ui.diagramWorkspaceIdsForWidth
 import com.indagium.ui.diagramWorkspaceOrderAfterVisibleReorder
 import com.indagium.ui.mkTab
@@ -107,6 +109,27 @@ class DiagramWorkspaceSessionTest {
     }
 
     @Test
+    fun newWorkspaceDefaultsToManualAndSeedActionsHaveOneStepRevert() {
+        val state = state()
+        state.seqDiagrams.begin("log", setOf(1, 2))
+        await {
+            state.seqDiagrams.preview.diagramOrNull != null &&
+                state.seqDiagrams.request?.spec?.manualDocument?.interactions?.isNotEmpty() == true
+        }
+        val seeded = state.seqDiagrams.request!!.spec.manualDocument
+        assertEquals(DiagramAuthoringMode.MANUAL, state.seqDiagrams.request!!.spec.authoringMode)
+
+        state.seqDiagrams.applyManualSeed(ManualDiagramSeedStrategy.THREAD_HANDOFFS)
+        await { !state.seqDiagrams.manualSeedBusy && state.seqDiagrams.canRevertManualSeed }
+        assertEquals(DiagramAuthoringMode.MANUAL, state.seqDiagrams.request!!.spec.authoringMode)
+
+        state.seqDiagrams.revertManualSeed()
+        await { !state.seqDiagrams.canRevertManualSeed }
+        assertEquals(seeded, state.seqDiagrams.request!!.spec.manualDocument)
+        assertTrue(state.seqDiagrams.request!!.spec.authoringMode == DiagramAuthoringMode.MANUAL)
+    }
+
+    @Test
     fun noSelectionUsesExplicitDisabledComponentModeAndDirtyCloseIsDeferred() {
         val state = state()
         state.seqDiagrams.begin("log")
@@ -122,6 +145,21 @@ class DiagramWorkspaceSessionTest {
         assertEquals(1, state.seqDiagrams.workspaces.size)
         state.seqDiagrams.cancelWorkspaceClose()
         assertNull(state.seqDiagrams.pendingCloseWorkspaceId)
+    }
+
+    @Test
+    fun noSelectionSeedsVisibleDiagramAfterInitialManualPreparation() {
+        val state = state()
+        state.seqDiagrams.begin("log")
+
+        await {
+            state.seqDiagrams.preview.diagramOrNull != null &&
+                state.seqDiagrams.request?.spec?.manualDocument?.interactions?.isNotEmpty() == true
+        }
+
+        val spec = state.seqDiagrams.request!!.spec
+        assertTrue(spec.components.any { it.tagIds.isNotEmpty() })
+        assertTrue(state.seqDiagrams.preview.diagramOrNull!!.messages.isNotEmpty())
     }
 
     @Test
@@ -511,6 +549,17 @@ class DiagramWorkspaceSessionTest {
         val after = state.seqDiagrams.activeSession!!
         assertEquals(false, after.inspectorOpen)
         assertEquals(400f, after.inspectorWidth)
+    }
+
+    @Test
+    fun resizeInspectorByAccumulatesDragDeltasFromCurrentWidth() {
+        val state = state()
+        state.seqDiagrams.begin("log", setOf(1))
+
+        state.seqDiagrams.resizeInspectorBy(18f)
+        state.seqDiagrams.resizeInspectorBy(24f)
+
+        assertEquals(372f, state.seqDiagrams.activeSession!!.inspectorWidth)
     }
 
     // ── Canvas click-to-navigate coordinate mapping (Part C) ────────────────────────────────────

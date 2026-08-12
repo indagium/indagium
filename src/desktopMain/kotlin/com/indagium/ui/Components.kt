@@ -34,6 +34,7 @@ import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.TriStateCheckbox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,6 +58,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.TextUnit
@@ -826,6 +828,35 @@ fun CheckRow(
     }
 }
 
+/** A checkbox for dense inspector rows. Unlike [CheckRow], this control owns only its compact
+ * footprint, so it can safely sit beside labels and row actions. [indeterminate] is used for
+ * grouped manual interactions whose occurrences are only partially enabled. */
+@Composable
+fun CompactCheckBox(
+    checked: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+    indeterminate: Boolean = false,
+    accentColor: Color = LocalTheme.current.ac,
+) {
+    val tc = tc()
+    val state = when {
+        indeterminate -> ToggleableState.Indeterminate
+        checked -> ToggleableState.On
+        else -> ToggleableState.Off
+    }
+    TriStateCheckbox(
+        state = state,
+        onClick = onToggle,
+        colors = CheckboxDefaults.colors(
+            checkedColor = accentColor,
+            uncheckedColor = tc.td,
+            checkmarkColor = tc.bg,
+        ),
+        modifier = modifier.size(20.dp),
+    )
+}
+
 @Composable
 fun ColorSwatch(color: Color, selected: Boolean, onClick: () -> Unit) {
     val tc = tc()
@@ -887,7 +918,14 @@ fun LabelIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modif
 // sequences, saved filters) with a real CircleShape so its hover highlight is a round halo behind
 // the dot, not a square highlight box behind a round glyph.
 @Composable
-fun RoundIndicator(active: Boolean, color: Color, onClick: () -> Unit, modifier: Modifier = Modifier, size: Dp = 10.dp) {
+fun RoundIndicator(
+    active: Boolean,
+    color: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    size: Dp = 10.dp,
+    indeterminate: Boolean = false,
+) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     Box(
@@ -904,7 +942,11 @@ fun RoundIndicator(active: Boolean, color: Color, onClick: () -> Unit, modifier:
             Modifier.size(size)
                 .background(if (active) color else Color.Transparent, CircleShape)
                 .border(1.dp, color, CircleShape),
-        )
+        ) {
+            if (indeterminate && !active) {
+                Box(Modifier.size(size / 2).background(color, CircleShape).align(Alignment.Center))
+            }
+        }
     }
 }
 

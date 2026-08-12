@@ -12,6 +12,7 @@ import com.indagium.diagram.DiagramExportMode
 import com.indagium.diagram.DiagramFrame
 import com.indagium.diagram.DiagramMessage
 import com.indagium.diagram.DiagramMessageRule
+import com.indagium.diagram.DiagramMessageOverride
 import com.indagium.diagram.DiagramNoteMark
 import com.indagium.diagram.DiagramOptions
 import com.indagium.diagram.DiagramParticipant
@@ -19,6 +20,29 @@ import com.indagium.diagram.DiagramRange
 import com.indagium.diagram.LabelSource
 import com.indagium.diagram.MessageEvidence
 import com.indagium.diagram.MessageKind
+import com.indagium.diagram.MessageOriginKey
+import com.indagium.diagram.DiagramParameter
+import com.indagium.diagram.DiagramAuthoringMode
+import com.indagium.diagram.DiagramRuleEndpoint
+import com.indagium.diagram.DiagramRuleCaptureBinding
+import com.indagium.diagram.ManualDiagramDocument
+import com.indagium.diagram.ManualDiagramInteraction
+import com.indagium.diagram.ManualDiagramGroup
+import com.indagium.diagram.ManualDiagramNote
+import com.indagium.diagram.ManualDiagramActivation
+import com.indagium.diagram.ManualOperationVisibility
+import com.indagium.diagram.DiagramResolvedTrace
+import com.indagium.diagram.DiagramTraceEvent
+import com.indagium.diagram.DiagramTraceCall
+import com.indagium.diagram.DiagramTraceOperation
+import com.indagium.diagram.DiagramTraceDiagnostics
+import com.indagium.diagram.DiagramTraceDiagnostic
+import com.indagium.diagram.DiagramTraceEvidence
+import com.indagium.diagram.SourceTraceMode
+import com.indagium.diagram.TraceCallStatus
+import com.indagium.diagram.TraceInvocationKind
+import com.indagium.diagram.TraceOperationKind
+import com.indagium.diagram.TraceDiagnosticReason
 import com.indagium.diagram.MirrorDirection
 import com.indagium.diagram.ParticipantKind
 import com.indagium.diagram.SeqDiagram
@@ -194,7 +218,7 @@ class DiagramSpecCodecTest {
 
     @Test
     fun parseDiagramNoteReturnsNullForAnUnsupportedFutureVersion() {
-        val futureVersion = "<!-- indagium:diagram v4 {\"dialect\":\"mermaid\"} -->\n```mermaid\nsequenceDiagram\n```\n"
+        val futureVersion = "<!-- indagium:diagram v5 {\"dialect\":\"mermaid\"} -->\n```mermaid\nsequenceDiagram\n```\n"
         assertNull(parseDiagramNote(futureVersion))
     }
 
@@ -331,7 +355,7 @@ class DiagramSpecCodecTest {
         val sourceMode = assertNotNull(updateDiagramNoteExportMode(captioned, DiagramExportMode.SOURCE))
         val parsed = assertNotNull(parseDiagramNote(sourceMode))
 
-        assertTrue(sourceMode.startsWith("<!-- indagium:diagram v3 "))
+        assertTrue(sourceMode.startsWith("<!-- indagium:diagram v4 "))
         assertEquals("Startup sequence", parsed.caption)
         assertEquals(DiagramExportMode.SOURCE, parsed.exportMode)
         assertEquals("sequenceDiagram", parsed.source)
@@ -362,6 +386,73 @@ class DiagramSpecCodecTest {
         assertEquals(spec.callOverrides, parsed.spec.callOverrides)
         assertEquals(MessageEvidence.SOURCE_INFERRED, parsed.model?.messages?.single()?.evidence)
         assertEquals(model.activationSpans, parsed.model?.activationSpans)
+    }
+
+    @Test
+    fun v4RoundTripsManualEditsTypedRulesAndBoundedTraceProvenance() {
+        val participants = listOf(
+            DiagramParticipant("client", "Client", ParticipantKind.ACTOR),
+            DiagramParticipant("service", "Service", ParticipantKind.TAG, tag = "Service"),
+        )
+        val origin = MessageOriginKey(7, ruleId = "route", sourceOperationId = "op-7", sourceLogSiteId = "site-7", invocationId = "i-7")
+        val document = ManualDiagramDocument(
+            interactions = listOf(ManualDiagramInteraction(
+                "manual-1", setOf(7), "client", "service", "fetch", listOf(DiagramParameter("id", "7"),),
+                kind = MessageKind.ASYNC, groupKey = "source:op-7|site-7", sourceMethodId = "op-7",
+                sourceLogSiteId = "site-7", sourceOwnerType = "Client", visibility = ManualOperationVisibility.PRIVATE,
+            )),
+            groups = listOf(ManualDiagramGroup("g-1", "request", listOf("manual-1"))),
+            notes = listOf(ManualDiagramNote("n-1", "service", "manual-1", "queued")),
+            activations = listOf(ManualDiagramActivation("a-1", "service", "manual-1", "manual-1")),
+        )
+        val spec = SeqDiagramSpec(
+            participants = participants,
+            rules = listOf(DiagramMessageRule(
+                "route", "to (?<peer>\\w+)", fromTemplate = "", toTemplate = "", labelTemplate = "",
+                fromEndpoint = DiagramRuleEndpoint.ExistingParticipant("client"),
+                toEndpoint = DiagramRuleEndpoint.CapturedValue("peer", listOf(DiagramRuleCaptureBinding("service", "service"))),
+            )),
+            authoringMode = DiagramAuthoringMode.MANUAL,
+            lifelineOrder = listOf("client", "service"),
+            messageOverrides = listOf(DiagramMessageOverride(origin, label = "fetch async", kind = MessageKind.ASYNC)),
+            manualDocument = document,
+        )
+        val trace = DiagramResolvedTrace(
+            events = listOf(DiagramTraceEvent(7, "site-7", methodId = "m-7", laneId = "p1:t1", confidence = 0.9, evidence = setOf(DiagramTraceEvidence.EXACT_SOURCE_SITE))),
+            calls = listOf(DiagramTraceCall("i-7", "Client", "Service", callEntryId = 7, status = TraceCallStatus.RETURNED, invocationKind = TraceInvocationKind.EXECUTOR_DISPATCH, callLabel = "fetch", confidence = 0.9)),
+            operations = listOf(DiagramTraceOperation("op-7", TraceOperationKind.SOURCE_CALL, 7, "i-7", "op-7", "site-7")),
+            diagnostics = DiagramTraceDiagnostics(diagnostics = listOf(DiagramTraceDiagnostic(TraceDiagnosticReason.ASYNC_BOUNDARY, 7, "dispatch"))),
+        )
+        val model = SeqDiagram(spec, participants, listOf(
+            DiagramMessage(0, 1, "fetch", 7, "10:00:00", LogLevel.I, MessageKind.ASYNC, sourceOperationId = "op-7", sourceLogSiteId = "site-7", originKeys = setOf(origin)),
+        ), resolvedTrace = trace, traceMode = SourceTraceMode.SOURCE_TRACE)
+
+        val encoded = encodeDiagramNote(spec, source, model)
+        val parsed = assertNotNull(parseDiagramNote(encoded))
+
+        assertTrue(encoded.startsWith("<!-- indagium:diagram v4 "))
+        assertEquals(spec, parsed.spec)
+        assertEquals(model.messages.single().originKeys, parsed.model?.messages?.single()?.originKeys)
+        assertEquals(trace, parsed.model?.resolvedTrace)
+        assertEquals(SourceTraceMode.SOURCE_TRACE, parsed.model?.traceMode)
+        assertEquals("source:op-7|site-7", parsed.spec.manualDocument.interactions.single().groupKey)
+        assertEquals(ManualOperationVisibility.PRIVATE, parsed.spec.manualDocument.interactions.single().visibility)
+    }
+
+    @Test
+    fun oldManualInteractionRecordsUseGroupingProvenanceAndVisibilityDefaults() {
+        val note = "<!-- indagium:diagram v4 {\"dialect\":\"mermaid\",\"participants\":[" +
+            "{\"id\":\"a\",\"label\":\"A\",\"kind\":\"TAG\",\"tag\":\"A\"}]," +
+            "\"authoringMode\":\"MANUAL\",\"manualDocument\":{\"interactions\":[" +
+            "{\"id\":\"m\",\"sourceEntryIds\":[1],\"fromParticipantId\":\"a\",\"toParticipantId\":\"a\"," +
+            "\"operation\":\"event\",\"parameters\":[],\"result\":null,\"label\":null," +
+            "\"kind\":\"SELF\",\"enabled\":true,\"order\":0}],\"groups\":[],\"notes\":[],\"activations\":[]}} -->\n" +
+            "```mermaid\nsequenceDiagram\n```\n"
+        val parsed = assertNotNull(parseDiagramNote(note))
+        val interaction = parsed.spec.manualDocument.interactions.single()
+        assertNull(interaction.groupKey)
+        assertNull(interaction.sourceMethodId)
+        assertEquals(ManualOperationVisibility.UNSPECIFIED, interaction.visibility)
     }
 
     @Test
@@ -492,6 +583,7 @@ class DiagramSpecCodecTest {
 
         val defaults = DiagramOptions()
         assertEquals(42, parsed.spec.options.maxMessages)
+        assertFalse(defaults.showElapsed)
         assertEquals(defaults.labelMaxLines, parsed.spec.options.labelMaxLines)
         assertEquals(defaults.threadHandoffArrows, parsed.spec.options.threadHandoffArrows)
         assertEquals(defaults.showSelfMessages, parsed.spec.options.showSelfMessages)

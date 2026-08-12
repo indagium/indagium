@@ -32,7 +32,8 @@ private const val MARKER_HEAD = "<!-- indagium:diagram "
 private const val MARKER_TAIL = " -->"
 private const val LEGACY_SPEC_VERSION = "v1"
 private const val SNAPSHOT_SPEC_VERSION = "v2"
-private const val CURRENT_SPEC_VERSION = "v3"
+private const val PREVIOUS_SPEC_VERSION = "v3"
+private const val CURRENT_SPEC_VERSION = "v4"
 
 // Notes can be imported from arbitrary .ann/case-library files.  Keep this boundary materially
 // below a pathological renderer allocation while matching the public MCP's 400-arrow limit.
@@ -47,6 +48,17 @@ private const val MAX_CODEC_ACTORS = 128
 internal const val MAX_CODEC_TAG_IDS = 512
 private const val MAX_CODEC_RULES = 128
 private const val MAX_CODEC_OVERRIDES = 512
+private const val MAX_CODEC_SOURCE_OVERRIDES = 512
+private const val MAX_CODEC_MESSAGE_OVERRIDES = 512
+private const val MAX_CODEC_MANUAL_INTERACTIONS = 400
+private const val MAX_CODEC_MANUAL_GROUPS = 128
+private const val MAX_CODEC_MANUAL_NOTES = 400
+private const val MAX_CODEC_MANUAL_ACTIVATIONS = 400
+private const val MAX_CODEC_PARAMETERS = 32
+private const val MAX_CODEC_TRACE_EVENTS = 400
+private const val MAX_CODEC_TRACE_CALLS = 400
+private const val MAX_CODEC_TRACE_OPERATIONS = 1_600
+private const val MAX_CODEC_TRACE_DIAGNOSTICS = 128
 
 // validSpec only runs on *decode* (see this file's own note on MAX_CODEC_COMPONENTS above) — the
 // options-panel SegmentedControl (ui/SeqDiagramInspector.kt) offers exactly "1".."4", well inside
@@ -207,6 +219,7 @@ fun parseDiagramNote(text: String): ParsedDiagram? {
     val version = afterHead.substring(0, spaceIdx)
     val supportedVersion = version == LEGACY_SPEC_VERSION ||
         version == SNAPSHOT_SPEC_VERSION ||
+        version == PREVIOUS_SPEC_VERSION ||
         version == CURRENT_SPEC_VERSION
     if (!supportedVersion) return null
     val rest = afterHead.substring(spaceIdx + 1)
@@ -370,6 +383,10 @@ private fun modelToMap(d: SeqDiagram): Map<String, Any?> = mapOf(
             "f" to m.fromIdx, "t" to m.toIdx, "l" to m.label, "e" to m.entryId,
             "ts" to m.ts, "v" to m.level.name, "k" to m.kind.name, "r" to m.repeatCount,
             "x" to m.evidence.name, "o" to m.edgeOrdinal,
+            "i" to m.invocationId, "st" to m.traceStatus?.name, "ik" to m.invocationKind?.name,
+            "p" to m.primary, "ids" to m.representedEntryIds.sorted(),
+            "so" to m.sourceOperationId, "sl" to m.sourceLogSiteId,
+            "origins" to m.originKeys.map(::originKeyToMap),
         )
     },
     "frames" to d.frames.map { f ->
@@ -379,7 +396,10 @@ private fun modelToMap(d: SeqDiagram): Map<String, Any?> = mapOf(
         mapOf("p" to n.participantIdx, "a" to n.afterMsg, "t" to n.text, "e" to n.isError)
     },
     "activations" to d.activationSpans.map { a ->
-        mapOf("p" to a.participantIdx, "s" to a.startMessage, "e" to a.endMessage, "v" to a.evidence.name)
+        mapOf(
+            "p" to a.participantIdx, "s" to a.startMessage, "e" to a.endMessage, "v" to a.evidence.name,
+            "i" to a.invocationId, "st" to a.status?.name, "ik" to a.invocationKind?.name,
+        )
     },
     "truncated" to d.truncated,
     "scanned" to d.scannedEntries,
@@ -389,6 +409,8 @@ private fun modelToMap(d: SeqDiagram): Map<String, Any?> = mapOf(
         "grouped" to d.coverage.groupedEntries,
         "hidden" to d.coverage.hiddenEntries,
     ),
+    "traceMode" to d.traceMode.name,
+    "trace" to d.resolvedTrace?.let(::traceToMap),
 )
 
 /** Rebuilds the model recorded by [modelToMap]. [spec] is threaded back in rather than stored
@@ -409,6 +431,9 @@ private fun modelFromMap(map: Map<String, Any?>, spec: SeqDiagramSpec): SeqDiagr
     val messages = messageMaps.map { m ->
         val from = m.int("f") ?: return@map null
         val to = m.int("t") ?: return@map null
+        val originMaps = strictMapListOrEmpty(m, "origins", MAX_CODEC_MESSAGE_OVERRIDES) ?: return@map null
+        val origins = originMaps.map(::originKeyFromMap)
+        if (origins.any { it == null }) return@map null
         DiagramMessage(
             fromIdx = from, toIdx = to,
             label = m.str("l") ?: "",
@@ -419,6 +444,15 @@ private fun modelFromMap(map: Map<String, Any?>, spec: SeqDiagramSpec): SeqDiagr
             repeatCount = m.int("r") ?: 1,
             evidence = enumFromName<MessageEvidence>(m.str("x")) ?: MessageEvidence.LOG,
             edgeOrdinal = m.int("o") ?: 0,
+            invocationId = m.str("i"),
+            traceStatus = enumFromName<TraceCallStatus>(m.str("st")),
+            invocationKind = enumFromName<TraceInvocationKind>(m.str("ik")),
+            primary = m.bool("p") ?: true,
+            representedEntryIds = (m["ids"] as? List<*>)?.mapNotNull { (it as? Number)?.toInt() }?.toSet()
+                ?.takeIf { it.isNotEmpty() } ?: setOf(m.int("e") ?: return@map null),
+            sourceOperationId = m.str("so"),
+            sourceLogSiteId = m.str("sl"),
+            originKeys = origins.filterNotNull().toSet(),
         )
     }
     if (messages.any { it == null }) return null
@@ -447,7 +481,12 @@ private fun modelFromMap(map: Map<String, Any?>, spec: SeqDiagramSpec): SeqDiagr
         val p = a.int("p") ?: return@map null
         val s = a.int("s") ?: return@map null
         val e = a.int("e") ?: return@map null
-        DiagramActivationSpan(p, s, e, enumFromName<MessageEvidence>(a.str("v")) ?: MessageEvidence.LOG)
+        DiagramActivationSpan(
+            p, s, e, enumFromName<MessageEvidence>(a.str("v")) ?: MessageEvidence.LOG,
+            invocationId = a.str("i"),
+            status = enumFromName<TraceCallStatus>(a.str("st")),
+            invocationKind = enumFromName<TraceInvocationKind>(a.str("ik")),
+        )
     }
     if (activations.any { it == null }) return null
     val safeActivations = activations.filterNotNull()
@@ -456,6 +495,11 @@ private fun modelFromMap(map: Map<String, Any?>, spec: SeqDiagramSpec): SeqDiagr
     if (scannedEntries < 0) return null
     val coverageMap = subMap(map, "coverage")
     if (coverageMap != null && listOf("scanned", "shown", "grouped", "hidden").any { (coverageMap.int(it) ?: 0) < 0 }) return null
+    val trace = if (map["trace"] != null) {
+        subMap(map, "trace")?.let(::traceFromMap) ?: return null
+    } else {
+        null
+    }
     return SeqDiagram(
         spec = spec,
         participants = safeParticipants,
@@ -473,6 +517,8 @@ private fun modelFromMap(map: Map<String, Any?>, spec: SeqDiagramSpec): SeqDiagr
                 hiddenEntries = it.int("hidden") ?: 0,
             )
         } ?: DiagramCoverage(scannedEntries = scannedEntries),
+        resolvedTrace = trace,
+        traceMode = enumFromName<SourceTraceMode>(map.str("traceMode")) ?: SourceTraceMode.DISABLED,
     )
 }
 
@@ -490,6 +536,11 @@ private fun specToMap(spec: SeqDiagramSpec): Map<String, Any?> = mapOf(
     "unmappedTagPolicy" to spec.unmappedTagPolicy.name,
     "sourceEnrichment" to sourceEnrichmentToMap(spec.sourceEnrichment),
     "callOverrides" to spec.callOverrides.map(::callOverrideToMap),
+    "sourceSiteOverrides" to spec.sourceSiteOverrides.map(::sourceSiteOverrideToMap),
+    "authoringMode" to spec.authoringMode.name,
+    "lifelineOrder" to spec.lifelineOrder,
+    "messageOverrides" to spec.messageOverrides.map(::messageOverrideToMap),
+    "manualDocument" to manualDocumentToMap(spec.manualDocument),
 )
 
 private fun componentToMap(c: DiagramComponent): Map<String, Any?> = mapOf(
@@ -509,9 +560,215 @@ private fun callOverrideToMap(o: DiagramCallOverride): Map<String, Any?> = mapOf
     "toParticipantId" to o.toParticipantId,
 )
 
+private fun sourceSiteOverrideToMap(o: DiagramSourceSiteOverride): Map<String, Any?> = mapOf(
+    "entryId" to o.entryId,
+    "sourceLogSiteId" to o.sourceLogSiteId,
+    "edgeOrdinal" to o.edgeOrdinal,
+)
+
+private fun parameterToMap(parameter: DiagramParameter): Map<String, Any?> = mapOf(
+    "name" to parameter.name,
+    "value" to parameter.value,
+)
+
+private fun messageOverrideToMap(override: DiagramMessageOverride): Map<String, Any?> = mapOf(
+    "origin" to originKeyToMap(override.origin), "enabled" to override.enabled,
+    "fromParticipantId" to override.fromParticipantId, "toParticipantId" to override.toParticipantId,
+    "label" to override.label, "kind" to override.kind?.name,
+    "parameters" to override.parameters?.map(::parameterToMap),
+)
+
+private fun manualDocumentToMap(document: ManualDiagramDocument): Map<String, Any?> = mapOf(
+    "interactions" to document.interactions.map { interaction ->
+        mapOf(
+            "id" to interaction.id, "sourceEntryIds" to interaction.sourceEntryIds.sorted(),
+            "fromParticipantId" to interaction.fromParticipantId, "toParticipantId" to interaction.toParticipantId,
+            "operation" to interaction.operation, "parameters" to interaction.parameters.map(::parameterToMap),
+            "result" to interaction.result, "label" to interaction.label, "kind" to interaction.kind.name,
+            "enabled" to interaction.enabled, "order" to interaction.order,
+            "groupKey" to interaction.groupKey, "sourceMethodId" to interaction.sourceMethodId,
+            "sourceLogSiteId" to interaction.sourceLogSiteId, "sourceOwnerType" to interaction.sourceOwnerType,
+            "visibility" to interaction.visibility.name,
+        )
+    },
+    "groups" to document.groups.map { group ->
+        mapOf("id" to group.id, "label" to group.label, "interactionIds" to group.interactionIds, "enabled" to group.enabled)
+    },
+    "notes" to document.notes.map { note ->
+        mapOf("id" to note.id, "participantId" to note.participantId, "afterInteractionId" to note.afterInteractionId,
+            "text" to note.text, "isError" to note.isError, "enabled" to note.enabled)
+    },
+    "activations" to document.activations.map { activation ->
+        mapOf("id" to activation.id, "participantId" to activation.participantId,
+            "startInteractionId" to activation.startInteractionId, "endInteractionId" to activation.endInteractionId,
+            "enabled" to activation.enabled)
+    },
+)
+
 private fun sourceEnrichmentToMap(s: DiagramSourceEnrichment): Map<String, Any?> = mapOf(
     "enabled" to s.enabled, "directCallDepth" to 1, "addReturnArrows" to s.addReturnArrows,
 )
+
+private fun originKeyToMap(key: MessageOriginKey): Map<String, Any?> = mapOf(
+    "entryId" to key.entryId,
+    "ruleId" to key.ruleId,
+    "sourceOperationId" to key.sourceOperationId,
+    "sourceLogSiteId" to key.sourceLogSiteId,
+    "invocationId" to key.invocationId,
+    "manualInteractionId" to key.manualInteractionId,
+    "generatedOrdinal" to key.generatedOrdinal,
+)
+
+private fun originKeyFromMap(map: Map<String, Any?>): MessageOriginKey? {
+    val entryId = map.int("entryId") ?: return null
+    return MessageOriginKey(
+        entryId = entryId,
+        ruleId = map.str("ruleId"),
+        sourceOperationId = map.str("sourceOperationId"),
+        sourceLogSiteId = map.str("sourceLogSiteId"),
+        invocationId = map.str("invocationId"),
+        manualInteractionId = map.str("manualInteractionId"),
+        generatedOrdinal = map.int("generatedOrdinal") ?: 0,
+    ).takeIf(::validOriginKey)
+}
+
+private fun traceToMap(trace: DiagramResolvedTrace): Map<String, Any?> = mapOf(
+    "events" to trace.events.map { event ->
+        mapOf(
+            "entryId" to event.entryId, "sourceLogSiteId" to event.sourceLogSiteId,
+            "methodId" to event.methodId, "ownerType" to event.ownerType, "methodName" to event.methodName,
+            "sourceFile" to event.sourceFile, "sourceLine" to event.sourceLine, "laneId" to event.laneId,
+            "pid" to event.pid, "tid" to event.tid, "confidence" to event.confidence,
+            "evidence" to event.evidence.map { it.name }, "stale" to event.stale,
+        )
+    },
+    "calls" to trace.calls.map { call ->
+        mapOf(
+            "invocationId" to call.invocationId, "callerOwnerType" to call.callerOwnerType,
+            "calleeOwnerType" to call.calleeOwnerType, "callerMethodId" to call.callerMethodId,
+            "calleeMethodId" to call.calleeMethodId, "callSiteId" to call.callSiteId,
+            "callEntryId" to call.callEntryId, "returnEntryId" to call.returnEntryId,
+            "status" to call.status.name, "invocationKind" to call.invocationKind.name,
+            "callLabel" to call.callLabel, "returnLabel" to call.returnLabel, "confidence" to call.confidence,
+            "evidence" to call.evidence.map { it.name }, "laneId" to call.laneId,
+            "sourceFile" to call.sourceFile, "sourceLine" to call.sourceLine, "receiverRole" to call.receiverRole,
+            "parentInvocationId" to call.parentInvocationId,
+        )
+    },
+    "operations" to trace.operations.map { operation ->
+        mapOf(
+            "id" to operation.id, "kind" to operation.kind.name, "entryId" to operation.entryId,
+            "invocationId" to operation.invocationId, "sourceOperationId" to operation.sourceOperationId,
+            "sourceLogSiteId" to operation.sourceLogSiteId, "methodId" to operation.methodId,
+            "ownerType" to operation.ownerType, "sourceFile" to operation.sourceFile, "sourceLine" to operation.sourceLine,
+        )
+    },
+    "diagnostics" to mapOf(
+        "droppedByReason" to trace.diagnostics.droppedByReason.mapKeys { it.key.name },
+        "ambiguousEntryIds" to trace.diagnostics.ambiguousEntryIds,
+        "staleEntryIds" to trace.diagnostics.staleEntryIds,
+        "truncated" to trace.diagnostics.truncated,
+        "entries" to trace.diagnostics.diagnostics.map { diagnostic ->
+            mapOf("reason" to diagnostic.reason.name, "entryId" to diagnostic.entryId, "detail" to diagnostic.detail)
+        },
+    ),
+)
+
+private fun traceFromMap(map: Map<String, Any?>): DiagramResolvedTrace? {
+    val eventMaps = strictMapListOrEmpty(map, "events", MAX_CODEC_TRACE_EVENTS) ?: return null
+    val events = eventMaps.map(::traceEventFromMap)
+    if (events.any { it == null }) return null
+    val callMaps = strictMapListOrEmpty(map, "calls", MAX_CODEC_TRACE_CALLS) ?: return null
+    val calls = callMaps.map(::traceCallFromMap)
+    if (calls.any { it == null }) return null
+    val operationMaps = strictMapListOrEmpty(map, "operations", MAX_CODEC_TRACE_OPERATIONS) ?: return null
+    val operations = operationMaps.map(::traceOperationFromMap)
+    if (operations.any { it == null }) return null
+    val diagnostics = subMap(map, "diagnostics")?.let(::traceDiagnosticsFromMap) ?: return null
+    return DiagramResolvedTrace(events.filterNotNull(), calls.filterNotNull(), operations.filterNotNull(), diagnostics)
+}
+
+private fun traceEventFromMap(map: Map<String, Any?>): DiagramTraceEvent? {
+    val entryId = map.int("entryId") ?: return null
+    val evidence = enumList<DiagramTraceEvidence>(map, "evidence") ?: return null
+    return DiagramTraceEvent(
+        entryId, map.str("sourceLogSiteId"), map.str("methodId"), map.str("ownerType"), map.str("methodName"),
+        map.str("sourceFile"), map.int("sourceLine"), map.str("laneId") ?: "unknown", map.int("pid") ?: 0,
+        map.int("tid") ?: 0, (map["confidence"] as? Number)?.toDouble() ?: 0.0, evidence.toSet(), map.bool("stale") ?: false,
+    ).takeIf { it.entryId >= 0 && it.sourceLine?.let { line -> line >= 0 } != false && validTraceStrings(it) }
+}
+
+private fun traceCallFromMap(map: Map<String, Any?>): DiagramTraceCall? {
+    val invocationId = map.str("invocationId") ?: return null
+    val caller = map.str("callerOwnerType") ?: return null
+    val callee = map.str("calleeOwnerType") ?: return null
+    val callEntryId = map.int("callEntryId") ?: return null
+    val label = map.str("callLabel") ?: return null
+    val evidence = enumList<DiagramTraceEvidence>(map, "evidence") ?: return null
+    return DiagramTraceCall(
+        invocationId, caller, callee, map.str("callerMethodId"), map.str("calleeMethodId"), map.str("callSiteId"),
+        callEntryId, map.int("returnEntryId"), enumFromName<TraceCallStatus>(map.str("status")) ?: return null,
+        enumFromName<TraceInvocationKind>(map.str("invocationKind")) ?: return null, label, map.str("returnLabel"),
+        (map["confidence"] as? Number)?.toDouble() ?: return null, evidence.toSet(), map.str("laneId") ?: "unknown",
+        map.str("sourceFile"), map.int("sourceLine"), map.str("receiverRole"), map.str("parentInvocationId"),
+    ).takeIf { it.callEntryId >= 0 && (it.returnEntryId == null || it.returnEntryId >= 0) && validTraceStrings(it) }
+}
+
+private fun traceOperationFromMap(map: Map<String, Any?>): DiagramTraceOperation? {
+    val id = map.str("id") ?: return null
+    val kind = enumFromName<TraceOperationKind>(map.str("kind")) ?: return null
+    val entryId = map.int("entryId") ?: return null
+    return DiagramTraceOperation(
+        id, kind, entryId, map.str("invocationId"), map.str("sourceOperationId"), map.str("sourceLogSiteId"),
+        map.str("methodId"), map.str("ownerType"), map.str("sourceFile"), map.int("sourceLine"),
+    ).takeIf { it.entryId >= 0 && it.sourceLine?.let { line -> line >= 0 } != false && validTraceStrings(it) }
+}
+
+private fun traceDiagnosticsFromMap(map: Map<String, Any?>): DiagramTraceDiagnostics? {
+    @Suppress("UNCHECKED_CAST")
+    val rawDropped = map["droppedByReason"] as? Map<String, Any?> ?: return null
+    val dropped = linkedMapOf<TraceDiagnosticReason, Int>()
+    rawDropped.forEach { (name, count) ->
+        val reason = enumFromName<TraceDiagnosticReason>(name) ?: return null
+        val value = (count as? Number)?.toInt() ?: return null
+        if (value < 0) return null
+        dropped[reason] = value
+    }
+    val ambiguous = intList(map, "ambiguousEntryIds", MAX_CODEC_TRACE_DIAGNOSTICS) ?: return null
+    val stale = intList(map, "staleEntryIds", MAX_CODEC_TRACE_DIAGNOSTICS) ?: return null
+    val entryMaps = strictMapListOrEmpty(map, "entries", MAX_CODEC_TRACE_DIAGNOSTICS) ?: return null
+    val entries = entryMaps.map { item ->
+        val reason = enumFromName<TraceDiagnosticReason>(item.str("reason")) ?: return@map null
+        DiagramTraceDiagnostic(reason, item.int("entryId"), item.str("detail"))
+    }
+    if (entries.any { it == null } || ambiguous.any { it < 0 } || stale.any { it < 0 }) return null
+    return DiagramTraceDiagnostics(dropped, ambiguous, stale, entries.filterNotNull(), map.bool("truncated") ?: false)
+}
+
+private inline fun <reified E : Enum<E>> enumList(map: Map<String, Any?>, key: String): List<E>? {
+    val raw = map[key] as? List<*> ?: return null
+    return raw.map { value -> enumFromName<E>(value as? String) ?: return null }
+}
+
+private fun intList(map: Map<String, Any?>, key: String, max: Int): List<Int>? {
+    val raw = map[key] as? List<*> ?: return null
+    if (raw.size > max) return null
+    return raw.map { (it as? Number)?.toInt() ?: return null }
+}
+
+private fun validTraceStrings(event: DiagramTraceEvent): Boolean = listOf(
+    event.sourceLogSiteId, event.methodId, event.ownerType, event.methodName, event.sourceFile, event.laneId,
+).all(::validString)
+
+private fun validTraceStrings(call: DiagramTraceCall): Boolean = listOf(
+    call.invocationId, call.callerOwnerType, call.calleeOwnerType, call.callerMethodId, call.calleeMethodId,
+    call.callSiteId, call.callLabel, call.returnLabel, call.laneId, call.sourceFile, call.receiverRole, call.parentInvocationId,
+).all(::validString)
+
+private fun validTraceStrings(operation: DiagramTraceOperation): Boolean = listOf(
+    operation.id, operation.invocationId, operation.sourceOperationId, operation.sourceLogSiteId, operation.methodId,
+    operation.ownerType, operation.sourceFile,
+).all(::validString)
 
 /** A present list must be an actual list of objects; silently dropping malformed elements would
  * make an untrusted note look valid while changing its semantic meaning. */
@@ -525,13 +782,23 @@ private fun strictMapList(map: Map<String, Any?>, key: String, max: Int): List<M
 private fun strictMapListOrEmpty(map: Map<String, Any?>, key: String, max: Int): List<Map<String, Any?>>? =
     if (map.containsKey(key)) strictMapList(map, key, max) else emptyList()
 
+private fun stringListOrEmpty(map: Map<String, Any?>, key: String, max: Int): List<String>? {
+    if (!map.containsKey(key)) return emptyList()
+    val raw = map[key] as? List<*> ?: return null
+    if (raw.size > max) return null
+    return raw.map { it as? String ?: return null }
+}
+
 private fun validString(value: String?): Boolean = value == null || value.length <= MAX_CODEC_STRING_CHARS
 
 private fun validId(value: String): Boolean = value.isNotBlank() && validString(value)
 
 private fun validParticipants(participants: List<DiagramParticipant>): Boolean =
     participants.size <= MAX_CODEC_PARTICIPANTS &&
-        participants.all { validId(it.id) && validString(it.label) && validString(it.tag) && validString(it.alias) } &&
+        participants.all {
+            validId(it.id) && validString(it.label) && validString(it.tag) && validString(it.alias) &&
+                validString(it.sourceOwnerType) && validString(it.receiverRole)
+        } &&
         participants.map { it.id }.toSet().size == participants.size
 
 private fun validMessage(message: DiagramMessage, participantCount: Int): Boolean =
@@ -540,7 +807,48 @@ private fun validMessage(message: DiagramMessage, participantCount: Int): Boolea
         message.entryId >= 0 &&
         message.edgeOrdinal >= 0 &&
         message.repeatCount in 1..MAX_DIAGRAM_MESSAGES &&
-        validString(message.label) && validString(message.ts)
+        validString(message.label) && validString(message.ts) && validString(message.invocationId) &&
+        validString(message.sourceOperationId) && validString(message.sourceLogSiteId) &&
+        message.originKeys.size <= MAX_CODEC_MESSAGE_OVERRIDES && message.originKeys.all(::validOriginKey)
+
+private fun validOriginKey(key: MessageOriginKey): Boolean =
+    key.entryId >= 0 && key.generatedOrdinal >= 0 && listOf(
+        key.ruleId, key.sourceOperationId, key.sourceLogSiteId, key.invocationId, key.manualInteractionId,
+    ).all(::validString)
+
+private fun validMessageOverride(override: DiagramMessageOverride): Boolean =
+    validOriginKey(override.origin) && listOf(
+        override.fromParticipantId, override.toParticipantId, override.label,
+    ).all(::validString) && (override.parameters?.size ?: 0) <= MAX_CODEC_PARAMETERS &&
+        override.parameters.orEmpty().all { validString(it.name) && validString(it.value) }
+
+private fun validManualInteraction(interaction: ManualDiagramInteraction): Boolean =
+    validId(interaction.id) && interaction.sourceEntryIds.all { it >= 0 } &&
+        validId(interaction.fromParticipantId) && validId(interaction.toParticipantId) &&
+        listOf(
+            interaction.operation, interaction.result, interaction.label, interaction.groupKey,
+            interaction.sourceMethodId, interaction.sourceLogSiteId, interaction.sourceOwnerType,
+        ).all(::validString) &&
+        interaction.parameters.size <= MAX_CODEC_PARAMETERS && interaction.parameters.all { validString(it.name) && validString(it.value) }
+
+private fun validManualDocument(document: ManualDiagramDocument): Boolean {
+    if (document.interactions.size > MAX_CODEC_MANUAL_INTERACTIONS || document.groups.size > MAX_CODEC_MANUAL_GROUPS ||
+        document.notes.size > MAX_CODEC_MANUAL_NOTES || document.activations.size > MAX_CODEC_MANUAL_ACTIVATIONS ||
+        !document.interactions.all(::validManualInteraction)) return false
+    val interactions = document.interactions.map { it.id }
+    if (interactions.toSet().size != interactions.size) return false
+    val validInteractions = interactions.toSet()
+    val groups = document.groups.map { it.id }
+    if (groups.toSet().size != groups.size || document.groups.any { !validId(it.id) || !validString(it.label) ||
+            it.interactionIds.isEmpty() || it.interactionIds.any { id -> id !in validInteractions } }) return false
+    val notes = document.notes.map { it.id }
+    if (notes.toSet().size != notes.size || document.notes.any { !validId(it.id) || !validId(it.participantId) ||
+            it.afterInteractionId !in validInteractions || !validString(it.text) }) return false
+    val activations = document.activations.map { it.id }
+    return activations.toSet().size == activations.size && document.activations.all {
+        validId(it.id) && validId(it.participantId) && it.startInteractionId in validInteractions && it.endInteractionId in validInteractions
+    }
+}
 
 private fun validFrame(frame: DiagramFrame, messageCount: Int): Boolean =
     frame.firstMsg in 0 until messageCount &&
@@ -581,12 +889,46 @@ private fun validCallOverrides(overrides: List<DiagramCallOverride>): Boolean =
             it.fromParticipantId.length <= MAX_CODEC_STRING_CHARS && it.toParticipantId.length <= MAX_CODEC_STRING_CHARS
     }
 
+private fun validSourceSiteOverrides(overrides: List<DiagramSourceSiteOverride>): Boolean =
+    overrides.size <= MAX_CODEC_SOURCE_OVERRIDES && overrides.all {
+        it.entryId >= 0 && it.edgeOrdinal >= 0 && validId(it.sourceLogSiteId) &&
+            it.sourceLogSiteId.length <= MAX_CODEC_STRING_CHARS
+    }
+
 private fun validRules(rules: List<DiagramMessageRule>): Boolean =
     rules.map { it.id }.toSet().size == rules.size && rules.all { rule ->
         validId(rule.id) && validString(rule.pattern) &&
             validString(rule.fromTemplate) && validString(rule.toTemplate) &&
-            validString(rule.labelTemplate)
+            validString(rule.labelTemplate) &&
+            validRuleEndpoint(rule.fromEndpoint) && validRuleEndpoint(rule.toEndpoint)
     }
+
+private fun validRuleEndpoint(endpoint: DiagramRuleEndpoint?): Boolean = when (endpoint) {
+    null, DiagramRuleEndpoint.CurrentEntry -> true
+    is DiagramRuleEndpoint.ExistingParticipant -> validId(endpoint.participantId)
+    is DiagramRuleEndpoint.CapturedValue ->
+        validId(endpoint.captureName) && endpoint.bindings.size <= MAX_CODEC_PARAMETERS &&
+            endpoint.bindings.map { it.capturedValue }.toSet().size == endpoint.bindings.size &&
+            endpoint.bindings.all { validString(it.capturedValue) && validId(it.participantId) }
+    is DiagramRuleEndpoint.ExplicitActor -> validId(endpoint.id) && validString(endpoint.label)
+}
+
+private fun ruleEndpointsReferenceDeclaredParticipants(
+    endpoint: DiagramRuleEndpoint?,
+    declaredParticipantIds: Set<String>,
+): Boolean = when (endpoint) {
+    null, DiagramRuleEndpoint.CurrentEntry, is DiagramRuleEndpoint.ExplicitActor -> true
+    is DiagramRuleEndpoint.ExistingParticipant -> endpoint.participantId in declaredParticipantIds
+    is DiagramRuleEndpoint.CapturedValue -> endpoint.bindings.all { it.participantId in declaredParticipantIds }
+}
+
+private fun manualEndpointsReferenceDeclaredParticipants(
+    document: ManualDiagramDocument,
+    declaredParticipantIds: Set<String>,
+): Boolean = document.interactions.all {
+    it.fromParticipantId in declaredParticipantIds && it.toParticipantId in declaredParticipantIds
+} && document.notes.all { it.participantId in declaredParticipantIds } &&
+    document.activations.all { it.participantId in declaredParticipantIds }
 
 // Validation is intentionally explicit so each persistence constraint remains locally visible.
 @Suppress("CyclomaticComplexMethod", "ReturnCount", "ComplexCondition")
@@ -603,7 +945,18 @@ private fun validSpec(spec: SeqDiagramSpec): Boolean {
     val actorIds = spec.actors.map { it.id }
     if (!validActors(spec.actors, actorIds, componentIds)) return false
     if (!validRules(spec.rules)) return false
+    val declaredParticipantIds = (spec.participants.map { it.id } + componentIds + actorIds).toSet()
+    if (!spec.rules.all {
+            ruleEndpointsReferenceDeclaredParticipants(it.fromEndpoint, declaredParticipantIds) &&
+                ruleEndpointsReferenceDeclaredParticipants(it.toEndpoint, declaredParticipantIds)
+        }) return false
     if (!validCallOverrides(spec.callOverrides)) return false
+    if (!validSourceSiteOverrides(spec.sourceSiteOverrides)) return false
+    if (spec.lifelineOrder.size > MAX_CODEC_PARTICIPANTS || spec.lifelineOrder.toSet().size != spec.lifelineOrder.size ||
+        !spec.lifelineOrder.all(::validId)) return false
+    if (spec.messageOverrides.size > MAX_CODEC_MESSAGE_OVERRIDES || !spec.messageOverrides.all(::validMessageOverride)) return false
+    if (!validManualDocument(spec.manualDocument)) return false
+    if (!manualEndpointsReferenceDeclaredParticipants(spec.manualDocument, declaredParticipantIds)) return false
     return spec.options.maxMessages in 1..MAX_DIAGRAM_MESSAGES &&
         spec.options.labelMaxChars in 1..MAX_CODEC_STRING_CHARS &&
         spec.options.labelMaxLines in 1..MAX_LABEL_LINES &&
@@ -624,6 +977,9 @@ private fun participantToMap(p: DiagramParticipant): Map<String, Any?> = mapOf(
     "isExitPoint" to p.isExitPoint,
     "alias" to p.alias,
     "representation" to p.representation.name,
+    "sourceOwnerType" to p.sourceOwnerType,
+    "receiverRole" to p.receiverRole,
+    "inferred" to p.inferred,
 )
 
 private fun ruleToMap(r: DiagramMessageRule): Map<String, Any?> = mapOf(
@@ -633,7 +989,22 @@ private fun ruleToMap(r: DiagramMessageRule): Map<String, Any?> = mapOf(
     "fromTemplate" to r.fromTemplate,
     "toTemplate" to r.toTemplate,
     "labelTemplate" to r.labelTemplate,
+    "fromEndpoint" to r.fromEndpoint?.let(::ruleEndpointToMap),
+    "toEndpoint" to r.toEndpoint?.let(::ruleEndpointToMap),
 )
+
+private fun ruleEndpointToMap(endpoint: DiagramRuleEndpoint): Map<String, Any?> = when (endpoint) {
+    is DiagramRuleEndpoint.ExistingParticipant -> mapOf("kind" to "existing", "participantId" to endpoint.participantId)
+    DiagramRuleEndpoint.CurrentEntry -> mapOf("kind" to "currentEntry")
+    is DiagramRuleEndpoint.CapturedValue -> mapOf(
+        "kind" to "captured",
+        "captureName" to endpoint.captureName,
+        "bindings" to endpoint.bindings.map { binding ->
+            mapOf("capturedValue" to binding.capturedValue, "participantId" to binding.participantId)
+        },
+    )
+    is DiagramRuleEndpoint.ExplicitActor -> mapOf("kind" to "actor", "id" to endpoint.id, "label" to endpoint.label)
+}
 
 private fun optionsToMap(o: DiagramOptions): Map<String, Any?> = mapOf(
     "collapseRepeats" to o.collapseRepeats,
@@ -659,7 +1030,7 @@ private fun optionsToMap(o: DiagramOptions): Map<String, Any?> = mapOf(
 
 private fun rangeToMap(r: DiagramRange): Map<String, Any?> = when (r) {
     is DiagramRange.VisibleView -> mapOf("kind" to "visible")
-    is DiagramRange.Ids -> mapOf("kind" to "ids", "from" to r.from, "to" to r.to)
+    is DiagramRange.Ids -> mapOf("kind" to "ids", "from" to r.from, "to" to r.to, "selectedIds" to r.selectedIds.sorted())
     is DiagramRange.Time -> mapOf("kind" to "time", "fromTs" to r.fromTs, "toTs" to r.toTs)
     is DiagramRange.SeqGroupRef -> mapOf("kind" to "seqGroup", "gid" to r.gid)
 }
@@ -687,6 +1058,18 @@ private fun specFromMap(map: Map<String, Any?>): SeqDiagramSpec? {
     val overrideMaps = strictMapListOrEmpty(map, "callOverrides", MAX_CODEC_OVERRIDES) ?: return null
     val callOverrides = overrideMaps.map(::callOverrideFromMap)
     if (callOverrides.any { it == null }) return null
+    val sourceOverrideMaps = strictMapListOrEmpty(map, "sourceSiteOverrides", MAX_CODEC_SOURCE_OVERRIDES) ?: return null
+    val sourceSiteOverrides = sourceOverrideMaps.map(::sourceSiteOverrideFromMap)
+    if (sourceSiteOverrides.any { it == null }) return null
+    val lifelineOrder = stringListOrEmpty(map, "lifelineOrder", MAX_CODEC_PARTICIPANTS) ?: return null
+    val messageOverrideMaps = strictMapListOrEmpty(map, "messageOverrides", MAX_CODEC_MESSAGE_OVERRIDES) ?: return null
+    val messageOverrides = messageOverrideMaps.map(::messageOverrideFromMap)
+    if (messageOverrides.any { it == null }) return null
+    val manualDocument = if (map.containsKey("manualDocument")) {
+        subMap(map, "manualDocument")?.let(::manualDocumentFromMap) ?: return null
+    } else {
+        d.manualDocument
+    }
     val spec = SeqDiagramSpec(
         dialect = enumFromName<DiagramDialect>(map.str("dialect")) ?: d.dialect,
         title = map.str("title") ?: d.title,
@@ -706,6 +1089,11 @@ private fun specFromMap(map: Map<String, Any?>): SeqDiagramSpec? {
             },
         sourceEnrichment = subMap(map, "sourceEnrichment")?.let(::sourceEnrichmentFromMap) ?: d.sourceEnrichment,
         callOverrides = callOverrides.filterNotNull(),
+        sourceSiteOverrides = sourceSiteOverrides.filterNotNull(),
+        authoringMode = enumFromName<DiagramAuthoringMode>(map.str("authoringMode")) ?: d.authoringMode,
+        lifelineOrder = lifelineOrder,
+        messageOverrides = messageOverrides.filterNotNull(),
+        manualDocument = manualDocument,
     )
     return spec.takeIf(::validSpec)
 }
@@ -733,6 +1121,85 @@ private fun callOverrideFromMap(m: Map<String, Any?>): DiagramCallOverride? {
     return DiagramCallOverride(entryId, ordinal, from, to)
 }
 
+private fun sourceSiteOverrideFromMap(m: Map<String, Any?>): DiagramSourceSiteOverride? {
+    val entryId = m.int("entryId") ?: return null
+    val sourceLogSiteId = m.str("sourceLogSiteId") ?: return null
+    val edgeOrdinal = m.int("edgeOrdinal") ?: return null
+    return DiagramSourceSiteOverride(entryId, sourceLogSiteId, edgeOrdinal)
+}
+
+private fun messageOverrideFromMap(map: Map<String, Any?>): DiagramMessageOverride? {
+    val origin = subMap(map, "origin")?.let(::originKeyFromMap) ?: return null
+    val parameterMaps = if (map["parameters"] != null) strictMapList(map, "parameters", MAX_CODEC_PARAMETERS) else null
+    val parameters = parameterMaps?.map(::parameterFromMap)
+    if (parameters?.any { it == null } == true) return null
+    return DiagramMessageOverride(
+        origin = origin, enabled = map.bool("enabled") ?: true,
+        fromParticipantId = map.str("fromParticipantId"), toParticipantId = map.str("toParticipantId"),
+        label = map.str("label"), kind = enumFromName<MessageKind>(map.str("kind")),
+        parameters = parameters?.filterNotNull(),
+    ).takeIf(::validMessageOverride)
+}
+
+private fun parameterFromMap(map: Map<String, Any?>): DiagramParameter? =
+    DiagramParameter(map.str("name") ?: "", map.str("value") ?: "").takeIf { validString(it.name) && validString(it.value) }
+
+private fun manualDocumentFromMap(map: Map<String, Any?>): ManualDiagramDocument? {
+    val interactionMaps = strictMapListOrEmpty(map, "interactions", MAX_CODEC_MANUAL_INTERACTIONS) ?: return null
+    val interactions = interactionMaps.map(::manualInteractionFromMap)
+    if (interactions.any { it == null }) return null
+    val groupMaps = strictMapListOrEmpty(map, "groups", MAX_CODEC_MANUAL_GROUPS) ?: return null
+    val groups = groupMaps.map(::manualGroupFromMap)
+    if (groups.any { it == null }) return null
+    val noteMaps = strictMapListOrEmpty(map, "notes", MAX_CODEC_MANUAL_NOTES) ?: return null
+    val notes = noteMaps.map(::manualNoteFromMap)
+    if (notes.any { it == null }) return null
+    val activationMaps = strictMapListOrEmpty(map, "activations", MAX_CODEC_MANUAL_ACTIVATIONS) ?: return null
+    val activations = activationMaps.map(::manualActivationFromMap)
+    if (activations.any { it == null }) return null
+    return ManualDiagramDocument(interactions.filterNotNull(), groups.filterNotNull(), notes.filterNotNull(), activations.filterNotNull())
+        .takeIf(::validManualDocument)
+}
+
+private fun manualInteractionFromMap(map: Map<String, Any?>): ManualDiagramInteraction? {
+    val id = map.str("id") ?: return null
+    val entryIds = intList(map, "sourceEntryIds", MAX_DIAGRAM_MESSAGES) ?: return null
+    val from = map.str("fromParticipantId") ?: return null
+    val to = map.str("toParticipantId") ?: return null
+    val parameters = strictMapListOrEmpty(map, "parameters", MAX_CODEC_PARAMETERS)?.map(::parameterFromMap) ?: return null
+    if (parameters.any { it == null }) return null
+    return ManualDiagramInteraction(
+        id, entryIds.toSet(), from, to, map.str("operation") ?: "", parameters.filterNotNull(), map.str("result"),
+        map.str("label"), enumFromName<MessageKind>(map.str("kind")) ?: MessageKind.CALL,
+        map.bool("enabled") ?: true, (map["order"] as? Number)?.toLong() ?: 0L,
+        map.str("groupKey"), map.str("sourceMethodId"), map.str("sourceLogSiteId"), map.str("sourceOwnerType"),
+        enumFromName<ManualOperationVisibility>(map.str("visibility")) ?: ManualOperationVisibility.UNSPECIFIED,
+    ).takeIf(::validManualInteraction)
+}
+
+private fun manualGroupFromMap(map: Map<String, Any?>): ManualDiagramGroup? {
+    val id = map.str("id") ?: return null
+    val label = map.str("label") ?: return null
+    val interactionIds = stringListOrEmpty(map, "interactionIds", MAX_CODEC_MANUAL_INTERACTIONS) ?: return null
+    return ManualDiagramGroup(id, label, interactionIds, map.bool("enabled") ?: true)
+}
+
+private fun manualNoteFromMap(map: Map<String, Any?>): ManualDiagramNote? {
+    val id = map.str("id") ?: return null
+    val participantId = map.str("participantId") ?: return null
+    val afterInteractionId = map.str("afterInteractionId") ?: return null
+    val text = map.str("text") ?: return null
+    return ManualDiagramNote(id, participantId, afterInteractionId, text, map.bool("isError") ?: false, map.bool("enabled") ?: true)
+}
+
+private fun manualActivationFromMap(map: Map<String, Any?>): ManualDiagramActivation? {
+    val id = map.str("id") ?: return null
+    val participantId = map.str("participantId") ?: return null
+    val start = map.str("startInteractionId") ?: return null
+    val end = map.str("endInteractionId") ?: return null
+    return ManualDiagramActivation(id, participantId, start, end, map.bool("enabled") ?: true)
+}
+
 private fun sourceEnrichmentFromMap(m: Map<String, Any?>): DiagramSourceEnrichment = DiagramSourceEnrichment(
     enabled = m.bool("enabled") ?: DiagramSourceEnrichment().enabled,
     directCallDepth = 1,
@@ -758,12 +1225,21 @@ private fun participantFromMap(m: Map<String, Any?>): DiagramParticipant? {
         alias = m.str("alias"),
         representation = enumFromName<DiagramParticipantRepresentation>(m.str("representation"))
             ?: DiagramParticipantRepresentation.SHOW,
+        sourceOwnerType = m.str("sourceOwnerType"),
+        receiverRole = m.str("receiverRole"),
+        inferred = m.bool("inferred") ?: false,
     )
 }
 
 private fun ruleFromMap(m: Map<String, Any?>): DiagramMessageRule? {
     val id = m.str("id") ?: return null
     val pattern = m.str("pattern") ?: return null
+    val fromEndpoint = if (m["fromEndpoint"] != null) {
+        subMap(m, "fromEndpoint")?.let(::ruleEndpointFromMap) ?: return null
+    } else null
+    val toEndpoint = if (m["toEndpoint"] != null) {
+        subMap(m, "toEndpoint")?.let(::ruleEndpointFromMap) ?: return null
+    } else null
     return DiagramMessageRule(
         id = id,
         pattern = pattern,
@@ -771,7 +1247,31 @@ private fun ruleFromMap(m: Map<String, Any?>): DiagramMessageRule? {
         fromTemplate = m.str("fromTemplate") ?: "",
         toTemplate = m.str("toTemplate") ?: "",
         labelTemplate = m.str("labelTemplate") ?: "",
+        fromEndpoint = fromEndpoint,
+        toEndpoint = toEndpoint,
     )
+}
+
+private fun ruleEndpointFromMap(map: Map<String, Any?>): DiagramRuleEndpoint? = when (map.str("kind")) {
+    "existing" -> map.str("participantId")?.let(DiagramRuleEndpoint::ExistingParticipant)
+    "currentEntry" -> DiagramRuleEndpoint.CurrentEntry
+    "actor" -> {
+        val id = map.str("id") ?: return null
+        val label = map.str("label") ?: return null
+        DiagramRuleEndpoint.ExplicitActor(id, label)
+    }
+    "captured" -> {
+        val captureName = map.str("captureName") ?: return null
+        val rawBindings = strictMapListOrEmpty(map, "bindings", MAX_CODEC_PARAMETERS) ?: return null
+        val bindings = mutableListOf<DiagramRuleCaptureBinding>()
+        for (binding in rawBindings) {
+            val capturedValue = binding.str("capturedValue") ?: return null
+            val participantId = binding.str("participantId") ?: return null
+            bindings += DiagramRuleCaptureBinding(capturedValue, participantId)
+        }
+        DiagramRuleEndpoint.CapturedValue(captureName, bindings)
+    }
+    else -> null
 }
 
 private fun optionsFromMap(m: Map<String, Any?>): DiagramOptions {
@@ -801,7 +1301,11 @@ private fun rangeFromMap(m: Map<String, Any?>): DiagramRange? = when (m.str("kin
     "ids" -> {
         val from = m.int("from")
         val to = m.int("to")
-        if (from != null && to != null) DiagramRange.Ids(from, to) else null
+        val rawSelected = m["selectedIds"] as? List<*>
+        val selected = rawSelected?.mapNotNull { (it as? Number)?.toInt() }?.toSet().orEmpty()
+        if (from != null && to != null && (rawSelected == null || selected.size == rawSelected.size)) {
+            DiagramRange.Ids(from, to, selected)
+        } else null
     }
     "time" -> {
         val fromTs = m.str("fromTs")

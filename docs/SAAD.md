@@ -785,6 +785,8 @@ The durable diagram spec is intentionally evidence-oriented:
 | `DiagramMessage` | Endpoint, label, originating line, kind, and `MessageEvidence` (`LOG`, `RULE`, `SOURCE_INFERRED`, or `ACTOR_MIRROR`). |
 | `DiagramActivationSpan` | Inclusive call/return interval carrying the evidence that justified it. |
 | `SeqDiagramSpec` | Range, components, actors, interaction mode/rules, source-enrichment and presentation options. |
+| `ManualDiagramInteraction` | Durable enabled occurrence with editable endpoints, operation data, optional group/provenance metadata, and UML visibility. |
+| `ManualDiagramDocument` | Ordered manual occurrences plus structural frames, notes, and activations. |
 
 Raw tag ids remain the provenance identity even when a component has been renamed or tags have been
 merged. This is what makes aliases, unmerge, source resolution, and arrow-to-log navigation stable
@@ -874,7 +876,7 @@ non-self interaction and records `ACTOR_MIRROR` evidence; it never reassigns the
 |---|---|
 | `source/SourceIndexer.kt` | Builds the call-site index by text scanning and brace matching — no compiler, no parser dependency |
 | `source/LogSourceResolver.kt` | Maps `(tag, msg)` back to call sites with confidence ranking |
-| `source/SourceIndexStore.kt` | On-disk index, format `indagium-source-index-v1` (a load also accepts the legacy `openLog2-source-index-v1` magic), schema version 10 |
+| `source/SourceIndexStore.kt` | On-disk index, format `indagium-source-index-v1` (a load also accepts the legacy `openLog2-source-index-v1` magic), schema version 18 |
 | `source/SourceStructureParser.kt` | Declaration scanner for the read-only source-navigation tools |
 | `cases/CaseIndexer.kt` / `CaseSearch.kt` / `CaseIndexStore.kt` | Similarity index over previously written notes; idf-lite scoring with tag boost and stale-version penalty |
 | `video/VideoPlayerController.kt` | FFmpeg decode loop on a dedicated thread, audio via `javax.sound.sampled` |
@@ -886,10 +888,12 @@ non-self interaction and records `ACTOR_MIRROR` evidence; it never reassigns the
 
 | File | Role |
 |---|---|
-| `diagram/DiagramModel.kt` | Dialect-neutral spec and result model: components, actors, evidence, activation spans, coverage, ranges, and interaction rules. |
-| `diagram/SeqDiagramBuilder.kt` | Cancellable range resolution, component mapping, interaction inference, source one-hop enrichment, mirroring, and evidence-backed activation construction. |
+| `diagram/DiagramModel.kt` | Dialect-neutral inferred/manual spec and result model: stable message origins, components, actors, typed rules, evidence, groups, notes, activation spans, coverage, and ranges. |
+| `diagram/SeqDiagramBuilder.kt` | Cancellable range resolution, verified source-trace projection with explicit fallback, component mapping, stable-origin overrides, mirroring, and invocation-backed activation construction. |
+| `diagram/ManualDiagramBuilder.kt` | Deterministic, source-index-independent projection of ordered manual interactions, groups, notes, activations, and lifelines. |
+| `diagram/ManualDiagramSeedService.kt` | Expands inferred occurrences into grouped-but-independent manual rows and normalizes volatile message parameters for stable grouping. |
 | `diagram/SeqDiagramRenderer.kt` / `DiagramEmitters.kt` | Themed raster rendering with arrow hit targets plus Mermaid and PlantUML source emission. |
-| `diagram/DiagramSpecCodec.kt` | v3 note-header codec; reads v1/v2 attachments and snapshots, migrates their legacy participant/actor fields, and writes current metadata. |
+| `diagram/DiagramSpecCodec.kt` | v4 note-header codec; reads v1-v3 attachments and snapshots, migrates legacy participant/actor fields, and persists manual authoring, stable origins, overrides, and source provenance. |
 | `ui/SeqDiagramDialog.kt` / `SeqDiagramCoordinator.kt` | Dedicated tab surface, conflated per-workspace preview pipeline, drafts, close handling, and source relinking. |
 
 ---
@@ -1247,7 +1251,7 @@ Everything is a plain file under one app-data directory, resolved per OS by
 | Path | Contents | Format |
 |---|---|---|
 | `autosave.cache` | Session: tabs, filters, settings, saved filters, recents | `indagium-cache-v1`, line-oriented (a load also accepts the legacy `openLog2-cache-v1` magic) |
-| `source-index` | Indexed `Log.*`/Timber call sites, owner/method/return metadata, and direct-call hints | `indagium-source-index-v1`, schema v10 (a load also accepts the legacy `openLog2-source-index-v1` magic) |
+| `source-index` | Indexed `Log.*`/Timber call sites, semantic methods/calls/operations, and bounded source-trace metadata | `indagium-source-index-v1`, schema v18 (a load also accepts the legacy `openLog2-source-index-v1` magic) |
 | `case-index` | Similarity index over past analysis notes | `indagium-case-index-v1`, schema v1 (a load also accepts the legacy `openLog2-case-index-v1` magic) |
 | `control-token` | Bearer token for the control server | 32 hex chars, plaintext |
 | `notes/` | Saved analyses: `<base>_analysis.md` + `.ann` sidecar | Markdown + token format |
@@ -1362,8 +1366,8 @@ the log it came from.
 ### 13.7 Diagram compatibility and source-index invalidation
 
 Diagram notes stay ordinary `AnnBlock.Note` values, so the `.ann` container format does not change.
-Their invisible header is a separate diagram codec: writers emit v3 while readers continue to accept
-v1 and v2 headers and library snapshots. Loading migrates legacy per-participant presentation and
+Their invisible header is a separate diagram codec: writers emit v4 while readers continue to accept
+v1-v3 headers and library snapshots. Loading migrates legacy per-participant presentation and
 entry/exit actor fields into components, actors, and the global unmapped-tag policy. This migration
 is deterministic and preserves the original raw tag identities; a legacy attachment that cannot be
 fully reconstructed remains readable as a source/snapshot card instead of being discarded.
@@ -1374,10 +1378,37 @@ revision. Both forms can be viewed after their source log closes. The default at
 is image, which writes the diagram PNG and its Markdown/Jira image reference; source is an explicit
 opt-in format.
 
-The source index moves to schema v10. It adds the owning type, method signature, declared return
-type, and high-confidence direct-call edges needed for one-hop enrichment. A non-v10 index is not
-partially trusted: it is rebuilt before inferred arrows are offered. Runtime values are intentionally
-absent from this store; they can enter a diagram only through log or rule evidence.
+The source index uses schema v18. In addition to methods, log sites, and resolved call edges, it
+persists source-ordered executable operations, branch/merge successors, continuations, returns,
+throws, receiver bindings, and async dispatch metadata. A non-v18 index is never partially
+trusted: it is rebuilt before source-trace reconstruction is offered. Test roots remain excluded from
+runtime call candidates, and runtime values remain log evidence rather than index content.
+
+When source enrichment has a compatible verified trace, `source/SourceTraceInference.kt` reconstructs
+lane-isolated invocation stacks over the indexed operations. Calls and returns are structural operations; selected
+log rows are separate trace events and remain visible exactly once at their source owner. PID/TID and
+logged values refine ambiguity and return correlation. Prefix/suffix boundaries are never synthesized;
+ambiguous, stale, unsupported, or incompatible lanes stay log-only and surface diagnostics/proposals
+instead of guessed arrows. Async dispatches cross lanes only when indexed evidence proves the handoff
+and never push a blocking synchronous activation.
+
+`diagram/SeqDiagramBuilder.kt` projects the source trace directly and derives activations from
+invocation enter/exit boundaries. Stable origin keys survive mirroring and repeat collapsing so
+bulk edits address the represented interactions rather than fragile rendered indices. Typed rule
+endpoints must bind to configured lifelines unless an actor is explicitly requested.
+
+Manual authoring stores ordered interactions, optional grouping keys, source method/site provenance,
+operation visibility, lifeline order, groups, notes, and explicit activation ranges in the v4
+diagram header. New workspaces default to Manual and asynchronously seed from an inferred preview;
+saved diagrams retain their persisted mode. Grouped occurrences remain separate durable rows so a
+group edit can fan out while Detach can make one occurrence independent. The manual builder renders
+only lifelines referenced by enabled interactions while retaining hidden order for reappearance.
+Explicit source-trace and same-thread-handoff seed actions each have a one-step session revert and
+preserve the document when inference fails. It snapshots proposals once and then renders
+independently of the source index; proposal refresh is non-destructive. Both UI and MCP use the same manual, typed-rule,
+override, trace, and provenance model. The persisted trace status vocabulary includes
+`PARTIAL_VERIFIED` for a future mixed-lane projection; the current builder selects `SOURCE_TRACE`
+only for a complete projected trace and otherwise uses conservative log-only `FALLBACK` output.
 
 ---
 

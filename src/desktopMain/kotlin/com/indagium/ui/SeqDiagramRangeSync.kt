@@ -16,7 +16,7 @@ internal fun selectionRangeForRows(tab: LogTab, selected: Set<Int>): DiagramRang
     if (selected.isEmpty()) return null
     val known = selected.filter { id -> tab.logData.any { it.id == id } }
     if (known.isEmpty()) return null
-    return DiagramRange.Ids(known.min(), known.max())
+    return DiagramRange.Ids(known.min(), known.max(), known.toSet())
 }
 
 internal fun timeRangeForRows(tab: LogTab, selected: Set<Int>): DiagramRange.Time? {

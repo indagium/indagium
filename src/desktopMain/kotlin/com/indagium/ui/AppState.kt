@@ -7432,6 +7432,8 @@ class AppState(
         val pruned = synchronized(stateLock) {
             val current = sourceIndex ?: return
             val registeredRoots = registeredSourceRoots().toSet()
+            val methods = current.methods.filter { sourceRootForPath(it.filePath) != null }
+            val methodIds = methods.mapTo(HashSet()) { it.id }
             SourceIndex(
                 version = SOURCE_INDEX_VERSION,
                 roots = registeredSourceRoots(),
@@ -7440,6 +7442,14 @@ class AppState(
                 builtAt = current.builtAt,
                 rootBuiltAt = current.rootBuiltAt.filterKeys { it in registeredRoots },
                 rootConfigFingerprints = current.rootConfigFingerprints.filterKeys { it in registeredRoots },
+                methods = methods,
+                calls = current.calls.filter { call ->
+                    call.callerMethodId in methodIds && call.candidateCalleeMethodIds.any { it in methodIds }
+                },
+                operations = current.operations.filter { operation ->
+                    current.methods.any { it.id == operation.methodId && sourceRootForPath(it.filePath) != null }
+                },
+                revision = current.revision,
             )
         }
         runCatching { SourceIndexStore.save(pruned, sourceIndexFile) }
@@ -7530,6 +7540,40 @@ class AppState(
                         }
                         val rebuiltSites = partial.sites.filter { sourceRootForPath(it.filePath) == rootAbs }
                         val rebuiltMeta = partial.fileMeta.filterKeys { sourceRootForPath(it) == rootAbs }
+                        val keptMethods = current?.methods.orEmpty().filter {
+                            sourceRootForPath(it.filePath)?.let { owner -> owner != rootAbs } == true
+                        }
+                        val rebuiltMethods = partial.methods.filter { sourceRootForPath(it.filePath) == rootAbs }
+                        val allMethods = (keptMethods + rebuiltMethods).distinctBy { it.id }
+                        val methodIds = allMethods.mapTo(HashSet()) { it.id }
+                        // A partial scan owns every call/operation whose *caller* method is in
+                        // this root.  Keeping the old records and then distincting by id leaves
+                        // deleted/rewritten call sites alive after a per-root reindex.  Calls from
+                        // another root into this one are retained: that other root remains their
+                        // source of truth and will be reindexed independently.
+                        val currentMethodRoot = current?.methods.orEmpty().associate { method ->
+                            method.id to sourceRootForPath(method.filePath)
+                        }
+                        val keptCalls = current?.calls.orEmpty().filter { call ->
+                            currentMethodRoot[call.callerMethodId] != rootAbs
+                        }
+                        val rebuiltCalls = partial.calls.filter { call ->
+                            partial.methods.any { it.id == call.callerMethodId && sourceRootForPath(it.filePath) == rootAbs }
+                        }
+                        val allCalls = (keptCalls + rebuiltCalls)
+                            .filter { call ->
+                                call.callerMethodId in methodIds && call.candidateCalleeMethodIds.any { it in methodIds }
+                            }
+                            .distinctBy { it.id }
+                        val keptOperations = current?.operations.orEmpty().filter { operation ->
+                            currentMethodRoot[operation.methodId] != rootAbs
+                        }
+                        val rebuiltOperations = partial.operations.filter { operation ->
+                            partial.methods.any { it.id == operation.methodId && sourceRootForPath(it.filePath) == rootAbs }
+                        }
+                        val allOperations = (keptOperations + rebuiltOperations)
+                            .filter { it.methodId in methodIds }
+                            .distinctBy { it.id }
                         SourceIndex(
                             version = SOURCE_INDEX_VERSION,
                             roots = registeredSourceRoots(),
@@ -7542,6 +7586,10 @@ class AppState(
                                     sourceConfigurationsForFolder(rootAbs),
                                     settings.sourceAutoDiscoveryEnabled,
                                 )),
+                            methods = allMethods,
+                            calls = allCalls,
+                            operations = allOperations,
+                            revision = partial.revision,
                         )
                     }
                     if (merged != null) {

@@ -8,7 +8,54 @@ import java.security.MessageDigest
  *  changes in a way that makes a previously-persisted index stale. Task 1 doesn't persist
  *  anything yet, but later tasks compare this against a saved value to decide whether a cached
  *  index must be rebuilt rather than merely refreshed. */
-const val SOURCE_INDEX_VERSION = 13
+const val SOURCE_INDEX_VERSION = 18
+
+enum class SourceSetKind {
+    PRODUCTION,
+    TEST,
+    GENERATED,
+    UNKNOWN,
+}
+
+/** Executable source operations.  These are deliberately separate from log matches: a log is an
+ * observation inside a method, while CALL/RETURN are structural operations that the trace solver
+ * can walk without turning a log row into an arrow. */
+enum class SourceOperationKind {
+    LOG,
+    CALL,
+    RETURN,
+    THROW,
+    ASYNC_DISPATCH,
+    BRANCH,
+    MERGE,
+}
+
+enum class ReceiverRole {
+    THIS,
+    FIELD,
+    PROPERTY,
+    PARAMETER,
+    LOCAL,
+    STATIC,
+    UNKNOWN,
+}
+
+enum class InvocationKind {
+    SYNCHRONOUS,
+    COROUTINE_LAUNCH,
+    CALLBACK_REGISTRATION,
+    EXECUTOR_DISPATCH,
+    BINDER_OR_RPC,
+    UNKNOWN_ASYNC,
+    UNKNOWN,
+}
+
+fun sourceStableId(kind: String, filePath: String, offset: Int, discriminator: String): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(
+        "$kind|$filePath|$offset|$discriminator".toByteArray(Charsets.UTF_8),
+    )
+    return digest.take(12).joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+}
 
 /** Generic message matchers are capped at 0.3, so this admits only specific tagged resolution. */
 const val MIN_SOURCE_ENRICHMENT_CONFIDENCE = 0.4
@@ -38,6 +85,55 @@ data class SourceDirectCall(
     val sourceOwnerType: String? = null,
     /** True when this edge was discovered from a caller of the log-owning method. */
     val isCallback: Boolean = false,
+    val callSiteId: String? = null,
+    val callerMethodId: String? = null,
+    val targetMethodId: String? = null,
+    val callOffset: Int = 0,
+    val receiverExpression: String? = null,
+    val receiverVariable: String? = null,
+    val receiverDeclaredType: String? = null,
+    val receiverRole: ReceiverRole = ReceiverRole.UNKNOWN,
+    val invocationKind: InvocationKind = InvocationKind.UNKNOWN,
+    val resolutionConfidence: Double = 1.0,
+)
+
+data class IndexedSourceMethod(
+    val id: String,
+    val filePath: String,
+    val ownerType: String?,
+    val name: String,
+    val signature: String,
+    val declaredReturnType: String?,
+    val startOffset: Int,
+    val endOffsetExclusive: Int,
+    val sourceSet: SourceSetKind = SourceSetKind.PRODUCTION,
+)
+
+data class IndexedSourceCall(
+    val id: String,
+    val callerMethodId: String,
+    val candidateCalleeMethodIds: List<String>,
+    val receiverExpression: String?,
+    val receiverVariable: String?,
+    val receiverDeclaredType: String?,
+    val receiverRole: ReceiverRole,
+    val callOffset: Int,
+    val callLine: Int,
+    val resultVariable: String?,
+    val invocationKind: InvocationKind,
+    val resolutionConfidence: Double,
+)
+
+/** Persisted, source-ordered operation used by the bounded interprocedural trace solver. */
+data class IndexedSourceOperation(
+    val id: String,
+    val methodId: String,
+    val kind: SourceOperationKind,
+    val sourceOrder: Int,
+    val sourceLine: Int,
+    val callSiteId: String? = null,
+    val logSiteId: String? = null,
+    val successorIds: List<String> = emptyList(),
 )
 
 /** One Android logging call site discovered by [SourceIndexer.build].
@@ -73,11 +169,16 @@ data class LogCallSite(
     val directCalls: List<SourceDirectCall> = emptyList(),
     /** Identifiers whose values are interpolated/concatenated into this log message. */
     val loggedValueNames: Set<String> = emptySet(),
+    val id: String = "",
+    val methodId: String? = null,
+    /** Absolute source offset of the logging call, used for stable operation ordering. */
+    val sourceOffset: Int = 0,
+    val sourceSet: SourceSetKind = SourceSetKind.PRODUCTION,
 )
 
 /** Snapshot of a source file's on-disk state at index-build time, used by later tasks to detect
  *  when a file has changed since it was scanned without re-reading its contents. */
-data class FileMeta(val mtime: Long, val size: Long)
+data class FileMeta(val mtime: Long, val size: Long, val sha256: String? = null)
 
 data class SourceIndex(
     val version: Int,
@@ -92,6 +193,10 @@ data class SourceIndex(
     // Fingerprint of the source logging configuration used for each root. A mismatch means
     // configuration-dependent wrapper sites are not current until that root is reindexed.
     val rootConfigFingerprints: Map<String, String> = emptyMap(),
+    val methods: List<IndexedSourceMethod> = emptyList(),
+    val calls: List<IndexedSourceCall> = emptyList(),
+    val operations: List<IndexedSourceOperation> = emptyList(),
+    val revision: String = "",
 )
 
 /** A candidate source site for a resolved log line. [stale] is always false in Task 1 — later
@@ -130,6 +235,15 @@ data class SourceOneHopCall(
     val observedReturnLabel: String? = null,
     /** Confidence of the log-to-source resolution; the direct source call itself is exact. */
     val confidence: Double,
+    val sourceLogSiteId: String? = null,
+    val callSiteId: String? = null,
+    val callerMethodId: String? = null,
+    val calleeMethodId: String? = null,
+    val receiverExpression: String? = null,
+    val receiverRole: ReceiverRole = ReceiverRole.UNKNOWN,
+    val invocationKind: InvocationKind = InvocationKind.UNKNOWN,
+    val sourceFile: String? = null,
+    val sourceLine: Int? = null,
 )
 
 /**
@@ -144,6 +258,13 @@ class SourceEnrichmentResolver(index: SourceIndex) {
     private val logResolver = LogSourceResolver(index)
 
     fun directCalls(site: LogCallSite): List<SourceDirectCall> = site.directCalls
+
+    /** Returns ranked candidates without applying the precision-first uniqueness gate. */
+    fun resolveCandidates(entry: LogEntry, limit: Int = 10): List<SourceMatch> =
+        logResolver.resolve(entry.tag, entry.msg, limit)
+
+    fun resolveCandidates(tag: String?, message: String, limit: Int = 10): List<SourceMatch> =
+        logResolver.resolve(tag, message, limit)
 
     fun inferOneHop(from: LogCallSite, to: LogCallSite): SourceInferredCall? {
         val call = from.directCalls.firstOrNull { candidate ->
@@ -160,7 +281,7 @@ class SourceEnrichmentResolver(index: SourceIndex) {
     /** Resolves [entry] to source and returns only direct calls that were uniquely indexed. */
     fun resolveOneHop(entry: LogEntry, limit: Int = 10): List<SourceOneHopCall> =
         uniquelyResolvedMatches(entry.tag, entry.msg, limit)
-            .filter { it.confidence >= MIN_SOURCE_ENRICHMENT_CONFIDENCE }
+            .filter { it.confidence >= MIN_SOURCE_ENRICHMENT_CONFIDENCE && !it.stale }
             .flatMap { match ->
                 toOneHopCalls(match, directCallsNearLogSite(match.site), entry.msg)
             }
@@ -168,7 +289,7 @@ class SourceEnrichmentResolver(index: SourceIndex) {
 
     /** Tag/message variant for callers that intentionally do not hold a [LogEntry]. */
     fun resolveOneHop(tag: String?, message: String, limit: Int = 10): List<SourceOneHopCall> = uniquelyResolvedMatches(tag, message, limit)
-        .filter { it.confidence >= MIN_SOURCE_ENRICHMENT_CONFIDENCE }
+        .filter { it.confidence >= MIN_SOURCE_ENRICHMENT_CONFIDENCE && !it.stale }
         .flatMap { match -> toOneHopCalls(match, match.site.directCalls) }
         .take(limit)
 
@@ -178,9 +299,8 @@ class SourceEnrichmentResolver(index: SourceIndex) {
         // or:
         //   Log.d(..., "starting"); service.fetch()
         // Restricting this to preceding calls made the second, very common form disappear.
-        val callbackCalls = site.directCalls.filter { it.isCallback }
-            .distinctBy { it.sourceOwnerType to (it.targetOwnerType to it.targetMethodSignature) }
         val localCalls = site.directCalls.filterNot { it.isCallback }
+        val incomingCalls = site.directCalls.filter { it.isCallback }
         // A logged assigned value is stronger evidence than line proximity. The caller may do
         // validation, mapping, or another small operation between `service.fetch()` and the log;
         // retain the exact call that produced the identifier instead of attaching the log to the
@@ -192,7 +312,7 @@ class SourceEnrichmentResolver(index: SourceIndex) {
                 call.callLine <= site.callLine
         }
         if (loggedResultCalls.isNotEmpty()) {
-            return (loggedResultCalls + callbackCalls).distinct()
+            return loggedResultCalls.distinct()
         }
         val nearestLine = localCalls
             .asSequence()
@@ -202,9 +322,15 @@ class SourceEnrichmentResolver(index: SourceIndex) {
             ?.takeIf { kotlin.math.abs(site.callLine - it) <= MAX_SOURCE_CALL_LOG_DISTANCE_LINES }
             ?.let { line -> localCalls.filter { it.callLine == line } }
             .orEmpty()
-        // Incoming calls are method-level callback/caller evidence. Their line belongs to the
-        // caller file, so it is intentionally not compared with the callee's log line.
-        return (nearbyLocalCalls + callbackCalls).distinct()
+        // Incoming calls are method-level possibilities, not runtime evidence. Attaching every
+        // caller here made a log inside one callee claim that production, fixture, and test
+        // callers all ran. Only a direct, local call (or the range trace's own ordered evidence)
+        // may promote an invocation.
+        if (nearbyLocalCalls.isNotEmpty()) return nearbyLocalCalls.distinct()
+        // Incoming member calls are useful evidence when exactly one indexed caller reaches the
+        // logging method. Several candidates remain ambiguous until range-level context can rank
+        // them; never expose all of them as simultaneous runtime calls.
+        return incomingCalls.singleOrNull()?.let(::listOf).orEmpty()
     }
 
     private fun toOneHopCalls(
@@ -224,6 +350,15 @@ class SourceEnrichmentResolver(index: SourceIndex) {
                 ?.takeIf { it in match.site.loggedValueNames }
                 ?.let { message },
             confidence = match.confidence,
+            sourceLogSiteId = match.site.id.takeIf { it.isNotBlank() },
+            callSiteId = call.callSiteId,
+            callerMethodId = call.callerMethodId,
+            calleeMethodId = call.targetMethodId,
+            receiverExpression = call.receiverExpression,
+            receiverRole = call.receiverRole,
+            invocationKind = call.invocationKind,
+            sourceFile = match.site.filePath,
+            sourceLine = match.site.callLine,
         )
     }
 

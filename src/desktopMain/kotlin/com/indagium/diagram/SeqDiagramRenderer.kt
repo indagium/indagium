@@ -265,6 +265,9 @@ internal class Metrics(val scale: Float) {
     val strokeThick = sf(1.6f)
     val dashLifeline = floatArrayOf(sf(4f), sf(4f))
     val dashReturn = floatArrayOf(sf(6f), sf(4f))
+    // A short dash makes non-blocking dispatch visually distinct from both a filled CALL and
+    // the longer-dashed RETURN, while the open arrowhead below provides a second clear cue.
+    val dashAsync = floatArrayOf(sf(3f), sf(3f))
 }
 
 // ── Measured layout (pure data — no Graphics2D held past measure()) ──────────────────────────
@@ -689,7 +692,7 @@ private fun measure(diagram: SeqDiagram, scale: Float): DiagramLayout {
             val invalidSpan = span.participantIdx !in participantLayouts.indices ||
                 span.startMessage !in rows.indices ||
                 span.endMessage !in rows.indices ||
-                span.startMessage > span.endMessage
+                span.startMessage >= span.endMessage
             if (invalidSpan) return@mapNotNull null
             val width = (metrics.strokeThick * ACTIVATION_BAR_WIDTH_MULTIPLIER)
                 .roundToInt()
@@ -919,14 +922,16 @@ private fun paintDirectMessage(
     val x2 = geo.x2
     val y = geo.y
     g.color = theme.arrow
-    g.stroke = if (m.kind == MessageKind.RETURN || m.evidence == MessageEvidence.SOURCE_INFERRED) {
-        BasicStroke(metrics.strokeThin, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, metrics.dashReturn, 0f)
-    } else {
-        BasicStroke(metrics.strokeThick)
+    g.stroke = when (m.kind) {
+        MessageKind.RETURN ->
+            BasicStroke(metrics.strokeThin, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, metrics.dashReturn, 0f)
+        MessageKind.ASYNC ->
+            BasicStroke(metrics.strokeThin, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 10f, metrics.dashAsync, 0f)
+        else -> BasicStroke(metrics.strokeThick)
     }
     g.drawLine(x1, y, x2, y)
     val pointingRight = x2 > x1
-    drawArrowhead(g, x2, y, pointingRight, filled = m.kind != MessageKind.RETURN, metrics, theme.arrow)
+    drawArrowhead(g, x2, y, pointingRight, filled = m.kind != MessageKind.RETURN && m.kind != MessageKind.ASYNC, metrics, theme.arrow)
 
     // row.lines is the wrapped/suffixed label measure() already settled on — never re-wrapped or
     // re-ellipsized here, so what's drawn can never disagree with the row pitch/column gap that

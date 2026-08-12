@@ -47,11 +47,9 @@ data class DiagramComponent(
 /** Direction(s) in which an actor mirrors the component it represents. */
 enum class MirrorDirection { INBOUND, OUTBOUND, BOTH }
 
-/** A workspace actor.  A mirrored actor duplicates, rather than replaces, component edges — it
- *  never invents one. Under [ArrowMode.EVIDENCE_FLOW], a component with no evidenced (non-SELF)
- *  arrow touching it has nothing for a mirroring actor to duplicate either, so that actor
- *  correctly renders with no messages of its own; this is a consequence of
- *  `applyActorMirrors` skipping same-endpoint messages, not a bug. */
+/** A workspace actor. A mirrored actor relays an evidenced component edge through the actor:
+ * outbound is Actor → Component → Destination and inbound is Source → Component → Actor. Under
+ * [ArrowMode.EVIDENCE_FLOW], a component with no evidenced (non-SELF) edge has nothing to relay. */
 data class DiagramActor(
     val id: String,
     val label: String,
@@ -72,9 +70,11 @@ enum class ActivationPolicy { NONE, EVIDENCE_BACKED }
 /** Source-index enrichment is deliberately bounded to one direct edge. */
 data class DiagramSourceEnrichment(
     // Source ownership is the primary call-direction evidence when an index is available. The
-    // UI still exposes this as an opt-out because source resolution remains conservative and
-    // bounded to one hop.
+    // UI exposes this as an opt-out; when it cannot reconstruct a complete path, the builder
+    // reports explicit fallback mode instead of mixing partial source edges into evidence flow.
     val enabled: Boolean = true,
+    // Retained as the legacy persisted option; source-trace inference uses its own bounded
+    // interprocedural search depth and does not reinterpret this old one-hop setting.
     val directCallDepth: Int = 1,
     val addReturnArrows: Boolean = true,
 )
@@ -116,7 +116,107 @@ enum class LabelSource { MESSAGE, SOURCE_METHOD, BOTH }
  *  change; RETURN = the synthetic closing arrow to an exit-point ACTOR, or a source-inferred
  *  return; SELF = a single line shown as an event on its own participant's lifeline — the default
  *  shape for any entry [ArrowMode.EVIDENCE_FLOW] finds no evidence of a correlation for. */
-enum class MessageKind { CALL, RETURN, SELF }
+enum class MessageKind { CALL, RETURN, SELF, ASYNC }
+
+/** Visibility of a manually authored operation in UML-style labels. */
+enum class ManualOperationVisibility { UNSPECIFIED, PUBLIC, PROTECTED, PACKAGE, PRIVATE }
+
+/** Whether a diagram is rebuilt from inference or from its durable user-authored document. */
+enum class DiagramAuthoringMode { INFERRED, MANUAL }
+
+/**
+ * Stable provenance for one generated or authored interaction.  Rendered message indices and
+ * generated edge ordinals are presentation details and may change after filtering/collapsing;
+ * this key instead follows the source operation, invocation, or the durable manual interaction.
+ * `generatedOrdinal` is retained only as the legacy fallback for one log row with several
+ * otherwise indistinguishable inferred edges.
+ */
+data class MessageOriginKey(
+    val entryId: Int,
+    /** Rule identity keeps a matched rule edge distinct from the entry's plain log event. */
+    val ruleId: String? = null,
+    val sourceOperationId: String? = null,
+    val sourceLogSiteId: String? = null,
+    val invocationId: String? = null,
+    val manualInteractionId: String? = null,
+    val generatedOrdinal: Int = 0,
+)
+
+/** One named value displayed as part of a manually authored operation. */
+data class DiagramParameter(
+    val name: String = "",
+    val value: String = "",
+)
+
+/** An explicit, durable correction for a generated message identified by [origin]. */
+data class DiagramMessageOverride(
+    val origin: MessageOriginKey,
+    val enabled: Boolean = true,
+    val fromParticipantId: String? = null,
+    val toParticipantId: String? = null,
+    val label: String? = null,
+    val kind: MessageKind? = null,
+    val parameters: List<DiagramParameter>? = null,
+)
+
+/** A manually authored interaction.  [sourceEntryIds] preserves its selected log evidence. */
+data class ManualDiagramInteraction(
+    val id: String,
+    val sourceEntryIds: Set<Int>,
+    val fromParticipantId: String,
+    val toParticipantId: String,
+    val operation: String = "",
+    val parameters: List<DiagramParameter> = emptyList(),
+    val result: String? = null,
+    /** Optional literal label; when absent it is formatted from operation/parameters/result. */
+    val label: String? = null,
+    val kind: MessageKind = MessageKind.CALL,
+    val enabled: Boolean = true,
+    /** Stable ordering key. Ties retain document order. */
+    val order: Long = 0L,
+    /** Non-blank interactions with the same key are shown as one editable group in the UI. */
+    val groupKey: String? = null,
+    /** Source-index provenance retained when this occurrence was seeded from inference. */
+    val sourceMethodId: String? = null,
+    val sourceLogSiteId: String? = null,
+    val sourceOwnerType: String? = null,
+    val visibility: ManualOperationVisibility = ManualOperationVisibility.UNSPECIFIED,
+)
+
+/** A manually authored group/frame spanning its named interactions. */
+data class ManualDiagramGroup(
+    val id: String,
+    val label: String,
+    val interactionIds: List<String>,
+    val enabled: Boolean = true,
+)
+
+/** A manually authored note anchored after one interaction. */
+data class ManualDiagramNote(
+    val id: String,
+    val participantId: String,
+    val afterInteractionId: String,
+    val text: String,
+    val isError: Boolean = false,
+    val enabled: Boolean = true,
+)
+
+/** A manually authored activation span bounded by named interactions. */
+data class ManualDiagramActivation(
+    val id: String,
+    val participantId: String,
+    val startInteractionId: String,
+    val endInteractionId: String,
+    val enabled: Boolean = true,
+)
+
+/** The complete durable, source-index-independent document used by [DiagramAuthoringMode.MANUAL]. */
+data class ManualDiagramDocument(
+    val interactions: List<ManualDiagramInteraction> = emptyList(),
+    val groups: List<ManualDiagramGroup> = emptyList(),
+    val notes: List<ManualDiagramNote> = emptyList(),
+    val activations: List<ManualDiagramActivation> = emptyList(),
+)
 
 data class DiagramParticipant(
     // Stable identifier. For a builder-derived TAG participant this is the raw tag string; for a
@@ -140,6 +240,12 @@ data class DiagramParticipant(
     val alias: String? = null,
     /** Per-tag presentation choice.  [SHOW] preserves the legacy behaviour. */
     val representation: DiagramParticipantRepresentation = DiagramParticipantRepresentation.SHOW,
+    /** Source owner represented by a transient source-only lifeline, when known. */
+    val sourceOwnerType: String? = null,
+    /** Receiver role used to distinguish two fields/parameters of the same type. */
+    val receiverRole: String? = null,
+    /** True for a participant synthesized from the resolved trace rather than the spec. */
+    val inferred: Boolean = false,
 )
 
 /** The human-facing name for a lifeline.  An alias wins only when it contains visible text, so
@@ -233,7 +339,12 @@ sealed class DiagramRange {
     /** Inclusive `LogEntry.id` bounds. Order-independent, like `ManualCollapseDirection.RANGE`
      *  (the builder takes `minOf`/`maxOf` of the two) — a caller building this from a drag
      *  selection shouldn't have to know which end the user started from. */
-    data class Ids(val from: Int, val to: Int) : DiagramRange()
+    data class Ids(
+        val from: Int,
+        val to: Int,
+        /** Exact user selection. Empty preserves the legacy inclusive span behavior. */
+        val selectedIds: Set<Int> = emptySet(),
+    ) : DiagramRange()
 
     /** Inclusive `"HH:MM:SS[.mmm]"` clock-time bounds, parsed the same way as `LogEntry.ts`
      *  everywhere else in the app (`utils.LogTime.parseMillisOfDay`). Order-independent, same as
@@ -246,6 +357,27 @@ sealed class DiagramRange {
      *  swallows — the same `gid` space `SeqGroup`/`NestedSeqGroup` use, so a diagram can be
      *  generated directly from "this collapsed block" without the caller re-deriving its bounds. */
     data class SeqGroupRef(val gid: String) : DiagramRange()
+}
+
+/** A concrete binding from one captured string to an already-declared participant id. */
+data class DiagramRuleCaptureBinding(
+    val capturedValue: String,
+    val participantId: String,
+)
+
+/**
+ * Typed endpoint for a [DiagramMessageRule]. Typed rules never invent lifelines: a capture must
+ * resolve through [CapturedValue.bindings], and an actor is created only when the rule explicitly
+ * names [ExplicitActor]. Null typed endpoints preserve legacy template behaviour.
+ */
+sealed interface DiagramRuleEndpoint {
+    data class ExistingParticipant(val participantId: String) : DiagramRuleEndpoint
+    data object CurrentEntry : DiagramRuleEndpoint
+    data class CapturedValue(
+        val captureName: String,
+        val bindings: List<DiagramRuleCaptureBinding>,
+    ) : DiagramRuleEndpoint
+    data class ExplicitActor(val id: String, val label: String) : DiagramRuleEndpoint
 }
 
 /** One named-capture-group rule for [ArrowMode.RULES]. [pattern] is matched against
@@ -263,6 +395,9 @@ data class DiagramMessageRule(
     val fromTemplate: String,
     val toTemplate: String,
     val labelTemplate: String,
+    /** Appended typed endpoint contract; null retains legacy template resolution. */
+    val fromEndpoint: DiagramRuleEndpoint? = null,
+    val toEndpoint: DiagramRuleEndpoint? = null,
 )
 
 data class DiagramOptions(
@@ -276,7 +411,8 @@ data class DiagramOptions(
     val labelMaxChars: Int = 60,
     val labelSource: LabelSource = LabelSource.MESSAGE,
     val showTimestamps: Boolean = false,
-    val showElapsed: Boolean = true,
+    /** Prefix generated messages with elapsed time from the first selected row. */
+    val showElapsed: Boolean = false,
     // Wrap each auto-detected sequence group (Filter's SeqGroup/NestedSeqGroup, one level of
     // nesting) that overlaps the diagram's range as a DiagramFrame.
     // A range-wide frame is visually louder than the interactions it is meant to organize.
@@ -317,6 +453,14 @@ data class DiagramCallOverride(
     val toParticipantId: String,
 )
 
+/** Explicit source-site correction retained by a diagram note. The inferred trace remains
+ * transient; only this bounded user choice is persisted. */
+data class DiagramSourceSiteOverride(
+    val entryId: Int,
+    val sourceLogSiteId: String,
+    val edgeOrdinal: Int = 0,
+)
+
 data class SeqDiagramSpec(
     val dialect: DiagramDialect = DiagramDialect.MERMAID,
     val title: String = "",
@@ -340,6 +484,13 @@ data class SeqDiagramSpec(
     val unmappedTagPolicy: UnmappedTagPolicy = UnmappedTagPolicy.HIDE,
     val sourceEnrichment: DiagramSourceEnrichment = DiagramSourceEnrichment(),
     val callOverrides: List<DiagramCallOverride> = emptyList(),
+    val sourceSiteOverrides: List<DiagramSourceSiteOverride> = emptyList(),
+    /** Inferred is the backwards-compatible default; manual never reads the source index. */
+    val authoringMode: DiagramAuthoringMode = DiagramAuthoringMode.INFERRED,
+    /** Full lifeline order. Missing current IDs append deterministically; stale IDs are ignored. */
+    val lifelineOrder: List<String> = emptyList(),
+    val messageOverrides: List<DiagramMessageOverride> = emptyList(),
+    val manualDocument: ManualDiagramDocument = ManualDiagramDocument(),
 )
 
 data class DiagramMessage(
@@ -360,6 +511,22 @@ data class DiagramMessage(
     val evidence: MessageEvidence = MessageEvidence.LOG,
     /** Deterministic generated-edge ordinal within the originating entry. */
     val edgeOrdinal: Int = 0,
+    /** Stable transient trace identity; absent for legacy/runtime/rule messages. */
+    val invocationId: String? = null,
+    /** Runtime outcome associated with this message, when it belongs to a trace invocation. */
+    val traceStatus: TraceCallStatus? = null,
+    /** Invocation semantics used to suppress false blocking activations for async dispatch. */
+    val invocationKind: TraceInvocationKind? = null,
+    /** Exactly one primary message is retained for every selected, enabled log entry. */
+    val primary: Boolean = true,
+    /** All log rows represented by this message; repeat collapsing unions this set losslessly. */
+    val representedEntryIds: Set<Int> = setOf(entryId),
+    /** Source operation provenance for structural messages; null for legacy evidence-flow rows. */
+    val sourceOperationId: String? = null,
+    /** Exact source log-site provenance for primary source-trace events. */
+    val sourceLogSiteId: String? = null,
+    /** Stable source/authored provenance. Collapsed and mirrored messages retain all members. */
+    val originKeys: Set<MessageOriginKey> = emptySet(),
 )
 
 /** A correlated call/return activation interval, inclusive message indices. */
@@ -368,6 +535,9 @@ data class DiagramActivationSpan(
     val startMessage: Int,
     val endMessage: Int,
     val evidence: MessageEvidence,
+    val invocationId: String? = null,
+    val status: TraceCallStatus? = null,
+    val invocationKind: TraceInvocationKind? = null,
 )
 
 /** One auto-detected sequence group rendered as a bracket around [firstMsg]..[lastMsg]
@@ -420,4 +590,11 @@ data class SeqDiagram(
     // parseable timestamps for a Time range all degrade to an empty-ish diagram plus an entry
     // here, rather than throwing. See SeqDiagramBuilder's own doc for the full list of cases.
     val warnings: List<String> = emptyList(),
-)
+    /** Range-level source result. Kept transient unless explicitly copied into a note snapshot. */
+    val resolvedTrace: DiagramResolvedTrace? = null,
+    /** Explicitly distinguishes source-first output from the log-only fallback. */
+    val traceMode: SourceTraceMode = SourceTraceMode.DISABLED,
+) {
+    /** Semantic primary evidence, including every ID retained by a collapsed primary message. */
+    val primaryEntryIds: Set<Int> get() = messages.filter { it.primary }.flatMapTo(linkedSetOf()) { it.representedEntryIds }
+}

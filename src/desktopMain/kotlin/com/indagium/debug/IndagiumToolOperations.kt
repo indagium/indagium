@@ -7,6 +7,7 @@ import com.indagium.cases.CaseSummary
 import com.indagium.diagram.ActivationPolicy
 import com.indagium.diagram.ArrowMode
 import com.indagium.diagram.DiagramActor
+import com.indagium.diagram.DiagramAuthoringMode
 import com.indagium.diagram.DiagramComponent
 import com.indagium.diagram.DiagramDialect
 import com.indagium.diagram.DiagramOptions
@@ -14,6 +15,20 @@ import com.indagium.diagram.DiagramParticipant
 import com.indagium.diagram.DiagramRange
 import com.indagium.diagram.DiagramSourceEnrichment
 import com.indagium.diagram.DiagramSourceInteraction
+import com.indagium.diagram.DiagramSourceSiteOverride
+import com.indagium.diagram.DiagramMessageOverride
+import com.indagium.diagram.DiagramMessageRule
+import com.indagium.diagram.ManualDiagramActivation
+import com.indagium.diagram.ManualDiagramDocument
+import com.indagium.diagram.ManualDiagramGroup
+import com.indagium.diagram.ManualDiagramInteraction
+import com.indagium.diagram.ManualDiagramNote
+import com.indagium.diagram.DiagramParameter
+import com.indagium.diagram.MessageKind
+import com.indagium.diagram.MessageOriginKey
+import com.indagium.diagram.DiagramRuleCaptureBinding
+import com.indagium.diagram.DiagramRuleEndpoint
+import com.indagium.diagram.DiagramResolvedTrace
 import com.indagium.diagram.MAX_SOURCE_INTERACTIONS_PER_ENTRY
 import com.indagium.diagram.MirrorDirection
 import com.indagium.diagram.ParticipantKind
@@ -45,6 +60,8 @@ import com.indagium.source.SourceFileSnapshot
 import com.indagium.source.SourceIndex
 import com.indagium.source.SourceMatch
 import com.indagium.source.SourceStructureParser
+import com.indagium.source.SourceTraceInferenceEngine
+import com.indagium.source.SOURCE_INDEX_VERSION
 import com.indagium.ui.AppState
 import com.indagium.ui.FollowDiagnostics
 import com.indagium.ui.HL_COLORS
@@ -801,10 +818,13 @@ internal class IndagiumToolOperations(
             actorParticipants = diagramActorParticipants(actorNames, actors, entryActor, exitActor),
             tagParticipants = tagParticipants,
         )
+        val manualDocumentError = manualDocumentConfigurationError(spec, components)
+        if (manualDocumentError != null) return mapOf("error" to manualDocumentError)
         val sourceIndex = sourceIndexProvider()
         val diagram = buildSequenceDiagram(
             tab = tab,
             spec = spec,
+            resolveTrace = sourceTraceResolver(spec, sourceIndex),
             resolveSourceInteractions = sourceInteractionResolver(spec, sourceIndex),
         )
         val routeWarnings = boundedDiagramWarnings(diagram.warnings + sourceEnrichmentAvailabilityWarnings(spec, sourceIndex))
@@ -841,6 +861,27 @@ internal class IndagiumToolOperations(
             actorCollision?.let { "participant id is used by both a component and actor: $it" },
             tagCollision?.let { "participant id is used more than once: $it" },
         ).firstOrNull()
+    }
+
+    private fun manualDocumentConfigurationError(spec: SeqDiagramSpec, components: List<DiagramComponent>): String? {
+        val participantIds = (spec.participants.map { it.id } + components.map { it.id }).toSet()
+        val badRule = spec.rules.firstOrNull { rule ->
+            sequenceOf(rule.fromEndpoint, rule.toEndpoint).any { endpoint -> when (endpoint) {
+                is DiagramRuleEndpoint.ExistingParticipant -> endpoint.participantId !in participantIds
+                is DiagramRuleEndpoint.CapturedValue -> endpoint.bindings.any { it.participantId !in participantIds }
+                else -> false
+            } }
+        }
+        if (badRule != null) return "rule ${badRule.id} must reference configured participants"
+        val document = spec.manualDocument
+        val unknownInteraction = document.interactions.firstOrNull {
+            it.fromParticipantId !in participantIds || it.toParticipantId !in participantIds
+        }
+        if (unknownInteraction != null) return "manual interaction ${unknownInteraction.id} must reference configured participants"
+        val unknownNote = document.notes.firstOrNull { it.participantId !in participantIds }
+        if (unknownNote != null) return "manual note ${unknownNote.id} must reference a configured participant"
+        val unknownActivation = document.activations.firstOrNull { it.participantId !in participantIds }
+        return unknownActivation?.let { "manual activation ${it.id} must reference a configured participant" }
     }
 
     private fun duplicateOf(ids: List<String>): String? =
@@ -903,6 +944,12 @@ internal class IndagiumToolOperations(
                 UnmappedTagPolicy.HIDE
             },
             sourceEnrichment = DiagramSourceEnrichment(enabled = args.anyBool("sourceEnrichment") == true),
+            sourceSiteOverrides = diagramSourceSiteOverrides(args),
+            rules = diagramRules(args),
+            authoringMode = if (args.str("authoringMode").equals("manual", ignoreCase = true)) DiagramAuthoringMode.MANUAL else DiagramAuthoringMode.INFERRED,
+            lifelineOrder = args.strList("lifelineOrder").orEmpty(),
+            messageOverrides = diagramMessageOverrides(args),
+            manualDocument = diagramManualDocument(args),
         )
     }
 
@@ -920,6 +967,9 @@ internal class IndagiumToolOperations(
             "scannedEntries" to diagram.scannedEntries,
             "coverage" to diagramCoverageMap(diagram),
             "sourceEnrichment" to sourceEnrichmentMap(spec, sourceIndex),
+            "traceMode" to diagram.traceMode.name.lowercase(),
+            "traceDiagnostics" to traceDiagnosticsMap(diagram),
+            "trace" to traceMap(diagram),
         )
         return mapOf(
             "source" to diagram.toSource(spec.dialect),
@@ -931,6 +981,9 @@ internal class IndagiumToolOperations(
                     "kind" to participant.kind.name.lowercase(),
                     "tag" to participant.tag,
                     "componentTagIds" to components.firstOrNull { it.id == participant.id }?.tagIds?.toList(),
+                    "sourceOwnerType" to participant.sourceOwnerType,
+                    "receiverRole" to participant.receiverRole,
+                    "inferred" to participant.inferred,
                 )
             },
             "messages" to diagram.messages.map { message ->
@@ -942,6 +995,13 @@ internal class IndagiumToolOperations(
                     "kind" to message.kind.name.lowercase(),
                     "evidence" to message.evidence.name.lowercase(),
                     "repeatCount" to message.repeatCount,
+                    "invocationId" to message.invocationId,
+                    "traceStatus" to message.traceStatus?.name?.lowercase(),
+                    "invocationKind" to message.invocationKind?.name?.lowercase(),
+                    "sourceOperationId" to message.sourceOperationId,
+                    "sourceLogSiteId" to message.sourceLogSiteId,
+                    "primary" to message.primary,
+                    "origins" to message.originKeys.map(::originMap),
                 )
             },
             "activationSpans" to diagram.activationSpans.map { span ->
@@ -950,6 +1010,9 @@ internal class IndagiumToolOperations(
                     "startMessage" to span.startMessage,
                     "endMessage" to span.endMessage,
                     "evidence" to span.evidence.name.lowercase(),
+                    "invocationId" to span.invocationId,
+                    "status" to span.status?.name?.lowercase(),
+                    "invocationKind" to span.invocationKind?.name?.lowercase(),
                 )
             },
             "messageCount" to diagram.messages.size,
@@ -957,7 +1020,83 @@ internal class IndagiumToolOperations(
             "scannedEntries" to diagram.scannedEntries,
             "coverage" to diagramCoverageMap(diagram),
             "sourceEnrichment" to sourceEnrichmentMap(spec, sourceIndex),
+            "traceMode" to diagram.traceMode.name.lowercase(),
+            "traceDiagnostics" to traceDiagnosticsMap(diagram),
+            "trace" to traceMap(diagram),
+            "authoringMode" to spec.authoringMode.name.lowercase(),
+            "lifelineOrder" to spec.lifelineOrder,
+            "rules" to spec.rules.map(::diagramRuleMap),
+            "messageOverrides" to spec.messageOverrides.map(::messageOverrideMap),
+            "manualDocument" to manualDocumentMap(spec.manualDocument),
             "warnings" to warnings,
+        )
+    }
+
+    private fun traceDiagnosticsMap(diagram: SeqDiagram): Map<String, Any?> {
+        val diagnostics = diagram.resolvedTrace?.diagnostics ?: return emptyMap()
+        return mapOf(
+            "droppedByReason" to diagnostics.droppedByReason.mapKeys { it.key.name.lowercase() },
+            "ambiguousEntryIds" to diagnostics.ambiguousEntryIds,
+            "staleEntryIds" to diagnostics.staleEntryIds,
+            "truncated" to diagnostics.truncated,
+            "entries" to diagnostics.diagnostics.map { item ->
+                mapOf(
+                    "reason" to item.reason.name.lowercase(),
+                    "entryId" to item.entryId,
+                    "detail" to item.detail,
+                )
+            },
+        )
+    }
+
+    /** Full source-trace evidence for MCP callers; the UI and MCP consume the same model. */
+    private fun traceMap(diagram: SeqDiagram): Map<String, Any?> {
+        val trace = diagram.resolvedTrace ?: return emptyMap()
+        return mapOf(
+            "events" to trace.events.map { event ->
+                mapOf(
+                    "entryId" to event.entryId,
+                    "sourceLogSiteId" to event.sourceLogSiteId,
+                    "methodId" to event.methodId,
+                    "ownerType" to event.ownerType,
+                    "methodName" to event.methodName,
+                    "sourceFile" to event.sourceFile,
+                    "sourceLine" to event.sourceLine,
+                    "laneId" to event.laneId,
+                    "confidence" to event.confidence,
+                )
+            },
+            "calls" to trace.calls.map { call ->
+                mapOf(
+                    "invocationId" to call.invocationId,
+                    "parentInvocationId" to call.parentInvocationId,
+                    "callerOwnerType" to call.callerOwnerType,
+                    "calleeOwnerType" to call.calleeOwnerType,
+                    "callSiteId" to call.callSiteId,
+                    "callEntryId" to call.callEntryId,
+                    "returnEntryId" to call.returnEntryId,
+                    "status" to call.status.name.lowercase(),
+                    "invocationKind" to call.invocationKind.name.lowercase(),
+                    "sourceFile" to call.sourceFile,
+                    "sourceLine" to call.sourceLine,
+                    "receiverRole" to call.receiverRole,
+                    "evidence" to call.evidence.map { it.name.lowercase() },
+                )
+            },
+            "operations" to trace.operations.map { operation ->
+                mapOf(
+                    "id" to operation.id,
+                    "kind" to operation.kind.name.lowercase(),
+                    "entryId" to operation.entryId,
+                    "invocationId" to operation.invocationId,
+                    "sourceOperationId" to operation.sourceOperationId,
+                    "sourceLogSiteId" to operation.sourceLogSiteId,
+                    "methodId" to operation.methodId,
+                    "ownerType" to operation.ownerType,
+                    "sourceFile" to operation.sourceFile,
+                    "sourceLine" to operation.sourceLine,
+                )
+            },
         )
     }
 
@@ -970,7 +1109,145 @@ internal class IndagiumToolOperations(
             validateDiagramComponents(args["components"]),
             validateMergedDiagramTags(args["mergedTags"]),
             validateDiagramActors(args["actors"]),
+            validateSourceSiteOverrides(args["sourceSiteOverrides"]),
+            validateDiagramRules(args["rules"]),
+            validateStringList(args["lifelineOrder"], "lifelineOrder", MAX_DIAGRAM_COMPONENTS),
+            validateMessageOverrides(args["messageOverrides"]),
+            validateManualDocument(args["manualDocument"]),
         ).firstOrNull()
+    }
+
+    private fun validateDiagramRules(value: Any?): String? {
+        val shape = validateListShape(value, "rules", MAX_DIAGRAM_COMPONENTS)
+        if (shape != null || value !is List<*>) return shape
+        return value.withIndex().firstNotNullOfOrNull { (index, item) ->
+            if (item !is Map<*, *>) return@firstNotNullOfOrNull "rules[$index] must be an object"
+            validateRequiredString(item["id"], "rules[$index].id", MAX_DIAGRAM_ID_CHARS) ?:
+                validateRequiredString(item["pattern"], "rules[$index].pattern", MAX_DIAGRAM_LABEL_CHARS) ?:
+                validateOptionalString(item["fromTemplate"], "rules[$index].fromTemplate", MAX_DIAGRAM_LABEL_CHARS) ?:
+                validateOptionalString(item["toTemplate"], "rules[$index].toTemplate", MAX_DIAGRAM_LABEL_CHARS) ?:
+                validateOptionalString(item["labelTemplate"], "rules[$index].labelTemplate", MAX_DIAGRAM_LABEL_CHARS) ?:
+                validateRuleEndpoint(item["fromEndpoint"], "rules[$index].fromEndpoint") ?:
+                validateRuleEndpoint(item["toEndpoint"], "rules[$index].toEndpoint")
+        }
+    }
+
+    private fun validateRuleEndpoint(value: Any?, field: String): String? {
+        if (value == null) return null
+        if (value !is Map<*, *>) return "$field must be an object"
+        return when (value["kind"]?.toString()?.lowercase()) {
+            "existing" -> validateRequiredString(value["participantId"], "$field.participantId", MAX_DIAGRAM_ID_CHARS)
+            "currententry" -> null
+            "actor" -> validateRequiredString(value["id"], "$field.id", MAX_DIAGRAM_ID_CHARS) ?:
+                validateRequiredString(value["label"], "$field.label", MAX_DIAGRAM_LABEL_CHARS)
+            "captured" -> validateRequiredString(value["captureName"], "$field.captureName", MAX_DIAGRAM_ID_CHARS) ?:
+                validateRuleBindings(value["bindings"], "$field.bindings")
+            else -> "$field.kind must be existing, currentEntry, captured, or actor"
+        }
+    }
+
+    private fun validateRuleBindings(value: Any?, field: String): String? {
+        val shape = validateListShape(value, field, MAX_DIAGRAM_COMPONENTS)
+        if (shape != null || value !is List<*>) return shape
+        return value.withIndex().firstNotNullOfOrNull { (index, item) ->
+            if (item !is Map<*, *>) "$field[$index] must be an object" else
+                validateRequiredString(item["capturedValue"], "$field[$index].capturedValue", MAX_DIAGRAM_LABEL_CHARS) ?:
+                    validateRequiredString(item["participantId"], "$field[$index].participantId", MAX_DIAGRAM_ID_CHARS)
+        }
+    }
+
+    private fun validateSourceSiteOverrides(value: Any?): String? {
+        val shape = validateListShape(value, "sourceSiteOverrides", MAX_DIAGRAM_COMPONENTS)
+        if (shape != null || value !is List<*>) return shape
+        return value.withIndex().firstNotNullOfOrNull { (index, item) ->
+            if (item !is Map<*, *>) return@firstNotNullOfOrNull "sourceSiteOverrides[$index] must be an object"
+            listOfNotNull(
+                validateRequiredString(item["sourceLogSiteId"], "sourceSiteOverrides[$index].sourceLogSiteId", MAX_DIAGRAM_ID_CHARS),
+                if ((item["entryId"] as? Number)?.toInt()?.let { it >= 0 } == false) {
+                    "sourceSiteOverrides[$index].entryId must be non-negative"
+                } else {
+                    null
+                },
+            ).firstOrNull()
+        }
+    }
+
+    private fun validateMessageOverrides(value: Any?): String? {
+        val shape = validateListShape(value, "messageOverrides", MAX_DIAGRAM_COMPONENTS)
+        if (shape != null || value !is List<*>) return shape
+        return value.withIndex().firstNotNullOfOrNull { (index, item) ->
+            if (item !is Map<*, *>) return@firstNotNullOfOrNull "messageOverrides[$index] must be an object"
+            val origin = item["origin"] as? Map<*, *> ?: return@firstNotNullOfOrNull "messageOverrides[$index].origin must be an object"
+            listOfNotNull(
+                if ((origin["entryId"] as? Number)?.toInt()?.let { it >= 0 } == true) null
+                else "messageOverrides[$index].origin.entryId must be a non-negative integer",
+                validateOptionalString(origin["ruleId"], "messageOverrides[$index].origin.ruleId", MAX_DIAGRAM_ID_CHARS),
+                validateOptionalString(origin["sourceOperationId"], "messageOverrides[$index].origin.sourceOperationId", MAX_DIAGRAM_ID_CHARS),
+                validateOptionalString(origin["sourceLogSiteId"], "messageOverrides[$index].origin.sourceLogSiteId", MAX_DIAGRAM_ID_CHARS),
+                validateOptionalString(origin["invocationId"], "messageOverrides[$index].origin.invocationId", MAX_DIAGRAM_ID_CHARS),
+                validateOptionalString(origin["manualInteractionId"], "messageOverrides[$index].origin.manualInteractionId", MAX_DIAGRAM_ID_CHARS),
+                validateOptionalString(item["fromParticipantId"], "messageOverrides[$index].fromParticipantId", MAX_DIAGRAM_ID_CHARS),
+                validateOptionalString(item["toParticipantId"], "messageOverrides[$index].toParticipantId", MAX_DIAGRAM_ID_CHARS),
+                validateOptionalString(item["label"], "messageOverrides[$index].label", MAX_DIAGRAM_LABEL_CHARS),
+            ).firstOrNull()
+        }
+    }
+
+    private fun validateManualDocument(value: Any?): String? {
+        if (value == null) return null
+        if (value !is Map<*, *>) return "manualDocument must be an object"
+        val interactions = value["interactions"] ?: emptyList<Any?>()
+        val shape = validateListShape(interactions, "manualDocument.interactions", MAX_DIAGRAM_MESSAGES)
+        if (shape != null || interactions !is List<*>) return shape
+        val ids = interactions.mapNotNull { (it as? Map<*, *>)?.get("id") as? String }
+        if (ids.size != interactions.size || duplicateOf(ids) != null) return "manualDocument interactions must have unique ids"
+        val interactionError = interactions.withIndex().firstNotNullOfOrNull { (index, item) ->
+            if (item !is Map<*, *>) return@firstNotNullOfOrNull "manualDocument.interactions[$index] must be an object"
+            listOfNotNull(
+                validateRequiredString(item["id"], "manualDocument.interactions[$index].id", MAX_DIAGRAM_ID_CHARS),
+                validateRequiredString(item["fromParticipantId"], "manualDocument.interactions[$index].fromParticipantId", MAX_DIAGRAM_ID_CHARS),
+                validateRequiredString(item["toParticipantId"], "manualDocument.interactions[$index].toParticipantId", MAX_DIAGRAM_ID_CHARS),
+                validateNonNegativeIntList(item["sourceEntryIds"], "manualDocument.interactions[$index].sourceEntryIds", MAX_DIAGRAM_MESSAGES),
+            ).firstOrNull()
+        }
+        if (interactionError != null) return interactionError
+        val interactionIds = ids.toSet()
+        return validateManualReferences(value, "groups", MAX_DIAGRAM_COMPONENTS) { item, index ->
+            val idError = validateRequiredString(item["id"], "manualDocument.groups[$index].id", MAX_DIAGRAM_ID_CHARS)
+            val labelError = validateRequiredString(item["label"], "manualDocument.groups[$index].label", MAX_DIAGRAM_LABEL_CHARS)
+            val referencesError = validateStringList(item["interactionIds"], "manualDocument.groups[$index].interactionIds", MAX_DIAGRAM_MESSAGES)
+            idError ?: labelError ?: referencesError ?: (item["interactionIds"] as? List<*>)
+                ?.filterIsInstance<String>()?.firstOrNull { it !in interactionIds }
+                ?.let { "manualDocument.groups[$index] references unknown interaction: $it" }
+        } ?: validateManualReferences(value, "notes", MAX_DIAGRAM_MESSAGES) { item, index ->
+            validateRequiredString(item["id"], "manualDocument.notes[$index].id", MAX_DIAGRAM_ID_CHARS) ?:
+                validateRequiredString(item["participantId"], "manualDocument.notes[$index].participantId", MAX_DIAGRAM_ID_CHARS) ?:
+                validateRequiredString(item["afterInteractionId"], "manualDocument.notes[$index].afterInteractionId", MAX_DIAGRAM_ID_CHARS) ?:
+                validateOptionalString(item["text"], "manualDocument.notes[$index].text", MAX_DIAGRAM_LABEL_CHARS) ?:
+                (item["afterInteractionId"] as? String)?.takeIf { it !in interactionIds }
+                    ?.let { "manualDocument.notes[$index] references unknown interaction: $it" }
+        } ?: validateManualReferences(value, "activations", MAX_DIAGRAM_MESSAGES) { item, index ->
+            validateRequiredString(item["id"], "manualDocument.activations[$index].id", MAX_DIAGRAM_ID_CHARS) ?:
+                validateRequiredString(item["participantId"], "manualDocument.activations[$index].participantId", MAX_DIAGRAM_ID_CHARS) ?:
+                validateRequiredString(item["startInteractionId"], "manualDocument.activations[$index].startInteractionId", MAX_DIAGRAM_ID_CHARS) ?:
+                validateRequiredString(item["endInteractionId"], "manualDocument.activations[$index].endInteractionId", MAX_DIAGRAM_ID_CHARS) ?:
+                listOf(item["startInteractionId"], item["endInteractionId"]).filterIsInstance<String>().firstOrNull { it !in interactionIds }
+                    ?.let { "manualDocument.activations[$index] references unknown interaction: $it" }
+        }
+    }
+
+    private fun validateManualReferences(
+        document: Map<*, *>, field: String, maxItems: Int,
+        validate: (Map<*, *>, Int) -> String?,
+    ): String? {
+        val items = document[field] ?: emptyList<Any?>()
+        val shape = validateListShape(items, "manualDocument.$field", maxItems)
+        if (shape != null || items !is List<*>) return shape
+        val ids = items.mapNotNull { (it as? Map<*, *>)?.get("id") as? String }
+        if (ids.size != items.size || duplicateOf(ids) != null) return "manualDocument $field must have unique ids"
+        return items.withIndex().firstNotNullOfOrNull { (index, item) ->
+            if (item !is Map<*, *>) "manualDocument.$field[$index] must be an object" else validate(item, index)
+        }
     }
 
     private fun validateOptionalString(value: Any?, field: String, maxChars: Int): String? = when {
@@ -999,6 +1276,14 @@ internal class IndagiumToolOperations(
         if (shapeError != null || value !is List<*>) return shapeError
         return value.withIndex().firstNotNullOfOrNull { (index, item) ->
             validateRequiredString(item, "$field[$index]", MAX_DIAGRAM_ID_CHARS)
+        }
+    }
+
+    private fun validateNonNegativeIntList(value: Any?, field: String, maxItems: Int): String? {
+        val shapeError = validateListShape(value, field, maxItems)
+        if (shapeError != null || value !is List<*>) return shapeError
+        return value.withIndex().firstNotNullOfOrNull { (index, item) ->
+            if ((item as? Number)?.toInt()?.let { it >= 0 } == true) null else "$field[$index] must be a non-negative integer"
         }
     }
 
@@ -1133,6 +1418,163 @@ internal class IndagiumToolOperations(
         } }.distinctBy { it.id }
     }
 
+    private fun diagramSourceSiteOverrides(args: Map<String, Any?>): List<DiagramSourceSiteOverride> =
+        (args["sourceSiteOverrides"] as? List<*>)?.mapNotNull { item ->
+            val map = item as? Map<*, *> ?: return@mapNotNull null
+            val entryId = (map["entryId"] as? Number)?.toInt() ?: return@mapNotNull null
+            val sourceLogSiteId = map["sourceLogSiteId"]?.toString()?.trim().orEmpty()
+            if (sourceLogSiteId.isEmpty()) return@mapNotNull null
+            val edgeOrdinal = (map["edgeOrdinal"] as? Number)?.toInt() ?: 0
+            DiagramSourceSiteOverride(entryId, sourceLogSiteId, edgeOrdinal)
+        }?.take(MAX_DIAGRAM_COMPONENTS).orEmpty()
+
+    private fun diagramRules(args: Map<String, Any?>): List<DiagramMessageRule> =
+        args.mapList("rules").orEmpty().mapNotNull { map ->
+            val id = map.str("id")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+            val pattern = map.str("pattern")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+            DiagramMessageRule(
+                id = id,
+                pattern = pattern,
+                enabled = map.anyBool("enabled") ?: true,
+                fromTemplate = map.str("fromTemplate").orEmpty(),
+                toTemplate = map.str("toTemplate").orEmpty(),
+                labelTemplate = map.str("labelTemplate").orEmpty(),
+                fromEndpoint = diagramRuleEndpoint(map["fromEndpoint"]),
+                toEndpoint = diagramRuleEndpoint(map["toEndpoint"]),
+            )
+        }.take(MAX_DIAGRAM_COMPONENTS)
+
+    private fun diagramRuleEndpoint(value: Any?): DiagramRuleEndpoint? {
+        val map = value as? Map<*, *> ?: return null
+        return when (map["kind"]?.toString()?.lowercase()) {
+            "existing" -> map["participantId"]?.toString()?.takeIf(String::isNotBlank)
+                ?.let(DiagramRuleEndpoint::ExistingParticipant)
+            "currententry" -> DiagramRuleEndpoint.CurrentEntry
+            "actor" -> {
+                val id = map["id"]?.toString()?.takeIf(String::isNotBlank) ?: return null
+                val label = map["label"]?.toString()?.takeIf(String::isNotBlank) ?: return null
+                DiagramRuleEndpoint.ExplicitActor(id, label)
+            }
+            "captured" -> {
+                val name = map["captureName"]?.toString()?.takeIf(String::isNotBlank) ?: return null
+                val bindings = (map["bindings"] as? List<*>).orEmpty().mapNotNull { item ->
+                    val binding = item as? Map<*, *> ?: return@mapNotNull null
+                    val captured = binding["capturedValue"]?.toString()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                    val participant = binding["participantId"]?.toString()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                    DiagramRuleCaptureBinding(captured, participant)
+                }
+                DiagramRuleEndpoint.CapturedValue(name, bindings)
+            }
+            else -> null
+        }
+    }
+
+    private fun diagramMessageOverrides(args: Map<String, Any?>): List<DiagramMessageOverride> =
+        args.mapList("messageOverrides").orEmpty().mapNotNull { map ->
+            val origin = (map["origin"] as? Map<*, *>) ?: return@mapNotNull null
+            val entryId = (origin["entryId"] as? Number)?.toInt() ?: return@mapNotNull null
+            val parameters = (map["parameters"] as? List<*>)?.mapNotNull { item ->
+                val parameter = item as? Map<*, *> ?: return@mapNotNull null
+                DiagramParameter(parameter["name"]?.toString().orEmpty(), parameter["value"]?.toString().orEmpty())
+            }
+            DiagramMessageOverride(
+                origin = MessageOriginKey(
+                    entryId = entryId, ruleId = origin["ruleId"]?.toString(),
+                    sourceOperationId = origin["sourceOperationId"]?.toString(), sourceLogSiteId = origin["sourceLogSiteId"]?.toString(),
+                    invocationId = origin["invocationId"]?.toString(), manualInteractionId = origin["manualInteractionId"]?.toString(),
+                    generatedOrdinal = (origin["generatedOrdinal"] as? Number)?.toInt() ?: 0,
+                ),
+                enabled = map.anyBool("enabled") ?: true, fromParticipantId = map.str("fromParticipantId"),
+                toParticipantId = map.str("toParticipantId"), label = map.str("label"),
+                kind = map.str("kind")?.uppercase()?.let { token -> MessageKind.entries.firstOrNull { it.name == token } },
+                parameters = parameters,
+            )
+        }.take(MAX_DIAGRAM_COMPONENTS)
+
+    private fun diagramManualDocument(args: Map<String, Any?>): ManualDiagramDocument {
+        val document = args["manualDocument"] as? Map<*, *> ?: return ManualDiagramDocument()
+        val interactions = (document["interactions"] as? List<*>).orEmpty().mapNotNull { item ->
+            val map = item as? Map<*, *> ?: return@mapNotNull null
+            val id = map["id"]?.toString()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+            val from = map["fromParticipantId"]?.toString()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+            val to = map["toParticipantId"]?.toString()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+            val entries = (map["sourceEntryIds"] as? List<*>)?.mapNotNull { (it as? Number)?.toInt() }?.toSet().orEmpty()
+            val parameters = (map["parameters"] as? List<*>).orEmpty().mapNotNull { parameter ->
+                val raw = parameter as? Map<*, *> ?: return@mapNotNull null
+                DiagramParameter(raw["name"]?.toString().orEmpty(), raw["value"]?.toString().orEmpty())
+            }
+            ManualDiagramInteraction(id, entries, from, to, map["operation"]?.toString().orEmpty(), parameters,
+                map["result"]?.toString(), map["label"]?.toString(),
+                map["kind"]?.toString()?.uppercase()?.let { kind -> MessageKind.entries.firstOrNull { it.name == kind } } ?: MessageKind.CALL,
+                (map["enabled"] as? Boolean) ?: true, (map["order"] as? Number)?.toLong() ?: 0L)
+        }
+        val groups = (document["groups"] as? List<*>).orEmpty().mapNotNull { item ->
+            val map = item as? Map<*, *> ?: return@mapNotNull null
+            val id = map["id"]?.toString() ?: return@mapNotNull null
+            ManualDiagramGroup(id, map["label"]?.toString().orEmpty(), (map["interactionIds"] as? List<*>)?.mapNotNull { it as? String }.orEmpty(),
+                (map["enabled"] as? Boolean) ?: true)
+        }
+        val notes = (document["notes"] as? List<*>).orEmpty().mapNotNull { item ->
+            val map = item as? Map<*, *> ?: return@mapNotNull null
+            val id = map["id"]?.toString() ?: return@mapNotNull null
+            val participant = map["participantId"]?.toString() ?: return@mapNotNull null
+            val after = map["afterInteractionId"]?.toString() ?: return@mapNotNull null
+            ManualDiagramNote(id, participant, after, map["text"]?.toString().orEmpty(), (map["isError"] as? Boolean) ?: false, (map["enabled"] as? Boolean) ?: true)
+        }
+        val activations = (document["activations"] as? List<*>).orEmpty().mapNotNull { item ->
+            val map = item as? Map<*, *> ?: return@mapNotNull null
+            val id = map["id"]?.toString() ?: return@mapNotNull null
+            val participant = map["participantId"]?.toString() ?: return@mapNotNull null
+            val start = map["startInteractionId"]?.toString() ?: return@mapNotNull null
+            val end = map["endInteractionId"]?.toString() ?: return@mapNotNull null
+            ManualDiagramActivation(id, participant, start, end, (map["enabled"] as? Boolean) ?: true)
+        }
+        return ManualDiagramDocument(interactions, groups, notes, activations)
+    }
+
+    private fun originMap(origin: MessageOriginKey): Map<String, Any?> = mapOf(
+        "entryId" to origin.entryId, "ruleId" to origin.ruleId, "sourceOperationId" to origin.sourceOperationId,
+        "sourceLogSiteId" to origin.sourceLogSiteId, "invocationId" to origin.invocationId,
+        "manualInteractionId" to origin.manualInteractionId, "generatedOrdinal" to origin.generatedOrdinal,
+    )
+
+    private fun diagramRuleMap(rule: DiagramMessageRule): Map<String, Any?> = mapOf(
+        "id" to rule.id, "pattern" to rule.pattern, "enabled" to rule.enabled,
+        "fromTemplate" to rule.fromTemplate, "toTemplate" to rule.toTemplate, "labelTemplate" to rule.labelTemplate,
+        "fromEndpoint" to rule.fromEndpoint?.let(::diagramRuleEndpointMap),
+        "toEndpoint" to rule.toEndpoint?.let(::diagramRuleEndpointMap),
+    )
+
+    private fun diagramRuleEndpointMap(endpoint: DiagramRuleEndpoint): Map<String, Any?> = when (endpoint) {
+        is DiagramRuleEndpoint.ExistingParticipant -> mapOf("kind" to "existing", "participantId" to endpoint.participantId)
+        DiagramRuleEndpoint.CurrentEntry -> mapOf("kind" to "currentEntry")
+        is DiagramRuleEndpoint.CapturedValue -> mapOf(
+            "kind" to "captured", "captureName" to endpoint.captureName,
+            "bindings" to endpoint.bindings.map { mapOf("capturedValue" to it.capturedValue, "participantId" to it.participantId) },
+        )
+        is DiagramRuleEndpoint.ExplicitActor -> mapOf("kind" to "actor", "id" to endpoint.id, "label" to endpoint.label)
+    }
+
+    private fun messageOverrideMap(override: DiagramMessageOverride): Map<String, Any?> = mapOf(
+        "origin" to originMap(override.origin), "enabled" to override.enabled,
+        "fromParticipantId" to override.fromParticipantId, "toParticipantId" to override.toParticipantId,
+        "label" to override.label, "kind" to override.kind?.name?.lowercase(),
+        "parameters" to override.parameters?.map { mapOf("name" to it.name, "value" to it.value) },
+    )
+
+    private fun manualDocumentMap(document: ManualDiagramDocument): Map<String, Any?> = mapOf(
+        "interactions" to document.interactions.map { interaction -> mapOf(
+            "id" to interaction.id, "sourceEntryIds" to interaction.sourceEntryIds.sorted(), "fromParticipantId" to interaction.fromParticipantId,
+            "toParticipantId" to interaction.toParticipantId, "operation" to interaction.operation,
+            "parameters" to interaction.parameters.map { mapOf("name" to it.name, "value" to it.value) },
+            "result" to interaction.result, "label" to interaction.label, "kind" to interaction.kind.name.lowercase(),
+            "enabled" to interaction.enabled, "order" to interaction.order,
+        ) },
+        "groups" to document.groups.map { mapOf("id" to it.id, "label" to it.label, "interactionIds" to it.interactionIds, "enabled" to it.enabled) },
+        "notes" to document.notes.map { mapOf("id" to it.id, "participantId" to it.participantId, "afterInteractionId" to it.afterInteractionId, "text" to it.text, "isError" to it.isError, "enabled" to it.enabled) },
+        "activations" to document.activations.map { mapOf("id" to it.id, "participantId" to it.participantId, "startInteractionId" to it.startInteractionId, "endInteractionId" to it.endInteractionId, "enabled" to it.enabled) },
+    )
+
     private fun rawDiagramActorIds(args: Map<String, Any?>): List<String> =
         (args["actors"] as? List<*>).orEmpty().mapNotNull { item -> when (item) {
             is String -> item.trim().takeIf(String::isNotEmpty)
@@ -1229,10 +1671,19 @@ internal class IndagiumToolOperations(
         }
     }
 
+    private fun sourceTraceResolver(
+        spec: SeqDiagramSpec,
+        index: SourceIndex?,
+    ): ((List<LogEntry>) -> DiagramResolvedTrace)? {
+        if (!spec.sourceEnrichment.enabled || index == null || index.version != SOURCE_INDEX_VERSION) return null
+        val engine = SourceTraceInferenceEngine(index)
+        return { entries -> engine.resolve(entries, sourceSiteOverrides = spec.sourceSiteOverrides) }
+    }
+
     private fun sourceEnrichmentAvailabilityWarnings(spec: SeqDiagramSpec, index: SourceIndex?): List<String> = when {
         !spec.sourceEnrichment.enabled -> emptyList()
-        spec.components.isEmpty() -> listOf("Source enrichment unavailable: define enabled components first.")
         index == null -> listOf("Source enrichment unavailable: no source index is loaded.")
+        index.version != SOURCE_INDEX_VERSION -> listOf("Source enrichment unavailable: the loaded source index is stale.")
         else -> emptyList()
     }
 
@@ -1246,7 +1697,13 @@ internal class IndagiumToolOperations(
 
     private fun sourceEnrichmentMap(spec: SeqDiagramSpec, index: SourceIndex?): Map<String, Any> = mapOf(
         "enabled" to spec.sourceEnrichment.enabled,
-        "available" to (spec.components.isNotEmpty() && index != null),
+        // Keep `available` backwards-compatible as "an index is loaded"; expose the stronger
+        // compatibility result separately so MCP callers can distinguish a stale cache from no
+        // configured source index.
+        "available" to (index != null),
+        "mode" to "sourceTrace",
+        "traceAvailable" to (index?.version == SOURCE_INDEX_VERSION),
+        "indexVersion" to (index?.version ?: -1),
         "directCallDepth" to spec.sourceEnrichment.directCallDepth,
         "addReturnArrows" to spec.sourceEnrichment.addReturnArrows,
     )

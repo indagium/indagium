@@ -49,8 +49,6 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.isCtrlPressed
-import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -67,6 +65,9 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.diagram.ArrowHit
 import com.indagium.diagram.DiagramCallOverride
+import com.indagium.diagram.DiagramMessageOverride
+import com.indagium.diagram.DiagramParameter
+import com.indagium.diagram.MessageOriginKey
 import com.indagium.diagram.MessageKind
 import com.indagium.diagram.DiagramRange
 import com.indagium.diagram.RenderedDiagram
@@ -86,6 +87,35 @@ private data class CallCorrectionDraft(
     val fromId: String,
     val toId: String,
 )
+
+private fun messageOrigins(message: com.indagium.diagram.DiagramMessage): Set<MessageOriginKey> =
+    message.originKeys.ifEmpty { setOf(MessageOriginKey(message.entryId, generatedOrdinal = message.edgeOrdinal)) }
+
+private fun manualSnapshotFor(
+    diagram: com.indagium.diagram.SeqDiagram,
+    selectedOrigins: Set<MessageOriginKey>,
+): List<com.indagium.diagram.ManualDiagramInteraction> = diagram.messages.mapNotNull { message ->
+    if (messageOrigins(message).none { it in selectedOrigins }) return@mapNotNull null
+    com.indagium.diagram.DiagramProposalService.manualSeedFromVerifiedSourceMessage(message, diagram.participants)
+        ?: run {
+            val from = diagram.participants.getOrNull(message.fromIdx)?.id ?: return@run null
+            val to = diagram.participants.getOrNull(message.toIdx)?.id ?: return@run null
+            val origin = messageOrigins(message).firstOrNull { it in selectedOrigins }
+                ?: return@run null
+            com.indagium.diagram.ManualDiagramInteraction(
+                id = origin.manualInteractionId ?: "snapshot:${origin.entryId}:${origin.generatedOrdinal}:${origin.ruleId.orEmpty()}",
+                sourceEntryIds = message.representedEntryIds.ifEmpty { setOf(message.entryId) },
+                fromParticipantId = from, toParticipantId = to, operation = message.label, label = message.label,
+                kind = message.kind, order = message.entryId.toLong(),
+                groupKey = com.indagium.diagram.manualInteractionGroupKey(
+                    message.sourceOperationId, message.sourceLogSiteId, from, to, message.kind, message.label,
+                ),
+                sourceMethodId = message.sourceOperationId,
+                sourceLogSiteId = message.sourceLogSiteId,
+                sourceOwnerType = diagram.participants.getOrNull(message.fromIdx)?.sourceOwnerType,
+            )
+        }
+}.distinctBy { it.id }
 
 /**
  * Dedicated sequence-diagram editor surface.  It is intentionally not a Dialog: the log tab bar
@@ -117,6 +147,8 @@ fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
     }
     val tc = tc()
     var correction by remember(workspaceId) { mutableStateOf<CallCorrectionDraft?>(null) }
+    var selectedOrigins by remember(workspaceId) { mutableStateOf<Set<MessageOriginKey>>(emptySet()) }
+    var batchEditorOpen by remember(workspaceId) { mutableStateOf(false) }
 
     fun requestClose() {
         state.seqDiagrams.requestCloseWorkspace(workspaceId)
@@ -151,6 +183,38 @@ fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                if (!readOnly && selectedOrigins.isNotEmpty()) {
+                    AppButton("Edit ${selectedOrigins.size} selected", { batchEditorOpen = true }, variant = ButtonVariant.Secondary)
+                    val focus = session.preview.diagramOrNull?.messages?.firstOrNull { messageOrigins(it).any { it in selectedOrigins } }
+                    fun addCohort(predicate: (com.indagium.diagram.DiagramMessage) -> Boolean) {
+                        val additions = session.preview.diagramOrNull?.messages.orEmpty()
+                            .filter(predicate).flatMapTo(linkedSetOf(), ::messageOrigins)
+                        selectedOrigins += additions
+                    }
+                    focus?.let { message ->
+                        AppButton("Same ends", { addCohort { it.fromIdx == message.fromIdx && it.toIdx == message.toIdx } }, variant = ButtonVariant.Ghost)
+                        AppButton("Same label", { addCohort { it.label == message.label } }, variant = ButtonVariant.Ghost)
+                        AppButton("Same evidence", { addCohort { it.evidence == message.evidence } }, variant = ButtonVariant.Ghost)
+                        message.sourceOperationId?.let { operation ->
+                            AppButton("Same operation", { addCohort { it.sourceOperationId == operation } }, variant = ButtonVariant.Ghost)
+                        }
+                    }
+                    AppButton("Make manual", {
+                        val diagram = session.preview.diagramOrNull ?: return@AppButton
+                        val snapshot = manualSnapshotFor(diagram, selectedOrigins)
+                        if (snapshot.isEmpty()) return@AppButton
+                        val existing = spec.manualDocument.interactions.associateBy { it.id }
+                        state.seqDiagrams.updateSpec(spec.copy(
+                            authoringMode = com.indagium.diagram.DiagramAuthoringMode.MANUAL,
+                            lifelineOrder = diagram.participants.map { it.id },
+                            manualDocument = spec.manualDocument.copy(
+                                interactions = (existing + snapshot.associateBy { it.id }).values.sortedBy { it.order },
+                            ),
+                        ))
+                        selectedOrigins = emptySet()
+                    }, variant = ButtonVariant.Ghost)
+                    AppButton("Clear", { selectedOrigins = emptySet() }, variant = ButtonVariant.Ghost)
+                }
                 ToolbarBtn(
                     "Inspector",
                     icon = Icons.Outlined.Tune,
@@ -174,15 +238,23 @@ fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    if (tab != null && !readOnly) WorkspaceInspector(tab, state, spec) { state.seqDiagrams.updateSpec(it) }
+                    if (tab != null && !readOnly) WorkspaceInspector(
+                        tab = tab,
+                        state = state,
+                        spec = spec,
+                        preview = session.preview.diagramOrNull,
+                        selectedEntryIds = selectedOrigins.mapTo(linkedSetOf()) { it.entryId },
+                        onSpec = { state.seqDiagrams.updateSpec(it) },
+                    )
                     else OfflineInspector(spec)
                 }
-                HDivider { delta -> state.seqDiagrams.updateInspector(width = session.inspectorWidth + delta) }
+                HDivider { delta -> state.seqDiagrams.resizeInspectorBy(delta) }
             }
-            DiagramPreviewPane(state, session, Modifier.weight(1f).fillMaxHeight()) { hit, message ->
-                val from = session.preview.diagramOrNull?.participants?.getOrNull(message.fromIdx)?.id ?: return@DiagramPreviewPane
-                val to = session.preview.diagramOrNull?.participants?.getOrNull(message.toIdx)?.id ?: return@DiagramPreviewPane
-                correction = CallCorrectionDraft(hit.entryId, message.edgeOrdinal, from, to)
+            DiagramPreviewPane(state, session, Modifier.weight(1f).fillMaxHeight()) { _, message ->
+                // Context-click is additive and works on collapsed arrows too: their origin set
+                // contains every member, so one selection can batch-correct all represented rows.
+                val origins = messageOrigins(message)
+                selectedOrigins = if (origins.all { it in selectedOrigins }) selectedOrigins - origins else selectedOrigins + origins
             }
         }
 
@@ -216,6 +288,31 @@ fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
                     correction = null
                 },
                 onDismiss = { correction = null },
+            )
+        }
+    }
+    if (batchEditorOpen && !readOnly) {
+        session.preview.diagramOrNull?.let { diagram ->
+            MessageBatchEditDialog(
+                diagram = diagram,
+                selectedOrigins = selectedOrigins,
+                onSave = { from, to, label, kind, parameters ->
+                    val replacements = selectedOrigins.map { origin ->
+                        DiagramMessageOverride(
+                            origin = origin, fromParticipantId = from, toParticipantId = to,
+                            label = label.ifBlank { null }, kind = kind, parameters = parameters,
+                        )
+                    }
+                    state.seqDiagrams.updateSpec(spec.copy(
+                        messageOverrides = spec.messageOverrides.filterNot { it.origin in selectedOrigins } + replacements,
+                    ))
+                    batchEditorOpen = false
+                },
+                onRequestReset = {
+                    state.seqDiagrams.updateSpec(spec.copy(messageOverrides = spec.messageOverrides.filterNot { it.origin in selectedOrigins }))
+                    batchEditorOpen = false
+                },
+                onDismiss = { batchEditorOpen = false },
             )
         }
     }
@@ -600,9 +697,10 @@ private fun DiagramPreviewPane(
                     )
                 }
                 val warnings = diagram.warnings
+                val traceDiagnostics = diagram.resolvedTrace?.diagnostics
                 Column(Modifier.padding(6.dp)) {
                     AppText(
-                        "${diagram.messages.size} shown / ${diagram.scannedEntries} scanned · ${diagram.participants.size} lifelines" +
+                        "${diagram.traceMode.name.lowercase().replace('_', ' ')} · ${diagram.messages.size} shown / ${diagram.scannedEntries} scanned · ${diagram.participants.size} lifelines" +
                             diagram.coverage.let { coverage ->
                                 buildString {
                                     if (coverage.groupedEntries > 0) append(" · ${coverage.groupedEntries} grouped")
@@ -612,11 +710,50 @@ private fun DiagramPreviewPane(
                             if (diagram.truncated) " · truncated" else "",
                         color = tc.td, fontSize = 10.sp,
                     )
+                    if (diagram.resolvedTrace != null) {
+                        AppText(
+                            "Source mappings: ${diagram.resolvedTrace.events.size} logs · ${diagram.resolvedTrace.calls.size} invocations · ${diagram.resolvedTrace.operations.size} operations",
+                            color = tc.td,
+                            fontSize = 10.sp,
+                            maxLines = 1,
+                        )
+                    }
                     warnings.take(2).forEach { AppText(it, color = DANGER_RED, fontSize = 10.sp, maxLines = 2) }
+                    if (traceDiagnostics != null && traceDiagnostics.diagnostics.isNotEmpty()) {
+                        AppText(
+                            "Trace diagnostics: ${traceDiagnostics.diagnostics.size}" +
+                                if (traceDiagnostics.truncated) " · capped" else "",
+                            color = tc.td,
+                            fontSize = 10.sp,
+                            maxLines = 1,
+                        )
+                        traceDiagnostics.diagnostics.take(2).forEach { diagnostic ->
+                            AppText(
+                                "${diagnostic.reason.name.lowercase()}" +
+                                    (diagnostic.entryId?.let { " · entry $it" } ?: "") +
+                                    (diagnostic.detail?.let { " · $it" } ?: ""),
+                                color = DANGER_RED,
+                                fontSize = 10.sp,
+                                maxLines = 2,
+                            )
+                        }
+                    }
                 }
             }
 
-            preview is DiagramPreviewState.Failed -> CenteredHint(preview.message, DANGER_RED)
+            preview is DiagramPreviewState.Failed -> Box(
+                Modifier.fillMaxWidth().heightIn(min = 260.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AppText(preview.message, color = DANGER_RED, fontSize = 11.sp, maxLines = 3)
+                    state.seqDiagrams.request?.let { request ->
+                        AppButton("Retry preview", {
+                            state.seqDiagrams.requestPreview(request.tabId, request.spec)
+                        }, variant = ButtonVariant.Ghost)
+                    }
+                }
+            }
             preview is DiagramPreviewState.Computing -> CenteredHint("Building…", tc.td)
             else -> CenteredHint("Pick participants and a range.", tc.td)
         }
@@ -694,6 +831,93 @@ private fun CallCorrectionParticipantPicker(
         }
         AppText(selectedId, color = tc.td, fontSize = 9.sp, fontFamily = MONO, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
     }
+}
+
+/** Bulk editor for stable message origins.  It is intentionally separate from the legacy
+ * CallCorrectionDialog: one displayed arrow can represent many origins after repeat collapsing,
+ * and a RETURN is a legitimate batch target. */
+@Composable
+private fun MessageBatchEditDialog(
+    diagram: com.indagium.diagram.SeqDiagram,
+    selectedOrigins: Set<MessageOriginKey>,
+    onSave: (String, String, String, MessageKind, List<DiagramParameter>) -> Unit,
+    onRequestReset: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val tc = tc()
+    val first = diagram.messages.firstOrNull { messageOrigins(it).any { origin -> origin in selectedOrigins } }
+    var fromId by remember(selectedOrigins) { mutableStateOf(first?.fromIdx?.let { diagram.participants.getOrNull(it)?.id }.orEmpty()) }
+    var toId by remember(selectedOrigins) { mutableStateOf(first?.toIdx?.let { diagram.participants.getOrNull(it)?.id }.orEmpty()) }
+    var label by remember(selectedOrigins) { mutableStateOf("") }
+    var parameters by remember(selectedOrigins) { mutableStateOf("") }
+    var kind by remember(selectedOrigins) { mutableStateOf(first?.kind ?: MessageKind.CALL) }
+    var confirmReset by remember(selectedOrigins) { mutableStateOf(false) }
+    val kinds = listOf(MessageKind.CALL, MessageKind.RETURN, MessageKind.SELF, MessageKind.ASYNC)
+
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            Modifier.width(680.dp).background(tc.p, RoundedCornerShape(8.dp)).border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            AppText("Edit ${selectedOrigins.size} selected message${if (selectedOrigins.size == 1) "" else "s"}", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            AppText(
+                "Changes apply to every stable origin selected on the canvas, including every row represented by a collapsed arrow.",
+                color = tc.td, fontSize = 10.sp, maxLines = 2,
+            )
+            BatchParticipantPicker("From", fromId, diagram.participants) { fromId = it }
+            BatchParticipantPicker("To", toId, diagram.participants) { toId = it }
+            InlineField(label, { label = it }, "custom label (leave blank to keep generated label)", Modifier.fillMaxWidth(), fontSize = 10.sp)
+            InlineField(parameters, { parameters = it }, "parameters: name=value; …", Modifier.fillMaxWidth(), fontSize = 10.sp)
+            SegmentedControl(kinds.map { it.name.lowercase() }, setOf(kinds.indexOf(kind)), onToggle = { kind = kinds[it] })
+            if (confirmReset) {
+                AppText("Remove all saved edits for these selected messages?", color = DANGER_RED, fontSize = 10.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    AppButton("Cancel", { confirmReset = false }, variant = ButtonVariant.Ghost)
+                    AppButton("Reset selected", onRequestReset, variant = ButtonVariant.Secondary, isDanger = true)
+                }
+            } else {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                    AppButton("Reset selected", { confirmReset = true }, variant = ButtonVariant.Ghost, isDanger = true)
+                    AppButton("Cancel", onDismiss, variant = ButtonVariant.Ghost)
+                    AppButton(
+                        "Apply to selected",
+                        { onSave(fromId, toId, label, kind, parameters.parseBatchParameters()) },
+                        variant = ButtonVariant.Primary,
+                        enabled = fromId.isNotBlank() && toId.isNotBlank(),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BatchParticipantPicker(
+    title: String,
+    selectedId: String,
+    participants: List<com.indagium.diagram.DiagramParticipant>,
+    onSelect: (String) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        AppText(title, color = tc().td, fontSize = 9.sp)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            participants.forEach { participant ->
+                AppButton(
+                    participant.displayName,
+                    { onSelect(participant.id) },
+                    variant = if (participant.id == selectedId) ButtonVariant.Primary else ButtonVariant.Ghost,
+                )
+            }
+        }
+    }
+}
+
+private fun String.parseBatchParameters(): List<DiagramParameter> = split(';').mapNotNull { raw ->
+    val text = raw.trim()
+    if (text.isBlank()) return@mapNotNull null
+    val split = text.indexOf('=')
+    if (split < 0) DiagramParameter(value = text)
+    else DiagramParameter(text.substring(0, split).trim(), text.substring(split + 1).trim())
 }
 
 // ── Footer ───────────────────────────────────────────────────────────────────────────────────

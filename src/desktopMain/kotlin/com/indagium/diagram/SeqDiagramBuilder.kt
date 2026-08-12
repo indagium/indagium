@@ -70,6 +70,8 @@ fun buildSequenceDiagram(
     resolveLabel: (LogEntry) -> String? = { null },
     cancellationCheck: CancellationCheck = CancellationCheck {},
     resolveSourceInteractions: (LogEntry) -> List<DiagramSourceInteraction> = { emptyList() },
+    /** New range-level source trace resolver. The legacy callback remains as a migration adapter. */
+    resolveTrace: ((List<LogEntry>) -> DiagramResolvedTrace)? = null,
 ): SeqDiagram {
     val warnings = mutableListOf<String>()
     // A diagram range is an explicit data-selection surface. New specs include rows hidden by
@@ -86,10 +88,41 @@ fun buildSequenceDiagram(
     } else {
         resolveTagParticipants(spec.participants, candidateEntries)
     }
+    // Accepted manual interactions are a complete authored document.  Deliberately stop before
+    // source resolution, actor mirroring, inferred overrides, and trace participant synthesis:
+    // none may mutate a manual diagram behind the user's back.
+    if (spec.authoringMode == DiagramAuthoringMode.MANUAL) {
+        return buildManualSequenceDiagram(
+            spec = spec,
+            entries = participantResolution.representedEntries,
+            participants = participantResolution.participants,
+            coverage = participantResolution.coverage,
+            warnings = warnings,
+        )
+    }
+    val resolvedTrace = if (spec.sourceEnrichment.enabled && resolveTrace != null) {
+        // Source reconstruction must see exactly the rows represented by configured lifelines.
+        // An intentionally hidden/unmapped row cannot invalidate an otherwise verifiable trace.
+        runCatching { resolveTrace(participantResolution.representedEntries) }
+            .onFailure { warnings += "Source trace inference failed: ${it.message ?: "unknown error"}" }
+            .getOrNull()
+    } else {
+        null
+    }
+    val projectedTrace = resolvedTrace?.projectTo(participantResolution.representedEntries)
+    val traceParticipantResolution = addTraceParticipants(participantResolution, spec, projectedTrace)
+    // A complete source trace is a separate semantic model from evidence flow.  It must not be
+    // seeded with legacy log arrows and then patched with source calls afterwards.
+    val sourceTraceActive = projectedTrace != null && traceParticipantResolution.representedEntries.isNotEmpty() &&
+        projectedTrace.events.map { it.entryId }.toSet() == traceParticipantResolution.representedEntries.map { it.id }.toSet() &&
+        projectedTrace.diagnostics.diagnostics.none { diagnostic ->
+            diagnostic.reason in SOURCE_TRACE_HARD_FAILURES
+        }
     val registry = ParticipantRegistry(
-        participantResolution.participants,
-        participantResolution.groupedTags,
-        participantResolution.tagToParticipantId,
+        traceParticipantResolution.participants,
+        traceParticipantResolution.groupedTags,
+        traceParticipantResolution.tagToParticipantId,
+        sourceOwnerBindings(spec, traceParticipantResolution.participants),
     )
     val entryPointIdx = spec.participants
         .firstOrNull { it.kind == ParticipantKind.ACTOR && it.isEntryPoint }
@@ -104,17 +137,17 @@ fun buildSequenceDiagram(
     // means for everything that survived the filter.
     val firstTs = candidateEntries.firstOrNull()?.ts
 
-    when (spec.mode) {
+    if (!sourceTraceActive) when (spec.mode) {
         ArrowMode.EVIDENCE_FLOW -> runEvidenceFlow(
-            participantResolution.representedEntries, registry, entryPointIdx, exitPointIdx, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
+            traceParticipantResolution.representedEntries, registry, entryPointIdx, exitPointIdx, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
         )
 
         ArrowMode.RULES -> runRules(
-            participantResolution.representedEntries, registry, spec.rules, spec.options, resolveLabel, firstTs, regexContext, cancellationCheck, gen, warnings,
+            traceParticipantResolution.representedEntries, registry, spec.rules, spec.options, resolveLabel, firstTs, regexContext, cancellationCheck, gen, warnings,
         )
 
         ArrowMode.LINE_PER_MESSAGE -> runLinePerMessage(
-            participantResolution.representedEntries, registry, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
+            traceParticipantResolution.representedEntries, registry, spec.options, resolveLabel, firstTs, cancellationCheck, gen,
         )
     }
     // EVIDENCE_FLOW's whole point is to stop guessing arrows — but a diagram that is ENTIRELY
@@ -123,12 +156,16 @@ fun buildSequenceDiagram(
     // structure". Checked on the mode's own raw output, before source enrichment/actor mirrors
     // (which have their own, separate warnings) — this is specifically about EVIDENCE_FLOW's own
     // inference finding nothing to draw.
-    if (spec.mode == ArrowMode.EVIDENCE_FLOW && gen.messages.isNotEmpty() && gen.messages.none { it.fromIdx != it.toIdx }) {
+    if (!sourceTraceActive && spec.mode == ArrowMode.EVIDENCE_FLOW && gen.messages.isNotEmpty() && gen.messages.none { it.fromIdx != it.toIdx }) {
         warnings += "No correlated interactions found — every line is shown as an event. " +
             "Enable same-thread handoffs or add interaction rules to draw arrows."
     }
 
-    val sourceResult = if (spec.sourceEnrichment.enabled) {
+    // A source-enabled diagram with a trace resolver has one semantic owner. If that resolver
+    // cannot produce a compatible path, use the ordinary log/evidence fallback; do not mix its
+    // partial result with the legacy one-hop overlay. The callback-only legacy adapter remains for
+    // non-source-trace callers and existing explicit component tests.
+    val sourceResult = if (spec.sourceEnrichment.enabled && resolveTrace == null) {
         // Resolve the same bounded entry window even when runtime fallbacks already fill the
         // message cap. A uniquely resolved source call can replace that entry's SELF event, so
         // budgeting source work against the unused capacity would make source enrichment silently
@@ -136,7 +173,7 @@ fun buildSequenceDiagram(
         val sourceBudget = spec.options.maxMessages
         val stackInteractions = inferStackInteractions(candidateEntries, spec.components)
         buildSourceInteractions(
-            participantResolution.representedEntries, candidateEntries, stackInteractions,
+        traceParticipantResolution.representedEntries, candidateEntries, stackInteractions,
             registry, spec.options, spec.sourceEnrichment,
             resolveSourceInteractions, cancellationCheck, warnings, sourceBudget,
         )
@@ -155,8 +192,31 @@ fun buildSequenceDiagram(
     // evidence-flow emits for a line. Promote only one source CALL per entry; if the source
     // resolver returns several candidates, keep the original SELF and leave the enrichment
     // messages supplemental rather than choosing an arbitrary endpoint.
-    val mergedMessages = promoteUniqueSourceCalls(gen.messages, sourceResult.messages, spec.options)
-    val orderedMessages = assignEdgeOrdinals(mergedMessages.sortedBy { it.entryId })
+    val traceResult = projectedTrace?.takeIf { sourceTraceActive }?.let {
+        buildTraceMessages(it, traceParticipantResolution.representedEntries, registry, spec.options, warnings)
+    }
+    val selectedSourceResult = traceResult ?: sourceResult
+    if (projectedTrace != null) {
+        projectedTrace.diagnostics.droppedByReason.forEach { (reason, count) ->
+            warnings += "Source trace dropped $count candidate(s): ${reason.name.lowercase()}"
+        }
+        projectedTrace.diagnostics.diagnostics.take(32).forEach { diagnostic ->
+            val entry = diagnostic.entryId?.let { " entry $it" }.orEmpty()
+            val detail = diagnostic.detail?.let { ": $it" }.orEmpty()
+            warnings += "Source trace ${diagnostic.reason.name.lowercase()}$entry$detail"
+        }
+    }
+    val mergedMessages = when {
+        sourceTraceActive -> selectedSourceResult.messages
+        // A source resolver was present but could not reconstruct a compatible trace: explicit
+        // log/evidence fallback, with no one-hop overlay semantics.
+        resolveTrace != null -> gen.messages
+        else -> promoteUniqueSourceCalls(gen.messages, selectedSourceResult.messages, spec.options)
+    }
+    val orderedMessages = assignEdgeOrdinals(mergedMessages.sortedWith(
+        compareBy<DiagramMessage> { it.entryId }
+            .thenBy { if (!it.primary && it.kind == MessageKind.CALL) 0 else 1 },
+    ))
     val correctedMessages = applyCallOverrides(orderedMessages, spec.callOverrides, registry)
     val rawMessages = applyActorMirrors(correctedMessages, registry, spec.actors)
     // showSelfMessages/showSourceInferred drop messages BEFORE collapsing — buildNotes/buildFrames
@@ -167,10 +227,26 @@ fun buildSequenceDiagram(
     // filtered)-to-collapsed mapping. See filterMessages' own doc for the out-of-range sentinel.
     val filterResult = filterMessages(rawMessages, spec.options)
     val collapsed = if (spec.options.collapseRepeats) collapseRepeats(filterResult.messages) else identityCollapse(filterResult.messages)
-    val truncated = collapsed.messages.size > spec.options.maxMessages || sourceResult.truncated
-    val cappedMessages = if (truncated) collapsed.messages.subList(0, spec.options.maxMessages).toList() else collapsed.messages
+    // Origin-addressed overrides deliberately run after repeat collapse and actor mirroring. A
+    // correction therefore fans out to every rendered representation carrying that origin rather
+    // than accidentally changing just one pre-collapse raw row.
+    val overrideResult = applyMessageOverrides(collapsed.messages, spec.messageOverrides, registry)
+    val primaryMessages = overrideResult.messages.filter { it.primary }
+    // Structural interactions are optional; selected log evidence is not. Retain every primary
+    // event even if that exceeds maxMessages, then use any remaining budget for structure.
+    val structuralBudget = (spec.options.maxMessages - primaryMessages.size).coerceAtLeast(0)
+    val retainedStructural = overrideResult.messages.filterNot { it.primary }.take(structuralBudget).toSet()
+    val cappedMessages = overrideResult.messages.filter { it.primary || it in retainedStructural }
+    val truncated = cappedMessages.size < overrideResult.messages.size || selectedSourceResult.truncated
+    val expectedPrimaryIds = traceParticipantResolution.representedEntries.mapTo(linkedSetOf()) { it.id }
+    val actualPrimaryIds = cappedMessages.filter { it.primary }.flatMapTo(linkedSetOf()) { it.representedEntryIds }
+    if (actualPrimaryIds != expectedPrimaryIds) {
+        warnings += "Primary event invariant failed; falling back to the represented log rows."
+    }
     val finalMapping = IntArray(rawMessages.size) { i ->
-        collapsed.rawToCollapsedIndex.getOrElse(filterResult.rawToFiltered[i]) { collapsed.messages.size }
+        overrideResult.oldToNew.getOrElse(
+            collapsed.rawToCollapsedIndex.getOrElse(filterResult.rawToFiltered[i]) { collapsed.messages.size },
+        ) { overrideResult.messages.size }
     }
     val notes = buildNotes(gen.notes, finalMapping, cappedMessages.size)
 
@@ -183,12 +259,16 @@ fun buildSequenceDiagram(
         emptyList()
     }
     val activations = if (spec.options.activationPolicy == ActivationPolicy.EVIDENCE_BACKED) {
-        buildActivationSpans(cappedMessages)
+        if (sourceTraceActive) {
+            buildTraceActivationSpansFromTrace(rawMessages, projectedTrace.calls, finalMapping, cappedMessages.size)
+        } else {
+            buildLegacyActivationSpans(cappedMessages)
+        }
     } else {
         emptyList()
     }
 
-    return SeqDiagram(
+    return reorderDiagramLifelines(SeqDiagram(
         spec = spec,
         participants = registry.list.toList(),
         messages = cappedMessages,
@@ -197,10 +277,34 @@ fun buildSequenceDiagram(
         activationSpans = activations,
         truncated = truncated,
         scannedEntries = candidateEntries.size,
-        coverage = participantResolution.coverage,
+        coverage = traceParticipantResolution.coverage,
         warnings = warnings,
-    )
+        resolvedTrace = projectedTrace,
+        traceMode = when {
+            sourceTraceActive -> SourceTraceMode.SOURCE_TRACE
+            spec.sourceEnrichment.enabled -> SourceTraceMode.FALLBACK
+            else -> SourceTraceMode.DISABLED
+        },
+    ), spec.lifelineOrder)
 }
+
+private val SOURCE_TRACE_HARD_FAILURES = setOf(
+    TraceDiagnosticReason.AMBIGUOUS_SOURCE_SITE,
+    TraceDiagnosticReason.LOW_CONFIDENCE,
+    TraceDiagnosticReason.STALE_SOURCE_SITE,
+    TraceDiagnosticReason.BRANCH_INCOMPATIBLE,
+    TraceDiagnosticReason.CALL_GRAPH_GAP,
+    TraceDiagnosticReason.UNMAPPED_CALLER,
+    TraceDiagnosticReason.UNMAPPED_CALLEE,
+)
+
+private val ASYNC_INVOCATION_KINDS = setOf(
+    TraceInvocationKind.COROUTINE_LAUNCH,
+    TraceInvocationKind.CALLBACK_REGISTRATION,
+    TraceInvocationKind.EXECUTOR_DISPATCH,
+    TraceInvocationKind.BINDER_OR_RPC,
+    TraceInvocationKind.UNKNOWN_ASYNC,
+)
 
 // ── Range resolution ──────────────────────────────────────────────────────────────────────────
 
@@ -228,7 +332,14 @@ private fun assignEdgeOrdinals(messages: List<DiagramMessage>): List<DiagramMess
     return messages.map { message ->
         val ordinal = next[message.entryId] ?: 0
         next[message.entryId] = ordinal + 1
-        message.copy(edgeOrdinal = ordinal)
+        val fallbackOrigin = MessageOriginKey(
+            entryId = message.entryId,
+            sourceOperationId = message.sourceOperationId,
+            sourceLogSiteId = message.sourceLogSiteId,
+            invocationId = message.invocationId,
+            generatedOrdinal = ordinal,
+        )
+        message.copy(edgeOrdinal = ordinal, originKeys = message.originKeys.ifEmpty { setOf(fallbackOrigin) })
     }
 }
 
@@ -252,6 +363,54 @@ private fun applyCallOverrides(
     }
 }
 
+/** Applies typed, origin-addressed corrections after legacy entry/ordinal endpoint corrections. */
+private class MessageOverrideResult(val messages: List<DiagramMessage>, val oldToNew: IntArray)
+
+private fun applyMessageOverrides(
+    messages: List<DiagramMessage>,
+    overrides: List<DiagramMessageOverride>,
+    registry: ParticipantRegistry,
+): MessageOverrideResult {
+    if (overrides.isEmpty()) return MessageOverrideResult(messages, IntArray(messages.size) { it })
+    val byOrigin = overrides.associateBy { it.origin }
+    val kept = BooleanArray(messages.size)
+    val indexIfKept = IntArray(messages.size) { -1 }
+    val result = ArrayList<DiagramMessage>(messages.size)
+    messages.forEachIndexed { index, message ->
+        val override = message.originKeys.asSequence().mapNotNull(byOrigin::get).firstOrNull()
+        if (override == null) {
+            kept[index] = true
+            indexIfKept[index] = result.size
+            result += message
+            return@forEachIndexed
+        }
+        if (!override.enabled) return@forEachIndexed
+        val from = override.fromParticipantId?.let(registry::indexForId) ?: message.fromIdx
+        val to = override.toParticipantId?.let(registry::indexForId) ?: message.toIdx
+        val label = override.label ?: override.parameters?.let { parameters ->
+            val args = parameters.joinToString(", ") { if (it.name.isBlank()) it.value else "${it.name}=${it.value}" }
+            "${message.label}($args)"
+        } ?: message.label
+        val kind = override.kind ?: message.kind
+        kept[index] = true
+        indexIfKept[index] = result.size
+        result += message.copy(
+            fromIdx = from,
+            toIdx = to,
+            label = label,
+            kind = if (from == to && kind != MessageKind.RETURN) MessageKind.SELF else kind,
+            evidence = MessageEvidence.MANUAL_OVERRIDE,
+        )
+    }
+    val oldToNew = IntArray(messages.size)
+    var nextSurviving = result.size
+    for (index in messages.indices.reversed()) {
+        if (kept[index]) nextSurviving = indexIfKept[index]
+        oldToNew[index] = nextSurviving
+    }
+    return MessageOverrideResult(result, oldToNew)
+}
+
 private fun promoteUniqueSourceCalls(
     runtimeMessages: List<DiagramMessage>,
     sourceMessages: List<DiagramMessage>,
@@ -260,28 +419,62 @@ private fun promoteUniqueSourceCalls(
     if (!options.showSourceInferred || sourceMessages.isEmpty()) return runtimeMessages + sourceMessages
 
     val sourceByEntry = sourceMessages.groupBy { it.entryId }
-    val promotable = sourceByEntry.mapNotNull { (entryId, messages) ->
-        val calls = messages.filter { it.kind == MessageKind.CALL }
-        val call = calls.singleOrNull()
-        call?.let { entryId to messages }
+    val promotableCalls = sourceByEntry.mapNotNull { (entryId, messages) ->
+        messages.filter { it.kind == MessageKind.CALL || it.kind == MessageKind.SELF }
+            .singleOrNull()
+            ?.let { entryId to it }
     }.toMap()
-    if (promotable.isEmpty()) return runtimeMessages + sourceMessages
+    if (promotableCalls.isEmpty()) return runtimeMessages
+    val promotableInvocationIds = promotableCalls.values.mapNotNull { it.invocationId }.toSet()
 
-    val promoted = mutableSetOf<DiagramMessage>()
-    val correctedRuntime = runtimeMessages.flatMap { runtime ->
-        if (runtime.kind != MessageKind.SELF) return@flatMap listOf(runtime)
-        val sourceEdges = promotable[runtime.entryId] ?: return@flatMap listOf(runtime)
-        // Replace a genuine fallback SELF with the complete source interaction for that entry.
-        // Keeping its CALL/RETURN pair together is important: the final message cap must not
-        // discard the return and thereby erase the evidence-backed activation span.
-        promoted += sourceEdges
-        sourceEdges
+    val overlaidMessages = mutableSetOf<DiagramMessage>()
+    val correctedRuntime = runtimeMessages.map { runtime ->
+        val sourceEdges = sourceByEntry[runtime.entryId].orEmpty()
+        val call = promotableCalls[runtime.entryId]
+        val outcome = sourceEdges.singleOrNull { it.kind == MessageKind.RETURN }
+        val overlay = when {
+            // A source trace can contain only a selected result row.  Its inferred call is
+            // supplemental structure, while the selected row remains the primary return.
+            call != null && outcome?.traceStatus != null -> outcome
+            call != null -> call
+            outcome?.invocationId in promotableInvocationIds -> outcome
+            else -> null
+        } ?: return@map runtime
+        overlaidMessages += overlay
+        // The log row is immutable primary evidence. Source inference may improve its endpoints
+        // and provenance, but must retain its original label, entry id, timestamp and severity.
+        runtime.copy(
+            fromIdx = overlay.fromIdx,
+            toIdx = overlay.toIdx,
+            kind = when (overlay.kind) {
+                MessageKind.RETURN -> MessageKind.RETURN
+                else -> if (overlay.fromIdx == overlay.toIdx) MessageKind.SELF else MessageKind.CALL
+            },
+            evidence = overlay.evidence,
+            invocationId = overlay.invocationId,
+            traceStatus = overlay.traceStatus,
+            invocationKind = overlay.invocationKind,
+            primary = runtime.primary,
+        )
     }
-    return correctedRuntime + sourceMessages.filterNot { it in promoted }
+    // A tie is not supplemental evidence: emitting both candidates would draw every possible
+    // caller. Retain a return only when its matching call was uniquely resolved.
+    return correctedRuntime + sourceMessages.filter { source ->
+        val isUniqueCall = promotableCalls[source.entryId] === source
+        val isOutcomeForUniqueCall = source.kind == MessageKind.RETURN &&
+            (promotableCalls.containsKey(source.entryId) ||
+                (source.invocationId != null && source.invocationId in promotableInvocationIds))
+        (isUniqueCall || isOutcomeForUniqueCall) && source !in overlaidMessages
+    }
 }
 
 private fun resolveIdsRange(allVisible: List<LogEntry>, range: DiagramRange.Ids): RangeResolution {
     if (allVisible.isEmpty()) return RangeResolution(emptyList(), 0, 0)
+    if (range.selectedIds.isNotEmpty()) {
+        val exact = allVisible.filter { it.id in range.selectedIds }
+        val first = allVisible.indexOfFirst { it.id in range.selectedIds }.coerceAtLeast(0)
+        return RangeResolution(exact, first, (allVisible.indexOfLast { it.id in range.selectedIds } + 1).coerceAtLeast(first))
+    }
     val minId = minOf(range.from, range.to)
     val maxId = maxOf(range.from, range.to)
     val ids = IntArray(allVisible.size) { allVisible[it].id }
@@ -407,6 +600,75 @@ private data class ParticipantResolution(
     val coverage: DiagramCoverage,
     val tagToParticipantId: Map<String, String> = emptyMap(),
 )
+
+/** Apply the enabled tag/component projection before source evidence reaches participants. */
+private fun DiagramResolvedTrace.projectTo(entries: List<LogEntry>): DiagramResolvedTrace {
+    val representedIds = entries.mapTo(HashSet()) { it.id }
+    return copy(
+        events = events.filter { it.entryId in representedIds },
+        calls = calls.filter { it.callEntryId in representedIds },
+    )
+}
+
+private fun addTraceParticipants(
+    base: ParticipantResolution,
+    spec: SeqDiagramSpec,
+    trace: DiagramResolvedTrace?,
+): ParticipantResolution {
+    if (trace == null) return base
+    val owners = (trace.calls.flatMap { listOf(it.callerOwnerType, it.calleeOwnerType) } +
+        trace.events.mapNotNull { it.ownerType })
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .toSet()
+    if (owners.isEmpty()) return base
+    val participants = base.participants.toMutableList()
+    val usedIds = participants.mapTo(HashSet()) { it.id }
+    owners.forEach { owner ->
+        val receiverRole = trace.calls.firstOrNull {
+            it.calleeOwnerType == owner && !it.receiverRole.isNullOrBlank()
+        }?.receiverRole
+        val explicitlyBound = spec.components.count { component ->
+            component.enabled && (owner in component.sourceOwnerTypes || owner.substringBefore('$') in component.sourceOwnerTypes)
+        }
+        val alreadyBound = participants.any { participant ->
+            participant.sourceOwnerType == owner ||
+                participant.id == owner || participant.id == owner.substringAfterLast('.')
+        }
+        if (explicitlyBound == 0 && !alreadyBound) {
+            val baseId = "source:$owner"
+            val id = generateSequence(baseId) { "${it}_" }.first { it !in usedIds }
+            usedIds += id
+            participants += DiagramParticipant(
+                id = id,
+                label = owner.substringAfterLast('.').let { simple ->
+                    receiverRole?.takeUnless { it.equals("UNKNOWN", true) }?.let { role ->
+                        "$simple [${role.lowercase().replace('_', ' ')}]"
+                    } ?: simple
+                },
+                kind = ParticipantKind.TAG,
+                sourceOwnerType = owner,
+                receiverRole = receiverRole?.takeUnless { it.equals("UNKNOWN", true) },
+                inferred = true,
+            )
+        }
+    }
+    return base.copy(participants = participants)
+}
+
+private fun sourceOwnerBindings(spec: SeqDiagramSpec, participants: List<DiagramParticipant>): Map<String, String> {
+    val bindings = LinkedHashMap<String, String>()
+    spec.components.filter { it.enabled }.forEach { component ->
+        component.sourceOwnerTypes.forEach { owner ->
+            if (owner.isNotBlank()) bindings.putIfAbsent(owner, component.id)
+            if (owner.contains('$')) bindings.putIfAbsent(owner.substringBefore('$'), component.id)
+        }
+    }
+    participants.forEach { participant ->
+        participant.sourceOwnerType?.takeIf { it.isNotBlank() }?.let { bindings.putIfAbsent(it, participant.id) }
+    }
+    return bindings
+}
 
 /** Returns range-correct candidates for the participant inspector. It resolves [spec.range] against
  * the same raw-or-filtered source list selected by [DiagramOptions.includeRowsHiddenByFilter] as
@@ -549,16 +811,19 @@ private fun resolveTagParticipants(
 /** Component selection is intentionally separate from legacy participants: an enabled component
  * owns all of its tags, and one global policy controls every remaining in-range tag. */
 private fun resolveComponentParticipants(spec: SeqDiagramSpec, candidateEntries: List<LogEntry>): ParticipantResolution {
-    val enabled = spec.components.filter { it.enabled }
+    // Manual authoring treats configured components as an available editing palette. Rendering
+    // still prunes unused lifelines in ManualDiagramBuilder, so this does not make disabled
+    // components appear until an interaction is assigned to them.
+    val available = spec.components.filter { it.enabled || spec.authoringMode == DiagramAuthoringMode.MANUAL }
     val tagToComponent = LinkedHashMap<String, DiagramComponent>()
-    enabled.forEach { component -> component.tagIds.forEach { tag -> tagToComponent.putIfAbsent(tag, component) } }
+    available.forEach { component -> component.tagIds.forEach { tag -> tagToComponent.putIfAbsent(tag, component) } }
     val participants = buildList {
         // Preserve old entry/exit actors when a migrated/partially edited spec still has them.
         addAll(spec.participants.filter { it.kind == ParticipantKind.ACTOR })
         spec.actors.forEach { actor ->
             if (none { it.id == actor.id }) add(DiagramParticipant(actor.id, actor.label, ParticipantKind.ACTOR))
         }
-        enabled.forEach { component ->
+        available.forEach { component ->
             add(DiagramParticipant(component.id, component.displayName, ParticipantKind.TAG))
         }
     }
@@ -594,10 +859,12 @@ private class ParticipantRegistry(
     initial: List<DiagramParticipant>,
     groupedTags: Set<String> = emptySet(),
     tagToParticipantId: Map<String, String> = emptyMap(),
+    sourceOwnerBindings: Map<String, String> = emptyMap(),
 ) {
     val list: MutableList<DiagramParticipant> = initial.toMutableList()
     private val idxByTag = HashMap<String, Int>()
     private val idxById = HashMap<String, Int>()
+    private val idxBySourceOwner = HashMap<String, Int>()
 
     init {
         list.forEachIndexed { i, p ->
@@ -607,11 +874,29 @@ private class ParticipantRegistry(
         val otherIdx = list.indexOfFirst { it.kind == ParticipantKind.TAG && it.representation == DiagramParticipantRepresentation.OTHER }
         if (otherIdx >= 0) groupedTags.forEach { idxByTag[it] = otherIdx }
         tagToParticipantId.forEach { (tag, participantId) -> idxById[participantId]?.let { idxByTag[tag] = it } }
+        sourceOwnerBindings.forEach { (owner, participantId) ->
+            idxById[participantId]?.let { idxBySourceOwner[owner] = it }
+        }
+        list.forEachIndexed { index, participant ->
+            participant.sourceOwnerType?.takeIf { it.isNotBlank() }?.let { owner ->
+                idxBySourceOwner.putIfAbsent(owner, index)
+                idxBySourceOwner.putIfAbsent(owner.substringBefore('$'), index)
+            }
+        }
     }
 
     fun indexForTag(tag: String): Int? = idxByTag[tag]
 
     fun indexForId(id: String): Int? = idxById[id]
+
+    fun indexForSourceOwner(owner: String): Int? {
+        val clean = owner.trim()
+        if (clean.isEmpty()) return null
+        return idxBySourceOwner[clean]
+            ?: idxBySourceOwner[clean.substringBefore('$')]
+            ?: idxById[clean]
+            ?: idxById[clean.substringAfterLast('.')]
+    }
 
     /** Resolves [name] against both the id and tag namespaces first (a rule can legitimately
      *  name an existing TAG participant), only creating a brand-new ACTOR when neither matches.
@@ -625,6 +910,18 @@ private class ParticipantRegistry(
         val idx = list.lastIndex
         idxById[key] = idx
         return idx to true
+    }
+
+    /** Creates only an explicitly declared typed-rule actor. Never used for captured values. */
+    fun resolveOrCreateExplicitActor(id: String, label: String): Int? {
+        val key = id.trim()
+        if (key.isEmpty()) return null
+        idxById[key]?.let { return it }
+        val participant = DiagramParticipant(id = key, label = label.ifBlank { key }, kind = ParticipantKind.ACTOR)
+        list += participant
+        val idx = list.lastIndex
+        idxById[key] = idx
+        return idx
     }
 }
 
@@ -801,19 +1098,57 @@ private fun runRulesMatched(
     options: DiagramOptions,
     gen: RawGen,
     warnings: MutableList<String>,
-): Pair<Int, LogEntry> {
+): Pair<Int, LogEntry>? {
     val fromName = substituteTemplate(rule.fromTemplate, matchResult, entry)
     val toName = substituteTemplate(rule.toTemplate, matchResult, entry)
     val rawLabel = substituteTemplate(rule.labelTemplate, matchResult, entry).ifBlank { fallbackLabel }
     val label = truncateLabel(collapseWhitespace(rawLabel), options.labelMaxChars)
-    val (fromIdx, fromCreated) = registry.resolveOrCreateActor(fromName)
-    val (toIdx, toCreated) = registry.resolveOrCreateActor(toName)
-    if (fromCreated) warnings += "Rule '${rule.id}' referenced unknown participant '$fromName' — added it as an actor."
-    if (toCreated) warnings += "Rule '${rule.id}' referenced unknown participant '$toName' — added it as an actor."
+    val fromIdx = resolveRuleEndpoint(rule.fromEndpoint, fromName, matchResult, entry, registry, rule, warnings) ?: run {
+        warnings += "Rule '${rule.id}' has no resolved source endpoint."
+        return null
+    }
+    val toIdx = resolveRuleEndpoint(rule.toEndpoint, toName, matchResult, entry, registry, rule, warnings) ?: run {
+        warnings += "Rule '${rule.id}' has no resolved destination endpoint."
+        return null
+    }
     val kind = if (fromIdx == toIdx) MessageKind.SELF else MessageKind.CALL
-    gen.messages += DiagramMessage(fromIdx, toIdx, label, entry.id, entry.ts, entry.level, kind, evidence = MessageEvidence.RULE)
+    gen.messages += DiagramMessage(
+        fromIdx, toIdx, label, entry.id, entry.ts, entry.level, kind,
+        evidence = MessageEvidence.RULE,
+        originKeys = setOf(MessageOriginKey(entry.id, ruleId = rule.id)),
+    )
     if (options.notesForErrors && errorLevel(entry.level)) gen.notes += PendingNote(gen.messages.lastIndex, toIdx, label)
     return toIdx to entry
+}
+
+private fun resolveRuleEndpoint(
+    endpoint: DiagramRuleEndpoint?,
+    legacyName: String,
+    matchResult: MatchResult,
+    entry: LogEntry,
+    registry: ParticipantRegistry,
+    rule: DiagramMessageRule,
+    warnings: MutableList<String>,
+): Int? = when (endpoint) {
+    null -> {
+        val (index, created) = registry.resolveOrCreateActor(legacyName)
+        if (created) warnings += "Rule '${rule.id}' referenced unknown participant '$legacyName' — added it as an actor."
+        index
+    }
+    is DiagramRuleEndpoint.ExistingParticipant -> registry.indexForId(endpoint.participantId).also {
+        if (it == null) warnings += "Rule '${rule.id}' references missing participant '${endpoint.participantId}'."
+    }
+    DiagramRuleEndpoint.CurrentEntry -> registry.indexForTag(entry.tag).also {
+        if (it == null) warnings += "Rule '${rule.id}' cannot bind current entry tag '${entry.tag}'."
+    }
+    is DiagramRuleEndpoint.CapturedValue -> {
+        val captured = matchResult.groups[endpoint.captureName]?.value.orEmpty()
+        val participantId = endpoint.bindings.firstOrNull { it.capturedValue == captured }?.participantId
+        participantId?.let(registry::indexForId).also {
+            if (it == null) warnings += "Rule '${rule.id}' has no explicit binding for capture '${endpoint.captureName}' = '$captured'."
+        }
+    }
+    is DiagramRuleEndpoint.ExplicitActor -> registry.resolveOrCreateExplicitActor(endpoint.id, endpoint.label)
 }
 
 private fun runLinePerMessage(
@@ -842,6 +1177,127 @@ private data class SourceInteractionResult(
     val messages: List<DiagramMessage> = emptyList(),
     val truncated: Boolean = false,
 )
+
+/** Converts the shared range-level trace into messages. Returns are emitted only when the trace
+ * has an observed return/failure entry; a source declaration alone is never enough to create an
+ * arrow back to the caller. */
+private fun buildTraceMessages(
+    trace: DiagramResolvedTrace,
+    entries: List<LogEntry>,
+    registry: ParticipantRegistry,
+    options: DiagramOptions,
+    warnings: MutableList<String>,
+): SourceInteractionResult {
+    val entriesById = entries.associateBy { it.id }
+    val eventsByEntry = trace.events.associateBy { it.entryId }
+    val operationsByInvocation = trace.operations.filter { it.invocationId != null }.groupBy { it.invocationId }
+    val logOperationByEntry = trace.operations
+        .filter { it.kind == TraceOperationKind.LOG_EVENT }
+        .associateBy { it.entryId }
+    val callsByEntry = trace.calls.groupBy { it.callEntryId }
+    val returnsByEntry = trace.calls.filter { it.returnEntryId != null }.groupBy { it.returnEntryId!! }
+    val messages = ArrayList<DiagramMessage>(entries.size + trace.calls.size * 2)
+    fun addCall(call: DiagramTraceCall) {
+        val from = registry.indexForSourceOwner(call.callerOwnerType)
+        val to = registry.indexForSourceOwner(call.calleeOwnerType)
+        if (from == null) {
+            warnings += "Source trace caller '${call.callerOwnerType}' is not bound to a participant."
+            return
+        }
+        if (to == null) {
+            warnings += "Source trace callee '${call.calleeOwnerType}' is not bound to a participant."
+            return
+        }
+        val callEntry = entriesById[call.callEntryId]
+        if (callEntry == null) {
+            warnings += "Source trace call ${call.invocationId} points outside the selected range."
+            return
+        }
+        val callLabel = truncateLabel(collapseWhitespace(call.callLabel), options.labelMaxChars)
+        messages += DiagramMessage(
+            fromIdx = from,
+            toIdx = to,
+            label = callLabel,
+            entryId = callEntry.id,
+            ts = callEntry.ts,
+            level = callEntry.level,
+            kind = when {
+                from == to -> MessageKind.SELF
+                call.invocationKind in ASYNC_INVOCATION_KINDS -> MessageKind.ASYNC
+                else -> MessageKind.CALL
+            },
+            evidence = MessageEvidence.SOURCE_INFERRED,
+            invocationId = call.invocationId,
+            traceStatus = call.status,
+            invocationKind = call.invocationKind,
+            primary = false,
+            sourceOperationId = operationsByInvocation[call.invocationId]
+                ?.firstOrNull { it.kind == TraceOperationKind.SOURCE_CALL || it.kind == TraceOperationKind.ASYNC_HANDOFF }
+                ?.id,
+        )
+
+    }
+    fun addReturn(call: DiagramTraceCall) {
+        val from = registry.indexForSourceOwner(call.callerOwnerType)
+        val to = registry.indexForSourceOwner(call.calleeOwnerType)
+        val returnEntry = call.returnEntryId?.let(entriesById::get)
+        if (from != null && to != null && returnEntry != null && call.status in setOf(
+                TraceCallStatus.RETURNED,
+                TraceCallStatus.THREW,
+                TraceCallStatus.TERMINAL_FAILURE,
+            )) {
+            val outcomeEntry = returnEntry
+            val outcomeLabel = when (call.status) {
+                TraceCallStatus.THREW -> call.returnLabel ?: "throws"
+                TraceCallStatus.TERMINAL_FAILURE -> call.returnLabel ?: "failure"
+                else -> call.returnLabel ?: "return"
+            }
+            messages += DiagramMessage(
+                fromIdx = to,
+                toIdx = from,
+                label = truncateLabel(collapseWhitespace(outcomeLabel), options.labelMaxChars),
+                entryId = outcomeEntry.id,
+                ts = outcomeEntry.ts,
+                level = outcomeEntry.level,
+                kind = if (from == to) MessageKind.SELF else MessageKind.RETURN,
+                evidence = MessageEvidence.SOURCE_INFERRED,
+                invocationId = call.invocationId,
+                traceStatus = call.status,
+                invocationKind = call.invocationKind,
+                primary = false,
+                sourceOperationId = operationsByInvocation[call.invocationId]
+                    ?.firstOrNull { it.kind == TraceOperationKind.SOURCE_RETURN || it.kind == TraceOperationKind.THROW }
+                    ?.id,
+            )
+        }
+    }
+    // Preserve the selected runtime order. Entry IDs are per-tab counters and are not a semantic
+    // clock after merged logs or explicit selections.
+    entries.forEach { entry ->
+        callsByEntry[entry.id].orEmpty().sortedBy { it.invocationId }.forEach(::addCall)
+        returnsByEntry[entry.id].orEmpty().sortedBy { it.invocationId }.forEach(::addReturn)
+        val event = eventsByEntry[entry.id]
+        val target = event?.ownerType?.let(registry::indexForSourceOwner) ?: registry.indexForTag(entry.tag)
+        if (target == null) {
+            warnings += "Source trace log ${entry.id} has no bound participant."
+        } else {
+            messages += DiagramMessage(
+                fromIdx = target,
+                toIdx = target,
+                label = truncateLabel(collapseWhitespace(entry.msg), options.labelMaxChars),
+                entryId = entry.id,
+                ts = entry.ts,
+                level = entry.level,
+                kind = MessageKind.SELF,
+                evidence = MessageEvidence.LOG,
+                primary = true,
+                sourceLogSiteId = event?.sourceLogSiteId,
+                sourceOperationId = logOperationByEntry[entry.id]?.id,
+            )
+        }
+    }
+    return SourceInteractionResult(messages)
+}
 
 /** Crash/watchdog markers prove that a source call did not complete in this selected window. */
 private fun isTerminalFailure(entry: LogEntry): Boolean {
@@ -1003,13 +1459,13 @@ private fun buildSourceInteractions(
                 from, to, truncateLabel(collapseWhitespace(interaction.label), options.labelMaxChars),
                 entry.id, entry.ts, entry.level,
                 if (from == to) MessageKind.SELF else MessageKind.CALL,
-                evidence = MessageEvidence.SOURCE_INFERRED,
+                evidence = MessageEvidence.SOURCE_INFERRED, primary = false,
             )
             if (needsReturn) {
                 messages += DiagramMessage(
                     to, from,
                     truncateLabel(collapseWhitespace(interaction.returnLabel.orEmpty()), options.labelMaxChars),
-                    entry.id, entry.ts, entry.level, MessageKind.RETURN, evidence = MessageEvidence.SOURCE_INFERRED,
+                    entry.id, entry.ts, entry.level, MessageKind.RETURN, evidence = MessageEvidence.SOURCE_INFERRED, primary = false,
                 )
             }
         }
@@ -1018,7 +1474,7 @@ private fun buildSourceInteractions(
     return SourceInteractionResult(messages, truncated)
 }
 
-/** Duplicate component edges for explicitly mirrored actors, immediately after their original. */
+/** Relays a mirrored component edge through the actor. */
 private fun applyActorMirrors(
     messages: List<DiagramMessage>,
     registry: ParticipantRegistry,
@@ -1035,15 +1491,20 @@ private fun applyActorMirrors(
     if (mirrors.isEmpty()) return messages
     return buildList(messages.size + mirrors.size) {
         messages.forEach { message ->
+            if (message.fromIdx == message.toIdx) {
+                add(message)
+                return@forEach
+            }
+            mirrors.filter { (componentIdx, actorIdx, direction) ->
+                message.fromIdx == componentIdx && direction != MirrorDirection.INBOUND && actorIdx != message.toIdx
+            }.forEach { (componentIdx, actorIdx, _) ->
+                add(message.copy(fromIdx = actorIdx, toIdx = componentIdx, evidence = MessageEvidence.ACTOR_MIRROR, primary = false))
+            }
             add(message)
-            if (message.fromIdx == message.toIdx) return@forEach
-            mirrors.forEach { (componentIdx, actorIdx, direction) ->
-                val outbound = message.fromIdx == componentIdx && direction != MirrorDirection.INBOUND
-                val inbound = message.toIdx == componentIdx && direction != MirrorDirection.OUTBOUND
-                when {
-                    outbound && actorIdx != message.toIdx -> add(message.copy(fromIdx = actorIdx, evidence = MessageEvidence.ACTOR_MIRROR))
-                    inbound && actorIdx != message.fromIdx -> add(message.copy(toIdx = actorIdx, evidence = MessageEvidence.ACTOR_MIRROR))
-                }
+            mirrors.filter { (componentIdx, actorIdx, direction) ->
+                message.toIdx == componentIdx && direction != MirrorDirection.OUTBOUND && actorIdx != message.fromIdx
+            }.forEach { (componentIdx, actorIdx, _) ->
+                add(message.copy(fromIdx = componentIdx, toIdx = actorIdx, evidence = MessageEvidence.ACTOR_MIRROR, primary = false))
             }
         }
     }
@@ -1068,8 +1529,10 @@ private fun filterMessages(raw: List<DiagramMessage>, options: DiagramOptions): 
     val filtered = ArrayList<DiagramMessage>(raw.size)
     val filteredIndexIfKept = IntArray(raw.size) { -1 }
     raw.forEachIndexed { i, m ->
-        val dropSelf = !options.showSelfMessages && m.kind == MessageKind.SELF
-        val dropSourceInferred = !options.showSourceInferred && m.evidence == MessageEvidence.SOURCE_INFERRED
+        // Visibility switches may suppress supplemental structure, but selected log evidence is
+        // never a presentation casualty. A primary SELF remains the one representation of its row.
+        val dropSelf = !options.showSelfMessages && !m.primary && m.kind == MessageKind.SELF
+        val dropSourceInferred = !options.showSourceInferred && !m.primary && m.evidence == MessageEvidence.SOURCE_INFERRED
         if (!dropSelf && !dropSourceInferred) {
             kept[i] = true
             filteredIndexIfKept[i] = filtered.size
@@ -1085,16 +1548,59 @@ private fun filterMessages(raw: List<DiagramMessage>, options: DiagramOptions): 
     return FilterResult(filtered, rawToFiltered)
 }
 
-/** Activations are emitted for correlated pairs and for source calls proven to remain active at a failure. */
-private fun buildActivationSpans(messages: List<DiagramMessage>): List<DiagramActivationSpan> {
+/** Projects invocation push/pop boundaries through presentation mappings without inferring them
+ * from adjacent rendered messages. The invocation tree remains authoritative even when filters,
+ * actor relays, repeat collapsing, or the message cap alter the final list. */
+private fun buildTraceActivationSpansFromTrace(
+    rawMessages: List<DiagramMessage>,
+    invocations: List<DiagramTraceCall>,
+    rawToFinal: IntArray,
+    finalSize: Int,
+): List<DiagramActivationSpan> {
+    if (rawMessages.isEmpty() || finalSize == 0) return emptyList()
+    val byInvocation = rawMessages.withIndex().filter { it.value.invocationId != null }
+        .groupBy { it.value.invocationId!! }
+    return invocations.mapNotNull { invocation ->
+        if (invocation.invocationKind in setOf(
+                TraceInvocationKind.COROUTINE_LAUNCH,
+                TraceInvocationKind.CALLBACK_REGISTRATION,
+                TraceInvocationKind.EXECUTOR_DISPATCH,
+                TraceInvocationKind.BINDER_OR_RPC,
+                TraceInvocationKind.UNKNOWN_ASYNC,
+            )) return@mapNotNull null
+        val rendered = byInvocation[invocation.invocationId].orEmpty()
+        val call = rendered.firstOrNull { it.value.kind == MessageKind.CALL || it.value.kind == MessageKind.SELF }
+            ?: return@mapNotNull null
+        val returnMessage = rendered.lastOrNull { it.value.kind == MessageKind.RETURN }
+        val start = rawToFinal.getOrNull(call.index) ?: return@mapNotNull null
+        val end = when {
+            returnMessage != null -> rawToFinal.getOrNull(returnMessage.index) ?: start
+            invocation.status == TraceCallStatus.INCOMPLETE_WINDOW -> finalSize - 1
+            else -> rendered.maxOfOrNull { rawToFinal.getOrNull(it.index) ?: start } ?: start
+        }.coerceAtMost(finalSize - 1)
+        if (end <= start) return@mapNotNull null
+        val participantIdx = if (call.value.fromIdx == call.value.toIdx) call.value.fromIdx else call.value.toIdx
+        DiagramActivationSpan(
+            participantIdx = participantIdx,
+            startMessage = start,
+            endMessage = end,
+            evidence = call.value.evidence,
+            invocationId = invocation.invocationId,
+            status = invocation.status,
+            invocationKind = invocation.invocationKind,
+        )
+    }.distinctBy { Triple(it.participantIdx, it.startMessage, it.endMessage) }
+}
+
+private fun buildLegacyActivationSpans(messages: List<DiagramMessage>): List<DiagramActivationSpan> {
     data class OpenCall(val from: Int, val to: Int, val index: Int, val evidence: MessageEvidence)
     val open = ArrayDeque<OpenCall>()
     val spans = mutableListOf<DiagramActivationSpan>()
     messages.forEachIndexed { index, message ->
         when {
-            message.kind == MessageKind.CALL && message.fromIdx != message.toIdx && message.evidence != MessageEvidence.ACTOR_MIRROR ->
+            message.invocationId == null && message.kind == MessageKind.CALL && message.fromIdx != message.toIdx && message.evidence != MessageEvidence.ACTOR_MIRROR ->
                 open.addLast(OpenCall(message.fromIdx, message.toIdx, index, message.evidence))
-            message.kind == MessageKind.RETURN && message.evidence != MessageEvidence.ACTOR_MIRROR -> {
+            message.invocationId == null && message.kind == MessageKind.RETURN && message.evidence != MessageEvidence.ACTOR_MIRROR -> {
                 val match = open.lastOrNull {
                     it.from == message.toIdx && it.to == message.fromIdx &&
                         (it.evidence == message.evidence || it.evidence == MessageEvidence.MANUAL_OVERRIDE || message.evidence == MessageEvidence.MANUAL_OVERRIDE)
@@ -1121,17 +1627,13 @@ private fun buildActivationSpans(messages: List<DiagramMessage>): List<DiagramAc
                         message.kind == MessageKind.CALL && message.fromIdx == call.from)
             }
             val endMessage = callerProgress ?: messages.lastIndex
-            spans += DiagramActivationSpan(call.to, call.index, endMessage, call.evidence)
+            if (endMessage > call.index) {
+                spans += DiagramActivationSpan(call.to, call.index, endMessage, call.evidence)
+            }
         }
     }
     return spans.distinctBy { Triple(it.participantIdx, it.startMessage, it.endMessage) }
 }
-
-private fun isTerminalFailureLabel(label: String): Boolean =
-    label.contains("FATAL EXCEPTION", ignoreCase = true) ||
-        label.contains("ANR in ", ignoreCase = true) ||
-        label.contains("StackOverflowError", ignoreCase = true) ||
-        label.contains("NullPointerException", ignoreCase = true)
 
 // ── Label formatting ──────────────────────────────────────────────────────────────────────────
 
@@ -1243,7 +1745,11 @@ private fun collapseRepeats(raw: List<DiagramMessage>): CollapseResult {
                 break
             }
         }
-        out += first.copy(repeatCount = count)
+        out += first.copy(
+            repeatCount = count,
+            representedEntryIds = raw.subList(i, j).flatMapTo(linkedSetOf()) { it.representedEntryIds },
+            originKeys = raw.subList(i, j).flatMapTo(linkedSetOf()) { it.originKeys },
+        )
         i = j
     }
     return CollapseResult(out, mapping)
