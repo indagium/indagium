@@ -15,6 +15,10 @@ import java.security.MessageDigest
  *  (the default `{ false }`) never sees it. */
 class SourceIndexCancelledException : RuntimeException("Source index build was cancelled")
 
+// Widens a signed Byte to its unsigned Int value before hex-formatting it (shared by both hex
+// digest sites in this file).
+private const val BYTE_MASK = 0xff
+
 // Reports (scanned, total) progress across every phase of build() — file reads, whole-project
 // analysis, per-file declaration scanning, direct-call resolution, and final extraction — not
 // just the last one, so the UI doesn't sit on a bare "Indexing source…" for most of the run. Each
@@ -67,6 +71,7 @@ private class ProgressTracker(totalFiles: Int, phaseCount: Int, private val onPr
 object SourceIndexer {
     private val SOURCE_EXTENSIONS = setOf("kt", "java")
     private val SKIP_DIR_NAMES = setOf("build", ".git", ".gradle", ".idea", "node_modules", "out")
+
     // Runtime inference must not learn callers from unit, instrumentation, or fixture code.
     // Source navigation still accepts an explicitly selected test root as its root itself.
     private val TEST_SOURCE_DIR_NAMES = setOf("test", "tests", "androidTest", "desktopTest", "testFixtures")
@@ -94,13 +99,7 @@ object SourceIndexer {
         // Phase 1/6: read every file's text (pure I/O, independent per file).
         val readResults = files.parallelStream().map { candidate ->
             checkCancelled()
-            // Re-resolve and re-check immediately before reading. collectSourceFiles already
-            // returns canonical contained files, but keeping the authorization at the read
-            // boundary prevents a future traversal refactor from weakening this invariant.
-            val pathAndText = runCatching {
-                val file = canonicalFileUnderRoots(candidate, canonicalRoots) ?: return@runCatching null
-                file.path to file.readText()
-            }.onFailure { e -> AppLogger.error("source-index", "Failed to read source file", e) }.getOrNull()
+            val pathAndText = readSourceFileText(candidate, canonicalRoots)
             tracker.advance()
             pathAndText
         }.collect(java.util.stream.Collectors.toList())
@@ -160,33 +159,10 @@ object SourceIndexer {
         // interleaved — reproducing today's sequential-loop order exactly.
         val extractionResults = files.parallelStream().map { candidate ->
             checkCancelled()
-            val result = runCatching {
-                val file = canonicalFileUnderRoots(candidate, canonicalRoots) ?: return@runCatching null
-                val text = texts[file.path] ?: return@runCatching null
-                val isJavaFile = file.extension.equals("java", true)
-                val fileSites = extractCallSites(
-                    file.path,
-                    text,
-                    isJavaFile = isJavaFile,
-                    globalConstants = globalConstants,
-                    sourceMethods = methodsByFile[file.path].orEmpty(),
-                    directCallsByMethod = callsByMethodForSites,
-                ) + extractWrapperCallSites(
-                    file.path,
-                    text,
-                    isJavaFile = isJavaFile,
-                    wrapperRules = wrapperRules,
-                    globalConstants = globalConstants,
-                    sourceMethods = methodsByFile[file.path].orEmpty(),
-                    directCallsByMethod = callsByMethodForSites,
-                    declarationTables = declarationTablesByFile[file.path] ?: DeclarationTables.EMPTY,
-                )
-                FileExtractionResult(
-                    file.path,
-                    fileSites,
-                    FileMeta(mtime = file.lastModified(), size = file.length(), sha256 = sha256Hex(text)),
-                )
-            }.onFailure { e -> AppLogger.error("source-index", "Failed to index source file", e) }.getOrNull()
+            val result = extractFileCallSites(
+                candidate, canonicalRoots, texts, globalConstants, wrapperRules,
+                methodsByFile, declarationTablesByFile, callsByMethodForSites,
+            )
             tracker.advance()
             result
         }.collect(java.util.stream.Collectors.toList())
@@ -201,133 +177,9 @@ object SourceIndexer {
             }
         }
 
-        val allMethods = methodsByFile.values.flatten()
-        val methods = allMethods.map { method ->
-            IndexedSourceMethod(
-                id = method.id,
-                filePath = method.filePath,
-                ownerType = method.owningType,
-                name = method.name,
-                signature = method.signature,
-                declaredReturnType = method.declaredReturnType,
-                startOffset = method.startOffset,
-                endOffsetExclusive = method.endOffsetExclusive,
-                sourceSet = sourceSetForPath(method.filePath),
-            )
-        }
-        val calls = callsByMethodForSites.values.asSequence()
-            .flatMap { it.asSequence() }
-            .mapNotNull { call ->
-                val caller = call.callerMethodId ?: return@mapNotNull null
-                val target = call.targetMethodId ?: return@mapNotNull null
-                IndexedSourceCall(
-                    id = call.callSiteId ?: sourceStableId(
-                        "call",
-                        call.targetFilePath,
-                        call.callOffset,
-                        "${call.targetMethodSignature}|${call.sourceOwnerType}|${call.callerMethodId}",
-                    ),
-                    callerMethodId = caller,
-                    candidateCalleeMethodIds = listOf(target),
-                    receiverExpression = call.receiverExpression,
-                    receiverVariable = call.receiverVariable,
-                    receiverDeclaredType = call.receiverDeclaredType,
-                    receiverRole = call.receiverRole,
-                    callOffset = call.callOffset,
-                    callLine = call.callLine,
-                    resultVariable = call.resultVariable,
-                    invocationKind = call.invocationKind,
-                    resolutionConfidence = call.resolutionConfidence,
-                )
-            }
-            .distinctBy { it.id }
-            .toList()
-        // The source scanner remains dependency-free, but the result is persisted as executable
-        // operations rather than only as per-log "nearby calls".  Return/throw/branch operations
-        // are recorded at their real source offsets; the solver can therefore reason about source
-        // order without mixing line numbers and character offsets.
-        val operationSeeds = buildList {
-            calls.forEach { call ->
-                add(
-                    IndexedSourceOperation(
-                        id = sourceStableId("operation-call", call.id, call.callOffset, call.callerMethodId),
-                        methodId = call.callerMethodId,
-                        kind = if (call.invocationKind == InvocationKind.SYNCHRONOUS) {
-                            SourceOperationKind.CALL
-                        } else {
-                            SourceOperationKind.ASYNC_DISPATCH
-                        },
-                         sourceOrder = call.callOffset.takeIf { it > 0 } ?: call.callLine,
-                         sourceLine = call.callLine,
-                         callSiteId = call.id,
-                     ),
-                )
-            }
-            sites.forEach { site ->
-                val methodId = site.methodId ?: return@forEach
-                add(
-                    IndexedSourceOperation(
-                        id = sourceStableId("operation-log", site.filePath, site.callLine, site.id),
-                        methodId = methodId,
-                        kind = SourceOperationKind.LOG,
-                        sourceOrder = site.sourceOffset.takeIf { it > 0 } ?: site.callLine,
-                        sourceLine = site.callLine,
-                        logSiteId = site.id.takeIf { it.isNotBlank() },
-                    ),
-                )
-            }
-            methods.forEach { method ->
-                val text = texts[method.filePath].orEmpty()
-                val mask = CodeMask(text)
-                val lines = LineIndex(text)
-                val returnOrThrow = Regex("\\b(return|throw)\\b").findAll(text)
-                    .filter { match ->
-                        match.range.first in method.startOffset until method.endOffsetExclusive &&
-                            mask.isCode.getOrElse(match.range.first) { false }
-                    }
-                    .map { match ->
-                        val kind = if (match.groupValues[1] == "throw") SourceOperationKind.THROW else SourceOperationKind.RETURN
-                        IndexedSourceOperation(
-                            id = sourceStableId("operation-${kind.name.lowercase()}", method.filePath, match.range.first, method.id),
-                            methodId = method.id,
-                            kind = kind,
-                            sourceOrder = match.range.first,
-                            sourceLine = lines.lineOf(match.range.first),
-                        )
-                    }
-                    .toList()
-                if (returnOrThrow.isNotEmpty()) {
-                    addAll(returnOrThrow)
-                } else {
-                    // A method with an implicit Kotlin/Java return still has a close boundary.
-                    add(
-                        IndexedSourceOperation(
-                            id = sourceStableId("operation-return", method.filePath, method.endOffsetExclusive, method.id),
-                            methodId = method.id,
-                            kind = SourceOperationKind.RETURN,
-                            sourceOrder = method.endOffsetExclusive,
-                            sourceLine = lines.lineOf(method.endOffsetExclusive.coerceAtLeast(1)),
-                        ),
-                    )
-                }
-                val branchMatches = Regex("\\b(if|when|for|while|catch)\\b").findAll(text)
-                    .filter { match ->
-                        match.range.first in method.startOffset until method.endOffsetExclusive &&
-                            mask.isCode.getOrElse(match.range.first) { false }
-                    }
-                    .map { match ->
-                        IndexedSourceOperation(
-                            id = sourceStableId("operation-branch", method.filePath, match.range.first, method.id),
-                            methodId = method.id,
-                            kind = SourceOperationKind.BRANCH,
-                            sourceOrder = match.range.first,
-                            sourceLine = lines.lineOf(match.range.first),
-                        )
-                    }
-                    .toList()
-                addAll(branchMatches)
-            }
-        }
+        val methods = buildIndexedMethods(methodsByFile)
+        val calls = buildIndexedCalls(callsByMethodForSites)
+        val operationSeeds = buildOperationSeeds(calls, sites, methods, texts)
         val operations = operationSeeds.groupBy { it.methodId }.values.flatMap { methodOperations ->
             val ordered = methodOperations.sortedWith(compareBy<IndexedSourceOperation> { it.sourceOrder }.thenBy { it.id })
             ordered.mapIndexed { index, operation ->
@@ -335,18 +187,7 @@ object SourceIndexer {
             }
         }
         val builtAt = System.currentTimeMillis()
-        val revision = MessageDigest.getInstance("SHA-256").digest(
-            buildString {
-                append(SOURCE_INDEX_VERSION).append('|')
-                canonicalRoots.forEach { append(it.path).append(';') }
-                rootConfigFingerprintsForRevision(options, canonicalRoots).forEach { (root, fingerprint) ->
-                    append(root).append('|').append(fingerprint).append(';')
-                }
-                fileMeta.toSortedMap().forEach { (path, meta) ->
-                    append(path).append('|').append(meta.mtime).append('|').append(meta.size).append('|').append(meta.sha256.orEmpty()).append(';')
-                }
-            }.toByteArray(Charsets.UTF_8),
-        ).take(12).joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+        val revision = computeSourceIndexRevision(canonicalRoots, options, fileMeta)
 
         return SourceIndex(
             version = SOURCE_INDEX_VERSION,
@@ -373,6 +214,212 @@ object SourceIndexer {
             revision = revision,
         )
     }
+
+    // The helpers below carry build()'s own per-phase logic (Phase 1's file read, Phase 6's
+    // per-file extraction, the operation-seed construction, and the revision hash) — pulled out
+    // purely to keep build()'s own complexity/length down; each does exactly what its inline
+    // block used to.
+
+    // Re-resolve and re-check immediately before reading. collectSourceFiles already returns
+    // canonical contained files, but keeping the authorization at the read boundary prevents a
+    // future traversal refactor from weakening this invariant.
+    private fun readSourceFileText(candidate: File, canonicalRoots: List<File>): Pair<String, String>? =
+        runCatching {
+            val file = canonicalFileUnderRoots(candidate, canonicalRoots) ?: return@runCatching null
+            file.path to file.readText()
+        }.onFailure { e -> AppLogger.error("source-index", "Failed to read source file", e) }.getOrNull()
+
+    @Suppress("LongParameterList")
+    private fun extractFileCallSites(
+        candidate: File,
+        canonicalRoots: List<File>,
+        texts: Map<String, String>,
+        globalConstants: Map<String, String>,
+        wrapperRules: List<SourceWrapperRule>,
+        methodsByFile: Map<String, List<IndexedMethod>>,
+        declarationTablesByFile: Map<String, DeclarationTables>,
+        callsByMethodForSites: Map<String, List<SourceDirectCall>>,
+    ): FileExtractionResult? = runCatching {
+        val file = canonicalFileUnderRoots(candidate, canonicalRoots) ?: return@runCatching null
+        val text = texts[file.path] ?: return@runCatching null
+        val isJavaFile = file.extension.equals("java", true)
+        val fileSites = extractCallSites(
+            file.path,
+            text,
+            isJavaFile = isJavaFile,
+            globalConstants = globalConstants,
+            sourceMethods = methodsByFile[file.path].orEmpty(),
+            directCallsByMethod = callsByMethodForSites,
+        ) + extractWrapperCallSites(
+            file.path,
+            text,
+            isJavaFile = isJavaFile,
+            wrapperRules = wrapperRules,
+            globalConstants = globalConstants,
+            sourceMethods = methodsByFile[file.path].orEmpty(),
+            directCallsByMethod = callsByMethodForSites,
+            declarationTables = declarationTablesByFile[file.path] ?: DeclarationTables.EMPTY,
+        )
+        FileExtractionResult(
+            file.path,
+            fileSites,
+            FileMeta(mtime = file.lastModified(), size = file.length(), sha256 = sha256Hex(text)),
+        )
+    }.onFailure { e -> AppLogger.error("source-index", "Failed to index source file", e) }.getOrNull()
+
+    private fun buildIndexedMethods(methodsByFile: Map<String, List<IndexedMethod>>): List<IndexedSourceMethod> =
+        methodsByFile.values.flatten().map { method ->
+            IndexedSourceMethod(
+                id = method.id,
+                filePath = method.filePath,
+                ownerType = method.owningType,
+                name = method.name,
+                signature = method.signature,
+                declaredReturnType = method.declaredReturnType,
+                startOffset = method.startOffset,
+                endOffsetExclusive = method.endOffsetExclusive,
+                sourceSet = sourceSetForPath(method.filePath),
+                synthetic = method.synthetic,
+            )
+        }
+
+    private fun buildIndexedCalls(callsByMethodForSites: Map<String, List<SourceDirectCall>>): List<IndexedSourceCall> =
+        callsByMethodForSites.values.asSequence()
+            .flatMap { it.asSequence() }
+            .mapNotNull { call ->
+                val caller = call.callerMethodId ?: return@mapNotNull null
+                val target = call.targetMethodId ?: return@mapNotNull null
+                IndexedSourceCall(
+                    id = call.callSiteId ?: sourceStableId(
+                        "call",
+                        call.targetFilePath,
+                        call.callOffset,
+                        "${call.targetMethodSignature}|${call.sourceOwnerType}|${call.callerMethodId}",
+                    ),
+                    callerMethodId = caller,
+                    candidateCalleeMethodIds = listOf(target),
+                    receiverExpression = call.receiverExpression,
+                    receiverVariable = call.receiverVariable,
+                    receiverDeclaredType = call.receiverDeclaredType,
+                    receiverRole = call.receiverRole,
+                    callOffset = call.callOffset,
+                    callLine = call.callLine,
+                    resultVariable = call.resultVariable,
+                    invocationKind = call.invocationKind,
+                    resolutionConfidence = call.resolutionConfidence,
+                )
+            }
+            .distinctBy { it.id }
+            .toList()
+
+    // The source scanner remains dependency-free, but the result is persisted as executable
+    // operations rather than only as per-log "nearby calls".  Return/throw/branch operations
+    // are recorded at their real source offsets; the solver can therefore reason about source
+    // order without mixing line numbers and character offsets.
+    private fun buildOperationSeeds(
+        calls: List<IndexedSourceCall>,
+        sites: List<LogCallSite>,
+        methods: List<IndexedSourceMethod>,
+        texts: Map<String, String>,
+    ): List<IndexedSourceOperation> = buildList {
+        calls.forEach { call ->
+            add(
+                IndexedSourceOperation(
+                    id = sourceStableId("operation-call", call.id, call.callOffset, call.callerMethodId),
+                    methodId = call.callerMethodId,
+                    kind = if (call.invocationKind == InvocationKind.SYNCHRONOUS) {
+                        SourceOperationKind.CALL
+                    } else {
+                        SourceOperationKind.ASYNC_DISPATCH
+                    },
+                    sourceOrder = call.callOffset.takeIf { it > 0 } ?: call.callLine,
+                    sourceLine = call.callLine,
+                    callSiteId = call.id,
+                ),
+            )
+        }
+        sites.forEach { site ->
+            val methodId = site.methodId ?: return@forEach
+            add(
+                IndexedSourceOperation(
+                    id = sourceStableId("operation-log", site.filePath, site.callLine, site.id),
+                    methodId = methodId,
+                    kind = SourceOperationKind.LOG,
+                    sourceOrder = site.sourceOffset.takeIf { it > 0 } ?: site.callLine,
+                    sourceLine = site.callLine,
+                    logSiteId = site.id.takeIf { it.isNotBlank() },
+                ),
+            )
+        }
+        methods.forEach { method ->
+            val text = texts[method.filePath].orEmpty()
+            val mask = CodeMask(text)
+            val lines = LineIndex(text)
+            val returnOrThrow = Regex("\\b(return|throw)\\b").findAll(text)
+                .filter { match ->
+                    match.range.first in method.startOffset until method.endOffsetExclusive &&
+                        mask.isCode.getOrElse(match.range.first) { false }
+                }
+                .map { match ->
+                    val kind = if (match.groupValues[1] == "throw") SourceOperationKind.THROW else SourceOperationKind.RETURN
+                    IndexedSourceOperation(
+                        id = sourceStableId("operation-${kind.name.lowercase()}", method.filePath, match.range.first, method.id),
+                        methodId = method.id,
+                        kind = kind,
+                        sourceOrder = match.range.first,
+                        sourceLine = lines.lineOf(match.range.first),
+                    )
+                }
+                .toList()
+            if (returnOrThrow.isNotEmpty()) {
+                addAll(returnOrThrow)
+            } else {
+                // A method with an implicit Kotlin/Java return still has a close boundary.
+                add(
+                    IndexedSourceOperation(
+                        id = sourceStableId("operation-return", method.filePath, method.endOffsetExclusive, method.id),
+                        methodId = method.id,
+                        kind = SourceOperationKind.RETURN,
+                        sourceOrder = method.endOffsetExclusive,
+                        sourceLine = lines.lineOf(method.endOffsetExclusive.coerceAtLeast(1)),
+                    ),
+                )
+            }
+            val branchMatches = Regex("\\b(if|when|for|while|catch)\\b").findAll(text)
+                .filter { match ->
+                    match.range.first in method.startOffset until method.endOffsetExclusive &&
+                        mask.isCode.getOrElse(match.range.first) { false }
+                }
+                .map { match ->
+                    IndexedSourceOperation(
+                        id = sourceStableId("operation-branch", method.filePath, match.range.first, method.id),
+                        methodId = method.id,
+                        kind = SourceOperationKind.BRANCH,
+                        sourceOrder = match.range.first,
+                        sourceLine = lines.lineOf(match.range.first),
+                    )
+                }
+                .toList()
+            addAll(branchMatches)
+        }
+    }
+
+    private fun computeSourceIndexRevision(
+        canonicalRoots: List<File>,
+        options: SourceIndexBuildOptions,
+        fileMeta: Map<String, FileMeta>,
+    ): String = MessageDigest.getInstance("SHA-256").digest(
+        buildString {
+            append(SOURCE_INDEX_VERSION).append('|')
+            canonicalRoots.forEach { append(it.path).append(';') }
+            rootConfigFingerprintsForRevision(options, canonicalRoots).forEach { (root, fingerprint) ->
+                append(root).append('|').append(fingerprint).append(';')
+            }
+            fileMeta.toSortedMap().forEach { (path, meta) ->
+                append(path).append('|').append(meta.mtime).append('|').append(meta.size).append('|').append(meta.sha256.orEmpty()).append(';')
+            }
+        }.toByteArray(Charsets.UTF_8),
+    ).take(12).joinToString("") { (it.toInt() and BYTE_MASK).toString(16).padStart(2, '0') }
 
     private fun collectSourceFiles(root: File): List<File> {
         if (!root.exists() || !root.isDirectory) return emptyList()
@@ -412,7 +459,7 @@ private fun rootConfigFingerprintsForRevision(
 
 private fun sha256Hex(value: String): String = MessageDigest.getInstance("SHA-256")
     .digest(value.toByteArray(Charsets.UTF_8))
-    .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+    .joinToString("") { (it.toInt() and BYTE_MASK).toString(16).padStart(2, '0') }
 
 data class SourceIndexBuildOptions(
     val wrapperRules: List<SourceWrapperRule> = emptyList(),
@@ -1158,6 +1205,11 @@ private data class IndexedMethod(
     val startOffset: Int,
     val endOffsetExclusive: Int,
     val sourceSet: SourceSetKind,
+    val synthetic: Boolean = false,
+    val callbackRegistrationName: String? = null,
+    val callbackRegistrationOffset: Int? = null,
+    val callbackContainerStart: Int? = null,
+    val callbackContainerEnd: Int? = null,
 )
 
 private val SOURCE_TYPE_KINDS = setOf(
@@ -1182,7 +1234,7 @@ private fun indexedMethods(filePath: String, text: String, isJavaFile: Boolean):
         return if (packageName.isNullOrBlank()) local else "$packageName.$local"
     }
 
-    return declarations.asSequence()
+    val ordinary = declarations.asSequence()
         .filter { it.kind == "function" || it.kind == "method" || it.kind == "constructor" }
         .map { declaration ->
             IndexedMethod(
@@ -1200,6 +1252,207 @@ private fun indexedMethods(filePath: String, text: String, isJavaFile: Boolean):
                 sourceSet = sourceSetForPath(filePath),
             )
         }.toList()
+    val synthetic = discoverSyntheticCallbackMethods(filePath, text, isJavaFile, ordinary)
+    val callbackContainers = synthetic.mapNotNull { method ->
+        val start = method.callbackContainerStart
+        val end = method.callbackContainerEnd
+        if (start != null && end != null) start to end else null
+    }
+    return ordinary.filterNot { method ->
+        callbackContainers.any { (start, end) -> method.startOffset in start until end }
+    } + synthetic
+}
+
+private val TRAILING_CALLBACK_RE = Regex(
+    """(?m)(?:^|[=,;])\s*(?:[A-Za-z_]\w*\s*\.\s*)?([A-Za-z_]\w*)\s*(?:\([^{}]*\))?\s*$""",
+)
+private val LAMBDA_ARGUMENT_CALLBACK_RE = Regex(
+    """\b([A-Za-z_]\w*)\s*\([^{}]*,\s*$""",
+)
+private val ANONYMOUS_CALLBACK_RE = Regex("""\b(?:object\s*:|new\s+)""")
+private val CALLBACK_CONTROL_WORDS = setOf("if", "for", "while", "when", "catch", "else", "try", "class", "object")
+
+private data class SyntheticCallbackMethod(
+    val method: IndexedMethod,
+    val callbackContainerStart: Int,
+    val callbackContainerEnd: Int,
+)
+
+/**
+ * Discovers only callback-shaped bodies with an explicit registration/dispatch call immediately
+ * surrounding the body. This is intentionally brace-based: it recognizes common Kotlin/Java
+ * callback syntax without treating arbitrary business lambdas as execution targets.
+ */
+private fun discoverSyntheticCallbackMethods(
+    filePath: String,
+    text: String,
+    isJavaFile: Boolean,
+    ordinaryMethods: List<IndexedMethod>,
+): List<IndexedMethod> {
+    val mask = CodeMask(text)
+    val lines = LineIndex(text)
+    val packageName = findFilePackage(text, mask)
+
+    fun enclosingOwner(offset: Int): String? = findEnclosingNamedType(text, mask, offset)?.let { simple ->
+        packageName?.let { "$it.$simple" } ?: simple
+    }
+    val synthetic = mutableListOf<SyntheticCallbackMethod>()
+    for (openBrace in text.indices) {
+        if (text[openBrace] != '{' || !mask.isCode.getOrElse(openBrace) { false }) continue
+        val closeBrace = findMatchingClose(text, mask, openBrace)
+        val headerStart = findHeaderStart(text, mask, openBrace)
+        val header = text.substring(headerStart, openBrace)
+        val anonymous = ANONYMOUS_CALLBACK_RE.find(header)
+        if (anonymous != null) {
+            synthetic += anonymousCallbackSyntheticMethods(
+                filePath, text, mask, lines, isJavaFile, ordinaryMethods, ::enclosingOwner,
+                header, anonymous, openBrace, closeBrace, headerStart,
+            )
+        } else {
+            lambdaOrTrailingCallbackSyntheticMethod(filePath, lines, ::enclosingOwner, header, openBrace, closeBrace, headerStart)
+                ?.let { synthetic += it }
+        }
+    }
+    return synthetic.distinctBy { it.method.id }.map { it.method }
+}
+
+// The three helpers below carry discoverSyntheticCallbackMethods' own two registration-shape
+// branches (anonymous class/object body, trailing-lambda/lambda-argument body) and the anonymous
+// branch's own inner callback-body scan — pulled out purely to keep the caller (and its loops)
+// under detekt's complexity/jump-statement thresholds; each does exactly what its inline block
+// used to, including every early "skip this candidate" exit (now a return instead of a continue).
+@Suppress("LongParameterList")
+private fun anonymousCallbackSyntheticMethods(
+    filePath: String,
+    text: String,
+    mask: CodeMask,
+    lines: LineIndex,
+    isJavaFile: Boolean,
+    ordinaryMethods: List<IndexedMethod>,
+    enclosingOwner: (Int) -> String?,
+    header: String,
+    anonymous: MatchResult,
+    openBrace: Int,
+    closeBrace: Int,
+    headerStart: Int,
+): List<SyntheticCallbackMethod> {
+    val prefix = header.substring(0, anonymous.range.first)
+    val registration = Regex("""([A-Za-z_]\w*)\s*\([^()]*$""").find(prefix) ?: return emptyList()
+    val registrationName = registration.groupValues[1]
+    if (registrationName in CALLBACK_CONTROL_WORDS || invocationKind(registrationName) == InvocationKind.SYNCHRONOUS) return emptyList()
+    val registrationOffset = headerStart + prefix.lastIndexOf(registrationName)
+    val callbackBodies = ordinaryMethods
+        .filter { it.startOffset in (openBrace + 1) until closeBrace }
+        .toMutableList()
+    for (callbackOpen in (openBrace + 1) until closeBrace) {
+        callbackBodyMethodAt(callbackOpen, text, mask, lines, isJavaFile, filePath, callbackBodies)?.let { callbackBodies += it }
+    }
+    return callbackBodies.mapNotNull { callback ->
+        val bodyOpen = text.indexOf('{', callback.startOffset).takeIf { it in callback.startOffset until callback.endOffsetExclusive }
+            ?: return@mapNotNull null
+        val role = callback.name
+        val id = sourceStableId(
+            "synthetic-callback", filePath, openBrace,
+            "$registrationOffset|$registrationName|$role|${callback.startOffset}",
+        )
+        SyntheticCallbackMethod(
+            method = IndexedMethod(
+                id = id,
+                filePath = filePath,
+                owningType = enclosingOwner(registrationOffset),
+                name = "$registrationName#$role",
+                signature = "<callback $registrationName $role>",
+                declaredReturnType = callback.declaredReturnType,
+                parameterCount = callback.parameterCount,
+                startLine = lines.lineOf(bodyOpen),
+                endLine = lines.lineOf(callback.endOffsetExclusive),
+                startOffset = bodyOpen,
+                endOffsetExclusive = callback.endOffsetExclusive,
+                sourceSet = sourceSetForPath(filePath),
+                synthetic = true,
+                callbackRegistrationName = registrationName,
+                callbackRegistrationOffset = registrationOffset,
+                callbackContainerStart = openBrace + 1,
+                callbackContainerEnd = closeBrace,
+            ),
+            callbackContainerStart = openBrace + 1,
+            callbackContainerEnd = closeBrace,
+        )
+    }
+}
+
+@Suppress("LongParameterList")
+private fun callbackBodyMethodAt(
+    callbackOpen: Int,
+    text: String,
+    mask: CodeMask,
+    lines: LineIndex,
+    isJavaFile: Boolean,
+    filePath: String,
+    existingBodies: List<IndexedMethod>,
+): IndexedMethod? {
+    if (text[callbackOpen] != '{' || !mask.isCode.getOrElse(callbackOpen) { false }) return null
+    val callbackClose = findMatchingClose(text, mask, callbackOpen)
+    val callbackHeaderStart = findHeaderStart(text, mask, callbackOpen)
+    val callbackHeader = text.substring(callbackHeaderStart, callbackOpen)
+    val callbackName = extractMethodName(callbackHeader, isJavaFile)?.name ?: return null
+    if (existingBodies.any { it.startOffset == callbackHeaderStart && it.name == callbackName }) return null
+    return IndexedMethod(
+        id = sourceStableId("callback-body", filePath, callbackHeaderStart, callbackHeader.trim()),
+        filePath = filePath,
+        owningType = null,
+        name = callbackName,
+        signature = callbackHeader.trim(),
+        declaredReturnType = null,
+        parameterCount = declarationParameterCount(callbackHeader),
+        startLine = lines.lineOf(callbackHeaderStart),
+        endLine = lines.lineOf(callbackClose),
+        startOffset = callbackHeaderStart,
+        endOffsetExclusive = callbackClose + 1,
+        sourceSet = sourceSetForPath(filePath),
+    )
+}
+
+@Suppress("LongParameterList")
+private fun lambdaOrTrailingCallbackSyntheticMethod(
+    filePath: String,
+    lines: LineIndex,
+    enclosingOwner: (Int) -> String?,
+    header: String,
+    openBrace: Int,
+    closeBrace: Int,
+    headerStart: Int,
+): SyntheticCallbackMethod? {
+    val registrationMatch = TRAILING_CALLBACK_RE.findAll(header).lastOrNull()
+        ?: LAMBDA_ARGUMENT_CALLBACK_RE.findAll(header).lastOrNull()
+        ?: return null
+    val registrationName = registrationMatch.groupValues[1]
+    if (registrationName in CALLBACK_CONTROL_WORDS || invocationKind(registrationName) == InvocationKind.SYNCHRONOUS) return null
+    val registrationOffset = headerStart + header.lastIndexOf(registrationName)
+    val id = sourceStableId("synthetic-callback", filePath, openBrace, "$registrationOffset|$registrationName|lambda")
+    return SyntheticCallbackMethod(
+        method = IndexedMethod(
+            id = id,
+            filePath = filePath,
+            owningType = enclosingOwner(registrationOffset),
+            name = "$registrationName#lambda",
+            signature = "<callback $registrationName lambda>",
+            declaredReturnType = null,
+            parameterCount = 0,
+            startLine = lines.lineOf(openBrace),
+            endLine = lines.lineOf(closeBrace),
+            startOffset = openBrace,
+            endOffsetExclusive = closeBrace + 1,
+            sourceSet = sourceSetForPath(filePath),
+            synthetic = true,
+            callbackRegistrationName = registrationName,
+            callbackRegistrationOffset = registrationOffset,
+            callbackContainerStart = openBrace,
+            callbackContainerEnd = closeBrace,
+        ),
+        callbackContainerStart = openBrace,
+        callbackContainerEnd = closeBrace,
+    )
 }
 
 private fun declaredReturnType(declaration: SourceDeclaration, isJavaFile: Boolean): String? {
@@ -1276,7 +1529,44 @@ private fun resolveDirectCalls(
         result
     }.collect(java.util.stream.Collectors.toList())
 
-    return perFileResults.asSequence().flatten().toMap()
+    val resolved = perFileResults.asSequence().flatten().toMap().toMutableMap()
+    // Registration/dispatch calls are explicit syntax evidence even when the registration API is
+    // outside the indexed source tree. Each synthetic callback target remains single-target; the
+    // trace solver can therefore use it without guessing among unrelated lambdas.
+    methodsByFile.forEach { (filePath, methods) ->
+        val text = texts[filePath] ?: return@forEach
+        val lines = LineIndex(text)
+        methods.filter { it.synthetic && it.callbackRegistrationOffset != null }.forEach { callback ->
+            val registrationOffset = callback.callbackRegistrationOffset ?: return@forEach
+            val caller = methods
+                .filter { it.id != callback.id && registrationOffset in it.startOffset until it.endOffsetExclusive }
+                .minByOrNull { it.endOffsetExclusive - it.startOffset }
+                ?: return@forEach
+            val registrationName = callback.callbackRegistrationName ?: return@forEach
+            val registrationCall = SourceDirectCall(
+                targetFilePath = filePath,
+                targetOwnerType = callback.owningType ?: return@forEach,
+                targetMethodName = callback.name,
+                targetMethodSignature = callback.signature,
+                targetDeclaredReturnType = callback.declaredReturnType,
+                callLine = lines.lineOf(registrationOffset),
+                sourceOwnerType = caller.owningType,
+                callSiteId = sourceStableId(
+                    "callback-registration", filePath, registrationOffset,
+                    "$registrationName|${callback.id}",
+                ),
+                callerMethodId = caller.id,
+                targetMethodId = callback.id,
+                callOffset = registrationOffset,
+                receiverExpression = registrationName,
+                receiverRole = ReceiverRole.UNKNOWN,
+                invocationKind = invocationKind(registrationName),
+                resolutionConfidence = 1.0,
+            )
+            resolved[caller.id] = (resolved[caller.id].orEmpty() + registrationCall).distinctBy { it.callSiteId }
+        }
+    }
+    return resolved
 }
 
 private fun addIncomingCallerCalls(
@@ -1410,13 +1700,33 @@ private fun receiverRole(
     else -> ReceiverRole.LOCAL
 }
 
+// "start" is an exact match, not a prefix: startsWith("start") would also catch
+// startActivity/startService/startForeground, which are ordinary synchronous calls, not a
+// coroutine launch.
+private val COROUTINE_LAUNCH_EXACT_NAMES = setOf("launch", "async", "launchin", "start")
+private val COROUTINE_LAUNCH_NAME_PREFIXES = listOf("launchwhen", "resume")
+private val EXECUTOR_DISPATCH_NAME_PREFIXES = listOf("submit", "execute", "post", "dispatch", "enqueue")
+
+// Flow.collect/collectLatest registers a collector that receives async emissions over time — the
+// same "someone else calls you back later" shape as a listener/callback registration.
+private val CALLBACK_REGISTRATION_NAME_SUBSTRINGS = listOf("callback", "listener")
+private val CALLBACK_REGISTRATION_NAME_PREFIXES = listOf("register", "subscribe", "observe", "collect")
+private val BINDER_OR_RPC_NAME_SUBSTRINGS = listOf("binder", "rpc")
+private val BINDER_OR_RPC_EXACT_NAMES = setOf("transact", "call")
+
+// Table-driven rather than one big ||-chained `when` so this stays well under detekt's cyclomatic
+// complexity threshold as name variants get added — each category is a plain list lookup, not a
+// literal boolean expression the complexity count grows with.
 private fun invocationKind(methodName: String): InvocationKind {
     val name = methodName.lowercase()
     return when {
-        name in setOf("launch", "async", "start", "resume") -> InvocationKind.COROUTINE_LAUNCH
-        name in setOf("submit", "execute", "post", "dispatch", "enqueue") -> InvocationKind.EXECUTOR_DISPATCH
-        name.contains("callback") || name.contains("listener") || name in setOf("register", "subscribe", "observe") -> InvocationKind.CALLBACK_REGISTRATION
-        name.contains("binder") || name.contains("rpc") || name in setOf("transact", "call") -> InvocationKind.BINDER_OR_RPC
+        name in COROUTINE_LAUNCH_EXACT_NAMES || COROUTINE_LAUNCH_NAME_PREFIXES.any { name.startsWith(it) } ->
+            InvocationKind.COROUTINE_LAUNCH
+        EXECUTOR_DISPATCH_NAME_PREFIXES.any { name.startsWith(it) } -> InvocationKind.EXECUTOR_DISPATCH
+        CALLBACK_REGISTRATION_NAME_SUBSTRINGS.any { name.contains(it) } ||
+            CALLBACK_REGISTRATION_NAME_PREFIXES.any { name.startsWith(it) } -> InvocationKind.CALLBACK_REGISTRATION
+        BINDER_OR_RPC_NAME_SUBSTRINGS.any { name.contains(it) } || name in BINDER_OR_RPC_EXACT_NAMES ->
+            InvocationKind.BINDER_OR_RPC
         else -> InvocationKind.SYNCHRONOUS
     }
 }
@@ -1581,9 +1891,9 @@ private fun buildSite(
     return LogCallSite(
         filePath = filePath,
         tag = tag,
-        methodName = methodInfo.name,
-        methodStartLine = methodInfo.startLine,
-        methodEndLine = methodInfo.endLine,
+        methodName = indexedMethod?.takeIf { it.synthetic }?.name ?: methodInfo.name,
+        methodStartLine = indexedMethod?.takeIf { it.synthetic }?.startLine ?: methodInfo.startLine,
+        methodEndLine = indexedMethod?.takeIf { it.synthetic }?.endLine ?: methodInfo.endLine,
         callLine = lines.lineOf(callStartIdx),
         matcher = matcherInfo.pattern,
         literalLen = matcherInfo.literalLen,
@@ -1811,6 +2121,7 @@ private fun declaredOwnerCandidates(receiver: String, tables: DeclarationTables,
         candidates += type
         if (!filePackage.isNullOrBlank() && !type.contains('.')) candidates += "$filePackage.$type"
     }
+
     fun addDeclaredType(table: Map<String, List<Pair<Int, String>>>) {
         val declarations = table[simpleReceiver] ?: return
         addType(declarations.lastTypeBefore(beforeOffset) ?: declarations.uniqueType())

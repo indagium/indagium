@@ -765,6 +765,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
 }
 
 // ── Shared ────────────────────────────────────────────────────────────
+
 /** The log-tab visual recipe, generalised so [DiagramWorkspaceTabs] can render diagram tabs
  *  through the exact same shell instead of an ad-hoc pill.  [pointerKey] replaces `tab.id` as the
  *  `pointerInput` restart key (cross-tab/cross-workspace id collisions are the same hazard either
@@ -896,7 +897,9 @@ internal fun TabItem(
                     AppText("●", color = DANGER_RED, fontSize = 10.sp)
                 }
             }
-        } else null,
+        } else {
+            null
+        },
         onClick = onClick,
         onClose = onClose,
         onCtxMenu = onCtxMenu,

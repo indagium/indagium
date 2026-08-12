@@ -5,48 +5,49 @@ import com.indagium.diagram.DiagramActivationSpan
 import com.indagium.diagram.DiagramActor
 import com.indagium.diagram.DiagramAttachmentMetadata
 import com.indagium.diagram.DiagramAttachmentMode
+import com.indagium.diagram.DiagramAuthoringMode
 import com.indagium.diagram.DiagramCallOverride
 import com.indagium.diagram.DiagramComponent
 import com.indagium.diagram.DiagramDialect
 import com.indagium.diagram.DiagramExportMode
 import com.indagium.diagram.DiagramFrame
 import com.indagium.diagram.DiagramMessage
-import com.indagium.diagram.DiagramMessageRule
 import com.indagium.diagram.DiagramMessageOverride
+import com.indagium.diagram.DiagramMessageRule
 import com.indagium.diagram.DiagramNoteMark
 import com.indagium.diagram.DiagramOptions
+import com.indagium.diagram.DiagramParameter
 import com.indagium.diagram.DiagramParticipant
 import com.indagium.diagram.DiagramRange
+import com.indagium.diagram.DiagramResolvedTrace
+import com.indagium.diagram.DiagramRuleCaptureBinding
+import com.indagium.diagram.DiagramRuleEndpoint
+import com.indagium.diagram.DiagramTraceCall
+import com.indagium.diagram.DiagramTraceDiagnostic
+import com.indagium.diagram.DiagramTraceDiagnostics
+import com.indagium.diagram.DiagramTraceEvent
+import com.indagium.diagram.DiagramTraceEvidence
+import com.indagium.diagram.DiagramTraceOperation
 import com.indagium.diagram.LabelSource
+import com.indagium.diagram.ManualDiagramActivation
+import com.indagium.diagram.ManualDiagramDocument
+import com.indagium.diagram.ManualDiagramGroup
+import com.indagium.diagram.ManualDiagramInteraction
+import com.indagium.diagram.ManualDiagramNote
+import com.indagium.diagram.ManualInteractionAuthoring
+import com.indagium.diagram.ManualOperationVisibility
 import com.indagium.diagram.MessageEvidence
 import com.indagium.diagram.MessageKind
 import com.indagium.diagram.MessageOriginKey
-import com.indagium.diagram.DiagramParameter
-import com.indagium.diagram.DiagramAuthoringMode
-import com.indagium.diagram.DiagramRuleEndpoint
-import com.indagium.diagram.DiagramRuleCaptureBinding
-import com.indagium.diagram.ManualDiagramDocument
-import com.indagium.diagram.ManualDiagramInteraction
-import com.indagium.diagram.ManualDiagramGroup
-import com.indagium.diagram.ManualDiagramNote
-import com.indagium.diagram.ManualDiagramActivation
-import com.indagium.diagram.ManualOperationVisibility
-import com.indagium.diagram.DiagramResolvedTrace
-import com.indagium.diagram.DiagramTraceEvent
-import com.indagium.diagram.DiagramTraceCall
-import com.indagium.diagram.DiagramTraceOperation
-import com.indagium.diagram.DiagramTraceDiagnostics
-import com.indagium.diagram.DiagramTraceDiagnostic
-import com.indagium.diagram.DiagramTraceEvidence
-import com.indagium.diagram.SourceTraceMode
-import com.indagium.diagram.TraceCallStatus
-import com.indagium.diagram.TraceInvocationKind
-import com.indagium.diagram.TraceOperationKind
-import com.indagium.diagram.TraceDiagnosticReason
 import com.indagium.diagram.MirrorDirection
 import com.indagium.diagram.ParticipantKind
 import com.indagium.diagram.SeqDiagram
 import com.indagium.diagram.SeqDiagramSpec
+import com.indagium.diagram.SourceTraceMode
+import com.indagium.diagram.TraceCallStatus
+import com.indagium.diagram.TraceDiagnosticReason
+import com.indagium.diagram.TraceInvocationKind
+import com.indagium.diagram.TraceOperationKind
 import com.indagium.diagram.UnmappedTagPolicy
 import com.indagium.diagram.encodeDiagramNote
 import com.indagium.diagram.parseDiagramNote
@@ -270,6 +271,28 @@ class DiagramSpecCodecTest {
     }
 
     @Test
+    fun transientCallerIsNotPersistedInCarriedModels() {
+        val durable = listOf(DiagramParticipant("A", "A", ParticipantKind.TAG, tag = "A"))
+        val caller = DiagramParticipant("Caller", "Caller", ParticipantKind.ACTOR, isEntryPoint = true, inferred = true)
+        val model = SeqDiagram(
+            spec = fullSpec.copy(participants = durable),
+            participants = listOf(caller, durable.single()),
+            messages = listOf(
+                DiagramMessage(0, 1, "start", 7, "10:00:00.000", LogLevel.I, MessageKind.CALL),
+                DiagramMessage(1, 1, "work", 8, "10:00:00.010", LogLevel.I, MessageKind.SELF),
+            ),
+        )
+
+        val parsed = assertNotNull(parseDiagramNote(encodeDiagramNote(model.spec, source, model)))
+        val carried = assertNotNull(parsed.model)
+
+        assertTrue(carried.participants.none { it.label == "Caller" })
+        assertEquals(listOf(0, 0), carried.messages.map { it.fromIdx })
+        assertEquals(listOf(0, 0), carried.messages.map { it.toIdx })
+        assertTrue(parsed.spec.participants.none { it.label == "Caller" })
+    }
+
+    @Test
     fun aDiagramNoteWithNoCarriedModelStillParsesAsADiagramNote() {
         // Notes written before the model was carried (and hand-authored ones) must keep working:
         // they show their fenced source and export correctly, they just can't be drawn until
@@ -425,13 +448,23 @@ class DiagramSpecCodecTest {
             manualDocument = document,
         )
         val trace = DiagramResolvedTrace(
-            events = listOf(DiagramTraceEvent(7, "site-7", methodId = "m-7", laneId = "p1:t1", confidence = 0.9, evidence = setOf(DiagramTraceEvidence.EXACT_SOURCE_SITE))),
-            calls = listOf(DiagramTraceCall("i-7", "Client", "Service", callEntryId = 7, status = TraceCallStatus.RETURNED, invocationKind = TraceInvocationKind.EXECUTOR_DISPATCH, callLabel = "fetch", confidence = 0.9)),
+            events = listOf(
+                DiagramTraceEvent(7, "site-7", methodId = "m-7", laneId = "p1:t1", confidence = 0.9, evidence = setOf(DiagramTraceEvidence.EXACT_SOURCE_SITE)),
+            ),
+            calls = listOf(
+                DiagramTraceCall(
+                    "i-7", "Client", "Service", callEntryId = 7, status = TraceCallStatus.RETURNED,
+                    invocationKind = TraceInvocationKind.EXECUTOR_DISPATCH, callLabel = "fetch", confidence = 0.9,
+                ),
+            ),
             operations = listOf(DiagramTraceOperation("op-7", TraceOperationKind.SOURCE_CALL, 7, "i-7", "op-7", "site-7")),
             diagnostics = DiagramTraceDiagnostics(diagnostics = listOf(DiagramTraceDiagnostic(TraceDiagnosticReason.ASYNC_BOUNDARY, 7, "dispatch"))),
         )
         val model = SeqDiagram(spec, participants, listOf(
-            DiagramMessage(0, 1, "fetch", 7, "10:00:00", LogLevel.I, MessageKind.ASYNC, sourceOperationId = "op-7", sourceLogSiteId = "site-7", originKeys = setOf(origin)),
+            DiagramMessage(
+                0, 1, "fetch", 7, "10:00:00", LogLevel.I, MessageKind.ASYNC,
+                sourceOperationId = "op-7", sourceLogSiteId = "site-7", originKeys = setOf(origin),
+            ),
         ), resolvedTrace = trace, traceMode = SourceTraceMode.SOURCE_TRACE)
 
         val encoded = encodeDiagramNote(spec, source, model)
@@ -465,6 +498,36 @@ class DiagramSpecCodecTest {
         assertNull(interaction.groupKey)
         assertNull(interaction.sourceMethodId)
         assertEquals(ManualOperationVisibility.UNSPECIFIED, interaction.visibility)
+        assertEquals(ManualInteractionAuthoring.AUTO, interaction.authoring)
+    }
+
+    @Test
+    fun targetlessManualInteractionsRoundTripWithStableModelIdentity() {
+        val participants = listOf(DiagramParticipant("a", "A", ParticipantKind.TAG, tag = "A"))
+        val interaction = ManualDiagramInteraction(
+            id = "targetless", sourceEntryIds = setOf(7), fromParticipantId = "a", toParticipantId = null,
+            label = "queued", groupKey = "queue", authoring = ManualInteractionAuthoring.EDITED,
+        )
+        val spec = SeqDiagramSpec(
+            participants = participants,
+            authoringMode = DiagramAuthoringMode.MANUAL,
+            manualDocument = ManualDiagramDocument(interactions = listOf(interaction)),
+        )
+        val model = SeqDiagram(
+            spec, participants,
+            listOf(DiagramMessage(
+                0, 0, "queued", 7, "10:00:00", LogLevel.W, MessageKind.CALL,
+                originKeys = setOf(MessageOriginKey(7, manualInteractionId = "targetless")),
+                targetless = true, manualGroupKey = "queue",
+            )),
+        )
+
+        val parsed = assertNotNull(parseDiagramNote(encodeDiagramNote(spec, source, model)))
+        assertEquals(null, parsed.spec.manualDocument.interactions.single().toParticipantId)
+        assertEquals(ManualInteractionAuthoring.EDITED, parsed.spec.manualDocument.interactions.single().authoring)
+        assertTrue(parsed.model?.messages?.single()?.targetless == true)
+        assertEquals("targetless", parsed.model?.messages?.single()?.originKeys?.single()?.manualInteractionId)
+        assertEquals("queue", parsed.model?.messages?.single()?.manualGroupKey)
     }
 
     @Test

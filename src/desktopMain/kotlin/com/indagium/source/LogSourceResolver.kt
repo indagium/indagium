@@ -18,6 +18,9 @@ private const val MAX_CONFIDENCE = 1.0
 // utils/LogParser.kt) — queried the same as a genuinely absent tag: search every bucket.
 private const val RAW_TAG = "RAW"
 
+// Widens a signed Byte to its unsigned Int value before hex-formatting it.
+private const val BYTE_MASK = 0xff
+
 /** Cheap indexed lookup from a log line's (tag, message) back to the source call site(s) that
  *  could have emitted it. Sites are bucketed by tag at construction time and each site's regex
  *  matcher is compiled once, so [resolve] is safe to call per-visible-row. */
@@ -91,7 +94,7 @@ class LogSourceResolver(index: SourceIndex) {
                     sha256 = expected.sha256?.let {
                         MessageDigest.getInstance("SHA-256")
                             .digest(file.readBytes())
-                            .joinToString("") { byte -> (byte.toInt() and 0xff).toString(16).padStart(2, '0') }
+                            .joinToString("") { byte -> (byte.toInt() and BYTE_MASK).toString(16).padStart(2, '0') }
                     },
                 )
             }

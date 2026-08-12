@@ -129,6 +129,15 @@ fun SeqDiagram.toMermaid(): String {
             }
             // Mermaid's open arrowhead is the native non-blocking/asynchronous call notation;
             // keep it distinct from both the filled CALL arrow and the dashed RETURN arrow.
+            if (msg.targetless) {
+                append("    Note right of ").append(aliasOf(msg.fromIdx)).append(": ")
+                    .append(mermaidEscape(msg.label)).append(" · needs target").append('\n')
+                closes[i]?.sortedByDescending { it.depth }?.forEach { f ->
+                    append("    Note over ").append(mermaidNoteSpan(f, messages, aliases)).append(": ")
+                        .append("  ".repeat(f.depth)).append("◀ ").append(mermaidEscape(frameLabel(f))).append('\n')
+                }
+                return@forEachIndexed
+            }
             val arrow = when (msg.kind) {
                 MessageKind.RETURN -> "-->>"
                 MessageKind.ASYNC -> "-)"
@@ -239,6 +248,12 @@ fun SeqDiagram.toPlantUml(): String {
                 append("group ").append(plantUmlEscape(frameLabel(f))).append('\n')
             }
             // PlantUML's doubled arrowhead is its native asynchronous-message notation.
+            if (msg.targetless) {
+                append("note right of ").append(aliasOf(msg.fromIdx)).append(": ")
+                    .append(plantUmlEscape(msg.label)).append(" · needs target").append('\n')
+                closes[i]?.sortedByDescending { it.depth }?.forEach { append("end\n") }
+                return@forEachIndexed
+            }
             val arrow = when (msg.kind) {
                 MessageKind.RETURN -> "-->"
                 MessageKind.ASYNC -> "->>"

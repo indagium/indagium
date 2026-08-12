@@ -3,29 +3,30 @@ package com.indagium
 import androidx.compose.ui.graphics.Color
 import com.indagium.diagram.ArrowMode
 import com.indagium.diagram.DiagramActor
+import com.indagium.diagram.DiagramAuthoringMode
 import com.indagium.diagram.DiagramCallOverride
 import com.indagium.diagram.DiagramComponent
-import com.indagium.diagram.DiagramAuthoringMode
 import com.indagium.diagram.DiagramMessageOverride
 import com.indagium.diagram.DiagramMessageRule
 import com.indagium.diagram.DiagramOptions
 import com.indagium.diagram.DiagramParticipant
 import com.indagium.diagram.DiagramParticipantRepresentation
 import com.indagium.diagram.DiagramRange
+import com.indagium.diagram.DiagramResolvedTrace
 import com.indagium.diagram.DiagramRuleCaptureBinding
 import com.indagium.diagram.DiagramRuleEndpoint
-import com.indagium.diagram.DiagramResolvedTrace
 import com.indagium.diagram.DiagramSourceEnrichment
 import com.indagium.diagram.DiagramSourceInteraction
+import com.indagium.diagram.LabelSource
 import com.indagium.diagram.ManualDiagramActivation
 import com.indagium.diagram.ManualDiagramDocument
 import com.indagium.diagram.ManualDiagramGroup
 import com.indagium.diagram.ManualDiagramInteraction
 import com.indagium.diagram.ManualDiagramNote
 import com.indagium.diagram.ManualOperationVisibility
-import com.indagium.diagram.MessageOriginKey
 import com.indagium.diagram.MessageEvidence
 import com.indagium.diagram.MessageKind
+import com.indagium.diagram.MessageOriginKey
 import com.indagium.diagram.ParticipantKind
 import com.indagium.diagram.SeqDiagramSpec
 import com.indagium.diagram.UnmappedTagPolicy
@@ -73,6 +74,120 @@ class DiagramBuilderTest {
     // ── EVIDENCE_FLOW: SELF unless there is real evidence of a correlation ──────────────────
 
     @Test
+    fun defaultsEnableSafeHandoffsAndUseBothLabelSources() {
+        assertTrue(DiagramOptions().threadHandoffArrows)
+        assertEquals(LabelSource.BOTH, DiagramOptions().labelSource)
+
+        val tab = mkTab("labels", "app.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "A", "message")))
+        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(options = DiagramOptions()), resolveLabel = { "run()" })
+        assertTrue(diagram.messages.single().label.contains("run() — message"), "${diagram.messages}")
+    }
+
+    @Test
+    fun tokenCorrelationDrawsOnlyAdjacentCrossLifelineCall() {
+        val token = "0123456789abcdef"
+        val tab = mkTab("tokens", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "requestId=$token start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "B", "request_id=\"$token\" finish"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "A", "unmatched"),
+        ))
+
+        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(options = plainOptions(threadHandoffArrows = false)))
+
+        assertEquals(listOf(MessageKind.CALL, MessageKind.CALL, MessageKind.SELF), diagram.messages.map { it.kind })
+        assertEquals(MessageEvidence.CORRELATION_TOKEN, diagram.messages[1].evidence)
+        assertTrue(diagram.messages.all { it.primary })
+    }
+
+    @Test
+    fun threadHandoffTakesPrecedenceOverSharedToken() {
+        val token = "0123456789abcdef"
+        val tab = mkTab("precedence", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "requestId=$token start", pid = 7, tid = 11),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "B", "traceId=$token finish", pid = 7, tid = 11),
+        ))
+
+        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(options = plainOptions(threadHandoffArrows = true)))
+
+        assertEquals(MessageEvidence.THREAD_HANDOFF, diagram.messages[1].evidence)
+    }
+
+    @Test
+    fun tokenCorrelationRequiresParsedTimestampAndDifferentLifelines() {
+        val token = "0123456789abcdef"
+        val sameTag = mkTab("same", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "requestId=$token start"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "A", "requestId=$token finish"),
+        ))
+        val badTimestamp = mkTab("bad", "app.log", listOf(
+            LogEntry(1, "unknown", LogLevel.I, "A", "requestId=$token start"),
+            LogEntry(2, "unknown", LogLevel.I, "B", "requestId=$token finish"),
+        ))
+
+        assertEquals(MessageKind.SELF, buildSequenceDiagram(sameTag, SeqDiagramSpec(options = plainOptions(false))).messages[1].kind)
+        assertEquals(MessageKind.SELF, buildSequenceDiagram(badTimestamp, SeqDiagramSpec(options = plainOptions(false))).messages[1].kind)
+    }
+
+    @Test
+    fun signalRankingKeepsHighErrorTemplateTagAheadOfNoisyTag() {
+        val entries = buildList {
+            repeat(20) { add(LogEntry(it + 1, "10:00:00.%03d".format(it), LogLevel.I, "Noisy", "heartbeat")) }
+            add(LogEntry(100, "10:00:01.000", LogLevel.E, "Signal", "failure one"))
+            add(LogEntry(101, "10:00:01.010", LogLevel.E, "Signal", "failure two"))
+            add(LogEntry(102, "10:00:01.020", LogLevel.W, "Signal", "retrying"))
+        }
+        val candidates = diagramParticipantCandidates(mkTab("ranking", "app.log", entries), SeqDiagramSpec())
+            .associateBy { it.tag }
+
+        assertEquals(DiagramParticipantRepresentation.SHOW, candidates.getValue("Signal").representation)
+        assertTrue(candidates.getValue("Signal").signalScore > candidates.getValue("Noisy").signalScore)
+    }
+
+    @Test
+    fun threadPeerBonusKeepsCorrelatedHighVolumeTagsOffTheOtherLifeline() {
+        // Regression test: a tag doing high-volume, low-diversity logging (a real worker/service
+        // tag genuinely part of a pid/tid call chain) used to lose signalScore ranking to several
+        // distinct-error/template "noise" tags, get merged into the shared "Other" lifeline together
+        // with its actual thread-handoff partner, and the correlated line's THREAD_HANDOFF CALL
+        // silently degraded into a same-lifeline SELF (fromIdx == toIdx once both landed on "Other").
+        val entries = buildList {
+            var id = 1
+            var ms = 0
+            // 8 tags that would outrank A/B on signalScore alone without the pid/tid-peer bonus: two
+            // distinct-message error entries each -> 4*2 + 2*2 + min(2, 10) = 14.
+            repeat(8) { i ->
+                val tag = "Noise$i"
+                add(LogEntry(id++, "09:00:00.%03d".format(ms++), LogLevel.E, tag, "err-a"))
+                add(LogEntry(id++, "09:00:00.%03d".format(ms++), LogLevel.E, tag, "err-b"))
+            }
+            // A: 10 same-message, no-error entries -> high volume, low diversity (signalScore = 12
+            // without the peer bonus, below every "Noise" tag's 14). The last one is A's half of the
+            // real pid/tid handoff.
+            repeat(9) { add(LogEntry(id++, "09:00:01.%03d".format(ms++), LogLevel.I, "A", "poll")) }
+            add(LogEntry(id++, "09:00:02.000", LogLevel.I, "A", "poll", pid = 7, tid = 42))
+            // B's first entry: same real thread, 50ms later - the one line that actually proves A
+            // and B are part of the same call chain.
+            add(LogEntry(id++, "09:00:02.050", LogLevel.I, "B", "poll", pid = 7, tid = 42))
+            repeat(9) { add(LogEntry(id++, "09:00:03.%03d".format(ms++), LogLevel.I, "B", "poll")) }
+        }
+        val tab = mkTab("thread-peer-bonus", "app.log", entries)
+
+        val candidates = diagramParticipantCandidates(tab, SeqDiagramSpec()).associateBy { it.tag }
+        assertTrue(
+            candidates.getValue("A").signalScore > candidates.getValue("Noise0").signalScore,
+            "${candidates["A"]} vs ${candidates["Noise0"]}",
+        )
+        assertEquals(DiagramParticipantRepresentation.SHOW, candidates.getValue("A").representation)
+        assertEquals(DiagramParticipantRepresentation.SHOW, candidates.getValue("B").representation)
+
+        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(options = plainOptions(threadHandoffArrows = true)))
+        assertTrue(
+            diagram.messages.any { it.evidence == MessageEvidence.THREAD_HANDOFF },
+            "expected a THREAD_HANDOFF call between A and B, got ${diagram.messages}",
+        )
+    }
+
+    @Test
     fun evidenceFlowEmitsSelfEventsWhenNothingCorrelatesAdjacentLines() {
         // This is the direct regression test for the reported bug: three (here four) adjacent
         // lines from unrelated tags must never render as guessed CALLs just because the tag
@@ -88,22 +203,21 @@ class DiagramBuilderTest {
         )
         val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(options = plainOptions()))
 
-        assertEquals(2, diagram.participants.size, "A and B, auto-derived; ${diagram.participants}")
+        assertEquals(3, diagram.participants.size, "A and B plus the transient Caller, auto-derived; ${diagram.participants}")
+        val callerIdx = diagram.participants.indexOfFirst { it.label == "Caller" }
         val aIdx = diagram.participants.indexOfFirst { it.tag == "A" }
         val bIdx = diagram.participants.indexOfFirst { it.tag == "B" }
         assertEquals(
             4, diagram.messages.size,
             "no bootstrap suppression anymore — every entry with a resolvable lifeline emits; ${diagram.messages}",
         )
-        assertTrue(diagram.messages.all { it.kind == MessageKind.SELF }, "no correlation exists, so nothing may be a CALL; ${diagram.messages}")
+        assertEquals(1, diagram.messages.count { it.kind == MessageKind.CALL })
+        assertTrue(diagram.messages.drop(1).all { it.kind == MessageKind.SELF }, "only the transient caller opening is a CALL; ${diagram.messages}")
         assertTrue(diagram.messages.all { it.evidence == MessageEvidence.LOG })
-        assertEquals(listOf(aIdx, bIdx, bIdx, aIdx), diagram.messages.map { it.fromIdx })
+        assertEquals(listOf(callerIdx, bIdx, bIdx, aIdx), diagram.messages.map { it.fromIdx })
         assertEquals(listOf("a1", "b1", "b2", "a2"), diagram.messages.map { it.label })
         assertEquals(4, diagram.scannedEntries)
-        assertTrue(
-            diagram.warnings.any { it.contains("No correlated interactions found") },
-            "an all-self diagram must say so, or the feature reads as broken; ${diagram.warnings}",
-        )
+        assertTrue(diagram.warnings.none { it.contains("No correlated interactions found") }, "Caller opening is evidenced; ${diagram.warnings}")
     }
 
     @Test
@@ -121,8 +235,8 @@ class DiagramBuilderTest {
         val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(options = plainOptions()))
 
         assertEquals(3, diagram.messages.size)
-        assertEquals(0, diagram.messages.count { it.kind == MessageKind.CALL }, "zero CALLs; ${diagram.messages}")
-        assertEquals(3, diagram.messages.count { it.kind == MessageKind.SELF })
+        assertEquals(1, diagram.messages.count { it.kind == MessageKind.CALL }, "only Caller -> A is a CALL; ${diagram.messages}")
+        assertEquals(2, diagram.messages.count { it.kind == MessageKind.SELF })
     }
 
     // ── Repeat collapsing + digit/hex normalization ─────────────────────────────────────────
@@ -139,7 +253,14 @@ class DiagramBuilderTest {
                 LogEntry(5, "10:00:00.400", LogLevel.I, "B", "done"),
             ),
         )
-        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(options = plainOptions(collapseRepeats = true)))
+        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(
+            participants = listOf(
+                DiagramParticipant("A", "A", ParticipantKind.TAG, tag = "A"),
+                DiagramParticipant("B", "B", ParticipantKind.TAG, tag = "B"),
+            ),
+            mode = ArrowMode.LINE_PER_MESSAGE,
+            options = plainOptions(collapseRepeats = true),
+        ))
 
         // Under EVIDENCE_FLOW every entry is its own SELF event (no bootstrap suppression, no
         // guessed CALL on the A->B tag change) — three folds into: "start" alone, the three
@@ -198,6 +319,7 @@ class DiagramBuilderTest {
         )
         val diagram = buildSequenceDiagram(tab, spec)
 
+        assertTrue(diagram.participants.none { it.label == "Caller" })
         val userIdx = diagram.participants.indexOfFirst { it.id == "user" }
         val serverIdx = diagram.participants.indexOfFirst { it.id == "server" }
         val aIdx = diagram.participants.indexOfFirst { it.tag == "A" }
@@ -301,15 +423,14 @@ class DiagramBuilderTest {
         )
         val diagram = buildSequenceDiagram(
             tab,
-            SeqDiagramSpec(range = DiagramRange.Time("10:00:00.000", "10:00:00.500"), options = plainOptions()),
+            SeqDiagramSpec(range = DiagramRange.Time("10:00:00.000", "10:00:00.500"), mode = ArrowMode.LINE_PER_MESSAGE, options = plainOptions()),
         )
 
         assertEquals(2, diagram.scannedEntries, "entry 3's own ts is outside the range; entry 2 inherits entry 1's and is inside it")
         // Both scanned entries share tag A, so both are uncorrelated SELF events — the range
         // resolution itself found no problem (no "unparseable timestamp"/"bad bound" warning),
         // just the expected "nothing to correlate" notice.
-        assertEquals(1, diagram.warnings.size, "${diagram.warnings}")
-        assertTrue(diagram.warnings.single().contains("No correlated interactions found"))
+        assertTrue(diagram.warnings.isEmpty(), "${diagram.warnings}")
     }
 
     @Test
@@ -355,15 +476,17 @@ class DiagramBuilderTest {
         ).copy(filter = Filter(activeTags = setOf("A")))
         val diagram = buildSequenceDiagram(
             tab,
-            SeqDiagramSpec(range = DiagramRange.Time("10:00:00.000", "10:00:00.200"), options = plainOptions().copy(includeRowsHiddenByFilter = false)),
+            SeqDiagramSpec(
+                range = DiagramRange.Time("10:00:00.000", "10:00:00.200"), mode = ArrowMode.LINE_PER_MESSAGE,
+                options = plainOptions().copy(includeRowsHiddenByFilter = false),
+            ),
         )
 
         assertEquals(
             2, diagram.scannedEntries,
             "entry 1 (own ts) and entry 3 (inherited from the filtered-out entry 2) are in window; entry 2 is invisible, entry 4 is out of window",
         )
-        assertEquals(1, diagram.warnings.size, "${diagram.warnings}")
-        assertTrue(diagram.warnings.single().contains("No correlated interactions found"))
+        assertTrue(diagram.warnings.isEmpty(), "${diagram.warnings}")
         // EVIDENCE_FLOW: both entries share tag A, so both are their own SELF event — no bootstrap
         // suppression anymore. Entry 3's presence (and entryId) confirms the TS_UNKNOWN
         // carry-forward actually included it.
@@ -629,9 +752,11 @@ class DiagramBuilderTest {
         assertFalse(diagram.participants.any { it.tag == "B" || it.tag == "C" })
         // A's own SELF event, Other's own SELF event (entry 2, grouped), Other's own SELF event
         // again (entry 4, grouped) — no bootstrap suppression, no guessed CALL for the A->Other
-        // tag change; hidden C still produces no arrow at all.
+        // tag change; hidden C still produces no arrow at all. The transient Caller is the one
+        // legitimate opening CALL.
         assertEquals(3, diagram.messages.size, "${diagram.messages}")
-        assertTrue(diagram.messages.all { it.kind == MessageKind.SELF })
+        assertEquals(MessageKind.CALL, diagram.messages.first().kind)
+        assertTrue(diagram.messages.drop(1).all { it.kind == MessageKind.SELF })
     }
 
     @Test
@@ -672,16 +797,17 @@ class DiagramBuilderTest {
             unmappedTagPolicy = UnmappedTagPolicy.GROUP_AS_OTHER,
             options = plainOptions(),
         ))
-        assertEquals(2, grouped.participants.size)
+        assertEquals(3, grouped.participants.size)
         assertEquals("App", grouped.participants.first().label)
         assertEquals(3, grouped.coverage.shownEntries + grouped.coverage.groupedEntries)
         // A and B both merge into the SAME "app" component, and C has no correlation evidence
-        // either — every one of the three entries is its own SELF event, never a guessed CALL.
+        // either — the only CALL is the transient Caller opening, never a guessed tag transition.
         assertEquals(3, grouped.messages.size, "${grouped.messages}")
-        assertTrue(grouped.messages.all { it.kind == MessageKind.SELF })
+        assertEquals(MessageKind.CALL, grouped.messages.first().kind)
+        assertTrue(grouped.messages.drop(1).all { it.kind == MessageKind.SELF })
 
         val hidden = buildSequenceDiagram(tab, SeqDiagramSpec(components = listOf(component), options = plainOptions()))
-        assertEquals(1, hidden.participants.size)
+        assertEquals(2, hidden.participants.size)
         assertEquals(1, hidden.coverage.hiddenEntries)
     }
 
@@ -700,16 +826,15 @@ class DiagramBuilderTest {
             actors = listOf(DiagramActor("client", "Client", "a")),
             options = plainOptions(threadHandoffArrows = true),
         ))
-        // Entry 1 is its own SELF event; the handoff is relayed as Client → A → B.
-        assertEquals(3, diagram.messages.size, "${diagram.messages}")
-        assertEquals(MessageKind.SELF, diagram.messages[0].kind)
-        assertEquals(MessageEvidence.ACTOR_MIRROR, diagram.messages[1].evidence)
-        assertEquals("client", diagram.participants[diagram.messages[1].fromIdx].id)
-        assertEquals("a", diagram.participants[diagram.messages[1].toIdx].id)
-        assertEquals(MessageKind.CALL, diagram.messages[2].kind)
-        assertEquals(MessageEvidence.THREAD_HANDOFF, diagram.messages[2].evidence)
-        assertEquals("a", diagram.participants[diagram.messages[2].fromIdx].id)
-        assertEquals("b", diagram.participants[diagram.messages[2].toIdx].id)
+        // The transient Caller opens the inferred flow; the actor relays and the handoff remain
+        // structural messages around the primary log rows.
+        assertEquals(4, diagram.messages.size, "${diagram.messages}")
+        assertEquals(MessageKind.CALL, diagram.messages[0].kind)
+        assertEquals(MessageEvidence.LOG, diagram.messages[0].evidence)
+        assertEquals(2, diagram.messages.count { it.evidence == MessageEvidence.ACTOR_MIRROR })
+        assertEquals(MessageEvidence.THREAD_HANDOFF, diagram.messages.last().evidence)
+        assertEquals("a", diagram.participants[diagram.messages.last().fromIdx].id)
+        assertEquals("b", diagram.participants[diagram.messages.last().toIdx].id)
     }
 
     @Test
@@ -746,7 +871,7 @@ class DiagramBuilderTest {
             actors = listOf(DiagramActor("client", "Client", mirrorComponentIds = setOf("a", "b"))),
             options = plainOptions(threadHandoffArrows = true),
         ))
-        assertEquals(2, diagram.messages.count { it.evidence == MessageEvidence.ACTOR_MIRROR })
+        assertEquals(3, diagram.messages.count { it.evidence == MessageEvidence.ACTOR_MIRROR })
     }
 
     @Test
@@ -859,7 +984,7 @@ class DiagramBuilderTest {
             },
         )
 
-        assertEquals(MessageKind.SELF, diagram.messages.first().kind)
+        assertEquals(MessageKind.CALL, diagram.messages.first().kind)
         assertEquals(MessageEvidence.LOG, diagram.messages.first().evidence)
     }
 
@@ -1090,7 +1215,7 @@ class DiagramBuilderTest {
 
         assertEquals(3, diagram.messages.size, "${diagram.messages}")
         assertEquals(setOf(1, 2, 3), diagram.primaryEntryIds)
-        assertEquals(listOf(MessageKind.SELF, MessageKind.SELF, MessageKind.CALL), diagram.messages.map { it.kind })
+        assertEquals(listOf(MessageKind.CALL, MessageKind.SELF, MessageKind.CALL), diagram.messages.map { it.kind })
         assertTrue(diagram.messages.all { it.primary })
 
         assertEquals(1, diagram.notes.size, "${diagram.notes}")
@@ -1126,10 +1251,10 @@ class DiagramBuilderTest {
             resolveSourceInteractions = { listOf(DiagramSourceInteraction("a", "b", "B.work()", "String")) },
         )
 
-        // The entry's own SELF event survives; both SOURCE_INFERRED messages (CALL + RETURN) are
-        // dropped, so nothing in the diagram carries that evidence anymore.
+        // The transient Caller opening survives as log evidence; both SOURCE_INFERRED messages
+        // (CALL + RETURN) are dropped by the option.
         assertEquals(1, diagram.messages.size, "${diagram.messages}")
-        assertEquals(MessageKind.SELF, diagram.messages[0].kind)
+        assertEquals(MessageKind.CALL, diagram.messages[0].kind)
         assertTrue(diagram.messages.none { it.evidence == MessageEvidence.SOURCE_INFERRED })
         assertEquals(1, diagram.frames.size, "${diagram.frames}")
         assertEquals(0, diagram.frames[0].firstMsg)
@@ -1150,7 +1275,11 @@ class DiagramBuilderTest {
                 LogEntry(2, "10:00:00.050", LogLevel.I, "A", "same", pid = 7, tid = 42),
             ),
         )
-        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(options = plainOptions(collapseRepeats = true)))
+        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(
+            participants = listOf(DiagramParticipant("A", "A", ParticipantKind.TAG, tag = "A")),
+            mode = ArrowMode.LINE_PER_MESSAGE,
+            options = plainOptions(collapseRepeats = true),
+        ))
         assertEquals(1, diagram.messages.size)
         assertEquals(MessageKind.SELF, diagram.messages[0].kind)
         assertEquals(2, diagram.messages[0].repeatCount)
@@ -1179,6 +1308,7 @@ class DiagramBuilderTest {
         )
         val diagram = buildSequenceDiagram(tab, spec, resolveTrace = { error("manual mode must not resolve source") })
 
+        assertTrue(diagram.participants.none { it.label == "Caller" })
         assertEquals(listOf("b", "a"), diagram.participants.map { it.id })
         assertEquals(listOf(3, 1), diagram.messages.map { it.entryId })
         assertEquals(listOf("send()", "later()"), diagram.messages.map { it.label })
@@ -1347,6 +1477,32 @@ class DiagramBuilderTest {
         assertEquals("+send()", buildSequenceDiagram(tab, spec.copy(manualDocument = spec.manualDocument.copy(
             interactions = listOf(first.copy(visibility = ManualOperationVisibility.PUBLIC)),
         ))).messages.single().label)
+    }
+
+    @Test
+    fun targetlessManualInteractionRemainsEvidenceBackedWithoutCreatingALifeline() {
+        val tab = mkTab("targetless", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.W, "A", "queued request"),
+        ))
+        val interaction = ManualDiagramInteraction(
+            id = "needs-target", sourceEntryIds = setOf(1), fromParticipantId = "a", toParticipantId = null,
+            label = "queued request", groupKey = "queue",
+        )
+        val diagram = buildSequenceDiagram(tab, SeqDiagramSpec(
+            authoringMode = DiagramAuthoringMode.MANUAL,
+            components = listOf(
+                DiagramComponent("a", "A", setOf("A")),
+                DiagramComponent("b", "B", setOf("B")),
+            ),
+            manualDocument = ManualDiagramDocument(interactions = listOf(interaction)),
+        ))
+
+        assertEquals(listOf("a"), diagram.participants.map { it.id })
+        assertEquals(1, diagram.messages.size)
+        assertTrue(diagram.messages.single().targetless)
+        assertEquals(MessageKind.CALL, diagram.messages.single().kind)
+        assertEquals("needs-target", diagram.messages.single().originKeys.single().manualInteractionId)
+        assertEquals("queue", diagram.messages.single().manualGroupKey)
     }
 
     @Test

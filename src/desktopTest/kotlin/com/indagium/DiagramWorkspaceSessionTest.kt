@@ -3,7 +3,9 @@ package com.indagium
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import com.indagium.diagram.ArrowHit
+import com.indagium.diagram.DiagramAuthoringMode
 import com.indagium.diagram.DiagramRange
+import com.indagium.diagram.ManualDiagramSeedStrategy
 import com.indagium.diagram.RenderedDiagram
 import com.indagium.diagram.parseDiagramNote
 import com.indagium.model.AnnBlock
@@ -20,8 +22,6 @@ import com.indagium.ui.ActiveSurface
 import com.indagium.ui.AppState
 import com.indagium.ui.DiagramCandidateState
 import com.indagium.ui.DiagramZoomMode
-import com.indagium.diagram.DiagramAuthoringMode
-import com.indagium.diagram.ManualDiagramSeedStrategy
 import com.indagium.ui.diagramWorkspaceIdsForWidth
 import com.indagium.ui.diagramWorkspaceOrderAfterVisibleReorder
 import com.indagium.ui.mkTab

@@ -27,34 +27,29 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.indagium.diagram.ActivationPolicy
-import com.indagium.diagram.ArrowMode
-import com.indagium.diagram.MAX_CODEC_COMPONENTS
-import com.indagium.diagram.MAX_CODEC_TAG_IDS
 import com.indagium.diagram.DiagramActor
 import com.indagium.diagram.DiagramComponent
 import com.indagium.diagram.DiagramDialect
 import com.indagium.diagram.DiagramParticipantCandidate
 import com.indagium.diagram.DiagramRange
-import com.indagium.diagram.DiagramRuleEndpoint
-import com.indagium.diagram.LabelSource
-import com.indagium.diagram.MirrorDirection
+import com.indagium.diagram.MAX_CODEC_COMPONENTS
+import com.indagium.diagram.MAX_CODEC_TAG_IDS
 import com.indagium.diagram.ParticipantKind
 import com.indagium.diagram.SeqDiagramSpec
-import com.indagium.diagram.UnmappedTagPolicy
 import com.indagium.diagram.displayName
 import com.indagium.model.LogTab
 import com.indagium.source.LogSourceResolver
@@ -93,6 +88,8 @@ internal fun WorkspaceInspector(
     preview: com.indagium.diagram.SeqDiagram?,
     selectedEntryIds: Set<Int>,
     onSpec: (SeqDiagramSpec) -> Unit,
+    focusedManualInteractionId: String?,
+    onFocusManualInteraction: (String?) -> Unit,
 ) {
     // The authoring editor must use durable participant identities, never display labels: labels
     // can collide and inferred source labels can disappear on a later rebuild.  Components and
@@ -114,6 +111,12 @@ internal fun WorkspaceInspector(
         onApplySeed = { configuration, force -> state.seqDiagrams.applyManualSeed(configuration, force) },
         onRevertSeed = { state.seqDiagrams.revertManualSeed() },
         onClearAllManual = { onSpec(spec.copy(manualDocument = com.indagium.diagram.ManualDiagramDocument())) },
+        onNavigateEvidence = { entryId -> state.navigateToLogLine(tab.id, entryId) },
+        focusedManualInteractionId = focusedManualInteractionId,
+        onFocusManualInteraction = onFocusManualInteraction,
+        manualSeedReview = state.seqDiagrams.manualSeedReview,
+        onAcceptSeedReview = { state.seqDiagrams.acceptManualSeedReview() },
+        onCancelSeedReview = { state.seqDiagrams.cancelManualSeedReview() },
         canRevertSeed = state.seqDiagrams.canRevertManualSeed,
         seedNeedsConfirmation = state.seqDiagrams.manualSeedNeedsConfirmation,
         seedBusy = state.seqDiagrams.manualSeedBusy,
@@ -154,7 +157,8 @@ private sealed interface ComponentDraft {
     data class Component(
         val editingId: String?,
         val tags: Set<String>, val name: String,
-        val nameTouched: Boolean, // suppresses re-proposal once the user has typed their own name
+        // suppresses re-proposal once the user has typed their own name
+        val nameTouched: Boolean,
     ) : ComponentDraft
 }
 
@@ -184,6 +188,7 @@ private fun BoundedIntField(
     LaunchedEffect(value) {
         if (text.toIntOrNull() != value) text = value.toString()
     }
+
     fun commit() {
         val parsed = text.toIntOrNull()
         if (parsed == null) {
@@ -465,7 +470,9 @@ private fun UnifiedLifelinesSection(
                 onUnmerge = { unmerge(component) },
                 onRemove = { deleteComponent(component) },
                 sourceOwnerTypes = indexedOwnerTypesForLog(state.sourceIndex, component.tagIds, tab.logData),
-                onSourceOwners = { owners -> onSpec(spec.copy(components = components.map { if (it.id == component.id) it.copy(sourceOwnerTypes = owners) else it })) },
+                onSourceOwners = { owners ->
+                    onSpec(spec.copy(components = components.map { if (it.id == component.id) it.copy(sourceOwnerTypes = owners) else it }))
+                },
             )
         }
         spec.actors.firstOrNull { it.id == id }?.let { actor ->
@@ -475,11 +482,24 @@ private fun UnifiedLifelinesSection(
                 modifier = modifier,
                 dragging = dragging,
                 onToggleSelected = { selectedIds = if (actor.id in selectedIds) selectedIds - actor.id else selectedIds + actor.id },
-                onRename = { label -> onSpec(spec.copy(actors = spec.actors.map { if (it.id == actor.id) it.copy(label = label) else it }, participants = spec.participants.map { if (it.id == actor.id) it.copy(label = label) else it })) },
+                onRename = { label ->
+                    onSpec(
+                        spec.copy(
+                            actors = spec.actors.map { if (it.id == actor.id) it.copy(label = label) else it },
+                            participants = spec.participants.map { if (it.id == actor.id) it.copy(label = label) else it },
+                        ),
+                    )
+                },
                 onRemove = {
                     val nextOrder = orderedLifelineIds - actor.id
                     orderedLifelineIds = nextOrder
-                    onSpec(spec.copy(actors = spec.actors.filterNot { it.id == actor.id }, participants = spec.participants.filterNot { it.id == actor.id }, lifelineOrder = nextOrder))
+                    onSpec(
+                        spec.copy(
+                            actors = spec.actors.filterNot { it.id == actor.id },
+                            participants = spec.participants.filterNot { it.id == actor.id },
+                            lifelineOrder = nextOrder,
+                        ),
+                    )
                 },
             )
         }
@@ -645,7 +665,10 @@ private fun UnifiedLifelineRow(
             if (renaming) {
                 BlankGuardedNameField(component.displayName, "lifeline alias", component.id, Modifier.weight(1f), onRename)
             } else {
-                AppText(component.displayName, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                AppText(
+                    component.displayName, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                )
             }
             if (component.tagIds.size > 1) AppText("×${component.tagIds.size}", color = tc.td, fontSize = 10.sp)
             SquareIconButton(if (renaming) "✓" else "✎", 12.sp, { renaming = !renaming })
@@ -682,7 +705,10 @@ private fun UnifiedActorRow(
             if (renaming) {
                 InlineField(actor.label, { if (it.isNotBlank()) onRename(it) }, "actor", Modifier.weight(1f), fontSize = 10.sp)
             } else {
-                AppText(actor.label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                AppText(
+                    actor.label, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                )
             }
             SquareIconButton(if (renaming) "✓" else "✎", 12.sp, { renaming = !renaming })
             SquareIconButton("×", 12.sp, onRemove)
@@ -706,7 +732,10 @@ private fun UnifiedLegacyActorRow(
         ) {
             AppText("☷", color = if (dragging) tc.ac else tc.td, fontSize = 12.sp)
             AppText("●", color = tc.ac, fontSize = 11.sp)
-            AppText(actor.displayName, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            AppText(
+                actor.displayName, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+            )
             SquareIconButton("×", 12.sp, onRemove)
         }
     }
@@ -728,100 +757,6 @@ private fun UnifiedCandidateRow(tag: String, count: Int, onAdd: () -> Unit) {
             AppText("$count", color = tc.td, fontSize = 9.sp)
             AppText("+", color = tc.ac, fontSize = 14.sp)
         }
-    }
-}
-
-@Composable
-private fun DiagramTagPills(
-    candidates: List<DiagramParticipantCandidate>,
-    ownerByTag: Map<String, DiagramComponent>,
-    multiTagComponents: List<DiagramComponent>,
-    packagePrefixes: Set<String>,
-    tc: ThemeColors,
-    onToggle: (String) -> Unit,
-) {
-    BoundedScrollBoxDp(132) {
-        FlowRow(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            candidates.forEach { candidate ->
-                val owner = ownerByTag[candidate.tag]
-                val (label, _) = displayTagForPrefix(candidate.tag, packagePrefixes)
-                TagPill(
-                    label, componentColor(owner, multiTagComponents, tc),
-                    trailing = "${candidate.entryCount}",
-                    active = owner?.enabled == true,
-                    tooltip = candidate.tag,
-                    onClick = { onToggle(candidate.tag) },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun AliasRow(
-    component: DiagramComponent,
-    sourceOwnerTypes: List<String>,
-    onRename: (String) -> Unit,
-    onSourceOwners: (Set<String>) -> Unit,
-    onRemove: () -> Unit,
-) {
-    val tc = tc()
-    val tag = component.tagIds.single()
-    HoverBox(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
-            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            FullTextHint(tag, modifier = Modifier.weight(1f)) { onTextLayout ->
-                AppText(
-                    tag, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth(), onTextLayout = onTextLayout,
-                )
-            }
-            AppText("→", color = tc.td, fontSize = 10.sp)
-            BlankGuardedNameField(component.displayName, "alias name", component.id, Modifier.weight(1f), onRename)
-            SquareIconButton("×", 12.sp, onRemove)
-        }
-        SourceOwnerPicker(component.sourceOwnerTypes, sourceOwnerTypes, onSourceOwners)
-    }
-}
-
-@Composable
-private fun ComponentCard(
-    component: DiagramComponent,
-    color: Color,
-    sourceOwnerTypes: List<String>,
-    onRename: (String) -> Unit,
-    onSourceOwners: (Set<String>) -> Unit,
-    onRemoveTag: (String) -> Unit,
-    onAddTags: () -> Unit,
-    onToggleEnabled: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    val tc = tc()
-    Column(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp)
-            .background(tc.p2, CORNER_SM).border(1.dp, tc.br, CORNER_SM).padding(6.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            BlankGuardedNameField(component.displayName, "Component name", component.id, Modifier.weight(1f), onRename)
-            SquareIconButton("+", 12.sp, onAddTags)
-            SquareIconButton("×", 12.sp, onDelete)
-        }
-        CheckRow(checked = component.enabled, onToggle = onToggleEnabled) {
-            AppText(if (component.enabled) "Included in diagram" else "Excluded from diagram", fontSize = 10.sp)
-        }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            component.tagIds.sorted().forEach { tag ->
-                TagPill(tag, color, trailing = "×", active = component.enabled, tooltip = tag) { onRemoveTag(tag) }
-            }
-        }
-        SourceOwnerPicker(component.sourceOwnerTypes, sourceOwnerTypes, onSourceOwners)
     }
 }
 
@@ -856,7 +791,9 @@ private fun SourceOwnerPicker(selected: Set<String>, allOwners: List<String>, on
     }
     if (expanded) {
         AppText(
-            "Optional: leave this empty for automatic source-call matching. Add one or more indexed classes only when automatic ownership is ambiguous or wrong. A mapping takes precedence for call direction; it does not create components or change which log rows are shown.",
+            "Optional: leave this empty for automatic source-call matching. Add one or more indexed classes only " +
+                "when automatic ownership is ambiguous or wrong. A mapping takes precedence for call direction; " +
+                "it does not create components or change which log rows are shown.",
             color = tc.td, fontSize = 9.sp, maxLines = 4,
         )
         InlineField(search, { search = it }, "Search indexed owner types…", Modifier.fillMaxWidth(), fontSize = 9.sp, onClear = { search = "" })
@@ -867,7 +804,10 @@ private fun SourceOwnerPicker(selected: Set<String>, allOwners: List<String>, on
             )
         }
         if (allOwners.isEmpty()) {
-            AppText("No suggestions match this log's tags. Index the relevant source folder and rebuild its index.", color = tc.td, fontSize = 9.sp, maxLines = 3)
+            AppText(
+                "No suggestions match this log's tags. Index the relevant source folder and rebuild its index.",
+                color = tc.td, fontSize = 9.sp, maxLines = 3,
+            )
         } else if (search.isBlank()) {
             // Do not open a long package/class list for every component.  Mappings are optional
             // corrections, not defaults; the user must type a class/package fragment to search.
@@ -1027,132 +967,6 @@ private fun ComponentDraftEditor(
     }
 }
 
-@Composable
-private fun ActorRow(actor: DiagramActor, realComponents: List<DiagramComponent>, onSpec: (SeqDiagramSpec) -> Unit, spec: SeqDiagramSpec) {
-    val tc = tc()
-    var mirrorSearch by remember(actor.id) { mutableStateOf("") }
-    var mirrorsExpanded by remember(actor.id) { mutableStateOf(false) }
-    val selectedIds = mirrorComponentIds(actor)
-    val filteredComponents = realComponents.filter {
-        mirrorSearch.isBlank() || it.displayName.contains(mirrorSearch.trim(), ignoreCase = true) ||
-            it.tagIds.any { tag -> tag.contains(mirrorSearch.trim(), ignoreCase = true) }
-    }
-    Column(Modifier.padding(horizontal = 12.dp, vertical = 3.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            InlineField(
-                actor.label,
-                { label ->
-                    onSpec(
-                        spec.copy(
-                            actors = spec.actors.map { if (it.id == actor.id) it.copy(label = label) else it },
-                            participants = spec.participants.map { if (it.id == actor.id) it.copy(label = label) else it },
-                        ),
-                    )
-                },
-                "Actor", Modifier.weight(1f), fontSize = 10.sp,
-            )
-            SquareIconButton("×", 12.sp, {
-                onSpec(
-                    spec.copy(
-                        actors = spec.actors.filterNot { it.id == actor.id },
-                        participants = spec.participants.filterNot { it.id == actor.id },
-                    ),
-                )
-            })
-        }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            AppText("Mirror components (${selectedIds.size} selected)", color = tc.td, fontSize = 10.sp, modifier = Modifier.weight(1f))
-            AppButton(if (mirrorsExpanded) "Hide" else "Choose", { mirrorsExpanded = !mirrorsExpanded }, variant = ButtonVariant.Ghost)
-        }
-        if (!mirrorsExpanded && selectedIds.isNotEmpty()) {
-            AppText(
-                selectedIds.mapNotNull { id -> realComponents.firstOrNull { it.id == id }?.displayName }.joinToString(", "),
-                color = tc.td, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            )
-        }
-        if (mirrorsExpanded) {
-            InlineField(
-                mirrorSearch,
-                { mirrorSearch = it },
-                "Search components…",
-                Modifier.fillMaxWidth(),
-                fontSize = 10.sp,
-                onClear = { mirrorSearch = "" },
-            )
-            BoundedScrollBoxDp(144) {
-                if (filteredComponents.isEmpty()) {
-                    AppText("No matching components.", color = tc.td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
-                } else {
-                    filteredComponents.forEach { component ->
-                        CheckRow(
-                            checked = component.id in selectedIds,
-                            onToggle = {
-                                val next = if (component.id in selectedIds) selectedIds - component.id else selectedIds + component.id
-                                onSpec(spec.copy(actors = spec.actors.map { if (it.id == actor.id) it.withMirrorComponentIds(next) else it }))
-                            },
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                AppText(component.displayName, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                AppText(component.tagIds.sorted().joinToString(", "), color = tc.td, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if (selectedIds.isNotEmpty()) {
-            val directionSelected = setOf(
-                when (actor.mirrorDirection) {
-                    MirrorDirection.INBOUND -> 0
-                    MirrorDirection.OUTBOUND -> 1
-                    MirrorDirection.BOTH -> 2
-                },
-            )
-            SegmentedControl(listOf("in", "out", "both"), directionSelected, onToggle = { idx ->
-                val direction = when (idx) {
-                    0 -> MirrorDirection.INBOUND
-                    1 -> MirrorDirection.OUTBOUND
-                    else -> MirrorDirection.BOTH
-                }
-                onSpec(spec.copy(actors = spec.actors.map { if (it.id == actor.id) it.copy(mirrorDirection = direction) else it }))
-            })
-            AppText(
-                "out: actor replaces the component as caller · in: actor replaces it as receiver · both: both directions",
-                color = tc.td, fontSize = 9.sp, maxLines = 2,
-            )
-        }
-    }
-}
-
-/** v1/v2 actors that predate the [DiagramActor] editor above — kept only until `migrateLegacyComponents`
- * (DiagramSpecCodec.kt) has a chance to run, which is why [ParticipantsSection] gates this on records
- * with no matching `spec.actors` entry: the two editors must never both render for the same actor. */
-@Composable
-private fun LegacyActorRow(actor: com.indagium.diagram.DiagramParticipant, onSpec: (SeqDiagramSpec) -> Unit, spec: SeqDiagramSpec) {
-    Row(
-        Modifier.padding(horizontal = 12.dp, vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        AppText(actor.displayName, fontSize = 10.sp, modifier = Modifier.weight(1f))
-        val selected = buildSet { if (actor.isEntryPoint) add(0); if (actor.isExitPoint) add(1) }
-        SegmentedControl(listOf("in", "out"), selected, onToggle = { idx ->
-            onSpec(
-                spec.copy(
-                    participants = spec.participants.map {
-                        when {
-                            it.id == actor.id && idx == 0 -> it.copy(isEntryPoint = !it.isEntryPoint)
-                            it.id == actor.id -> it.copy(isExitPoint = !it.isExitPoint)
-                            it.kind == ParticipantKind.ACTOR && idx == 0 -> it.copy(isEntryPoint = false)
-                            it.kind == ParticipantKind.ACTOR -> it.copy(isExitPoint = false)
-                            else -> it
-                        }
-                    },
-                ),
-            )
-        })
-    }
-}
-
 // ── Range ────────────────────────────────────────────────────────────────────────────────────
 
 private enum class RangeEditorMode { SELECTION, WHOLE_VIEW, TIME }
@@ -1201,7 +1015,9 @@ private fun RangeSection(tab: LogTab, state: AppState, spec: SeqDiagramSpec, onS
     }
 
     fun idsForStoredRange(): Set<Int> = when (val stored = spec.range) {
-        is DiagramRange.Ids -> if (stored.selectedIds.isNotEmpty()) stored.selectedIds else {
+        is DiagramRange.Ids -> if (stored.selectedIds.isNotEmpty()) {
+            stored.selectedIds
+        } else {
             tab.logData.filter { it.id in minOf(stored.from, stored.to)..maxOf(stored.from, stored.to) }.map { it.id }.toSet()
         }
         is DiagramRange.Time -> rowsForTimeRange(tab, stored.fromTs, stored.toTs).selectedIds.toSet()
@@ -1328,352 +1144,7 @@ private fun rangeEditorMode(range: DiagramRange): RangeEditorMode = when (range)
     is DiagramRange.SeqGroupRef -> RangeEditorMode.SELECTION
 }
 
-// ── Mode ─────────────────────────────────────────────────────────────────────────────────────
-
-@Composable
-private fun ModeSection(tab: LogTab, spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
-    val tc = tc()
-    SectionHeader("Interactions")
-    val modeSelected = when (spec.mode) {
-        ArrowMode.EVIDENCE_FLOW -> setOf(0)
-        ArrowMode.RULES -> setOf(1)
-        ArrowMode.LINE_PER_MESSAGE -> setOf(2)
-    }
-    SegmentedControl(
-        listOf("Component flow", "Rules", "Timeline"), modeSelected,
-        onToggle = { idx ->
-            onSpec(
-                spec.copy(
-                    mode = when (idx) {
-                        0 -> ArrowMode.EVIDENCE_FLOW
-                        1 -> ArrowMode.RULES
-                        else -> ArrowMode.LINE_PER_MESSAGE
-                    },
-                ),
-            )
-        },
-        modifier = Modifier.padding(horizontal = 12.dp),
-    )
-    // Neither explanation claims an arrow from a bare tag change anymore — EVIDENCE_FLOW draws one
-    // only where the log actually carries evidence of it (see DiagramModel.kt's ArrowMode doc);
-    // everything else renders as an event on its own lifeline, same as Timeline's own shape.
-    val explanation = when (spec.mode) {
-        ArrowMode.EVIDENCE_FLOW -> "An arrow only where the log has real evidence of one — a declared entry actor below, " +
-            "an optional same-thread handoff, or a matched rule. Every other line is an event on its own lifeline."
-        ArrowMode.RULES -> "Regex rules with (?<from>) (?<to>) (?<msg>) groups; an unmatched line falls back to an event " +
-            "on its own lifeline (same fallback Component flow uses)."
-        ArrowMode.LINE_PER_MESSAGE -> "Every line as an event on its own tag's lifeline."
-    }
-    AppText(explanation, color = tc.td, fontSize = 10.sp, maxLines = 4, modifier = Modifier.padding(horizontal = 12.dp))
-    // A single enabled component is a perfectly good evidence-flow diagram now (it just has no
-    // OTHER lifeline to draw a cross-component arrow to) — only a genuinely empty one-row scope has
-    // nothing at all to show.
-    val oneRow = (spec.range as? DiagramRange.Ids)?.let { it.from == it.to } == true
-    if (spec.mode == ArrowMode.EVIDENCE_FLOW && oneRow) {
-        AppText(
-            "A one-row scope has nothing to correlate.",
-            color = tc.td, fontSize = 10.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 12.dp),
-        )
-        AppButton(
-            "Use event timeline", { onSpec(spec.copy(mode = ArrowMode.LINE_PER_MESSAGE)) },
-            variant = ButtonVariant.Ghost, modifier = Modifier.padding(horizontal = 12.dp),
-        )
-    }
-    CheckRow(checked = spec.sourceEnrichment.enabled, onToggle = {
-        onSpec(spec.copy(sourceEnrichment = spec.sourceEnrichment.copy(enabled = !spec.sourceEnrichment.enabled)))
-    }) { AppText("Reconstruct source execution trace", fontSize = 10.sp) }
-    // An interaction-evidence choice, not a presentation one — sits beside source-call enrichment
-    // rather than down in OptionsSection's presentation toggles.
-    CheckRow(checked = spec.options.threadHandoffArrows, onToggle = {
-        onSpec(spec.copy(options = spec.options.copy(threadHandoffArrows = !spec.options.threadHandoffArrows)))
-    }) { AppText("Infer arrows from same-thread handoffs (pid + tid)", fontSize = 10.sp) }
-    AppText(
-        "Source trace mode derives call/return arrows and activations from the indexed invocation path. If the path is ambiguous or stale, the diagram reports fallback mode; PID/TID only refines lane selection.",
-        color = tc.td, fontSize = 10.sp, maxLines = 3, modifier = Modifier.padding(horizontal = 12.dp),
-    )
-    if (spec.mode == ArrowMode.RULES) DiagramRulesEditor(tab, spec, onSpec)
-}
-
-@Composable
-private fun DiagramRulesEditor(tab: LogTab, spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit) {
-    var pattern by remember { mutableStateOf("") }
-    var label by remember { mutableStateOf("\${msg}") }
-    var proposalRevision by remember(tab.id) { mutableStateOf(0) }
-    val lifelineIds = remember(spec.components, spec.actors, spec.participants) {
-        (spec.components.filter { it.enabled && it.id.isNotBlank() }.map { it.id } +
-            spec.actors.map { it.id } + spec.participants.map { it.id }).distinct()
-    }
-    val availableParticipants = remember(spec.components, spec.actors, spec.participants, lifelineIds) {
-        // Keep component tag bindings in this preview-only list.  The same component id can occur
-        // once per tag here; the proposal service uses tags for CurrentEntry and IDs for endpoint
-        // validity, while the actual builder still emits one lifeline per component.
-        val componentBindings = spec.components.filter { it.enabled }.flatMap { component ->
-            component.tagIds.map { tag -> com.indagium.diagram.DiagramParticipant(component.id, component.displayName, ParticipantKind.TAG, tag = tag) }
-        }
-        componentBindings + spec.actors.map { actor ->
-            com.indagium.diagram.DiagramParticipant(actor.id, actor.label, ParticipantKind.ACTOR)
-        } + spec.participants
-    }
-    var fromEndpoint by remember(lifelineIds) { mutableStateOf<DiagramRuleEndpoint>(DiagramRuleEndpoint.CurrentEntry) }
-    var toEndpoint by remember(lifelineIds) { mutableStateOf<DiagramRuleEndpoint?>(lifelineIds.firstOrNull()?.let(DiagramRuleEndpoint::ExistingParticipant)) }
-
-    fun invalidPattern(value: String): String? = runCatching { Regex(value) }.exceptionOrNull()?.message
-    val draftError = pattern.takeIf { it.isNotBlank() }?.let(::invalidPattern)
-
-    AppText(
-        "Rules match log messages in order. Endpoints are explicit diagram lifelines, so typed rules never invent a lifeline from captured text. " +
-            "Use captures in labels (for example \${msg}); unmatched rows remain self events.",
-        color = tc().td, fontSize = 10.sp, maxLines = 4, modifier = Modifier.padding(horizontal = 12.dp),
-    )
-
-    spec.rules.forEach { rule ->
-        val error = remember(rule.pattern) { invalidPattern(rule.pattern) }
-        val proposal = remember(rule, tab.logData, availableParticipants, proposalRevision) {
-            com.indagium.diagram.DiagramProposalService.evaluateRules(tab.logData, listOf(rule), availableParticipants).candidates.single()
-        }
-        Column(Modifier.padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                CheckRow(checked = rule.enabled, onToggle = {
-                    onSpec(spec.copy(rules = spec.rules.map { if (it.id == rule.id) it.copy(enabled = !it.enabled) else it }))
-                }) {}
-                AppText(
-                    rule.pattern,
-                    fontSize = 10.sp,
-                    fontFamily = MONO,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                )
-                AppButton("×", { onSpec(spec.copy(rules = spec.rules.filterNot { it.id == rule.id })) }, variant = ButtonVariant.Ghost)
-            }
-            InlineField(rule.pattern, { value ->
-                onSpec(spec.copy(rules = spec.rules.map { if (it.id == rule.id) it.copy(pattern = value) else it }))
-            }, "regex", Modifier.fillMaxWidth(), fontSize = 10.sp)
-            RuleEndpointPicker("From", rule.fromEndpoint, lifelineIds) { endpoint ->
-                onSpec(spec.copy(rules = spec.rules.map { if (it.id == rule.id) it.copy(fromEndpoint = endpoint) else it }))
-            }
-            RuleEndpointPicker("To", rule.toEndpoint, lifelineIds) { endpoint ->
-                onSpec(spec.copy(rules = spec.rules.map { if (it.id == rule.id) it.copy(toEndpoint = endpoint) else it }))
-            }
-            InlineField(rule.labelTemplate, { value ->
-                onSpec(spec.copy(rules = spec.rules.map { if (it.id == rule.id) it.copy(labelTemplate = value) else it }))
-            }, "label (for example \${msg})", Modifier.fillMaxWidth(), fontSize = 10.sp)
-            AppText(
-                "${proposal.matchedEntryIds.size} matches · ${proposal.resolvedEndpointIds.joinToString().ifBlank { "no resolved lifelines" }}",
-                color = if (proposal.applyBlocked) DANGER_RED else tc().td, fontSize = 9.sp, maxLines = 2,
-            )
-            proposal.issues.take(2).forEach { issue -> AppText(issue.detail, color = DANGER_RED, fontSize = 9.sp, maxLines = 2) }
-            proposal.samples.firstOrNull()?.let { sample ->
-                AppText("Example ${sample.entryId}: ${sample.message}", color = tc().td, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            if (rule.fromEndpoint == null || rule.toEndpoint == null) {
-                AppText("Legacy rule: choose both lifelines before relying on it; unbound templates may create actors.", color = DANGER_RED, fontSize = 9.sp, maxLines = 2)
-            }
-            if (error != null) AppText("Invalid regex: ${error.take(90)}", color = DANGER_RED, fontSize = 9.sp, maxLines = 2)
-        }
-    }
-    AppButton("Refresh rule proposals", { proposalRevision++ }, variant = ButtonVariant.Ghost, modifier = Modifier.padding(horizontal = 12.dp))
-    InlineField(pattern, { pattern = it }, "regex with named groups…", Modifier.fillMaxWidth().padding(horizontal = 12.dp), fontSize = 10.sp)
-    RuleEndpointPicker("From", fromEndpoint, lifelineIds) { fromEndpoint = it ?: DiagramRuleEndpoint.CurrentEntry }
-    RuleEndpointPicker("To", toEndpoint, lifelineIds) { toEndpoint = it }
-    InlineField(label, { label = it }, "label (for example \${msg})", Modifier.fillMaxWidth().padding(horizontal = 12.dp), fontSize = 10.sp)
-    if (draftError != null) {
-        AppText(
-            "Invalid regex: ${draftError.take(90)}", color = DANGER_RED, fontSize = 10.sp, maxLines = 2,
-            modifier = Modifier.padding(horizontal = 12.dp),
-        )
-    }
-    val draftProposal = remember(pattern, fromEndpoint, toEndpoint, label, tab.logData, availableParticipants) {
-        if (pattern.isBlank() || draftError != null || toEndpoint == null) null else {
-            val rule = com.indagium.diagram.DiagramMessageRule(
-                id = "draft", pattern = pattern, fromTemplate = "", toTemplate = "", labelTemplate = label,
-                fromEndpoint = fromEndpoint, toEndpoint = toEndpoint,
-            )
-            com.indagium.diagram.DiagramProposalService.evaluateRules(tab.logData, listOf(rule), availableParticipants).candidates.single()
-        }
-    }
-    draftProposal?.let { proposal ->
-        AppText(
-            "Proposal: ${proposal.matchedEntryIds.size} matches · ${proposal.resolvedEndpointIds.joinToString().ifBlank { "no resolved lifelines" }}",
-            color = if (proposal.applyBlocked) DANGER_RED else tc().td, fontSize = 9.sp, maxLines = 2,
-            modifier = Modifier.padding(horizontal = 12.dp),
-        )
-        proposal.issues.take(2).forEach { issue ->
-            AppText(issue.detail, color = DANGER_RED, fontSize = 9.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 12.dp))
-        }
-    }
-    AppButton(
-        "Add rule", {
-            if (pattern.isNotBlank() && draftError == null && toEndpoint != null && draftProposal?.applyBlocked != true) {
-                onSpec(
-                    spec.copy(
-                        rules = spec.rules + com.indagium.diagram.DiagramMessageRule(
-                            id = "dr${System.nanoTime()}", pattern = pattern,
-                            fromTemplate = "", toTemplate = "", labelTemplate = label,
-                            fromEndpoint = fromEndpoint, toEndpoint = toEndpoint,
-                        ),
-                    ),
-                )
-                pattern = ""
-            }
-        },
-        enabled = pattern.isNotBlank() && draftError == null && toEndpoint != null && draftProposal?.applyBlocked != true,
-        modifier = Modifier.padding(horizontal = 12.dp),
-    )
-}
-
-@Composable
-private fun RuleEndpointPicker(
-    title: String,
-    selected: DiagramRuleEndpoint?,
-    lifelineIds: List<String>,
-    onSelect: (DiagramRuleEndpoint?) -> Unit,
-) {
-    Column(Modifier.padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        AppText(title, color = tc().td, fontSize = 9.sp)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            AppButton("This log row", { onSelect(DiagramRuleEndpoint.CurrentEntry) }, variant = if (selected == DiagramRuleEndpoint.CurrentEntry) ButtonVariant.Primary else ButtonVariant.Ghost)
-            lifelineIds.forEach { id ->
-                val endpoint = DiagramRuleEndpoint.ExistingParticipant(id)
-                AppButton(id, { onSelect(endpoint) }, variant = if (selected == endpoint) ButtonVariant.Primary else ButtonVariant.Ghost)
-            }
-            AppButton("Captured value", { onSelect(DiagramRuleEndpoint.CapturedValue("value", emptyList())) }, variant = if (selected is DiagramRuleEndpoint.CapturedValue) ButtonVariant.Primary else ButtonVariant.Ghost)
-            AppButton("Explicit actor", { onSelect(DiagramRuleEndpoint.ExplicitActor("actor", "Actor")) }, variant = if (selected is DiagramRuleEndpoint.ExplicitActor) ButtonVariant.Primary else ButtonVariant.Ghost)
-        }
-        when (selected) {
-            is DiagramRuleEndpoint.CapturedValue -> {
-                InlineField(selected.captureName, { capture ->
-                    onSelect(selected.copy(captureName = capture))
-                }, "capture name", Modifier.fillMaxWidth(), fontSize = 9.sp)
-                InlineField(selected.bindings.formatRuleBindings(), { text ->
-                    onSelect(selected.copy(bindings = text.parseRuleBindings(lifelineIds)))
-                }, "bindings: captured=lifeline id; …", Modifier.fillMaxWidth(), fontSize = 9.sp)
-            }
-            is DiagramRuleEndpoint.ExplicitActor -> {
-                InlineField(selected.id, { id -> onSelect(selected.copy(id = id)) }, "actor id", Modifier.fillMaxWidth(), fontSize = 9.sp)
-                InlineField(selected.label, { label -> onSelect(selected.copy(label = label)) }, "actor label", Modifier.fillMaxWidth(), fontSize = 9.sp)
-            }
-            else -> Unit
-        }
-    }
-}
-
-private fun List<com.indagium.diagram.DiagramRuleCaptureBinding>.formatRuleBindings(): String =
-    joinToString("; ") { "${it.capturedValue}=${it.participantId}" }
-
-private fun String.parseRuleBindings(lifelineIds: List<String>): List<com.indagium.diagram.DiagramRuleCaptureBinding> =
-    split(';').mapNotNull { raw ->
-        val pair = raw.trim()
-        val separator = pair.indexOf('=')
-        if (separator <= 0) return@mapNotNull null
-        val captured = pair.substring(0, separator).trim()
-        val participant = pair.substring(separator + 1).trim()
-        if (captured.isBlank() || participant !in lifelineIds) null
-        else com.indagium.diagram.DiagramRuleCaptureBinding(captured, participant)
-    }.distinct()
-
 // ── Options ──────────────────────────────────────────────────────────────────────────────────
-
-@Composable
-private fun OptionsSection(state: AppState, spec: SeqDiagramSpec, onSpec: (SeqDiagramSpec) -> Unit, manualMode: Boolean = false) {
-    if (manualMode) {
-        ManualPresentationSection(spec, onSpec)
-        return
-    }
-    val tc = tc()
-    val o = spec.options
-    // SOURCE_METHOD/BOTH resolve each line against the source index; offering them with no folder
-    // indexed would just silently fall back to the message for every arrow.
-    val sourceAvailable = state.settings.sourceFolders.isNotEmpty()
-
-    SectionHeader("Presentation")
-    CheckRow(checked = o.collapseRepeats, onToggle = { onSpec(spec.copy(options = o.copy(collapseRepeats = !o.collapseRepeats))) }) {
-        AppText("Collapse repeated messages", fontSize = 11.sp)
-    }
-    CheckRow(checked = o.seqGroupFrames, onToggle = { onSpec(spec.copy(options = o.copy(seqGroupFrames = !o.seqGroupFrames))) }) {
-        AppText("Frame sequence groups", fontSize = 11.sp)
-    }
-    CheckRow(checked = o.notesForErrors, onToggle = { onSpec(spec.copy(options = o.copy(notesForErrors = !o.notesForErrors))) }) {
-        AppText("Note errors and crashes", fontSize = 11.sp)
-    }
-    CheckRow(checked = o.showElapsed, onToggle = { onSpec(spec.copy(options = o.copy(showElapsed = !o.showElapsed))) }) {
-        AppText("Show time delta", fontSize = 11.sp)
-    }
-    CheckRow(checked = o.showTimestamps, onToggle = { onSpec(spec.copy(options = o.copy(showTimestamps = !o.showTimestamps))) }) {
-        AppText("Show timestamps", fontSize = 11.sp)
-    }
-    if (sourceAvailable) {
-        CheckRow(
-            checked = o.labelSource != LabelSource.MESSAGE,
-            onToggle = {
-                onSpec(spec.copy(options = o.copy(labelSource = if (o.labelSource == LabelSource.MESSAGE) LabelSource.BOTH else LabelSource.MESSAGE)))
-            },
-        ) { AppText("Label with source method", fontSize = 11.sp) }
-    } else {
-        AppText(
-            "Label with source method — needs an indexed source folder.", color = tc.td, fontSize = 10.sp, maxLines = 2,
-            modifier = Modifier.padding(horizontal = 12.dp),
-        )
-    }
-    CheckRow(checked = o.activationPolicy == ActivationPolicy.EVIDENCE_BACKED, onToggle = {
-        val next = if (o.activationPolicy == ActivationPolicy.NONE) {
-            ActivationPolicy.EVIDENCE_BACKED
-        } else {
-            ActivationPolicy.NONE
-        }
-        onSpec(spec.copy(options = o.copy(activationPolicy = next)))
-    }) { AppText("Evidence-backed activations", fontSize = 11.sp) }
-    AppText(
-        "Enabled by default. Bars are drawn only for evidence-backed call/return spans, so a self-event-only log has no activation to show.",
-        color = tc.td, fontSize = 10.sp, maxLines = 3, modifier = Modifier.padding(horizontal = 12.dp),
-    )
-    CheckRow(checked = o.showSelfMessages, onToggle = {
-        onSpec(spec.copy(options = o.copy(showSelfMessages = !o.showSelfMessages)))
-    }) { AppText("Show self events", fontSize = 11.sp) }
-    if (spec.sourceEnrichment.enabled) {
-        CheckRow(checked = o.showSourceInferred, onToggle = {
-            onSpec(spec.copy(options = o.copy(showSourceInferred = !o.showSourceInferred)))
-        }) { AppText("Show inferred source calls", fontSize = 11.sp) }
-    } else {
-        AppText(
-            "Show source-trace structure — requires a current source index above.", color = tc.td, fontSize = 10.sp, maxLines = 2,
-            modifier = Modifier.padding(horizontal = 12.dp),
-        )
-    }
-
-    NumericSettingRow("Message label chars", o.labelMaxChars, 10..400) {
-        onSpec(spec.copy(options = o.copy(labelMaxChars = it)))
-    }
-    NumericSettingRow("Label lines", o.labelMaxLines, 1..8) {
-        onSpec(spec.copy(options = o.copy(labelMaxLines = it)))
-    }
-    AppText(
-        "Message labels are truncated and wrapped independently from participant/component labels.",
-        color = tc.td, fontSize = 10.sp, maxLines = 2, modifier = Modifier.padding(horizontal = 12.dp),
-    )
-    NumericSettingRow("Component label chars", o.participantLabelMaxChars, 10..120) {
-        onSpec(spec.copy(options = o.copy(participantLabelMaxChars = it)))
-    }
-    NumericSettingRow("Component label lines", o.participantLabelMaxLines, 1..4) {
-        onSpec(spec.copy(options = o.copy(participantLabelMaxLines = it)))
-    }
-    AppText(
-        "Component labels use these limits for their lifeline headers; raw tags remain available in the inspector.",
-        color = tc.td, fontSize = 10.sp, maxLines = 3, modifier = Modifier.padding(horizontal = 12.dp),
-    )
-    Row(
-        Modifier.padding(horizontal = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
-    ) {
-        AppText("Format", fontSize = 11.sp)
-        SegmentedControl(
-            listOf("Mermaid", "PlantUML"),
-            setOf(if (spec.dialect == DiagramDialect.MERMAID) 0 else 1),
-            onToggle = { idx -> onSpec(spec.copy(dialect = if (idx == 0) DiagramDialect.MERMAID else DiagramDialect.PLANTUML)) },
-        )
-    }
-    Spacer(Modifier.height(8.dp))
-}
 
 /** Presentation controls audited against ManualDiagramBuilder and the shared renderer. Inferred
  * filtering, repeat collapsing, source labels, and generated error notes are intentionally absent

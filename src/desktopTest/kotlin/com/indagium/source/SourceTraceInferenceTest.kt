@@ -5,10 +5,10 @@ import com.indagium.diagram.DiagramOptions
 import com.indagium.diagram.DiagramTraceEvidence
 import com.indagium.diagram.MessageKind
 import com.indagium.diagram.SeqDiagramSpec
+import com.indagium.diagram.SourceTraceMode
 import com.indagium.diagram.TraceCallStatus
 import com.indagium.diagram.TraceDiagnosticReason
 import com.indagium.diagram.TraceInvocationKind
-import com.indagium.diagram.SourceTraceMode
 import com.indagium.diagram.buildSequenceDiagram
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
@@ -21,8 +21,11 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-class SourceTraceInferenceTest {
+// Arbitrary-but-large-enough end offset for the fixture methods below — not a meaningful specific
+// value, just wide enough to cover the fixture bodies.
+private const val FIXTURE_METHOD_END_OFFSET = 200
 
+class SourceTraceInferenceTest {
     @Test
     fun canonicalNestedKotlinFixtureProducesSourceOrderedCallsReturnsAndEveryLog() {
         val dir = createTempDirectory("indagium-source-trace").toFile()
@@ -87,6 +90,7 @@ class SourceTraceInferenceTest {
         )
         assertEquals(setOf(1, 2, 3, 4, 5), diagram.primaryEntryIds)
         assertEquals(SourceTraceMode.SOURCE_TRACE, diagram.traceMode)
+        assertTrue(diagram.participants.none { it.label == "Caller" })
         assertEquals(
             listOf(MessageKind.SELF, MessageKind.CALL, MessageKind.SELF, MessageKind.CALL, MessageKind.SELF,
                 MessageKind.RETURN, MessageKind.SELF, MessageKind.RETURN, MessageKind.SELF),
@@ -197,7 +201,10 @@ class SourceTraceInferenceTest {
         val index = client.copy(
             sites = listOf(client.sites.single(), service),
             operations = listOf(
-                IndexedSourceOperation("client-log", "method-client", SourceOperationKind.LOG, 10, 10, logSiteId = "client-start", successorIds = listOf("branch")),
+                IndexedSourceOperation(
+                    "client-log", "method-client", SourceOperationKind.LOG, 10, 10,
+                    logSiteId = "client-start", successorIds = listOf("branch"),
+                ),
                 IndexedSourceOperation("branch", "method-client", SourceOperationKind.BRANCH, 11, 11, successorIds = listOf("call")),
                 IndexedSourceOperation("call", "method-client", SourceOperationKind.CALL, 12, 12, callSiteId = "call-1", successorIds = emptyList()),
                 IndexedSourceOperation("service-log", "method-service", SourceOperationKind.LOG, 10, 10, logSiteId = "service-log", successorIds = emptyList()),
@@ -210,6 +217,68 @@ class SourceTraceInferenceTest {
 
         assertTrue(trace.calls.isEmpty())
         assertTrue(TraceDiagnosticReason.BRANCH_INCOMPATIBLE in trace.diagnostics.droppedByReason)
+    }
+
+    @Test
+    fun incompatibleMiddleAnchorKeepsVerifiedPrefixAndSuffixAsPartialTrace() {
+        val start = site(id = "client-start", call = directCall(resultVariable = null), matcher = Regex.escape("start"))
+        val service = start.sites.single().copy(
+            id = "service-log",
+            filePath = "/fixture/Service.kt",
+            tag = "Service",
+            methodName = "fetch",
+            methodId = "method-service",
+            owningType = "com.example.Service",
+            matcher = Regex.escape("service"),
+            directCalls = emptyList(),
+        )
+        val end = start.sites.single().copy(
+            id = "client-end",
+            matcher = Regex.escape("end"),
+            directCalls = emptyList(),
+            loggedValueNames = emptySet(),
+        )
+        val index = start.copy(
+            sites = listOf(start.sites.single(), service, end),
+            operations = listOf(
+                IndexedSourceOperation(
+                    "client-start-op", "method-client", SourceOperationKind.LOG, 10, 10,
+                    logSiteId = "client-start", successorIds = listOf("branch"),
+                ),
+                IndexedSourceOperation("branch", "method-client", SourceOperationKind.BRANCH, 11, 11, successorIds = listOf("call")),
+                IndexedSourceOperation("call", "method-client", SourceOperationKind.CALL, 12, 12, callSiteId = "call-1", successorIds = emptyList()),
+                IndexedSourceOperation("service-log", "method-service", SourceOperationKind.LOG, 10, 10, logSiteId = "service-log", successorIds = emptyList()),
+                IndexedSourceOperation("client-end-op", "method-client", SourceOperationKind.LOG, 20, 20, logSiteId = "client-end", successorIds = emptyList()),
+            ),
+        )
+        val entries = listOf(entry(1, "start"), entry(2, "service").copy(tag = "Service"), entry(3, "end"))
+
+        val trace = SourceTraceInferenceEngine(index).resolve(entries)
+
+        assertEquals(listOf(1, 3), trace.events.map { it.entryId })
+        assertTrue(TraceDiagnosticReason.BRANCH_INCOMPATIBLE in trace.diagnostics.droppedByReason)
+        assertTrue(trace.events.none { it.entryId == 2 })
+        assertTrue(trace.calls.isEmpty())
+    }
+
+    @Test
+    fun ambiguousMiddleAnchorIsOmittedWhileVerifiedPrefixAndSuffixRemain() {
+        val base = site(call = directCall(resultVariable = null), matcher = Regex.escape("start"))
+        val start = base.sites.single()
+        val middleA = start.copy(id = "middle-a", matcher = Regex.escape("middle"))
+        val middleB = start.copy(
+            id = "middle-b",
+            filePath = "/fixture/Other.kt",
+            matcher = Regex.escape("middle"),
+        )
+        val end = start.copy(id = "end", matcher = Regex.escape("end"))
+        val trace = SourceTraceInferenceEngine(
+            base.copy(sites = listOf(start, middleA, middleB, end)),
+        ).resolve(listOf(entry(1, "start"), entry(2, "middle"), entry(3, "end")))
+
+        assertEquals(listOf(1, 3), trace.events.map { it.entryId })
+        assertTrue(trace.events.none { it.entryId == 2 })
+        assertTrue(TraceDiagnosticReason.AMBIGUOUS_SOURCE_SITE in trace.diagnostics.droppedByReason)
     }
 
     @Test
@@ -320,10 +389,10 @@ class SourceTraceInferenceTest {
         builtAt = 1L,
         methods = listOf(
             IndexedSourceMethod(
-                "method-client", path, "com.example.Client", "run", "run()", "Unit", 0, 200,
+                "method-client", path, "com.example.Client", "run", "run()", "Unit", 0, FIXTURE_METHOD_END_OFFSET,
             ),
             IndexedSourceMethod(
-                "method-service", "/fixture/Service.kt", "com.example.Service", "fetch", "fetch()", "String", 0, 200,
+                "method-service", "/fixture/Service.kt", "com.example.Service", "fetch", "fetch()", "String", 0, FIXTURE_METHOD_END_OFFSET,
             ),
         ),
         calls = listOf(

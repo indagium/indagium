@@ -33,72 +33,99 @@ data class ManualDiagramSeedConfiguration(
  * the UI can edit the group as one row and still detach one occurrence for a precise correction.
  */
 fun manualDocumentFromDiagram(diagram: SeqDiagram): ManualDiagramDocument {
+    var nextOrder = 0L
     val interactions = buildList {
-        // Keep the primary log event for every selected row, plus source-trace structure. A source
-        // trace's call/return/async arrows carry a real execution boundary and must not disappear
-        // merely because they supplement the log event for the same row. Other supplemental
-        // presentation (actor mirrors) remains inferred-only to avoid creating duplicate editable
-        // rows for the same ordinary log evidence. Same-thread handoffs are an explicit seed
-        // choice, so they become durable structure when present. Retain the old fallback for
-        // callers that construct structural-only diagrams.
-        val seedMessages = diagram.messages.filter {
-            it.primary ||
-                (it.evidence == MessageEvidence.SOURCE_INFERRED && it.kind != MessageKind.SELF) ||
-                (it.evidence == MessageEvidence.THREAD_HANDOFF && it.kind != MessageKind.SELF)
-        }
-            .ifEmpty { diagram.messages }
-        var nextOrder = 0L
-        seedMessages.forEachIndexed { messageIndex, message ->
-            val from = diagram.participants.getOrNull(message.fromIdx) ?: return@forEachIndexed
-            val to = diagram.participants.getOrNull(message.toIdx) ?: return@forEachIndexed
-            val occurrenceIds = message.representedEntryIds.ifEmpty { setOf(message.entryId) }.toList().sorted()
-            val sourceMethodId = message.sourceOperationId
-            val sourceLogSiteId = message.sourceLogSiteId
-            // A regular log line is evidence, not a method invocation. Keep its complete text as a
-            // literal label so values such as "detached=vendorId=…" are not guessed into a fake
-            // operation/parameter structure. Source-inferred calls retain the structured editor
-            // representation because the source index provides a real operation boundary.
-            val label = stripDiagramPresentationPrefixes(message.label)
-            val isSourceCall = message.evidence == MessageEvidence.SOURCE_INFERRED ||
-                (sourceMethodId != null && sourceLogSiteId != null)
-            val parameters = if (isSourceCall) extractManualParameters(label) else emptyList()
-            val normalizedMessage = normalizeManualMessage(label)
-            val operation = if (isSourceCall) manualOperationLabel(label) else label
-            val groupKey = manualInteractionGroupKey(
-                sourceMethodId = sourceMethodId,
-                sourceLogSiteId = sourceLogSiteId,
-                fromParticipantId = from.id,
-                toParticipantId = to.id,
-                kind = message.kind,
-                label = normalizedMessage,
-            )
-            occurrenceIds.forEachIndexed { occurrenceIndex, entryId ->
-                add(
-                    ManualDiagramInteraction(
-                        id = "manual:$messageIndex:$entryId:$occurrenceIndex",
-                        sourceEntryIds = setOf(entryId),
-                        fromParticipantId = from.id,
-                        toParticipantId = to.id,
-                        operation = operation,
-                        parameters = parameters,
-                        label = label.takeUnless { isSourceCall },
-                        kind = message.kind,
-                        // Each occurrence remains independently editable. Incrementing through the
-                        // already-ordered model produces stable, unique ordering even for a very
-                        // large collapsed run (where the old fixed stride could collide).
-                        order = nextOrder++,
-                        groupKey = groupKey,
-                        sourceMethodId = sourceMethodId,
-                        sourceLogSiteId = sourceLogSiteId,
-                        sourceOwnerType = from.sourceOwnerType,
-                        renderAnchorTs = message.ts,
-                        renderAnchorLevel = message.level,
-                    ),
-                )
-            }
+        seedMessagesFor(diagram).forEachIndexed { messageIndex, message ->
+            addAll(manualInteractionsForMessage(diagram, message, messageIndex) { nextOrder++ })
         }
     }
     return ManualDiagramDocument(interactions = interactions)
+}
+
+// Keep the primary log event for every selected row, plus source-trace structure. A source
+// trace's call/return/async arrows carry a real execution boundary and must not disappear
+// merely because they supplement the log event for the same row. Other supplemental
+// presentation (actor mirrors) remains inferred-only to avoid creating duplicate editable
+// rows for the same ordinary log evidence. Same-thread handoffs are an explicit seed
+// choice, so they become durable structure when present. Retain the old fallback for
+// callers that construct structural-only diagrams.
+private fun seedMessagesFor(diagram: SeqDiagram): List<DiagramMessage> {
+    val seedMessages = diagram.messages.filter {
+        it.primary ||
+            (it.evidence == MessageEvidence.SOURCE_INFERRED && it.kind != MessageKind.SELF) ||
+            (it.evidence == MessageEvidence.THREAD_HANDOFF && it.kind != MessageKind.SELF) ||
+            (it.evidence == MessageEvidence.CORRELATION_TOKEN && it.kind != MessageKind.SELF)
+    }
+    return seedMessages.ifEmpty { diagram.messages }
+}
+
+// Extracted from manualDocumentFromDiagram's own per-message loop body to keep that function's
+// complexity down; behavior (including the transient-actor unwrap and per-occurrence ordering via
+// the shared nextOrder counter) is unchanged.
+private fun manualInteractionsForMessage(
+    diagram: SeqDiagram,
+    message: DiagramMessage,
+    messageIndex: Int,
+    nextOrder: () -> Long,
+): List<ManualDiagramInteraction> {
+    val rawFrom = diagram.participants.getOrNull(message.fromIdx) ?: return emptyList()
+    val rawTo = diagram.participants.getOrNull(message.toIdx) ?: return emptyList()
+    val fromTransient = rawFrom.kind == ParticipantKind.ACTOR && rawFrom.inferred && rawFrom.label == "Caller"
+    val toTransient = rawTo.kind == ParticipantKind.ACTOR && rawTo.inferred && rawTo.label == "Caller"
+    if (fromTransient && toTransient) return emptyList()
+    // The inferred opening actor is output-only. Preserve the primary row as a self event
+    // when seeding a durable document, but never persist the transient participant ID.
+    val from = if (fromTransient) rawTo else rawFrom
+    val to = if (message.targetless) {
+        null
+    } else if (toTransient) {
+        rawFrom
+    } else {
+        rawTo
+    }
+    val occurrenceIds = message.representedEntryIds.ifEmpty { setOf(message.entryId) }.toList().sorted()
+    val sourceMethodId = message.sourceOperationId
+    val sourceLogSiteId = message.sourceLogSiteId
+    // A regular log line is evidence, not a method invocation. Keep its complete text as a
+    // literal label so values such as "detached=vendorId=…" are not guessed into a fake
+    // operation/parameter structure. Source-inferred calls retain the structured editor
+    // representation because the source index provides a real operation boundary.
+    val label = stripDiagramPresentationPrefixes(message.label)
+    val isSourceCall = message.evidence == MessageEvidence.SOURCE_INFERRED ||
+        (sourceMethodId != null && sourceLogSiteId != null)
+    val parameters = if (isSourceCall) extractManualParameters(label) else emptyList()
+    val normalizedMessage = normalizeManualMessage(label)
+    val operation = if (isSourceCall) manualOperationLabel(label) else label
+    val groupKey = manualInteractionGroupKey(
+        sourceMethodId = sourceMethodId,
+        sourceLogSiteId = sourceLogSiteId,
+        fromParticipantId = from.id,
+        toParticipantId = to?.id,
+        kind = message.kind,
+        label = normalizedMessage,
+    )
+    return occurrenceIds.mapIndexed { occurrenceIndex, entryId ->
+        ManualDiagramInteraction(
+            id = "manual:$messageIndex:$entryId:$occurrenceIndex",
+            sourceEntryIds = setOf(entryId),
+            fromParticipantId = from.id,
+            toParticipantId = to?.id,
+            operation = operation,
+            parameters = parameters,
+            label = label.takeUnless { isSourceCall },
+            kind = message.kind,
+            // Each occurrence remains independently editable. Incrementing through the
+            // already-ordered model produces stable, unique ordering even for a very
+            // large collapsed run (where the old fixed stride could collide).
+            order = nextOrder(),
+            groupKey = groupKey,
+            sourceMethodId = sourceMethodId,
+            sourceLogSiteId = sourceLogSiteId,
+            sourceOwnerType = from.sourceOwnerType,
+            renderAnchorTs = message.ts,
+            renderAnchorLevel = message.level,
+        )
+    }
 }
 
 // The generated diagram label may contain optional presentation-only timestamp/elapsed prefixes.
@@ -120,7 +147,7 @@ fun manualInteractionGroupKey(
     sourceMethodId: String?,
     sourceLogSiteId: String?,
     fromParticipantId: String,
-    toParticipantId: String,
+    toParticipantId: String?,
     kind: MessageKind,
     label: String,
 ): String {
@@ -131,7 +158,7 @@ fun manualInteractionGroupKey(
     return listOf(
         if (provenance.isNotEmpty()) "source:${provenance.joinToString("|")}" else "log",
         fromParticipantId,
-        toParticipantId,
+        toParticipantId.orEmpty(),
         kind.name,
         normalizeManualMessage(label),
     ).joinToString("|")

@@ -49,6 +49,7 @@ import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -58,7 +59,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.TextUnit
@@ -268,9 +268,12 @@ fun LevelBadge(level: LogLevel) {
 @Composable
 internal fun TagPill(
     tag: String, color: Color,
-    trailing: String = "×",      // "×" for removable, or a count for a toggle pill
-    active: Boolean = true,      // false → tc.td.copy(.10f) fill, tc.br border, tc.ts text
-    tooltip: String = tag,       // full dotted tag when `tag` is a shortened label
+    // "×" for removable, or a count for a toggle pill
+    trailing: String = "×",
+    // false → tc.td.copy(.10f) fill, tc.br border, tc.ts text
+    active: Boolean = true,
+    // full dotted tag when `tag` is a shortened label
+    tooltip: String = tag,
     onClick: () -> Unit,
 ) {
     val tc = tc()

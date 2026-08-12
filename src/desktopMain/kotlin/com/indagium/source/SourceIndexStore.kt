@@ -40,11 +40,11 @@ private fun LogCallSite.toLine(): String = listOf(
     methodSignature.fieldToken(),
     declaredReturnType.orEmpty().fieldToken(),
     directCalls.fieldToken(),
-        loggedValueNames.fieldToken(),
-        id.fieldToken(),
-        methodId.orEmpty().fieldToken(),
-        sourceOffset.toString(),
-        sourceSet.name,
+    loggedValueNames.fieldToken(),
+    id.fieldToken(),
+    methodId.orEmpty().fieldToken(),
+    sourceOffset.toString(),
+    sourceSet.name,
 ).joinToString("\t")
 
 // Direct-call fields use base64-url too, so ':' and ';' are safe structural separators.  Keeping
@@ -77,7 +77,7 @@ private fun List<SourceDirectCall>.fieldToken(): String = if (isEmpty()) "~" els
 private fun IndexedSourceMethod.toLine(): String = listOf(
     id.fieldToken(), filePath.fieldToken(), ownerType.orEmpty().fieldToken(), name.fieldToken(),
     signature.fieldToken(), declaredReturnType.orEmpty().fieldToken(), startOffset.toString(), endOffsetExclusive.toString(),
-    sourceSet.name,
+    sourceSet.name, synthetic.toString(),
 ).joinToString("\t")
 
 private fun IndexedSourceCall.toLine(): String = listOf(
@@ -100,6 +100,13 @@ private fun Set<String>.fieldToken(): String =
 private fun String.loggedValueNamesFieldValue(): Set<String> =
     if (this == "~" || isBlank()) emptySet() else split(';').map { it.fieldValue() }.toSet()
 
+// Positional indices into a direct-call sub-token's own colon-separated fields (append-only, see
+// this file's own decoder discipline) — named only for the indices detekt's MagicNumber config
+// doesn't already treat as an obviously-fine small literal.
+private const val DIRECT_CALL_FIELD_TARGET_METHOD_ID = 11
+private const val DIRECT_CALL_FIELD_RECEIVER_DECLARED_TYPE = 15
+private const val DIRECT_CALL_FIELD_INVOCATION_KIND = 17
+
 private fun String.directCallsFieldValue(): List<SourceDirectCall> {
     if (this == "~" || isBlank()) return emptyList()
     return split(';').mapNotNull { token ->
@@ -118,18 +125,26 @@ private fun String.directCallsFieldValue(): List<SourceDirectCall> {
                 isCallback = fields.getOrNull(8)?.toBooleanStrictOrNull() ?: false,
                 callSiteId = fields.getOrNull(9)?.fieldValue()?.takeIf { it.isNotBlank() },
                 callerMethodId = fields.getOrNull(10)?.fieldValue()?.takeIf { it.isNotBlank() },
-                targetMethodId = fields.getOrNull(11)?.fieldValue()?.takeIf { it.isNotBlank() },
+                targetMethodId = fields.getOrNull(DIRECT_CALL_FIELD_TARGET_METHOD_ID)?.fieldValue()?.takeIf { it.isNotBlank() },
                 callOffset = fields.getOrNull(12)?.toIntOrNull() ?: 0,
                 receiverExpression = fields.getOrNull(13)?.fieldValue()?.takeIf { it.isNotBlank() },
                 receiverVariable = fields.getOrNull(14)?.fieldValue()?.takeIf { it.isNotBlank() },
-                receiverDeclaredType = fields.getOrNull(15)?.fieldValue()?.takeIf { it.isNotBlank() },
+                receiverDeclaredType = fields.getOrNull(DIRECT_CALL_FIELD_RECEIVER_DECLARED_TYPE)?.fieldValue()?.takeIf { it.isNotBlank() },
                 receiverRole = fields.getOrNull(16)?.let { runCatching { ReceiverRole.valueOf(it) }.getOrNull() } ?: ReceiverRole.UNKNOWN,
-                invocationKind = fields.getOrNull(17)?.let { runCatching { InvocationKind.valueOf(it) }.getOrNull() } ?: InvocationKind.UNKNOWN,
+                invocationKind = fields.getOrNull(DIRECT_CALL_FIELD_INVOCATION_KIND)?.let {
+                    runCatching { InvocationKind.valueOf(it) }.getOrNull()
+                } ?: InvocationKind.UNKNOWN,
                 resolutionConfidence = fields.getOrNull(18)?.toDoubleOrNull() ?: 1.0,
             )
         }.getOrNull()
     }
 }
+
+// Positional indices into a persisted site line's own tab-separated fields (append-only, see
+// this file's own decoder discipline) — named only for the indices detekt's MagicNumber config
+// doesn't already treat as an obviously-fine small literal.
+private const val SITE_FIELD_METHOD_ID = 15
+private const val SITE_FIELD_SOURCE_SET = 17
 
 private fun parseSiteLine(rest: String): LogCallSite? {
     val parts = rest.split("\t")
@@ -150,9 +165,9 @@ private fun parseSiteLine(rest: String): LogCallSite? {
         directCalls = parts[12].directCallsFieldValue(),
         loggedValueNames = parts.getOrNull(13)?.loggedValueNamesFieldValue().orEmpty(),
         id = parts.getOrNull(14)?.fieldValue().orEmpty(),
-        methodId = parts.getOrNull(15)?.fieldValue()?.takeIf { it.isNotBlank() },
+        methodId = parts.getOrNull(SITE_FIELD_METHOD_ID)?.fieldValue()?.takeIf { it.isNotBlank() },
         sourceOffset = parts.getOrNull(16)?.toIntOrNull() ?: 0,
-        sourceSet = parts.getOrNull(17)?.let { runCatching { SourceSetKind.valueOf(it) }.getOrNull() }
+        sourceSet = parts.getOrNull(SITE_FIELD_SOURCE_SET)?.let { runCatching { SourceSetKind.valueOf(it) }.getOrNull() }
             ?: SourceSetKind.PRODUCTION,
     )
 }
@@ -168,6 +183,7 @@ private fun parseMethodLine(rest: String): IndexedSourceMethod? {
             startOffset = parts[6].toInt(), endOffsetExclusive = parts[7].toInt(),
             sourceSet = parts.getOrNull(8)?.let { runCatching { SourceSetKind.valueOf(it) }.getOrNull() }
                 ?: SourceSetKind.PRODUCTION,
+            synthetic = parts.getOrNull(9)?.toBooleanStrictOrNull() ?: false,
         )
     }.getOrNull()
 }
