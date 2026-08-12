@@ -119,6 +119,64 @@ class ManualDiagramSeedServiceTest {
     }
 
     @Test
+    fun seedRetainsSourceCallReturnAndAsyncStructureAlongsidePrimaryLogRowsInModelOrder() {
+        val participants = listOf(
+            DiagramParticipant("client", "Client", ParticipantKind.TAG, tag = "Client"),
+            DiagramParticipant("service", "Service", ParticipantKind.TAG, tag = "Service"),
+        )
+        fun message(
+            label: String,
+            entryId: Int,
+            kind: MessageKind,
+            primary: Boolean,
+            evidence: MessageEvidence,
+            ts: String,
+            level: LogLevel,
+        ) = DiagramMessage(
+            fromIdx = if (kind == MessageKind.RETURN) 1 else 0,
+            toIdx = when (kind) {
+                MessageKind.RETURN -> 0
+                MessageKind.SELF -> 0
+                else -> 1
+            },
+            label = label,
+            entryId = entryId,
+            ts = ts,
+            level = level,
+            kind = kind,
+            primary = primary,
+            evidence = evidence,
+        )
+
+        val document = manualDocumentFromDiagram(
+            SeqDiagram(
+                SeqDiagramSpec(),
+                participants,
+                listOf(
+                    message("call", 7, MessageKind.CALL, false, MessageEvidence.SOURCE_INFERRED, "10:00:00.000", LogLevel.D),
+                    message("logged request", 7, MessageKind.SELF, true, MessageEvidence.LOG, "10:00:00.001", LogLevel.I),
+                    message("dispatch", 8, MessageKind.ASYNC, false, MessageEvidence.SOURCE_INFERRED, "10:00:00.002", LogLevel.W),
+                    message("logged result", 8, MessageKind.SELF, true, MessageEvidence.LOG, "10:00:00.003", LogLevel.I),
+                    message("return", 8, MessageKind.RETURN, false, MessageEvidence.SOURCE_INFERRED, "10:00:00.004", LogLevel.E),
+                ),
+            ),
+        )
+
+        assertEquals(listOf("call", "logged request", "dispatch", "logged result", "return"), document.interactions.map { it.operation })
+        assertEquals(listOf(MessageKind.CALL, MessageKind.SELF, MessageKind.ASYNC, MessageKind.SELF, MessageKind.RETURN), document.interactions.map { it.kind })
+        assertEquals(
+            listOf("client" to "service", "client" to "client", "client" to "service", "client" to "client", "service" to "client"),
+            document.interactions.map { it.fromParticipantId to it.toParticipantId },
+        )
+        assertEquals((0L..4L).toList(), document.interactions.map { it.order })
+        assertEquals(document.interactions.size, document.interactions.map { it.id }.toSet().size)
+        assertEquals(
+            listOf("10:00:00.000" to LogLevel.D, "10:00:00.001" to LogLevel.I, "10:00:00.002" to LogLevel.W, "10:00:00.003" to LogLevel.I, "10:00:00.004" to LogLevel.E),
+            document.interactions.map { it.renderAnchorTs to it.renderAnchorLevel },
+        )
+    }
+
+    @Test
     fun stripsTimestampAndElapsedPrefixesTogether() {
         assertEquals(
             "USB poll(tick=portCount=4)",

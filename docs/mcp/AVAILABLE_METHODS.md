@@ -73,23 +73,20 @@ Recent state; file-open calls must still use explicit approved fixture paths.
 
 ## Diagrams
 
-- `build_sequence_diagram` turns a range of log lines into UML sequence-diagram source (Mermaid by
-  default, PlantUML on request). Its default **Component flow** joins tag changes into handoffs.
+- `build_sequence_diagram` turns a range of log lines into an editable manual sequence-diagram
+  draft and UML source (Mermaid by default, PlantUML on request). By default it uses verified
+  source tracing to seed structural calls/returns alongside every selected log event; use
+  `seed: { sourceTrace, threadHandoffs }` to control that starting draft. Ambiguous or unavailable
+  source evidence remains diagnostics and falls back to log events rather than guessed arrows.
   Prefer `components`: each object is `{ id, displayName, tagIds, enabled }`, so a component can
   deliberately represent several raw tags. Components are not capped at eight participants; use a
   tight range and the returned coverage/warnings to judge readability. `tags` remains available for
   legacy callers, and `mergedTags` is a shorthand map from component name/id to tag arrays. Use
-  `lifelineOrder` for an explicit participant order. Set `authoringMode` to `manual` and provide a
-  `manualDocument` for source-index-independent interactions, groups, notes, and activations. Stable
-  `messageOverrides` edit or disable interactions by origin rather than by rendered position. The MCP
+  `lifelineOrder` for an explicit participant order. Provide `manualDocument` to render a completed
+  source-index-independent draft with interactions, groups, notes, and activations. The MCP
   boundary accepts at most 64 components, 64 actors, 128 legacy tags, 128 tags per component, and
   1,024 component/merged tag references; IDs/tags are at most 256 characters and labels/titles at
   most 512. Component and actor IDs must be unique and cannot collide.
-
-  `actors` accepts legacy strings or `{ id, label, mirrorComponentId?, mirrorDirection? }` objects.
-  A mirror retains the original non-self component edge and adds a marked duplicate to the actor;
-  `mirrorDirection` is `inbound`, `outbound`, or `both` (the default). Legacy `entryActor` and
-  `exitActor` remain supported for one-way opening/closing arrows.
 
   Tags outside enabled components are hidden by default. Set `unmappedTagPolicy` to `groupAsOther`
   only when grouping every remaining in-range tag into the single `Other` component is meaningful.

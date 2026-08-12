@@ -50,6 +50,7 @@ import com.indagium.ui.cumulativeBlockOffsets
 import com.indagium.ui.emptyWorkspaceTab
 import com.indagium.ui.filterSearchTargetForTab
 import com.indagium.ui.manualCollapseAvailability
+import com.indagium.ui.manualGroupKeyAtY
 import com.indagium.ui.maskWordForCopy
 import com.indagium.ui.mkTab
 import com.indagium.ui.persistedSnapshot
@@ -91,6 +92,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -5693,6 +5695,16 @@ class AppStateBehaviorTest {
         val offsets = cumulativeBlockOffsets(listOf("a", "b", "c")) { heights.getValue(it) }
 
         assertEquals(mapOf("a" to 0f, "b" to 20f, "c" to 120f), offsets)
+    }
+
+    @Test
+    fun manualGroupKeyAtYUsesMeasuredVariableHeights() {
+        val heights = mapOf("collapsed" to 36f, "expanded" to 360f, "after" to 36f)
+
+        assertEquals("collapsed", manualGroupKeyAtY(heights.keys.toList(), 35f) { heights.getValue(it) })
+        assertEquals("expanded", manualGroupKeyAtY(heights.keys.toList(), 100f) { heights.getValue(it) })
+        assertEquals("after", manualGroupKeyAtY(heights.keys.toList(), 400f) { heights.getValue(it) })
+        assertNull(manualGroupKeyAtY(heights.keys.toList(), 432f) { heights.getValue(it) })
     }
 
     @Test

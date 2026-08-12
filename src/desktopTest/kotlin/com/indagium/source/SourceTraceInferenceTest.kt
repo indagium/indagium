@@ -140,7 +140,7 @@ class SourceTraceInferenceTest {
     }
 
     @Test
-    fun multipleMatchingSourceSitesAreAmbiguousUntilTheUserOverridesTheRow() {
+    fun compatibleCrossRowPathDisambiguatesMatchingSourceSites() {
         val first = site(
             id = "first",
             call = directCall(resultVariable = null),
@@ -176,8 +176,9 @@ class SourceTraceInferenceTest {
         val trace = SourceTraceInferenceEngine(index).resolve(
             listOf(entry(1, "start event"), entry(2, "done event")),
         )
-        assertTrue(trace.calls.isEmpty())
-        assertTrue(TraceDiagnosticReason.AMBIGUOUS_SOURCE_SITE in trace.diagnostics.droppedByReason)
+        assertEquals(listOf("first", "reachable"), trace.events.map { it.sourceLogSiteId })
+        assertTrue(trace.calls.isNotEmpty())
+        assertTrue(TraceDiagnosticReason.AMBIGUOUS_SOURCE_SITE !in trace.diagnostics.droppedByReason)
     }
 
     @Test

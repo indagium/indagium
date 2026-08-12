@@ -181,6 +181,10 @@ data class ManualDiagramInteraction(
     val sourceLogSiteId: String? = null,
     val sourceOwnerType: String? = null,
     val visibility: ManualOperationVisibility = ManualOperationVisibility.UNSPECIFIED,
+    /** Timestamp retained from the rendered message so this interaction survives a later range change. */
+    val renderAnchorTs: String? = null,
+    /** Severity retained alongside [renderAnchorTs] when no selected source row is available. */
+    val renderAnchorLevel: LogLevel? = null,
 )
 
 /** A manually authored group/frame spanning its named interactions. */

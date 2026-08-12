@@ -37,7 +37,7 @@ private const val CURRENT_SPEC_VERSION = "v4"
 
 // Notes can be imported from arbitrary .ann/case-library files.  Keep this boundary materially
 // below a pathological renderer allocation while matching the public MCP's 400-arrow limit.
-private const val MAX_DIAGRAM_MESSAGES = 400
+private const val MAX_DIAGRAM_MESSAGES = 5_000
 private const val MAX_CODEC_PARTICIPANTS = 128
 // internal, not private: validSpec only runs on *decode*, so the component editor
 // (ui/SeqDiagramDialog.kt) is what has to stop a user building a spec that saves fine and then
@@ -50,7 +50,7 @@ private const val MAX_CODEC_RULES = 128
 private const val MAX_CODEC_OVERRIDES = 512
 private const val MAX_CODEC_SOURCE_OVERRIDES = 512
 private const val MAX_CODEC_MESSAGE_OVERRIDES = 512
-private const val MAX_CODEC_MANUAL_INTERACTIONS = 400
+private const val MAX_CODEC_MANUAL_INTERACTIONS = 5_000
 private const val MAX_CODEC_MANUAL_GROUPS = 128
 private const val MAX_CODEC_MANUAL_NOTES = 400
 private const val MAX_CODEC_MANUAL_ACTIVATIONS = 400
@@ -114,9 +114,20 @@ fun encodeDiagramNote(
 ): String {
     val normalizedSource = source.trimEnd('\n')
     val sourceHash = diagramSourceHash(normalizedSource)
-    val normalizedSnapshot = snapshot ?: DiagramNoteSnapshot(normalizedSource, sourceHash, model)
+    // Every newly saved model is reopened as the one editable manual document.  A source-only
+    // note remains a viewable legacy snapshot because it has no model from which to make a draft.
+    val persistedSpec = if (spec.manualDocument.interactions.isNotEmpty()) spec else model?.let {
+        spec.copy(
+            authoringMode = DiagramAuthoringMode.MANUAL,
+            manualDocument = manualDocumentFromDiagram(it),
+        )
+    } ?: spec
+    val normalizedModel = model?.copy(spec = persistedSpec)
+    val normalizedSnapshot = (snapshot ?: DiagramNoteSnapshot(normalizedSource, sourceHash, normalizedModel)).let {
+        it.copy(model = it.model?.copy(spec = persistedSpec))
+    }
     val json = Json.encode(
-        specToMap(spec) + mapOf(
+        specToMap(persistedSpec) + mapOf(
             "sourceHash" to sourceHash,
             "attachment" to attachment?.let(::attachmentToMap),
             "snapshot" to snapshotToMap(normalizedSnapshot),
@@ -527,19 +538,12 @@ private fun specToMap(spec: SeqDiagramSpec): Map<String, Any?> = mapOf(
     "title" to spec.title,
     "participants" to spec.participants.map(::participantToMap),
     "range" to rangeToMap(spec.range),
-    "mode" to spec.mode.name,
-    "rules" to spec.rules.map(::ruleToMap),
     "options" to optionsToMap(spec.options),
     "sourceFile" to spec.sourceFile,
     "components" to spec.components.map(::componentToMap),
     "actors" to spec.actors.map(::actorToMap),
     "unmappedTagPolicy" to spec.unmappedTagPolicy.name,
-    "sourceEnrichment" to sourceEnrichmentToMap(spec.sourceEnrichment),
-    "callOverrides" to spec.callOverrides.map(::callOverrideToMap),
-    "sourceSiteOverrides" to spec.sourceSiteOverrides.map(::sourceSiteOverrideToMap),
-    "authoringMode" to spec.authoringMode.name,
     "lifelineOrder" to spec.lifelineOrder,
-    "messageOverrides" to spec.messageOverrides.map(::messageOverrideToMap),
     "manualDocument" to manualDocumentToMap(spec.manualDocument),
 )
 
@@ -549,8 +553,7 @@ private fun componentToMap(c: DiagramComponent): Map<String, Any?> = mapOf(
 )
 
 private fun actorToMap(a: DiagramActor): Map<String, Any?> = mapOf(
-    "id" to a.id, "label" to a.label, "mirrorComponentId" to a.mirrorComponentId, "mirrorDirection" to a.mirrorDirection.name,
-    "mirrorComponentIds" to a.mirrorComponentIds.toList(),
+    "id" to a.id, "label" to a.label,
 )
 
 private fun callOverrideToMap(o: DiagramCallOverride): Map<String, Any?> = mapOf(
@@ -589,6 +592,8 @@ private fun manualDocumentToMap(document: ManualDiagramDocument): Map<String, An
             "groupKey" to interaction.groupKey, "sourceMethodId" to interaction.sourceMethodId,
             "sourceLogSiteId" to interaction.sourceLogSiteId, "sourceOwnerType" to interaction.sourceOwnerType,
             "visibility" to interaction.visibility.name,
+            "renderAnchorTs" to interaction.renderAnchorTs,
+            "renderAnchorLevel" to interaction.renderAnchorLevel?.name,
         )
     },
     "groups" to document.groups.map { group ->
@@ -828,6 +833,7 @@ private fun validManualInteraction(interaction: ManualDiagramInteraction): Boole
         listOf(
             interaction.operation, interaction.result, interaction.label, interaction.groupKey,
             interaction.sourceMethodId, interaction.sourceLogSiteId, interaction.sourceOwnerType,
+            interaction.renderAnchorTs,
         ).all(::validString) &&
         interaction.parameters.size <= MAX_CODEC_PARAMETERS && interaction.parameters.all { validString(it.name) && validString(it.value) }
 
@@ -1090,7 +1096,10 @@ private fun specFromMap(map: Map<String, Any?>): SeqDiagramSpec? {
         sourceEnrichment = subMap(map, "sourceEnrichment")?.let(::sourceEnrichmentFromMap) ?: d.sourceEnrichment,
         callOverrides = callOverrides.filterNotNull(),
         sourceSiteOverrides = sourceSiteOverrides.filterNotNull(),
-        authoringMode = enumFromName<DiagramAuthoringMode>(map.str("authoringMode")) ?: d.authoringMode,
+        // New writes are always an editable manual document and intentionally omit the retired
+        // authoringMode field. Keep inferred decoding only for source-only legacy notes.
+        authoringMode = if (manualDocument.interactions.isNotEmpty()) DiagramAuthoringMode.MANUAL
+        else enumFromName<DiagramAuthoringMode>(map.str("authoringMode")) ?: d.authoringMode,
         lifelineOrder = lifelineOrder,
         messageOverrides = messageOverrides.filterNotNull(),
         manualDocument = manualDocument,
@@ -1174,6 +1183,7 @@ private fun manualInteractionFromMap(map: Map<String, Any?>): ManualDiagramInter
         map.bool("enabled") ?: true, (map["order"] as? Number)?.toLong() ?: 0L,
         map.str("groupKey"), map.str("sourceMethodId"), map.str("sourceLogSiteId"), map.str("sourceOwnerType"),
         enumFromName<ManualOperationVisibility>(map.str("visibility")) ?: ManualOperationVisibility.UNSPECIFIED,
+        map.str("renderAnchorTs"), enumFromName<LogLevel>(map.str("renderAnchorLevel")),
     ).takeIf(::validManualInteraction)
 }
 

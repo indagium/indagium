@@ -36,6 +36,7 @@ import com.indagium.diagram.SeqDiagram
 import com.indagium.diagram.SeqDiagramSpec
 import com.indagium.diagram.UnmappedTagPolicy
 import com.indagium.diagram.buildSequenceDiagram
+import com.indagium.diagram.manualDocumentFromDiagram
 import com.indagium.diagram.toSource
 import com.indagium.model.AnnBlock
 import com.indagium.model.CrashSite
@@ -810,7 +811,7 @@ internal class IndagiumToolOperations(
         val configurationError = diagramConfigurationError(components, actors, tagParticipants, rawDiagramActorIds(args))
         if (configurationError != null) return mapOf("error" to configurationError)
 
-        val spec = diagramSpec(
+        val requestedSpec = diagramSpec(
             tab = tab,
             args = args,
             components = components,
@@ -818,15 +819,34 @@ internal class IndagiumToolOperations(
             actorParticipants = diagramActorParticipants(actorNames, actors, entryActor, exitActor),
             tagParticipants = tagParticipants,
         )
-        val manualDocumentError = manualDocumentConfigurationError(spec, components)
+        val manualDocumentError = manualDocumentConfigurationError(requestedSpec, components)
         if (manualDocumentError != null) return mapOf("error" to manualDocumentError)
         val sourceIndex = sourceIndexProvider()
-        val diagram = buildSequenceDiagram(
-            tab = tab,
-            spec = spec,
-            resolveTrace = sourceTraceResolver(spec, sourceIndex),
-            resolveSourceInteractions = sourceInteractionResolver(spec, sourceIndex),
+        // MCP has the same contract as the workspace: callers may submit a finished manual
+        // document, otherwise the service creates an evidence-assisted manual draft first.
+        val seed = args["seed"] as? Map<*, *>
+        val seedSourceTrace = (seed?.get("sourceTrace") as? Boolean) ?: args.anyBool("sourceEnrichment") ?: true
+        val seedHandoffs = (seed?.get("threadHandoffs") as? Boolean) ?: false
+        val seedSpec = requestedSpec.copy(
+            authoringMode = DiagramAuthoringMode.INFERRED,
+            sourceEnrichment = requestedSpec.sourceEnrichment.copy(enabled = seedSourceTrace),
+            options = requestedSpec.options.copy(threadHandoffArrows = seedHandoffs),
         )
+        val spec = if (requestedSpec.manualDocument.interactions.isNotEmpty()) {
+            requestedSpec.copy(authoringMode = DiagramAuthoringMode.MANUAL)
+        } else {
+            val inferred = buildSequenceDiagram(
+                tab = tab,
+                spec = seedSpec,
+                resolveTrace = sourceTraceResolver(seedSpec, sourceIndex),
+                resolveSourceInteractions = sourceInteractionResolver(seedSpec, sourceIndex),
+            )
+            requestedSpec.copy(
+                authoringMode = DiagramAuthoringMode.MANUAL,
+                manualDocument = manualDocumentFromDiagram(inferred),
+            )
+        }
+        val diagram = buildSequenceDiagram(tab = tab, spec = spec)
         val routeWarnings = boundedDiagramWarnings(diagram.warnings + sourceEnrichmentAvailabilityWarnings(spec, sourceIndex))
         return diagramRouteResponse(diagram, spec, components, sourceIndex, routeWarnings)
     }
@@ -966,7 +986,6 @@ internal class IndagiumToolOperations(
             "warnings" to warnings,
             "scannedEntries" to diagram.scannedEntries,
             "coverage" to diagramCoverageMap(diagram),
-            "sourceEnrichment" to sourceEnrichmentMap(spec, sourceIndex),
             "traceMode" to diagram.traceMode.name.lowercase(),
             "traceDiagnostics" to traceDiagnosticsMap(diagram),
             "trace" to traceMap(diagram),
@@ -1019,14 +1038,10 @@ internal class IndagiumToolOperations(
             "truncated" to diagram.truncated,
             "scannedEntries" to diagram.scannedEntries,
             "coverage" to diagramCoverageMap(diagram),
-            "sourceEnrichment" to sourceEnrichmentMap(spec, sourceIndex),
             "traceMode" to diagram.traceMode.name.lowercase(),
             "traceDiagnostics" to traceDiagnosticsMap(diagram),
             "trace" to traceMap(diagram),
-            "authoringMode" to spec.authoringMode.name.lowercase(),
             "lifelineOrder" to spec.lifelineOrder,
-            "rules" to spec.rules.map(::diagramRuleMap),
-            "messageOverrides" to spec.messageOverrides.map(::messageOverrideMap),
             "manualDocument" to manualDocumentMap(spec.manualDocument),
             "warnings" to warnings,
         )
