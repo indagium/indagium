@@ -24,6 +24,13 @@ private const val ALPHA_SEARCH_MATCH_DARK = 0.34f
 private const val ALPHA_SEARCH_CURRENT_LIGHT = 0.42f
 private const val ALPHA_SEARCH_CURRENT_DARK = 0.55f
 
+// Sequence diagram v3 (diagram3/Seq3*, ui/Seq3Theme.kt/Seq3Session.kt/Seq3Workspace.kt)'s "needs a
+// target" row wash. Tuned lighter on dark backgrounds for the same reason ALPHA_SEARCH_MATCH_* is
+// split: a wash needs more opacity on a dark panel to register at all, and would look like a solid
+// fill at the same alpha on a light one.
+private const val ALPHA_WARN_BG_LIGHT = 0.16f
+private const val ALPHA_WARN_BG_DARK = 0.22f
+
 data class ThemeColors(
     val bg: Color, val p: Color, val p2: Color, val br: Color,
     val tx: Color, val ts: Color, val td: Color,
@@ -34,6 +41,14 @@ data class ThemeColors(
     // per-theme (see theme()) so both read correctly on light vs dark backgrounds instead of the old
     // fixed constants that looked identical in every palette.
     val searchMatchBg: Color, val searchCurrentBg: Color,
+    // Sequence diagram v3's three roles the base ten fields above don't name (design spec §03/§04):
+    // `warn` is the "needs target" amber text/icon colour and `warnBg` its tinted row background;
+    // `ok` is the "edited" confirmation dot. All three are DERIVED below, never a fixed hex, so
+    // every preset (including the ~14 dark ones) gets a version that's actually legible on its own
+    // background — see theme()'s own comment on why seq1/seq2 are the source material. Runtime-only,
+    // like every other ThemeColors field: this never touches AutosaveCodec (verified — that codec
+    // has no ThemeColors reference at all) or AutosaveGoldenV1Test.
+    val warn: Color, val warnBg: Color, val ok: Color,
 )
 
 // Relative luminance of a packed 0xAARRGGBB background — lets theme() pick light- vs dark-tuned
@@ -56,6 +71,21 @@ private fun theme(
         // at higher alpha so it stands out. Both track the palette, so every preset stays on-theme.
         searchMatchBg = Color(seq2).copy(alpha = if (light) ALPHA_SEARCH_MATCH_LIGHT else ALPHA_SEARCH_MATCH_DARK),
         searchCurrentBg = Color(ac).copy(alpha = if (light) ALPHA_SEARCH_CURRENT_LIGHT else ALPHA_SEARCH_CURRENT_DARK),
+        // `warn`/`warnBg` reuse `seq2` (not a fixed amber hex) because `seq2` is already warm/
+        // amber-toned in nearly every preset declared below (e.g. DARK_GITHUB's f0883e, LIGHT_
+        // THEME's bc4c00, GRUVBOX's d65d0e) AND already proven legible as small foreground text/
+        // icon colour, not just a translucent tint — LogViewer.kt's SectionBanner draws its label
+        // directly in the sibling `seq1` today. Where a preset's `seq2` leans a different hue
+        // (ROSE_PAPER's teal, DEEP_CURRENT's rose), the role still reads as "this preset's own
+        // second accent, called out" rather than plain body text — legible and on-theme, just not
+        // literally amber everywhere, which is the explicitly accepted trade-off (hues track the
+        // preset; layout/weight/structure do not — see the v3 rewrite plan's palette decision).
+        // `ok` reuses `seq1` for the same reason, one level lower in intensity than `ac` (already
+        // spoken for by selection/interactive highlighting), so an "edited" dot never collides
+        // visually with a selected row's own accent bar.
+        warn = Color(seq2),
+        warnBg = Color(seq2).copy(alpha = if (light) ALPHA_WARN_BG_LIGHT else ALPHA_WARN_BG_DARK),
+        ok = Color(seq1),
     )
 }
 

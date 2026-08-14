@@ -58,12 +58,12 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
-import com.indagium.diagram.DiagramExportMode
-import com.indagium.diagram.DiagramTheme
-import com.indagium.diagram.ParsedDiagram
-import com.indagium.diagram.parseDiagramNote
-import com.indagium.diagram.updateDiagramNoteCaption
-import com.indagium.diagram.updateDiagramNoteExportMode
+import com.indagium.diagram3.DiagramExportMode
+import com.indagium.diagram3.ParsedSeq3
+import com.indagium.diagram3.Seq3RasterTheme
+import com.indagium.diagram3.parseSeq3Note
+import com.indagium.diagram3.updateSeq3NoteCaption
+import com.indagium.diagram3.updateSeq3NoteExportMode
 import com.indagium.model.AnnBlock
 import com.indagium.model.AppSettings
 import com.indagium.model.LogTab
@@ -86,6 +86,10 @@ import java.io.File
 import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
+// Half of Seq3Layout.kt's own (private) ROW_H=42.0 — a click within this unit-less vertical
+// distance of a row's y counts as hitting it (see DiagramNoteView's tap handler).
+private const val DIAGRAM_ROW_HIT_TOLERANCE = 21.0
+
 private const val BLOCK_DRAG_SNAP_BIAS = 0.25f
 private const val AUTO_SCROLL_SPEED_FACTOR = 0.6f
 private const val STICK_TO_BOTTOM_THRESHOLD_DP = 24f
@@ -100,36 +104,43 @@ private const val UNVERIFIED_RELINK_NOTICE_MS = 8_000L
 private const val IMAGE_BLOCK_THUMBNAIL_DP = 140f
 
 /**
- * The Notes column can contain many large diagram attachments.  A full [parseDiagramNote] decodes
- * every carried message and participant, which is unnecessary just to draw a folded card header.
- * This deliberately shallow extraction reads only the small top-level metadata it displays; the
- * full, trusted parser remains the authority and runs only when a card is expanded or an action
- * needs the model.
+ * The Notes column can contain many large diagram attachments.  A full [parseSeq3Note] decodes
+ * every carried lifeline/message, which is unnecessary just to draw a folded card header.  This
+ * deliberately shallow extraction reads only the small top-level metadata it displays; the full,
+ * trusted parser remains the authority and runs only when a card is expanded or an action needs
+ * the document.
+ *
+ * Unlike the deleted v1/v2 codec, [com.indagium.diagram3.Seq3Codec]'s header carries the WHOLE
+ * document (lifelines/messages included, not a separate optional snapshot) — but `title`,
+ * `caption`, `exportMode` and `range` are all written before the `lifelines`/`messages` arrays
+ * (see `Seq3Codec.documentToMap`'s field order), so a bounded text scan still never has to reach
+ * them to answer a folded card's questions.
  */
-internal data class DiagramNoteSummary(
+internal data class Seq3NoteSummary(
     val title: String,
     val caption: String,
     val exportMode: DiagramExportMode,
     val scope: String,
+    /** v3's header carries no compact count either (see this object's own doc) — counting
+     *  messages would mean scanning the unbounded array a folded card must never touch. */
     val messageCount: Int?,
-    val revision: Long?,
     /** Maximum number of input characters inspected to produce this summary. */
     val inspectedChars: Int,
 )
 
-internal object DiagramNoteSummaryCache {
+internal object Seq3NoteSummaryCache {
     private const val MAX_ENTRIES = 48
     internal const val MAX_INSPECTED_CHARS = 64 * 1024
     private const val MAX_LEADING_WHITESPACE = 256
-    private const val DIAGRAM_MARKER = "<!-- indagium:diagram "
+    private const val DIAGRAM_MARKER = "<!-- indagium:diagram3 "
     private const val HEADER_TERMINATOR = " -->"
     private const val UNKNOWN_RANGE_ENDPOINT = "?"
-    private val supportedVersions = setOf("v1", "v2", "v3")
-    private val payloadKeys = listOf("\"snapshot\"", "\"model\"")
+    private const val SUPPORTED_VERSION = "v1"
+    private val payloadKeys = listOf("\"lifelines\"", "\"messages\"")
     private val unicodeEscapeRegex = Regex("\\\\u([0-9a-fA-F]{4})")
     private val rangeRegex = Regex("\\\"range\\\"\\s*:\\s*\\{([^}]*)}")
 
-    private data class Cached(val summary: DiagramNoteSummary?)
+    private data class Cached(val summary: Seq3NoteSummary?)
 
     private data class BoundedMetadata(val text: String, val inspectedChars: Int)
 
@@ -140,7 +151,7 @@ internal object DiagramNoteSummaryCache {
     private val cache = java.util.IdentityHashMap<String, Cached>()
     private val insertionOrder = java.util.ArrayDeque<String>()
 
-    fun summary(text: String): DiagramNoteSummary? {
+    fun summary(text: String): Seq3NoteSummary? {
         synchronized(cache) {
             if (cache.containsKey(text)) return cache[text]?.summary
         }
@@ -155,18 +166,15 @@ internal object DiagramNoteSummaryCache {
         return summary
     }
 
-    private fun parseSummary(text: String): DiagramNoteSummary? {
+    private fun parseSummary(text: String): Seq3NoteSummary? {
         val metadata = boundedMetadata(text) ?: return null
         val header = metadata.text
-        return DiagramNoteSummary(
+        return Seq3NoteSummary(
             title = jsonString(header, "title").orEmpty(),
             caption = jsonString(header, "caption").orEmpty(),
             exportMode = exportModeFrom(header),
             scope = scopeFrom(header),
-            // v1-v3 do not carry a compact count. Counting model objects would scan unbounded
-            // data and v1/v2 snapshots can duplicate them, so folded cards omit it honestly.
             messageCount = null,
-            revision = jsonNumber(header, "revision"),
             inspectedChars = metadata.inspectedChars,
         )
     }
@@ -178,7 +186,7 @@ internal object DiagramNoteSummaryCache {
         val prefix = text.substring(headerStart, inspectedEnd)
         val versionEnd = prefix.indexOf(' ')
         val version = prefix.takeIf { versionEnd > 0 }?.substring(0, versionEnd)
-        if (version !in supportedVersions) return null
+        if (version != SUPPORTED_VERSION) return null
         return BoundedMetadata(
             text = prefix.substring(0, metadataEnd(prefix, versionEnd)),
             inspectedChars = prefix.length,
@@ -202,7 +210,7 @@ internal object DiagramNoteSummaryCache {
     private fun jsonString(text: String, name: String): String? {
         val encoded = Regex("\\\"$name\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)\\\"")
             .find(text)?.groupValues?.get(1) ?: return null
-        // This small unescaper covers JSON scalar escapes without decoding the carried model.
+        // This small unescaper covers JSON scalar escapes without decoding the carried document.
         return encoded.replace("\\\\\"", "\"")
             .replace("\\\\\\\\", "\\")
             .replace("\\\\n", "\n")
@@ -223,12 +231,13 @@ internal object DiagramNoteSummaryCache {
 
     private fun scopeFrom(header: String): String {
         val range = rangeRegex.find(header)?.groupValues?.get(1).orEmpty()
-        return when (jsonString(range, "kind")) {
+        // "type", not v1/v2's "kind" — see Seq3Codec.rangeToMap. There is no v3 counterpart of
+        // v1's "seqGroup" range kind (Seq3Range dropped it — see that type's own doc).
+        return when (jsonString(range, "type")) {
             "ids" -> "Lines ${jsonNumber(range, "from") ?: UNKNOWN_RANGE_ENDPOINT}–" +
                 "${jsonNumber(range, "to") ?: UNKNOWN_RANGE_ENDPOINT}"
             "time" -> "${jsonString(range, "fromTs").orEmpty().ifBlank { "start" }}–" +
                 jsonString(range, "toTs").orEmpty().ifBlank { "end" }
-            "seqGroup" -> "Sequence group ${jsonString(range, "gid").orEmpty()}"
             else -> "Current filtered view"
         }
     }
@@ -242,20 +251,20 @@ internal object DiagramNoteSummaryCache {
 }
 
 /** Full parser cache for the moment a folded card is expanded. */
-internal object DiagramNoteParseCache {
+internal object Seq3NoteParseCache {
     private const val MAX_ENTRIES = 48
 
-    private data class Cached(val parsed: ParsedDiagram?)
+    private data class Cached(val parsed: ParsedSeq3?)
 
     private val cache = object : LinkedHashMap<String, Cached>(MAX_ENTRIES, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Cached>?): Boolean = size > MAX_ENTRIES
     }
     private val parseCount = java.util.concurrent.atomic.AtomicInteger()
 
-    fun parse(text: String): ParsedDiagram? {
+    fun parse(text: String): ParsedSeq3? {
         synchronized(cache) { cache[text] }?.let { return it.parsed }
         parseCount.incrementAndGet()
-        val parsed = parseDiagramNote(text)
+        val parsed = parseSeq3Note(text)
         synchronized(cache) { cache[text] = Cached(parsed) }
         return parsed
     }
@@ -269,26 +278,24 @@ internal object DiagramNoteParseCache {
 }
 
 private fun stripDiagramHeaderFast(text: String): String {
-    val start = text.indexOf("<!-- indagium:diagram ")
+    val start = text.indexOf("<!-- indagium:diagram3 ")
     if (start < 0) return text
     val end = text.indexOf(" -->", start)
     return if (end < 0) text else text.substring(end + 4).trimStart('\r', '\n')
 }
 
-private data class ExpandedDiagram(val parsed: ParsedDiagram, val display: DiagramDisplay?)
+private data class ExpandedDiagram(val parsed: ParsedSeq3, val display: Seq3Display?)
 
 @Composable
 private fun rememberExpandedDiagram(
     noteText: String,
-    theme: DiagramTheme,
+    theme: Seq3RasterTheme,
     expanded: Boolean,
-    allowSnapshotPreview: Boolean = false,
 ): ExpandedDiagram? {
-    val result by produceState<ExpandedDiagram?>(initialValue = null, noteText, theme, expanded, allowSnapshotPreview) {
+    val result by produceState<ExpandedDiagram?>(initialValue = null, noteText, theme, expanded) {
         value = if (!expanded) null else withContext(Dispatchers.Default) {
-            DiagramNoteParseCache.parse(noteText)?.let { parsed ->
-                val model = if (allowSnapshotPreview) parsed.snapshotPreviewModel else parsed.model
-                ExpandedDiagram(parsed, model?.let { DiagramRenderCache.display(it, theme) })
+            Seq3NoteParseCache.parse(noteText)?.let { parsed ->
+                ExpandedDiagram(parsed, Seq3RenderCache.display(parsed.document, theme))
             }
         }
     }
@@ -340,6 +347,25 @@ internal fun blockOrderDuringDrag(
         draggedCenter < center
     }.takeIf { it >= 0 } ?: without.size
     return without.take(insertAt) + dragged + without.drop(insertAt)
+}
+
+/** Which of [groupKeys] a given [y] position falls into, given each group's measured height —
+ *  generic variable-height row hit-testing, the same idea [cumulativeBlockOffsets] runs for a
+ *  drag offset. A negative [y] (above every group) is deliberately unmatched, and a [y] past the
+ *  last group's bottom is deliberately unmatched too. */
+internal fun manualGroupKeyAtY(
+    groupKeys: List<String>,
+    y: Float,
+    heightOf: (String) -> Float,
+): String? {
+    if (y < 0f) return null
+    var top = 0f
+    for (groupKey in groupKeys) {
+        val bottom = top + heightOf(groupKey)
+        if (y < bottom) return groupKey
+        top = bottom
+    }
+    return null
 }
 
 @Composable
@@ -497,7 +523,7 @@ fun AnnotationPanel(
                 // Folded diagram cards do not decode or draw their carried model.  The shallow
                 // summary gives us a stable header-height estimate without making a long Notes
                 // document pay an O(messages) parse during layout.
-                val summary = DiagramNoteSummaryCache.summary(block.text)
+                val summary = Seq3NoteSummaryCache.summary(block.text)
                 val collapsedDiagramDp = if (summary != null) 38f else 0f
                 val caption = summary?.caption.orEmpty()
                 controlsDp + collapsedDiagramDp + textFieldDp(caption, 20.7f, 40f) + outerChromeDp
@@ -1263,7 +1289,7 @@ private fun DiagramLibrarySection(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 AppText(
-                                    item.parsed?.let { parsed -> diagramLibraryRangeSummary(parsed.spec) } ?: "Unavailable diagram data",
+                                    item.parsed?.let { parsed -> rangeSummary(parsed.document.range) } ?: "Unavailable diagram data",
                                     color = tc.td,
                                     fontSize = 9.sp,
                                     maxLines = 1,
@@ -1289,13 +1315,6 @@ private fun DiagramLibrarySection(
             }
         }
     }
-}
-
-private fun diagramLibraryRangeSummary(spec: com.indagium.diagram.SeqDiagramSpec): String = when (val range = spec.range) {
-    is com.indagium.diagram.DiagramRange.VisibleView -> "Current filtered view"
-    is com.indagium.diagram.DiagramRange.Ids -> "Lines ${minOf(range.from, range.to)}–${maxOf(range.from, range.to)}"
-    is com.indagium.diagram.DiagramRange.Time -> "${range.fromTs.ifBlank { "start" }}–${range.toTs.ifBlank { "end" }}"
-    is com.indagium.diagram.DiagramRange.SeqGroupRef -> "Sequence group ${range.gid}"
 }
 
 @Composable
@@ -1564,14 +1583,9 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                     // Diagrams are drawn out-of-band from the Markdown renderer, the same way
                     // AnnBlock.Image is below — the renderer has no Mermaid support, and feeding it
                     // the note text raw would show a wall of spec-header JSON followed by source.
-                    val summary = remember(block.text) { DiagramNoteSummaryCache.summary(block.text) }
-                    // `model` is deliberately null for a v2 attachment whose visible source no
-                    // longer hashes to its carried model. The Markdown preview is read-only, so
-                    // it may present that retained model as an explicitly labelled snapshot;
-                    // otherwise v2 attachments vanish between the surrounding log blocks.
-                    // Editor and hit-test paths continue to use ParsedDiagram.model only.
+                    val summary = remember(block.text) { Seq3NoteSummaryCache.summary(block.text) }
                     val expandedDiagram = if (summary != null) {
-                        rememberExpandedDiagram(block.text, tc.toDiagramTheme(), expanded = true, allowSnapshotPreview = true)
+                        rememberExpandedDiagram(block.text, tc.toSeq3RasterTheme(), expanded = true)
                     } else {
                         null
                     }
@@ -1603,15 +1617,16 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                                     verticalArrangement = Arrangement.spacedBy(6.dp),
                                 ) {
                                     AppText(
-                                        parsed.spec.title.ifBlank { "Sequence diagram" },
+                                        parsed.document.title.ifBlank { "Sequence diagram" },
                                         color = tc.ts,
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.SemiBold,
                                     )
-                                    // A retained model whose source has changed is safe to show,
-                                    // but must remain distinguishable from a current rendering.
-                                    if (parsed.model == null) {
-                                        AppText("Saved snapshot — source changed", color = tc.td, fontSize = 10.sp)
+                                    // The document is always drawable in v3 (Seq3Codec.kt's own
+                                    // doc: it's returned even when the fence's hash no longer
+                                    // matches) — only the drift warning needs surfacing here.
+                                    if (!parsed.sourceHashMatches) {
+                                        AppText("Diagram source has drifted from its model", color = tc.td, fontSize = 10.sp)
                                     }
                                     // Do not fit the raster into the viewport height: a sequence
                                     // diagram stays readable only when it fills the card width.
@@ -1822,7 +1837,7 @@ private fun NoteBlock(
     // Diagram notes are cards, not an exposed model header plus dialect source. Opening the
     // workspace is the only normal editing route, which keeps the rendered model and saved source
     // in sync. A malformed/non-diagram note remains the ordinary editable text control below.
-    val diagram = remember(block.text) { DiagramNoteSummaryCache.summary(block.text) }
+    val diagram = remember(block.text) { Seq3NoteSummaryCache.summary(block.text) }
     var diagramExpanded by remember(block.id, block.text) { mutableStateOf(false) }
     Column(
         Modifier.fillMaxWidth()
@@ -1837,10 +1852,10 @@ private fun NoteBlock(
             onCopyImage = diagram?.let { summary ->
                 {
                     // Copy is an explicit action, so it is the right point to pay for parsing
-                    // and PNG encoding. A folded card itself stays model-free.
-                    DiagramNoteParseCache.parse(block.text)?.model?.let { model ->
+                    // and rasterizing. A folded card itself stays document-free.
+                    Seq3NoteParseCache.parse(block.text)?.document?.let { document ->
                         onCopyDiagramImage(
-                            DiagramRenderCache.pngBytes(model, tc.toDiagramTheme()),
+                            Seq3RenderCache.pngBytes(Seq3RenderCache.layout(document), tc.toSeq3RasterTheme()),
                             "Sequence diagram: ${summary.title.ifBlank { "Sequence diagram" }}",
                         )
                     }
@@ -1894,9 +1909,8 @@ private fun NoteBlock(
 }
 
 @Composable
-private fun DiagramHeaderSummary(summary: DiagramNoteSummary) {
+private fun DiagramHeaderSummary(summary: Seq3NoteSummary) {
     val metrics = summary.messageCount?.let { "$it arrows" }
-    val revision = summary.revision?.let { "rev $it" }
     Column(Modifier.widthIn(max = 180.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
         AppText(
             summary.title.ifBlank { "Sequence diagram" },
@@ -1907,7 +1921,7 @@ private fun DiagramHeaderSummary(summary: DiagramNoteSummary) {
             overflow = TextOverflow.Ellipsis,
         )
         AppText(
-            listOfNotNull(summary.scope, metrics, revision).joinToString(" · "),
+            listOfNotNull(summary.scope, metrics).joinToString(" · "),
             color = tc().td,
             fontSize = 9.sp,
             maxLines = 1,
@@ -1937,7 +1951,7 @@ private fun DiagramExportModeSwitcher(
                     .background(if (exportMode == DiagramExportMode.IMAGE) tc.ac.copy(.2f) else Color.Transparent)
                     .clickable {
                         if (exportMode != DiagramExportMode.IMAGE) {
-                            updateDiagramNoteExportMode(noteText, DiagramExportMode.IMAGE)?.let(onUpdateDiagramText)
+                            updateSeq3NoteExportMode(noteText, DiagramExportMode.IMAGE)?.let(onUpdateDiagramText)
                         }
                     }
                     .padding(horizontal = 7.dp),
@@ -1961,7 +1975,7 @@ private fun DiagramExportModeSwitcher(
                     .background(if (exportMode == DiagramExportMode.SOURCE) tc.ac.copy(.2f) else Color.Transparent)
                     .clickable {
                         if (exportMode != DiagramExportMode.SOURCE) {
-                            updateDiagramNoteExportMode(noteText, DiagramExportMode.SOURCE)?.let(onUpdateDiagramText)
+                            updateSeq3NoteExportMode(noteText, DiagramExportMode.SOURCE)?.let(onUpdateDiagramText)
                         }
                     }
                     .padding(horizontal = 7.dp),
@@ -1992,7 +2006,7 @@ private fun DiagramExportModeSwitcher(
 @Composable
 private fun DiagramNoteView(
     noteText: String,
-    summary: DiagramNoteSummary,
+    summary: Seq3NoteSummary,
     tc: ThemeColors,
     fieldFocusRequester: FocusRequester?,
     onFieldFocusChanged: (Boolean) -> Unit,
@@ -2004,7 +2018,7 @@ private fun DiagramNoteView(
     BasicTextField(
         value = summary.caption,
         onValueChange = { caption ->
-            updateDiagramNoteCaption(noteText, caption)?.let(onUpdateDiagramText)
+            updateSeq3NoteCaption(noteText, caption)?.let(onUpdateDiagramText)
         },
         textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
         cursorBrush = SolidColor(tc.ac),
@@ -2036,7 +2050,7 @@ private fun DiagramNoteView(
     // Folded cards intentionally do no model decode, rasterization, or bitmap conversion.  An
     // expansion starts the full parse/render pipeline on Dispatchers.Default and publishes its
     // finished display artifact back to Compose.
-    val theme = tc.toDiagramTheme()
+    val theme = tc.toSeq3RasterTheme()
     val expandedDiagram = rememberExpandedDiagram(noteText, theme, expanded)
     if (expanded) {
         Spacer(Modifier.height(6.dp))
@@ -2071,13 +2085,22 @@ private fun DiagramNoteView(
                                 .height(previewHeight)
                                 .pointerInput(rendered, previewWidth, previewHeight) {
                                     detectTapGestures { offset ->
+                                        // RenderedSeq3 carries no per-arrow hit list (unlike v1/v2's
+                                        // RenderedDiagram.hits) — Seq3Layout.kt's own header names
+                                        // it as the ONE shared geometry source for both this static
+                                        // preview and the live Compose canvas (Seq3Canvas.kt), so
+                                        // hit-testing here maps the tap back into that same unit-
+                                        // less layout space and finds the nearest row by y, rather
+                                        // than duplicating a second hit-region format.
                                         val displayWidthPx = previewWidth.value * density
                                         val displayHeightPx = previewHeight.value * density
-                                        val ix = (offset.x / displayWidthPx * rendered.widthPx).toInt()
-                                        val iy = (offset.y / displayHeightPx * rendered.heightPx).toInt()
-                                        rendered.hits.firstOrNull { h ->
-                                            ix >= h.x && ix <= h.x + h.width && iy >= h.y && iy <= h.y + h.height
-                                        }?.let { if (it.entryId > 0) onNavigateLine(it.entryId) }
+                                        val unitX = (offset.x / displayWidthPx * rendered.widthPx) / rendered.scale
+                                        val unitY = (offset.y / displayHeightPx * rendered.heightPx) / rendered.scale
+                                        val layout = Seq3RenderCache.layout(expandedDiagram.parsed.document)
+                                        layout.rows.minByOrNull { kotlin.math.abs(it.y - unitY) }
+                                            ?.takeIf { kotlin.math.abs(it.y - unitY) <= DIAGRAM_ROW_HIT_TOLERANCE && unitX >= 0.0 }
+                                            ?.occurrenceEntryId
+                                            ?.let(onNavigateLine)
                                     }
                                 },
                         )

@@ -1,0 +1,220 @@
+@file:Suppress("ReturnCount")
+
+package com.indagium.diagram3
+
+// ── Occurrence text -> Seq3Match ────────────────────────────────────────────────────────────
+//
+// This is what makes ×12 log lines ONE message instead of twelve: given a set of near-identical
+// occurrence texts under one tag, produce a single [Seq3Match] whose `{name}` slots sit exactly
+// at the runs that vary, proven against every occurrence before it is returned.
+//
+// Ported and adapted from `diagram/ManualMessageMatchCompiler.kt` (193 lines) — the compiler
+// itself (named-value pattern first, single positional run as fallback, reject anything more
+// ambiguous than that) is unchanged; what's adapted:
+//   - no `tagPattern`/`tag` matching — a v3 [Seq3Match.tag] is always the exact source tag the
+//     caller (Seq3Generator) already scanned occurrences under, never a regex to re-prove;
+//   - the single anonymous positional capture gets a content-shaped generated name (`n`/`id`/
+//     `value`) instead of the old compiler's hardcoded literal `"value"` — see
+//     [anonymousCaptureName] — so a purely numeric run reads as `{n}` and a hex-ish run reads as
+//     `{id}` in the label, per this phase's brief;
+//   - a named value is only eligible to become a capture when at least one of its distinct
+//     observed values falls OUTSIDE [GENERIC_NAMED_VALUES] — see [isGenericValueSet]. Two
+//     occurrences differing only by `state=true`/`state=false` do not get a noisy `{state}` token;
+//     they either merge some other way or stay separate messages, never silently mislabeled.
+// `manualMessageDisplayTemplate` (`diagram/ManualDiagramMessageQueue.kt:193-239`) was read for
+// the multi-occurrence label-templating idea, but not ported: in v3 the template lives directly
+// on [Seq3Match]/[com.indagium.diagram3.Seq3Message.labelTemplate], there is no separate
+// queue-row projection step to keep in sync with it.
+
+/** One occurrence text handed to the tokenizer, keyed by a caller-stable id (Seq3Generator uses
+ *  `LogEntry.id.toString()`) so [Seq3TokenizeResult.captureValuesByOccurrence] can be joined back
+ *  to the right [Seq3Occurrence] afterwards. */
+data class Seq3TokenizeInput(val occurrenceId: String, val text: String)
+
+data class Seq3TokenizeResult(
+    val match: Seq3Match? = null,
+    val captureValuesByOccurrence: Map<String, Map<String, String>> = emptyMap(),
+    val error: String? = null,
+) {
+    val compiled: Boolean get() = match != null && error == null
+}
+
+/**
+ * Compiles [occurrences] (all belonging to one [tag]) into a single proven [Seq3Match], or reports
+ * why it couldn't. Deliberately rejects ambiguous variation (more than one unanchored varying run)
+ * rather than guessing a broad regex — a caller with a rejected result should fall back to one
+ * literal message per occurrence (Seq3Generator does exactly this).
+ */
+fun tokenizeSeq3Messages(tag: String, occurrences: List<Seq3TokenizeInput>): Seq3TokenizeResult {
+    if (occurrences.isEmpty()) return Seq3TokenizeResult(error = "At least one occurrence is required")
+    if (occurrences.any { it.occurrenceId.isBlank() }) {
+        return Seq3TokenizeResult(error = "Every occurrence must have a stable id")
+    }
+    if (occurrences.any { it.text.isEmpty() }) {
+        return Seq3TokenizeResult(error = "Empty occurrence text cannot be tokenized")
+    }
+
+    val named = compileNamedValuePattern(tag, occurrences)
+    val candidate = named ?: compileSingleRunPattern(tag, occurrences)
+        ?: return Seq3TokenizeResult(
+            error = "The selected occurrences have ambiguous variation; only merge occurrences whose stable text anchors agree",
+        )
+
+    val match = candidate.first
+    val captureValues = candidate.second
+    val failures = occurrences.any { input -> matchesText(match, input.text) == null }
+    if (failures) {
+        return Seq3TokenizeResult(error = "The inferred pattern does not exactly match every selected occurrence")
+    }
+    return Seq3TokenizeResult(match = match, captureValuesByOccurrence = captureValues)
+}
+
+/** The capture token names written in a durable match/label template. */
+internal fun seq3CaptureTokenNames(template: String): List<String> =
+    CAPTURE_TOKEN.findAll(template).map { it.groupValues[1] }.toList()
+
+/**
+ * Returns captured values when [text] is an exact match for [match]'s template, or null otherwise.
+ * The token/declared-name check is intentional: silently associating a value with the wrong
+ * capture name would be worse than refusing the match outright.
+ */
+fun matchesText(match: Seq3Match, text: String): Map<String, String>? {
+    val tokenNames = seq3CaptureTokenNames(match.template)
+    val declaredNames = match.captures.map { it.name }
+    if (tokenNames.distinct().size != tokenNames.size || tokenNames.toSet() != declaredNames.toSet()) return null
+    if (declaredNames.isEmpty()) return text.takeIf { it == match.template }?.let { emptyMap() }
+    val pattern = buildString {
+        var cursor = 0
+        CAPTURE_TOKEN.findAll(match.template).forEach { token ->
+            append(Regex.escape(match.template.substring(cursor, token.range.first)))
+            append("(.+?)")
+            cursor = token.range.last + 1
+        }
+        append(Regex.escape(match.template.substring(cursor)))
+    }
+    val result = Regex("^(?:$pattern)$", setOf(RegexOption.DOT_MATCHES_ALL)).matchEntire(text) ?: return null
+    if (result.groupValues.size - 1 != tokenNames.size) return null
+    val valuesByToken = tokenNames.mapIndexed { index, name -> name to result.groupValues[index + 1] }.toMap()
+    return declaredNames.associateWith(valuesByToken::getValue)
+}
+
+private val NAMED_VALUE = Regex(
+    "([A-Za-z_][A-Za-z0-9_.-]*)\\s*(=|:)\\s*(\"[^\"]*\"|'[^']*'|[^=,:;\\s)]+)(?=\\s+(?:[A-Za-z_][A-Za-z0-9_.-]*\\s*(?:=|:))|\\s*$|[,;)])",
+)
+private val CAPTURE_TOKEN = Regex("\\{([A-Za-z_][A-Za-z0-9_]*)}")
+
+// Values so generic that varying between them carries no real identity — see this file's own
+// header. Deliberately a small, focused list (not `Seq3Correlation`'s own denylist, which exists
+// for a different purpose: rejecting weak CORRELATION evidence, not gating tokenizer captures).
+private val GENERIC_NAMED_VALUES = setOf("true", "false", "0", "null", "none", "unknown", "")
+
+private fun isGenericValueSet(values: Set<String>): Boolean = values.all { it.lowercase() in GENERIC_NAMED_VALUES }
+
+private fun compileNamedValuePattern(
+    tag: String,
+    occurrences: List<Seq3TokenizeInput>,
+): Pair<Seq3Match, Map<String, Map<String, String>>>? {
+    val matches = occurrences.map { NAMED_VALUE.findAll(it.text).toList() }
+    if (matches.any { it.isEmpty() }) return null
+    val firstKeys = matches.first().map { it.groupValues[1] }
+    if (matches.any { it.map { part -> part.groupValues[1] } != firstKeys }) return null
+
+    fun valuesFor(name: String): Set<String> =
+        matches.map { parts -> unquote(parts.first { part -> part.groupValues[1] == name }.groupValues[3]) }.toSet()
+
+    val varyingNames = firstKeys.filter { valuesFor(it).size > 1 }
+    if (varyingNames.isEmpty()) {
+        val exact = Seq3Match(tag = tag, template = occurrences.first().text)
+        return exact to occurrences.associate { it.occurrenceId to emptyMap() }
+    }
+    // A named value that only ever varies among denylisted generic words (true/false/0/null/...)
+    // carries no real identity worth a `{name}` token of its own — see this file's header. Rather
+    // than silently drop it while keeping its FIRST occurrence's value as fixed template text
+    // (which would then only match that one occurrence), the whole named-value path is abandoned
+    // here so the positional single-run fallback below gets a chance to capture the actual
+    // differing text under a generic name instead.
+    if (varyingNames.any { isGenericValueSet(valuesFor(it)) }) return null
+
+    val first = occurrences.first().text
+    val replacements = matches.first().mapNotNull { part ->
+        val name = part.groupValues[1]
+        name.takeIf { it in varyingNames }?.let { part.groups[3]!!.range to "{$it}" }
+    }.sortedByDescending { it.first.first }
+    var template = first
+    replacements.forEach { (range, replacement) -> template = template.replaceRange(range, replacement) }
+    val captures = varyingNames.map { Seq3Capture(it, Seq3CaptureSource.NAMED_VALUE) }
+    val values = occurrences.associate { input ->
+        val parts = NAMED_VALUE.findAll(input.text).toList()
+        input.occurrenceId to varyingNames.associateWith { name -> unquote(parts.first { it.groupValues[1] == name }.groupValues[3]) }
+    }
+    return Seq3Match(tag = tag, template = template, captures = captures) to values
+}
+
+private fun compileSingleRunPattern(
+    tag: String,
+    occurrences: List<Seq3TokenizeInput>,
+): Pair<Seq3Match, Map<String, Map<String, String>>>? {
+    val first = occurrences.first().text
+    val texts = occurrences.map { it.text }
+    val prefixLength = texts.minOf { commonPrefix(first, it) }
+    val suffixLength = texts.minOf { commonSuffix(first, it) }
+    val maxSuffix = (first.length - prefixLength).coerceAtLeast(0)
+    val safeSuffix = suffixLength.coerceAtMost(maxSuffix)
+    if (prefixLength == first.length && texts.all { it == first }) {
+        return Seq3Match(tag = tag, template = first) to occurrences.associate { it.occurrenceId to emptyMap() }
+    }
+    if (prefixLength == 0 && safeSuffix == 0) return null
+
+    val prefix = first.take(prefixLength)
+    val suffix = first.takeLast(safeSuffix).takeIf { safeSuffix > 0 }.orEmpty()
+    val values = mutableListOf<String>()
+    occurrences.forEach { input ->
+        val text = input.text
+        val middleEnd = text.length - safeSuffix
+        if (middleEnd >= prefixLength && text.startsWith(prefix) && text.endsWith(suffix)) {
+            values += text.substring(prefixLength, middleEnd)
+        }
+    }
+    if (values.size != occurrences.size) return null
+    if (values.any { it.isEmpty() }) return null
+    val name = anonymousCaptureName(values)
+    val template = prefix + "{$name}" + suffix
+    return Seq3Match(
+        tag = tag,
+        template = template,
+        captures = listOf(Seq3Capture(name, Seq3CaptureSource.POSITIONAL_RUN)),
+    ) to occurrences.mapIndexed { index, input -> input.occurrenceId to mapOf(name to values[index]) }.toMap()
+}
+
+private val ALL_DIGITS_RE = Regex("^[0-9]+$")
+private val HEX_ISH_RE = Regex("(?i)^[0-9a-f]{4,}$")
+
+/**
+ * A stable, content-shaped name for the one anonymous varying run [compileSingleRunPattern] found
+ * — pure function of [values], so the SAME set of occurrences always tokenizes to the SAME token
+ * name (the brief's "stable and deterministic" requirement; these names end up in user-visible
+ * labels, so they must never depend on iteration order, a random id, or wall-clock time).
+ */
+private fun anonymousCaptureName(values: List<String>): String = when {
+    values.all { ALL_DIGITS_RE.matches(it) } -> "n"
+    values.all { HEX_ISH_RE.matches(it) } -> "id"
+    else -> "value"
+}
+
+private fun commonPrefix(a: String, b: String): Int {
+    val limit = minOf(a.length, b.length)
+    var index = 0
+    while (index < limit && a[index] == b[index]) index++
+    return index
+}
+
+private fun commonSuffix(a: String, b: String): Int {
+    val limit = minOf(a.length, b.length)
+    var index = 0
+    while (index < limit && a[a.length - index - 1] == b[b.length - index - 1]) index++
+    return index
+}
+
+private fun unquote(value: String): String = value
+    .removePrefix("\"").removeSuffix("\"")
+    .removePrefix("'").removeSuffix("'")

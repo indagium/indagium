@@ -1538,11 +1538,11 @@ class AppState(
     // See AnnotationManager's own doc comment for what it owns vs. what stays on AppState.
     private val annotationManager = AnnotationManager(this)
 
-    // UML sequence-diagram generation (com.indagium.diagram). Owns the builder dialog's open
-    // request, its debounced background preview build, and writing the result into the notes as an
-    // ordinary AnnBlock.Note — see SeqDiagramCoordinator. Public because App.kt renders the dialog
-    // straight off it, the same way the merge-tabs dialog reads mergeTabsDialogOpen below.
-    val seqDiagrams = SeqDiagramCoordinator(this)
+    // UML sequence-diagram generation (com.indagium.diagram3). Owns every open workspace session,
+    // its debounced background generate+layout pipeline, and writing a confirmed document into the
+    // notes as an ordinary AnnBlock.Note — see Seq3Session. Public because App.kt renders the
+    // workspace straight off it, the same way the merge-tabs dialog reads mergeTabsDialogOpen below.
+    val seq3Sessions = Seq3Session(this)
 
     // App.kt writes this directly (dialog dismiss/confirm), not just reads it, so it needs a
     // full get/set forwarding var rather than a read-only getter like mcpControlError above.
@@ -1622,14 +1622,14 @@ class AppState(
     var activeTabId by mutableStateOf("")
 
     /** Main content routing only.  [tabs] intentionally remains a collection of log tabs; open
-     * sequence diagrams are independent, non-persisted editor surfaces owned by seqDiagrams. */
+     * sequence diagrams are independent, non-persisted editor surfaces owned by seq3Sessions. */
     var activeSurface by mutableStateOf<ActiveSurface?>(null)
 
     /** True while a diagram workspace owns the content area (App.kt:317).  activeTabId stays
      *  semantically intact for everything that depends on it — the Video/Cases/Compare toolbar
      *  buttons, autosave, compare mode — so this exists purely to keep exactly one tab reading
      *  as selected in the tab bar. */
-    val diagramSurfaceActive: Boolean get() = activeSurface is ActiveSurface.Diagram
+    val diagramSurfaceActive: Boolean get() = activeSurface is ActiveSurface.Diagram3
     var compareMode by mutableStateOf(false)
     var compareTabId by mutableStateOf("")
     var loadingStatus by mutableStateOf<String?>(null)
@@ -4969,7 +4969,7 @@ class AppState(
         if (tabIds.isEmpty()) return
         synchronized(stateLock) {
             tabIds.forEach { tabId ->
-                seqDiagrams.sourceTabClosed(tabId)
+                seq3Sessions.sourceTabClosed(tabId)
                 aiSessions.remove(tabId)
                 cancelActiveLoad(tabId)
                 tailCoordinator.cancelTailingFor(tabId)
@@ -5796,8 +5796,8 @@ class AppState(
         val t = tab(tabId) ?: return
         // Diagrams are rasterized in the ACTIVE theme, so a pasted picture matches what the user is
         // looking at rather than a fixed light palette.
-        val diagramTheme = themeColors(settings.theme).toDiagramTheme()
-        val html = buildAnnotationsHtml(t, settings) { DiagramRenderCache.pngBytes(it, diagramTheme) }
+        val diagramTheme = themeColors(settings.theme).toSeq3RasterTheme()
+        val html = buildAnnotationsHtml(t, settings) { document -> Seq3RenderCache.pngBytes(Seq3RenderCache.layout(document), diagramTheme) }
         val plainText = maskWordForCopy(buildMd(t, settings), settings)
         Toolkit.getDefaultToolkit().systemClipboard.setContents(HtmlTransferable(html, plainText), null)
     }
@@ -5823,7 +5823,7 @@ class AppState(
     // stamp, rename the files out from under the previous export, and orphan the old ones.
     private fun writeAnnotationFrameImages(t: LogTab, mdFile: File) {
         val images = t.annotations.blocks.filterIsInstance<AnnBlock.Image>()
-        val diagrams = t.diagramNotes()
+        val diagrams = t.seq3DiagramNotes()
         if (images.isEmpty() && diagrams.isEmpty()) return
         val framesDir = File(mdFile.parentFile, "${mdFile.nameWithoutExtension}_frames")
         framesDir.mkdirs()
@@ -5842,26 +5842,25 @@ class AppState(
      *
      * PNG, not the JPEG the image path uses: a diagram is line art, and JPEG fringes every arrow.
      *
-     * Rendering goes through DiagramRenderCache because this runs on EVERY debounced note edit (see
+     * Rendering goes through Seq3RenderCache because this runs on EVERY debounced note edit (see
      * autoExportAnnotations) — without it, typing in an unrelated text block would re-rasterize
      * every diagram in the document on a 400 ms cadence. The cache key includes the theme, so a
      * theme switch still re-renders rather than exporting a stale palette.
      *
-     * A note whose header carries no model (written by an older build, or hand-authored) is skipped
-     * rather than failing the export: its fenced source is still in the .md, so the analysis is
-     * complete, just without a picture for Jira until it's regenerated.
+     * Unlike v1/v2's optional carried model, a v3 note's header always carries its whole
+     * [com.indagium.diagram3.Seq3Document] (Seq3Codec.kt's own doc) — every parsed diagram note is
+     * therefore renderable; only its [DiagramExportMode] gates whether a PNG is written here.
      */
     private fun writeAnnotationDiagramImages(
         t: LogTab,
         framesDir: File,
-        diagrams: List<Pair<String, com.indagium.diagram.ParsedDiagram>>,
+        diagrams: List<Pair<String, com.indagium.diagram3.ParsedSeq3>>,
     ) {
         if (diagrams.isEmpty()) return
-        val diagramTheme = themeColors(settings.theme).toDiagramTheme()
+        val diagramTheme = themeColors(settings.theme).toSeq3RasterTheme()
         diagrams.forEachIndexed { index, (_, parsed) ->
-            if (parsed.exportMode != com.indagium.diagram.DiagramExportMode.IMAGE) return@forEachIndexed
-            val model = parsed.model ?: return@forEachIndexed
-            runCatching { DiagramRenderCache.pngBytes(model, diagramTheme) }
+            if (parsed.exportMode != com.indagium.diagram3.DiagramExportMode.IMAGE) return@forEachIndexed
+            runCatching { Seq3RenderCache.pngBytes(Seq3RenderCache.layout(parsed.document), diagramTheme) }
                 .onSuccess { bytes ->
                     File(framesDir, annotationDiagramFileName(index + 1, t.annotations.frameStamp)).writeBytes(bytes)
                 }
@@ -6000,9 +5999,9 @@ class AppState(
     fun exportAnnotationFrames(tabId: String) {
         val t = tab(tabId) ?: return
         val images = t.annotations.blocks.filterIsInstance<AnnBlock.Image>()
-        val allDiagrams = t.diagramNotes()
+        val allDiagrams = t.seq3DiagramNotes()
         val imageDiagramCount = allDiagrams.count { (_, parsed) ->
-            parsed.exportMode == com.indagium.diagram.DiagramExportMode.IMAGE
+            parsed.exportMode == com.indagium.diagram3.DiagramExportMode.IMAGE
         }
         if (images.isEmpty() && imageDiagramCount == 0) return
         val dir = pickDirectory("Export Frames", settings.defaultSaveDir?.let(::File)) ?: return

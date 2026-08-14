@@ -1,16 +1,12 @@
 package com.indagium.debug
 
 import androidx.compose.ui.graphics.Color
-import com.indagium.diagram.MAX_SOURCE_INTERACTIONS_PER_ENTRY
 import com.indagium.model.AnnBlock
 import com.indagium.model.FilterMode
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.SequenceDef
 import com.indagium.model.VideoAttachment
-import com.indagium.source.LogCallSite
-import com.indagium.source.SourceDirectCall
-import com.indagium.source.SourceIndex
 import com.indagium.ui.AppState
 import com.indagium.ui.mkTab
 import kotlinx.serialization.json.Json
@@ -682,239 +678,105 @@ class IndagiumToolGatewayTest {
     }
 
     @Test
-    fun sequenceDiagramCreatesManualDraftWithCoverage() {
+    fun sequenceDiagramGeneratesFromRangeAndReturnsLifelinesAndMessages() {
         state.tabs = listOf(
             mkTab("t1", "components.log", listOf(
-                LogEntry(1, "10:00:00.000", LogLevel.I, "Ui", "tap"),
-                LogEntry(2, "10:00:00.010", LogLevel.I, "Service", "request"),
+                LogEntry(1, "10:00:00.000", LogLevel.I, "Ui", "tap", pid = 7, tid = 7),
+                LogEntry(2, "10:00:00.010", LogLevel.I, "Service", "request", pid = 7, tid = 7),
                 LogEntry(3, "10:00:00.020", LogLevel.I, "Noise", "ignored"),
             )),
         )
         val result = operations.toolGateway.execute(
             "build_sequence_diagram",
-            mapOf(
-                "tabId" to "t1",
-                "components" to listOf(
-                    mapOf("id" to "ui", "displayName" to "UI", "tagIds" to listOf("Ui")),
-                    mapOf("id" to "svc", "displayName" to "Service", "tagIds" to listOf("Service")),
-                ),
-                "unmappedTagPolicy" to "hide",
-                "activationPolicy" to "evidenceBacked",
-            ),
+            mapOf("tabId" to "t1", "dialect" to "mermaid"),
         ) as Map<*, *>
-
-        assertEquals(2, (result["coverage"] as Map<*, *>)["shownEntries"])
-        assertEquals(1, (result["coverage"] as Map<*, *>)["hiddenEntries"])
-        assertTrue((result["messages"] as List<*>).all { (it as Map<*, *>)["evidence"] == "manual_override" })
-        assertEquals(2, ((result["manualDocument"] as Map<*, *>)["interactions"] as List<*>).size)
-        assertNotNull(result["activationSpans"])
-    }
-
-    @Test
-    fun sequenceDiagramKeepsLegacyTagsAndEntryExitActorsCompatible() {
-        state.tabs = listOf(
-            mkTab("t1", "legacy.log", listOf(
-                LogEntry(1, "10:00:00.000", LogLevel.I, "A", "begin"),
-                LogEntry(2, "10:00:00.010", LogLevel.I, "B", "end"),
-            )),
-        )
-        val result = operations.toolGateway.execute(
-            "build_sequence_diagram",
-            mapOf("tabId" to "t1", "tags" to listOf("A", "B"), "actors" to listOf("User", "Server"),
-                "entryActor" to "User", "exitActor" to "Server"),
-        ) as Map<*, *>
-
-        val participantIds = (result["participants"] as List<*>).map { (it as Map<*, *>)["id"] }
-        assertTrue(participantIds.containsAll(listOf("A", "B", "User", "Server")))
-    }
-
-    @Test
-    fun sequenceDiagramMcpReturnsManualDocumentAndAcceptsLegacyFields() {
-        val result = operations.toolGateway.execute("build_sequence_diagram", mapOf(
-            "tabId" to "t1",
-            "tags" to listOf("App", "Peer"),
-            "authoringMode" to "manual",
-            "lifelineOrder" to listOf("App", "Peer"),
-            "rules" to listOf(mapOf(
-                "id" to "route", "pattern" to "to (?<peer>\\w+)",
-                "fromEndpoint" to mapOf("kind" to "existing", "participantId" to "App"),
-                "toEndpoint" to mapOf("kind" to "captured", "captureName" to "peer", "bindings" to listOf(
-                    mapOf("capturedValue" to "Peer", "participantId" to "Peer"),
-                )),
-            )),
-            "messageOverrides" to listOf(mapOf(
-                "origin" to mapOf("entryId" to 1, "ruleId" to "route", "sourceOperationId" to "op-1"),
-                "label" to "manual hello", "kind" to "async",
-            )),
-            "manualDocument" to mapOf(
-                "interactions" to listOf(mapOf(
-                    "id" to "m-1", "sourceEntryIds" to listOf(1), "fromParticipantId" to "App", "toParticipantId" to "Peer",
-                    "operation" to "hello", "kind" to "async",
-                )),
-                "groups" to listOf(mapOf("id" to "g-1", "label" to "manual", "interactionIds" to listOf("m-1"))),
-                "notes" to listOf(mapOf("id" to "n-1", "participantId" to "Peer", "afterInteractionId" to "m-1", "text" to "received")),
-                "activations" to listOf(mapOf("id" to "a-1", "participantId" to "Peer", "startInteractionId" to "m-1", "endInteractionId" to "m-1")),
-            ),
-        )) as Map<*, *>
 
         assertNull(result["error"])
-        assertEquals(listOf("App", "Peer"), result["lifelineOrder"])
-        assertNull(result["authoringMode"])
-        assertNull(result["messageOverrides"])
-        assertEquals("m-1", (((result["manualDocument"] as Map<*, *>)["interactions"] as List<*>).single() as Map<*, *>)["id"])
+        assertEquals("mermaid", result["dialect"])
+        assertTrue((result["source"] as String).contains("sequenceDiagram"))
+        val lifelineIds = (result["lifelines"] as List<*>).map { (it as Map<*, *>)["id"] }
+        assertTrue(lifelineIds.containsAll(listOf("Ui", "Service", "Noise")))
+        val messages = (result["messages"] as List<*>).map { it as Map<*, *> }
+        assertTrue(messages.isNotEmpty())
+        assertEquals(messages.size, result["messageCount"])
+        // Ui -> Service on the same thread, one message apart, is a thread-handoff: the generator
+        // infers a target rather than leaving it in the needs-target queue.
+        val uiMessage = messages.single { it["fromLifelineId"] == "Ui" }
+        assertEquals("Service", uiMessage["toLifelineId"])
+        assertEquals(false, uiMessage["needsTarget"])
     }
 
     @Test
-    fun sequenceDiagramRejectsOversizedParticipantCollections() {
-        fun call(extra: Map<String, Any?>): Map<*, *> = operations.toolGateway.execute(
-            "build_sequence_diagram", mapOf("tabId" to "t1") + extra,
-        ) as Map<*, *>
-
-        val components = (0..64).map { mapOf("id" to "c$it", "displayName" to "C$it", "tagIds" to emptyList<String>()) }
-        val actors = (0..64).map { "actor-$it" }
-        val merged = (0..64).associate { "merged-$it" to listOf("tag-$it") }
-        val tags = (0..128).map { "tag-$it" }
-
-        assertTrue((call(mapOf("components" to components))["error"] as String).contains("at most 64"))
-        assertTrue((call(mapOf("actors" to actors))["error"] as String).contains("at most 64"))
-        assertTrue((call(mapOf("mergedTags" to merged))["error"] as String).contains("at most 64"))
-        assertTrue((call(mapOf("tags" to tags))["error"] as String).contains("at most 128"))
-    }
-
-    @Test
-    fun sequenceDiagramRejectsDuplicateAndCollidingParticipantIds() {
-        fun error(extra: Map<String, Any?>): String = (operations.toolGateway.execute(
-            "build_sequence_diagram", mapOf("tabId" to "t1") + extra,
-        ) as Map<*, *>)["error"] as String
-
-        assertTrue(error(mapOf("components" to listOf(
-            mapOf("id" to "same", "tagIds" to listOf("A")),
-            mapOf("id" to "same", "tagIds" to listOf("B")),
-        ))).contains("duplicate component id"))
-        assertTrue(error(mapOf("actors" to listOf("User", mapOf("id" to "User", "label" to "Person"))))
-            .contains("duplicate actor id"))
-        assertTrue(error(mapOf(
-            "components" to listOf(mapOf("id" to "shared", "tagIds" to listOf("A"))),
-            "actors" to listOf(mapOf("id" to "shared", "label" to "Shared")),
-        )).contains("both a component and actor"))
-    }
-
-    @Test
-    fun sequenceDiagramRejectsOversizedStringsAndTagMembership() {
-        fun error(extra: Map<String, Any?>): String = (operations.toolGateway.execute(
-            "build_sequence_diagram", mapOf("tabId" to "t1") + extra,
-        ) as Map<*, *>)["error"] as String
-
-        assertTrue(error(mapOf("title" to "x".repeat(513))).contains("title must be at most 512"))
-        assertTrue(error(mapOf("components" to listOf(mapOf(
-            "id" to "c", "tagIds" to (0..128).map { "tag-$it" },
-        )))).contains("tagIds may contain at most 128"))
-        assertTrue(error(mapOf("actors" to listOf(mapOf(
-            "id" to "x".repeat(257), "label" to "Actor",
-        )))).contains("id must be at most 256"))
-    }
-
-    @Test
-    fun sequenceDiagramStillClampsMaxMessagesAtTheHardCap() {
-        // build_sequence_diagram always seeds/renders through the manual pipeline (see
-        // buildSequenceDiagramRoute), whose canvas now collapses same-groupKey repeats (Stage
-        // 1b) — and that seeded groupKey normalizes numeric text out of the message before
-        // comparing rows (normalizeManualMessage), so a purely numeric per-row suffix like
-        // "message-$id" would collapse every same-tag row into one arrow regardless of this
-        // test's own "collapseRepeats" request. A letters-only per-row suffix keeps every row's
-        // seeded groupKey distinct, so this test still exercises "450 genuinely distinct
-        // selected rows are not truncated by a generous maxMessages", matching its own doc string.
-        fun distinctSuffix(id: Int): String {
-            var n = id
-            val letters = StringBuilder()
-            while (n > 0) {
-                n--
-                letters.append('A' + (n % 26))
-                n /= 26
-            }
-            return letters.reverse().toString()
-        }
-        state.tabs = listOf(mkTab("t1", "many.log", (1..450).map { id ->
-            LogEntry(id, "10:00:00.000", LogLevel.I, if (id % 2 == 0) "A" else "B", "message-${distinctSuffix(id)}")
-        }))
+    fun sequenceDiagramReportsNeedsTargetWhenNoHandoffEvidenceExists() {
+        // "hello" from "App" (the default t1 fixture) has no adjacent tag change to infer a target
+        // from, so the one generated message must be reported as needing a target, never guessed.
         val result = operations.toolGateway.execute(
             "build_sequence_diagram",
-            mapOf("tabId" to "t1", "tags" to listOf("A", "B"), "collapseRepeats" to false, "maxMessages" to 50_000),
+            mapOf("tabId" to "t1"),
         ) as Map<*, *>
 
-        assertEquals(450, result["messageCount"], "the hard cap limits optional structure, not selected log rows")
-        assertEquals(false, result["truncated"])
-        assertEquals(450, (result["messages"] as List<*>).size)
+        assertNull(result["error"])
+        val message = (result["messages"] as List<*>).single() as Map<*, *>
+        assertNull(message["toLifelineId"])
+        assertEquals(true, message["needsTarget"])
+        assertEquals(1, result["needsTargetCount"])
     }
 
     @Test
-    fun sequenceDiagramSourceEnrichmentDoesNotEmitEveryAmbiguousIndexedCall() {
-        val directCalls = (0 until MAX_SOURCE_INTERACTIONS_PER_ENTRY * 2).map { index ->
-            SourceDirectCall(
-                targetFilePath = "/fixture/NetworkService.kt",
-                targetOwnerType = "demo.NetworkService",
-                targetMethodName = "fetch$index",
-                targetMethodSignature = "fun fetch$index(): ApiResult",
-                targetDeclaredReturnType = "ApiResult",
-                // Keep the synthetic calls on the log statement's source line so this
-                // test continues to exercise the per-entry interaction cap. Calls on
-                // unrelated lines are intentionally rejected by source-site matching.
-                callLine = 10,
-            )
-        }
-        val sourceIndex = SourceIndex(
-            version = 10,
-            roots = listOf("/fixture"),
-            sites = listOf(LogCallSite(
-                filePath = "/fixture/Screen.kt",
-                tag = "Screen",
-                methodName = "refresh",
-                methodStartLine = 1,
-                methodEndLine = 20,
-                callLine = 10,
-                matcher = Regex.escape("refresh operation completed"),
-                literalLen = 27,
-                owningType = "demo.Screen",
-                methodSignature = "fun refresh()",
-                directCalls = directCalls,
+    fun sequenceDiagramRespectsExplicitLineRangeAndPlantUmlDialect() {
+        state.tabs = listOf(
+            mkTab("t1", "ranged.log", listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "A", "before range"),
+                LogEntry(2, "10:00:00.010", LogLevel.I, "B", "in range"),
+                LogEntry(3, "10:00:00.020", LogLevel.I, "C", "after range"),
             )),
-            fileMeta = emptyMap(),
-            builtAt = 1L,
         )
-        operations = IndagiumToolOperations(state) { sourceIndex }
-        state.tabs = listOf(mkTab("t1", "source.log", listOf(
-            LogEntry(1, "10:00:00.000", LogLevel.I, "Screen", "refresh operation completed"),
-        )))
+        val result = operations.toolGateway.execute(
+            "build_sequence_diagram",
+            mapOf("tabId" to "t1", "startLineId" to 2, "endLineId" to 2, "dialect" to "plantuml"),
+        ) as Map<*, *>
 
-        val result = operations.toolGateway.execute("build_sequence_diagram", mapOf(
-            "tabId" to "t1",
-            "components" to listOf(
-                mapOf("id" to "screen", "displayName" to "Screen", "tagIds" to listOf("Screen")),
-                mapOf("id" to "network", "displayName" to "NetworkService", "tagIds" to listOf("Network")),
-            ),
-            "sourceEnrichment" to true,
-        )) as Map<*, *>
-
-        val messages = result["messages"] as List<*>
-        assertEquals(1, messages.size)
-        assertEquals("manual_override", (messages.single() as Map<*, *>)["evidence"])
-        assertNull(result["sourceEnrichment"])
+        assertNull(result["error"])
+        assertEquals("plantuml", result["dialect"])
+        assertTrue((result["source"] as String).contains("@startuml"))
+        val lifelineIds = (result["lifelines"] as List<*>).map { (it as Map<*, *>)["id"] }
+        assertEquals(listOf("B"), lifelineIds)
+        assertEquals(1, result["scannedEntries"])
     }
 
     @Test
-    fun sequenceDiagramSourceEnrichmentReportsUnavailableIndex() {
-        operations = IndagiumToolOperations(state) { null }
-        state.tabs = listOf(mkTab("t1", "source.log", listOf(
-            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "event"),
-        )))
-        val result = operations.toolGateway.execute("build_sequence_diagram", mapOf(
-            "tabId" to "t1",
-            "components" to listOf(mapOf("id" to "a", "displayName" to "A", "tagIds" to listOf("A"))),
-            "sourceEnrichment" to true,
-        )) as Map<*, *>
+    fun sequenceDiagramReportsNoArrowsForAnEmptyRange() {
+        val result = operations.toolGateway.execute(
+            "build_sequence_diagram",
+            mapOf("tabId" to "t1", "startLineId" to 9_000, "endLineId" to 9_001),
+        ) as Map<*, *>
 
-        assertTrue((result["warnings"] as List<*>).any { it.toString().contains("no source index") })
-        assertNull(result["sourceEnrichment"])
+        assertNotNull(result["error"])
+        assertEquals(0, result["scannedEntries"])
+    }
+
+    @Test
+    fun sequenceDiagramRejectsUnknownTabAndOversizedTitle() {
+        assertTrue(
+            (operations.toolGateway.execute("build_sequence_diagram", mapOf("tabId" to "no-such-tab")) as Map<*, *>)
+                .get("error").toString().contains("no such tab"),
+        )
+        assertTrue(
+            (
+                operations.toolGateway.execute(
+                    "build_sequence_diagram",
+                    mapOf("tabId" to "t1", "title" to "x".repeat(513)),
+                ) as Map<*, *>
+            ).get("error").toString().contains("title must be"),
+        )
+        assertTrue(
+            (
+                operations.toolGateway.execute(
+                    "build_sequence_diagram",
+                    mapOf("tabId" to "t1", "dialect" to "graphviz"),
+                ) as Map<*, *>
+            ).get("error").toString().contains("dialect must be"),
+        )
     }
 
     @Test

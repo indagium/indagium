@@ -1300,61 +1300,35 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     ),
     McpTool(
         "build_sequence_diagram",
-        "Build a manual UML sequence-diagram draft from a range of a tab's log lines and return its Mermaid " +
-            "(or PlantUML) source and editable manual document. The seed retains every selected log event, " +
-            "adding only verified source calls, returns, and opt-in same-thread handoffs; it never guesses " +
-            "arrows from tag changes. " +
-            "Use components to give one or more raw tags a stable lifeline; tags outside enabled " +
-            "components are hidden unless unmappedTagPolicy=groupAsOther. This is read-only: pass " +
-            "returned source to add_text_note to store it. Legacy tags/actors/entryActor/exitActor " +
-            "remain supported. Returns participants, messages, evidence, coverage, truncation and warnings.",
+        "Generate a UML sequence diagram from a range of a tab's log lines and return its Mermaid " +
+            "(or PlantUML) source, lifelines, and messages. Lifelines are ranked automatically from " +
+            "tag activity (errors, message-shape diversity, same-thread peers, raw count); a message's " +
+            "target lifeline is inferred only from adjacent-entry evidence (same-thread handoff or a " +
+            "shared correlation token) above a confidence bar — anything short of that is reported " +
+            "with needsTarget=true rather than guessed. This is read-only and never does source-index " +
+            "enrichment: pass the returned source to add_text_note to store it as a note.",
         schema(
             "tabId" to "string",
-            "tags" to "array",
-            "components" to "array",
-            "mergedTags" to "object",
-            "actors" to "array",
-            "unmappedTagPolicy" to "string",
-            "seed" to "object",
-            "activationPolicy" to "string",
             "startLineId" to "integer",
             "endLineId" to "integer",
             "dialect" to "string",
             "title" to "string",
-            "maxMessages" to "integer",
-            "collapseRepeats" to "boolean",
-            "lifelineOrder" to "array",
-            "manualDocument" to "object",
+            "maxLifelines" to "integer",
+            "threadHandoffs" to "boolean",
+            "correlationTokens" to "boolean",
             required = listOf("tabId"),
             enums = mapOf(
                 "dialect" to listOf("mermaid", "plantuml"),
-                "unmappedTagPolicy" to listOf("hide", "groupAsOther"),
-                "activationPolicy" to listOf("evidenceBacked", "none"),
             ),
             descriptions = mapOf(
-                "tags" to "Legacy flat tag participant list. Prefer components for new calls. " +
-                    "Omit both tags and components to auto-pick in-range tags. Maximum 128 tags; each id is at most 256 characters.",
-                "components" to "Preferred component list: objects {id, displayName, tagIds: string[], enabled?: boolean}. " +
-                    "One component may own multiple raw log tags. Maximum 64 components, 128 tags per component and 1,024 tag references total.",
-                "mergedTags" to "Compatibility shorthand object mapping component display names or ids to raw tag arrays; " +
-                    "mergedTags is applied with components when both are supplied. Maximum 64 entries and 1,024 tag references.",
-                "actors" to "Optional external lifelines as strings or {id, label} objects. Maximum 64 actors; " +
-                    "IDs must be unique across actors and components.",
-                "unmappedTagPolicy" to "hide (default) omits tags not owned by enabled components; groupAsOther sends all " +
-                    "unmapped in-range tags to a single Other lifeline.",
-                "seed" to "Optional {sourceTrace?: boolean, threadHandoffs?: boolean}. Defaults to sourceTrace=true. " +
-                    "The service creates a manual draft containing verified structure plus selected log events; unavailable or ambiguous " +
-                    "source evidence falls back to log events with diagnostics.",
-                "activationPolicy" to "evidenceBacked (default) shows activations only for correlated call/return evidence; " +
-                    "none suppresses activation spans.",
                 "startLineId" to "First log line id of the range (inclusive). Omit both ids to use the whole filtered view.",
                 "endLineId" to "Last log line id of the range (inclusive).",
                 "dialect" to "Output syntax. Defaults to mermaid.",
-                "maxMessages" to "Arrow cap; values are clamped to the hard maximum of 400 and truncated=true reports clipping. Defaults to 60.",
-                "collapseRepeats" to "Fold consecutive identical messages into one with a repeat count. Defaults to true.",
-                "lifelineOrder" to "Optional full ordered list of participant IDs. Unknown/stale IDs are ignored by rendering; duplicate IDs are rejected.",
-                "manualDocument" to "Manual authoring document with interactions, groups, notes, and activations. " +
-                    "Interaction IDs are unique and endpoints must name participants.",
+                "maxLifelines" to "Lifeline cap; clamped to a hard maximum of 32. Defaults to 8.",
+                "threadHandoffs" to "Whether a same-thread (pid+tid, bounded gap) handoff between adjacent entries may " +
+                    "resolve a message's target lifeline. Defaults to true.",
+                "correlationTokens" to "Whether a shared identifier (UUID, hex token, or named value) between adjacent " +
+                    "entries may resolve a message's target lifeline. Defaults to true.",
             ),
         ),
     ),

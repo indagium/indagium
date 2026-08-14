@@ -73,20 +73,17 @@ Recent state; file-open calls must still use explicit approved fixture paths.
 
 ## Diagrams
 
-- `build_sequence_diagram` turns a range of log lines into an editable manual sequence-diagram
-  draft and UML source (Mermaid by default, PlantUML on request). By default it uses verified
-  source tracing to seed structural calls/returns alongside every selected log event; use
-  `seed: { sourceTrace, threadHandoffs }` to control that starting draft. Ambiguous or unavailable
-  source evidence remains diagnostics and falls back to log events rather than guessed arrows.
-  Prefer `components`: each object is `{ id, displayName, tagIds, enabled }`, so a component can
-  deliberately represent several raw tags. Components are not capped at eight participants; use a
-  tight range and the returned coverage/warnings to judge readability. `tags` remains available for
-  legacy callers, and `mergedTags` is a shorthand map from component name/id to tag arrays. Use
-  `lifelineOrder` for an explicit participant order. Provide `manualDocument` to render a completed
-  source-index-independent draft with interactions, groups, notes, and activations. The MCP
-  boundary accepts at most 64 components, 64 actors, 128 legacy tags, 128 tags per component, and
-  1,024 component/merged tag references; IDs/tags are at most 256 characters and labels/titles at
-  most 512. Component and actor IDs must be unique and cannot collide.
+- `build_sequence_diagram` generates a UML sequence diagram from a range of log lines and returns
+  its source (Mermaid by default, PlantUML on request) plus the generated lifelines and messages.
+  Lifelines are ranked automatically from tag activity (errors, message-shape diversity, same-thread
+  peers, raw count) — there is no `components`/`tags`/`actors` participant configuration to pass.
+  A message's target lifeline is inferred only from adjacent-entry evidence (a same-thread handoff
+  or a shared correlation token, both on by default and individually toggleable via
+  `threadHandoffs`/`correlationTokens`) above a confidence bar; anything short of that is returned
+  with `needsTarget: true` rather than guessed. Use `startLineId`/`endLineId` for an explicit range
+  (omit both for the whole filtered view), `maxLifelines` to cap lifeline count (default 8, hard
+  maximum 32), and `title` for the diagram's title. This is read-only and does no source-index
+  enrichment — pass the returned `source` to `add_text_note` to store it as a note.
 
   Tags outside enabled components are hidden by default. Set `unmappedTagPolicy` to `groupAsOther`
   only when grouping every remaining in-range tag into the single `Other` component is meaningful.

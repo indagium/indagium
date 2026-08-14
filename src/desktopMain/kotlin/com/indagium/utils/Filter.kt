@@ -1,10 +1,10 @@
 package com.indagium.utils
 
 import androidx.compose.ui.graphics.Color
-import com.indagium.diagram.DiagramDialect
-import com.indagium.diagram.DiagramExportMode
-import com.indagium.diagram.ParsedDiagram
-import com.indagium.diagram.parseDiagramNote
+import com.indagium.diagram3.DiagramExportMode
+import com.indagium.diagram3.ParsedSeq3
+import com.indagium.diagram3.Seq3Dialect
+import com.indagium.diagram3.parseSeq3Note
 import com.indagium.model.*
 import com.indagium.ui.DANGER_RED
 import com.indagium.ui.SEQ_COLORS
@@ -473,8 +473,7 @@ private fun manualBlockExpansionIds(tab: LogTab, selected: Set<Int>, visible: ()
 // Sequence groups, including nested children — only when sequence folding is on at all,
 // mirroring computeItems' own gate, so a tab with sequences disabled never pays for
 // computeSeqGroups just to answer this. cachedSeqGroupsFor null means "no cheap answer right
-// now," never "no groups exist" — fall back to computing fresh, exactly as resolveSeqGroupRange
-// (diagram/SeqDiagramBuilder.kt) already does for the same cache.
+// now," never "no groups exist" — fall back to computing fresh.
 private fun seqGroupExpansionIds(tab: LogTab, selected: Set<Int>, applyFilter: Boolean, visible: () -> List<LogEntry>): List<Int> {
     if (!tab.filter.seqOn || tab.filter.sequences.none { it.enabled }) return emptyList()
     val groups = cachedSeqGroupsFor(tab, applyFilter) ?: computeSeqGroups(visible(), tab.filter.sequences)
@@ -921,20 +920,20 @@ private fun StringBuilder.appendLogRefBlock(tab: LogTab, settings: AppSettings, 
  * a Jira `{code}` block. Source mode intentionally does not reference or write a PNG.
  *
  * The spec/model header is stripped in both cases: it's machine state for reopening the note (see
- * diagram/DiagramSpecCodec.kt), and would otherwise show up as a stray HTML comment — or, in Jira,
+ * diagram3/Seq3Codec.kt), and would otherwise show up as a stray HTML comment — or, in Jira,
  * as a wall of raw JSON.
  */
 private fun StringBuilder.appendDiagramNote(
-    diagram: ParsedDiagram,
+    diagram: ParsedSeq3,
     settings: AppSettings,
     diagramOrdinal: Int,
     frameStamp: String?,
 ) {
-    // ParsedDiagram.source is the fence BODY (the header and the ``` lines are already parsed off),
+    // ParsedSeq3.source is the fence BODY (the header and the ``` lines are already parsed off),
     // so the Markdown form re-wraps it rather than stripping anything.
     val fenceLanguage = when (diagram.dialect) {
-        DiagramDialect.MERMAID -> "mermaid"
-        DiagramDialect.PLANTUML -> "plantuml"
+        Seq3Dialect.MERMAID -> "mermaid"
+        Seq3Dialect.PLANTUML -> "plantuml"
     }
     if (diagram.caption.isNotBlank()) appendLine(diagram.caption)
     when (diagram.exportMode) {
@@ -992,7 +991,7 @@ fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildS
             is AnnBlock.Note -> {
                 if (block.text.isNotBlank()) {
                     if (settings.numberAnnotationBlocks) append("${blockNumber++}. ")
-                    val diagram = parseDiagramNote(block.text)
+                    val diagram = parseSeq3Note(block.text)
                     if (diagram != null) {
                         diagramOrdinal += 1
                         appendDiagramNote(diagram, settings, diagramOrdinal, tab.annotations.frameStamp)
