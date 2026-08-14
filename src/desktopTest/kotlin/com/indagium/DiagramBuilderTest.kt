@@ -1,3 +1,5 @@
+@file:Suppress("MaxLineLength")
+
 package com.indagium
 
 import androidx.compose.ui.graphics.Color
@@ -17,22 +19,28 @@ import com.indagium.diagram.DiagramRuleCaptureBinding
 import com.indagium.diagram.DiagramRuleEndpoint
 import com.indagium.diagram.DiagramSourceEnrichment
 import com.indagium.diagram.DiagramSourceInteraction
+import com.indagium.diagram.DiagramTraceEvent
 import com.indagium.diagram.LabelSource
 import com.indagium.diagram.ManualDiagramActivation
 import com.indagium.diagram.ManualDiagramDocument
 import com.indagium.diagram.ManualDiagramGroup
 import com.indagium.diagram.ManualDiagramInteraction
 import com.indagium.diagram.ManualDiagramNote
+import com.indagium.diagram.ManualDiagramRepeatPresentation
+import com.indagium.diagram.ManualFragmentKind
 import com.indagium.diagram.ManualOperationVisibility
 import com.indagium.diagram.MessageEvidence
 import com.indagium.diagram.MessageKind
 import com.indagium.diagram.MessageOriginKey
 import com.indagium.diagram.ParticipantKind
 import com.indagium.diagram.SeqDiagramSpec
+import com.indagium.diagram.SourceTraceMode
 import com.indagium.diagram.UnmappedTagPolicy
+import com.indagium.diagram.buildManualMessageQueue
 import com.indagium.diagram.buildSequenceDiagram
 import com.indagium.diagram.diagramParticipantCandidates
 import com.indagium.diagram.manualDocumentFromDiagram
+import com.indagium.diagram.manualMessageBucketId
 import com.indagium.diagram.toMermaid
 import com.indagium.model.Filter
 import com.indagium.model.LogEntry
@@ -1125,6 +1133,40 @@ class DiagramBuilderTest {
     }
 
     @Test
+    fun aPartialSourceTraceStillLetsThreadHandoffsDrawACallInsteadOfCollapsingToSelfOnly() {
+        // Regression test for a bug where enabling "Use verified source trace" together with
+        // "Include same-thread handoffs" silently stopped changing the diagram at all: any
+        // non-empty (but incomplete) resolved trace used to take over message generation
+        // entirely and skip evidence-flow, so options.threadHandoffArrows was never read and
+        // every row fell back to a same-lifeline SELF the moment the source trace could not
+        // fully cover the selected range — which is the common case, not the exception.
+        val tab = mkTab(
+            "partial-trace-handoff", "app.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "A", "a", pid = 7, tid = 42),
+                LogEntry(2, "10:00:00.050", LogLevel.I, "B", "b", pid = 7, tid = 42),
+            ),
+        )
+        // A trace that resolved entry 1 only: non-empty (sourceTraceUsable) but not a full
+        // projection over both represented entries (not sourceTraceComplete), and it contributes
+        // no calls of its own — isolating whether evidence-flow's own handoff detection still runs.
+        val partialTrace = DiagramResolvedTrace(events = listOf(DiagramTraceEvent(entryId = 1, ownerType = "A")))
+        val diagram = buildSequenceDiagram(
+            tab,
+            SeqDiagramSpec(
+                sourceEnrichment = DiagramSourceEnrichment(enabled = true),
+                options = plainOptions(threadHandoffArrows = true),
+            ),
+            resolveTrace = { partialTrace },
+        )
+
+        assertEquals(SourceTraceMode.PARTIAL_SOURCE_TRACE, diagram.traceMode)
+        val handoff = diagram.messages.singleOrNull { it.entryId == 2 }
+        assertEquals(MessageKind.CALL, handoff?.kind, "${diagram.messages}")
+        assertEquals(MessageEvidence.THREAD_HANDOFF, handoff?.evidence, "${diagram.messages}")
+    }
+
+    @Test
     fun zeroPidAndTidNeverCorrelateEvenWithTheOptionOn() {
         // LogEntry.pid/tid both default to 0 — brief/RAW logcat carries neither. Without this
         // guard, an entire such log would correlate into one fake thread, reproducing the exact
@@ -1448,7 +1490,7 @@ class DiagramBuilderTest {
     }
 
     @Test
-    fun manualBuilderGroupsRemainSeparateAndUnusedLifelinesReappear() {
+    fun manualBuilderGroupsCollapseIntoOneRepeatedArrowAndUnusedLifelinesReappear() {
         val tab = mkTab("manual-groups", "app.log", listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "A", "same id=1"),
             LogEntry(2, "10:00:00.010", LogLevel.I, "A", "same id=2"),
@@ -1468,7 +1510,12 @@ class DiagramBuilderTest {
         )
         val diagram = buildSequenceDiagram(tab, spec)
         assertEquals(listOf("a", "b"), diagram.participants.map { it.id })
-        assertEquals(2, diagram.messages.size)
+        // Same groupKey bucket collapses into one arrow (Stage 1b) instead of drawing both
+        // occurrences separately; the collapsed message reports both entries as evidence.
+        assertEquals(1, diagram.messages.size)
+        assertEquals(2, diagram.messages.single().repeatCount)
+        assertEquals(setOf(1, 2), diagram.messages.single().representedEntryIds)
+        assertEquals("group:send", diagram.messages.single().manualGroupKey)
 
         val reappeared = buildSequenceDiagram(tab, spec.copy(manualDocument = spec.manualDocument.copy(
             interactions = listOf(first, second.copy(toParticipantId = "c")),
@@ -1477,6 +1524,29 @@ class DiagramBuilderTest {
         assertEquals("+send()", buildSequenceDiagram(tab, spec.copy(manualDocument = spec.manualDocument.copy(
             interactions = listOf(first.copy(visibility = ManualOperationVisibility.PUBLIC)),
         ))).messages.single().label)
+    }
+
+    @Test
+    fun manualRepeatPresentationNeverCollapsesInterleavedEvidenceAndKeepsFirstAndLastBoundaries() {
+        val tab = mkTab("manual-repeat-presentations", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "first"),
+            LogEntry(2, "10:00:00.010", LogLevel.I, "A", "middle"),
+            LogEntry(3, "10:00:00.020", LogLevel.I, "A", "last"),
+        ))
+        val components = listOf(DiagramComponent("a", "A", setOf("A")), DiagramComponent("b", "B", setOf("B")))
+        fun grouped(id: String, entryId: Int, order: Long) =
+            ManualDiagramInteraction(id, setOf(entryId), "a", "b", operation = "send", groupKey = "send", order = order)
+        fun build(document: ManualDiagramDocument) = buildSequenceDiagram(
+            tab, SeqDiagramSpec(authoringMode = DiagramAuthoringMode.MANUAL, components = components, manualDocument = document),
+        )
+
+        val contiguous = listOf(grouped("first", 1, 0), grouped("middle", 2, 1), grouped("last", 3, 2))
+        assertEquals(3, build(ManualDiagramDocument(contiguous, repeatPresentation = ManualDiagramRepeatPresentation.EVERY_OCCURRENCE)).messages.size)
+        val firstAndLast = build(ManualDiagramDocument(contiguous, repeatPresentation = ManualDiagramRepeatPresentation.FIRST_AND_LAST))
+        assertEquals(listOf(1, 3), firstAndLast.messages.map { it.entryId })
+
+        val interleaved = listOf(grouped("first", 1, 0), ManualDiagramInteraction("other", setOf(2), "a", "b", operation = "other", order = 1), grouped("last", 3, 2))
+        assertEquals(listOf(1, 2, 3), build(ManualDiagramDocument(interleaved)).messages.map { it.entryId })
     }
 
     @Test
@@ -1502,7 +1572,97 @@ class DiagramBuilderTest {
         assertTrue(diagram.messages.single().targetless)
         assertEquals(MessageKind.CALL, diagram.messages.single().kind)
         assertEquals("needs-target", diagram.messages.single().originKeys.single().manualInteractionId)
-        assertEquals("queue", diagram.messages.single().manualGroupKey)
+        // "group:" prefixed — this is the bucket-id fix: manualGroupKey now always matches
+        // manualMessageBucketId/ManualMessageQueueRow.id for a grouped interaction (previously it
+        // was the bare groupKey, which silently broke row<->canvas identity).
+        assertEquals("group:queue", diagram.messages.single().manualGroupKey)
+        assertEquals(manualMessageBucketId(interaction), diagram.messages.single().manualGroupKey)
+    }
+
+    @Test
+    fun hiddenTargetlessManualInteractionStaysOffCanvasWithoutBecomingARealMessage() {
+        val tab = mkTab("hidden-targetless", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.W, "A", "background poll"),
+        ))
+        val interaction = ManualDiagramInteraction(
+            id = "hidden-needs-target",
+            sourceEntryIds = setOf(1),
+            fromParticipantId = "a",
+            toParticipantId = null,
+            label = "background poll",
+            enabled = false,
+        )
+
+        val diagram = buildSequenceDiagram(
+            tab,
+            SeqDiagramSpec(
+                authoringMode = DiagramAuthoringMode.MANUAL,
+                components = listOf(DiagramComponent("a", "A", setOf("A"))),
+                manualDocument = ManualDiagramDocument(interactions = listOf(interaction)),
+            ),
+        )
+
+        assertTrue(diagram.messages.isEmpty(), "hidden targetless evidence must not render a stub or arrow")
+    }
+
+    @Test
+    fun everyMessageQueueRowIdMatchesTheBuiltDiagramsManualGroupKey() {
+        // Regression guard for the bucket-id mismatch bug: the panel's row id
+        // (groupManualMessageQueueRows) and the canvas's DiagramMessage.manualGroupKey
+        // (buildManualMessages) must always agree for the same group, since ArrowHit.groupKey is
+        // compared against ManualMessageQueueRow.id to drive row<->canvas selection.
+        val tab = mkTab("bucket-parity", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "one"),
+            LogEntry(2, "10:00:00.010", LogLevel.I, "A", "two"),
+            LogEntry(3, "10:00:00.020", LogLevel.I, "A", "three"),
+        ))
+        val components = listOf(DiagramComponent("a", "A", setOf("A")), DiagramComponent("b", "B", setOf("B")))
+        val grouped1 = ManualDiagramInteraction("g1", setOf(1), "a", "b", operation = "send", groupKey = "send", order = 0)
+        val grouped2 = ManualDiagramInteraction("g2", setOf(2), "a", "b", operation = "send", groupKey = "send", order = 1)
+        val solo = ManualDiagramInteraction("solo", setOf(3), "a", "b", operation = "ping", order = 2)
+        val document = ManualDiagramDocument(interactions = listOf(grouped1, grouped2, solo))
+        val spec = SeqDiagramSpec(authoringMode = DiagramAuthoringMode.MANUAL, components = components, manualDocument = document)
+
+        val diagram = buildSequenceDiagram(tab, spec)
+        val queueRowIds = buildManualMessageQueue(document).rows.map { it.id }.toSet()
+        val diagramGroupKeys = diagram.messages.mapNotNull { it.manualGroupKey }.toSet()
+
+        assertEquals(queueRowIds, diagramGroupKeys)
+        assertEquals(setOf(manualMessageBucketId(grouped1), manualMessageBucketId(solo)), diagramGroupKeys)
+        assertEquals(2, diagram.messages.size, "the grouped pair collapses into one arrow, the solo message stays separate")
+    }
+
+    @Test
+    fun manualFragmentKindPrefixesTheFrameLabelAndOldDocumentsDefaultToCustom() {
+        val tab = mkTab("fragment-kind", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "first"),
+        ))
+        val components = listOf(DiagramComponent("a", "A", setOf("A")), DiagramComponent("b", "B", setOf("B")))
+        val interaction = ManualDiagramInteraction("m", setOf(1), "a", "b", operation = "send")
+
+        fun diagramWithKind(kind: ManualFragmentKind?) = buildSequenceDiagram(
+            tab,
+            SeqDiagramSpec(
+                authoringMode = DiagramAuthoringMode.MANUAL,
+                components = components,
+                manualDocument = ManualDiagramDocument(
+                    interactions = listOf(interaction),
+                    groups = listOf(
+                        if (kind == null) {
+                            ManualDiagramGroup("g", "Retry", listOf("m"))
+                        } else {
+                            ManualDiagramGroup("g", "Retry", listOf("m"), kind = kind)
+                        },
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals("Retry", diagramWithKind(null).frames.single().label, "default/CUSTOM keeps the free-text label verbatim")
+        assertEquals("loop Retry", diagramWithKind(ManualFragmentKind.LOOP).frames.single().label)
+        assertEquals("alt Retry", diagramWithKind(ManualFragmentKind.ALT).frames.single().label)
+        assertEquals("opt Retry", diagramWithKind(ManualFragmentKind.OPT).frames.single().label)
+        assertEquals("par Retry", diagramWithKind(ManualFragmentKind.PAR).frames.single().label)
     }
 
     @Test
@@ -1532,6 +1692,31 @@ class DiagramBuilderTest {
     }
 
     @Test
+    fun manualRepeatsDoNotCollapseAcrossAnEqualOrderInterleavedOccurrence() {
+        val tab = mkTab("equal-order-interleaving", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "first"),
+            LogEntry(2, "10:00:00.001", LogLevel.I, "A", "middle"),
+            LogEntry(3, "10:00:00.002", LogLevel.I, "A", "last"),
+        ))
+        val document = ManualDiagramDocument(interactions = listOf(
+            ManualDiagramInteraction("b", setOf(1), "a", "b", operation = "send", groupKey = "send", order = 0),
+            ManualDiagramInteraction("a", setOf(2), "a", "b", operation = "other", order = 0),
+            ManualDiagramInteraction("c", setOf(3), "a", "b", operation = "send", groupKey = "send", order = 0),
+        ))
+        val diagram = buildSequenceDiagram(
+            tab,
+            SeqDiagramSpec(
+                authoringMode = DiagramAuthoringMode.MANUAL,
+                components = listOf(DiagramComponent("a", "A", setOf("A")), DiagramComponent("b", "B", setOf("B"))),
+                manualDocument = document,
+            ),
+        )
+
+        assertEquals(listOf(1, 2, 3), diagram.messages.map { it.entryId })
+        assertEquals(listOf(1, 1, 1), diagram.messages.map { it.repeatCount })
+    }
+
+    @Test
     fun originOverrideFansOutAcrossACollapsedMessageAndLifelineOrderRemapsInferredOutput() {
         val tab = mkTab("remap", "app.log", listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "A", "same"),
@@ -1552,6 +1737,39 @@ class DiagramBuilderTest {
             DiagramMessageOverride(ordered.messages.single().originKeys.first { it.entryId == 2 }, enabled = false),
         )))
         assertTrue(disabled.messages.isEmpty(), "an override matched through a collapsed origin set removes that rendered interaction: ${disabled.messages}")
+    }
+
+    @Test
+    fun lifelineOrderChangesOnlyPresentationAndNeverReordersManualMessageEvidence() {
+        val tab = mkTab("lifeline-order", "app.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "A", "request"),
+            LogEntry(2, "10:00:00.010", LogLevel.I, "B", "reply"),
+        ))
+        val spec = SeqDiagramSpec(
+            authoringMode = DiagramAuthoringMode.MANUAL,
+            components = listOf(
+                DiagramComponent("a", "A", setOf("A")),
+                DiagramComponent("b", "B", setOf("B")),
+                DiagramComponent("c", "C", setOf("C")),
+            ),
+            lifelineOrder = listOf("c", "b", "a"),
+            manualDocument = ManualDiagramDocument(interactions = listOf(
+                ManualDiagramInteraction("first", setOf(1), "a", "b", operation = "request", order = 0),
+                ManualDiagramInteraction("second", setOf(2), "b", "c", operation = "reply", order = 1),
+            )),
+        )
+
+        val diagram = buildSequenceDiagram(tab, spec)
+
+        assertEquals(listOf("c", "b", "a"), diagram.participants.map { it.id })
+        assertEquals(listOf(1, 2), diagram.messages.map { it.entryId })
+        assertEquals(listOf(setOf(1), setOf(2)), diagram.messages.map { it.representedEntryIds })
+        assertEquals(
+            listOf("a" to "b", "b" to "c"),
+            diagram.messages.map { message ->
+                diagram.participants[message.fromIdx].id to diagram.participants[message.toIdx].id
+            },
+        )
     }
 
     @Test

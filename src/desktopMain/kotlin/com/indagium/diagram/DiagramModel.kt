@@ -161,6 +161,103 @@ data class DiagramParameter(
     val value: String = "",
 )
 
+/** Immutable log evidence retained with a manual occurrence.  Unlike a source-tab lookup this
+ * snapshot remains useful after the tab/range has gone away. */
+data class ManualDiagramEvidence(
+    val entryId: Int,
+    val timestamp: String,
+    val level: LogLevel,
+)
+
+/** Where a durable message capture gets its value.  The compiler is deliberately conservative:
+ * it only emits captures it can prove against every selected occurrence. */
+enum class ManualCaptureSource { NAMED_VALUE, POSITIONAL_RUN, AUTHOR }
+
+data class ManualMessageCapture(
+    val name: String,
+    val source: ManualCaptureSource,
+)
+
+/** A source-independent match.  Braced capture tokens are display syntax and are compiled to a
+ * bounded matcher by [compileManualMessageMatch]; [labelTemplate] remains independent. */
+data class ManualMessageMatch(
+    val tagPattern: String? = null,
+    val textPattern: String,
+    val captures: List<ManualMessageCapture> = emptyList(),
+)
+
+enum class ManualMessageRepeatMode { COLLAPSE_CONSECUTIVE, EVERY_OCCURRENCE, FIRST_AND_LAST }
+
+data class ManualMessageRepeatPolicy(
+    val mode: ManualMessageRepeatMode = ManualMessageRepeatMode.COLLAPSE_CONSECUTIVE,
+    val collapseThreshold: Int = 3,
+) {
+    init {
+        require(collapseThreshold >= 1) { "collapseThreshold must be positive" }
+    }
+
+    companion object {
+        fun collapseAbove(threshold: Int = 3): ManualMessageRepeatPolicy =
+            ManualMessageRepeatPolicy(ManualMessageRepeatMode.COLLAPSE_CONSECUTIVE, threshold)
+    }
+}
+
+enum class ManualMessageVisibility { VISIBLE, HIDDEN }
+
+/** Message-level state; occurrence records are evidence and do not carry independent queue state. */
+enum class ManualMessageStateKind { AUTO, EDITED, NEEDS_TARGET, HIDDEN }
+
+data class ManualDerivedOrder(
+    val timestampMillis: Long?,
+    val sourceOrdinal: Long,
+)
+
+data class ManualMessageOrderOverride(
+    val tiedTimestampMillis: Long,
+    val tieRank: Int,
+)
+
+data class ManualMessageOccurrence(
+    val interactionId: String,
+    val captureValues: Map<String, String> = emptyMap(),
+    val evidence: List<ManualDiagramEvidence> = emptyList(),
+    val derivedOrder: ManualDerivedOrder,
+)
+
+/** Stable anchors used by fragments and notes. They resolve against canonical evidence order. */
+data class ManualMessageSpan(
+    val firstMessageId: String,
+    val lastMessageId: String,
+)
+
+/** The editable durable unit. Legacy [ManualDiagramInteraction] values remain the occurrence
+ * store for compatibility, but queue, builder, and regeneration code can now consume this
+ * message definition without grouping Compose projections. */
+data class ManualDiagramMessageDefinition(
+    val id: String,
+    val occurrenceIds: List<String>,
+    val match: ManualMessageMatch,
+    val fromParticipantId: String,
+    val toParticipantId: String?,
+    val labelTemplate: String,
+    val kind: MessageKind,
+    val repeatPolicy: ManualMessageRepeatPolicy = ManualMessageRepeatPolicy.collapseAbove(),
+    val visibility: ManualMessageVisibility = ManualMessageVisibility.VISIBLE,
+    val state: ManualMessageStateKind = ManualMessageStateKind.AUTO,
+    val authoring: ManualInteractionAuthoring = ManualInteractionAuthoring.AUTO,
+    val orderOverride: ManualMessageOrderOverride? = null,
+)
+
+/** Controls how a contiguous run of equivalent grouped manual occurrences is drawn. */
+enum class ManualDiagramRepeatPresentation {
+    /** Collapse only adjacent equivalent occurrences into a single ×N message. */
+    CONSECUTIVE,
+    /** Draw every occurrence at its durable document order. */
+    EVERY_OCCURRENCE,
+    /** Draw the first and final occurrence of a contiguous equivalent run. */
+    FIRST_AND_LAST,
+}
+
 /** An explicit, durable correction for a generated message identified by [origin]. */
 data class DiagramMessageOverride(
     val origin: MessageOriginKey,
@@ -200,7 +297,19 @@ data class ManualDiagramInteraction(
     val renderAnchorLevel: LogLevel? = null,
     /** Append-only authoring state; old notes/drafts decode as [ManualInteractionAuthoring.AUTO]. */
     val authoring: ManualInteractionAuthoring = ManualInteractionAuthoring.AUTO,
+    /** Append-only immutable evidence snapshots; [sourceEntryIds] remains the legacy identity. */
+    val evidence: List<ManualDiagramEvidence> = emptyList(),
+    /** Durable capture values for the explicit message definition; absent in legacy documents. */
+    val captureValues: Map<String, String> = emptyMap(),
+    /** Source text used for matching; kept separate from the user-facing label template. */
+    val matchText: String? = null,
 )
+
+/** The UML fragment shape a manually authored group renders as. [CUSTOM] keeps the group's own
+ *  free-text [ManualDiagramGroup.label] verbatim, exactly like every group did before this field
+ *  existed; the others prefix the frame label with the fragment's conventional keyword. Old/decoded
+ *  documents with no persisted kind default to [CUSTOM] so their rendered frame is unchanged. */
+enum class ManualFragmentKind { LOOP, ALT, OPT, PAR, CUSTOM }
 
 /** A manually authored group/frame spanning its named interactions. */
 data class ManualDiagramGroup(
@@ -208,6 +317,8 @@ data class ManualDiagramGroup(
     val label: String,
     val interactionIds: List<String>,
     val enabled: Boolean = true,
+    /** Append-only; old notes/drafts decode as [ManualFragmentKind.CUSTOM]. */
+    val kind: ManualFragmentKind = ManualFragmentKind.CUSTOM,
 )
 
 /** A manually authored note anchored after one interaction. */
@@ -235,6 +346,13 @@ data class ManualDiagramDocument(
     val groups: List<ManualDiagramGroup> = emptyList(),
     val notes: List<ManualDiagramNote> = emptyList(),
     val activations: List<ManualDiagramActivation> = emptyList(),
+    /** Append-only persisted presentation setting; legacy documents collapse adjacent repeats. */
+    val repeatPresentation: ManualDiagramRepeatPresentation = ManualDiagramRepeatPresentation.CONSECUTIVE,
+    /** Version-5 row definitions. Empty means the document is legacy and is projected by the
+     * canonical adapter without changing its persisted occurrence data. */
+    val messages: List<ManualDiagramMessageDefinition> = emptyList(),
+    /** Default used only when a legacy occurrence group is first normalized into a message. */
+    val defaultRepeatPolicy: ManualMessageRepeatPolicy = ManualMessageRepeatPolicy.collapseAbove(),
 )
 
 data class DiagramParticipant(
@@ -515,6 +633,8 @@ data class SeqDiagramSpec(
     val lifelineOrder: List<String> = emptyList(),
     val messageOverrides: List<DiagramMessageOverride> = emptyList(),
     val manualDocument: ManualDiagramDocument = ManualDiagramDocument(),
+    /** Durable editor discriminator. Absent in v1-v5 notes and therefore defaults to v1. */
+    val editorVersion: Int = 1,
 )
 
 data class DiagramMessage(

@@ -816,8 +816,26 @@ class IndagiumToolGatewayTest {
 
     @Test
     fun sequenceDiagramStillClampsMaxMessagesAtTheHardCap() {
+        // build_sequence_diagram always seeds/renders through the manual pipeline (see
+        // buildSequenceDiagramRoute), whose canvas now collapses same-groupKey repeats (Stage
+        // 1b) — and that seeded groupKey normalizes numeric text out of the message before
+        // comparing rows (normalizeManualMessage), so a purely numeric per-row suffix like
+        // "message-$id" would collapse every same-tag row into one arrow regardless of this
+        // test's own "collapseRepeats" request. A letters-only per-row suffix keeps every row's
+        // seeded groupKey distinct, so this test still exercises "450 genuinely distinct
+        // selected rows are not truncated by a generous maxMessages", matching its own doc string.
+        fun distinctSuffix(id: Int): String {
+            var n = id
+            val letters = StringBuilder()
+            while (n > 0) {
+                n--
+                letters.append('A' + (n % 26))
+                n /= 26
+            }
+            return letters.reverse().toString()
+        }
         state.tabs = listOf(mkTab("t1", "many.log", (1..450).map { id ->
-            LogEntry(id, "10:00:00.000", LogLevel.I, if (id % 2 == 0) "A" else "B", "message-$id")
+            LogEntry(id, "10:00:00.000", LogLevel.I, if (id % 2 == 0) "A" else "B", "message-${distinctSuffix(id)}")
         }))
         val result = operations.toolGateway.execute(
             "build_sequence_diagram",

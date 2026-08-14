@@ -119,7 +119,15 @@ fun buildSequenceDiagram(
     // means for everything that survived the filter.
     val firstTs = candidateEntries.firstOrNull()?.ts
 
-    if (!sourceTraceUsable) {
+    // Evidence-flow (incl. same-thread pid/tid handoffs) must run whenever the trace is anything
+    // short of COMPLETE, not merely non-empty: a partial trace still leaves gaps that only
+    // evidence-flow's own log-based inference can fill, and options.threadHandoffArrows has no
+    // other code path that reads it. Gating this on sourceTraceUsable instead of
+    // sourceTraceComplete was the regression — it silently turned "Include same-thread handoffs"
+    // into a no-op and collapsed every unresolved row to a self-call the moment ANY partial trace
+    // existed (see mergedMessages below for how a partial trace's own structure is still folded
+    // back in).
+    if (!sourceTraceComplete) {
         runArrowModeAndCheckAllSelf(
             spec, traceParticipantResolution.representedEntries, registry, entryPointIdx, exitPointIdx,
             resolveLabel, firstTs, regexContext, cancellationCheck, gen, warnings,
@@ -144,7 +152,17 @@ fun buildSequenceDiagram(
     val selectedResultWithTransientCaller = sourceResolution.withTransientCaller
     appendTraceDiagnosticWarnings(projectedTrace, warnings)
     val mergedMessages = when {
-        sourceTraceUsable -> selectedResultWithTransientCaller.messages
+        // A complete trace is a self-sufficient semantic model: it accounts for every
+        // represented entry, so it alone owns both the primary rows and the call/return
+        // structure.
+        sourceTraceComplete -> selectedResultWithTransientCaller.messages
+        // A partial trace does NOT own the primary rows — evidence-flow (above) already filled
+        // those in, log line by log line, including whatever same-thread handoffs it could prove.
+        // What the partial trace adds on top is cross-lifeline structure evidence-flow cannot see:
+        // genuinely resolved CALL/RETURN edges (and the transient-caller opening call). Self-loop
+        // duplicates of a row evidence-flow already emitted (fromIdx == toIdx) carry no new
+        // information and are dropped.
+        sourceTraceUsable -> gen.messages + selectedResultWithTransientCaller.messages.filter { it.fromIdx != it.toIdx }
         // A source resolver was present but could not reconstruct a compatible trace: explicit
         // log/evidence fallback, with no one-hop overlay semantics.
         resolveTrace != null -> gen.messages
@@ -268,7 +286,7 @@ private fun resolveTraceAndRegistry(
     )
 }
 
-// Only ever called when !sourceTraceUsable (see the call site), so — unlike the pre-extraction
+// Only ever called when !sourceTraceComplete (see the call site), so — unlike the pre-extraction
 // inline code — neither this dispatch nor the all-self warning check below needs to repeat that
 // condition themselves.
 @Suppress("LongParameterList")

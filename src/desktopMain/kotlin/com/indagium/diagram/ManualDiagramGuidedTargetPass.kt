@@ -9,6 +9,8 @@ import com.indagium.model.LogEntry
 data class GuidedTargetPassState(
     val groupIds: List<String>,
     val currentIndex: Int = 0,
+    /** Snapshot used to distinguish partial resolution of a repeated row from an explicit skip. */
+    val unresolvedOccurrenceIdsByGroup: Map<String, Set<String>> = emptyMap(),
 ) {
     val currentGroupId: String?
         get() = groupIds.getOrNull(currentIndex)
@@ -18,15 +20,21 @@ data class GuidedTargetPassState(
 }
 
 fun beginGuidedTargetPass(document: ManualDiagramDocument): GuidedTargetPassState? {
-    val unresolved = groupManualMessageQueueRows(document)
+    val rows = groupManualMessageQueueRows(document)
         .filter { row -> row.interactions.any { it.toParticipantId == null } }
-        .map { it.id }
-    return unresolved.takeIf { it.isNotEmpty() }?.let(::GuidedTargetPassState)
+    val unresolved = rows.map { it.id }
+    return unresolved.takeIf { it.isNotEmpty() }?.let {
+        GuidedTargetPassState(it, unresolvedOccurrenceIdsByGroup = rows.associate { row ->
+            row.id to row.interactions.filter { interaction -> interaction.toParticipantId == null }.map { it.id }.toSet()
+        })
+    }
 }
 
 /**
  * Refreshes the unresolved snapshot after a user action and advances past the current group. A
- * skipped group remains in the refreshed list but is not revisited until the pass wraps or restarts.
+ * A skipped group remains in the refreshed list but is never revisited during this pass. In
+ * particular, skipping the final unresolved group completes the pass instead of wrapping back to
+ * the first row.
  */
 fun advanceGuidedTargetPass(
     document: ManualDiagramDocument,
@@ -41,8 +49,36 @@ fun advanceGuidedTargetPass(
         val currentIndex = unresolved.indexOf(id)
         if (currentIndex >= 0) unresolved.drop(currentIndex + 1) else unresolved
     }.orEmpty()
+    val currentStillUnresolved = current != null && current in unresolved
+    if (afterCurrent.isEmpty() && currentStillUnresolved) {
+        val currentIds = groupManualMessageQueueRows(document)
+            .firstOrNull { it.id == current }
+            ?.interactions
+            ?.filter { it.toParticipantId == null }
+            ?.map { it.id }
+            ?.toSet()
+            .orEmpty()
+        val previousIds = state.unresolvedOccurrenceIdsByGroup[current].orEmpty()
+        // A smaller set means the user resolved one occurrence and must stay on the same
+        // logical message. An unchanged set means Skip, so the pass completes at the end.
+        if (previousIds.isNotEmpty() && currentIds.size < previousIds.size) {
+            return GuidedTargetPassState(
+                unresolved,
+                unresolved.indexOf(current),
+                state.unresolvedOccurrenceIdsByGroup + (current to currentIds),
+            )
+        }
+        return null
+    }
     val nextId = afterCurrent.firstOrNull() ?: unresolved.first()
-    return GuidedTargetPassState(unresolved, unresolved.indexOf(nextId))
+    val currentRows = groupManualMessageQueueRows(document)
+    return GuidedTargetPassState(
+        unresolved,
+        unresolved.indexOf(nextId),
+        currentRows.associate { row ->
+            row.id to row.interactions.filter { it.toParticipantId == null }.map { it.id }.toSet()
+        },
+    )
 }
 
 fun guidedTargetRow(
@@ -50,7 +86,18 @@ fun guidedTargetRow(
     state: GuidedTargetPassState,
 ): ManualMessageQueueRow? {
     val id = state.currentGroupId ?: return null
-    return groupManualMessageQueueRows(document).firstOrNull { it.id == id }
+    val row = groupManualMessageQueueRows(document).firstOrNull { it.id == id } ?: return null
+    // A repeat group can be resolved one occurrence at a time when the user clears “Apply to
+    // all”. Present only its still-unresolved members here; otherwise the representative stays
+    // on the already fixed first member and the pass appears unable to advance.
+    val unresolved = row.interactions.filter { it.toParticipantId == null }
+    if (unresolved.isEmpty()) return null
+    return row.copy(
+        interactions = unresolved,
+        occurrenceCount = unresolved.size,
+        sourceEntryIds = unresolved.flatMapTo(linkedSetOf(), ::manualEvidenceEntryIds),
+        firstOrder = unresolved.first().order,
+    )
 }
 
 fun guidedTargetContext(

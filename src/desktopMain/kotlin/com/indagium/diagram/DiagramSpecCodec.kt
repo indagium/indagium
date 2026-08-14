@@ -1,3 +1,5 @@
+@file:Suppress("CyclomaticComplexMethod", "ReturnCount")
+
 package com.indagium.diagram
 
 import com.indagium.debug.Json
@@ -33,7 +35,8 @@ private const val MARKER_TAIL = " -->"
 private const val LEGACY_SPEC_VERSION = "v1"
 private const val SNAPSHOT_SPEC_VERSION = "v2"
 private const val PREVIOUS_SPEC_VERSION = "v3"
-private const val CURRENT_SPEC_VERSION = "v4"
+private const val LEGACY_CURRENT_SPEC_VERSION = "v4"
+private const val CURRENT_SPEC_VERSION = "v5"
 
 // Notes can be imported from arbitrary .ann/case-library files.  Keep this boundary materially
 // below a pathological renderer allocation while matching the public MCP's 400-arrow limit.
@@ -117,12 +120,13 @@ fun encodeDiagramNote(
     val sourceHash = diagramSourceHash(normalizedSource)
     // Every newly saved model is reopened as the one editable manual document.  A source-only
     // note remains a viewable legacy snapshot because it has no model from which to make a draft.
-    val persistedSpec = if (spec.manualDocument.interactions.isNotEmpty()) spec else model?.let {
+    val sourceSpec = if (spec.manualDocument.interactions.isNotEmpty() || spec.manualDocument.messages.isNotEmpty()) spec else model?.let {
         spec.copy(
             authoringMode = DiagramAuthoringMode.MANUAL,
             manualDocument = manualDocumentFromDiagram(it),
         )
     } ?: spec
+    val persistedSpec = sourceSpec.copy(manualDocument = normalizeManualDocument(sourceSpec.manualDocument))
     val normalizedModel = model?.copy(spec = persistedSpec)
     val normalizedSnapshot = (snapshot ?: DiagramNoteSnapshot(normalizedSource, sourceHash, normalizedModel)).let {
         it.copy(model = it.model?.copy(spec = persistedSpec))
@@ -232,7 +236,7 @@ fun parseDiagramNote(text: String): ParsedDiagram? {
     val supportedVersion = version == LEGACY_SPEC_VERSION ||
         version == SNAPSHOT_SPEC_VERSION ||
         version == PREVIOUS_SPEC_VERSION ||
-        version == CURRENT_SPEC_VERSION
+        version == LEGACY_CURRENT_SPEC_VERSION || version == CURRENT_SPEC_VERSION
     if (!supportedVersion) return null
     val rest = afterHead.substring(spaceIdx + 1)
     val tailIdx = rest.indexOf(MARKER_TAIL)
@@ -582,6 +586,8 @@ private fun specToMap(spec: SeqDiagramSpec): Map<String, Any?> = mapOf(
     "unmappedTagPolicy" to spec.unmappedTagPolicy.name,
     "lifelineOrder" to spec.lifelineOrder,
     "manualDocument" to manualDocumentToMap(spec.manualDocument),
+    // Append-only editor routing metadata. Legacy notes omit this key and therefore decode as v1.
+    "editorVersion" to spec.editorVersion,
 )
 
 private fun componentToMap(c: DiagramComponent): Map<String, Any?> = mapOf(
@@ -612,10 +618,23 @@ private fun manualDocumentToMap(document: ManualDiagramDocument): Map<String, An
             "renderAnchorTs" to interaction.renderAnchorTs,
             "renderAnchorLevel" to interaction.renderAnchorLevel?.name,
             "authoring" to interaction.authoring.name,
+            // Append-only durable occurrence evidence. sourceEntryIds above remains present for
+            // old readers and old notes which never wrote these snapshots.
+            "evidence" to interaction.evidence.map { evidence ->
+                mapOf("entryId" to evidence.entryId, "timestamp" to evidence.timestamp, "level" to evidence.level.name)
+            },
+            "captureValues" to interaction.captureValues,
+            "matchText" to interaction.matchText,
         )
     },
     "groups" to document.groups.map { group ->
-        mapOf("id" to group.id, "label" to group.label, "interactionIds" to group.interactionIds, "enabled" to group.enabled)
+        mapOf(
+            "id" to group.id, "label" to group.label, "interactionIds" to group.interactionIds, "enabled" to group.enabled,
+            // Appended last — see this file's own "append last" codec-versioning discipline. A
+            // v1-v4 note written before fragment kinds existed simply lacks this key;
+            // manualGroupFromMap defaults missing/unknown values to CUSTOM below.
+            "kind" to group.kind.name,
+        )
     },
     "notes" to document.notes.map { note ->
         mapOf("id" to note.id, "participantId" to note.participantId, "afterInteractionId" to note.afterInteractionId,
@@ -626,6 +645,37 @@ private fun manualDocumentToMap(document: ManualDiagramDocument): Map<String, An
             "startInteractionId" to activation.startInteractionId, "endInteractionId" to activation.endInteractionId,
             "enabled" to activation.enabled)
     },
+    "repeatPresentation" to document.repeatPresentation.name,
+    "messages" to document.messages.map(::manualMessageDefinitionToMap),
+    "defaultRepeatPolicy" to repeatPolicyToMap(document.defaultRepeatPolicy),
+)
+
+private fun manualMessageDefinitionToMap(message: ManualDiagramMessageDefinition): Map<String, Any?> = mapOf(
+    "id" to message.id,
+    "occurrenceIds" to message.occurrenceIds,
+    "match" to mapOf(
+        "tagPattern" to message.match.tagPattern,
+        "textPattern" to message.match.textPattern,
+        "captures" to message.match.captures.map { capture ->
+            mapOf("name" to capture.name, "source" to capture.source.name)
+        },
+    ),
+    "fromParticipantId" to message.fromParticipantId,
+    "toParticipantId" to message.toParticipantId,
+    "labelTemplate" to message.labelTemplate,
+    "kind" to message.kind.name,
+    "repeatPolicy" to repeatPolicyToMap(message.repeatPolicy),
+    "visibility" to message.visibility.name,
+    "state" to message.state.name,
+    "authoring" to message.authoring.name,
+    "orderOverride" to message.orderOverride?.let { override ->
+        mapOf("tiedTimestampMillis" to override.tiedTimestampMillis, "tieRank" to override.tieRank)
+    },
+)
+
+private fun repeatPolicyToMap(policy: ManualMessageRepeatPolicy): Map<String, Any?> = mapOf(
+    "mode" to policy.mode.name,
+    "collapseThreshold" to policy.collapseThreshold,
 )
 
 private fun originKeyToMap(key: MessageOriginKey): Map<String, Any?> = mapOf(
@@ -871,7 +921,26 @@ private fun validManualInteraction(interaction: ManualDiagramInteraction): Boole
             interaction.sourceMethodId, interaction.sourceLogSiteId, interaction.sourceOwnerType,
             interaction.renderAnchorTs,
         ).all(::validString) &&
-        interaction.parameters.size <= MAX_CODEC_PARAMETERS && interaction.parameters.all { validString(it.name) && validString(it.value) }
+        interaction.parameters.size <= MAX_CODEC_PARAMETERS && interaction.parameters.all { validString(it.name) && validString(it.value) } &&
+        interaction.evidence.size <= MAX_DIAGRAM_MESSAGES && interaction.evidence.all { evidence ->
+            evidence.entryId >= 0 && validString(evidence.timestamp)
+        } && interaction.captureValues.size <= MAX_CODEC_PARAMETERS && interaction.captureValues.all { (name, value) ->
+            validString(name) && validString(value)
+        } && validString(interaction.matchText)
+
+private fun validManualMessageDefinition(
+    message: ManualDiagramMessageDefinition,
+    validInteractions: Set<String>,
+): Boolean =
+    validId(message.id) && message.occurrenceIds.isNotEmpty() &&
+        message.occurrenceIds.all { it in validInteractions } &&
+        validString(message.match.tagPattern) && validString(message.match.textPattern) &&
+        message.match.captures.size <= MAX_CODEC_PARAMETERS &&
+        message.match.captures.all { capture -> validId(capture.name) } &&
+        message.match.captures.map { it.name }.toSet().size == message.match.captures.size &&
+        validId(message.fromParticipantId) && (message.toParticipantId == null || validId(message.toParticipantId)) &&
+        validString(message.labelTemplate) && message.repeatPolicy.collapseThreshold >= 1 &&
+        message.orderOverride?.let { it.tieRank >= 0 } != false
 
 // Extracted from validManualDocument's own inline conditions so each stays under detekt's
 // per-condition complexity threshold; behavior is unchanged (De Morgan's on the old any{!valid}
@@ -881,6 +950,7 @@ private fun manualDocumentWithinLimits(document: ManualDiagramDocument): Boolean
         document.groups.size <= MAX_CODEC_MANUAL_GROUPS &&
         document.notes.size <= MAX_CODEC_MANUAL_NOTES &&
         document.activations.size <= MAX_CODEC_MANUAL_ACTIVATIONS &&
+        document.messages.size <= MAX_CODEC_MANUAL_INTERACTIONS &&
         document.interactions.all(::validManualInteraction)
 
 private fun validManualGroup(group: ManualDiagramGroup, validInteractions: Set<String>): Boolean =
@@ -893,9 +963,14 @@ private fun validManualNote(note: ManualDiagramNote, validInteractions: Set<Stri
 
 private fun validManualDocument(document: ManualDiagramDocument): Boolean {
     if (!manualDocumentWithinLimits(document)) return false
+    if (!validateManualDocument(document).isValid) return false
     val interactions = document.interactions.map { it.id }
     if (interactions.toSet().size != interactions.size) return false
     val validInteractions = interactions.toSet()
+    val messageIds = document.messages.map { it.id }
+    if (messageIds.toSet().size != messageIds.size || !document.messages.all {
+            validManualMessageDefinition(it, validInteractions)
+        }) return false
     val groups = document.groups.map { it.id }
     if (groups.toSet().size != groups.size || !document.groups.all { validManualGroup(it, validInteractions) }) return false
     val notes = document.notes.map { it.id }
@@ -989,6 +1064,7 @@ private fun manualEndpointsReferenceDeclaredParticipants(
 // Validation is intentionally explicit so each persistence constraint remains locally visible.
 @Suppress("CyclomaticComplexMethod", "ReturnCount", "ComplexCondition")
 private fun validSpec(spec: SeqDiagramSpec): Boolean {
+    if (spec.editorVersion !in 1..2) return false
     if (!validString(spec.title) || !validString(spec.sourceFile)) return false
     if (!validParticipants(spec.participants)) return false
     val collectionSizesAreValid = spec.components.size <= MAX_CODEC_COMPONENTS &&
@@ -1124,11 +1200,12 @@ private fun specFromMap(map: Map<String, Any?>): SeqDiagramSpec? {
         sourceSiteOverrides = sourceSiteOverrides.filterNotNull(),
         // New writes are always an editable manual document and intentionally omit the retired
         // authoringMode field. Keep inferred decoding only for source-only legacy notes.
-        authoringMode = if (manualDocument.interactions.isNotEmpty()) DiagramAuthoringMode.MANUAL
+        authoringMode = if (manualDocument.interactions.isNotEmpty() || manualDocument.messages.isNotEmpty()) DiagramAuthoringMode.MANUAL
         else enumFromName<DiagramAuthoringMode>(map.str("authoringMode")) ?: d.authoringMode,
         lifelineOrder = lifelineOrder,
         messageOverrides = messageOverrides.filterNotNull(),
         manualDocument = manualDocument,
+        editorVersion = map.int("editorVersion") ?: d.editorVersion,
     )
     return spec.takeIf(::validSpec)
 }
@@ -1187,7 +1264,19 @@ private fun manualDocumentFromMap(map: Map<String, Any?>): ManualDiagramDocument
     val groups = strictDecodedList(map, "groups", MAX_CODEC_MANUAL_GROUPS, ::manualGroupFromMap) ?: return null
     val notes = strictDecodedList(map, "notes", MAX_CODEC_MANUAL_NOTES, ::manualNoteFromMap) ?: return null
     val activations = strictDecodedList(map, "activations", MAX_CODEC_MANUAL_ACTIVATIONS, ::manualActivationFromMap) ?: return null
-    return ManualDiagramDocument(interactions, groups, notes, activations).takeIf(::validManualDocument)
+    val messages = strictDecodedList(map, "messages", MAX_CODEC_MANUAL_INTERACTIONS, ::manualMessageDefinitionFromMap) ?: return null
+    val defaultRepeatPolicy = if (map.containsKey("defaultRepeatPolicy")) {
+        subMap(map, "defaultRepeatPolicy")?.let(::repeatPolicyFromMap) ?: return null
+    } else {
+        ManualMessageRepeatPolicy.collapseAbove()
+    }
+    return ManualDiagramDocument(
+        interactions, groups, notes, activations,
+        enumFromName<ManualDiagramRepeatPresentation>(map.str("repeatPresentation"))
+            ?: ManualDiagramRepeatPresentation.CONSECUTIVE,
+        messages,
+        defaultRepeatPolicy,
+    ).takeIf(::validManualDocument)
 }
 
 private fun manualInteractionFromMap(map: Map<String, Any?>): ManualDiagramInteraction? {
@@ -1197,6 +1286,9 @@ private fun manualInteractionFromMap(map: Map<String, Any?>): ManualDiagramInter
     val to = map.str("toParticipantId")
     val parameters = strictMapListOrEmpty(map, "parameters", MAX_CODEC_PARAMETERS)?.map(::parameterFromMap) ?: return null
     if (parameters.any { it == null }) return null
+    val evidence = strictMapListOrEmpty(map, "evidence", MAX_DIAGRAM_MESSAGES)?.map(::manualEvidenceFromMap) ?: return null
+    if (evidence.any { it == null }) return null
+    val captureValues = stringMapOrEmpty(map, "captureValues") ?: return null
     return ManualDiagramInteraction(
         id, entryIds.toSet(), from, to, map.str("operation") ?: "", parameters.filterNotNull(), map.str("result"),
         map.str("label"), enumFromName<MessageKind>(map.str("kind")) ?: MessageKind.CALL,
@@ -1205,14 +1297,82 @@ private fun manualInteractionFromMap(map: Map<String, Any?>): ManualDiagramInter
         enumFromName<ManualOperationVisibility>(map.str("visibility")) ?: ManualOperationVisibility.UNSPECIFIED,
         map.str("renderAnchorTs"), enumFromName<LogLevel>(map.str("renderAnchorLevel")),
         enumFromName<ManualInteractionAuthoring>(map.str("authoring")) ?: ManualInteractionAuthoring.AUTO,
+        evidence.filterNotNull(),
+        captureValues,
+        map.str("matchText"),
     ).takeIf(::validManualInteraction)
+}
+
+private fun manualMessageDefinitionFromMap(map: Map<String, Any?>): ManualDiagramMessageDefinition? {
+    val id = map.str("id") ?: return null
+    val occurrenceIds = stringListOrEmpty(map, "occurrenceIds", MAX_CODEC_MANUAL_INTERACTIONS) ?: return null
+    val matchMap = subMap(map, "match") ?: return null
+    val textPattern = matchMap.str("textPattern") ?: return null
+    val captureMaps = strictMapListOrEmpty(matchMap, "captures", MAX_CODEC_PARAMETERS) ?: return null
+    val captures = captureMaps.map { captureMap ->
+        val name = captureMap.str("name") ?: return null
+        val source = enumFromName<ManualCaptureSource>(captureMap.str("source")) ?: return null
+        ManualMessageCapture(name, source)
+    }
+    val repeatPolicy = subMap(map, "repeatPolicy")?.let(::repeatPolicyFromMap) ?: ManualMessageRepeatPolicy.collapseAbove()
+    val orderOverride = when {
+        !map.containsKey("orderOverride") || map["orderOverride"] == null -> null
+        else -> {
+            val overrideMap = map["orderOverride"] as? Map<*, *> ?: return null
+            val timestamp = (overrideMap["tiedTimestampMillis"] as? Number)?.toLong() ?: return null
+            val tieRank = (overrideMap["tieRank"] as? Number)?.toInt() ?: return null
+            ManualMessageOrderOverride(timestamp, tieRank)
+        }
+    }
+    return ManualDiagramMessageDefinition(
+        id = id,
+        occurrenceIds = occurrenceIds,
+        match = ManualMessageMatch(matchMap.str("tagPattern"), textPattern, captures),
+        fromParticipantId = map.str("fromParticipantId") ?: return null,
+        toParticipantId = map.str("toParticipantId"),
+        labelTemplate = map.str("labelTemplate") ?: return null,
+        kind = enumFromName<MessageKind>(map.str("kind")) ?: MessageKind.CALL,
+        repeatPolicy = repeatPolicy,
+        visibility = enumFromName<ManualMessageVisibility>(map.str("visibility")) ?: ManualMessageVisibility.VISIBLE,
+        state = enumFromName<ManualMessageStateKind>(map.str("state")) ?: ManualMessageStateKind.AUTO,
+        authoring = enumFromName<ManualInteractionAuthoring>(map.str("authoring")) ?: ManualInteractionAuthoring.AUTO,
+        orderOverride = orderOverride,
+    ).takeIf { validString(it.labelTemplate) }
+}
+
+private fun repeatPolicyFromMap(map: Map<String, Any?>): ManualMessageRepeatPolicy? {
+    val mode = enumFromName<ManualMessageRepeatMode>(map.str("mode"))
+        ?: ManualMessageRepeatMode.COLLAPSE_CONSECUTIVE
+    val threshold = map.int("collapseThreshold") ?: 3
+    return if (threshold >= 1) ManualMessageRepeatPolicy(mode, threshold) else null
+}
+
+private fun stringMapOrEmpty(map: Map<String, Any?>, key: String): Map<String, String>? {
+    if (!map.containsKey(key)) return emptyMap()
+    val raw = map[key] as? Map<*, *> ?: return null
+    if (raw.size > MAX_CODEC_PARAMETERS) return null
+    return raw.entries.associate { entry ->
+        val name = entry.key as? String ?: return null
+        val value = entry.value as? String ?: return null
+        name to value
+    }
+}
+
+private fun manualEvidenceFromMap(map: Map<String, Any?>): ManualDiagramEvidence? {
+    val entryId = map.int("entryId") ?: return null
+    val timestamp = map.str("timestamp") ?: return null
+    val level = enumFromName<LogLevel>(map.str("level")) ?: return null
+    return ManualDiagramEvidence(entryId, timestamp, level)
 }
 
 private fun manualGroupFromMap(map: Map<String, Any?>): ManualDiagramGroup? {
     val id = map.str("id") ?: return null
     val label = map.str("label") ?: return null
     val interactionIds = stringListOrEmpty(map, "interactionIds", MAX_CODEC_MANUAL_INTERACTIONS) ?: return null
-    return ManualDiagramGroup(id, label, interactionIds, map.bool("enabled") ?: true)
+    return ManualDiagramGroup(
+        id, label, interactionIds, map.bool("enabled") ?: true,
+        enumFromName<ManualFragmentKind>(map.str("kind")) ?: ManualFragmentKind.CUSTOM,
+    )
 }
 
 private fun manualNoteFromMap(map: Map<String, Any?>): ManualDiagramNote? {

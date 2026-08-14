@@ -74,6 +74,7 @@ class ManualDiagramSeedServiceTest {
         assertEquals("service", interaction.toParticipantId)
         assertEquals(MessageKind.CALL, interaction.kind)
         assertEquals("source:operation:fetch|site:7|client|service|CALL|fetch id=?", interaction.groupKey)
+        assertEquals(listOf(7 to ("10:00:00.000" to LogLevel.I)), interaction.evidence.map { it.entryId to (it.timestamp to it.level) })
     }
 
     @Test

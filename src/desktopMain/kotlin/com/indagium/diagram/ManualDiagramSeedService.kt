@@ -39,7 +39,9 @@ fun manualDocumentFromDiagram(diagram: SeqDiagram): ManualDiagramDocument {
             addAll(manualInteractionsForMessage(diagram, message, messageIndex) { nextOrder++ })
         }
     }
-    return ManualDiagramDocument(interactions = interactions)
+    // Normalize once at the seed boundary so the editable unit is explicit from its first save;
+    // the legacy interactions remain as the durable occurrence/evidence store.
+    return normalizeManualDocument(ManualDiagramDocument(interactions = interactions))
 }
 
 // Keep the primary log event for every selected row, plus source-trace structure. A source
@@ -124,6 +126,8 @@ private fun manualInteractionsForMessage(
             sourceOwnerType = from.sourceOwnerType,
             renderAnchorTs = message.ts,
             renderAnchorLevel = message.level,
+            evidence = listOf(ManualDiagramEvidence(entryId, message.ts, message.level)),
+            matchText = label,
         )
     }
 }

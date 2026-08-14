@@ -5,7 +5,10 @@ import androidx.compose.ui.graphics.Color
 import com.indagium.diagram.ArrowHit
 import com.indagium.diagram.DiagramAuthoringMode
 import com.indagium.diagram.DiagramRange
+import com.indagium.diagram.ManualDiagramDocument
+import com.indagium.diagram.ManualDiagramInteraction
 import com.indagium.diagram.ManualDiagramSeedStrategy
+import com.indagium.diagram.MessageKind
 import com.indagium.diagram.RenderedDiagram
 import com.indagium.diagram.parseDiagramNote
 import com.indagium.model.AnnBlock
@@ -25,6 +28,8 @@ import com.indagium.ui.DiagramZoomMode
 import com.indagium.ui.diagramWorkspaceIdsForWidth
 import com.indagium.ui.diagramWorkspaceOrderAfterVisibleReorder
 import com.indagium.ui.mkTab
+import com.indagium.ui.canvasHitOverlayBounds
+import com.indagium.ui.manualQueueRowIdentity
 import com.indagium.ui.resolveCanvasClickHit
 import java.io.File
 import kotlin.io.path.createTempDirectory
@@ -118,6 +123,7 @@ class DiagramWorkspaceSessionTest {
                 state.seqDiagrams.request?.spec?.manualDocument?.interactions?.isNotEmpty() == true
         }
         val seeded = state.seqDiagrams.request!!.spec.manualDocument
+        val seededLifelineOrder = state.seqDiagrams.request!!.spec.lifelineOrder
         assertEquals(DiagramAuthoringMode.MANUAL, state.seqDiagrams.request!!.spec.authoringMode)
 
         state.seqDiagrams.applyManualSeed(ManualDiagramSeedStrategy.THREAD_HANDOFFS)
@@ -127,6 +133,11 @@ class DiagramWorkspaceSessionTest {
         state.seqDiagrams.revertManualSeed()
         await { !state.seqDiagrams.canRevertManualSeed }
         assertEquals(seeded, state.seqDiagrams.request!!.spec.manualDocument)
+        assertEquals(
+            seededLifelineOrder,
+            state.seqDiagrams.request!!.spec.lifelineOrder,
+            "one-step revert must restore ordering as well as the manual interactions",
+        )
         assertTrue(state.seqDiagrams.request!!.spec.authoringMode == DiagramAuthoringMode.MANUAL)
     }
 
@@ -568,7 +579,83 @@ class DiagramWorkspaceSessionTest {
 
     // ── Canvas click-to-navigate coordinate mapping (Part C) ────────────────────────────────────
 
-    private fun hit(entryId: Int, x: Int, y: Int, w: Int = 20, h: Int = 20) = ArrowHit(0, entryId, x, y, w, h)
+    private fun hit(
+        entryId: Int,
+        x: Int,
+        y: Int,
+        w: Int = 20,
+        h: Int = 20,
+        manualInteractionId: String? = null,
+        groupKey: String? = null,
+    ) = ArrowHit(0, entryId, x, y, w, h, manualInteractionId, groupKey)
+
+    @Test
+    fun canvasAndQueueUseTheSameStableIdentityForGroupedAndUngroupedMessages() {
+        fun interaction(id: String, groupKey: String? = null) = ManualDiagramInteraction(
+            id = id,
+            sourceEntryIds = setOf(id.hashCode()),
+            fromParticipantId = "client",
+            toParticipantId = "service",
+            kind = MessageKind.CALL,
+            groupKey = groupKey,
+        )
+
+        val document = ManualDiagramDocument(
+            interactions = listOf(
+                interaction("group-first", groupKey = "request"),
+                interaction("group-second", groupKey = "request"),
+                interaction("single"),
+            ),
+        )
+
+        assertEquals(
+            "group:request",
+            manualQueueRowIdentity(document, interactionId = "group-first", groupKey = "group:request"),
+        )
+        assertEquals(
+            "group:request",
+            manualQueueRowIdentity(document, interactionId = "group-second"),
+        )
+        assertEquals(
+            "individual:single",
+            manualQueueRowIdentity(document, interactionId = "single", groupKey = "individual:single"),
+        )
+    }
+
+    @Test
+    fun rowHoverOverlayCoordinatesRoundTripThroughZoomDensityAndScroll() {
+        val arrow = hit(entryId = 7, x = 100, y = 40, w = 20, h = 10)
+        val rendered = RenderedDiagram(
+            image = java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB),
+            hits = listOf(arrow),
+            widthPx = 800,
+            heightPx = 400,
+            scale = 2f,
+        )
+        val zoom = 1.5f
+        val density = 2f
+        val bounds = canvasHitOverlayBounds(arrow, rendered, zoom)!!
+
+        assertEquals(75f, bounds.xDp)
+        assertEquals(30f, bounds.yDp)
+        assertEquals(15f, bounds.widthDp)
+        assertEquals(7.5f, bounds.heightDp)
+
+        // The pointer is over the overlay after its content position is converted to raw pixels
+        // and the viewport has been panned; the inverse mapping must recover the same ArrowHit.
+        val resolved = resolveCanvasClickHit(
+            rendered = rendered,
+            clickPositionPx = Offset(
+                bounds.xDp * density - 25f,
+                bounds.yDp * density - 40f,
+            ),
+            horizontalScrollPx = 25f,
+            verticalScrollPx = 40f,
+            zoom = zoom,
+            density = density,
+        )
+        assertEquals(arrow, resolved)
+    }
 
     @Test
     fun resolveCanvasClickHitAtIdentityZoomAndDensityMatchesRawImagePixels() {
