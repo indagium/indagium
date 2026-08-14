@@ -53,4 +53,14 @@ class ManualDiagramGuidedTargetPassTest {
         assertEquals(listOf(1, 2, 3), guidedTargetContext(row, entries).map { it.id })
         assertNull(beginGuidedTargetPass(ManualDiagramDocument(interactions = listOf(interaction("m1", "service", 1)))))
     }
+
+    @Test
+    fun skippingTheFinalUnresolvedGroupCompletesWithoutWrapping() {
+        val document = ManualDiagramDocument(
+            interactions = listOf(interaction("m1", null, 1)),
+        )
+        val pass = requireNotNull(beginGuidedTargetPass(document))
+
+        assertNull(advanceGuidedTargetPass(document, pass))
+    }
 }

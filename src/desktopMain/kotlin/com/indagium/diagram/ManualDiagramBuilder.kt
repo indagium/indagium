@@ -1,3 +1,5 @@
+@file:Suppress("CyclomaticComplexMethod")
+
 package com.indagium.diagram
 
 import com.indagium.model.LogEntry
@@ -14,6 +16,9 @@ internal fun buildManualSequenceDiagram(
     coverage: DiagramCoverage,
     warnings: MutableList<String>,
 ): SeqDiagram {
+    if (spec.manualDocument.messages.isNotEmpty()) {
+        return buildCanonicalManualSequenceDiagram(spec, entries, participants, coverage, warnings)
+    }
     val entryById = entries.associateBy { it.id }
     val candidateInteractions = spec.manualDocument.interactions.withIndex()
         .filter { it.value.enabled }
@@ -30,6 +35,126 @@ internal fun buildManualSequenceDiagram(
     val indexById = orderedParticipants.mapIndexed { index, participant -> participant.id to index }.toMap()
     val (messages, indexByInteractionId) = buildManualMessages(resolvedInteractions, indexById, spec, warnings)
 
+    return SeqDiagram(
+        spec = spec,
+        participants = orderedParticipants,
+        messages = messages,
+        frames = manualFrames(spec, indexByInteractionId, warnings),
+        notes = manualNotes(spec, indexById, indexByInteractionId, warnings),
+        activationSpans = manualActivations(spec, indexById, indexByInteractionId, warnings),
+        truncated = false,
+        scannedEntries = entries.size,
+        coverage = coverage,
+        warnings = warnings,
+        traceMode = SourceTraceMode.DISABLED,
+    )
+}
+
+/** Renders the version-5 message aggregate. Legacy documents deliberately continue through the
+ * compatibility path below until they are explicitly normalized/saved. */
+private fun buildCanonicalManualSequenceDiagram(
+    spec: SeqDiagramSpec,
+    entries: List<LogEntry>,
+    participants: List<DiagramParticipant>,
+    coverage: DiagramCoverage,
+    warnings: MutableList<String>,
+): SeqDiagram {
+    val canonical = canonicalizeManualMessages(spec.manualDocument)
+    canonical.diagnostics.filter { it.isError }.forEach { warnings += it.message }
+    val interactions = spec.manualDocument.interactions.associateBy { it.id }
+    val entryById = entries.associateBy { it.id }
+    val events = canonical.messages.flatMap { message ->
+        if (message.definition.visibility == ManualMessageVisibility.HIDDEN) return@flatMap emptyList()
+        message.occurrences.mapNotNull { occurrence ->
+            val interaction = interactions[occurrence.interactionId] ?: return@mapNotNull null
+            if (!interaction.enabled) return@mapNotNull null
+            val durableEntryIds = occurrence.evidence.map { it.entryId }.toSet() + interaction.sourceEntryIds
+            val entry = durableEntryIds.asSequence().mapNotNull(entryById::get).firstOrNull()
+            val evidence = occurrence.evidence.firstOrNull()
+            val timestamp = entry?.ts ?: evidence?.timestamp ?: interaction.renderAnchorTs
+            val level = entry?.level ?: evidence?.level ?: interaction.renderAnchorLevel
+            if (timestamp.isNullOrBlank() || level == null) {
+                warnings += "Message '${message.definition.id}' has no renderable evidence anchor."
+                return@mapNotNull null
+            }
+            CanonicalManualRenderItem(
+                message = message,
+                interaction = interaction,
+                occurrence = occurrence,
+                representedEntryIds = durableEntryIds,
+                entryId = entry?.id ?: durableEntryIds.minOrNull() ?: 0,
+                ts = timestamp,
+                level = level,
+            )
+        }
+    }.sortedWith(compareBy<CanonicalManualRenderItem> {
+        it.occurrence.derivedOrder.timestampMillis ?: Long.MAX_VALUE
+    }.thenBy {
+        it.message.definition.orderOverride?.tieRank ?: Int.MAX_VALUE
+    }.thenBy { it.occurrence.derivedOrder.sourceOrdinal }.thenBy { it.message.definition.id })
+
+    val activeParticipantIds = events.flatMap { event ->
+        listOfNotNull(event.message.definition.fromParticipantId, event.message.definition.toParticipantId)
+    }.toSet()
+    val orderedParticipants = orderParticipants(participants.filter { it.id in activeParticipantIds }, spec.lifelineOrder)
+    val indexById = orderedParticipants.mapIndexed { index, participant -> participant.id to index }.toMap()
+    val indexByInteractionId = linkedMapOf<String, Int>()
+    val messages = mutableListOf<DiagramMessage>()
+    var cursor = 0
+    while (cursor < events.size) {
+        val head = events[cursor]
+        var end = cursor + 1
+        while (end < events.size && events[end].message.definition.id == head.message.definition.id) end++
+        val run = events.subList(cursor, end)
+        val policy = head.message.definition.repeatPolicy
+        val visibleRuns = when (policy.mode) {
+            ManualMessageRepeatMode.EVERY_OCCURRENCE -> run.map { listOf(it) }
+            ManualMessageRepeatMode.FIRST_AND_LAST -> if (run.size <= 2) run.map { listOf(it) }
+            else listOf(listOf(run.first()), listOf(run.last()))
+            ManualMessageRepeatMode.COLLAPSE_CONSECUTIVE -> if (run.size >= policy.collapseThreshold) {
+                listOf(run)
+            } else {
+                run.map { listOf(it) }
+            }
+        }
+        visibleRuns.forEach { visible ->
+            val definition = head.message.definition
+            val from = indexById[definition.fromParticipantId]
+            val targetless = definition.toParticipantId == null
+            val to = definition.toParticipantId?.let(indexById::get)
+            if (from == null || (!targetless && to == null)) {
+                warnings += "Message '${definition.id}' references an unavailable lifeline."
+                return@forEach
+            }
+            val renderTo = to ?: from
+            val kind = when {
+                targetless -> MessageKind.CALL
+                from == renderTo && definition.kind != MessageKind.RETURN -> MessageKind.SELF
+                else -> definition.kind
+            }
+            val messageIndex = messages.size
+            visible.forEach { item -> indexByInteractionId[item.interaction.id] = messageIndex }
+            messages += DiagramMessage(
+                fromIdx = from,
+                toIdx = renderTo,
+                label = truncateManualLabel(definition.labelTemplate, spec.options.labelMaxChars),
+                entryId = visible.first().entryId,
+                ts = visible.first().ts,
+                level = visible.first().level,
+                kind = kind,
+                repeatCount = visible.size,
+                evidence = MessageEvidence.MANUAL_OVERRIDE,
+                primary = true,
+                representedEntryIds = visible.flatMapTo(linkedSetOf()) { it.representedEntryIds },
+                originKeys = visible.mapTo(linkedSetOf()) {
+                    MessageOriginKey(it.entryId, manualInteractionId = it.interaction.id)
+                },
+                targetless = targetless,
+                manualGroupKey = definition.id,
+            )
+        }
+        cursor = end
+    }
     return SeqDiagram(
         spec = spec,
         participants = orderedParticipants,
@@ -63,8 +188,9 @@ private fun resolveManualRenderItems(
         warnings += "Interaction with an empty id was ignored."
         return@mapNotNull null
     }
-    val representedInRange = interaction.sourceEntryIds.filterTo(linkedSetOf()) { it in entryById }
-    if (representedInRange.size != interaction.sourceEntryIds.size && representedInRange.isNotEmpty()) {
+    val durableEntryIds = interaction.sourceEntryIds + interaction.evidence.map { it.entryId }
+    val representedInRange = durableEntryIds.filterTo(linkedSetOf()) { it in entryById }
+    if (representedInRange.size != durableEntryIds.size && representedInRange.isNotEmpty()) {
         warnings += "Interaction '${interaction.id}' references log rows outside the current selection."
     }
     val entry = entries.firstOrNull { it.id in representedInRange }
@@ -77,8 +203,9 @@ private fun resolveManualRenderItems(
             level = entry.level,
         )
     }
-    val anchorTs = interaction.renderAnchorTs
-    val anchorLevel = interaction.renderAnchorLevel
+    val retainedEvidence = interaction.evidence.minByOrNull { it.entryId }
+    val anchorTs = retainedEvidence?.timestamp ?: interaction.renderAnchorTs
+    val anchorLevel = retainedEvidence?.level ?: interaction.renderAnchorLevel
     if (anchorTs.isNullOrBlank() || anchorLevel == null) {
         warnings += "Interaction '${interaction.id}' has no selected log evidence."
         return@mapNotNull null
@@ -87,37 +214,56 @@ private fun resolveManualRenderItems(
     // after the current range/filter no longer contains its original log rows.
     ManualRenderItem(
         interaction = interaction,
-        representedEntryIds = interaction.sourceEntryIds,
-        entryId = interaction.sourceEntryIds.minOrNull() ?: 0,
+        representedEntryIds = durableEntryIds,
+        entryId = durableEntryIds.minOrNull() ?: 0,
         ts = anchorTs,
         level = anchorLevel,
     )
 }
 
+// Groups remain logical editing groups.  Rendering must retain evidence order: only an adjacent
+// run of equivalent group members may collapse, so an interleaved log occurrence can never vanish
+// behind a misleading ×N arrow.
 private fun buildManualMessages(
     resolvedInteractions: List<ManualRenderItem>,
     indexById: Map<String, Int>,
     spec: SeqDiagramSpec,
     warnings: MutableList<String>,
 ): Pair<List<DiagramMessage>, Map<String, Int>> {
-    val messages = mutableListOf<DiagramMessage>()
-    val indexByInteractionId = linkedMapOf<String, Int>()
-    resolvedInteractions.forEach { item ->
+    val seenInteractionIds = mutableSetOf<String>()
+    // resolveManualRenderItems receives interactions already stably ordered by durable `order`
+    // and their document index. Do not add an id tie-break here: equal-order evidence must retain
+    // that original order or an interleaved event could become falsely adjacent and collapse.
+    val ordered = resolvedInteractions
+    val runs = mutableListOf<MutableList<ManualRenderItem>>()
+    ordered.forEach { item ->
         val interaction = item.interaction
-        if (interaction.id in indexByInteractionId) {
+        if (!seenInteractionIds.add(interaction.id)) {
             warnings += "Duplicate interaction '${interaction.id}' was ignored."
             return@forEach
         }
+        val previous = runs.lastOrNull()?.lastOrNull()
+        if (previous != null && canCollapseManualOccurrences(previous.interaction, interaction)) {
+            runs.last().add(item)
+        } else {
+            runs += mutableListOf(item)
+        }
+    }
+    val messages = mutableListOf<DiagramMessage>()
+    val indexByInteractionId = linkedMapOf<String, Int>()
+    fun emit(rendered: List<ManualRenderItem>, repeatCount: Int) {
+        val head = rendered.first()
+        val interaction = head.interaction
         val from = indexById[interaction.fromParticipantId]
         val targetless = interaction.toParticipantId == null
         val requestedTo = interaction.toParticipantId?.let(indexById::get)
         val source = from ?: run {
             warnings += "Interaction '${interaction.id}' references an unavailable lifeline."
-            return@forEach
+            return
         }
         if (!targetless && requestedTo == null) {
             warnings += "Interaction '${interaction.id}' references an unavailable lifeline."
-            return@forEach
+            return
         }
         val to = requestedTo ?: source
         val kind = when {
@@ -125,28 +271,73 @@ private fun buildManualMessages(
             source == to && interaction.kind != MessageKind.RETURN -> MessageKind.SELF
             else -> interaction.kind
         }
-        val origin = MessageOriginKey(
-            entryId = item.entryId,
-            manualInteractionId = interaction.id,
-        )
-        indexByInteractionId[interaction.id] = messages.size
+        val origins = rendered.mapTo(linkedSetOf()) { member ->
+            MessageOriginKey(entryId = member.entryId, manualInteractionId = member.interaction.id)
+        }
+        val representedEntryIds = rendered.flatMapTo(linkedSetOf()) { it.representedEntryIds }
+        val messageIndex = messages.size
+        rendered.forEach { member -> indexByInteractionId[member.interaction.id] = messageIndex }
         messages += DiagramMessage(
             fromIdx = source,
             toIdx = to,
-            label = manualLabel(interaction, spec.options.labelMaxChars),
-            entryId = item.entryId,
-            ts = item.ts,
-            level = item.level,
+            label = manualDisplayLabel(rendered.map { it.interaction }, spec.options.labelMaxChars),
+            entryId = head.entryId,
+            ts = head.ts,
+            level = head.level,
             kind = kind,
+            repeatCount = repeatCount,
             evidence = MessageEvidence.MANUAL_OVERRIDE,
             primary = true,
-            representedEntryIds = item.representedEntryIds,
-            originKeys = setOf(origin),
+            representedEntryIds = representedEntryIds,
+            originKeys = origins,
             targetless = targetless,
-            manualGroupKey = interaction.groupKey ?: "individual:${interaction.id}",
+            manualGroupKey = manualMessageBucketId(interaction),
         )
     }
+    runs.forEach { run ->
+        when (spec.manualDocument.repeatPresentation) {
+            ManualDiagramRepeatPresentation.EVERY_OCCURRENCE -> run.forEach { emit(listOf(it), 1) }
+            ManualDiagramRepeatPresentation.CONSECUTIVE -> emit(run, run.size)
+            ManualDiagramRepeatPresentation.FIRST_AND_LAST -> when (run.size) {
+                1 -> emit(run, 1)
+                2 -> run.forEach { emit(listOf(it), 1) }
+                else -> {
+                    emit(listOf(run.first()), 1)
+                    val lastIndex = messages.lastIndex
+                    emit(listOf(run.last()), 1)
+                    // Frames/notes which refer to a collapsed middle occurrence remain bounded
+                    // by the first visible member instead of becoming orphaned.
+                    run.drop(1).dropLast(1).forEach { indexByInteractionId[it.interaction.id] = lastIndex }
+                }
+            }
+        }
+    }
     return messages to indexByInteractionId
+}
+
+private fun canCollapseManualOccurrences(
+    previous: ManualDiagramInteraction,
+    next: ManualDiagramInteraction,
+): Boolean = manualMessageBucketId(previous) == manualMessageBucketId(next) &&
+    manualMergeCompatibility(listOf(previous, next)).compatible
+
+private fun manualDisplayLabel(interactions: List<ManualDiagramInteraction>, maxChars: Int): String {
+    val representative = interactions.first()
+    val visibility = when (representative.visibility) {
+        ManualOperationVisibility.PUBLIC -> "+"
+        ManualOperationVisibility.PROTECTED -> "#"
+        ManualOperationVisibility.PACKAGE -> "~"
+        ManualOperationVisibility.PRIVATE -> "-"
+        ManualOperationVisibility.UNSPECIFIED -> ""
+    }
+    val label = if (representative.label.isNullOrBlank()) {
+        manualMessageDisplayTemplate(interactions)
+    } else {
+        representative.label.orEmpty()
+    }
+    val structuredDefault = representative.label.isNullOrBlank() && representative.parameters.isEmpty()
+    val formatted = if (structuredDefault && !label.contains('(')) "$label()" else label
+    return visibility + truncateManualLabel(formatted, maxChars)
 }
 
 private fun manualFrames(
@@ -159,8 +350,21 @@ private fun manualFrames(
         warnings += "Group '${group.id}' has no enabled interactions."
         null
     } else {
-        DiagramFrame(group.label, null, indices.min(), indices.max(), depth = 0)
+        DiagramFrame(manualFragmentLabel(group), null, indices.min(), indices.max(), depth = 0)
     }
+}
+
+/** CUSTOM keeps the group's own free-text label verbatim; a typed kind prefixes the conventional
+ *  UML fragment keyword (mockup "Group ▾ ... loop, alt, opt, par") ahead of it. */
+private fun manualFragmentLabel(group: ManualDiagramGroup): String {
+    val prefix = when (group.kind) {
+        ManualFragmentKind.LOOP -> "loop "
+        ManualFragmentKind.ALT -> "alt "
+        ManualFragmentKind.OPT -> "opt "
+        ManualFragmentKind.PAR -> "par "
+        ManualFragmentKind.CUSTOM -> return group.label
+    }
+    return prefix + group.label
 }
 
 private fun manualNotes(
@@ -226,6 +430,16 @@ private fun truncateManualLabel(value: String, maxChars: Int): String {
 
 private data class ManualRenderItem(
     val interaction: ManualDiagramInteraction,
+    val representedEntryIds: Set<Int>,
+    val entryId: Int,
+    val ts: String,
+    val level: com.indagium.model.LogLevel,
+)
+
+private data class CanonicalManualRenderItem(
+    val message: CanonicalManualMessage,
+    val interaction: ManualDiagramInteraction,
+    val occurrence: ManualMessageOccurrence,
     val representedEntryIds: Set<Int>,
     val entryId: Int,
     val ts: String,

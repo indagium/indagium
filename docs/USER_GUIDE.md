@@ -436,7 +436,7 @@ rebuilt from source.
 The left inspector is collapsible and resizable. Every diagram is an editable interaction document;
 new diagrams are seeded asynchronously from the best available source evidence, which gives you a
 starting point rather than an automatic final result. The inspector groups the controls as **Scope**,
-**Lifelines**, **Starting point**, **Message queue**, **Advanced structure**, **Presentation**, and
+**Lifelines**, **Message queue**, **Advanced structure**, **Presentation**, and
 **Draft library**.
 The canvas supports pan, pointer-centred zoom, fit/reset, visible scrollbars, warnings, and coverage
 counts.
@@ -460,10 +460,12 @@ explicitly selected.
 
 #### Edit interactions
 
-The workspace is a durable editor for the rendered message queue. Message order follows evidence and
-cannot be drag-reordered; only lifeline-column presentation order is reorderable. Each compact row
-shows a readable template, occurrence count, source and destination (From → To), state, and
-source-entry evidence. Endpoint controls are available directly on the row; details are secondary
+The workspace is a durable editor for first-class messages. Each message owns its `From → To : label`
+definition and one or more evidence occurrences. Message order follows evidence and cannot be
+drag-reordered; only lifeline-column presentation order is reorderable. Each compact row shows a
+readable template, occurrence count, source and destination (From → To), state, and source-entry
+evidence. Plain click selects one message, Shift selects a visible range, and Cmd/Ctrl toggles
+additional messages. Endpoint controls are available directly on the row; details are secondary
 fields. Repeated normalized messages remain separate durable occurrences behind one ×n row.
 
 An interaction with no destination is shown as **needs target**, counted and filterable. Its source
@@ -477,21 +479,32 @@ Interactions created from selected log rows are grouped by source method/site wh
 otherwise by source, destination, line type, and message text with volatile parameter values
 removed. A group shows its occurrence count (for example, ×12) and can be edited as one entity.
 Expanding it shows the individual log rows; evidence remains available for explicit navigation.
-Source, destination, line type, visibility, operation, result, label, and parameters are available.
+Groups are logical editing groups, not permission to rewrite event order: each message carries its
+own repeat policy (collapse adjacent runs above the default threshold of three, every occurrence, or
+first and last). An interleaved event always remains visible at its original evidence position, and
+one message's repeat setting cannot change another message. The queue and canvas use the same
+`{parameter}` capture template when values vary. Source, destination, line type, visibility,
+operation, result, label, and parameters are available. Only same-timestamp neighbors may receive a
+validated tie pin; non-tied messages cannot be manually reordered.
 
-Selecting multiple rows exposes only explicit safe actions: **Set from**, **Set target**, **Merge**,
-**Group as fragment**, **Hide/Show**, and **Add note**. Bulk delete, bulk reorder, and bulk pattern
-editing are not offered. Merge is reversible because every occurrence and its evidence are retained.
+Selecting multiple messages exposes only explicit safe actions: **Set from**, **Set target**, **Merge**,
+**Group as fragment**, **Hide/Show**, and **Add note**. Fragment grouping supports the UML-style
+**alt**, **opt**, **loop**, **par**, and custom frame kinds. Bulk delete, bulk reorder, and bulk
+pattern editing are not offered. Merge is reversible because every occurrence and its evidence are
+retained. A merge is rejected unless all selected occurrences have compatible endpoints, message
+kind, editable label shape, and source provenance; failed bulk actions report their reason in the
+queue instead of silently doing nothing. Group-row edits are explicitly group-wide and are only
+available after that compatibility check.
 
-The **Starting point** section provides **Use verified source trace**, **Include same-thread
-handoffs**, reviewed regeneration, and one-step undo. New inferred diagrams default to readable
-evidence flow: a transient **Caller** opens the first represented lifeline when no explicit entry
-actor is configured, same non-zero PID/TID rows within 250 ms can form safe handoff arrows, and
+Use **Regenerate…** in the queue footer to open source-trace options and the regeneration review.
+The review shows new, changed-auto, removed-auto, and edited-kept rows. Each row can be accepted or
+rejected, with **Accept all** and **Reject all** shortcuts. Applying the review updates only safe auto
+interactions, preserves edited/manual messages and compatible structure, and keeps a one-step session
+undo; canceling or a failed build preserves the existing document. New inferred diagrams default to
+readable evidence flow: a transient **Caller** opens the first represented lifeline when no explicit
+entry actor is configured, same non-zero PID/TID rows within 250 ms can form safe handoff arrows, and
 adjacent rows can form token-backed arrows only for shared high-confidence request/trace IDs. The
 Caller exists only in the preview and is not saved into the diagram's durable participants or manual
-document. A source build first shows new, changed-auto, removed-auto, and edited-kept rows. Applying
-the review updates only safe auto interactions, preserves edited/manual messages and compatible
-structure, and keeps a one-step session undo; canceling or a failed build preserves the existing
 document.
 
 Aliases remain display-only; the raw tag identity is retained for source navigation. Presentation
@@ -508,10 +521,24 @@ The inspector and MCP diagnostics expose that mode and identify stale, ambiguous
 branch-incompatible rows. Labels default to the resolved source method plus the original message,
 falling back to the message alone when source metadata is unavailable.
 
-Arrows remain clickable: selecting one reveals the matching queue row, including targetless stubs;
-the row's explicit evidence action navigates to the log line that supplied it. Warnings and
-coverage identify hidden, grouped, truncated, or ambiguous evidence so the diagram does not look
-more certain than its source.
+Expanded queue rows preserve immutable evidence snapshots (log row id, timestamp, and level). When
+the originating source tab or range is no longer available, the retained row is labelled
+**source row unavailable** and is not clickable; it is never silently redirected to another row.
+Source-traced messages also show their owner, operation/site identity, and verified trace mode. The
+**Open source location** action is enabled only while the source index can resolve the matching log
+row. In guided target resolution, the proposed target is only the next mapped tag on the same PID/TID;
+earlier evidence is context, never the default target.
+
+Arrows remain linked in both directions: hovering a queue row highlights its canvas arrow, and
+selecting an arrow reveals the matching queue row, including targetless stubs. Drag an arrow endpoint
+to a declared lifeline column to edit its source or target; dragging elsewhere still pans the canvas.
+A second click on a label/arrow focuses and expands the inline row details editor. If a matching row
+is filtered out, the queue reveals it before selecting it; clicking the canvas does not silently
+navigate away. The row's explicit evidence action navigates to the log line that supplied it.
+Press **⌘Z** on macOS or **Ctrl+Z** elsewhere from the diagram surface to undo the last applied,
+reviewed regeneration; text fields retain their normal local undo behaviour. Warnings and coverage
+identify hidden, grouped, truncated, or ambiguous evidence so the diagram does not look more certain
+than its source.
 
 #### Drafts, notes, and export
 

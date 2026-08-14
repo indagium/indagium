@@ -31,9 +31,12 @@ import com.indagium.diagram.DiagramTraceOperation
 import com.indagium.diagram.LabelSource
 import com.indagium.diagram.ManualDiagramActivation
 import com.indagium.diagram.ManualDiagramDocument
+import com.indagium.diagram.ManualDiagramEvidence
 import com.indagium.diagram.ManualDiagramGroup
 import com.indagium.diagram.ManualDiagramInteraction
 import com.indagium.diagram.ManualDiagramNote
+import com.indagium.diagram.ManualDiagramRepeatPresentation
+import com.indagium.diagram.ManualFragmentKind
 import com.indagium.diagram.ManualInteractionAuthoring
 import com.indagium.diagram.ManualOperationVisibility
 import com.indagium.diagram.MessageEvidence
@@ -50,6 +53,7 @@ import com.indagium.diagram.TraceInvocationKind
 import com.indagium.diagram.TraceOperationKind
 import com.indagium.diagram.UnmappedTagPolicy
 import com.indagium.diagram.encodeDiagramNote
+import com.indagium.diagram.normalizeManualDocument
 import com.indagium.diagram.parseDiagramNote
 import com.indagium.diagram.stripDiagramSpecHeader
 import com.indagium.diagram.updateDiagramNoteCaption
@@ -102,7 +106,7 @@ class DiagramSpecCodecTest {
 
         assertTrue(parsed != null, "a note this codec itself produced must always parse back")
         assertEquals(fullSpec.copy(mode = ArrowMode.EVIDENCE_FLOW, rules = emptyList()), parsed.spec)
-        assertFalse(note.contains("\"mode\""))
+        assertFalse(note.contains("\"mode\":\"EVIDENCE_FLOW\""))
         assertFalse(note.contains("\"rules\""))
         assertEquals(DiagramDialect.MERMAID, parsed.dialect)
         assertEquals(source.trimEnd('\n'), parsed.source.trimEnd('\n'))
@@ -221,7 +225,7 @@ class DiagramSpecCodecTest {
 
     @Test
     fun parseDiagramNoteReturnsNullForAnUnsupportedFutureVersion() {
-        val futureVersion = "<!-- indagium:diagram v5 {\"dialect\":\"mermaid\"} -->\n```mermaid\nsequenceDiagram\n```\n"
+        val futureVersion = "<!-- indagium:diagram v6 {\"dialect\":\"mermaid\"} -->\n```mermaid\nsequenceDiagram\n```\n"
         assertNull(parseDiagramNote(futureVersion))
     }
 
@@ -380,7 +384,7 @@ class DiagramSpecCodecTest {
         val sourceMode = assertNotNull(updateDiagramNoteExportMode(captioned, DiagramExportMode.SOURCE))
         val parsed = assertNotNull(parseDiagramNote(sourceMode))
 
-        assertTrue(sourceMode.startsWith("<!-- indagium:diagram v4 "))
+        assertTrue(sourceMode.startsWith("<!-- indagium:diagram v5 "))
         assertEquals("Startup sequence", parsed.caption)
         assertEquals(DiagramExportMode.SOURCE, parsed.exportMode)
         assertEquals("sequenceDiagram", parsed.source)
@@ -431,7 +435,7 @@ class DiagramSpecCodecTest {
                 kind = MessageKind.ASYNC, groupKey = "source:op-7|site-7", sourceMethodId = "op-7",
                 sourceLogSiteId = "site-7", sourceOwnerType = "Client", visibility = ManualOperationVisibility.PRIVATE,
             )),
-            groups = listOf(ManualDiagramGroup("g-1", "request", listOf("manual-1"))),
+            groups = listOf(ManualDiagramGroup("g-1", "request", listOf("manual-1"), kind = ManualFragmentKind.LOOP)),
             notes = listOf(ManualDiagramNote("n-1", "service", "manual-1", "queued")),
             activations = listOf(ManualDiagramActivation("a-1", "service", "manual-1", "manual-1")),
         )
@@ -470,8 +474,8 @@ class DiagramSpecCodecTest {
         val encoded = encodeDiagramNote(spec, source, model)
         val parsed = assertNotNull(parseDiagramNote(encoded))
 
-        assertTrue(encoded.startsWith("<!-- indagium:diagram v4 "))
-        assertEquals(document, parsed.spec.manualDocument)
+        assertTrue(encoded.startsWith("<!-- indagium:diagram v5 "))
+        assertEquals(normalizeManualDocument(document), parsed.spec.manualDocument)
         assertEquals(DiagramAuthoringMode.MANUAL, parsed.spec.authoringMode)
         assertTrue(parsed.spec.rules.isEmpty())
         assertTrue(parsed.spec.messageOverrides.isEmpty())
@@ -482,6 +486,37 @@ class DiagramSpecCodecTest {
         assertEquals(SourceTraceMode.SOURCE_TRACE, parsed.model?.traceMode)
         assertEquals("source:op-7|site-7", parsed.spec.manualDocument.interactions.single().groupKey)
         assertEquals(ManualOperationVisibility.PRIVATE, parsed.spec.manualDocument.interactions.single().visibility)
+        assertEquals(ManualFragmentKind.LOOP, parsed.spec.manualDocument.groups.single().kind)
+    }
+
+    @Test
+    fun oldManualGroupRecordsWithNoPersistedKindDecodeAsCustom() {
+        val note = "<!-- indagium:diagram v4 {\"dialect\":\"mermaid\",\"participants\":[" +
+            "{\"id\":\"a\",\"label\":\"A\",\"kind\":\"TAG\",\"tag\":\"A\"}]," +
+            "\"authoringMode\":\"MANUAL\",\"manualDocument\":{\"interactions\":[" +
+            "{\"id\":\"m\",\"sourceEntryIds\":[1],\"fromParticipantId\":\"a\",\"toParticipantId\":\"a\"," +
+            "\"operation\":\"event\",\"parameters\":[],\"result\":null,\"label\":null," +
+            "\"kind\":\"SELF\",\"enabled\":true,\"order\":0}]," +
+            "\"groups\":[{\"id\":\"g\",\"label\":\"Frame\",\"interactionIds\":[\"m\"],\"enabled\":true}]," +
+            "\"notes\":[],\"activations\":[]}} -->\n" +
+            "```mermaid\nsequenceDiagram\n```\n"
+        val parsed = assertNotNull(parseDiagramNote(note))
+        assertEquals(ManualFragmentKind.CUSTOM, parsed.spec.manualDocument.groups.single().kind)
+    }
+
+    @Test
+    fun unknownPersistedFragmentKindDecodesAsCustomRatherThanFailingTheWholeNote() {
+        val note = "<!-- indagium:diagram v4 {\"dialect\":\"mermaid\",\"participants\":[" +
+            "{\"id\":\"a\",\"label\":\"A\",\"kind\":\"TAG\",\"tag\":\"A\"}]," +
+            "\"authoringMode\":\"MANUAL\",\"manualDocument\":{\"interactions\":[" +
+            "{\"id\":\"m\",\"sourceEntryIds\":[1],\"fromParticipantId\":\"a\",\"toParticipantId\":\"a\"," +
+            "\"operation\":\"event\",\"parameters\":[],\"result\":null,\"label\":null," +
+            "\"kind\":\"SELF\",\"enabled\":true,\"order\":0}]," +
+            "\"groups\":[{\"id\":\"g\",\"label\":\"Frame\",\"interactionIds\":[\"m\"],\"enabled\":true,\"kind\":\"FUTURE_KIND\"}]," +
+            "\"notes\":[],\"activations\":[]}} -->\n" +
+            "```mermaid\nsequenceDiagram\n```\n"
+        val parsed = assertNotNull(parseDiagramNote(note))
+        assertEquals(ManualFragmentKind.CUSTOM, parsed.spec.manualDocument.groups.single().kind)
     }
 
     @Test
@@ -675,5 +710,24 @@ class DiagramSpecCodecTest {
 
         val atTheEdge = SeqDiagramSpec(options = DiagramOptions(labelMaxLines = 8))
         assertNotNull(parseDiagramNote(encodeDiagramNote(atTheEdge, source)), "8 is the inclusive upper bound")
+    }
+
+    @Test
+    fun manualEvidenceAndRepeatPresentationRoundTripAndLegacyDocumentsDefaultSafely() {
+        val interaction = ManualDiagramInteraction(
+            id = "m", sourceEntryIds = setOf(7), fromParticipantId = "a", toParticipantId = "a",
+            label = "event", evidence = listOf(ManualDiagramEvidence(7, "10:00:00.000", LogLevel.W)),
+        )
+        val spec = SeqDiagramSpec(
+            participants = listOf(DiagramParticipant("a", "A", ParticipantKind.TAG, tag = "A")),
+            manualDocument = ManualDiagramDocument(
+                interactions = listOf(interaction), repeatPresentation = ManualDiagramRepeatPresentation.FIRST_AND_LAST,
+            ),
+        )
+
+        val parsed = assertNotNull(parseDiagramNote(encodeDiagramNote(spec, source)))
+
+        assertEquals(interaction.evidence, parsed.spec.manualDocument.interactions.single().evidence)
+        assertEquals(ManualDiagramRepeatPresentation.FIRST_AND_LAST, parsed.spec.manualDocument.repeatPresentation)
     }
 }

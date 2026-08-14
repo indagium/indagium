@@ -1,4 +1,5 @@
 @file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
+@file:Suppress("ReturnCount", "MaxLineLength")
 
 package com.indagium.ui
 
@@ -23,6 +24,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -65,7 +67,11 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.diagram.ArrowHit
 import com.indagium.diagram.DiagramRange
+import com.indagium.diagram.ManualDiagramDocument
+import com.indagium.diagram.ManualMessageBulkAction
 import com.indagium.diagram.RenderedDiagram
+import com.indagium.diagram.applyManualMessageBulkAction
+import com.indagium.diagram.manualMessageBucketId
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -83,9 +89,9 @@ private data class CanvasZoomAnchor(val content: Offset, val pointer: Offset)
  * remains available, diagrams can coexist with logs, and closing a log does not close its cached
  * diagram.
  *
- * Two columns: controls on the left, a live rendered preview on the right. The preview is what
- * makes participant selection tractable — tag curation is the whole difficulty of this feature
- * (logcat tags are not architectural components), and it can't be done blind.
+ * The default shell is deliberately narrow: a resizable message-authoring queue beside the live
+ * canvas. Participant and presentation configuration is useful, but it is occasional work, so it
+ * lives behind the explicit Details control instead of permanently competing with the queue.
  */
 @Composable
 fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
@@ -125,66 +131,96 @@ fun SeqDiagramWorkspace(state: AppState, workspaceId: String) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                AppText(
-                    if (readOnly) "Diagram workspace · cached" else if (req.editingBlockId != null) "Diagram workspace" else "New diagram workspace",
-                    fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                )
                 if (readOnly) {
-                    AppText(spec.title.ifBlank { "Untitled sequence diagram" }, fontSize = 12.sp)
+                    AppText(spec.title.ifBlank { "Untitled sequence diagram" }, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
                 } else {
                     InlineField(
                         spec.title,
                         { state.seqDiagrams.updateSpec(spec.copy(title = it)) },
-                        "Untitled sequence diagram", Modifier.fillMaxWidth(), fontSize = 12.sp,
+                        "Untitled sequence diagram", Modifier.fillMaxWidth(), fontSize = 15.sp,
                     )
                 }
-                AppText("${rangeSummary(spec.range)} · ${spec.sourceFile ?: "current log"}", color = tc.td, fontSize = 10.sp)
+                AppText(
+                    "${spec.sourceFile ?: tab?.filename ?: "current log"} · ${rangeSummary(spec.range)} · " +
+                        "${tab?.logData?.size ?: 0} rows",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                )
             }
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 ToolbarBtn(
-                    "Inspector",
+                    "Details",
                     icon = Icons.Outlined.Tune,
-                    showLabel = false,
-                    tooltip = "Toggle diagram inspector panel",
+                    tooltip = "Show advanced diagram details",
                     active = session.inspectorOpen,
-                    // CloseButton owns a 24.dp hit box; use the same box with no vertical offset
-                    // so the two controls share one center line.
-                    modifier = Modifier.size(24.dp),
-                    contentPadding = PaddingValues(0.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 5.dp),
                 ) { state.seqDiagrams.updateInspector(open = !session.inspectorOpen) }
+                AppButton(
+                    "Scope: ${rangeSummary(spec.range)} ▾",
+                    { state.seqDiagrams.updateInspector(open = true) },
+                    variant = ButtonVariant.Ghost,
+                )
                 CloseButton(onClick = ::requestClose)
             }
         }
 
         Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (session.inspectorOpen) {
-                Column(
-                    Modifier.width(session.inspectorWidth.dp).fillMaxHeight()
-                        .background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    if (tab != null && !readOnly) WorkspaceInspector(
-                        tab = tab,
-                        state = state,
-                        spec = spec,
-                        preview = session.preview.diagramOrNull,
-                        selectedEntryIds = emptySet(),
-                        onSpec = { state.seqDiagrams.updateSpec(it) },
-                        focusedManualInteractionId = session.focusedManualInteractionId,
-                        onFocusManualInteraction = { state.seqDiagrams.focusManualInteraction(it) },
-                    )
-                    else OfflineInspector(spec)
-                }
-                HDivider { delta -> state.seqDiagrams.resizeInspectorBy(delta) }
+            Column(
+                Modifier.width(session.inspectorWidth.dp).fillMaxHeight()
+                    .background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (tab != null && !readOnly) WorkspaceMessagesPane(
+                    tab = tab,
+                    state = state,
+                    spec = spec,
+                    preview = session.preview.diagramOrNull,
+                    selectedEntryIds = emptySet(),
+                    onSpec = { state.seqDiagrams.updateSpec(it) },
+                    focusedManualInteractionId = session.focusedManualInteractionId,
+                    onFocusManualInteraction = {
+                        state.seqDiagrams.focusManualInteraction(
+                            manualQueueRowIdentity(spec.manualDocument, interactionId = it),
+                        )
+                    },
+                    hoveredManualInteractionId = session.hoveredManualInteractionId,
+                    onHoverManualInteraction = {
+                        state.seqDiagrams.hoverManualInteraction(
+                            manualQueueRowIdentity(spec.manualDocument, interactionId = it),
+                        )
+                    },
+                ) else OfflineInspector(spec)
             }
+            HDivider { delta -> state.seqDiagrams.resizeInspectorBy(delta) }
             DiagramPreviewPane(state, session, Modifier.weight(1f).fillMaxHeight())
         }
 
         WorkspaceFooter(state, req, readOnly)
+    }
+    // Details is a secondary sheet. It must not become a permanent third column that squeezes
+    // the canvas out of the primary Messages + Canvas comparison surface.
+    if (session.inspectorOpen) {
+        Dialog(onDismissRequest = { state.seqDiagrams.updateInspector(open = false) }) {
+            Column(
+                Modifier.width(360.dp).background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM)
+                    .verticalScroll(rememberScrollState()).padding(vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AppText("Details", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    AppButton("Close", { state.seqDiagrams.updateInspector(open = false) }, variant = ButtonVariant.Ghost)
+                }
+                if (tab != null && !readOnly) {
+                    WorkspaceDetailsPane(tab, state, spec) { state.seqDiagrams.updateSpec(it) }
+                } else {
+                    OfflineInspector(spec)
+                }
+            }
+        }
     }
     if (state.seqDiagrams.pendingCloseWorkspaceId == workspaceId) {
         Dialog(onDismissRequest = { state.seqDiagrams.cancelWorkspaceClose() }, properties = DialogProperties(dismissOnClickOutside = false)) {
@@ -256,6 +292,13 @@ private fun CanvasZoomStepper(zoom: Float, onZoom: (Float) -> Unit) {
 // that pointer positions/deltas are already in raw pixels.
 private const val CANVAS_PAN_SLOP_PX = 5f
 
+// Compose's Constraints pack width/height into a shared bit budget; a dp value much beyond this
+// makes BOTH dimensions unrepresentable (Compose throws "Can't represent a width of W and height
+// of H in Constraints" rather than clamping) — seen in practice on a very large diagram (hundreds
+// of messages) whose reconstructed logical size, `rendered.heightPx / rendered.scale * zoom`, blew
+// past it. Kept well under Compose's actual limit (~262_143) for margin.
+private const val MAX_CANVAS_DIM_DP = 200_000f
+
 /**
  * Maps a canvas pointer position to the underlying [RenderedDiagram]'s own image-pixel space and
  * resolves the [ArrowHit] under it, if any — the click-to-navigate counterpart of
@@ -291,6 +334,114 @@ internal fun resolveCanvasClickHit(
     return rendered.hits.firstOrNull { h ->
         imageX >= h.x && imageX <= h.x + h.width && imageY >= h.y && imageY <= h.y + h.height
     }
+}
+
+internal enum class CanvasEndpointSide { SOURCE, TARGET }
+
+internal data class CanvasEndpointDragTarget(
+    val hit: ArrowHit,
+    val side: CanvasEndpointSide,
+)
+
+/** Resolves only the small endpoint handles of a manual arrow. The broad arrow hitbox remains a
+ * click target; endpoint editing is armed exclusively near a rendered lifeline endpoint so a
+ * normal canvas drag can still pan. */
+internal fun resolveCanvasEndpointDragTarget(
+    rendered: RenderedDiagram,
+    clickPositionPx: Offset,
+    horizontalScrollPx: Float,
+    verticalScrollPx: Float,
+    zoom: Float,
+    density: Float,
+    tolerancePx: Int = 18,
+): CanvasEndpointDragTarget? {
+    if (zoom <= 0f || density <= 0f) return null
+    val imageX = ((clickPositionPx.x + horizontalScrollPx) / density / zoom * rendered.scale).roundToInt()
+    val imageY = ((clickPositionPx.y + verticalScrollPx) / density / zoom * rendered.scale).roundToInt()
+    return rendered.hits.asSequence().mapNotNull { hit ->
+        val fromX = hit.fromX ?: return@mapNotNull null
+        val toX = hit.toX ?: return@mapNotNull null
+        val y = hit.arrowY ?: return@mapNotNull null
+        if (kotlin.math.abs(imageY - y) > tolerancePx) return@mapNotNull null
+        val fromDistance = kotlin.math.abs(imageX - fromX)
+        val toDistance = kotlin.math.abs(imageX - toX)
+        when {
+            fromDistance <= tolerancePx && fromDistance <= toDistance -> CanvasEndpointDragTarget(hit, CanvasEndpointSide.SOURCE)
+            toDistance <= tolerancePx -> CanvasEndpointDragTarget(hit, CanvasEndpointSide.TARGET)
+            else -> null
+        }
+    }.firstOrNull()
+}
+
+internal fun nearestCanvasParticipantIndex(
+    rendered: RenderedDiagram,
+    imageX: Int,
+    maxDistancePx: Int = 42,
+): Int? = rendered.participantCentersPx
+    .mapIndexed { index, center -> index to kotlin.math.abs(center - imageX) }
+    .filter { (_, distance) -> distance <= maxDistancePx }
+    .minByOrNull { (_, distance) -> distance }
+    ?.first
+
+/**
+ * The content-space rectangle used by the transient Compose hover overlay.  Arrow hit bounds are
+ * stored in rendered image pixels, while the Image and its scroll container are laid out in dp;
+ * keeping this conversion pure makes the overlay and click hit-test use the same zoom/scale math.
+ */
+internal data class CanvasHitOverlayBounds(
+    val xDp: Float,
+    val yDp: Float,
+    val widthDp: Float,
+    val heightDp: Float,
+)
+
+internal fun canvasHitOverlayBounds(
+    hit: ArrowHit,
+    rendered: RenderedDiagram,
+    zoom: Float,
+): CanvasHitOverlayBounds? {
+    if (zoom <= 0f || rendered.scale <= 0f) return null
+    return CanvasHitOverlayBounds(
+        xDp = hit.x / rendered.scale * zoom,
+        yDp = hit.y / rendered.scale * zoom,
+        widthDp = hit.width / rendered.scale * zoom,
+        heightDp = hit.height / rendered.scale * zoom,
+    )
+}
+
+/**
+ * Resolves either side of the row/canvas association to the queue's durable bucket identity.
+ * Grouped rows use `group:<groupKey>` and ungrouped rows use `individual:<interactionId>`; the
+ * renderer can provide both the first occurrence id and the bucket id, while a queue row hover
+ * currently provides an occurrence id.  Mapping both through the document keeps those paths
+ * identical after filtering, sorting, and preview rebuilds.
+ */
+internal fun manualQueueRowIdentity(
+    document: ManualDiagramDocument,
+    interactionId: String? = null,
+    groupKey: String? = null,
+): String? {
+    val normalizedGroupKey = groupKey?.trim()?.takeUnless { it.isEmpty() }
+    normalizedGroupKey?.let { key ->
+        document.messages.firstOrNull { it.id == key }?.let { return it.id }
+        document.messages.firstOrNull { interactionId in it.occurrenceIds }?.let { return it.id }
+        document.interactions.firstOrNull { manualMessageBucketId(it) == key }
+            ?.let { return manualMessageBucketId(it) }
+        document.interactions.firstOrNull { it.groupKey?.trim() == key }
+            ?.let { return manualMessageBucketId(it) }
+    }
+
+    val normalizedInteractionId = interactionId?.trim()?.takeUnless { it.isEmpty() }
+    normalizedInteractionId?.let { id ->
+        document.interactions.firstOrNull { manualMessageBucketId(it) == id }
+            ?.let { return manualMessageBucketId(it) }
+        document.interactions.firstOrNull { it.id == id }
+            ?.let { return manualMessageBucketId(it) }
+    }
+
+    // Preserve an already-canonical renderer/queue id even when the current document no longer
+    // contains that row; the caller's preview-rebuild check will clear it when it is stale.
+    return normalizedGroupKey ?: normalizedInteractionId
 }
 
 @Composable
@@ -362,6 +513,28 @@ private fun DiagramPreviewPane(
             diagram != null -> {
                 val rendered = display!!.rendered
                 val bitmap = display!!.bitmap
+                // The Image below is laid out at `(rendered.*Px / rendered.scale * zoom).dp`, which
+                // reconstructs the diagram's full logical size — for a diagram with hundreds of
+                // messages that can exceed MAX_CANVAS_DIM_DP even at a modest zoom and crash Compose
+                // (see the constant's doc). Clamp the zoom actually used for sizing/hit-testing,
+                // never the persisted `session.zoom` itself, so the zoom stepper and scroll-to-zoom
+                // gesture keep working off the user's real value.
+                val effectiveZoom = run {
+                    val maxDim = maxOf(rendered.widthPx, rendered.heightPx) / rendered.scale
+                    if (maxDim <= 0f) zoom else minOf(zoom, MAX_CANVAS_DIM_DP / maxDim)
+                }
+                LaunchedEffect(rendered, session.hoveredManualInteractionId) {
+                    val hoveredId = session.hoveredManualInteractionId ?: return@LaunchedEffect
+                    if (rendered.hits.none { hit ->
+                            manualQueueRowIdentity(
+                                session.spec.manualDocument,
+                                interactionId = hit.manualInteractionId,
+                                groupKey = hit.groupKey,
+                            ) == hoveredId
+                        }) {
+                        state.seqDiagrams.hoverManualInteraction(null)
+                    }
+                }
                 BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                     // Fit shows an orienting overview even for a long trace.  At that scale the
                     // diagram remains navigable through the always-visible scrollbars; Fit width
@@ -395,10 +568,10 @@ private fun DiagramPreviewPane(
                     // Zoom uses the pointer's pre-zoom content coordinate. Applying the scroll
                     // correction after the zoom state commits keeps that exact point under the
                     // cursor instead of jumping toward the top-left.
-                    LaunchedEffect(zoom, zoomAnchor) {
+                    LaunchedEffect(zoom, effectiveZoom, zoomAnchor) {
                         zoomAnchor?.let { anchor ->
-                            horizontal.scrollTo((anchor.content.x * zoom - anchor.pointer.x).roundToInt().coerceAtLeast(0))
-                            vertical.scrollTo((anchor.content.y * zoom - anchor.pointer.y).roundToInt().coerceAtLeast(0))
+                            horizontal.scrollTo((anchor.content.x * effectiveZoom - anchor.pointer.x).roundToInt().coerceAtLeast(0))
+                            vertical.scrollTo((anchor.content.y * effectiveZoom - anchor.pointer.y).roundToInt().coerceAtLeast(0))
                             zoomAnchor = null
                         }
                     }
@@ -426,7 +599,7 @@ private fun DiagramPreviewPane(
                             // reorder handle uses) rather than a literal open/closed hand — java.awt
                             // has no distinct grab/grabbing pair to switch between on press.
                             .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR)))
-                            .pointerInput(zoom, spaceHeld, rendered) {
+                            .pointerInput(zoom, effectiveZoom, spaceHeld, rendered) {
                                 awaitPointerEventScope {
                                     var panning = false
                                     // Armed on a plain left Press, resolved into either a pan (once
@@ -436,6 +609,37 @@ private fun DiagramPreviewPane(
                                     var pendingPan = false
                                     var downPosition = Offset.Zero
                                     var lastPosition = Offset.Zero
+                                    var endpointDrag: CanvasEndpointDragTarget? = null
+                                    var lastClickMillis = 0L
+                                    var lastClickRowId: String? = null
+                                    // Stage 5 task 2: dedupes repeated hoverManualInteraction calls
+                                    // across consecutive Move events over the same arrow (each call
+                                    // writes coordinator state and would otherwise trigger a
+                                    // recomposition on every raw pixel of mouse movement).
+                                    var hoveredHitId: String? = null
+
+                                    fun updateCanvasHover(position: Offset) {
+                                        val hit = resolveCanvasClickHit(
+                                            rendered = rendered,
+                                            clickPositionPx = position,
+                                            horizontalScrollPx = horizontal.value.toFloat(),
+                                            verticalScrollPx = vertical.value.toFloat(),
+                                            zoom = effectiveZoom,
+                                            density = density,
+                                        )
+                                        val id = hit?.let {
+                                            manualQueueRowIdentity(
+                                                session.spec.manualDocument,
+                                                interactionId = it.manualInteractionId,
+                                                groupKey = it.groupKey,
+                                            )
+                                        }
+                                        if (id != hoveredHitId) {
+                                            hoveredHitId = id
+                                            state.seqDiagrams.hoverManualInteraction(id)
+                                        }
+                                    }
+
                                     while (true) {
                                         val event = awaitPointerEvent(PointerEventPass.Initial)
                                         val change = event.changes.firstOrNull() ?: continue
@@ -447,8 +651,8 @@ private fun DiagramPreviewPane(
                                                     if (nextZoom != zoom) {
                                                         zoomAnchor = CanvasZoomAnchor(
                                                             content = Offset(
-                                                                (horizontal.value + change.position.x) / zoom,
-                                                                (vertical.value + change.position.y) / zoom
+                                                                (horizontal.value + change.position.x) / effectiveZoom,
+                                                                (vertical.value + change.position.y) / effectiveZoom,
                                                             ),
                                                             pointer = change.position,
                                                         )
@@ -476,10 +680,26 @@ private fun DiagramPreviewPane(
                                                         event.changes.forEach { it.consume() }
                                                     }
                                                     event.buttons.isPrimaryPressed -> {
-                                                        // Don't consume yet: a plain press that never
-                                                        // moves must still resolve as a click below.
-                                                        panning = false
-                                                        pendingPan = true
+                                                        val endpoint = resolveCanvasEndpointDragTarget(
+                                                            rendered = rendered,
+                                                            clickPositionPx = change.position,
+                                                            horizontalScrollPx = horizontal.value.toFloat(),
+                                                            verticalScrollPx = vertical.value.toFloat(),
+                                                            zoom = effectiveZoom,
+                                                            density = density,
+                                                        )
+                                                        if (endpoint != null && session.request != null && !state.seqDiagrams.libraryOpenReadOnly) {
+                                                            endpointDrag = endpoint
+                                                            panning = false
+                                                            pendingPan = false
+                                                            event.changes.forEach { it.consume() }
+                                                        } else {
+                                                            // Don't consume yet: a plain press that never
+                                                            // moves must still resolve as a click below.
+                                                            endpointDrag = null
+                                                            panning = false
+                                                            pendingPan = true
+                                                        }
                                                     }
                                                     else -> {
                                                         panning = false
@@ -488,8 +708,15 @@ private fun DiagramPreviewPane(
                                                 }
                                             }
 
+                                            PointerEventType.Enter -> updateCanvasHover(change.position)
+
                                             PointerEventType.Move -> {
-                                                if (panning) {
+                                                if (endpointDrag != null) {
+                                                    // Endpoint previews are intentionally lightweight: the
+                                                    // durable write happens on release after resolving a
+                                                    // declared lifeline under the dragged handle.
+                                                    event.changes.forEach { it.consume() }
+                                                } else if (panning) {
                                                     val delta = change.position - lastPosition
                                                     horizontal.dispatchRawDelta(-delta.x)
                                                     vertical.dispatchRawDelta(-delta.y)
@@ -503,31 +730,83 @@ private fun DiagramPreviewPane(
                                                         lastPosition = change.position
                                                         event.changes.forEach { it.consume() }
                                                     }
+                                                } else {
+                                                    // Not a pan/drag in progress: use the same pure
+                                                    // coordinate and stable-identity path as clicks.
+                                                    updateCanvasHover(change.position)
                                                 }
                                             }
 
+                                            PointerEventType.Exit -> {
+                                                hoveredHitId = null
+                                                state.seqDiagrams.hoverManualInteraction(null)
+                                            }
+
                                             PointerEventType.Release -> {
-                                                if (pendingPan && !panning) {
+                                                if (endpointDrag != null) {
+                                                    val drag = requireNotNull(endpointDrag)
+                                                    val imageX = ((change.position.x + horizontal.value) / density / effectiveZoom * rendered.scale).roundToInt()
+                                                    val participantIndex = nearestCanvasParticipantIndex(rendered, imageX)
+                                                    val targetId = participantIndex?.let { diagram.participants.getOrNull(it)?.id }
+                                                    val rowId = drag.hit.let {
+                                                        manualQueueRowIdentity(
+                                                            session.spec.manualDocument,
+                                                            interactionId = it.manualInteractionId,
+                                                            groupKey = it.groupKey,
+                                                        )
+                                                    }
+                                                    if (targetId != null && rowId != null) {
+                                                        val action = if (drag.side == CanvasEndpointSide.SOURCE) {
+                                                            ManualMessageBulkAction.SetSource(targetId)
+                                                        } else {
+                                                            ManualMessageBulkAction.SetTarget(targetId)
+                                                        }
+                                                        val result = applyManualMessageBulkAction(
+                                                            session.spec.manualDocument,
+                                                            setOf(rowId),
+                                                            action,
+                                                        )
+                                                        if (result.applied) {
+                                                            state.seqDiagrams.updateSpec(session.spec.copy(manualDocument = result.document))
+                                                        }
+                                                    }
+                                                    endpointDrag = null
+                                                    event.changes.forEach { it.consume() }
+                                                } else if (pendingPan && !panning) {
                                                     val hit = resolveCanvasClickHit(
                                                         rendered = rendered,
                                                         clickPositionPx = change.position,
                                                         horizontalScrollPx = horizontal.value.toFloat(),
                                                         verticalScrollPx = vertical.value.toFloat(),
-                                                        zoom = zoom,
+                                                        zoom = effectiveZoom,
                                                         density = density,
                                                     )
-                                                    // Matches AnnotationPanel's DiagramNoteView guard
-                                                    // (entryId > 0); a null sourceTabId means either
-                                                    // an offline/library workspace or one whose log
-                                                    // was closed — navigateToLogLine no-ops safely on
-                                                    // a missing tab either way, so this never crashes.
                                                     if (hit != null) {
-                                                        hit.manualInteractionId?.let { state.seqDiagrams.focusManualInteraction(it) }
+                                                        manualQueueRowIdentity(
+                                                            session.spec.manualDocument,
+                                                            interactionId = hit.manualInteractionId,
+                                                            groupKey = hit.groupKey,
+                                                        )?.let { rowId ->
+                                                            val now = System.currentTimeMillis()
+                                                            val isDoubleClick = now - lastClickMillis <= 340L && lastClickRowId == rowId
+                                                            lastClickMillis = now
+                                                            lastClickRowId = rowId
+                                                            state.seqDiagrams.focusManualInteraction(rowId)
+                                                            if (isDoubleClick) {
+                                                                // A second label/arrow click focuses the durable row and
+                                                                // lets the queue's inline details editor become the
+                                                                // authoring surface; no modal editor is opened.
+                                                                state.seqDiagrams.focusManualInteraction(rowId)
+                                                            }
+                                                        }
                                                     }
-                                                    if (hit != null && hit.entryId > 0) {
-                                                        session.sourceTabId?.let { tabId -> state.navigateToLogLine(tabId, hit.entryId) }
-                                                    }
+                                                    // Evidence navigation stays explicit through the
+                                                    // row's Open evidence action, guided pass, or L
+                                                    // shortcut. Clicking the canvas arrow only changes
+                                                    // queue focus/selection so it never yanks the user
+                                                    // away from the diagram workspace.
                                                 }
+                                                if (!panning) updateCanvasHover(change.position)
                                                 panning = false
                                                 pendingPan = false
                                             }
@@ -543,9 +822,40 @@ private fun DiagramPreviewPane(
                             bitmap = bitmap,
                             contentDescription = "Sequence diagram preview",
                             modifier = Modifier
-                                .width((rendered.widthPx / rendered.scale * zoom).dp)
-                                .height((rendered.heightPx / rendered.scale * zoom).dp),
+                                .width((rendered.widthPx / rendered.scale * effectiveZoom).dp)
+                                .height((rendered.heightPx / rendered.scale * effectiveZoom).dp),
                         )
+                        // Stage 5 task 1: a pure Compose overlay for the row-hovered arrow, drawn as a
+                        // sibling of the Image inside the SAME scrolled container so it inherits the
+                        // exact scroll offset with no manual math. Position/size use the identical
+                        // `imageX / rendered.scale * effectiveZoom` conversion the Image's own
+                        // width/height use (the inverse of resolveCanvasClickHit's math — see that
+                        // function's doc) — never touches DiagramRenderCache or the raster Image itself.
+                        session.hoveredManualInteractionId?.let { hoveredId ->
+                            val hoveredHit = rendered.hits.firstOrNull {
+                                manualQueueRowIdentity(
+                                    session.spec.manualDocument,
+                                    interactionId = it.manualInteractionId,
+                                    groupKey = it.groupKey,
+                                ) == hoveredId
+                            }
+                            val bounds = hoveredHit?.let { canvasHitOverlayBounds(it, rendered, effectiveZoom) }
+                            if (bounds != null) {
+                                Box(
+                                    Modifier
+                                        .offset(
+                                            x = bounds.xDp.dp,
+                                            y = bounds.yDp.dp,
+                                        )
+                                        .size(
+                                            width = bounds.widthDp.dp,
+                                            height = bounds.heightDp.dp,
+                                        )
+                                        .background(tc.ac.copy(alpha = .18f), RoundedCornerShape(4.dp))
+                                        .border(1.dp, tc.ac.copy(alpha = .55f), RoundedCornerShape(4.dp)),
+                                )
+                            }
+                        }
                     }
                     VerticalScrollbar(
                         adapter = rememberScrollbarAdapter(vertical),

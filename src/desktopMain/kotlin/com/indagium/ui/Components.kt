@@ -58,6 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -246,11 +247,15 @@ fun AppText(
     modifier: Modifier = Modifier,
     maxLines: Int = 1,
     overflow: TextOverflow = TextOverflow.Clip,
+    // Appended last so every existing (near-exclusively named-argument) call site is unaffected;
+    // null preserves the platform default (no decoration) exactly like before this param existed.
+    textDecoration: TextDecoration? = null,
     onTextLayout: ((TextLayoutResult) -> Unit)? = null,
 ) {
     androidx.compose.material3.Text(
         text, color = color, fontSize = fontSize, fontFamily = fontFamily,
         fontWeight = fontWeight, modifier = modifier, maxLines = maxLines, overflow = overflow,
+        textDecoration = textDecoration,
         onTextLayout = onTextLayout ?: {},
     )
 }
@@ -360,7 +365,7 @@ internal fun BoundedScrollBox(
     rowDp: Int = 28,
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
-) = BoundedScrollBoxDp(rowLimit * rowDp, modifier, content)
+) = BoundedScrollBoxDp(maxHeightDp = rowLimit * rowDp, modifier = modifier, content = content)
 
 // Same box as BoundedScrollBox, parameterized directly by the cap in dp rather than a row
 // count/row-height pair — for sections like Issues where rows aren't uniform height (a collapsed
@@ -370,6 +375,10 @@ internal fun BoundedScrollBox(
 internal fun BoundedScrollBoxDp(
     maxHeightDp: Int,
     modifier: Modifier = Modifier,
+    // Stage 5 task 4: a caller that needs to programmatically scroll this box (e.g. scrolling a
+    // manual-message row into view on canvas click) can hoist and pass its own ScrollState;
+    // every other call site keeps getting a private one via this default, exactly as before.
+    scrollState: ScrollState = rememberScrollState(),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     // heightIn(max) rather than height(): maxHeightDp is only ever a guessed/derived content
@@ -377,7 +386,6 @@ internal fun BoundedScrollBoxDp(
     // message line). heightIn(max) makes it a cap for many rows while letting fewer/shorter rows
     // size to their own content instead of being stretched-then-clipped to it.
     val h = maxHeightDp.dp
-    val scrollState = rememberScrollState()
     Box(modifier.fillMaxWidth().heightIn(max = h)) {
         // fillMaxWidth, not fillMaxSize: fillMaxSize would claim the full `h` cap regardless of
         // actual content height, forcing the Box back to a fixed size and defeating heightIn above.

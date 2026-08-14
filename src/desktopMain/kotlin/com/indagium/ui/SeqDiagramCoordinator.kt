@@ -91,9 +91,12 @@ sealed interface ActiveSurface {
  *  touch it until they pick a mode again. */
 enum class DiagramZoomMode { MANUAL, FIT, FIT_WIDTH }
 
+/** Identifies the editor shell used by an independent diagram workspace. */
+enum class DiagramWorkspaceVariant { V1, V2 }
+
 data class ManualSeedUndoSnapshot(
-    val document: ManualDiagramDocument,
-    val lifelineOrder: List<String>,
+    /** Complete pre-regeneration spec, so undo restores metadata as well as message structure. */
+    val spec: SeqDiagramSpec,
 )
 
 /** A diagram is an independent working document.  Keeping the last rendered model here is what
@@ -104,12 +107,15 @@ data class DiagramWorkspaceSession(
     /** Kept when [request] is cleared after closing the source log. */
     val spec: SeqDiagramSpec,
     val request: SeqDiagramRequest?,
+    /** Existing sessions remain on the original workspace shell unless explicitly opened as v2. */
+    val variant: DiagramWorkspaceVariant = DiagramWorkspaceVariant.V1,
     val preview: DiagramPreviewState = DiagramPreviewState.NotComputed,
     val candidates: DiagramCandidateState = DiagramCandidateState.NotComputed,
     val openedLibraryItem: DiagramLibraryItem? = null,
     val offlineRequest: OfflineDiagramLibraryRequest? = null,
     val dirty: Boolean = false,
-    val inspectorOpen: Boolean = true,
+    /** The compact Messages pane is always visible; this flag opens secondary Details only. */
+    val inspectorOpen: Boolean = false,
     val inspectorWidth: Float = 330f,
     /** Canvas viewport. FIT is the default so a freshly opened workspace auto-fits exactly once,
      *  the same first-render behaviour the old always-refit LaunchedEffect gave every workspace —
@@ -308,12 +314,13 @@ class SeqDiagramCoordinator(
         sourceTabId: String?, request: SeqDiagramRequest?, preview: DiagramPreviewState,
         item: DiagramLibraryItem? = null, offline: OfflineDiagramLibraryRequest? = null,
         initialManualSeedPending: Boolean = false,
+        variant: DiagramWorkspaceVariant = DiagramWorkspaceVariant.V1,
     ) {
         persistActiveWorkspace()
         val id = "diagram-${java.util.UUID.randomUUID()}"
         val workspace = DiagramWorkspaceSession(
             id = id, sourceTabId = sourceTabId, spec = request?.spec ?: offline?.spec ?: SeqDiagramSpec(),
-            request = request, preview = preview, openedLibraryItem = item, offlineRequest = offline,
+            request = request, variant = variant, preview = preview, openedLibraryItem = item, offlineRequest = offline,
             initialManualSeedPending = initialManualSeedPending,
         )
         workspaces = workspaces + workspace
@@ -465,7 +472,18 @@ class SeqDiagramCoordinator(
      * by far the most common way a user says "this part of the log", so it becomes the default
      * range (min..max, matching how AppState.collapseRange treats an inclusive id span).
      */
-    fun begin(tabId: String, seedIds: Set<Int> = emptySet()) {
+    fun begin(tabId: String, seedIds: Set<Int> = emptySet()) =
+        beginWorkspace(tabId, seedIds, DiagramWorkspaceVariant.V1)
+
+    /** Opens the v2 full-height message workspace using the same ctx-tab/range selection semantics. */
+    fun beginV2(tabId: String, selectedIds: Set<Int> = emptySet()) =
+        beginWorkspace(tabId, selectedIds, DiagramWorkspaceVariant.V2)
+
+    private fun beginWorkspace(
+        tabId: String,
+        seedIds: Set<Int>,
+        variant: DiagramWorkspaceVariant,
+    ) {
         val tab = appState.tab(tabId) ?: return
         // "Select a collapsed block" must mean what uncollapsing it and selecting the same lines by
         // hand would mean (expandSelectionThroughCollapsedBlocks, utils/Filter.kt) — widened BEFORE
@@ -494,17 +512,24 @@ class SeqDiagramCoordinator(
             listOf(com.indagium.diagram.DiagramComponent(EMPTY_COMPONENT_ID, "", emptySet(), enabled = false))
         }
         val spec = base.copy(
+            title = when {
+                variant == DiagramWorkspaceVariant.V2 && base.title.isBlank() -> "Sequence diagram v2"
+                variant == DiagramWorkspaceVariant.V1 && base.editorVersion == 2 && base.title == "Sequence diagram v2" -> ""
+                else -> base.title
+            },
             range = range,
             components = seededComponents,
             sourceFile = File(tab.filename).name,
             authoringMode = com.indagium.diagram.DiagramAuthoringMode.MANUAL,
             manualDocument = ManualDiagramDocument(),
+            editorVersion = if (variant == DiagramWorkspaceVariant.V2) 2 else 1,
         )
         openWorkspace(
             tabId,
             SeqDiagramRequest(tabId, spec),
             DiagramPreviewState.NotComputed,
             initialManualSeedPending = true,
+            variant = variant,
         )
         requestCandidates(tabId, spec)
         requestPreview(tabId, spec)
@@ -535,6 +560,7 @@ class SeqDiagramCoordinator(
         openWorkspace(
             tabId, SeqDiagramRequest(tabId, editableSpec, editingBlockId = blockId),
             parsed.model?.let { DiagramPreviewState.Computed(it.copy(spec = editableSpec)) } ?: DiagramPreviewState.NotComputed,
+            variant = if (editableSpec.editorVersion >= 2) DiagramWorkspaceVariant.V2 else DiagramWorkspaceVariant.V1,
         )
         return true
     }
@@ -577,14 +603,11 @@ class SeqDiagramCoordinator(
 
     /**
      * Replaces the current manual document with one inferred using independently selected evidence.
-     *
-     * `force` is threaded through from the UI (SeqDiagramInspector.kt's onApplySeed) but not yet
-     * consumed here — flagged during a detekt cleanup pass rather than guessed at and implemented;
-     * worth a follow-up to confirm whether it should bypass reviewManualRegeneration's conflict
-     * review below.
+     * Always routes through the review below. The old dead `force: Boolean` bypass parameter (never
+     * consumed by this function) was removed; per-row [ManualRegenerationRowDecision] is the
+     * replacement for what it was meant to enable.
      */
-    @Suppress("UnusedParameter")
-    fun applyManualSeed(configuration: ManualDiagramSeedConfiguration, force: Boolean = false) {
+    fun applyManualSeed(configuration: ManualDiagramSeedConfiguration) {
         val workspaceId = activeWorkspaceId ?: return
         val currentRequest = request ?: return
         val tab = appState.tab(currentRequest.tabId) ?: return
@@ -594,7 +617,7 @@ class SeqDiagramCoordinator(
             return
         }
         val expectedSpec = currentRequest.spec
-        val undo = ManualSeedUndoSnapshot(expectedSpec.manualDocument, expectedSpec.lifelineOrder)
+        val undo = ManualSeedUndoSnapshot(expectedSpec)
         replaceWorkspace(workspaceId) {
             it.copy(manualSeedBusy = true, manualSeedStatus = "Building ${configuration.label}…")
         }
@@ -633,14 +656,19 @@ class SeqDiagramCoordinator(
                         )
                         val review = reviewManualRegeneration(expectedSpec.manualDocument, document)
                             .copy(candidateSpec = next)
+                        val reviewStatus = if (review.rows.isEmpty()) {
+                            "No changes found: regenerated interactions already match this source scope."
+                        } else {
+                            "Review " + configuration.label + ": " +
+                                review.newCount + " new, " + review.changedAutoCount + " changed auto, " +
+                                review.editedKeptCount + " edits kept."
+                        }
                         replaceWorkspace(workspaceId) {
                             it.copy(
                                 manualSeedUndo = undo,
                                 manualSeedBusy = false,
                                 manualSeedReview = review,
-                                manualSeedStatus = "Review " + configuration.label + ": " +
-                                    review.newCount + " new, " + review.changedAutoCount + " changed auto, " +
-                                    review.editedKeptCount + " edits kept.",
+                                manualSeedStatus = reviewStatus,
                             )
                         }
                     }
@@ -659,10 +687,28 @@ class SeqDiagramCoordinator(
         seedJobs[workspaceId] = job
     }
 
+    /** Persists a per-row decision change made in the regeneration review UI so a subsequent
+     *  [acceptManualSeedReview] call (which reads [DiagramWorkspaceSession.manualSeedReview] itself,
+     *  taking no review argument) applies exactly the decisions currently shown. A no-op once the
+     *  review has already been accepted/canceled (no active workspace review to update). */
+    fun updateManualSeedReview(review: ManualRegenerationReview) {
+        val id = activeWorkspaceId ?: return
+        replaceWorkspace(id) { current ->
+            if (current.manualSeedReview == null) current else current.copy(manualSeedReview = review)
+        }
+    }
+
     fun cancelManualSeedReview() {
         val id = activeWorkspaceId ?: return
-        replaceWorkspace(id) {
-            it.copy(manualSeedReview = null, manualSeedBusy = false, manualSeedStatus = "Regeneration canceled.")
+        replaceWorkspace(id) { workspace ->
+            // An empty review is a completed no-op regeneration, not a cancellation. Dismissing
+            // its informational sheet must preserve the successful result in the workspace status.
+            val status = if (workspace.manualSeedReview?.rows?.isEmpty() == true) {
+                workspace.manualSeedStatus
+            } else {
+                "Regeneration canceled."
+            }
+            workspace.copy(manualSeedReview = null, manualSeedBusy = false, manualSeedStatus = status)
         }
     }
 
@@ -713,11 +759,7 @@ class SeqDiagramCoordinator(
         }
         val undo = workspace.manualSeedUndo ?: return
         val current = request ?: return
-        val restored = current.spec.copy(
-            authoringMode = com.indagium.diagram.DiagramAuthoringMode.MANUAL,
-            manualDocument = undo.document,
-            lifelineOrder = undo.lifelineOrder,
-        )
+        val restored = undo.spec
         replaceWorkspace(workspaceId) {
             it.copy(
                 spec = restored,
@@ -750,6 +792,7 @@ class SeqDiagramCoordinator(
             parsed.model?.let { DiagramPreviewState.Computed(it) } ?: DiagramPreviewState.NotComputed,
             item = item,
             offline = if (usableTabId == null) OfflineDiagramLibraryRequest(item, parsed.spec) else null,
+            variant = if (parsed.spec.editorVersion >= 2) DiagramWorkspaceVariant.V2 else DiagramWorkspaceVariant.V1,
         )
         return true
     }

@@ -56,10 +56,8 @@ import com.indagium.source.LogSourceResolver
 import com.indagium.source.SourceIndex
 import kotlin.math.roundToInt
 
-// This is the inspector half of the sequence-diagram workspace, split out of what used to be
-// SeqDiagramDialog.kt (now ui/SeqDiagramWorkspace.kt) purely for file size — see that file's
-// SeqDiagramWorkspace() for the surface that hosts this panel and DiagramPreviewPane for the
-// canvas beside it. Same package, so cross-file calls below need no imports.
+// This file owns the workspace's two authoring surfaces. The message queue is always visible
+// beside the canvas; less-frequent participant and presentation edits live in Details.
 
 @Composable
 internal fun OfflineInspector(spec: SeqDiagramSpec) {
@@ -81,7 +79,7 @@ internal fun OfflineInspector(spec: SeqDiagramSpec) {
 }
 
 @Composable
-internal fun WorkspaceInspector(
+internal fun WorkspaceMessagesPane(
     tab: LogTab,
     state: AppState,
     spec: SeqDiagramSpec,
@@ -90,13 +88,18 @@ internal fun WorkspaceInspector(
     onSpec: (SeqDiagramSpec) -> Unit,
     focusedManualInteractionId: String?,
     onFocusManualInteraction: (String?) -> Unit,
+    hoveredManualInteractionId: String?,
+    onHoverManualInteraction: (String?) -> Unit,
 ) {
     // The authoring editor must use durable participant identities, never display labels: labels
     // can collide and inferred source labels can disappear on a later rebuild.  Components and
     // actors are the user-owned lifeline set; legacy participants remain available for old notes.
-    val authoringLifelines = remember(spec.components, spec.actors, spec.participants) {
-        (spec.components.filter { it.id.isNotBlank() }.map { it.id } +
+    val authoringLifelines = remember(spec.components, spec.actors, spec.participants, spec.lifelineOrder) {
+        val declared = (spec.components.filter { it.id.isNotBlank() }.map { it.id } +
             spec.actors.map { it.id } + spec.participants.map { it.id }).distinct()
+        // Keyboard digit shortcuts and the rendered canvas must share the builder's persisted
+        // lifeline order; otherwise `1` can target a different participant than the first lane.
+        spec.lifelineOrder.filter { it in declared } + declared.filter { it !in spec.lifelineOrder }
     }
     val anchorEntryIds = selectedEntryIds.ifEmpty { preview?.primaryEntryIds.orEmpty() }
     DiagramAuthoringSection(
@@ -108,13 +111,24 @@ internal fun WorkspaceInspector(
         workspaceKey = state.seqDiagrams.activeWorkspaceId ?: tab.id,
         rangeContent = { RangeSection(tab, state, spec, onSpec) },
         onSpec = onSpec,
-        onApplySeed = { configuration, force -> state.seqDiagrams.applyManualSeed(configuration, force) },
+        // The applyManualSeed(configuration, force) two-arg call shape is fixed by
+        // SeqDiagramManualEditor.kt's onApplySeed type (out of this change's scope); `force` is a
+        // dead parameter there too and is intentionally not forwarded — see applyManualSeed's own
+        // doc for why it was dropped from the coordinator function itself.
+        onApplySeed = { configuration, _ -> state.seqDiagrams.applyManualSeed(configuration) },
         onRevertSeed = { state.seqDiagrams.revertManualSeed() },
         onClearAllManual = { onSpec(spec.copy(manualDocument = com.indagium.diagram.ManualDiagramDocument())) },
         onNavigateEvidence = { entryId -> state.navigateToLogLine(tab.id, entryId) },
+        canOpenSourceEvidence = { entryId ->
+            state.sourceIndex != null && state.resolveForLine(tab.id, entryId).isNotEmpty()
+        },
+        onOpenSourceEvidence = { entryId -> state.showSourceForLine(tab.id, entryId) },
         focusedManualInteractionId = focusedManualInteractionId,
         onFocusManualInteraction = onFocusManualInteraction,
+        hoveredManualInteractionId = hoveredManualInteractionId,
+        onHoverManualInteraction = onHoverManualInteraction,
         manualSeedReview = state.seqDiagrams.manualSeedReview,
+        onUpdateSeedReview = { state.seqDiagrams.updateManualSeedReview(it) },
         onAcceptSeedReview = { state.seqDiagrams.acceptManualSeedReview() },
         onCancelSeedReview = { state.seqDiagrams.cancelManualSeedReview() },
         canRevertSeed = state.seqDiagrams.canRevertManualSeed,
@@ -122,6 +136,20 @@ internal fun WorkspaceInspector(
         seedBusy = state.seqDiagrams.manualSeedBusy,
         seedStatus = state.seqDiagrams.manualSeedStatus,
     )
+}
+
+/** The explicit Details surface keeps configuration close at hand without displacing the message
+ * queue — the primary authoring loop — from the workspace's default layout. */
+@Composable
+internal fun WorkspaceDetailsPane(
+    tab: LogTab,
+    state: AppState,
+    spec: SeqDiagramSpec,
+    onSpec: (SeqDiagramSpec) -> Unit,
+) {
+    // The header Scope control opens this explicit secondary sheet; scope editing remains out of
+    // the primary queue so it cannot disturb evidence-order authoring.
+    RangeSection(tab, state, spec, onSpec)
     Divider()
     ParticipantsSection(tab, state, spec, onSpec)
     Divider()

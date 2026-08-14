@@ -768,16 +768,45 @@ It is never persisted and never leaves the process.
 
 ### 8.3 Sequence-diagram workspace model
 
-The manual message queue is a view over the durable occurrence document. It groups only by the
-existing grouping key and keeps every source entry independently addressable. A nullable target is
-derived as needs-target state; it is rendered as an evidence-backed dashed stub and never creates a
-participant. The append-only authoring marker distinguishes AUTO rows from EDITED/manual rows.
+The manual message queue is a view over a canonical `ManualDiagramMessageDefinition` document. Each
+message owns its `from → to : label` definition, match/capture template, per-message repeat policy,
+state, order metadata, and one or more occurrence/evidence records. `ManualDiagramInteraction`
+remains the compatibility occurrence store for v1–v4. A nullable target is derived as needs-target
+state; it is rendered as an evidence-backed dashed stub and never creates a participant. The
+append-only authoring marker distinguishes AUTO rows from EDITED/manual rows.
 
-Queue filtering and sorting are transient workspace views and never rewrite evidence order. Guided
-target resolution uses stable group ids, declared lifelines, bounded same-thread evidence, and
-explicit confirmation. Stable manual/group hit identities connect the themed raster canvas back to
-queue rows. Regeneration builds a review model first, then updates only safe AUTO occurrences while
-preserving edited occurrences and valid structural references through the existing undo snapshot.
+Queue filtering and sorting are transient workspace views and never rewrite evidence order. Selection
+stores message ids, with Shift range and Cmd/Ctrl additive semantics; occurrence ids are resolved
+only inside domain commands. Guided target resolution uses stable message ids, declared lifelines,
+bounded same-thread evidence, and explicit confirmation. Stable manual/message hit identities connect
+the themed raster canvas back to queue rows; the Compose overlay uses the same geometry and identity
+mapping as the canvas rather than relying on raster hit-testing. Canvas selection reveals and scrolls
+to the corresponding queue row, including a row hidden by the current filter, while row hover
+highlights the corresponding canvas arrow. Endpoint drags are constrained to declared lifeline
+columns, and a canvas double-click focuses the inline row details editor. Evidence navigation remains
+an explicit row action. Regeneration builds a review model first, then updates only safe AUTO
+occurrences and message definitions while preserving edited messages and valid structural references
+through the existing full-document undo snapshot.
+
+Repeat grouping is evidence-safe. The persisted `ManualMessageRepeatPolicy` belongs to one message
+and supports collapse-above-threshold (default 3), every occurrence, and first/last. The builder
+orders by derived evidence timestamp plus source ordinal and collapses only adjacent,
+compatibility-equivalent occurrences; an interleaved occurrence cannot disappear and one message's
+repeat choice cannot affect another. A `groupKey` is retained only as a legacy migration identity.
+`manualMessageDisplayTemplate` is the shared queue/canvas projection and replaces only varying named
+parameter values with `{name}`. A merge must pass `manualMergeCompatibility` (same endpoints, kind,
+editable label shape, and source provenance) before the editor creates a reversible message
+definition. Order overrides are validated as same-timestamp tie pins; non-tied messages cannot be
+reordered.
+
+`ManualDiagramInteraction.evidence` is append-only immutable per-occurrence evidence (entry id,
+timestamp, level). It augments, rather than replaces, legacy `sourceEntryIds`; codecs decode either
+form. The UI resolves live evidence by id from the source tab and otherwise renders the immutable
+snapshot as unavailable without navigation. Source-traced rows expose owner, method/site identity,
+trace mode, and an explicit source-location action only when the index can resolve the log row.
+Regeneration uses durable evidence/provenance one-to-one first. Semantic fallback is permitted only
+when both occurrences are evidence-free and the candidate is unique; ambiguous rows remain distinct
+and are marked in the review.
 
 Diagram workspaces are deliberately separate from `LogTab`. `AppState.tabs` remains the list of open
 log files; `ActiveSurface` selects either a log tab or an independent `DiagramWorkspaceSession`.
@@ -796,8 +825,11 @@ The durable diagram spec is intentionally evidence-oriented:
 | `DiagramMessage` | Endpoint, label, originating line, kind, and `MessageEvidence` (`LOG`, `RULE`, `SOURCE_INFERRED`, `ACTOR_MIRROR`, `THREAD_HANDOFF`, or `CORRELATION_TOKEN`). |
 | `DiagramActivationSpan` | Inclusive call/return interval carrying the evidence that justified it. |
 | `SeqDiagramSpec` | Range, components, actors, interaction mode/rules, source-enrichment and presentation options. |
-| `ManualDiagramInteraction` | Durable enabled occurrence with editable endpoints, operation data, optional group/provenance metadata, and UML visibility. |
-| `ManualDiagramDocument` | Ordered manual occurrences plus structural frames, notes, and activations. |
+| `ManualDiagramMessageDefinition` | Durable authored `from → to : label` message with match/capture data, endpoints, kind, per-message repeat policy, visibility/state, authoring, order override, and occurrence references. |
+| `ManualMessageOccurrence` / `ManualDiagramInteraction` | Immutable evidence-backed occurrence projection; `ManualDiagramInteraction` remains the v1–v4 compatibility store with editable source-row fields. |
+| `ManualDiagramGroup` / `ManualFragmentKind` | Stable queue grouping and explicit `alt`, `opt`, `loop`, `par`, or custom fragment structure over occurrence ids. |
+| `ManualDiagramDocument` | Canonical messages plus compatibility occurrences, structural frames, notes, activations, and a default repeat policy for new messages. Codec v5 writes explicit messages and reads v1–v4. |
+| `ManualRegenerationReview` | Per-occurrence regeneration decisions for new, changed-auto, removed-auto, and edited-kept rows, with bulk accept/reject operations. |
 
 Raw tag ids remain the provenance identity even when a component has been renamed or tags have been
 merged. This is what makes aliases, unmerge, source resolution, and arrow-to-log navigation stable

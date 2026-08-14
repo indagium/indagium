@@ -100,6 +100,10 @@ data class ArrowHit(
     val manualInteractionId: String? = null,
     /** Stable grouped-row identity, when the message represents a repeated manual group. */
     val groupKey: String? = null,
+    /** Endpoint geometry in image pixels, used by the manual canvas endpoint-drag affordance. */
+    val fromX: Int? = null,
+    val toX: Int? = null,
+    val arrowY: Int? = null,
 ) {
     /** Alias used by workspace association code when it does not need to distinguish legacy hits. */
     val interactionId: String? get() = manualInteractionId
@@ -111,6 +115,8 @@ data class RenderedDiagram(
     val widthPx: Int,
     val heightPx: Int,
     val scale: Float,
+    /** Lifeline centers in image pixels, retained as hit-test metadata rather than UI state. */
+    val participantCentersPx: List<Int> = emptyList(),
 )
 
 // ── Layout constants ──────────────────────────────────────────────────────────────────────────
@@ -829,6 +835,7 @@ private fun buildHits(diagram: SeqDiagram, layout: DiagramLayout): List<ArrowHit
             ArrowHit(i, m.entryId, geo.x1, geo.y - hitInset / 2, width, row.above + row.below + hitInset,
                 manualInteractionId = m.originKeys.firstNotNullOfOrNull { it.manualInteractionId },
                 groupKey = m.manualGroupKey,
+                fromX = geo.x1, toX = geo.x2, arrowY = geo.y,
             )
         } else if (geo.isSelf) {
             // The box now covers the loop AND its label — the label is what users actually click,
@@ -837,6 +844,7 @@ private fun buildHits(diagram: SeqDiagram, layout: DiagramLayout): List<ArrowHit
             ArrowHit(i, m.entryId, geo.x1, geo.y - hitInset / 2, width, row.loopH + hitInset,
                 manualInteractionId = m.originKeys.firstNotNullOfOrNull { it.manualInteractionId },
                 groupKey = m.manualGroupKey,
+                fromX = geo.x1, toX = geo.x2, arrowY = geo.y,
             )
         } else {
             // Clamped into the REAL gap between this row's neighbors (row pitch is no longer
@@ -851,6 +859,7 @@ private fun buildHits(diagram: SeqDiagram, layout: DiagramLayout): List<ArrowHit
             ArrowHit(i, m.entryId, x, top, w, bottom - top,
                 manualInteractionId = m.originKeys.firstNotNullOfOrNull { it.manualInteractionId },
                 groupKey = m.manualGroupKey,
+                fromX = geo.x1, toX = geo.x2, arrowY = geo.y,
             )
         }
     }
@@ -1148,7 +1157,7 @@ fun renderSequenceDiagram(diagram: SeqDiagram, theme: DiagramTheme, scale: Float
     } finally {
         g.dispose()
     }
-    return RenderedDiagram(image, hits, w, h, effectiveScale)
+    return RenderedDiagram(image, hits, w, h, effectiveScale, layout.participants.map { it.centerX })
 }
 
 private fun renderPlaceholder(theme: DiagramTheme, scale: Float): RenderedDiagram {
