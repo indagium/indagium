@@ -1,16 +1,5 @@
 package com.indagium.source
 
-import com.indagium.diagram.DiagramResolvedTrace
-import com.indagium.diagram.DiagramSourceSiteOverride
-import com.indagium.diagram.DiagramTraceCall
-import com.indagium.diagram.DiagramTraceDiagnostics
-import com.indagium.diagram.DiagramTraceEvent
-import com.indagium.diagram.DiagramTraceEvidence
-import com.indagium.diagram.DiagramTraceOperation
-import com.indagium.diagram.TraceCallStatus
-import com.indagium.diagram.TraceDiagnosticReason
-import com.indagium.diagram.TraceInvocationKind
-import com.indagium.diagram.TraceOperationKind
 import com.indagium.model.LogEntry
 import com.indagium.utils.CancellationCheck
 

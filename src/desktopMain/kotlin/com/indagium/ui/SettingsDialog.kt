@@ -48,7 +48,7 @@ import com.indagium.ai.CustomAiCommand
 import com.indagium.ai.ModelDiscoveryResult
 import com.indagium.ai.OpenAiCompatibleProvider
 import com.indagium.ai.normalizeAiProviderProfiles
-import com.indagium.diagram.DiagramExportMode
+import com.indagium.diagram3.DiagramExportMode
 import com.indagium.generated.BuildInfo
 import com.indagium.model.*
 import com.indagium.voice.VoiceLanguageCatalog

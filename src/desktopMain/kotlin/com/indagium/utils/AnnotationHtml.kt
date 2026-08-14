@@ -24,7 +24,7 @@ import java.util.Base64
 fun buildAnnotationsHtml(
     tab: LogTab,
     settings: AppSettings = AppSettings(),
-    renderDiagramPng: (com.indagium.diagram.SeqDiagram) -> ByteArray? = { null },
+    renderDiagramPng: (com.indagium.diagram3.Seq3Document) -> ByteArray? = { null },
 ): String = buildString {
     append("<div>")
     if (tab.annotations.prefix.isNotBlank()) {
@@ -50,17 +50,20 @@ private fun StringBuilder.appendNoteHtml(
     block: AnnBlock.Note,
     settings: AppSettings,
     blockNumber: Int,
-    renderDiagramPng: (com.indagium.diagram.SeqDiagram) -> ByteArray?,
+    renderDiagramPng: (com.indagium.diagram3.Seq3Document) -> ByteArray?,
 ): Int {
     if (block.text.isBlank()) return blockNumber
     val prefix = if (settings.numberAnnotationBlocks) "$blockNumber. " else ""
-    val diagram = com.indagium.diagram.parseDiagramNote(block.text)
+    val diagram = com.indagium.diagram3.parseSeq3Note(block.text)
     if (diagram != null) {
         // This is the single highest-value sink for a diagram: pasting a rich-text clipboard into
         // a Jira/Confluence comment is the one path that puts an actual picture in the ticket
         // without the user hand-attaching a file (which is what the !diagram-0N.png! anchor in
         // buildMd's Jira form requires). So embed the PNG the same way appendImageHtml does.
-        val png = diagram.model?.let(renderDiagramPng)
+        // Unlike v1/v2's ParsedDiagram.model, [Seq3Document] is never null here — v3's header
+        // always carries the whole document (see Seq3Codec.kt's own doc) — so this only degrades
+        // to the `<pre>` fallback below when [renderDiagramPng] itself can't rasterize.
+        val png = renderDiagramPng(diagram.document)
         if (prefix.isNotEmpty()) append("<p>").append(escapeHtmlMultiline(prefix.trim())).append("</p>")
         if (png != null) {
             append("<img src=\"data:image/png;base64,")

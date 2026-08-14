@@ -926,8 +926,8 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         autoScrollWhileTailing = o.boolOrDefault("autoScrollWhileTailing", true),
         diagramLinkedNotePrimary = o.boolOrDefault("diagramLinkedNotePrimary", false),
         diagramDefaultExportMode = o.stringOrNull("diagramDefaultExportMode")
-            ?.let { raw -> runCatching { com.indagium.diagram.DiagramExportMode.valueOf(raw) }.getOrNull() }
-            ?: com.indagium.diagram.DiagramExportMode.IMAGE,
+            ?.let { raw -> runCatching { com.indagium.diagram3.DiagramExportMode.valueOf(raw) }.getOrNull() }
+            ?: com.indagium.diagram3.DiagramExportMode.IMAGE,
     )
 }.getOrNull()
 

@@ -257,7 +257,7 @@ flowchart TB
         fileview["FileView / CompareView"]
         viewer["LogViewer + Minimap + TidMap + SearchBar"]
         fpanel["FilterPanel"]
-        diagramws["DiagramWorkspace<br/>tabs · inspector · canvas"]
+        diagramws["Seq3Workspace<br/>tabs · queue panel · canvas · inspector"]
         rpanel["Right sidebar<br/>AnnotationPanel · AiSidebar · VideoPanel"]
         dialogs["SettingsDialog · SourceCodeDialog<br/>McpInfoDialog · UpdateDialog · Dialogs.kt"]
     end
@@ -285,10 +285,10 @@ flowchart TB
         caseidx["cases/<br/>CaseIndexer · CaseSearch · CaseIndexStore"]
     end
 
-    subgraph diagrams["Diagram engine — package diagram"]
-        diagrambuild["SeqDiagramBuilder<br/>components · evidence · activations"]
-        diagramrender["SeqDiagramRenderer / DiagramEmitters"]
-        diagramcodec["DiagramSpecCodec"]
+    subgraph diagrams["Diagram engine — package diagram3"]
+        diagrambuild["Seq3Generator<br/>lifelines · adjacent-evidence targets"]
+        diagramrender["Seq3Layout / Seq3Raster / Seq3Emitters"]
+        diagramcodec["Seq3Codec"]
     end
 
     subgraph automation["Automation — package debug"]
@@ -362,13 +362,13 @@ observed in the code and enforced by convention and review rather than by toolin
 | `model` | All domain data types. No behaviour beyond trivial accessors and custom `equals`. | Compose `Color` only | Everything else |
 | `utils` | Pure log-processing algorithms: parse, filter, fold, merge, split, export, tail, match. | `model` | `ui`, `ai`, `debug`, any Compose UI |
 | `source` | Source-code indexing and log-line → call-site resolution. Pure text/regex, no compiler. | `model`, `utils` | `ui`, `ai`, `debug` |
-| `diagram` | UI-free sequence-diagram model, builder, renderer, text emitters, and note codec. | `model`, `utils`, `source` | `ui`, `ai`, `debug`, Compose UI |
+| `diagram3` | UI-free sequence-diagram model, generator, layout, raster, text emitters, and note codec. | `model`, `utils`, `debug` (`Json.kt` only — see §7) | `ui`, `ai`, `source`, Compose UI |
 | `cases` | Similarity index over previously written analysis notes. | `model`, `utils` | `ui`, `ai`, `debug` |
 | `video` | FFmpeg-backed playback and frame grabbing. | `model` | `ui` |
 | `voice` | Audio capture and the three transcription backends. | — | `ui` |
 | `update` | GitHub release check and asset download. | — | `ui` |
 | `singleinstance` | File-lock + loopback-socket single-instance IPC. | — | Everything else |
-| `debug` | Control server, tool catalogue, tool handlers, diagnostic logger. | `ui` (`AppState`), `model`, `utils`, `cases` | Compose UI composables |
+| `debug` | Control server, tool catalogue, tool handlers, diagnostic logger. | `ui` (`AppState`), `model`, `utils`, `cases`, `diagram3` | Compose UI composables |
 | `ai` | Provider clients, agent loop, tool-execution policy, managed MCP leases. | `debug` (gateway), `model`, `ui` (`AppState`) | Compose UI composables |
 | `ui` | Compose UI, `AppState`, coordinators, persistence codecs. | Everything | — |
 
@@ -400,7 +400,7 @@ flowchart TB
     ai["ai"]
     debug["debug"]
     source["source"]
-    diagram["diagram"]
+    diagram3["diagram3"]
     cases["cases"]
     utils["utils"]
     model["model"]
@@ -412,7 +412,7 @@ flowchart TB
     ui --> ai
     ui --> debug
     ui --> source
-    ui --> diagram
+    ui --> diagram3
     ui --> cases
     ui --> utils
     ui --> model
@@ -429,12 +429,13 @@ flowchart TB
     debug --> model
     debug --> cases
     debug --> source
+    debug --> diagram3
 
     source --> utils
     source --> model
-    diagram --> source
-    diagram --> utils
-    diagram --> model
+    diagram3 --> utils
+    diagram3 --> model
+    diagram3 --> debug
     cases --> utils
     cases --> model
     video --> model
@@ -445,13 +446,22 @@ flowchart TB
 
 **Key.** Arrows point from dependant to dependency.
 
-**The one cycle.** `ui ↔ ai` and `ui ↔ debug` are genuine bidirectional dependencies, not diagram
+**The cycles.** `ui ↔ ai` and `ui ↔ debug` are genuine bidirectional dependencies, not diagram
 artifacts. `debug/IndagiumToolOperations` holds an `AppState`, and `AppState` constructs
 `IndagiumToolOperations(this).toolGateway` to hand to the AI runtime (`ui/AppState.kt:970-981`). This
 is deliberate: the tools *are* "things the user can do", so they must reach the state that models
 what the user can do. It is the main reason a Gradle module split has not been attempted — the cycle
 would have to be broken with an interface extraction first. See
 [risk R7](#23-known-architectural-risks-and-technical-debt).
+
+`debug ↔ diagram3` is new since the v3 sequence-diagram cutover: `debug/IndagiumToolOperations`'s
+`build_sequence_diagram` route calls `diagram3.generateSeq3` directly, and `diagram3/Seq3Codec.kt`
+reuses `debug/Json.kt`'s hand-rolled encoder/decoder for its note header rather than adding a second
+JSON implementation. Unlike the `ui` cycles this one is a plain reuse-of-a-small-utility case, not a
+structural need to reach shared state — a future cleanup could break it by moving `Json.kt` (or just
+the four bounded accessor functions `diagram3` actually uses) to `utils` or `model` without changing
+either package's public behaviour. `diagram3` itself stays UI-free and does not depend on `source`
+(unlike the deleted `diagram` package's `SeqDiagramBuilder.kt`) — see §9.7 and §13.7 for why.
 
 `model` is a leaf. `utils` depends only on `model`. `singleinstance` depends on nothing in the
 application at all — it runs before `AppState` exists (`Main.kt:106`).
@@ -766,75 +776,55 @@ It is never persisted and never leaves the process.
 
 ---
 
-### 8.3 Sequence-diagram workspace model
+### 8.3 Sequence-diagram workspace model (v3)
 
-The manual message queue is a view over a canonical `ManualDiagramMessageDefinition` document. Each
-message owns its `from → to : label` definition, match/capture template, per-message repeat policy,
-state, order metadata, and one or more occurrence/evidence records. `ManualDiagramInteraction`
-remains the compatibility occurrence store for v1–v4. A nullable target is derived as needs-target
-state; it is rendered as an evidence-backed dashed stub and never creates a participant. The
-append-only authoring marker distinguishes AUTO rows from EDITED/manual rows.
+Rewritten wholesale in the "v3 cutover" (`docs/plans/use-the-claude-design-mcp-compiled-lighthouse.md`,
+phase 6): the earlier `diagram`-package model (`SeqDiagramSpec`, `ManualDiagramDocument`,
+`ManualDiagramInteraction`'s v1–v4 compatibility layer, rules-mode message generation, and the
+override/regeneration machinery it needed) is deleted outright, not migrated. v3 never reads a
+legacy document — there is exactly one on-disk version (`Seq3Codec`'s `SEQ3_VERSION = "v1"`), no
+`editorVersion` discriminator anywhere in the model, and the whole domain lives in
+`com.indagium.diagram3` (UI-free — see §9.7).
 
-Queue filtering and sorting are transient workspace views and never rewrite evidence order. Selection
-stores message ids, with Shift range and Cmd/Ctrl additive semantics; occurrence ids are resolved
-only inside domain commands. Guided target resolution uses stable message ids, declared lifelines,
-bounded same-thread evidence, and explicit confirmation. Stable manual/message hit identities connect
-the themed raster canvas back to queue rows; the Compose overlay uses the same geometry and identity
-mapping as the canvas rather than relying on raster hit-testing. Canvas selection reveals and scrolls
-to the corresponding queue row, including a row hidden by the current filter, while row hover
-highlights the corresponding canvas arrow. Endpoint drags are constrained to declared lifeline
-columns, and a canvas double-click focuses the inline row details editor. Evidence navigation remains
-an explicit row action. Regeneration builds a review model first, then updates only safe AUTO
-occurrences and message definitions while preserving edited messages and valid structural references
-through the existing full-document undo snapshot.
-
-Repeat grouping is evidence-safe. The persisted `ManualMessageRepeatPolicy` belongs to one message
-and supports collapse-above-threshold (default 3), every occurrence, and first/last. The builder
-orders by derived evidence timestamp plus source ordinal and collapses only adjacent,
-compatibility-equivalent occurrences; an interleaved occurrence cannot disappear and one message's
-repeat choice cannot affect another. A `groupKey` is retained only as a legacy migration identity.
-`manualMessageDisplayTemplate` is the shared queue/canvas projection and replaces only varying named
-parameter values with `{name}`. A merge must pass `manualMergeCompatibility` (same endpoints, kind,
-editable label shape, and source provenance) before the editor creates a reversible message
-definition. Order overrides are validated as same-timestamp tie pins; non-tied messages cannot be
-reordered.
-
-`ManualDiagramInteraction.evidence` is append-only immutable per-occurrence evidence (entry id,
-timestamp, level). It augments, rather than replaces, legacy `sourceEntryIds`; codecs decode either
-form. The UI resolves live evidence by id from the source tab and otherwise renders the immutable
-snapshot as unavailable without navigation. Source-traced rows expose owner, method/site identity,
-trace mode, and an explicit source-location action only when the index can resolve the log row.
-Regeneration uses durable evidence/provenance one-to-one first. Semantic fallback is permitted only
-when both occurrences are evidence-free and the candidate is unique; ambiguous rows remain distinct
-and are marked in the review.
-
-Diagram workspaces are deliberately separate from `LogTab`. `AppState.tabs` remains the list of open
-log files; `ActiveSurface` selects either a log tab or an independent `DiagramWorkspaceSession`.
-This keeps log lifecycle, compare view, and autosave semantics from acquiring diagram-only state.
-A workspace carries the source-log id (when it is still open), optional draft id, editable spec,
-dirty state, candidate tiers, and the last usable preview. A source tab can therefore close without
-destroying an already-built diagram; regeneration is disabled until a source is relinked.
-
-The durable diagram spec is intentionally evidence-oriented:
+The core reframe: a panel row is not a log line and not a rule — it is a **message**,
+`from → to : label`, backed by *n* real log occurrences.
 
 | Type | Responsibility |
 |---|---|
-| `DiagramComponent` | Stable id, display name, enabled state, and one-or-more raw `tagIds`; replaces per-tag presentation states. |
-| `DiagramActor` | External participant; may mirror a component inbound, outbound, or both while retaining the original edge. |
-| `UnmappedTagPolicy` | Global `HIDE` (default) or `GROUP_AS_OTHER` for every otherwise-unmapped in-range tag. |
-| `DiagramMessage` | Endpoint, label, originating line, kind, and `MessageEvidence` (`LOG`, `RULE`, `SOURCE_INFERRED`, `ACTOR_MIRROR`, `THREAD_HANDOFF`, or `CORRELATION_TOKEN`). |
-| `DiagramActivationSpan` | Inclusive call/return interval carrying the evidence that justified it. |
-| `SeqDiagramSpec` | Range, components, actors, interaction mode/rules, source-enrichment and presentation options. |
-| `ManualDiagramMessageDefinition` | Durable authored `from → to : label` message with match/capture data, endpoints, kind, per-message repeat policy, visibility/state, authoring, order override, and occurrence references. |
-| `ManualMessageOccurrence` / `ManualDiagramInteraction` | Immutable evidence-backed occurrence projection; `ManualDiagramInteraction` remains the v1–v4 compatibility store with editable source-row fields. |
-| `ManualDiagramGroup` / `ManualFragmentKind` | Stable queue grouping and explicit `alt`, `opt`, `loop`, `par`, or custom fragment structure over occurrence ids. |
-| `ManualDiagramDocument` | Canonical messages plus compatibility occurrences, structural frames, notes, activations, and a default repeat policy for new messages. Codec v5 writes explicit messages and reads v1–v4. |
-| `ManualRegenerationReview` | Per-occurrence regeneration decisions for new, changed-auto, removed-auto, and edited-kept rows, with bulk accept/reject operations. |
+| `Seq3Lifeline` | One canvas column: id, display name, the raw tag ids it represents (a singleton until a user merges two lifelines), and display ordinal. |
+| `Seq3Match` / `Seq3Capture` | A source-independent pattern proven across every occurrence of one message (`Seq3Tokenizer`), with named `{token}` slots for the varying runs. |
+| `Seq3Occurrence` | One real log line backing a message — entry id, timestamp, pid/tid, level, text, per-token capture values. Append-only, never user-editable. |
+| `Seq3Message` | The editable durable unit. `fromLifelineId` is never null (it's the tag the occurrences were scanned under); `toLifelineId` is nullable — a null value **is** the needs-target condition (`Seq3State.NEEDS_TARGET`), derived from the field rather than stored, so it can never drift out of sync. Also carries `kind` (call/return/async/self/note), `repeat` policy, `visibility` (a separate flag from authoring state — hiding never discards evidence), and `authoring` (`AUTO`/`EDITED`, which regeneration must respect). |
+| `Seq3Fragment` | An explicit, user-chosen `loop`/`alt`/`opt`/`par` block over a set of message ids — unlike the old auto-detected, meaning-free `DiagramFrame`, every fragment here was deliberately created by a Group action. |
+| `Seq3Note` | A canvas/text note spanning a message selection — distinct from a `Seq3Kind.NOTE` message, which is its own queue row with its own evidence. |
+| `Seq3Document` | The whole generated-or-edited diagram: title, source file, range, lifelines, messages, fragments, notes, default repeat policy. No `interactions` list and no version discriminator — see this type's own doc for why there is nothing to discriminate against. |
+| `Seq3GenerateOptions` | Tuning knobs for `Seq3Generator.generateSeq3`: title/source-file seed, lifeline cap, default repeat policy/threshold, and independent on/off switches for thread-handoff and correlation-token target inference. |
+| `Seq3RegenReview` | Regenerate-is-a-reviewed-proposal (never a wholesale replace): new/changed/removed/edited-kept rows with per-row decisions, produced by diffing a fresh generation against the current document; `applySeq3Command`'s `ApplyRegeneration` case turns an accepted review into exactly one undo step. |
 
-Raw tag ids remain the provenance identity even when a component has been renamed or tags have been
-merged. This is what makes aliases, unmerge, source resolution, and arrow-to-log navigation stable
-across edits. The builder duplicates a mirrored actor edge adjacent to its original only for a
-non-self interaction and records `ACTOR_MIRROR` evidence; it never reassigns the original endpoint.
+`Seq3Generator.generateSeq3` ranks lifelines from tag activity (errors, message-shape diversity,
+same-thread peers, a capped raw count — the ranking itself ported unchanged from the deleted
+`SeqDiagramBuilder.kt`), groups near-identical occurrences per tag into one `Seq3Message` via
+`Seq3Tokenizer`, and infers each message's target only from the *immediately adjacent* entry: a
+same-thread (pid+tid, bounded gap) handoff or a shared correlation token, both above a confidence
+bar. Deliberately absent, by this phase's own brief: no source-index enrichment, no rules-mode
+message generation, no call/site override machinery, no activation spans. v3's answer to "I don't
+like what the generator inferred" is the queue's own edit affordances (`Seq3Queue`, `Seq3Commands`),
+not more inference knobs in the generator.
+
+`Seq3Layout.layoutSeq3` is the single unit-less geometry source shared by the Compose canvas
+(`ui/Seq3Canvas.kt`) and the headless PNG rasterizer (`Seq3Raster.kt`, §9.7 and §13.7) — an export
+can never draw something the user didn't see on screen, because both consumers draw from exactly
+the same computed `Seq3Layout`, differing only in which transform (density vs. raster scale) turns
+its numbers into pixels.
+
+Diagram workspaces remain deliberately separate from `LogTab`, same shape as before the cutover:
+`AppState.tabs` stays the list of open log files; `ActiveSurface` selects either a log tab
+(`ActiveSurface.Log`) or an independent `Seq3WorkspaceSession` (`ActiveSurface.Diagram3` — the only
+non-log variant now that the v1/v2 `ActiveSurface.Diagram` case is gone). A session carries the
+source-log id (nullable — see §11.6), the generated/edited document, its own undo stack (one entry
+per `applySeq3Command` call, including a whole regeneration apply), dirty/draft-saved state, and
+the note block id a confirm writes into. A source tab can close without destroying an already-built
+session; regeneration is disabled (`requestGenerate` is a no-op) until the session is relinked.
 
 ---
 
@@ -927,17 +917,29 @@ non-self interaction and records `ACTOR_MIRROR` evidence; it never reassigns the
 | `update/UpdateChecker.kt` | GitHub Releases API, per-OS asset selection, streamed download to a `.part` file |
 | `singleinstance/SingleInstance.kt` | File lock plus loopback socket; forwards file arguments to the running instance |
 
-### 9.7 `diagram`
+### 9.7 `diagram3`
+
+v3 (the "v3 cutover", `docs/plans/use-the-claude-design-mcp-compiled-lighthouse.md` phase 6)
+replaced the whole `diagram` package outright — the model in §8.3, the generator, the raster, and
+the note codec are a fresh, much smaller design with no v1–v5 compatibility layer. One file from
+the old package survived, moved rather than deleted: `source/SourceTraceModel.kt` (package renamed
+from `com.indagium.diagram`), because `source/SourceTraceInference.kt` depends on its types and v3
+itself does no source-trace enrichment.
 
 | File | Role |
 |---|---|
-| `diagram/DiagramModel.kt` | Dialect-neutral inferred/manual spec and result model: stable message origins, components, actors, typed rules, evidence, groups, notes, activation spans, coverage, and ranges. |
-| `diagram/SeqDiagramBuilder.kt` | Cancellable range resolution, verified source-trace projection with explicit fallback, component mapping, stable-origin overrides, mirroring, and invocation-backed activation construction. |
-| `diagram/ManualDiagramBuilder.kt` | Deterministic, source-index-independent projection of ordered manual interactions, groups, notes, activations, and lifelines. |
-| `diagram/ManualDiagramSeedService.kt` | Expands inferred occurrences into grouped-but-independent manual rows and normalizes volatile message parameters for stable grouping. |
-| `diagram/SeqDiagramRenderer.kt` / `DiagramEmitters.kt` | Themed raster rendering with arrow hit targets plus Mermaid and PlantUML source emission. |
-| `diagram/DiagramSpecCodec.kt` | v4 note-header codec; reads v1-v3 attachments and snapshots, migrates legacy participant/actor fields, and persists manual authoring, stable origins, overrides, and source provenance. |
-| `ui/SeqDiagramDialog.kt` / `SeqDiagramCoordinator.kt` | Dedicated tab surface, conflated per-workspace preview pipeline, drafts, close handling, and source relinking. |
+| `diagram3/Seq3Model.kt` | The whole model, one file — §8.3's types plus `DiagramExportMode` (moved here from the old codec; its two serialised constant names, `IMAGE`/`SOURCE`, are unchanged so `AutosaveCodec`'s `diagramDefaultExportMode` setting keeps reading old autosaves). |
+| `diagram3/Seq3Tokenizer.kt` | Occurrence texts → one `Seq3Match` with named `{token}` captures, and the reverse `matches(text)` check. |
+| `diagram3/Seq3Correlation.kt` | Thread-handoff and shared-correlation-token evidence between two adjacent log entries — the only signals a message's target may be inferred from. |
+| `diagram3/Seq3Generator.kt` | Cancellable range resolution, tag-activity lifeline ranking, near-identical occurrence grouping, and adjacent-evidence target inference. No source-index enrichment, no rules mode, no overrides. |
+| `diagram3/Seq3Layout.kt` | `layoutSeq3`: the single unit-less geometry source for both the Compose canvas and the raster (arrow/self-loop/unresolved-stub/note/fragment boxes, lifeline-arrangement crossing count). |
+| `diagram3/Seq3Raster.kt` | Headless Graphics2D rasterizer over a `Seq3Layout` → `BufferedImage`/PNG bytes. Mandatory, not optional: note export, the rich-clipboard data-URI, and `diagram-NN.png` all depend on it (§13.7). |
+| `diagram3/Seq3Emitters.kt` | Mermaid and PlantUML source emission. |
+| `diagram3/Seq3Codec.kt` | The `<!-- indagium:diagram3 v1 {json} -->` note-header codec — the whole `Seq3Document` as JSON, SHA-256 body-hash guard, own bounds discipline. Exactly one version constant; a note written by an unrecognised/future version degrades to "not a diagram note" rather than throwing. |
+| `diagram3/Seq3Queue.kt` / `Seq3Guided.kt` / `Seq3Regeneration.kt` / `Seq3Commands.kt` | Pure filter/sort/selection/bulk-action logic, the guided target-resolution pass, the regenerate-review diff, and every mutation as a named command producing one undo entry. |
+| `ui/Seq3Session.kt` | State owner (`AppState.seq3Sessions`): session lifecycle keyed off a source log tab, the debounced generate+layout pipeline, per-session undo stack, note-write on confirm, and the `DiagramLibraryStore` integration that keeps a confirmed diagram reachable from the Notes-panel library section. Declares `ActiveSurface` (moved here from the deleted `ui/SeqDiagramCoordinator.kt`). |
+| `ui/Seq3Workspace.kt` / `Seq3QueuePanel.kt` / `Seq3Canvas.kt` / `Seq3Inspector.kt` / `Seq3GuidedPass.kt` / `Seq3RegenerateSheet.kt` | The workspace shell, the message queue panel, the Compose canvas (drawn from `Seq3Layout`), the pattern/kind/evidence inspector, the guided "Fix these" mode, and the regenerate review sheet. |
+| `ui/Seq3Theme.kt` | `ThemeColors.toSeq3RasterTheme()` plus `Seq3RenderCache` — a bounded LRU in front of `layoutSeq3`/`renderSeq3`, split into a layout tier (theme/scale-independent) and a render tier, so a theme switch never recomputes geometry and an unrelated note edit never re-rasterizes every open diagram. |
 
 ---
 
@@ -1013,26 +1015,32 @@ out; returning `null` falls back to a full rebuild.
 
 **Cancellation** is covered in [§12.3](#123-cancellation-of-computeitems).
 
-### 10.2 Diagram build and preview pipeline
+### 10.2 Diagram build and preview pipeline (v3)
 
-Diagram work is a second, per-workspace pipeline; it does not piggyback on the log viewer's
-composition path. Build-affecting inputs — range, components, actors, unmapped-tag policy,
-inference, source enrichment, and activation policy — feed a conflated `mapLatest` job. A later
-edit cancels range resolution, filtering, candidate counting, participant mapping, source lookup,
-and rendering before the obsolete result can publish. Metadata-only edits (title, attachment
-caption, and export format) bypass the pipeline entirely.
+Diagram work is a second, per-session pipeline (`ui/Seq3Session.kt`); it does not piggyback on the
+log viewer's composition path. `requestGenerate` is the ONLY entry point into
+`Seq3Generator.generateSeq3` — a session's own generation counter makes a later range/option edit
+supersede rather than queue an in-flight scan, debounced 180ms so a range-boundary drag on a huge
+log doesn't enqueue a dozen multi-second scans that all still have to run to completion. Debounced
+separately per session, so regenerating workspace A never cancels workspace B's in-flight build.
+Metadata-only edits (`updateTitle`) deliberately never call `requestGenerate`, which is what makes
+"a title keystroke must never trigger a rebuild" true by construction rather than a special case.
 
-The pipeline reuses cached filtered entries and caches source resolution by source-index revision and
-tag/message. It resolves selected-range candidates separately from current-filtered-view candidates;
-whole-log candidates remain a search operation backed by existing analysis counts. The diagram model
-then records coverage, evidence, warnings, and activation spans before it reaches either renderer.
+Layout and rendering are cached independently of generation, in `Seq3RenderCache` (`ui/Seq3Theme.kt`):
+a layout tier keyed only on the `Seq3Document` (geometry never depends on theme or scale) and a
+render tier keyed on `(layout, theme, scale)`. A theme switch therefore reuses the cached layout and
+only re-rasterizes; an unrelated note edit elsewhere in the document hits neither cache. The Notes
+panel follows the same discipline one level up: `Seq3NoteSummaryCache` extracts only the small
+top-level fields (title, caption, export mode, range) a folded card needs via a bounded text scan
+that never reaches a note's `lifelines`/`messages` arrays; `Seq3NoteParseCache` runs the full,
+trusted `parseSeq3Note` only when a card is expanded (§13.7 has the property test that pins this).
 
-Raster work runs off the Compose thread and produces an `ImageBitmap` for interactive preview. PNG
-encoding is deferred to copy/export. This distinction keeps a large preview from blocking input and
-avoids repeatedly encoding bytes the canvas does not need. The Notes panel follows the same rule:
-it parses only a diagram card's summary while collapsed; full codec decode and render happen
-asynchronously only after expansion. Parsed notes are cached by block id/text, and attachment images
-are re-exported only when their model, theme, or export mode changes.
+Regeneration (spec §08, `Seq3Regeneration.kt`) is a separate, explicit, non-debounced pipeline:
+`requestRegenReview` runs one fresh `generateSeq3` pass, diffs it against the session's current
+document into a `Seq3RegenReview` (new/changed/removed/edited-kept rows), and leaves the document
+itself untouched until `applyRegenReview` routes the accepted decisions through the same
+`applyCommand`/`applySeq3Command` path every other mutation uses — so "Apply N changes" is one undo
+step, not N.
 
 ---
 
@@ -1118,18 +1126,22 @@ request would be equal to the first and would not trigger recomposition.
 
 ### 11.6 Diagram surfaces are not log tabs
 
-`AppState.tabs` remains log-only. Diagram workspace sessions live in a separate collection selected
-through `ActiveSurface`, so log-tab code cannot accidentally treat a diagram as a log with an empty
-body. Each session owns its source-log identity, draft reference, spec, dirty state, candidate and
-preview state, zoom/pan presentation state, and cached model. Closing a dirty workspace routes
-through a three-way save-draft/discard/cancel decision; closing a source log converts dependent
-workspaces to offline/view-only state rather than discarding their cached evidence.
+`AppState.tabs` remains log-only. Diagram workspace sessions (`Seq3WorkspaceSession`, owned by
+`AppState.seq3Sessions`) live in a separate collection selected through `ActiveSurface`, so log-tab
+code cannot accidentally treat a diagram as a log with an empty body. Each session owns its
+source-log id (nullable), the generated/edited `Seq3Document`, its own undo stack, dirty/draft-saved
+state, the confirmed note block id, and the library item id it's backed by. Closing a v3 session is
+a plain, immediate close (`Seq3Session.close`) — unlike the deleted v1/v2 coordinator's three-way
+save-draft/discard/cancel prompt, a v3 diagram has no separate "unsaved draft" state to protect:
+confirming is the only durable-write action, and it always goes through the same overwrite-gated
+`upAnn` path any other note write does. Closing a source log converts dependent sessions to
+offline/view-only state (`sourceTabClosed` clears `sourceTabId`) rather than discarding their cached
+document; `requestGenerate`/`confirm` become no-ops until `relink` reattaches a live tab.
 
-The workspace inspector follows the same Bound-adapter rule as other UI leaf surfaces: it receives
-immutable state plus callbacks rather than `AppState`. Its sidebar is independently collapsible and
-resizable; canvas pan, zoom, fit/reset, scrollbars, and arrow navigation are presentation state, not
-diagram-spec state. This distinction is essential: a viewport adjustment must never mark a draft
-dirty or trigger a diagram rebuild.
+The workspace panel/canvas/inspector follow the same Bound-adapter rule as other UI leaf surfaces:
+they receive immutable session state plus callbacks into `Seq3Session` rather than reaching into
+`AppState` directly. Canvas pan, zoom, fit/reset, and scrollbar position are presentation state, not
+document state — a viewport adjustment must never mark a session dirty or trigger a regenerate.
 
 ---
 
@@ -1143,7 +1155,7 @@ dirty or trigger a diagram rebuild.
 | `Dispatchers.Default` | `ui/LogViewer.kt:308`, `ui/AppState.kt:2914`, `ui/Minimap.kt:453`, `ui/TidMap.kt:130` | CPU-bound work: `computeItems` for large files, minimap rendering, TID colouring, custom-issue scanning |
 | `CoroutineScope(SupervisorJob() + Dispatchers.Default)` | `ai/AiSidebarRuntime.kt:62` | AI runtime |
 | `CoroutineScope(SupervisorJob() + Dispatchers.IO)` | `ai/AccountAgentRunner.kt:29` | Subprocess agent runs |
-| Per-workspace `mapLatest` pipeline | Diagram workspace coordinator | Cancellable candidate and preview builds; metadata edits do not enter this pipeline |
+| Per-session conflated generate pipeline | `ui/Seq3Session.kt` | Cancellable `generateSeq3` builds, debounced 180ms; metadata-only edits (title) never enter this pipeline |
 | Ktor CIO request coroutines | `debug/ControlServer.kt` | Tool invocations from external clients |
 
 `SupervisorJob` throughout means one failed file load cannot cancel the scope and take every other
@@ -1216,7 +1228,8 @@ from any single file:
 | Search recompute | 150 ms | `ui/AppState.kt:4064` | Keystrokes in the Find bar |
 | Tail re-analysis | 1500 ms | `ui/TailCoordinator.kt:128` | Continuous appends into periodic crash re-detection |
 | AI UI update | 75 ms | `ai/AiSidebarRuntime.kt:281-288` | Token deltas, so Markdown is not reparsed per token |
-| Diagram workspace build | Conflated / latest only | Diagram workspace coordinator | Spec edits into one cancellable candidate/preview build; never metadata-only edits |
+| Diagram session generate | 180 ms | `ui/Seq3Session.kt` | Range/option edits into one cancellable `generateSeq3` build; never metadata-only edits |
+| Diagram session draft-saved | 400 ms | `ui/Seq3Session.kt` | Settles the canvas status bar's "Draft saved Nm ago" after the last edit |
 | Loading indicator grace | 250 ms | `ui/LogViewer.kt:72` | Suppresses a flashing spinner for sub-quarter-second recomputes |
 
 ### 12.6 Threading map
@@ -1406,69 +1419,59 @@ structure, including image bytes and log references, when the note is reopened. 
 carries `sourcePath` (`ui/AppState.kt:5327`), which is what lets the case index associate a note with
 the log it came from.
 
-### 13.7 Diagram compatibility and source-index invalidation
+### 13.7 Diagram note codec (v3) and PNG export
 
 Diagram notes stay ordinary `AnnBlock.Note` values, so the `.ann` container format does not change.
-Their invisible header is a separate diagram codec: writers emit v4 while readers continue to accept
-v1-v3 headers and library snapshots. Loading migrates legacy per-participant presentation and
-entry/exit actor fields into components, actors, and the global unmapped-tag policy. This migration
-is deterministic and preserves the original raw tag identities; a legacy attachment that cannot be
-fully reconstructed remains readable as a source/snapshot card instead of being discarded.
+The v3 cutover (phase 6 of `docs/plans/use-the-claude-design-mcp-compiled-lighthouse.md`) replaced
+the invisible header wholesale: `Seq3Codec` writes and reads exactly one version
+(`<!-- indagium:diagram3 v1 {json} -->`), never a v1–v5 compatibility chain. The header carries the
+WHOLE `Seq3Document` — lifelines and messages included, not a separate optional model/snapshot —
+followed by a fenced Mermaid/PlantUML body and a SHA-256 hash of that body; a hash mismatch (the
+fence was hand-edited, or written by a build that computed the hash differently) sets a warning but
+still returns the document, since it's what the header actually says. A header stamped with an
+unrecognised version, or one with garbled/truncated JSON or no fence after it, degrades to "not a
+diagram note" rather than throwing — same "never crash a Notes-panel render" contract the old codec
+had, reimplemented against the far smaller v3 model rather than ported. `DiagramExportMode`'s two
+serialised constant names (`IMAGE`/`SOURCE`) moved into `diagram3` unchanged, so
+`AutosaveCodec`'s `diagramDefaultExportMode` setting keeps reading old autosaves.
 
-Draft-library snapshots use the same codec, not a parallel serialized model. Snapshot attachments
-retain the rendered model and source identity; linked attachments retain the durable draft id and
-revision. Both forms can be viewed after their source log closes. The default attachment/export mode
-is image, which writes the diagram PNG and its Markdown/Jira image reference; source is an explicit
-opt-in format.
+`Seq3Layout`/`Seq3Raster` are mandatory, not optional: PNG export has no fallback path. Every
+consumer — the rich-clipboard data-URI (`AppState.copyRichPreview`), the `diagram-NN.png` files
+`writeAnnotationDiagramImages` writes beside an exported `.md`, and `exportAnnotationFrames`'s
+`_frames` folder — rasterizes through the same `Seq3RenderCache` (§10.2) rather than a bespoke path,
+so a theme switch is honoured everywhere identically. `DiagramLibraryStore` is unchanged by the
+cutover: it always stored the codec's encoded text verbatim (`DiagramLibrarySnapshot.
+encodedDiagramNote`), so only the bytes it now stores changed, not its own format or on-disk layout.
+
+Diagram3's generator deliberately does **no** source-index enrichment (`Seq3Generator.kt`'s own
+header) — a message's target lifeline is inferred only from adjacent-entry evidence in the log
+itself (thread handoff, correlation token; see §8.3), never from the source index. The source-trace
+reconstruction engine described below (`source/SourceTraceInference.kt`,
+`SourceTraceInferenceEngine`) therefore currently has **no production caller**: the old
+`diagram/SeqDiagramBuilder.kt` was its only consumer, and it was deleted with the rest of that
+package. The engine and its model (moved intact to `source/SourceTraceModel.kt` — see §9.7) remain
+in the tree, covered by their own test suite (`SourceTraceInferenceTest.kt`), on the phase-6 brief's
+explicit instruction to preserve them; nothing currently invokes them at runtime.
 
 The source index uses schema v19. In addition to methods, log sites, and resolved call edges, it
 persists source-ordered executable operations, branch/merge successors, continuations, returns,
 throws, receiver bindings, and async dispatch metadata. A non-v19 index is never partially
-trusted: it is rebuilt before source-trace reconstruction is offered. Test roots remain excluded from
-runtime call candidates, and runtime values remain log evidence rather than index content.
+trusted: it would be rebuilt before source-trace reconstruction is offered. Test roots remain
+excluded from runtime call candidates, and runtime values remain log evidence rather than index
+content.
 
-When source enrichment has a compatible verified trace, `source/SourceTraceInference.kt` reconstructs
-lane-isolated invocation stacks over the indexed operations. Calls and returns are structural operations; selected
-log rows are separate trace events and remain visible exactly once at their source owner. PID/TID and
-logged values refine ambiguity and return correlation. Prefix/suffix boundaries are never synthesized;
-ambiguous, stale, unsupported, or incompatible lanes stay log-only and surface diagnostics/proposals
-instead of guessed arrows. Async dispatches cross lanes only when indexed evidence proves the handoff
-and never push a blocking synchronous activation.
-
-`diagram/SeqDiagramBuilder.kt` projects the source trace directly and derives activations from
-invocation enter/exit boundaries. Stable origin keys survive mirroring and repeat collapsing so
-bulk edits address the represented interactions rather than fragile rendered indices. Typed rule
-endpoints must bind to configured lifelines unless an actor is explicitly requested.
-
-In inferred evidence-flow diagrams, the default experience includes a transient `Caller` opening
-actor when no explicit entry actor exists and the selected rows have usable lifelines. The actor is
-build-time state only: it is excluded from the durable spec, manual seed, and carried note model.
-Same non-zero PID/TID rows within 250 ms produce `THREAD_HANDOFF` evidence; adjacent rows on
-different lifelines may also produce `CORRELATION_TOKEN` evidence only for shared high-confidence
-UUID, long-hex, or recognised request/session/trace/correlation/span identifiers with parseable
-timestamps. `labelSource=BOTH` is the default, and source-method labels fall back to the original
-message when no method resolves.
-
-Source reconstruction is segment-based. A verified prefix or suffix is retained when a middle row
-is stale, ambiguous, low-confidence, or branch-incompatible; `PARTIAL_SOURCE_TRACE` distinguishes
-that projection from a complete trace, while unresolved selected rows remain primary log events.
-Synthetic callback methods for Kotlin trailing lambdas and Java/Kotlin anonymous callback bodies are
-stored with stable IDs and async registration edges. Only async paths may cross branch operations;
-synchronous call and return proof remains straight-line and conservative.
-
-Manual authoring stores ordered interactions, optional grouping keys, source method/site provenance,
-operation visibility, lifeline order, groups, notes, and explicit activation ranges in the v4
-diagram header. New workspaces default to Manual and asynchronously seed from an inferred preview;
-saved diagrams retain their persisted mode. Grouped occurrences remain separate durable rows so a
-group edit can fan out while Detach can make one occurrence independent. The manual builder renders
-only lifelines referenced by enabled interactions while retaining hidden order for reappearance.
-Explicit source-trace and same-thread-handoff seed actions each have a one-step session revert and
-preserve the document when inference fails. It snapshots proposals once and then renders
-independently of the source index; proposal refresh is non-destructive. Both UI and MCP use the same manual, typed-rule,
-override, trace, and provenance model. The persisted trace status vocabulary includes
-`PARTIAL_VERIFIED` for a future mixed-lane projection; the current builder selects `SOURCE_TRACE`
-only for a complete projected trace, `PARTIAL_SOURCE_TRACE` for verified segments, and `FALLBACK`
-when source reconstruction is unusable.
+Were it wired to a caller again, `SourceTraceInferenceEngine.resolve` reconstructs lane-isolated
+invocation stacks over the indexed operations: calls and returns are structural operations, selected
+log rows are separate trace events and remain visible exactly once at their source owner, PID/TID
+and logged values refine ambiguity and return correlation, prefix/suffix boundaries are never
+synthesized, and ambiguous/stale/unsupported/incompatible lanes stay log-only with diagnostics
+rather than guessed arrows. Async dispatches cross lanes only when indexed evidence proves the
+handoff and never push a blocking synchronous activation. Source reconstruction is segment-based: a
+verified prefix or suffix is retained when a middle row is stale, ambiguous, low-confidence, or
+branch-incompatible (`PARTIAL_SOURCE_TRACE` distinguishes that projection from a complete
+`SOURCE_TRACE`); synthetic callback methods for Kotlin trailing lambdas and Java/Kotlin anonymous
+callback bodies are stored with stable IDs and async registration edges; only async paths may cross
+branch operations, and synchronous call/return proof remains straight-line and conservative.
 
 ---
 

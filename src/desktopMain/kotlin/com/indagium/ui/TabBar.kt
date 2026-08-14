@@ -35,7 +35,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
-import com.indagium.diagram.SeqDiagramSpec
 import com.indagium.model.*
 import java.awt.FileDialog
 import java.awt.Frame
@@ -92,7 +91,7 @@ internal fun TabBar(state: AppState) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TabOverflowRow(state = state, modifier = Modifier.weight(1f).fillMaxHeight())
-        if (state.seqDiagrams.workspaces.isNotEmpty()) {
+        if (state.seq3Sessions.sessions.isNotEmpty()) {
             DiagramWorkspaceTabs(state)
             Spacer(Modifier.width(toolbarGap))
         }
@@ -247,15 +246,15 @@ private fun DiagramWorkspaceTabs(state: AppState) {
 
     BoxWithConstraints(Modifier.widthIn(max = 460.dp).fillMaxHeight()) {
         val rawCapacity = (maxWidth.value / 145f).toInt().coerceIn(1, 3)
-        val capacity = if (state.seqDiagrams.workspaces.size > rawCapacity) {
+        val capacity = if (state.seq3Sessions.sessions.size > rawCapacity) {
             (rawCapacity - 1).coerceAtLeast(1)
         } else {
             rawCapacity
         }
-        val activeId = (state.activeSurface as? ActiveSurface.Diagram)?.workspaceId
-        val allIds = state.seqDiagrams.workspaces.map { it.id }
+        val activeId = (state.activeSurface as? ActiveSurface.Diagram3)?.sessionId
+        val allIds = state.seq3Sessions.sessions.map { it.id }
         val (visibleIds, overflowIds) = diagramWorkspaceIdsForWidth(allIds, activeId, capacity)
-        val byId = state.seqDiagrams.workspaces.associateBy { it.id }
+        val byId = state.seq3Sessions.sessions.associateBy { it.id }
 
         LaunchedEffect(visibleIds, dragWorkspaceId) {
             if (dragWorkspaceId == null) liveVisualIds = visibleIds
@@ -311,7 +310,7 @@ private fun DiagramWorkspaceTabs(state: AppState) {
                                     PointerEventType.Release -> {
                                         if (dragging && dragWorkspaceId != null) {
                                             justReleasedWorkspaceId = dragWorkspaceId
-                                            state.seqDiagrams.reorderWorkspaces(
+                                            state.seq3Sessions.reorderSessions(
                                                 diagramWorkspaceOrderAfterVisibleReorder(
                                                     allIds = currentAllIds,
                                                     newVisibleOrder = currentVisualIds,
@@ -350,7 +349,7 @@ private fun DiagramWorkspaceTabs(state: AppState) {
                             targetX = targetX,
                             animatedX = animatedX,
                         )
-                        val active = state.activeSurface == ActiveSurface.Diagram(workspace.id)
+                        val active = state.activeSurface == ActiveSurface.Diagram3(workspace.id)
                         Box(
                             Modifier
                                 .offset { IntOffset(tabX.roundToInt(), 0) }
@@ -366,13 +365,13 @@ private fun DiagramWorkspaceTabs(state: AppState) {
                         ) {
                             TabShell(
                                 pointerKey = workspace.id,
-                                label = workspace.spec.title.ifBlank { "Diagram" },
-                                tooltip = diagramTabTooltip(workspace.spec),
+                                label = workspace.document.title.ifBlank { "Diagram" },
+                                tooltip = diagramTabTooltip(workspace),
                                 isActive = active,
                                 showClose = true,
                                 dragging = isDragging,
-                                onClick = { if (dragWorkspaceId == null) state.seqDiagrams.activateWorkspace(workspace.id) },
-                                onClose = { state.seqDiagrams.requestCloseWorkspace(workspace.id) },
+                                onClick = { if (dragWorkspaceId == null) state.seq3Sessions.activate(workspace.id) },
+                                onClose = { state.seq3Sessions.close(workspace.id) },
                                 onCtxMenu = { _, _ -> ctxMenuWorkspaceId = workspace.id },
                             )
                             if (ctxMenuWorkspaceId == workspace.id) {
@@ -387,7 +386,7 @@ private fun DiagramWorkspaceTabs(state: AppState) {
                                             .border(1.dp, tc.br, RoundedCornerShape(7.dp)).padding(vertical = 4.dp),
                                     ) {
                                         CtxItem(icon = Icons.Outlined.Close, label = "Close") {
-                                            state.seqDiagrams.requestCloseWorkspace(workspace.id)
+                                            state.seq3Sessions.close(workspace.id)
                                             ctxMenuWorkspaceId = null
                                         }
                                         CtxItem(icon = Icons.Outlined.Block, label = "Close all diagrams") {
@@ -422,12 +421,12 @@ private fun DiagramWorkspaceTabs(state: AppState) {
                         HoverBox(
                             modifier = Modifier.fillMaxWidth(),
                             onClick = {
-                                state.seqDiagrams.activateWorkspace(workspace.id)
+                                state.seq3Sessions.activate(workspace.id)
                                 overflowOpen = false
                             },
                         ) {
                             AppText(
-                                workspace.spec.title.ifBlank { "Diagram" },
+                                workspace.document.title.ifBlank { "Diagram" },
                                 fontSize = 11.sp,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -440,28 +439,21 @@ private fun DiagramWorkspaceTabs(state: AppState) {
     }
 }
 
-/** Closes every diagram workspace, saving nothing silently.
- *
- * pendingCloseWorkspaceId is a single slot (SeqDiagramCoordinator), so a naive
- * `workspaces.forEach(::requestCloseWorkspace)` has every dirty workspace overwrite the previous
- * one's prompt: exactly one of them asks to save and the rest stay open with no explanation.
- * Instead close the clean ones outright and hand the first dirty one to the normal Save/Discard
- * gate — re-invoking the action walks the remaining drafts one prompt at a time, which is the only
- * shape that never discards an unsaved draft without asking.
- */
+/** Closes every open diagram workspace. Unlike v1/v2's `SeqDiagramCoordinator`, a v3
+ *  [Seq3WorkspaceSession] has no dirty-close confirmation of its own (Seq3Workspace.kt's header
+ *  `CloseButton` already closes outright) — a confirmed diagram is durable the moment it's written
+ *  as a note, so there is no "unsaved draft" state here to protect with a one-at-a-time prompt. */
 private fun closeAllDiagramWorkspaces(state: AppState) {
-    val ids = state.seqDiagrams.workspaces.map { it.id }
-    ids.filterNot(state.seqDiagrams::workspaceNeedsSave).forEach { state.seqDiagrams.closeWorkspace(it) }
-    ids.firstOrNull(state.seqDiagrams::workspaceNeedsSave)?.let(state.seqDiagrams::requestCloseWorkspace)
+    state.seq3Sessions.sessions.map { it.id }.forEach(state.seq3Sessions::close)
 }
 
-/** Title + scope + source, matching what the inspector's own Scope pill shows (rangeSummary,
- * ui/SeqDiagramDialog.kt) so the tab tooltip and the inspector never disagree about the range. */
-private fun diagramTabTooltip(spec: SeqDiagramSpec): String = buildString {
-    append(spec.title.ifBlank { "Diagram" })
+/** Title + scope + source, matching what the queue panel's own scope line shows so the tab tooltip
+ * and the workspace never disagree about the range. */
+private fun diagramTabTooltip(session: Seq3WorkspaceSession): String = buildString {
+    append(session.document.title.ifBlank { "Diagram" })
     append('\n')
-    append(rangeSummary(spec.range))
-    spec.sourceFile?.let {
+    append(rangeSummary(session.range))
+    session.document.sourceFile?.let {
         append('\n')
         append(it)
     }

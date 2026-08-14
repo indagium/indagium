@@ -1,10 +1,12 @@
 package com.indagium.ui
 
-import com.indagium.diagram.ParsedDiagram
-import com.indagium.diagram.SeqDiagram
-import com.indagium.diagram.SeqDiagramSpec
-import com.indagium.diagram.encodeDiagramNote
-import com.indagium.diagram.parseDiagramNote
+import com.indagium.diagram3.DiagramExportMode
+import com.indagium.diagram3.ParsedSeq3
+import com.indagium.diagram3.Seq3Dialect
+import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.Seq3Range
+import com.indagium.diagram3.encodeSeq3Note
+import com.indagium.diagram3.parseSeq3Note
 import com.indagium.utils.writeFileAtomically
 import java.io.File
 import java.util.Base64
@@ -21,18 +23,23 @@ data class DiagramSourceIdentity(
 
 /**
  * The full codec artifact is intentionally the library's payload, rather than a second, lossy
- * serialization of SeqDiagramSpec/SeqDiagram.  DiagramSpecCodec owns that format and may append
- * metadata in later versions; a library written by this layer preserves those bytes verbatim.
+ * serialization of [Seq3Document]. [com.indagium.diagram3.Seq3Codec] owns that format and may
+ * append metadata in later versions; a library written by this layer preserves those bytes
+ * verbatim.
  */
 data class DiagramLibrarySnapshot(val encodedDiagramNote: String) {
-    fun parsed(): ParsedDiagram? = parseDiagramNote(encodedDiagramNote)
+    fun parsed(): ParsedSeq3? = parseSeq3Note(encodedDiagramNote)
 
     companion object {
-        fun create(spec: SeqDiagramSpec, source: String, model: SeqDiagram?): DiagramLibrarySnapshot =
-            DiagramLibrarySnapshot(encodeDiagramNote(spec, source, model))
+        fun create(
+            document: Seq3Document,
+            dialect: Seq3Dialect = Seq3Dialect.MERMAID,
+            caption: String = "",
+            exportMode: DiagramExportMode = DiagramExportMode.IMAGE,
+        ): DiagramLibrarySnapshot = DiagramLibrarySnapshot(encodeSeq3Note(document, dialect, caption, exportMode))
 
         fun fromDiagramNote(text: String): DiagramLibrarySnapshot? =
-            text.takeIf { parseDiagramNote(it) != null }?.let(::DiagramLibrarySnapshot)
+            text.takeIf { parseSeq3Note(it) != null }?.let(::DiagramLibrarySnapshot)
     }
 }
 
@@ -58,7 +65,7 @@ data class DiagramLibraryItem(
     val lastOpenedAt: Long = 0L,
     val attachments: List<DiagramLibraryAttachment> = emptyList(),
 ) {
-    val parsed: ParsedDiagram? get() = snapshot.parsed()
+    val parsed: ParsedSeq3? get() = snapshot.parsed()
     val isAttached: Boolean get() = attachments.isNotEmpty()
 }
 
@@ -116,11 +123,10 @@ private fun String.boundedValue(maxChars: Int, maxBytes: Int): String? {
     return String(bytes, Charsets.UTF_8).takeIf { it.length <= maxChars }
 }
 
-private fun rangeSummary(spec: SeqDiagramSpec): String = when (val range = spec.range) {
-    is com.indagium.diagram.DiagramRange.VisibleView -> "Visible view"
-    is com.indagium.diagram.DiagramRange.Ids -> "IDs ${minOf(range.from, range.to)}–${maxOf(range.from, range.to)}"
-    is com.indagium.diagram.DiagramRange.Time -> "${range.fromTs}–${range.toTs}"
-    is com.indagium.diagram.DiagramRange.SeqGroupRef -> "Sequence ${range.gid}"
+internal fun rangeSummary(range: Seq3Range): String = when (range) {
+    is Seq3Range.VisibleView -> "Visible view"
+    is Seq3Range.Ids -> "IDs ${minOf(range.from, range.to)}–${maxOf(range.from, range.to)}"
+    is Seq3Range.Time -> "${range.fromTs}–${range.toTs}"
 }
 
 private fun DiagramLibraryItem.toSummary(): DiagramLibrarySummary {
@@ -134,9 +140,8 @@ private fun DiagramLibraryItem.toSummary(): DiagramLibrarySummary {
         updatedAt = updatedAt,
         lastOpenedAt = lastOpenedAt,
         attachmentCount = attachments.size,
-        participantLabels = parsed?.model?.participants?.map { it.label }
-            ?: parsed?.spec?.participants?.map { it.label }.orEmpty(),
-        rangeSummary = parsed?.let { rangeSummary(it.spec) } ?: "Unavailable diagram data",
+        participantLabels = parsed?.document?.lifelines?.map { it.name }.orEmpty(),
+        rangeSummary = parsed?.let { rangeSummary(it.document.range) } ?: "Unavailable diagram data",
     )
 }
 

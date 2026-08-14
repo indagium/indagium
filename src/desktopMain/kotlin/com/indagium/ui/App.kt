@@ -309,21 +309,17 @@ fun App(
                 val activeTab = state.activeTab()
                 val activeSurface = state.activeSurface ?: activeTab?.id?.let(ActiveSurface::Log)
                 when {
-                    state.tabs.isEmpty() && state.seqDiagrams.workspaces.isEmpty() ->
+                    state.tabs.isEmpty() && state.seq3Sessions.sessions.isEmpty() ->
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             AppText("No files open — click Open to add a log", color = tc.ts, fontSize = 14.sp)
                         }
 
-                    // Keyed on the workspace id — matching the log path's key(activeTab.id) just
-                    // below — so DiagramPreviewPane's remembered viewport/scroll/focus state
-                    // (SeqDiagramWorkspace.kt) is fully per-workspace instead of leaking whatever
-                    // the previously active diagram tab left behind (Part B task note).
-                    activeSurface is ActiveSurface.Diagram -> key(activeSurface.workspaceId) {
-                        if (state.seqDiagrams.workspaces.firstOrNull { it.id == activeSurface.workspaceId }?.variant == DiagramWorkspaceVariant.V2) {
-                            SeqDiagramWorkspaceV2(state, activeSurface.workspaceId)
-                        } else {
-                            SeqDiagramWorkspace(state, activeSurface.workspaceId)
-                        }
+                    // Keyed on the session id — matching the log path's key(activeTab.id) just
+                    // below — so Seq3Workspace's remembered viewport/scroll/focus state is fully
+                    // per-session instead of leaking whatever the previously active diagram tab
+                    // left behind (Part B task note, carried over from the v1/v2 surface it replaces).
+                    activeSurface is ActiveSurface.Diagram3 -> key(activeSurface.sessionId) {
+                        Seq3Workspace(state, activeSurface.sessionId)
                     }
                     state.compareMode -> CompareView(
                         state = state,
@@ -461,10 +457,9 @@ fun App(
                         // two-row shape.
                         val hasProcessBlock = hasShowMapAction || hasHideMapAction || hasNameAction
                         val hasProcessSecondRow = hasShowMapAction && hasHideMapAction && hasNameAction
-                        // 522, not 458: the always-present "Sequence diagram…" and "Sequence diagram v2"
-                        // action rows in the sequence block below add two more 32dp entries. This estimate only decides
-                        // where the menu is anchored, but an under-estimate lets it open off-screen.
-                        val estimatedMenuHeight = (522 +
+                        // This estimate only decides where the menu is anchored, but an
+                        // under-estimate lets it open off-screen.
+                        val estimatedMenuHeight = (458 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
                             (if (state.pendingSequenceStart != null) 32 else 0) +
                             (if (hasProcessBlock) 73 else 0) +
@@ -568,13 +563,7 @@ fun App(
                                 add(
                                     CtxMenuEntry.Action(Icons.Outlined.Schema, "Sequence diagram…") {
                                         state.ctx = null
-                                        state.seqDiagrams.begin(ctx.tabId, selectedIds.toSet())
-                                    },
-                                )
-                                add(
-                                    CtxMenuEntry.Action(Icons.Outlined.Schema, "Sequence diagram v2") {
-                                        state.ctx = null
-                                        state.seqDiagrams.beginV2(ctx.tabId, selectedIds.toSet())
+                                        state.seq3Sessions.begin(ctx.tabId, selectedIds.toSet())
                                     },
                                 )
                                 add(CtxMenuEntry.Divider)
@@ -2286,12 +2275,11 @@ private fun handleGlobalKey(
         ev.key == Key.LeftBracket            -> { navigateTab(state, -1); true }
         ev.key == Key.W                      -> { state.activeTab()?.id?.let(state::closeTab); true }
         ev.key == Key.Slash                  -> { state.shortcutsOpen = true; true }
-        // Diagram-surface-only undo (one step: the last manual-seed build/regeneration). No new
-        // undo stack — this calls the same revertManualSeed() the panel's own "Reset" button uses,
-        // which already safely no-ops when there is nothing to revert.
+        // Diagram-surface undo (ui/Seq3Session.kt): every mutation there is one applySeq3Command
+        // step, so this is a plain pop off that session's own undo stack.
         (ev.isCtrlPressed || ev.isMetaPressed) && !ev.isShiftPressed &&
-            ev.key == Key.Z && state.activeSurface is ActiveSurface.Diagram -> {
-            state.seqDiagrams.revertManualSeed(); true
+            ev.key == Key.Z && state.activeSurface is ActiveSurface.Diagram3 -> {
+            state.seq3Sessions.undoActive(); true
         }
         else -> false
     }

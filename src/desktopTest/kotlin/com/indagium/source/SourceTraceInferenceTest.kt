@@ -1,30 +1,27 @@
 package com.indagium.source
 
-import com.indagium.diagram.DiagramComponent
-import com.indagium.diagram.DiagramOptions
-import com.indagium.diagram.DiagramTraceEvidence
-import com.indagium.diagram.MessageKind
-import com.indagium.diagram.SeqDiagramSpec
-import com.indagium.diagram.SourceTraceMode
-import com.indagium.diagram.TraceCallStatus
-import com.indagium.diagram.TraceDiagnosticReason
-import com.indagium.diagram.TraceInvocationKind
-import com.indagium.diagram.buildSequenceDiagram
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
-import com.indagium.ui.mkTab
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 // Arbitrary-but-large-enough end offset for the fixture methods below — not a meaningful specific
 // value, just wide enough to cover the fixture bodies.
 private const val FIXTURE_METHOD_END_OFFSET = 200
 
+// This file used to also assert on `diagram.buildSequenceDiagram`'s output (participants/messages/
+// activationSpans built FROM a resolved trace) — that pipeline was `diagram/SeqDiagramBuilder.kt`,
+// deleted in the sequence-diagram v3 cutover (docs/plans/use-the-claude-design-mcp-compiled-
+// lighthouse.md, phase 6): v3 (`com.indagium.diagram3`) deliberately does no source-trace
+// enrichment (see `Seq3Generator.kt`'s own header), so there is no successor pipeline to assert
+// those diagram-level properties against. Every test below now asserts directly against
+// [SourceTraceInferenceEngine.resolve]'s [DiagramResolvedTrace] output instead — the actual unit
+// under test in this package — which is exactly what each test's diagram-level assertions were
+// themselves downstream of.
 class SourceTraceInferenceTest {
     @Test
     fun canonicalNestedKotlinFixtureProducesSourceOrderedCallsReturnsAndEveryLog() {
@@ -75,28 +72,6 @@ class SourceTraceInferenceTest {
         assertEquals(trace.calls[0].invocationId, trace.calls[1].parentInvocationId)
         assertEquals(9, trace.operations.count { it.kind.name in setOf("SOURCE_CALL", "SOURCE_RETURN", "LOG_EVENT") })
         assertEquals(listOf(1, 2, 3, 4, 5), trace.operations.filter { it.kind.name == "LOG_EVENT" }.map { it.entryId })
-
-        val diagram = buildSequenceDiagram(
-            mkTab("canonical", "fixture.log", entries),
-            SeqDiagramSpec(
-                components = listOf(
-                    DiagramComponent("controller", "Controller", setOf("Controller"), sourceOwnerTypes = setOf("fixture.Controller")),
-                    DiagramComponent("service", "Service", setOf("Service"), sourceOwnerTypes = setOf("fixture.Service")),
-                    DiagramComponent("repository", "Repository", setOf("Repository"), sourceOwnerTypes = setOf("fixture.Repository")),
-                ),
-                options = DiagramOptions(collapseRepeats = false),
-            ),
-            resolveTrace = { SourceTraceInferenceEngine(index).resolve(it) },
-        )
-        assertEquals(setOf(1, 2, 3, 4, 5), diagram.primaryEntryIds)
-        assertEquals(SourceTraceMode.SOURCE_TRACE, diagram.traceMode)
-        assertTrue(diagram.participants.none { it.label == "Caller" })
-        assertEquals(
-            listOf(MessageKind.SELF, MessageKind.CALL, MessageKind.SELF, MessageKind.CALL, MessageKind.SELF,
-                MessageKind.RETURN, MessageKind.SELF, MessageKind.RETURN, MessageKind.SELF),
-            diagram.messages.map { it.kind },
-        )
-        assertTrue(diagram.messages.filter { !it.primary }.all { it.sourceOperationId != null })
     }
 
     @Test
@@ -420,42 +395,16 @@ class SourceTraceInferenceTest {
         assertEquals(1, call.callEntryId)
         assertEquals(2, call.returnEntryId)
         assertTrue(DiagramTraceEvidence.RUNTIME_RETURN_VALUE in call.evidence)
-
-        val diagram = buildSequenceDiagram(
-            mkTab("trace", "trace.log", listOf(entry(1, "started"), entry(2))),
-            SeqDiagramSpec(
-                components = listOf(
-                    DiagramComponent("client", "Client", setOf("Client"), sourceOwnerTypes = setOf("com.example.Client")),
-                    DiagramComponent("service", "Service", setOf("Service"), sourceOwnerTypes = setOf("com.example.Service")),
-                ),
-                options = DiagramOptions(collapseRepeats = false),
-            ),
-            resolveTrace = { entries -> engine.resolve(entries) },
-        )
-        assertEquals(listOf(MessageKind.CALL, MessageKind.SELF, MessageKind.RETURN, MessageKind.SELF), diagram.messages.map { it.kind })
-        assertEquals(setOf(1, 2), diagram.primaryEntryIds)
-        assertTrue(diagram.messages.filter { it.primary }.all { it.kind == MessageKind.SELF })
-        assertEquals(TraceCallStatus.RETURNED, diagram.activationSpans.single().status)
     }
 
     @Test
     fun returnOnlySelectionNeverFabricatesAnEarlierCallOrReturn() {
-        val engine = SourceTraceInferenceEngine(site())
-        val diagram = buildSequenceDiagram(
-            mkTab("return-only", "trace.log", listOf(entry(1))),
-            SeqDiagramSpec(
-                components = listOf(
-                    DiagramComponent("client", "Client", setOf("Client"), sourceOwnerTypes = setOf("com.example.Client")),
-                    DiagramComponent("service", "Service", setOf("Service"), sourceOwnerTypes = setOf("com.example.Service")),
-                ),
-                options = DiagramOptions(collapseRepeats = false),
-            ),
-            resolveTrace = { entries -> engine.resolve(entries) },
-        )
-        assertEquals(listOf(MessageKind.SELF), diagram.messages.map { it.kind })
-        assertTrue(diagram.messages.single().primary)
-        assertEquals(setOf(1), diagram.primaryEntryIds)
-        assertTrue(diagram.activationSpans.isEmpty())
+        // Only the return-side log line is in range — the source describes a call INTO this site,
+        // but nothing upstream was ever observed, so no call may be synthesized from source
+        // structure alone.
+        val trace = SourceTraceInferenceEngine(site()).resolve(listOf(entry(1)))
+        assertEquals(listOf(1), trace.events.map { it.entryId })
+        assertTrue(trace.calls.isEmpty())
     }
 
     @Test
@@ -482,41 +431,30 @@ class SourceTraceInferenceTest {
         val incomplete = incompleteEngine.resolve(listOf(entry(1, "started")))
         assertTrue(incomplete.calls.isEmpty())
 
+        // Same shape, but the direct call is an async dispatch and only the dispatching side is in
+        // range: with no observed callee-side log line, no call — blocking or non-blocking — may be
+        // fabricated from source structure alone (see explicitAsyncDispatchAcrossLanesIsNonBlocking
+        // ButRetained for the case where BOTH sides are observed).
         val asyncCall = directCall(kind = InvocationKind.EXECUTOR_DISPATCH, resultVariable = null)
         val asyncEngine = SourceTraceInferenceEngine(
             site(call = asyncCall, matcher = Regex.escape("dispatch")),
         )
-        val diagram = buildSequenceDiagram(
-            mkTab("async", "trace.log", listOf(entry(1, "dispatch"))),
-            SeqDiagramSpec(
-                components = listOf(
-                    DiagramComponent("client", "Client", setOf("Client"), sourceOwnerTypes = setOf("com.example.Client")),
-                    DiagramComponent("service", "Service", setOf("Service"), sourceOwnerTypes = setOf("com.example.Service")),
-                ),
-                options = DiagramOptions(collapseRepeats = false),
-            ),
-            resolveTrace = { entries -> asyncEngine.resolve(entries) },
-        )
-        assertFalse(diagram.activationSpans.any { it.invocationKind == TraceInvocationKind.EXECUTOR_DISPATCH })
+        val asyncTrace = asyncEngine.resolve(listOf(entry(1, "dispatch")))
+        assertTrue(asyncTrace.calls.isEmpty())
     }
 
     @Test
     fun unobservedCallDoesNotCreateTransientOwnerLifelines() {
+        // The source describes a call from Client into Service, but only the caller-side log line
+        // is in range — Service was never observed, so its owner type must never appear anywhere in
+        // the resolved trace (there is no lifeline concept at this layer, but a fabricated call
+        // would be the trace-level equivalent of the phantom participant this test's name refers to).
         val engine = SourceTraceInferenceEngine(
             site(call = directCall(resultVariable = null), matcher = Regex.escape("started")),
         )
-        val diagram = buildSequenceDiagram(
-            mkTab("owners", "trace.log", listOf(entry(1, "started"))),
-            SeqDiagramSpec(
-                components = listOf(
-                    DiagramComponent("client", "Client", setOf("Client")),
-                    DiagramComponent("service", "Service", setOf("Service")),
-                ),
-                options = DiagramOptions(collapseRepeats = false),
-            ),
-            resolveTrace = { entries -> engine.resolve(entries) },
-        )
-        assertTrue(diagram.participants.none { it.sourceOwnerType == "com.example.Service" })
-        assertEquals(MessageKind.SELF, diagram.messages.single().kind)
+        val trace = engine.resolve(listOf(entry(1, "started")))
+        assertEquals(listOf(1), trace.events.map { it.entryId })
+        assertTrue(trace.calls.isEmpty())
+        assertTrue(trace.calls.none { it.calleeOwnerType == "com.example.Service" })
     }
 }

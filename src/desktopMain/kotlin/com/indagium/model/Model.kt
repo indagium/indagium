@@ -1,7 +1,7 @@
 package com.indagium.model
 
 import androidx.compose.ui.graphics.Color
-import com.indagium.diagram.DiagramExportMode
+import com.indagium.diagram3.DiagramExportMode
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.video.formatVideoTime
 
