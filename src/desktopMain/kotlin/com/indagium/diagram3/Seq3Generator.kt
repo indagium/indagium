@@ -224,7 +224,24 @@ private fun rankLifelines(entries: List<LogEntry>, maxLifelines: Int, cancellati
 
 private val SHAPE_UUID_RE = Regex("""(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b""")
 private val SHAPE_HEX_RE = Regex("""(?i)\b[0-9a-f]{16,}\b""")
-private val SHAPE_NUMBER_RE = Regex("""\b\d+(?:\.\d+)?\b""")
+
+// Any run of letters/digits containing at least one digit — deliberately broader than the old
+// "\b\d+\b"-only mask (see this function's own bug history, item 3 of the phase-5 post-ship plan):
+// a short mixed alnum id (a USB device handle like "1a2b", a session id like "usbdev3") has no pure
+// digit run bounded by \b on both sides — \b only fires at a transition between a word char and a
+// non-word char, and letters/digits/underscore are ALL word chars, so "1a2b" or "dev3" never had a
+// masked boundary under the old regex. Left unmasked, every occurrence produced a DIFFERENT shape
+// key, so `groupByShape` never even offered the tokenizer a chance to prove one shared pattern —
+// each occurrence became its own single-occurrence Seq3Message, sorted into the document by its own
+// exact timestamp and interleaved with unrelated tags' messages instead of staying one grouped
+// repeat (confirmed via Seq3GeneratorTest, not just static reading — see that test's own doc).
+// Matching per alnum TOKEN (split on underscore/punctuation, not one blanket digit regex) keeps a
+// stable non-digit prefix/suffix like "usbdev" or "poll_tick" as literal context in the shape key —
+// only the actually-varying id-like run collapses to one placeholder. Over-masking here is always
+// safe: a shape key is only a CANDIDATE grouping (this function's own doc, next paragraph) — the
+// tokenizer below still has to prove a real shared pattern before two occurrences are ever actually
+// merged into one message.
+private val SHAPE_ALNUM_TOKEN_RE = Regex("[0-9A-Za-z]+")
 private val SHAPE_WHITESPACE_RE = Regex("\\s+")
 
 /** A cheap, lossy grouping key — NOT the final template (Seq3Tokenizer proves that). Two
@@ -232,13 +249,16 @@ private val SHAPE_WHITESPACE_RE = Regex("\\s+")
  *  `buildMessages` still falls back to one literal message per occurrence if the tokenizer can't
  *  actually prove a shared pattern across the group (e.g. two candidates share a shape but differ
  *  in unrelated ways the tokenizer's stricter single-run-or-named-values rule rejects). */
-private fun messageShapeKey(message: String): String = message
-    .lowercase()
-    .replace(SHAPE_UUID_RE, " u")
-    .replace(SHAPE_HEX_RE, " h")
-    .replace(SHAPE_NUMBER_RE, " n")
-    .replace(SHAPE_WHITESPACE_RE, " ")
-    .trim()
+private fun messageShapeKey(message: String): String {
+    val withStableTokensMasked = message
+        .lowercase()
+        .replace(SHAPE_UUID_RE, " u")
+        .replace(SHAPE_HEX_RE, " h")
+    val withDigitBearingTokensMasked = SHAPE_ALNUM_TOKEN_RE.replace(withStableTokensMasked) { m ->
+        if (m.value.any(Char::isDigit)) "n" else m.value
+    }
+    return withDigitBearingTokensMasked.replace(SHAPE_WHITESPACE_RE, " ").trim()
+}
 
 private fun groupByShape(entries: List<LogEntry>): List<List<LogEntry>> {
     val groups = LinkedHashMap<String, MutableList<LogEntry>>()

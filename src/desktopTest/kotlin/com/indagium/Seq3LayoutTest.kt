@@ -168,9 +168,53 @@ class Seq3LayoutTest {
         assertTrue(layout.rows.all { it.messageId == "m1" })
     }
 
+    // ── Item 5 (phase-5 round-2 post-ship plan): TRUE timeline order, not grouped-by-message ──────
+    //
+    // This directly reverses the round-1 assumption that "one message's occurrences render as one
+    // contiguous block" was correct — that was only ever true of `expandForLayout`'s per-message
+    // grouping (kept, unchanged, for the queue PANEL's convenience), never of what the CANVAS should
+    // draw. Two messages on two different lifeline pairs, interleaved in real time (A@t0, B@t1,
+    // A@t2, B@t3), must produce four canvas rows that alternate A/B/A/B by Y position — not two
+    // contiguous blocks of A then B.
+
+    @Test
+    fun canvasRowsInterleaveByTrueTimestampAcrossDifferentMessagesNotGroupedByMessage() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("X", 0), lifeline("Y", 1), lifeline("Z", 2)),
+            messages = listOf(
+                // Message A (X->Y) fires at t0 and t2; message B (Y->Z) fires at t1 and t3 — genuinely
+                // interleaved in real time, but grouped contiguously in doc.messages/expandForLayout
+                // order (all of A's occurrences, then all of B's).
+                message(
+                    "msgA", "X", "Y", repeat = Seq3Repeat.EVERY,
+                    occurrences = listOf(occurrence(1, ts = 1_000L), occurrence(3, ts = 3_000L)),
+                ),
+                message(
+                    "msgB", "Y", "Z", repeat = Seq3Repeat.EVERY,
+                    occurrences = listOf(occurrence(2, ts = 2_000L), occurrence(4, ts = 4_000L)),
+                ),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertEquals(4, layout.rows.size)
+        val messageIdsByY = layout.rows.sortedBy { it.y }.map { it.messageId }
+        assertEquals(
+            listOf("msgA", "msgB", "msgA", "msgB"), messageIdsByY,
+            "canvas rows must alternate by true timestamp order (A@1000,B@2000,A@3000,B@4000), " +
+                "not group all of msgA's occurrences before msgB's: got $messageIdsByY",
+        )
+        // Also pin down the actual entry ids in order, not just the message-id alternation.
+        val entryIdsByY = layout.rows.sortedBy { it.y }.map { it.occurrenceEntryId }
+        assertEquals(listOf(1, 2, 3, 4), entryIdsByY)
+    }
+
     @Test
     fun firstLastModeDrawsFirstElisionMarkerThenLast() {
-        val occs = (1..5).map { occurrence(it) }
+        // Item 5 (phase-5 round-2): the canvas now sorts every drawn row into true timeline order,
+        // so this fixture uses genuinely increasing timestamps (rather than the default helper's
+        // shared 1_000L) — a realistic FIRST_LAST run, not a synthetic same-instant tie.
+        val occs = (1..5).map { occurrence(it, ts = 1_000L + it) }
         val doc = Seq3Document(
             lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
             messages = listOf(message("m1", "A", "B", repeat = Seq3Repeat.FIRST_LAST, occurrences = occs)),

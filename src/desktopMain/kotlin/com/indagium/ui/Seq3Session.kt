@@ -701,24 +701,65 @@ class Seq3Session(
     // ── Status-bar support ──────────────────────────────────────────────────────────────────────
 
     /**
-     * Rough "N scanned" figure for the canvas status bar (design spec §04: "45 shown · 748 scanned
-     * · 4 lifelines · 31 hidden"). Deliberately not `Seq3Generator`'s own (private) range resolver —
-     * this only ever needs a COUNT, and [Seq3Range.Time]'s exact carry-forward-timestamp rule isn't
-     * worth duplicating for a status-bar estimate, so that one case falls back to the tab's full
-     * size rather than re-implementing the generator's parsing.
+     * The entries a status-bar figure is counted/spanned over. Deliberately not `Seq3Generator`'s
+     * own (private) range resolver — a status line only ever needs a COUNT or a first/last
+     * timestamp, and [Seq3Range.Time]'s exact carry-forward-timestamp rule isn't worth duplicating
+     * for an estimate, so that one case falls back to the tab's full list rather than
+     * re-implementing the generator's parsing. Shared by [scannedEntryCount] and [scannedTimeRange]
+     * so the two can never disagree about which entries "scanned" means.
      */
-    fun scannedEntryCount(id: String): Int {
-        val current = session(id) ?: return 0
-        val tab = current.sourceTabId?.let(appState::tab) ?: return 0
+    private fun scannedEntries(id: String): List<com.indagium.model.LogEntry> {
+        val current = session(id) ?: return emptyList()
+        val tab = current.sourceTabId?.let(appState::tab) ?: return emptyList()
         return when (val range = current.range) {
-            is Seq3Range.VisibleView -> tab.logData.size
+            is Seq3Range.VisibleView -> tab.logData
             is Seq3Range.Ids -> {
                 val lo = minOf(range.from, range.to)
                 val hi = maxOf(range.from, range.to)
-                tab.logData.count { it.id in lo..hi }
+                tab.logData.filter { it.id in lo..hi }
             }
-            is Seq3Range.Time -> tab.logData.size
+            is Seq3Range.Time -> tab.logData
         }
+    }
+
+    /** Rough "N scanned" figure for the canvas status bar (design spec §04: "45 shown · 748 scanned
+     *  · 4 lifelines · 31 hidden"). */
+    fun scannedEntryCount(id: String): Int = scannedEntries(id).size
+
+    /**
+     * The scanned range's actual `"HH:MM:SS.mmm"` span — the title bar's subtitle (item 1 of the
+     * phase-5 post-ship plan: a bare row count reads as if it WERE the scope; the real value is the
+     * time span). A [Seq3Range.Time] scope already carries its own textual bounds
+     * ([Seq3Range.Time.fromTs]/[toTs]), so those are returned directly rather than filtering
+     * [scannedEntries] and re-deriving what the user already typed. [Seq3Range.Ids]/[Seq3Range.
+     * VisibleView] read the first/last [scannedEntries]' own [com.indagium.model.LogEntry.ts] —
+     * already a raw `"HH:MM:SS.mmm"` string, exactly the format this subtitle wants, no reformatting
+     * needed. Null when there is nothing to show (no source tab, or the resolved range is empty).
+     */
+    fun scannedTimeRange(id: String): Pair<String, String>? {
+        val range = session(id)?.range
+        if (range is Seq3Range.Time) return range.fromTs to range.toTs
+        val entries = scannedEntries(id)
+        val first = entries.firstOrNull() ?: return null
+        val last = entries.lastOrNull() ?: return null
+        return first.ts to last.ts
+    }
+
+    /**
+     * The scanned range's actual row-id span — the regenerate sheet's Rows scope fields (item 4 of
+     * the phase-5 round-2 post-ship plan) seed from this instead of starting blank. Mirrors
+     * [scannedTimeRange] exactly: a [Seq3Range.Ids] scope already carries its own bounds
+     * ([Seq3Range.Ids.from]/[to]), so those are returned directly; [Seq3Range.Time]/[Seq3Range.
+     * VisibleView] read the first/last [scannedEntries]' own [com.indagium.model.LogEntry.id]. Null
+     * when there is nothing to show (no source tab, or the resolved range is empty).
+     */
+    fun scannedIdRange(id: String): Pair<Int, Int>? {
+        val range = session(id)?.range
+        if (range is Seq3Range.Ids) return range.from to range.to
+        val entries = scannedEntries(id)
+        val first = entries.firstOrNull() ?: return null
+        val last = entries.lastOrNull() ?: return null
+        return first.id to last.id
     }
 
     private companion object {

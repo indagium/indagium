@@ -302,6 +302,23 @@ class Seq3RegenerateSheetTest {
     // exact `Seq3Session` calls the sheet's new Time-range menu item / source-trace toggle make.
 
     @Test
+    fun theRowsScopeItemCallsUpdateScopeAndNeverTriggersARegenerate() {
+        val state = stateFor(mkTab("log", "sample.log", twoTagEntries()))
+        val id = state.seq3Sessions.begin("log")!!
+        await { state.seq3Sessions.sessions.single().generating == false }
+        val runsBefore = state.seq3Sessions.generateRunCount.get()
+
+        // What Seq3RegenScopeControls' "Rows" dropdown item does on click, with the from/to fields
+        // holding "1"/"2" — a plain inclusive span with no dependency on the log tab's live
+        // selection (item 4b: this replaces the old "Selection (N rows)" item, which only ever
+        // reflected the tab's own selection and was invisible/unusable without one).
+        state.seq3Sessions.updateScope(id, Seq3Range.Ids(1, 2))
+
+        assertEquals(Seq3Range.Ids(1, 2), state.seq3Sessions.sessions.single().range)
+        assertEquals(runsBefore, state.seq3Sessions.generateRunCount.get(), "the scope picker only seeds the next Build review, never regenerates on its own")
+    }
+
+    @Test
     fun theTimeRangeScopeItemCallsUpdateScopeAndNeverTriggersARegenerate() {
         val state = stateFor(mkTab("log", "sample.log", twoTagEntries()))
         val id = state.seq3Sessions.begin("log")!!

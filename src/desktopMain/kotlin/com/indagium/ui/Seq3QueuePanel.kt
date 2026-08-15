@@ -393,13 +393,29 @@ private fun Seq3QueueRow(
                     while (true) {
                         val event = awaitPointerEvent()
                         if (event.type == PointerEventType.Press && event.buttons.isPrimaryPressed) {
+                            // Item 11's checkbox now owns its own `Modifier.clickable` (see
+                            // Seq3RowCheckbox's own doc) — `clickable` consumes the pointer change on
+                            // press, so a Press this loop sees ALREADY consumed came from the checkbox,
+                            // not the row body. Without this check, this handler would double-process
+                            // every checkbox click (reintroducing the exact double-fire bug item 11's
+                            // original fix worked around by stripping the checkbox's own clickable).
+                            if (event.changes.any { it.isConsumed }) continue
                             val mods = event.keyboardModifiers
-                            view.selection = seq3Select(
-                                visibleIds, view.selection, message.id,
-                                additive = mods.isMetaPressed || mods.isCtrlPressed,
-                                range = mods.isShiftPressed,
-                            )
+                            if (mods.isShiftPressed || mods.isMetaPressed || mods.isCtrlPressed) {
+                                // ⇧/⌘/Ctrl on the row body: keep today's range/additive behavior —
+                                // the confirmed "keep ⇧/⌘ on the row too" decision.
+                                view.selection = seq3Select(
+                                    visibleIds, view.selection, message.id,
+                                    additive = mods.isMetaPressed || mods.isCtrlPressed,
+                                    range = mods.isShiftPressed,
+                                )
+                            }
+                            // A plain click on the row body (outside the checkbox) opens the
+                            // inspector ONLY — it must never replace the whole selection with just
+                            // this row (that radio-like behavior was the reported bug); the checkbox
+                            // is the row's only plain-click selection entry point now.
                             view.inspectorMessageId = message.id
+                            runCatching { view.focusRequester.requestFocus() }
                         }
                     }
                 }
@@ -408,7 +424,13 @@ private fun Seq3QueueRow(
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(Modifier.width(16.dp).padding(top = 2.dp)) {
-                Seq3RowCheckbox(checked = selected)
+                Seq3RowCheckbox(checked = selected) {
+                    // The checkbox's own, independent hit target (item 11): always additive, no
+                    // modifier needed, and — unlike the row body's plain click — never touches
+                    // `inspectorMessageId`.
+                    view.selection = seq3Select(visibleIds, view.selection, message.id, additive = true)
+                    runCatching { view.focusRequester.requestFocus() }
+                }
             }
             Column(Modifier.weight(1f)) {
                 Seq3RowPatternLine(message, collapsedCount)
@@ -453,18 +475,26 @@ private fun Seq3QueueRow(
     }
 }
 
-/** Item 11 fix: a PURE visual indicator of [checked], no independent hit target. The checkbox used
- *  to carry its own `Modifier.clickable` (hardcoded `additive = true`, no shift/⌘ awareness) that
- *  fired alongside the row's own modifier-aware `pointerInput` Press handler on every click — Press
- *  selected only this row first, then the checkbox's Release-driven toggle saw the id already
- *  selected and (being an unconditional toggle) removed it, so a checkbox click always emptied the
- *  selection. The row's Press handler is now the ONLY selection entry point for the whole row,
- *  checkbox included, matching the design spec's click/⇧click/⌘click-on-the-row model. */
+/** Item 11's original fix made this a PURE visual indicator with no hit target of its own, because
+ *  its `Modifier.clickable` (hardcoded `additive = true`, no shift/⌘ awareness) fired ALONGSIDE the
+ *  row's own modifier-aware `pointerInput` Press handler on every click, double-processing it: Press
+ *  selected only this row first via the row handler, then the checkbox's own Release-driven toggle
+ *  saw the id already selected and (being an unconditional toggle) removed it — so a checkbox click
+ *  always emptied the selection instead of independently toggling it.
+ *
+ *  Phase-5 post-ship fix (item 11 continued): the checkbox regains its own [onClick] — always
+ *  additive, matching the confirmed "checkbox click is always additive, no ⌘ needed" decision — now
+ *  that [Seq3QueueRow]'s own `pointerInput` checks `event.changes.any { it.isConsumed }` before
+ *  acting (see that modifier's own comment), so `clickable`'s consumption of the Press change is
+ *  what stops the double-fire this time, instead of removing the checkbox's click handling
+ *  entirely. */
 @Composable
-private fun Seq3RowCheckbox(checked: Boolean) {
+private fun Seq3RowCheckbox(checked: Boolean, onClick: () -> Unit) {
     val tc = tc()
     Box(
         Modifier.size(16.dp)
+            .clip(RoundedCornerShape(3.dp))
+            .clickable(onClick = onClick)
             .background(if (checked) tc.ac else Color.Transparent, RoundedCornerShape(3.dp))
             .border(1.dp, if (checked) tc.ac else tc.br, RoundedCornerShape(3.dp)),
         contentAlignment = Alignment.Center,
@@ -515,7 +545,9 @@ private fun Seq3RowEndpointsLine(
                 state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(message.id), Seq3BulkAction.SetTo(lifelineId)))
             }
         } else if (message.kind != Seq3Kind.NOTE) {
-            Seq3DropdownButton(label = "set target", labelColor = tc.warn, fillColor = tc.warnBg, menuWidth = 150.dp) { close ->
+            Seq3DropdownButton(
+                label = "set target", labelColor = tc.warn, fillColor = tc.warnBg, alwaysFilled = true, menuWidth = 150.dp,
+            ) { close ->
                 document.lifelines.sortedBy { it.ordinal }.forEach { lifeline ->
                     Seq3DropdownMenuItem(lifeline.name) {
                         state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(message.id), Seq3BulkAction.SetTo(lifeline.id)))
@@ -648,12 +680,12 @@ private fun Seq3SelectionActionBar(state: AppState, session: Seq3WorkspaceSessio
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AppText("${selectedIds.size} selected", color = tc.bg, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-        Seq3DropdownButton(label = "Set from", labelColor = tc.bg, fillColor = tc.tx.copy(alpha = 0f)) { close ->
+        Seq3DropdownButton(label = "Set from", labelColor = tc.bg) { close ->
             document.lifelines.sortedBy { it.ordinal }.forEach { lifeline ->
                 Seq3DropdownMenuItem(lifeline.name) { dispatch(Seq3BulkAction.SetFrom(lifeline.id)); close() }
             }
         }
-        Seq3DropdownButton(label = "Set to", labelColor = tc.bg, fillColor = tc.tx.copy(alpha = 0f)) { close ->
+        Seq3DropdownButton(label = "Set to", labelColor = tc.bg) { close ->
             document.lifelines.sortedBy { it.ordinal }.forEach { lifeline ->
                 Seq3DropdownMenuItem(lifeline.name) { dispatch(Seq3BulkAction.SetTo(lifeline.id)); close() }
             }
@@ -663,7 +695,7 @@ private fun Seq3SelectionActionBar(state: AppState, session: Seq3WorkspaceSessio
             dispatch(Seq3BulkAction.Merge(mergedId))
             view.selection = com.indagium.diagram3.Seq3Selection()
         }
-        Seq3DropdownButton(label = "Group", labelColor = tc.bg, fillColor = tc.tx.copy(alpha = 0f)) { close ->
+        Seq3DropdownButton(label = "Group", labelColor = tc.bg) { close ->
             Seq3FragmentKind.entries.forEach { kind ->
                 Seq3DropdownMenuItem(kind.name.lowercase()) {
                     val fragment = Seq3Fragment("frag-${UUID.randomUUID()}", kind, kind.name.lowercase(), selectedIds.toList())
