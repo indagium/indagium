@@ -1,5 +1,8 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.indagium.ui
 
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
@@ -11,9 +14,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.DisableSelection
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -42,13 +51,16 @@ import androidx.compose.ui.input.key.utf16CodePoint
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.diagram3.Seq3AttachmentMode
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
+import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3Fragment
@@ -73,16 +85,13 @@ import java.util.UUID
 // included (see the v3 rewrite plan's palette decision).
 
 private val PANEL_WIDTH = 392.dp
-private val INSPECTOR_WIDTH = 320.dp
 
-// Item 14 — drag bounds for the queue-panel/inspector dividers. PANEL_WIDTH/INSPECTOR_WIDTH above
-// stay as the seed value a freshly-opened workspace starts at; these four are how far a drag can
-// push either pane: narrow enough that neither panel goes unusable, wide enough that the canvas
-// (the primary surface, the only `weight(1f)` in the row) can't be squeezed away entirely.
+// Item 14 — drag bounds for the queue-panel divider. The panel width stays the seed value a
+// freshly-opened workspace starts at; the height bounds keep the two stacked sections usable.
 private const val PANEL_WIDTH_MIN_DP = 280f
 private const val PANEL_WIDTH_MAX_DP = 560f
-private const val INSPECTOR_WIDTH_MIN_DP = 240f
-private const val INSPECTOR_WIDTH_MAX_DP = 480f
+internal const val SEQ3_INSPECTOR_HEIGHT_MIN_DP = 140f
+internal const val SEQ3_INSPECTOR_HEIGHT_MAX_DP = 520f
 
 @Composable
 fun Seq3Workspace(state: AppState, sessionId: String) {
@@ -115,24 +124,20 @@ fun Seq3Workspace(state: AppState, sessionId: String) {
                 .focusRequester(view.focusRequester).focusable()
                 .onPreviewKeyEvent { event -> handleSeq3Key(state, session, view, event) },
         ) {
-            Seq3TitleBar(state, session)
+            Seq3TitleBar(state, session, view)
+            // Keep the title identity block visually separate from the Messages/Canvas body.
+            Divider()
             if (view.guidedPass != null) {
                 Seq3GuidedPass(state, session, view, Modifier.fillMaxSize())
             } else {
                 Row(Modifier.fillMaxSize()) {
-                    Seq3QueuePanel(state, session, view, Modifier.width(view.panelWidthDp.dp).fillMaxHeight())
-                    HDivider { delta ->
-                        view.panelWidthDp = seq3ClampDividerWidth(view.panelWidthDp, delta, PANEL_WIDTH_MIN_DP, PANEL_WIDTH_MAX_DP)
+                    if (view.sidebarOpen) {
+                        Seq3QueuePanel(state, session, view, Modifier.width(view.panelWidthDp.dp).fillMaxHeight())
+                        HDivider { delta ->
+                            view.panelWidthDp = seq3ClampDividerWidth(view.panelWidthDp, delta, PANEL_WIDTH_MIN_DP, PANEL_WIDTH_MAX_DP)
+                        }
                     }
                     Seq3Canvas(state, session, view, Modifier.weight(1f).fillMaxHeight())
-                    if (view.inspectorMessageId != null) {
-                        // Inspector sits on the right, so a rightward (positive) drag should SHRINK it —
-                        // mirrors AppState.updateAnnotationPanelWidth's `width - delta` for the same reason.
-                        HDivider { delta ->
-                            view.inspectorWidthDp = seq3ClampDividerWidth(view.inspectorWidthDp, -delta, INSPECTOR_WIDTH_MIN_DP, INSPECTOR_WIDTH_MAX_DP)
-                        }
-                        Seq3Inspector(state, session, view, Modifier.width(view.inspectorWidthDp.dp).fillMaxHeight())
-                    }
                 }
             }
         }
@@ -141,21 +146,14 @@ fun Seq3Workspace(state: AppState, sessionId: String) {
 }
 
 @Composable
-private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession) {
+private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
     val tc = tc()
     val tabName = session.sourceTabId?.let(state::tab)?.filename?.substringAfterLast('/') ?: "log closed"
     val scanned = state.seq3Sessions.scannedEntryCount(session.id)
-    val timeRange = state.seq3Sessions.scannedTimeRange(session.id)
-    // Item 3 (phase-5 round 2): the scope-kind word ("rows"/"time range"/"whole log range") is
-    // dropped entirely — it said nothing the actual time span and row count don't already say, and
-    // repeated "rows" once as the scope label and again as the count's unit. The title-bar scope
-    // dropdown this label used to feed is gone too (item 2) — actual scope changes now only happen
-    // through the regenerate sheet's own scope controls (Seq3RegenScopeControls).
-    val subtitle = if (timeRange != null) {
-        "$tabName · ${timeRange.first}–${timeRange.second} · $scanned rows"
-    } else {
-        "$tabName · $scanned rows"
-    }
+    // Keep the title bar focused on identity and size. The exact timestamp range belongs to the
+    // log view, not this diagram header, and made the title area noisy without changing the
+    // diagram's scope. Scope changes still happen through the regenerate sheet.
+    val subtitle = "$tabName · $scanned rows"
     Row(
         Modifier.fillMaxWidth().background(tc.p)
             .padding(horizontal = 12.dp, vertical = 8.dp),
@@ -166,12 +164,122 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession) {
             Seq3TitleField(state, session)
             AppText(subtitle, color = tc.ts, fontSize = 11.sp)
         }
-        if (session.generating) AppText("Generating…", color = tc.ts, fontSize = 11.sp)
-        CloseButton(onClick = { state.seq3Sessions.close(session.id) })
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            ToolbarBtn(
+                label = "≡",
+                tooltip = if (view.sidebarOpen) "Hide Messages and Inspector" else "Show Messages and Inspector",
+                active = view.sidebarOpen,
+                modifier = Modifier.size(28.dp),
+                shape = CORNER_SM,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                onClick = { view.sidebarOpen = !view.sidebarOpen },
+            )
+            Seq3AttachmentAction(state, session)
+            SegmentedControl(
+                options = listOf("PlantUML", "Mermaid"),
+                selectedIndices = setOf(if (session.dialect == Seq3Dialect.PLANTUML) 0 else 1),
+                onToggle = { index ->
+                    state.seq3Sessions.setDialect(
+                        session.id,
+                        if (index == 0) Seq3Dialect.PLANTUML else Seq3Dialect.MERMAID,
+                    )
+                },
+            )
+            Seq3CanvasZoomToolbarControls(view)
+            if (session.generating) AppText("Generating…", color = tc.ts, fontSize = 11.sp)
+        }
     }
 }
 
-private val TITLE_FIELD_WIDTH = 220.dp
+/** Compact explicit note attachment action. The button itself stays the same 28dp footprint as the
+ * zoom stepper; the two attachment modes live in the popup so neither choice is hidden behind an
+ * update-only state. */
+@Composable
+private fun Seq3AttachmentAction(state: AppState, session: Seq3WorkspaceSession) {
+    val density = LocalDensity.current
+    val focusRequester = LocalSeq3FocusRequester.current
+    var open by remember(session.id) { mutableStateOf(false) }
+    val primary = if (state.settings.diagramLinkedNotePrimary) Seq3AttachmentMode.LINKED else Seq3AttachmentMode.SNAPSHOT
+    val secondary = if (primary == Seq3AttachmentMode.LINKED) Seq3AttachmentMode.SNAPSHOT else Seq3AttachmentMode.LINKED
+
+    fun close() {
+        open = false
+        focusRequester?.let { runCatching { it.requestFocus() } }
+    }
+
+    Box {
+        ToolbarBtn(
+            label = "+",
+            tooltip = "Attach diagram to note",
+            modifier = Modifier.size(28.dp),
+            shape = CORNER_SM,
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+            onClick = { open = !open },
+        )
+        if (open) {
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
+                onDismissRequest = ::close,
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.width(170.dp)
+                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                        .background(tc().p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc().br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                ) {
+                    Seq3DropdownMenuItem(
+                        label = attachmentActionLabel(primary),
+                        onClick = {
+                            attach(state, session, primary)
+                            close()
+                        },
+                    )
+                    Seq3DropdownMenuItem(
+                        label = attachmentActionLabel(secondary),
+                        onClick = {
+                            attach(state, session, secondary)
+                            close()
+                        },
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun attachmentActionLabel(mode: Seq3AttachmentMode): String = when (mode) {
+    Seq3AttachmentMode.SNAPSHOT -> "Attach snapshot"
+    Seq3AttachmentMode.LINKED -> "Attach live link"
+}
+
+private fun attach(state: AppState, session: Seq3WorkspaceSession, mode: Seq3AttachmentMode) {
+    when (mode) {
+        Seq3AttachmentMode.SNAPSHOT -> state.seq3Sessions.attachSnapshot(session.id)
+        Seq3AttachmentMode.LINKED -> state.seq3Sessions.attachLiveLink(session.id)
+    }
+}
+
+private val TITLE_FIELD_MAX_WIDTH = 220.dp
+private val TITLE_FIELD_MIN_WIDTH = 96.dp
+private val TITLE_FIELD_HEIGHT = 24.dp
+private const val TITLE_MAX_VISIBLE_CHARS = 28
+private const val TITLE_CHARACTER_WIDTH_DP = 7.2f
+private const val TITLE_HORIZONTAL_PADDING_DP = 16f
+
+private fun seq3TitleWidth(title: String): androidx.compose.ui.unit.Dp {
+    // Keep display and edit modes on the same box so toggling the pencil never changes the
+    // title strip's height or causes the controls to jump. The width follows short names closely,
+    // but is capped so long names get a stable ellipsis/tooltip affordance.
+    val estimated = (title.length * TITLE_CHARACTER_WIDTH_DP + TITLE_HORIZONTAL_PADDING_DP)
+        .coerceIn(TITLE_FIELD_MIN_WIDTH.value, TITLE_FIELD_MAX_WIDTH.value)
+    return estimated.dp
+}
 
 /** The title bar's editable title (item 6c) — double-click to rename, same convention as the
  *  canvas's own inline editors ([Seq3InlineLabelEditor]'s double-click-to-edit label,
@@ -180,20 +288,45 @@ private val TITLE_FIELD_WIDTH = 220.dp
  *  alone isn't discoverable without already knowing the convention). Both open the exact same
  *  [Seq3TitleEditor]; the icon is simply a second, visible entry point into it. Commits through the
  *  already-existing [Seq3Session.updateTitle] — which already marks the session dirty and now
- *  auto-saves per the debounce in [markDirty] — never a new session method. */
+ *  note action — never a new session method. */
 @Composable
 private fun Seq3TitleField(state: AppState, session: Seq3WorkspaceSession) {
     val tc = tc()
     var editing by remember(session.id) { mutableStateOf(false) }
+    val fullTitle = session.document.title.ifBlank { "Sequence diagram v3" }
+    val titleWidth = seq3TitleWidth(fullTitle)
     if (editing) {
-        Seq3TitleEditor(state, session) { editing = false }
+        Seq3TitleEditor(state, session, titleWidth) { editing = false }
     } else {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Box(Modifier.pointerInput(session.id) { detectTapGestures(onDoubleTap = { editing = true }) }) {
-                AppText(
-                    session.document.title.ifBlank { "Sequence diagram v3" },
-                    color = tc.tx, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                )
+        val titleBox: @Composable () -> Unit = {
+            Box(
+                Modifier.width(titleWidth).height(TITLE_FIELD_HEIGHT)
+                    .pointerInput(session.id) { detectTapGestures(onDoubleTap = { editing = true }) },
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                DisableSelection {
+                    AppText(
+                        fullTitle,
+                        color = tc.tx,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+        Row(
+            modifier = Modifier.height(TITLE_FIELD_HEIGHT),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (fullTitle.length > TITLE_MAX_VISIBLE_CHARS) {
+                TooltipArea(tooltip = { ToolbarTooltip(fullTitle) }) {
+                    titleBox()
+                }
+            } else {
+                titleBox()
             }
             SquareIconButton("✎", fontSize = 10.sp, onClick = { editing = true }, size = 16.dp)
         }
@@ -201,7 +334,12 @@ private fun Seq3TitleField(state: AppState, session: Seq3WorkspaceSession) {
 }
 
 @Composable
-private fun Seq3TitleEditor(state: AppState, session: Seq3WorkspaceSession, onDone: () -> Unit) {
+private fun Seq3TitleEditor(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    titleWidth: androidx.compose.ui.unit.Dp,
+    onDone: () -> Unit,
+) {
     var text by remember(session.id) { mutableStateOf(session.document.title) }
 
     // A blank commit keeps the PREVIOUS value rather than saving an empty title — enforced by
@@ -211,10 +349,23 @@ private fun Seq3TitleEditor(state: AppState, session: Seq3WorkspaceSession, onDo
         state.seq3Sessions.updateTitle(session.id, text)
         onDone()
     }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        InlineField(value = text, onValue = { text = it }, fontSize = 13.sp, modifier = Modifier.width(TITLE_FIELD_WIDTH), onSubmit = ::commit)
-        SquareIconButton("✓", fontSize = 11.sp, onClick = ::commit, size = 18.dp)
-        SquareIconButton("×", fontSize = 11.sp, onClick = onDone, size = 18.dp)
+    Row(
+        modifier = Modifier.height(TITLE_FIELD_HEIGHT),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        InlineField(
+            value = text,
+            onValue = { text = it },
+            fontSize = 13.sp,
+            modifier = Modifier.width(titleWidth).height(TITLE_FIELD_HEIGHT),
+            centerTextVertically = true,
+            onSubmit = ::commit,
+        )
+        // Reuse the same small, unbordered note-action controls for save/cancel so the title
+        // editor does not introduce a second button language in the title strip.
+        SquareIconButton("✓", fontSize = 12.sp, onClick = ::commit, size = 18.dp)
+        SquareIconButton("×", fontSize = 14.sp, onClick = onDone, size = 18.dp)
     }
 }
 
@@ -268,12 +419,22 @@ internal class Seq3ViewState {
     var zoom by mutableStateOf(1f)
     var zoomMode by mutableStateOf(Seq3ZoomMode.FIT)
 
-    /** Queue-panel and inspector widths (dp), drag-resized via the two [HDivider]s in
-     *  [Seq3Workspace]'s main `Row`. Same "ephemeral, resets on reopen" reasoning as every other
-     *  field in this class — extended here to "how wide you dragged a pane is a view preference,
-     *  not a document fact." Seeded from [PANEL_WIDTH]/[INSPECTOR_WIDTH]. */
+    /** Queue-panel width (dp), drag-resized via the [HDivider] in [Seq3Workspace]'s main `Row`.
+     *  The Inspector now lives inside that same panel and owns a vertical height preference. */
     var panelWidthDp by mutableStateOf(PANEL_WIDTH.value)
-    var inspectorWidthDp by mutableStateOf(INSPECTOR_WIDTH.value)
+
+    /** Whether the Messages + Inspector sidebar is visible. The diagram remains usable full-width
+     *  when this is collapsed; it is a view preference and is never persisted into the document. */
+    var sidebarOpen by mutableStateOf(true)
+
+    /** Whether the stacked Messages and Inspector sections are expanded. These are view-only
+     *  preferences, so collapsing either section never changes the document or its undo history. */
+    var messagesExpanded by mutableStateOf(true)
+    var inspectorExpanded by mutableStateOf(true)
+
+    /** Inspector body height in dp. [VDivider] changes this with the same cursor-driven resize
+     *  affordance used by the app's other split panels. */
+    var inspectorHeightDp by mutableStateOf(320f)
 
     /** Non-null while the guided pass MODE is on screen (spec §05). A mode, not a dialog, so it
      *  lives here beside the other view state rather than in a dialog-visibility flag on the
@@ -348,14 +509,24 @@ internal fun Seq3DropdownButton(
     }
     Box(modifier) {
         HoverBox(
-            modifier = Modifier.clip(CORNER_SM).background(if (open || alwaysFilled) fillColor else Color.Transparent, CORNER_SM)
-                .border(1.dp, tc.br, CORNER_SM)
-                .padding(horizontal = 8.dp, vertical = 4.dp),
+            // Keep the padding inside the clickable Box. `HoverBox` appends its clickable
+            // modifier after the supplied modifier, so padding on the supplied chain would
+            // leave only the label text as the effective hit target (the same bug users see
+            // in the Log order control). The log-view pills put their padding inside the
+            // clickable surface; keep this shared dropdown consistent with that behavior.
+            modifier = Modifier.clip(CORNER_MD).background(if (open || alwaysFilled) fillColor else Color.Transparent, CORNER_MD)
+                .border(1.dp, tc.br, CORNER_MD),
             onClick = { if (System.currentTimeMillis() >= suppressUntilMs) open = !open },
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                AppText(label, color = labelColor, fontSize = 11.sp)
-                AppText("▾", color = labelColor.copy(alpha = .7f), fontSize = 9.sp)
+            Row(
+                Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                DisableSelection {
+                    AppText(label, color = labelColor, fontSize = 11.sp)
+                    AppText("▾", color = labelColor.copy(alpha = .7f), fontSize = 9.sp)
+                }
             }
         }
         if (open) {
@@ -367,6 +538,8 @@ internal fun Seq3DropdownButton(
             ) {
                 Column(
                     Modifier.width(menuWidth)
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
                         .shadow(8.dp, RoundedCornerShape(8.dp))
                         .background(tc.p, RoundedCornerShape(8.dp))
                         .border(1.dp, tc.br, RoundedCornerShape(8.dp))
@@ -392,17 +565,19 @@ internal fun Seq3DropdownMenuItem(label: String, active: Boolean = false, enable
         baseBg = if (active) tc.abg else Color.Transparent,
         onClick = if (enabled) onClick else null,
     ) {
-        AppText(
-            label,
-            color = when {
-                !enabled -> tc.td
-                active -> tc.ac
-                else -> tc.tx
-            },
-            fontSize = 11.sp,
-            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-        )
+        DisableSelection {
+            AppText(
+                label,
+                color = when {
+                    !enabled -> tc.td
+                    active -> tc.ac
+                    else -> tc.tx
+                },
+                fontSize = 11.sp,
+                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+        }
     }
 }
 
@@ -626,10 +801,10 @@ private fun seq3TargetIds(view: Seq3ViewState): Set<String>? =
 
 private const val MILLIS_PER_MINUTE = 60_000L
 
-/** "Draft saved 2 min ago" (design spec §04) / "Saving…" while a debounced edit is still settling
- *  / blank before the first edit. Not `@Composable` — evaluated fresh on every recomposition. */
+/** "Draft saved 2 min ago" after the explicit note action / "Unsaved changes" while edits are
+ *  pending / blank before the first save. Not `@Composable` — evaluated fresh on every recomposition. */
 internal fun draftStatusLabel(session: Seq3WorkspaceSession): String = when {
-    session.dirty -> "Saving…"
+    session.dirty -> "Unsaved changes"
     session.draftSavedAtMillis == null -> ""
     else -> {
         val ageMs = (System.currentTimeMillis() - session.draftSavedAtMillis).coerceAtLeast(0)

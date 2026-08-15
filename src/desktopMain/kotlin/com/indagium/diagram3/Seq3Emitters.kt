@@ -127,7 +127,11 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
         return listOf(Seq3Emission.NeedsTarget(message.id, fromIdx, templatedLabel(message)))
     }
     val occurrences = message.occurrences
-    if (occurrences.isEmpty()) return emptyList()
+    // Authored messages intentionally have no fabricated log occurrence. They still need one
+    // drawable arrow in both source dialects, using the authored label and no evidence expansion.
+    if (occurrences.isEmpty()) {
+        return listOf(Seq3Emission.Arrow(message.id, fromIdx, toIdx, templatedLabel(message), message.kind, 1))
+    }
     return when (message.repeat) {
         Seq3Repeat.EVERY -> occurrences.map { occ ->
             Seq3Emission.Arrow(message.id, fromIdx, toIdx, occurrenceLabel(message, occ), message.kind, 1)

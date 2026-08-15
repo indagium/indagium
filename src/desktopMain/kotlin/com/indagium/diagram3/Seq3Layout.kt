@@ -247,13 +247,31 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     // chronological position, interleaved with every other lifeline's activity exactly as it
     // happened — grouping a message's repeated occurrences together (`expandForLayout`, per
     // message) exists ONLY so the queue panel is convenient to edit; it must never dictate canvas
-    // row order. So `flatMap` still walks messages in doc order (cheap, and irrelevant once sorted),
-    // but the flat result is then re-sorted into TRUE timeline order before any geometry is derived
-    // from it — same fallback/tiebreak convention Seq3Generator.kt's own message-order sort already
-    // uses (`?: Long.MAX_VALUE`, then entryId), so an entry with no parseable timestamp degrades the
-    // same way it already does elsewhere in this codebase.
+    // row order. A timestamp override is authoritative for every emission of that message. For an
+    // untimestamped authored message, interpolate a stable fallback between its nearest timestamped
+    // neighbours so inserting it before/after a row also places it there on the canvas.
+    val messageOrder = doc.messages.withIndex().associate { (index, message) -> message.id to index }
+    val primaryTimestamps = doc.messages.map { it.primaryTimestampMillis }
+    val untimestampedFallbacks = doc.messages.mapIndexedNotNull { index, message ->
+        if (message.primaryTimestampMillis != null) return@mapIndexedNotNull null
+        val previous = (index - 1 downTo 0).firstNotNullOfOrNull { primaryTimestamps[it] }
+        val next = (index + 1 until primaryTimestamps.size).firstNotNullOfOrNull { primaryTimestamps[it] }
+        val fallback = when {
+            previous != null && next != null && previous < next -> previous + ((next - previous) / 2).coerceAtLeast(1L)
+            previous != null -> previous + 1L
+            next != null -> next - 1L
+            else -> null
+        }
+        fallback?.let { message.id to it }
+    }.toMap()
     val emissions = visibleMessages.flatMap(::expandForLayout)
-        .sortedWith(compareBy({ it.timestampMillis ?: Long.MAX_VALUE }, { it.entryId ?: Int.MAX_VALUE }))
+        .sortedWith(
+            compareBy<Emission> { emission ->
+                emission.timestampMillis ?: untimestampedFallbacks[emission.messageId] ?: Long.MAX_VALUE
+            }
+                .thenBy { emission -> messageOrder[emission.messageId] ?: Int.MAX_VALUE }
+                .thenBy { emission -> emission.entryId ?: Int.MAX_VALUE },
+        )
     val requirements = emissions.map { measureRequirement(it, tm, opts.maxLabelLines) }
     val gapSolve = solveGaps(emissions, requirements, lifelineIndex, headerWidths)
 
@@ -397,19 +415,28 @@ private fun occurrenceLabel(message: Seq3Message, occurrence: Seq3Occurrence): S
     return label
 }
 
+private fun emissionTimestamp(message: Seq3Message, occurrenceTimestampMillis: Long?): Long? =
+    message.manualTimestampMillis ?: occurrenceTimestampMillis
+
 private fun expandForLayout(message: Seq3Message): List<Emission> {
     if (message.kind == Seq3Kind.NOTE) {
         val occ = message.occurrences.firstOrNull()
-        return listOf(Emission.Note(message.id, message.fromLifelineId, message.labelTemplate, occ?.entryId, occ?.timestampMillis))
+        return listOf(Emission.Note(message.id, message.fromLifelineId, message.labelTemplate, occ?.entryId, message.primaryTimestampMillis))
     }
     if (message.toLifelineId == null) {
         val occ = message.occurrences.firstOrNull()
         return listOf(
-            Emission.Stub(message.id, message.fromLifelineId, message.labelTemplate, message.occurrences.size, occ?.entryId, occ?.timestampMillis),
+            Emission.Stub(
+                message.id,
+                message.fromLifelineId,
+                message.labelTemplate,
+                message.occurrences.size.coerceAtLeast(1),
+                occ?.entryId,
+                message.primaryTimestampMillis,
+            ),
         )
     }
     val occurrences = message.occurrences
-    if (occurrences.isEmpty()) return emptyList()
     val isSelf = message.kind == Seq3Kind.SELF
 
     fun arrow(label: String, count: Int, entryId: Int?, timestampMillis: Long?): Emission = if (isSelf) {
@@ -417,13 +444,27 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
     } else {
         Emission.Arrow(message.id, message.fromLifelineId, message.toLifelineId, message.kind, label, count, entryId, timestampMillis)
     }
+    if (occurrences.isEmpty()) {
+        return listOf(arrow(message.labelTemplate, 1, null, message.primaryTimestampMillis))
+    }
     return when (message.repeat) {
-        Seq3Repeat.EVERY -> occurrences.map { occ -> arrow(occurrenceLabel(message, occ), 1, occ.entryId, occ.timestampMillis) }
+        Seq3Repeat.EVERY -> occurrences.map { occ ->
+            arrow(occurrenceLabel(message, occ), 1, occ.entryId, emissionTimestamp(message, occ.timestampMillis))
+        }
         Seq3Repeat.FIRST_LAST -> firstLastEmissions(message, occurrences, ::arrow)
         Seq3Repeat.COLLAPSE_ABOVE -> if (occurrences.size > message.repeatThreshold) {
-            listOf(arrow(message.labelTemplate, occurrences.size, occurrences.first().entryId, occurrences.first().timestampMillis))
+            listOf(
+                arrow(
+                    message.labelTemplate,
+                    occurrences.size,
+                    occurrences.first().entryId,
+                    emissionTimestamp(message, occurrences.first().timestampMillis),
+                ),
+            )
         } else {
-            occurrences.map { occ -> arrow(occurrenceLabel(message, occ), 1, occ.entryId, occ.timestampMillis) }
+            occurrences.map { occ ->
+                arrow(occurrenceLabel(message, occ), 1, occ.entryId, emissionTimestamp(message, occ.timestampMillis))
+            }
         }
     }
 }
@@ -435,13 +476,43 @@ private fun firstLastEmissions(
 ): List<Emission> {
     if (occurrences.size <= 1) {
         val only = occurrences.firstOrNull()
-        return listOf(arrow(occurrenceLabel(message, occurrences.first()), 1, only?.entryId, only?.timestampMillis))
+        return listOf(
+            arrow(
+                occurrenceLabel(message, occurrences.first()),
+                1,
+                only?.entryId,
+                emissionTimestamp(message, only?.timestampMillis),
+            ),
+        )
     }
     val elided = occurrences.size - 2
     return buildList {
-        add(arrow(occurrenceLabel(message, occurrences.first()), 1, occurrences.first().entryId, occurrences.first().timestampMillis))
-        if (elided > 0) add(Emission.Elision(message.id, message.fromLifelineId, elided, occurrences.first().timestampMillis))
-        add(arrow(occurrenceLabel(message, occurrences.last()), 1, occurrences.last().entryId, occurrences.last().timestampMillis))
+        add(
+            arrow(
+                occurrenceLabel(message, occurrences.first()),
+                1,
+                occurrences.first().entryId,
+                emissionTimestamp(message, occurrences.first().timestampMillis),
+            ),
+        )
+        if (elided > 0) {
+            add(
+                Emission.Elision(
+                    message.id,
+                    message.fromLifelineId,
+                    elided,
+                    emissionTimestamp(message, occurrences.first().timestampMillis),
+                ),
+            )
+        }
+        add(
+            arrow(
+                occurrenceLabel(message, occurrences.last()),
+                1,
+                occurrences.last().entryId,
+                emissionTimestamp(message, occurrences.last().timestampMillis),
+            ),
+        )
     }
 }
 

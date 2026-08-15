@@ -149,7 +149,20 @@ data class Seq3Message(
     val authoring: Seq3Authoring = Seq3Authoring.AUTO,
     val orderPin: Seq3OrderPin? = null,
     val occurrences: List<Seq3Occurrence> = emptyList(),
+    /** Optional author-supplied timeline timestamp. When present it overrides the first evidence
+     *  timestamp for a manually-authored message, while leaving immutable log evidence untouched. */
+    val manualTimestampMillis: Long? = null,
+    /** The timestamp text entered by the author, if it cannot or should not be normalized to millis. */
+    val manualRawTimestamp: String = "",
 ) {
+    /** Timeline value shared by queue sorting, canvas layout, and authored-message editing. */
+    val primaryTimestampMillis: Long?
+        get() = manualTimestampMillis ?: occurrences.firstOrNull()?.timestampMillis
+
+    /** Human-readable timestamp with the authored override taking precedence when present. */
+    val primaryRawTimestamp: String
+        get() = manualRawTimestamp.ifBlank { occurrences.firstOrNull()?.rawTimestamp.orEmpty() }
+
     /**
      * Design decision: [Seq3State] is deliberately NOT a stored field, even though the design
      * spec's §03 table lists "state" as one of the things a message carries. `NEEDS_TARGET` is
@@ -172,6 +185,52 @@ data class Seq3Message(
         } else {
             Seq3State.AUTO
         }
+}
+
+/** Where a manually-authored message is inserted in the document's canonical message list. The
+ *  list itself remains the durable queue order; timestamps additionally control chronological canvas
+ *  placement when they are available. */
+sealed class Seq3InsertionPosition {
+    data object Start : Seq3InsertionPosition()
+
+    data object End : Seq3InsertionPosition()
+
+    data class AtIndex(val index: Int) : Seq3InsertionPosition()
+
+    data class BeforeMessage(val messageId: String) : Seq3InsertionPosition()
+
+    data class AfterMessage(val messageId: String) : Seq3InsertionPosition()
+}
+
+/** Explicit author input for a custom message. Lifeline values are IDs from [Seq3Document.lifelines],
+ *  not display names, so a renamed lifeline does not make an existing custom message ambiguous. */
+data class Seq3CustomMessageSpec(
+    val fromLifelineId: String,
+    val toLifelineId: String?,
+    val text: String,
+    val timestampMillis: Long? = null,
+    val rawTimestamp: String = "",
+    val position: Seq3InsertionPosition = Seq3InsertionPosition.End,
+    val kind: Seq3Kind = Seq3Kind.CALL,
+    val repeat: Seq3Repeat = Seq3Repeat.EVERY,
+    /** Existing semantic fragment to include this message in, e.g. an OPT/ALT section. */
+    val fragmentId: String? = null,
+)
+
+sealed class Seq3CustomMessageResult {
+    data class Added(
+        val document: Seq3Document,
+        val newMessageId: String,
+        val insertionIndex: Int,
+    ) : Seq3CustomMessageResult()
+
+    data class Rejected(val reason: String) : Seq3CustomMessageResult()
+}
+
+sealed class Seq3MessageEditResult {
+    data class Updated(val document: Seq3Document) : Seq3MessageEditResult()
+
+    data class Rejected(val reason: String) : Seq3MessageEditResult()
 }
 
 // ── Fragments / notes ───────────────────────────────────────────────────────────────────────

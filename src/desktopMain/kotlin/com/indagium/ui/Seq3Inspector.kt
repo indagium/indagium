@@ -1,19 +1,21 @@
 package com.indagium.ui
 
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -21,20 +23,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.pointer.PointerIcon
-import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.diagram3.DEFAULT_SEQ3_REPEAT_THRESHOLD
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
+import com.indagium.diagram3.Seq3InsertionPosition
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Repeat
-import java.awt.Cursor as AwtCursor
+import com.indagium.diagram3.parseSeq3Timestamp
 
 // ── The inspector — design spec §03 ─────────────────────────────────────────────────────────────
 //
@@ -42,7 +43,8 @@ import java.awt.Cursor as AwtCursor
 // Seq3QueuePanel.kt's `Seq3SelectionActionBar`). The pattern field is "the power-user escape
 // hatch" (spec's own words for the pattern field specifically, but the same posture applies to
 // every field here): everything is a real, named `Seq3Command`, never a direct document mutation.
-// Evidence is READ ONLY — see [Seq3EvidenceList]'s own doc.
+// Evidence is READ ONLY — see [Seq3EvidenceList]'s own doc. The surrounding collapsible section
+// header is owned by [Seq3QueuePanel], so this composable is only the Inspector body.
 
 @Composable
 internal fun Seq3Inspector(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, modifier: Modifier) {
@@ -50,14 +52,6 @@ internal fun Seq3Inspector(state: AppState, session: Seq3WorkspaceSession, view:
     val messageId = view.inspectorMessageId
     val message = messageId?.let { id -> session.document.messages.firstOrNull { it.id == id } }
     Column(modifier.background(tc.p).fillMaxSize()) {
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AppText("Inspector", color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            CloseButton(onClick = { view.inspectorMessageId = null })
-        }
         if (message == null) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 AppText("Select a message to inspect", color = tc.td, fontSize = 11.sp)
@@ -70,16 +64,82 @@ internal fun Seq3Inspector(state: AppState, session: Seq3WorkspaceSession, view:
 
 @Composable
 private fun Seq3InspectorBody(state: AppState, session: Seq3WorkspaceSession, message: Seq3Message) {
-    Column(Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 4.dp)) {
-        Seq3InspectorPatternField(state, session, message)
-        Spacer(Modifier.height(10.dp))
-        Seq3InspectorLabelField(state, session, message)
-        Spacer(Modifier.height(12.dp))
-        Seq3InspectorKindControl(state, session, message)
-        Spacer(Modifier.height(12.dp))
-        Seq3InspectorRepeatsControl(state, session, message)
-        Spacer(Modifier.height(12.dp))
-        Seq3EvidenceList(state, session, message)
+    val scrollState = rememberScrollState()
+    Box(Modifier.fillMaxSize()) {
+        Column(
+            Modifier.fillMaxSize()
+                .verticalScroll(scrollState)
+                .padding(start = 12.dp, end = 18.dp, top = 4.dp, bottom = 4.dp),
+        ) {
+            Seq3InspectorPatternField(state, session, message)
+            Spacer(Modifier.height(10.dp))
+            Seq3InspectorLabelField(state, session, message)
+            Spacer(Modifier.height(12.dp))
+            Seq3InspectorKindControl(state, session, message)
+            Spacer(Modifier.height(12.dp))
+            Seq3InspectorPlacementControls(state, session, message)
+            Spacer(Modifier.height(12.dp))
+            Seq3InspectorRepeatsControl(state, session, message)
+            Spacer(Modifier.height(12.dp))
+            Seq3EvidenceList(state, session, message)
+        }
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scrollState),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+            style = appScrollbarStyle(tc()),
+        )
+    }
+}
+
+@Composable
+private fun Seq3InspectorPlacementControls(state: AppState, session: Seq3WorkspaceSession, message: Seq3Message) {
+    var timestamp by remember(message.id, message.primaryRawTimestamp) { mutableStateOf(message.primaryRawTimestamp) }
+    val messages = session.document.messages
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Seq3FieldLabel("Timestamp / position")
+        InlineField(
+            value = timestamp,
+            onValue = { timestamp = it },
+            placeholder = "Optional timestamp…",
+            fontSize = 11.sp,
+            modifier = Modifier.fillMaxWidth(),
+            onSubmit = {
+                state.seq3Sessions.applyCommand(
+                    session.id,
+                    Seq3Command.SetMessageTimestamp(
+                        messageId = message.id,
+                        timestampMillis = parseSeq3Timestamp(timestamp),
+                        rawTimestamp = timestamp,
+                    ),
+                )
+            },
+        )
+        Seq3DropdownButton(label = "Move message…", modifier = Modifier.fillMaxWidth(), menuWidth = 330.dp) { close ->
+            Seq3DropdownMenuItem("At start") {
+                state.seq3Sessions.applyCommand(session.id, Seq3Command.MoveMessage(message.id, Seq3InsertionPosition.Start))
+                close()
+            }
+            Seq3DropdownMenuItem("At end") {
+                state.seq3Sessions.applyCommand(session.id, Seq3Command.MoveMessage(message.id, Seq3InsertionPosition.End))
+                close()
+            }
+            messages.filter { it.id != message.id }.forEachIndexed { index, candidate ->
+                Seq3DropdownMenuItem("Before ${index + 1}: ${candidate.labelTemplate}") {
+                    state.seq3Sessions.applyCommand(
+                        session.id,
+                        Seq3Command.MoveMessage(message.id, Seq3InsertionPosition.BeforeMessage(candidate.id)),
+                    )
+                    close()
+                }
+                Seq3DropdownMenuItem("After ${index + 1}: ${candidate.labelTemplate}") {
+                    state.seq3Sessions.applyCommand(
+                        session.id,
+                        Seq3Command.MoveMessage(message.id, Seq3InsertionPosition.AfterMessage(candidate.id)),
+                    )
+                    close()
+                }
+            }
+        }
     }
 }
 
@@ -202,35 +262,33 @@ private fun Seq3EvidenceList(state: AppState, session: Seq3WorkspaceSession, mes
     var expanded by remember(message.id) { mutableStateOf(false) }
     val occurrences = message.occurrences
     Column(Modifier.fillMaxWidth()) {
-        Row(
-            Modifier.fillMaxWidth().clickable { expanded = !expanded },
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Seq3FieldLabel("Evidence · ${occurrences.size} occurrence${if (occurrences.size == 1) "" else "s"}")
-            AppText(if (expanded) "▾" else "▸", color = tc.td, fontSize = 10.sp)
-        }
+        SectionHeader(
+            title = "Evidence · ${occurrences.size} occurrence${if (occurrences.size == 1) "" else "s"}",
+            expanded = expanded,
+            onToggle = { expanded = !expanded },
+        )
         val shown = if (expanded) occurrences else occurrences.take(EVIDENCE_COLLAPSED_PREVIEW)
         if (expanded) {
-            LazyColumn(Modifier.fillMaxWidth().height((EVIDENCE_ROW_HEIGHT_DP * minOf(occurrences.size, 8)).dp)) {
-                items(shown, key = Seq3Occurrence::entryId) { occurrence -> Seq3EvidenceRow(state, session, occurrence) }
+            ScrollableItems(
+                itemCount = occurrences.size,
+                rowDp = EVIDENCE_ROW_HEIGHT_DP,
+                maxDp = EVIDENCE_ROW_HEIGHT_DP * 8,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                shown.forEach { occurrence -> Seq3EvidenceRow(state, session, occurrence) }
             }
         } else {
             Column(Modifier.fillMaxWidth()) {
                 shown.forEach { occurrence -> Seq3EvidenceRow(state, session, occurrence) }
                 if (occurrences.size > EVIDENCE_COLLAPSED_PREVIEW) {
-                    HoverBox(
-                        modifier = Modifier.pointerHoverIcon(
-                            PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
-                            overrideDescendants = true,
-                        ),
+                    AppButton(
+                        label = "+${occurrences.size - EVIDENCE_COLLAPSED_PREVIEW} more — expand to see all",
                         onClick = { expanded = true },
-                    ) {
-                        AppText(
-                            "+${occurrences.size - EVIDENCE_COLLAPSED_PREVIEW} more — expand to see all",
-                            color = tc.td, fontSize = 9.sp, modifier = Modifier.padding(top = 2.dp),
-                        )
-                    }
+                        variant = ButtonVariant.Ghost,
+                        textColor = tc.td,
+                        horizontalPadding = 0.dp,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
                 }
             }
         }

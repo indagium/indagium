@@ -5,6 +5,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.indagium.diagram3.DiagramExportMode
 import com.indagium.diagram3.ParsedSeq3
+import com.indagium.diagram3.Seq3AttachmentMetadata
+import com.indagium.diagram3.Seq3AttachmentMode
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3Document
@@ -120,6 +122,9 @@ data class Seq3WorkspaceSession(
      *  choice. Every later confirm on this session reuses this value rather than re-reading the
      *  (possibly since-changed) global setting. */
     val exportMode: DiagramExportMode? = null,
+    /** Dialect used by the explicit note action. Changing it never mutates the document or writes
+     *  an annotation by itself. */
+    val dialect: Seq3Dialect = Seq3Dialect.MERMAID,
 )
 
 private const val BASE_UNTITLED_TITLE = "Untitled diagram"
@@ -210,6 +215,17 @@ class Seq3Session(
         val tab = appState.tab(tabId) ?: return null
         val block = tab.annotations.blocks.firstOrNull { it.id == blockId } as? AnnBlock.Note ?: return null
         val parsed = parseSeq3Note(block.text) ?: return null
+        val attachmentLibraryId = parsed.attachment?.diagramId
+        val isSnapshot = parsed.attachment?.mode == Seq3AttachmentMode.SNAPSHOT
+        sessions.firstOrNull { existing ->
+            existing.sourceTabId == tabId &&
+                (!isSnapshot || existing.document == parsed.document) &&
+                (existing.confirmedBlockId == blockId ||
+                    (attachmentLibraryId != null && existing.libraryItemId == attachmentLibraryId))
+        }?.let { existing ->
+            activate(existing.id)
+            return existing.id
+        }
         val id = "seq3-${UUID.randomUUID()}"
         val session = Seq3WorkspaceSession(
             id = id,
@@ -218,7 +234,14 @@ class Seq3Session(
             range = parsed.document.range,
             generateOptions = Seq3GenerateOptions(sourceFile = parsed.document.sourceFile ?: File(tab.filename).name),
             confirmedBlockId = blockId,
+            // Only live links retain the library id. Snapshot notes remain independent from the
+            // library item that produced them; assigning their id here would make later edits of
+            // the snapshot update the library record and turn a static attachment into a live one.
+            libraryItemId = parsed.attachment
+                ?.takeIf { it.mode == Seq3AttachmentMode.LINKED }
+                ?.diagramId,
             exportMode = parsed.exportMode,
+            dialect = parsed.dialect,
         )
         sessions = sessions + session
         activeSessionId = id
@@ -240,7 +263,6 @@ class Seq3Session(
      *  caller that wants to warn on [Seq3WorkspaceSession.dirty] checks it before calling this. */
     fun close(id: String) {
         generateJobs.remove(id)?.cancel()
-        draftJobs.remove(id)?.cancel()
         revertJobs.remove(id)?.cancel()
         generations.remove(id)
         sessions = sessions.filterNot { it.id == id }
@@ -359,6 +381,7 @@ class Seq3Session(
             // whatever the user already typed rather than blanking it on every regenerate.
             current.copy(document = fresh.copy(title = current.document.title.ifBlank { fresh.title }), generating = false)
         }
+        syncLiveLinkedNote(id)
     }
 
     /** Changes [Seq3WorkspaceSession.range] and re-triggers [requestGenerate] in one call — the
@@ -374,7 +397,7 @@ class Seq3Session(
      * scope controls "are inputs to THIS action", i.e. to the explicit "Build review" press that
      * follows, not a trigger of their own). Deliberately not [updateRangeAndRegenerate], and
      * deliberately not [markDirty]: choosing a scope is not a document edit and must not start the
-     * draft-saved debounce or push an undo step.
+     * workspace dirty or push an undo step.
      */
     fun updateScope(id: String, range: Seq3Range) {
         if (session(id) == null) return
@@ -392,7 +415,7 @@ class Seq3Session(
      * Title is pure metadata — [Seq3GenerateOptions.title] only ever seeds a BRAND NEW document
      * (see [publishGenerated]'s `ifBlank` above), it is never read back out of one — so this
      * deliberately never calls [requestGenerate]. Still marks the session dirty and starts the
-     * draft-saved (now auto-save, see [markDirty]) debounce like every other edit.
+     * title-strip note action makes the pending change visible to the user.
      *
      * A [title] that's blank after trimming is silently ignored, keeping whatever the session
      * already had — the title bar always needs something to show (item 6c), so this is the one
@@ -405,6 +428,13 @@ class Seq3Session(
         if (trimmed.isEmpty()) return
         replace(id) { it.copy(document = it.document.copy(title = trimmed)) }
         markDirty(id)
+    }
+
+    /** Changes only the source dialect used by the explicit note action. */
+    fun setDialect(id: String, dialect: Seq3Dialect) {
+        if (session(id)?.dialect == dialect) return
+        replace(id) { it.copy(dialect = dialect, dirty = true) }
+        syncLiveLinkedNote(id)
     }
 
     // ── Undo stack: every mutation routes through applySeq3Command ──────────────────────────────
@@ -443,34 +473,14 @@ class Seq3Session(
      *  mirroring the v1/v2 `state.seqDiagrams.revertManualSeed()` call site at `ui/App.kt:2294`. */
     fun undoActive(): Boolean = activeSessionId?.let(::undo) ?: false
 
-    // ── Dirty flag / draft-saved timestamp / auto-save ──────────────────────────────────────────
+    // ── Dirty flag / explicit note save ─────────────────────────────────────────────────────────
     //
-    // This debounce IS the auto-save (design spec's "fully automatic — no Save button" decision):
-    // 400ms after an edit settles, [markDirty] calls [confirm], which writes the document into a
-    // note (going through AppState's normal upAnn autosave path for that note block, same as any
-    // other annotation edit) and updates DiagramLibraryStore. [markDirty] itself is called ONLY from
-    // [applyCommand], [undo] and [updateTitle] — never from generation completing — so opening or
-    // regenerating a diagram nobody has touched writes nothing; only a real edit ever reaches
-    // [confirm] this way. [confirm] already no-ops harmlessly (returns null, dirty stays true) when
-    // `current.sourceTabId == null` or the document has no lifelines yet, so the `ensureActive()`
-    // check below is the only guard this debounce needs. Same 400ms debounce constant AppState's own
-    // autosave scheduler uses, reused here so a v3 workspace settles on the same cadence the rest of
-    // the app already trains a user to expect.
-
-    private val draftJobs = ConcurrentHashMap<String, Job>()
-
-    /** Marks [id] dirty and (re)starts the auto-save debounce — see this section's own header for
-     *  why calling [confirm] here on settle is a real save, not merely a cosmetic timestamp flip. A
-     *  second edit before the debounce fires cancels and restarts it, same conflation idiom
-     *  [requestGenerate] uses for its own debounce. */
+    // Diagram edits intentionally remain in the in-memory workspace. This is separate from
+    // AppState's annotation autosave: opening or editing a diagram must never create or rewrite a
+    // note until the user explicitly presses the title-strip note action.
     private fun markDirty(id: String) {
         replace(id) { it.copy(dirty = true) }
-        draftJobs.remove(id)?.cancel()
-        draftJobs[id] = scope.launch {
-            delay(DRAFT_SAVE_DEBOUNCE_MS)
-            coroutineContext.ensureActive()
-            confirm(id)
-        }
+        syncLiveLinkedNote(id)
     }
 
     // ── Confirm: write the document into a note ─────────────────────────────────────────────────
@@ -497,12 +507,22 @@ class Seq3Session(
         // reached via beginEdit/openLibraryItem, which seed it from the note/item's own already-
         // written choice — reuses this value rather than re-reading a since-changed setting.
         val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
-        val text = encodeSeq3Note(current.document, Seq3Dialect.MERMAID, exportMode = exportMode)
+        val existingAttachment = current.confirmedBlockId
+            ?.let { blockId ->
+                (appState.tab(tabId)?.annotations?.blocks?.firstOrNull { it.id == blockId } as? AnnBlock.Note)
+                    ?.let { parseSeq3Note(it.text)?.attachment }
+            }
+        val text = encodeSeq3Note(
+            current.document,
+            current.dialect,
+            exportMode = exportMode,
+            attachment = existingAttachment,
+        )
         val blockId = current.confirmedBlockId?.also { appState.updateBlock(tabId, it, text) }
             ?: appState.addNoteBlock(tabId, text)
         if (blockId != null) {
-            draftJobs.remove(id)?.cancel()
-            val libraryItemId = appState.tab(tabId)?.let { tab -> saveToLibrary(current, tab, text) }
+            val plainText = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
+            val libraryItemId = appState.tab(tabId)?.let { tab -> saveToLibrary(current, tab, plainText)?.id }
             replace(id) {
                 it.copy(
                     confirmedBlockId = blockId,
@@ -512,22 +532,135 @@ class Seq3Session(
                     exportMode = exportMode,
                 )
             }
+            syncLiveLinkedNote(id)
         }
         return blockId
     }
 
-    private fun saveToLibrary(current: Seq3WorkspaceSession, tab: LogTab, encodedNote: String): String? {
+    private fun saveToLibrary(current: Seq3WorkspaceSession, tab: LogTab, encodedNote: String): DiagramLibraryItem? {
         val title = current.document.title.ifBlank { "Untitled diagram" }
         val snapshot = DiagramLibrarySnapshot(encodedNote)
         val saved = if (current.libraryItemId == null) {
             libraryStore.create(title, "", sourceIdentity(tab), snapshot)
         } else {
             libraryStore.update(current.libraryItemId) { item ->
-                item.copy(title = title, source = sourceIdentity(tab), snapshot = snapshot, updatedAt = System.currentTimeMillis())
+                item.copy(title = title, source = sourceIdentity(tab), snapshot = snapshot, updatedAt = clock())
             }
         }
         libraryRevision++
-        return saved?.id ?: current.libraryItemId
+        return saved ?: current.libraryItemId?.let(libraryStore::get)
+    }
+
+    /** Explicitly attaches the current workspace as an immutable note snapshot. */
+    fun attachSnapshot(id: String): String? = attach(id, Seq3AttachmentMode.SNAPSHOT)
+
+    /** Explicitly attaches the current workspace as a durable live-link note. */
+    fun attachLiveLink(id: String): String? = attach(id, Seq3AttachmentMode.LINKED)
+
+    private fun attach(id: String, mode: Seq3AttachmentMode): String? {
+        val current = session(id)
+        val tabId = current?.sourceTabId
+        val tab = current?.sourceTabId?.let(appState::tab)
+        if (current == null || tabId == null || tab == null || current.document.lifelines.isEmpty()) return null
+        val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
+        val plainText = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
+        val item = saveToLibrary(current, tab, plainText) ?: return null
+        val blockId = when (mode) {
+            Seq3AttachmentMode.SNAPSHOT -> attachLibrarySnapshot(tabId, item.id)
+            Seq3AttachmentMode.LINKED -> attachLibraryLink(tabId, item.id)
+        } ?: return null
+        replace(id) {
+            it.copy(
+                libraryItemId = item.id,
+                confirmedBlockId = if (mode == Seq3AttachmentMode.LINKED) blockId else it.confirmedBlockId,
+                dirty = false,
+                draftSavedAtMillis = clock(),
+                exportMode = exportMode,
+            )
+        }
+        return blockId
+    }
+
+    /** Adds an immutable copy of a saved library artifact to [tabId]. */
+    fun attachLibrarySnapshot(tabId: String, libraryItemId: String, afterBlockId: String? = null): String? =
+        attachLibraryItem(tabId, libraryItemId, DiagramAttachmentKind.SNAPSHOT, afterBlockId)
+
+    /** Adds a durable live-link note that follows later workspace/library updates. */
+    fun attachLibraryLink(tabId: String, libraryItemId: String, afterBlockId: String? = null): String? =
+        attachLibraryItem(tabId, libraryItemId, DiagramAttachmentKind.LINK, afterBlockId)
+
+    private fun attachLibraryItem(
+        tabId: String,
+        libraryItemId: String,
+        kind: DiagramAttachmentKind,
+        afterBlockId: String?,
+    ): String? {
+        val item = libraryStore.get(libraryItemId) ?: return null
+        val parsed = item.parsed ?: return null
+        val attachedAt = clock()
+        val mode = if (kind == DiagramAttachmentKind.LINK) Seq3AttachmentMode.LINKED else Seq3AttachmentMode.SNAPSHOT
+        val text = encodeSeq3Note(
+            parsed.document,
+            parsed.dialect,
+            parsed.caption,
+            parsed.exportMode,
+            attachment = Seq3AttachmentMetadata(item.id, mode, item.updatedAt, attachedAt),
+            sourceOverride = parsed.source,
+        )
+        val blockId = appState.addNoteBlock(tabId, text, afterBlockId) ?: return null
+        libraryStore.addAttachment(
+            libraryItemId,
+            DiagramLibraryAttachment(tabId, blockId, kind, attachedAt),
+        )
+        libraryRevision++
+        return blockId
+    }
+
+    /** Refreshes all live-link notes owned by this session after a document/library mutation. */
+    private fun syncLiveLinkedNote(id: String) {
+        val current = session(id) ?: return
+        val tabId = current.sourceTabId ?: return
+        val libraryItemId = current.libraryItemId ?: return
+        val tab = appState.tab(tabId) ?: return
+        val linkedNotes = tab.annotations.blocks.mapNotNull { block ->
+            val note = block as? AnnBlock.Note ?: return@mapNotNull null
+            val parsed = parseSeq3Note(note.text) ?: return@mapNotNull null
+            val attachment = parsed.attachment ?: return@mapNotNull null
+            if (attachment.mode == Seq3AttachmentMode.LINKED && attachment.diagramId == libraryItemId) {
+                Triple(note.id, parsed, attachment)
+            } else {
+                null
+            }
+        }
+        if (linkedNotes.isEmpty()) return
+        val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
+        val plainText = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
+        val updated = libraryStore.update(libraryItemId) { item ->
+            item.copy(
+                title = current.document.title.ifBlank { item.title },
+                source = sourceIdentity(tab),
+                snapshot = DiagramLibrarySnapshot(plainText),
+                updatedAt = clock(),
+            )
+        } ?: return
+        linkedNotes.forEach { (blockId, parsed, attachment) ->
+            val linkedText = encodeSeq3Note(
+                current.document,
+                current.dialect,
+                parsed.caption,
+                exportMode,
+                attachment = attachment.copy(revision = updated.updatedAt),
+            )
+            appState.updateBlock(tabId, blockId, linkedText)
+        }
+        libraryRevision++
+        replace(id) {
+            it.copy(
+                exportMode = exportMode,
+                dirty = false,
+                draftSavedAtMillis = clock(),
+            )
+        }
     }
 
     // ── Diagram library (ui.DiagramLibraryStore) ────────────────────────────────────────────────
@@ -556,6 +689,14 @@ class Seq3Session(
      * fully viewable session from the cached document, same as v1/v2's offline contract.
      */
     fun openLibraryItem(id: String, tabId: String? = null): Boolean {
+        sessions.firstOrNull { existing ->
+            existing.libraryItemId == id && (tabId == null || existing.sourceTabId == tabId)
+        }?.let { existing ->
+            libraryStore.markOpened(id)
+            libraryRevision++
+            activate(existing.id)
+            return true
+        }
         val item = libraryStore.markOpened(id) ?: return false
         libraryRevision++
         val parsed = item.parsed ?: return false
@@ -569,6 +710,7 @@ class Seq3Session(
             generateOptions = Seq3GenerateOptions(sourceFile = parsed.document.sourceFile),
             libraryItemId = item.id,
             exportMode = parsed.exportMode,
+            dialect = parsed.dialect,
         )
         sessions = sessions + session
         activeSessionId = sessionId
@@ -581,6 +723,18 @@ class Seq3Session(
     fun deleteLibraryItem(id: String): Boolean {
         sessions.filter { it.libraryItemId == id }.forEach { close(it.id) }
         return libraryStore.delete(id).also { deleted -> if (deleted) libraryRevision++ }
+    }
+
+    /** Removes the library's durable back-reference when a Note attachment is deleted. */
+    fun removeLibraryAttachment(tabId: String, blockId: String) {
+        var changed = false
+        libraryStore.all().forEach { item ->
+            if (item.attachments.any { it.tabId == tabId && it.blockId == blockId }) {
+                libraryStore.removeAttachment(item.id, tabId, blockId)
+                changed = true
+            }
+        }
+        if (changed) libraryRevision++
     }
 
     // ── Regenerate: a reviewed proposal, never a wholesale replace (spec §08) ──────────────────
@@ -764,7 +918,6 @@ class Seq3Session(
 
     private companion object {
         const val GENERATE_DEBOUNCE_MS = 180L
-        const val DRAFT_SAVE_DEBOUNCE_MS = 400L
         const val MAX_UNDO_DEPTH = 50
     }
 }

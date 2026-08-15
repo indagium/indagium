@@ -130,11 +130,17 @@ fun HoverBox(
 ) {
     var hovered by remember { mutableStateOf(false) }
     Box(
-        modifier = modifier
+        // Keep the click target outside the caller's layout modifiers. In Compose, placing
+        // clickable after padding/size makes the decoration visible but leaves only the inner
+        // content as the effective hit target. HoverBox is used for compact buttons, dropdowns,
+        // and menu rows throughout the log and diagram views, so the whole visual surface must
+        // be interactive.
+        modifier = Modifier
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(modifier)
             .background(if ((hovered && hoverEnabled) || forceHover) hoverBg else baseBg)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
         content = content,
     )
 }
@@ -219,20 +225,27 @@ fun SectionHeader(
     onToggle: (() -> Unit)? = null,
 ) {
     val tc = tc()
-    Row(
-        Modifier.fillMaxWidth()
-            .then(if (onToggle != null) Modifier.clickable(onClick = onToggle) else Modifier)
-            .padding(horizontal = 12.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    HoverBox(
+        modifier = Modifier.fillMaxWidth().clip(CORNER_SM),
+        onClick = onToggle,
     ) {
-        AppText(title, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-        trailing?.invoke(this)
-        if (expanded != null) {
-            Spacer(Modifier.width(6.dp))
-            Box(
-                Modifier.size(18.dp).background(tc.br.copy(.5f), CORNER_SM),
-                contentAlignment = Alignment.Center,
-            ) { AppText(if (expanded) "▾" else "▸", color = tc.ts, fontSize = 14.sp) }
+        DisableSelection {
+            Row(
+                // Keep every collapsible header on the same 32dp rhythm. In particular, a trailing
+                // action must not make the Messages header taller than Inspector/Evidence headers.
+                Modifier.fillMaxWidth().height(32.dp).padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppText(title, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                trailing?.invoke(this)
+                if (expanded != null) {
+                    Spacer(Modifier.width(6.dp))
+                    Box(
+                        Modifier.size(18.dp).background(tc.br.copy(.5f), CORNER_SM),
+                        contentAlignment = Alignment.Center,
+                    ) { AppText(if (expanded) "▾" else "▸", color = tc.ts, fontSize = 14.sp) }
+                }
+            }
         }
     }
 }
@@ -554,9 +567,12 @@ fun PillBtn(label: String, active: Boolean, onClick: () -> Unit) {
             .clip(CORNER_MD)
             .clickable(onClick = onClick)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(horizontal = 7.dp, vertical = 2.dp),
-    ) { AppText(label, color = if (active) tc.ac else tc.ts, fontSize = 10.sp) }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
+    ) {
+        DisableSelection {
+            AppText(label, color = if (active) tc.ac else tc.ts, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp))
+        }
+    }
 }
 
 @Composable
@@ -570,6 +586,7 @@ fun ToolbarBtn(
     modifier: Modifier = Modifier,
     shape: RoundedCornerShape = CORNER_MD,
     contentPadding: PaddingValues = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
+    baseBg: Color = Color.Transparent,
     onClick: () -> Unit,
 ) {
     val tc = tc()
@@ -585,36 +602,40 @@ fun ToolbarBtn(
                     when {
                         active && enabled -> tc.ac
                         hovered && enabled -> tc.hv
-                        else -> Color.Transparent
+                        else -> baseBg
                     },
                     shape,
                 )
                 .clip(shape)
+                // Put the gesture before content padding so the complete visual button surface,
+                // including its breathing room, is interactive.
                 .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
                 .onPointerEvent(PointerEventType.Enter) { hovered = true }
                 .onPointerEvent(PointerEventType.Exit) { hovered = false }
                 .padding(contentPadding),
             contentAlignment = Alignment.Center,
         ) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (icon != null) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = if (showLabel) null else tooltip ?: label,
-                        tint = contentColor,
-                        modifier = Modifier.size(15.dp),
-                    )
-                }
-                if (showLabel || icon == null) {
-                    AppText(
-                        label,
-                        color = contentColor,
-                        fontSize = 12.sp,
-                        fontWeight = if (active && enabled) FontWeight.Medium else FontWeight.Normal,
-                    )
+            DisableSelection {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (icon != null) {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = if (showLabel) null else tooltip ?: label,
+                            tint = contentColor,
+                            modifier = Modifier.size(15.dp),
+                        )
+                    }
+                    if (showLabel || icon == null) {
+                        AppText(
+                            label,
+                            color = contentColor,
+                            fontSize = 12.sp,
+                            fontWeight = if (active && enabled) FontWeight.Medium else FontWeight.Normal,
+                        )
+                    }
                 }
             }
         }
@@ -825,11 +846,12 @@ fun ScrollableTextArea(
 fun CheckRow(
     checked: Boolean, onToggle: () -> Unit,
     accentColor: Color = LocalTheme.current.ac,
+    modifier: Modifier = Modifier,
     content: @Composable RowScope.() -> Unit,
 ) {
     val tc = tc()
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(horizontal = 12.dp, vertical = 3.dp),
+        modifier.fillMaxWidth().clickable(onClick = onToggle).padding(horizontal = 12.dp, vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Checkbox(checked = checked, onCheckedChange = { onToggle() },
@@ -900,7 +922,7 @@ fun SquareIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modi
             .onPointerEvent(PointerEventType.Exit) { hovered = false },
         contentAlignment = Alignment.Center,
     ) {
-        AppText(text, color = tc.td, fontSize = fontSize)
+        DisableSelection { AppText(text, color = tc.td, fontSize = fontSize) }
     }
 }
 
@@ -917,11 +939,12 @@ fun LabelIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modif
             .clip(CORNER_MD)
             .clickable(onClick = onClick)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(horizontal = 6.dp),
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
         contentAlignment = Alignment.Center,
     ) {
-        AppText(text, color = tc.td, fontSize = fontSize)
+        DisableSelection {
+            AppText(text, color = tc.td, fontSize = fontSize, modifier = Modifier.padding(horizontal = 6.dp))
+        }
     }
 }
 
@@ -1010,28 +1033,41 @@ fun SegmentedControl(
     enabled: Boolean = true,
 ) {
     val tc = tc()
+    val controlShape = RoundedCornerShape(6.dp)
     Row(
         modifier = modifier
-            .border(0.5.dp, tc.br, RoundedCornerShape(6.dp))
-            .clip(RoundedCornerShape(6.dp)),
+            .border(0.5.dp, tc.br, controlShape)
+            .clip(controlShape),
     ) {
         options.forEachIndexed { index, label ->
             val selected = index in selectedIndices
             val selColor = selectedColors?.getOrNull(index) ?: tc.ac
+            // The selected fill is part of the segment, not an unshaped overlay. Keeping the
+            // outer segment corners rounded makes the highlight follow the control's silhouette;
+            // middle segments remain square where they meet their neighbors.
+            val segmentShape = when {
+                options.size == 1 -> controlShape
+                index == 0 -> RoundedCornerShape(topStart = 6.dp, bottomStart = 6.dp)
+                index == options.lastIndex -> RoundedCornerShape(topEnd = 6.dp, bottomEnd = 6.dp)
+                else -> RoundedCornerShape(0.dp)
+            }
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = (if (fillWidth) Modifier.weight(1f) else Modifier.defaultMinSize(minWidth = 36.dp))
                     .height(28.dp)
-                    .background(if (selected && enabled) selColor.copy(.2f) else Color.Transparent)
-                    .clickable(enabled = enabled) { onToggle(index) }
-                    .padding(horizontal = 10.dp),
+                    .clip(segmentShape)
+                    .background(if (selected && enabled) selColor.copy(.2f) else Color.Transparent, segmentShape)
+                    .clickable(enabled = enabled) { onToggle(index) },
             ) {
-                AppText(
-                    text = label,
-                    color = if (!enabled) tc.td.copy(.5f) else if (selected) selColor else tc.ts,
-                    fontSize = 12.sp,
-                    fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-                )
+                DisableSelection {
+                    AppText(
+                        text = label,
+                        color = if (!enabled) tc.td.copy(.5f) else if (selected) selColor else tc.ts,
+                        fontSize = 12.sp,
+                        fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+                        modifier = Modifier.padding(horizontal = 10.dp),
+                    )
+                }
             }
             if (index < options.lastIndex) {
                 Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
@@ -1057,11 +1093,12 @@ fun AppButton(
     // Open+▾ split button) the same way ToolbarBtn does — CORNER_MD default means every
     // pre-existing call site (none of which passes this) renders identically to before.
     shape: Shape = CORNER_MD,
+    textColor: Color? = null,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     val accentColor = if (isDanger) DANGER_RED else tc.ac
-    val textColor = when {
+    val resolvedTextColor = textColor ?: when {
         !enabled -> tc.td.copy(.5f)
         variant == ButtonVariant.Primary -> Color.White
         variant == ButtonVariant.Secondary && isDanger -> DANGER_RED
@@ -1082,6 +1119,8 @@ fun AppButton(
                 shape,
             )
             .clip(shape)
+            // Keep the entire padded visual surface clickable; placing this after padding would
+            // make only the label hit-testable and lets parent row handlers win in the padding.
             .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
@@ -1101,12 +1140,12 @@ fun AppButton(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 leadingIcon?.let {
-                    Icon(it, contentDescription = null, modifier = Modifier.size(14.dp), tint = textColor)
+                    Icon(it, contentDescription = null, modifier = Modifier.size(14.dp), tint = resolvedTextColor)
                 }
                 if (label.isNotEmpty()) {
                     AppText(
                         label,
-                        color = textColor,
+                        color = resolvedTextColor,
                         fontSize = 12.sp,
                         fontWeight = if (variant == ButtonVariant.Primary) FontWeight.Medium else FontWeight.Normal,
                     )

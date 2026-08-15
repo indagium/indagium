@@ -42,7 +42,7 @@ private fun passesTextFilter(message: Seq3Message, text: String): Boolean {
 
 enum class Seq3Sort { LOG_ORDER, LIFELINE, OCCURRENCES, STATE }
 
-private fun firstTimestamp(message: Seq3Message): Long = message.occurrences.firstOrNull()?.timestampMillis ?: Long.MAX_VALUE
+private fun firstTimestamp(message: Seq3Message): Long = message.primaryTimestampMillis ?: Long.MAX_VALUE
 
 private fun stateSortRank(state: Seq3State): Int = when (state) {
     Seq3State.NEEDS_TARGET -> 0
@@ -369,8 +369,8 @@ fun nudgeSeq3OrderPin(document: Seq3Document, messageId: String, direction: Seq3
     if (neighborIdx !in document.messages.indices) return Seq3PinResult(document, false, "No neighbouring message in that direction")
     val message = document.messages[idx]
     val neighbor = document.messages[neighborIdx]
-    val ts = message.occurrences.firstOrNull()?.timestampMillis
-    val neighborTs = neighbor.occurrences.firstOrNull()?.timestampMillis
+    val ts = message.primaryTimestampMillis
+    val neighborTs = neighbor.primaryTimestampMillis
     if (ts == null || ts != neighborTs) {
         return Seq3PinResult(document, false, "Order can only be pinned between messages that share an exact timestamp")
     }

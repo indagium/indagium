@@ -15,10 +15,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -64,11 +66,9 @@ import com.indagium.diagram3.Seq3LifelineColumn
 import com.indagium.diagram3.Seq3MessageNoteRow
 import com.indagium.diagram3.Seq3NoteBox
 import com.indagium.diagram3.Seq3RowGeometry
-import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3SelfLoopRow
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
-import com.indagium.diagram3.seq3Select
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -102,7 +102,6 @@ internal fun Seq3Canvas(state: AppState, session: Seq3WorkspaceSession, view: Se
     val document = session.document
     val layout = remember(document) { Seq3RenderCache.layout(document) }
     Column(modifier.fillMaxSize().background(tc.bg)) {
-        Seq3CanvasToolbar(view, layout)
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (layout.lifelines.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -117,47 +116,53 @@ internal fun Seq3Canvas(state: AppState, session: Seq3WorkspaceSession, view: Se
 }
 
 @Composable
-private fun Seq3CanvasToolbar(view: Seq3ViewState, layout: Seq3Layout) {
+internal fun Seq3CanvasZoomToolbarControls(view: Seq3ViewState) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Seq3ZoomControls(view)
+        SegmentedControl(
+            options = listOf("Fit height", "Fit width", "Reset"),
+            selectedIndices = when (view.zoomMode) {
+                Seq3ZoomMode.FIT -> setOf(0)
+                Seq3ZoomMode.FIT_WIDTH -> setOf(1)
+                Seq3ZoomMode.MANUAL -> emptySet()
+            },
+            onToggle = { index ->
+                when (index) {
+                    0 -> view.zoomMode = Seq3ZoomMode.FIT
+                    1 -> view.zoomMode = Seq3ZoomMode.FIT_WIDTH
+                    else -> {
+                        view.zoom = 1f
+                        view.zoomMode = Seq3ZoomMode.MANUAL
+                    }
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun Seq3ZoomControls(view: Seq3ViewState) {
     val tc = tc()
     Row(
-        Modifier.fillMaxWidth().background(tc.p).padding(horizontal = 12.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = Modifier
+            .height(28.dp)
+            .border(0.5.dp, tc.br, CORNER_MD)
+            .clip(CORNER_MD),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AppText("Canvas", color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            // Design spec §07: "a crossing count that flags a bad arrangement" — straight off
-            // Seq3Layout's own `crossingCount`, recomputed by layoutSeq3 whenever a lifeline drag
-            // changes `Seq3Lifeline.ordinal` (see Seq3Layout.kt's own doc on that field).
-            AppText(
-                seq3CrossingLabel(layout.crossingCount),
-                color = if (layout.crossingCount > 0) tc.warn else tc.ts, fontSize = 10.sp,
-            )
+        Seq3ZoomStepButton("−") {
+            view.zoom = (view.zoom - ZOOM_STEP).coerceAtLeast(MIN_ZOOM)
+            view.zoomMode = Seq3ZoomMode.MANUAL
         }
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Seq3ZoomStepButton("−") { view.zoom = (view.zoom - ZOOM_STEP).coerceAtLeast(MIN_ZOOM); view.zoomMode = Seq3ZoomMode.MANUAL }
-                AppText(seq3ZoomPercentLabel(view.zoom), color = tc.ts, fontSize = 11.sp, modifier = Modifier.width(36.dp))
-                Seq3ZoomStepButton("+") { view.zoom = (view.zoom + ZOOM_STEP).coerceAtMost(MAX_ZOOM); view.zoomMode = Seq3ZoomMode.MANUAL }
-            }
-            SegmentedControl(
-                options = listOf("Fit height", "Fit width", "Reset"),
-                selectedIndices = when (view.zoomMode) {
-                    Seq3ZoomMode.FIT -> setOf(0)
-                    Seq3ZoomMode.FIT_WIDTH -> setOf(1)
-                    Seq3ZoomMode.MANUAL -> emptySet()
-                },
-                onToggle = { index ->
-                    when (index) {
-                        0 -> view.zoomMode = Seq3ZoomMode.FIT
-                        1 -> view.zoomMode = Seq3ZoomMode.FIT_WIDTH
-                        else -> {
-                            view.zoom = 1f
-                            view.zoomMode = Seq3ZoomMode.MANUAL
-                        }
-                    }
-                },
-            )
+        Box(
+            Modifier.width(42.dp).height(28.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            AppText(seq3ZoomPercentLabel(view.zoom), color = tc.ts, fontSize = 11.sp)
+        }
+        Seq3ZoomStepButton("+") {
+            view.zoom = (view.zoom + ZOOM_STEP).coerceAtMost(MAX_ZOOM)
+            view.zoomMode = Seq3ZoomMode.MANUAL
         }
     }
 }
@@ -165,11 +170,15 @@ private fun Seq3CanvasToolbar(view: Seq3ViewState, layout: Seq3Layout) {
 @Composable
 private fun Seq3ZoomStepButton(label: String, onClick: () -> Unit) {
     val tc = tc()
-    HoverBox(
-        modifier = Modifier.size(20.dp).background(tc.p2, CORNER_SM).border(1.dp, tc.br, CORNER_SM).clip(CORNER_SM)
+    ToolbarBtn(
+        label = label,
+        modifier = Modifier.size(28.dp)
             .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
+        shape = CORNER_SM,
+        contentPadding = PaddingValues(0.dp),
+        baseBg = tc.p2,
         onClick = onClick,
-    ) { AppText(label, color = tc.ts, fontSize = 12.sp, modifier = Modifier.align(Alignment.Center)) }
+    )
 }
 
 @Composable
@@ -368,7 +377,7 @@ private fun seq3CanvasGestureModifier(
                             }
                             !moved && !pressWasMiddle -> {
                                 val hitRow = seq3RowAt(layout, xUnits, yUnits)
-                                if (hitRow != null) seq3HandleCanvasRowClick(view, document, hitRow, event) { now, id ->
+                                if (hitRow != null) seq3HandleCanvasRowClick(view, hitRow) { now, id ->
                                     val doubleClick = now - lastClickTimeMs <= DOUBLE_CLICK_WINDOW_MS && lastClickMessageId == id
                                     lastClickTimeMs = now
                                     lastClickMessageId = id
@@ -388,23 +397,18 @@ private fun seq3CanvasGestureModifier(
 
 private fun seq3HandleCanvasRowClick(
     view: Seq3ViewState,
-    document: Seq3Document,
     hitRow: Seq3RowGeometry,
-    event: PointerEvent,
     registerClick: (nowMs: Long, id: String) -> Boolean,
 ) {
-    val mods = event.keyboardModifiers
-    val allIds = document.messages.map { it.id }
-    if (mods.isShiftPressed || mods.isMetaPressed || mods.isCtrlPressed) {
-        view.selection = seq3Select(allIds, view.selection, hitRow.messageId, mods.isMetaPressed || mods.isCtrlPressed, mods.isShiftPressed)
-    } else {
-        // A plain click always resolves the row into view even when the current queue
-        // filter/text hides it (spec §04) — reset the view here, BEFORE requesting the scroll,
-        // so Seq3QueuePanel's own effect finds the row on the very next recomposition.
-        view.filter = Seq3Filter.ALL
-        view.textFilter = ""
-        view.selection = Seq3Selection(setOf(hitRow.messageId), hitRow.messageId)
-    }
+    // Canvas/message presses are Inspector navigation, never queue selection. Selection is
+    // intentionally owned by the message checkboxes so clicking an arrow cannot unexpectedly
+    // activate a checkbox or trigger the selection action bar. Modifier keys do not change this
+    // rule.
+    // A click always resolves the row into view even when the current queue filter/text hides it
+    // (spec §04) — reset the view here, BEFORE requesting the scroll, so Seq3QueuePanel's effect
+    // finds the row on the very next recomposition.
+    view.filter = Seq3Filter.ALL
+    view.textFilter = ""
     view.inspectorMessageId = hitRow.messageId
     view.scrollRequestId = hitRow.messageId
     val doubleClick = registerClick(System.currentTimeMillis(), hitRow.messageId)
@@ -864,7 +868,7 @@ internal fun seq3FitWidthZoom(contentWidth: Double, viewportWidth: Double): Floa
 internal fun seq3ZoomPercentLabel(zoom: Float): String = "${(zoom * PERCENT).roundToInt()}%"
 
 internal fun seq3CrossingLabel(count: Int): String = when (count) {
-    0 -> "No crossings"
-    1 -> "1 crossing"
-    else -> "$count crossings"
+    0 -> "No arrow crossings"
+    1 -> "1 arrow crossing"
+    else -> "$count arrow crossings"
 }

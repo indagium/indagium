@@ -2,10 +2,10 @@ package com.indagium.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,7 +24,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.text.font.FontFamily
@@ -125,13 +124,15 @@ private fun Seq3GuidedHeader(pass: Seq3GuidedPassState, onExit: () -> Unit) {
             val fraction = if (total == 0) 0f else done.toFloat() / total
             Box(Modifier.fillMaxWidth(fraction.coerceIn(0f, 1f)).height(3.dp).background(tc.ac))
         }
-        HoverBox(
-            modifier = Modifier.clip(CORNER_SM)
-                .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
+        LabelIconButton(
+            text = "Esc to exit",
+            fontSize = 11.sp,
             onClick = onExit,
-        ) {
-            AppText("Esc to exit", color = tc.ts, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-        }
+            modifier = Modifier.pointerHoverIcon(
+                PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                overrideDescendants = true,
+            ),
+        )
     }
 }
 
@@ -301,7 +302,6 @@ private fun Seq3GuidedSecondaryActions(
     document: Seq3Document,
     message: Seq3Message,
 ) {
-    val tc = tc()
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Seq3GuidedSecondaryButton("＋ New lifeline") {
             val name = newSeq3LifelineName(document)
@@ -315,24 +315,29 @@ private fun Seq3GuidedSecondaryActions(
             applySeq3GuidedChoice(state, session, view, Seq3Command.GuidedSelfCall(message.id))
         }
         Spacer(Modifier.weight(1f))
-        HoverBox(
-            modifier = Modifier.clip(CORNER_SM)
-                .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
+        ToolbarBtn(
+            label = "Skip · S",
+            shape = CORNER_SM,
+            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 3.dp),
+            modifier = Modifier.pointerHoverIcon(
+                PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                overrideDescendants = true,
+            ),
             onClick = { skipSeq3Guided(session, view) },
-        ) {
-            AppText("Skip · S", color = tc.ts, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
-        }
+        )
     }
 }
 
 @Composable
 private fun Seq3GuidedSecondaryButton(label: String, onClick: () -> Unit) {
-    val tc = tc()
-    HoverBox(
-        modifier = Modifier.clip(RoundedCornerShape(7.dp)).background(tc.p, RoundedCornerShape(7.dp))
-            .border(1.dp, tc.br, RoundedCornerShape(7.dp)).padding(horizontal = 12.dp, vertical = 7.dp),
+    AppButton(
+        label = label,
         onClick = onClick,
-    ) { AppText(label, color = tc.tx, fontSize = 12.sp) }
+        variant = ButtonVariant.Secondary,
+        shape = RoundedCornerShape(7.dp),
+        horizontalPadding = 12.dp,
+        modifier = Modifier.height(32.dp),
+    )
 }
 
 @Composable
@@ -349,17 +354,7 @@ private fun Seq3GuidedFooter(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Row(
-            Modifier.clip(CORNER_SM).clickable(onClick = onToggleApplyToAll).padding(vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Box(
-                Modifier.width(13.dp).height(13.dp).clip(CORNER_SM)
-                    .background(if (applyToAll) tc.ac else Color.Transparent, CORNER_SM)
-                    .border(1.5.dp, if (applyToAll) tc.ac else tc.br, CORNER_SM),
-                contentAlignment = Alignment.Center,
-            ) { if (applyToAll) AppText("✓", color = tc.p, fontSize = 9.sp) }
+        CheckRow(checked = applyToAll, onToggle = onToggleApplyToAll, modifier = Modifier.weight(1f)) {
             AppText("Apply to all ×$occurrenceCount occurrences", color = tc.tx, fontSize = 12.sp)
         }
         Spacer(Modifier.weight(1f))
