@@ -15,6 +15,7 @@ import com.indagium.diagram3.Seq3UndoEntry
 import com.indagium.diagram3.applySeq3Command
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.generateSeq3
+import com.indagium.diagram3.matchOneMessage
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.reviewSeq3Regeneration
 import com.indagium.model.AnnBlock
@@ -121,6 +122,22 @@ data class Seq3WorkspaceSession(
     val exportMode: DiagramExportMode? = null,
 )
 
+private const val BASE_UNTITLED_TITLE = "Untitled diagram"
+
+/**
+ * A unique default title for a brand-new session, seeded in [Seq3Session.begin] against that exact
+ * log's own already-saved diagrams ([DiagramLibraryStore.forSource]) so two diagrams for the SAME
+ * log never start out sharing a name — a different log is free to also start at "Untitled diagram",
+ * since [existingTitles] is scoped per-source by the caller. `internal`, not `private`, purely so
+ * [Seq3SessionTest] can assert the numbering directly without going through [Seq3Session.begin].
+ */
+internal fun defaultSeq3Title(existingTitles: Set<String>): String {
+    if (BASE_UNTITLED_TITLE !in existingTitles) return BASE_UNTITLED_TITLE
+    var suffix = 2
+    while ("$BASE_UNTITLED_TITLE $suffix" in existingTitles) suffix++
+    return "$BASE_UNTITLED_TITLE $suffix"
+}
+
 /**
  * Owns every open [Seq3WorkspaceSession]. One instance lives on [AppState] (`AppState.seq3Sessions`),
  * exactly like `AppState.seqDiagrams` owns [SeqDiagramCoordinator].
@@ -165,10 +182,13 @@ class Seq3Session(
         val tab = appState.tab(tabId) ?: return null
         val range = rangeFor(tab, selectedIds)
         val id = "seq3-${UUID.randomUUID()}"
+        // Unique against THIS exact log's own library entries (not the whole library) — two
+        // different logs are free to each have their own "Untitled diagram".
+        val title = defaultSeq3Title(libraryStore.forSource(sourceIdentity(tab)).map { it.title }.toSet())
         val session = Seq3WorkspaceSession(
             id = id,
             sourceTabId = tabId,
-            document = Seq3Document(sourceFile = File(tab.filename).name, range = range),
+            document = Seq3Document(title = title, sourceFile = File(tab.filename).name, range = range),
             range = range,
             generateOptions = Seq3GenerateOptions(sourceFile = File(tab.filename).name),
         )
@@ -221,6 +241,7 @@ class Seq3Session(
     fun close(id: String) {
         generateJobs.remove(id)?.cancel()
         draftJobs.remove(id)?.cancel()
+        revertJobs.remove(id)?.cancel()
         generations.remove(id)
         sessions = sessions.filterNot { it.id == id }
         if (activeSessionId == id) {
@@ -316,7 +337,9 @@ class Seq3Session(
             }
             val cancellationCheck: () -> Unit = { if (!isActive) throw CancellationException("seq3 generate superseded") }
             generateRunCount.incrementAndGet()
-            val result = runCatching { generateSeq3(tab.logData, current.range, current.generateOptions, cancellationCheck) }
+            val result = runCatching {
+                generateSeq3(tab.logData, current.range, current.generateOptions, cancellationCheck, appState.sourceIndex)
+            }
             coroutineContext.ensureActive()
             result.onSuccess { fresh -> publishGenerated(id, generation, fresh) }
                 .onFailure { e ->
@@ -369,11 +392,18 @@ class Seq3Session(
      * Title is pure metadata — [Seq3GenerateOptions.title] only ever seeds a BRAND NEW document
      * (see [publishGenerated]'s `ifBlank` above), it is never read back out of one — so this
      * deliberately never calls [requestGenerate]. Still marks the session dirty and starts the
-     * draft-saved debounce like every other edit (see [markDirty]).
+     * draft-saved (now auto-save, see [markDirty]) debounce like every other edit.
+     *
+     * A [title] that's blank after trimming is silently ignored, keeping whatever the session
+     * already had — the title bar always needs something to show (item 6c), so this is the one
+     * place that guarantee is enforced, rather than duplicating the check in every caller
+     * ([Seq3TitleField]'s commit included).
      */
     fun updateTitle(id: String, title: String) {
         if (session(id) == null) return
-        replace(id) { it.copy(document = it.document.copy(title = title)) }
+        val trimmed = title.trim()
+        if (trimmed.isEmpty()) return
+        replace(id) { it.copy(document = it.document.copy(title = trimmed)) }
         markDirty(id)
     }
 
@@ -413,24 +443,33 @@ class Seq3Session(
      *  mirroring the v1/v2 `state.seqDiagrams.revertManualSeed()` call site at `ui/App.kt:2294`. */
     fun undoActive(): Boolean = activeSessionId?.let(::undo) ?: false
 
-    // ── Dirty flag / draft-saved timestamp ──────────────────────────────────────────────────────
+    // ── Dirty flag / draft-saved timestamp / auto-save ──────────────────────────────────────────
     //
-    // Not a real autosave-to-disk (that stays AppState/AutosaveScheduler's job for actual log tabs;
-    // a v3 draft is either in memory or, once confirmed, inside a note block that already goes
-    // through the normal autosave path via upAnn). This only tracks the UI-facing "has this settled
-    // since the last edit" signal the canvas status bar shows as "Draft saved Nm ago" (design spec
-    // §04) — same 400ms debounce constant AppState's own autosave scheduler uses, reused here so a
-    // v3 workspace settles on the same cadence the rest of the app already trains a user to expect.
+    // This debounce IS the auto-save (design spec's "fully automatic — no Save button" decision):
+    // 400ms after an edit settles, [markDirty] calls [confirm], which writes the document into a
+    // note (going through AppState's normal upAnn autosave path for that note block, same as any
+    // other annotation edit) and updates DiagramLibraryStore. [markDirty] itself is called ONLY from
+    // [applyCommand], [undo] and [updateTitle] — never from generation completing — so opening or
+    // regenerating a diagram nobody has touched writes nothing; only a real edit ever reaches
+    // [confirm] this way. [confirm] already no-ops harmlessly (returns null, dirty stays true) when
+    // `current.sourceTabId == null` or the document has no lifelines yet, so the `ensureActive()`
+    // check below is the only guard this debounce needs. Same 400ms debounce constant AppState's own
+    // autosave scheduler uses, reused here so a v3 workspace settles on the same cadence the rest of
+    // the app already trains a user to expect.
 
     private val draftJobs = ConcurrentHashMap<String, Job>()
 
+    /** Marks [id] dirty and (re)starts the auto-save debounce — see this section's own header for
+     *  why calling [confirm] here on settle is a real save, not merely a cosmetic timestamp flip. A
+     *  second edit before the debounce fires cancels and restarts it, same conflation idiom
+     *  [requestGenerate] uses for its own debounce. */
     private fun markDirty(id: String) {
         replace(id) { it.copy(dirty = true) }
         draftJobs.remove(id)?.cancel()
         draftJobs[id] = scope.launch {
             delay(DRAFT_SAVE_DEBOUNCE_MS)
             coroutineContext.ensureActive()
-            replace(id) { it.copy(dirty = false, draftSavedAtMillis = clock()) }
+            confirm(id)
         }
     }
 
@@ -574,7 +613,7 @@ class Seq3Session(
             }
             val cancellationCheck: () -> Unit = { if (!isActive) throw CancellationException("seq3 regen review superseded") }
             generateRunCount.incrementAndGet()
-            val result = runCatching { generateSeq3(tab.logData, range, options, cancellationCheck) }
+            val result = runCatching { generateSeq3(tab.logData, range, options, cancellationCheck, appState.sourceIndex) }
             coroutineContext.ensureActive()
             result.onSuccess { fresh ->
                 val latest = session(id) ?: return@onSuccess
@@ -615,6 +654,48 @@ class Seq3Session(
         val applied = applyCommand(id, Seq3Command.ApplyRegeneration(review))
         if (applied) replace(id) { it.copy(pendingRegenReview = null) }
         return applied
+    }
+
+    // ── Revert one message to its freshly regenerated counterpart (item 15) ────────────────────
+    //
+    // No existing primitive is message-scoped — [Seq3RegenReview]'s own per-row decisions all act
+    // across a WHOLE pending review built by [requestRegenReview]. This runs its own one-shot,
+    // fire-and-forget `generateSeq3` pass (same shape as [requestRegenReview]) over the session's
+    // CURRENT [Seq3WorkspaceSession.range]/[Seq3WorkspaceSession.generateOptions], finds [messageId]'s
+    // regenerated counterpart via [matchOneMessage] — the promoted, single-message sibling of the
+    // whole-document matching [requestRegenReview] uses, so a one-message revert and a full
+    // regeneration review can never silently disagree on what "the same message" means — and applies
+    // it through [Seq3Command.ReplaceMessage]: one [applyCommand] call, one undo step, same discipline
+    // as every other v3 mutation.
+
+    private val revertJobs = ConcurrentHashMap<String, Job>()
+
+    /**
+     * "Revert to generated" (spec: undo a hand-edit back to what the engine would produce today) for
+     * the ONE row [messageId] inside session [id]. A safe no-op — nothing errors, nothing changes —
+     * when the source tab is closed, [messageId] no longer exists, or nothing in the fresh pass
+     * matches it (no shared evidence and no unique template match, [matchOneMessage]'s own contract).
+     */
+    fun revertMessage(id: String, messageId: String) {
+        val current = session(id) ?: return
+        val tabId = current.sourceTabId ?: return
+        if (current.document.messages.none { it.id == messageId }) return
+        revertJobs.remove(id)?.cancel()
+        val job = scope.launch {
+            val tab = appState.tab(tabId) ?: return@launch
+            val cancellationCheck: () -> Unit = { if (!isActive) throw CancellationException("seq3 revert superseded") }
+            generateRunCount.incrementAndGet()
+            val result = runCatching {
+                generateSeq3(tab.logData, current.range, current.generateOptions, cancellationCheck, appState.sourceIndex)
+            }
+            coroutineContext.ensureActive()
+            result.onSuccess { fresh ->
+                val latestMessage = session(id)?.document?.messages?.firstOrNull { it.id == messageId } ?: return@onSuccess
+                val matched = matchOneMessage(latestMessage, fresh.messages) ?: return@onSuccess
+                applyCommand(id, Seq3Command.ReplaceMessage(messageId, matched))
+            }.onFailure { e -> if (e is CancellationException) throw e }
+        }
+        revertJobs[id] = job
     }
 
     // ── Status-bar support ──────────────────────────────────────────────────────────────────────

@@ -202,6 +202,41 @@ class Seq3LayoutTest {
     }
 
     @Test
+    fun stubRowLabelAndPillNeverOverlapVertically() {
+        // item 10 (phase-5 post-ship plan): labelBox and dropPill used to share the same origin and
+        // overlapping y-ranges. Assert their y-ranges are now genuinely disjoint.
+        val doc = Seq3Document(lifelines = listOf(lifeline("A", 0)), messages = listOf(message("m1", "A", null)))
+        val layout = layoutSeq3(doc, opts())
+        val stub = layout.rows.single() as Seq3UnresolvedStubRow
+
+        val labelTop = stub.labelBox.y
+        val labelBottom = stub.labelBox.y + stub.labelBox.height
+        val pillTop = stub.dropPill.y
+        val pillBottom = stub.dropPill.y + stub.dropPill.height
+        assertTrue(
+            labelBottom <= pillTop || pillBottom <= labelTop,
+            "labelBox [$labelTop, $labelBottom] and dropPill [$pillTop, $pillBottom] must not overlap in y",
+        )
+    }
+
+    @Test
+    fun stubRowGrowsItsPitchSoTheNextRowNeverOverlapsThePill() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", null),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2))),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val stub = layout.rows.single { it.messageId == "m1" } as Seq3UnresolvedStubRow
+        val next = layout.rows.single { it.messageId == "m2" }
+        val pillBottom = stub.dropPill.y + stub.dropPill.height
+
+        assertTrue(next.y > pillBottom, "the next row (y=${next.y}) must sit below the stub's pill (bottom=$pillBottom)")
+    }
+
+    @Test
     fun crossingCountDetectsAnInterleavedArrangementButNotANestedOrDisjointOne() {
         val lifelines = listOf(lifeline("A", 0), lifeline("B", 1), lifeline("C", 2), lifeline("D", 3))
         // A->C (span 0..2) and B->D (span 1..3) interleave: 0 < 1 < 2 < 3 -> exactly one crossing.

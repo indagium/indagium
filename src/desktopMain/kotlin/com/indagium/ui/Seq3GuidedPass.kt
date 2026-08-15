@@ -25,6 +25,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -40,6 +42,7 @@ import com.indagium.diagram3.seq3GuidedContext
 import com.indagium.diagram3.seq3GuidedCurrentMessage
 import com.indagium.diagram3.suggestSeq3Target
 import com.indagium.model.LogEntry
+import java.awt.Cursor as AwtCursor
 
 // ── "Fix these" — the guided pass (design spec §05) ───────────────────────────────────────────
 //
@@ -122,10 +125,13 @@ private fun Seq3GuidedHeader(pass: Seq3GuidedPassState, onExit: () -> Unit) {
             val fraction = if (total == 0) 0f else done.toFloat() / total
             Box(Modifier.fillMaxWidth(fraction.coerceIn(0f, 1f)).height(3.dp).background(tc.ac))
         }
-        AppText(
-            "Esc to exit", color = tc.ts, fontSize = 11.sp,
-            modifier = Modifier.clip(CORNER_SM).clickable(onClick = onExit).padding(horizontal = 6.dp, vertical = 2.dp),
-        )
+        HoverBox(
+            modifier = Modifier.clip(CORNER_SM)
+                .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
+            onClick = onExit,
+        ) {
+            AppText("Esc to exit", color = tc.ts, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+        }
     }
 }
 
@@ -309,10 +315,13 @@ private fun Seq3GuidedSecondaryActions(
             applySeq3GuidedChoice(state, session, view, Seq3Command.GuidedSelfCall(message.id))
         }
         Spacer(Modifier.weight(1f))
-        AppText(
-            "Skip · S", color = tc.ts, fontSize = 12.sp,
-            modifier = Modifier.clip(CORNER_SM).clickable { skipSeq3Guided(session, view) }.padding(horizontal = 6.dp, vertical = 3.dp),
-        )
+        HoverBox(
+            modifier = Modifier.clip(CORNER_SM)
+                .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
+            onClick = { skipSeq3Guided(session, view) },
+        ) {
+            AppText("Skip · S", color = tc.ts, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
+        }
     }
 }
 

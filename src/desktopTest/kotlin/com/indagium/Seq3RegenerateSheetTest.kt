@@ -21,6 +21,7 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 import com.indagium.ui.AppState
+import com.indagium.ui.DiagramLibraryStore
 import com.indagium.ui.mkTab
 import com.indagium.ui.seq3RegenRowDetail
 import java.io.File
@@ -278,7 +279,11 @@ class Seq3RegenerateSheetTest {
 
     private fun stateFor(tab: LogTab): AppState {
         val root = createTempDirectory("indagium-seq3-regen-sheet").toFile()
-        return AppState(File(root, "state.cache"), notesDir = File(root, "notes")).also { s ->
+        return AppState(
+            File(root, "state.cache"),
+            notesDir = File(root, "notes"),
+            diagramLibraryStore = DiagramLibraryStore(File(root, "library.cache")),
+        ).also { s ->
             s.tabs = listOf(tab)
             s.activateTab(tab.id)
         }
@@ -288,6 +293,41 @@ class Seq3RegenerateSheetTest {
         val deadline = System.nanoTime() + timeoutMs * NANOS_PER_MILLI
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(10)
         assertTrue(condition(), "condition did not become true within ${timeoutMs}ms")
+    }
+
+    // ── Scope controls (item 4) ─────────────────────────────────────────────────────────────────
+    //
+    // Seq3RegenScopeControls' own composable isn't exercised here (this file follows
+    // Seq3GuidedPassTest's posture: no Compose testing harness in this codebase) — these assert the
+    // exact `Seq3Session` calls the sheet's new Time-range menu item / source-trace toggle make.
+
+    @Test
+    fun theTimeRangeScopeItemCallsUpdateScopeAndNeverTriggersARegenerate() {
+        val state = stateFor(mkTab("log", "sample.log", twoTagEntries()))
+        val id = state.seq3Sessions.begin("log")!!
+        await { state.seq3Sessions.sessions.single().generating == false }
+        val runsBefore = state.seq3Sessions.generateRunCount.get()
+
+        // What Seq3RegenScopeControls' "Time range" dropdown item does on click.
+        state.seq3Sessions.updateScope(id, Seq3Range.Time("10:00:00.000", "10:00:05.000"))
+
+        assertEquals(Seq3Range.Time("10:00:00.000", "10:00:05.000"), state.seq3Sessions.sessions.single().range)
+        assertEquals(runsBefore, state.seq3Sessions.generateRunCount.get(), "the scope picker only seeds the next Build review, never regenerates on its own")
+    }
+
+    @Test
+    fun theSourceTraceToggleFlipsGenerateOptionsWithoutRegenerating() {
+        val state = stateFor(mkTab("log", "sample.log", twoTagEntries()))
+        val id = state.seq3Sessions.begin("log")!!
+        await { state.seq3Sessions.sessions.single().generating == false }
+        assertTrue(state.seq3Sessions.sessions.single().generateOptions.sourceTraceEnabled, "default is on")
+        val runsBefore = state.seq3Sessions.generateRunCount.get()
+
+        // What Seq3RegenToggle's onToggle for the "Source trace" row does on click.
+        state.seq3Sessions.updateGenerateOptions(id) { it.copy(sourceTraceEnabled = !it.sourceTraceEnabled) }
+
+        assertFalse(state.seq3Sessions.sessions.single().generateOptions.sourceTraceEnabled)
+        assertEquals(runsBefore, state.seq3Sessions.generateRunCount.get(), "a toggle is an input to the next Build review, not a rebuild itself")
     }
 
     @Test

@@ -1155,6 +1155,10 @@ class AppState(
     // restarts. Injectable for the same reason as autosaveFile/controlTokenFile — tests shouldn't
     // touch the real ~/.openlog2-equivalent location.
     private val sourceIndexFile: File = DesktopStorage.sourceIndexFile(),
+    // Where confirmed v3 sequence diagrams are persisted across restarts (DiagramLibraryStore),
+    // threaded into Seq3Session below. Injectable for the same reason as autosaveFile/
+    // controlTokenFile/sourceIndexFile — tests shouldn't touch the real appDataDir() store.
+    private val diagramLibraryStore: DiagramLibraryStore = DiagramLibraryStore(),
     // Test seam for the S-02 lifecycle race (applyControlServerState): production always
     // constructs-and-starts a real ControlServer synchronously; tests can substitute a slower
     // suspend factory (e.g. one that delays before starting) to exercise enable/disable ordering
@@ -1542,7 +1546,7 @@ class AppState(
     // its debounced background generate+layout pipeline, and writing a confirmed document into the
     // notes as an ordinary AnnBlock.Note — see Seq3Session. Public because App.kt renders the
     // workspace straight off it, the same way the merge-tabs dialog reads mergeTabsDialogOpen below.
-    val seq3Sessions = Seq3Session(this)
+    val seq3Sessions = Seq3Session(this, libraryStore = diagramLibraryStore)
 
     // App.kt writes this directly (dialog dismiss/confirm), not just reads it, so it needs a
     // full get/set forwarding var rather than a read-only getter like mcpControlError above.

@@ -112,8 +112,10 @@ private fun matchMessages(currentMessages: List<Seq3Message>, freshMessages: Lis
 
 /** Greedy strongest-overlap-first pairing by shared [Seq3Occurrence.entryId]s — a current/fresh
  *  pair with more shared real log lines is a stronger match than one with fewer, and ties break
- *  deterministically on id so this never depends on list iteration order. */
-private fun matchByEvidence(currentMessages: List<Seq3Message>, freshMessages: List<Seq3Message>): List<Pair<String, String>> {
+ *  deterministically on id so this never depends on list iteration order. Internal (not private) so
+ *  [matchOneMessage] can reuse this exact rule for a single-message revert instead of re-deriving
+ *  it — see that function's own doc. */
+internal fun matchByEvidence(currentMessages: List<Seq3Message>, freshMessages: List<Seq3Message>): List<Pair<String, String>> {
     data class Candidate(val currentId: String, val freshId: String, val overlap: Int)
 
     val candidates = currentMessages.flatMap { c ->
@@ -132,8 +134,9 @@ private fun matchByEvidence(currentMessages: List<Seq3Message>, freshMessages: L
 /** Fallback for messages with NO evidence at all on either side (see this file's header) — matched
  *  by template equality, but ONLY when exactly one still-unmatched fresh candidate shares the
  *  template; two-or-more candidates are left unmatched (ambiguous) rather than picked arbitrarily,
- *  per this phase's brief. */
-private fun matchEvidenceFreeMessages(
+ *  per this phase's brief. Internal for the same reason as [matchByEvidence] — [matchOneMessage]
+ *  reuses it rather than re-implementing the fallback rule. */
+internal fun matchEvidenceFreeMessages(
     currentMessages: List<Seq3Message>,
     freshMessages: List<Seq3Message>,
     matchedCurrentIds: Set<String>,
@@ -146,6 +149,23 @@ private fun matchEvidenceFreeMessages(
         val candidates = freeFresh.filter { it.match.template == c.match.template && it.id !in claimedFresh }
         candidates.singleOrNull()?.let { f -> claimedFresh += f.id; c.id to f.id }
     }
+}
+
+/**
+ * The single-message counterpart to [matchMessages] (backs `Seq3Session.revertMessage`, phase 2's
+ * "revert to generated" verb on one edited row): finds [current]'s counterpart in [freshMessages]
+ * using the exact same evidence-first/unique-template-fallback rule the whole-document regeneration
+ * review uses — composed from [matchByEvidence]/[matchEvidenceFreeMessages] rather than
+ * re-implemented, so a one-message revert and a full regeneration review can never silently diverge
+ * on what "the same message" means. Returns null when nothing in [freshMessages] qualifies (no
+ * shared evidence and no unique template match) — the caller then leaves [current] untouched rather
+ * than guessing.
+ */
+internal fun matchOneMessage(current: Seq3Message, freshMessages: List<Seq3Message>): Seq3Message? {
+    val freshById = freshMessages.associateBy { it.id }
+    val evidenceMatch = matchByEvidence(listOf(current), freshMessages).firstOrNull()?.second
+    val freshId = evidenceMatch ?: matchEvidenceFreeMessages(listOf(current), freshMessages, emptySet(), emptySet()).firstOrNull()?.second
+    return freshId?.let(freshById::get)
 }
 
 // ── Decisions ────────────────────────────────────────────────────────────────────────────────

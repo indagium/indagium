@@ -19,8 +19,10 @@ import com.indagium.ui.Seq3DragEndpoint
 import com.indagium.ui.Seq3EndpointSide
 import com.indagium.ui.seq3ArrowEndpointAt
 import com.indagium.ui.seq3CrossingLabel
+import com.indagium.ui.seq3DragPreview
+import com.indagium.ui.seq3FitHeightZoom
 import com.indagium.ui.seq3FitWidthZoom
-import com.indagium.ui.seq3FitZoom
+import com.indagium.ui.seq3IsEmptyCanvasBackground
 import com.indagium.ui.seq3LifelineDropIndex
 import com.indagium.ui.seq3NearestLifelineId
 import com.indagium.ui.seq3PointInBox
@@ -177,6 +179,78 @@ class Seq3CanvasTest {
         assertNull(seq3ResolveDragEndpoint(layout, x = -1000.0, y = -1000.0))
     }
 
+    // ── seq3IsEmptyCanvasBackground: pan-arming (item 12) ───────────────────────────────────────
+
+    @Test
+    fun emptyCanvasBackgroundIsFalseOnAnArrowRow() {
+        val layout = layoutSeq3(twoLifelineArrowDoc(), opts())
+        val row = layout.rows.single() as Seq3ArrowRow
+        assertTrue(!seq3IsEmptyCanvasBackground(layout, x = (row.fromX + row.toX) / 2, y = row.y))
+    }
+
+    @Test
+    fun emptyCanvasBackgroundIsFalseExactlyOnAnEndpointHandleToo() {
+        // Not just "on the row" — right on the grabbable handle itself must also count as content,
+        // since a pan armed there would fight the endpoint-drag Press already resolves first.
+        val layout = layoutSeq3(twoLifelineArrowDoc(), opts())
+        val row = layout.rows.single() as Seq3ArrowRow
+        assertTrue(!seq3IsEmptyCanvasBackground(layout, x = row.toX - 1.0, y = row.y))
+    }
+
+    @Test
+    fun emptyCanvasBackgroundIsTrueFarFromEveryRow() {
+        val layout = layoutSeq3(twoLifelineArrowDoc(), opts())
+        assertTrue(seq3IsEmptyCanvasBackground(layout, x = -1000.0, y = -1000.0))
+    }
+
+    // ── seq3DragPreview: live feedback while dragging an endpoint (item 13) ─────────────────────
+
+    @Test
+    fun dragPreviewAnchorsOnTheOppositeEndWhenDraggingTo() {
+        val layout = layoutSeq3(twoLifelineArrowDoc(), opts())
+        val row = layout.rows.single() as Seq3ArrowRow
+        val preview = seq3DragPreview(layout, Seq3DragEndpoint("m1", Seq3EndpointSide.TO), cursorX = row.toX + 5.0)
+        assertEquals(row.fromX, preview?.anchorX, "TO is being dragged, so the anchor is the FROM end that's staying put")
+        assertEquals(row.y, preview?.y)
+        assertEquals(row.toX + 5.0, preview?.cursorX)
+    }
+
+    @Test
+    fun dragPreviewAnchorsOnTheOppositeEndWhenDraggingFrom() {
+        val layout = layoutSeq3(twoLifelineArrowDoc(), opts())
+        val row = layout.rows.single() as Seq3ArrowRow
+        val preview = seq3DragPreview(layout, Seq3DragEndpoint("m1", Seq3EndpointSide.FROM), cursorX = row.fromX - 5.0)
+        assertEquals(row.toX, preview?.anchorX, "FROM is being dragged, so the anchor is the TO end that's staying put")
+    }
+
+    @Test
+    fun dragPreviewAlwaysAnchorsOnFromForAnUnresolvedStub() {
+        val doc = Seq3Document(lifelines = listOf(lifeline("A", 0)), messages = listOf(message("m1", "A", null)))
+        val layout = layoutSeq3(doc, opts())
+        val row = layout.rows.single() as Seq3UnresolvedStubRow
+        val preview = seq3DragPreview(layout, Seq3DragEndpoint("m1", Seq3EndpointSide.TO), cursorX = row.fromX + 40.0)
+        assertEquals(row.fromX, preview?.anchorX)
+        assertEquals(row.fromX + 40.0, preview?.cursorX)
+    }
+
+    @Test
+    fun dragPreviewReportsTheNearestLifelineAsTheCandidateUsingTheSameFunctionReleaseWillUse() {
+        val doc = Seq3Document(lifelines = listOf(lifeline("A", 0), lifeline("B", 1), lifeline("C", 2)))
+        val layout = layoutSeq3(doc, opts())
+        val cCenter = layout.lifelines.first { it.lifelineId == "C" }.centerX
+        val docWithArrow = Seq3Document(lifelines = doc.lifelines, messages = listOf(message("m1", "A", "B")))
+        val layoutWithArrow = layoutSeq3(docWithArrow, opts())
+        val preview = seq3DragPreview(layoutWithArrow, Seq3DragEndpoint("m1", Seq3EndpointSide.TO), cursorX = cCenter)
+        assertEquals(seq3NearestLifelineId(layoutWithArrow, cCenter), preview?.candidateLifelineId)
+        assertEquals("C", preview?.candidateLifelineId)
+    }
+
+    @Test
+    fun dragPreviewIsNullWhenTheDraggedMessageNoLongerHasARow() {
+        val layout = layoutSeq3(twoLifelineArrowDoc(), opts())
+        assertNull(seq3DragPreview(layout, Seq3DragEndpoint("no-such-message", Seq3EndpointSide.TO), cursorX = 0.0))
+    }
+
     // ── seq3PointInBox ───────────────────────────────────────────────────────────────────────
 
     @Test
@@ -257,13 +331,16 @@ class Seq3CanvasTest {
     // ── Zoom helpers ─────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun fitZoomShrinksToTheSmallerOfWidthOrHeightRatio() {
-        assertEquals(0.5f, seq3FitZoom(contentWidth = 200.0, contentHeight = 100.0, viewportWidth = 100.0, viewportHeight = 100.0))
+    fun fitHeightZoomOnlyConsidersHeight() {
+        // Genuine complement of fitWidthZoomOnlyConsidersWidth below (item 5) — width is irrelevant.
+        assertEquals(0.5f, seq3FitHeightZoom(contentHeight = 200.0, viewportHeight = 100.0))
+        assertEquals(2f, seq3FitHeightZoom(contentHeight = 100.0, viewportHeight = 200.0))
     }
 
     @Test
-    fun fitZoomFallsBackToOneForADegenerateViewport() {
-        assertEquals(1f, seq3FitZoom(200.0, 100.0, 0.0, 100.0))
+    fun fitHeightZoomFallsBackToOneForADegenerateViewport() {
+        assertEquals(1f, seq3FitHeightZoom(200.0, 0.0))
+        assertEquals(1f, seq3FitHeightZoom(0.0, 100.0))
     }
 
     @Test

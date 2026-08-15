@@ -5,6 +5,7 @@ package com.indagium.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -13,6 +14,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -26,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.indagium.diagram3.Seq3AddResult
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Document
@@ -40,11 +43,17 @@ import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3State
 import com.indagium.diagram3.Seq3Visibility
+import com.indagium.diagram3.addSeq3MessageFromSelection
 import com.indagium.diagram3.nudgeSeq3OrderPin
 import com.indagium.diagram3.seq3FilterCounts
 import com.indagium.diagram3.seq3QueueRows
 import com.indagium.diagram3.seq3Select
+import com.indagium.model.LogEntry
+import kotlinx.coroutines.delay
 import java.util.UUID
+import java.awt.Cursor as AwtCursor
+
+private const val ADD_HINT_DURATION_MS = 2_500L
 
 // ── The panel is a queue — design spec §04 + §06 + §07 ─────────────────────────────────────────
 //
@@ -78,7 +87,7 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
     }
 
     Column(modifier.background(tc.p)) {
-        Seq3QueueHeader(counts)
+        Seq3QueueHeader(state, session, counts)
         if (counts.needsTarget > 0) {
             Seq3NeedsTargetBanner(counts.needsTarget) {
                 // Spec §05: the banner is what starts the guided pass. `startSeq3GuidedPass`
@@ -89,6 +98,9 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
         }
         Seq3FilterChipsRow(view, counts)
         Seq3FilterTextAndSortRow(view)
+        if (document.fragments.isNotEmpty() || document.notes.isNotEmpty()) {
+            Seq3FragmentsAndNotesSection(state, session, document)
+        }
         Box(Modifier.weight(1f)) {
             LazyColumn(Modifier.fillMaxWidth(), state = listState) {
                 items(rows, key = Seq3Message::id) { message ->
@@ -104,9 +116,35 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
     }
 }
 
+/** Resolves a log tab's currently-selected row ids into the [LogEntry]s "Add ＋" (item 2) hands to
+ *  [addSeq3MessageFromSelection] — pure and `internal` purely for testability, mirroring
+ *  [seq3PinnableDirections]/[seq3TemplateSegments]'s own "no composition needed" split. */
+internal fun seq3ResolveSelectedEntries(logData: List<LogEntry>, selectedIds: Set<Int>): List<LogEntry> =
+    logData.filter { it.id in selectedIds }
+
 @Composable
-private fun Seq3QueueHeader(counts: com.indagium.diagram3.Seq3FilterCounts) {
+private fun Seq3QueueHeader(state: AppState, session: Seq3WorkspaceSession, counts: com.indagium.diagram3.Seq3FilterCounts) {
     val tc = tc()
+    // A short-lived rejection hint ("Select rows from a single tag", …) — this file has no other
+    // transient-message convention to match (checked, per this phase's brief), so a plain
+    // remember+LaunchedEffect auto-clear is the documented fallback.
+    var addHint by remember(session.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(addHint) {
+        if (addHint != null) {
+            delay(ADD_HINT_DURATION_MS)
+            addHint = null
+        }
+    }
+
+    fun onAddClicked() {
+        val tab = session.sourceTabId?.let(state::tab)
+        val selectedEntries = tab?.let { seq3ResolveSelectedEntries(it.logData, it.selected) }.orEmpty()
+        when (val result = addSeq3MessageFromSelection(session.document, selectedEntries)) {
+            is Seq3AddResult.Added ->
+                state.seq3Sessions.applyCommand(session.id, Seq3Command.ReplaceDocument(result.document))
+            is Seq3AddResult.Rejected -> addHint = result.reason
+        }
+    }
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -117,17 +155,20 @@ private fun Seq3QueueHeader(counts: com.indagium.diagram3.Seq3FilterCounts) {
             Spacer(Modifier.width(6.dp))
             AppText("${counts.all}", color = tc.ts, fontSize = 12.sp)
         }
-        // No `Seq3Command`/`Seq3BulkAction` exists to create a brand-new, evidence-less message —
-        // every message in this engine is generated from a log range (Seq3Generator.kt's own
-        // header: "no fabricated/synthetic lifeline"), and this phase's brief only names "Fix
-        // these" and "Regenerate…" as the TODO hooks phase 5 fills. "Add ＋" is wired the same way
-        // rather than inventing engine surface outside this phase's scope — see this phase's
-        // report for the full note.
-        AppText(
-            "Add ＋", color = tc.ts, fontSize = 11.sp,
-            modifier = Modifier.clip(RoundedCornerShape(4.dp)).clickable { /* TODO(phase 5+): no engine hook yet */ }
-                .padding(horizontal = 6.dp, vertical = 2.dp),
-        )
+        Column(horizontalAlignment = Alignment.End) {
+            // Builds one message from the log tab's currently-selected rows via
+            // `addSeq3MessageFromSelection` — the resulting whole-document replacement is applied
+            // through `Seq3Command.ReplaceDocument`, so this is one undoable step like every other
+            // editing verb (this phase's brief: "never call session.document.copy(...) directly").
+            HoverBox(
+                modifier = Modifier.clip(RoundedCornerShape(4.dp))
+                    .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
+                onClick = ::onAddClicked,
+            ) {
+                AppText("Add ＋", color = tc.ts, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+            }
+            addHint?.let { hint -> AppText(hint, color = tc.warn, fontSize = 9.sp) }
+        }
     }
 }
 
@@ -141,10 +182,15 @@ private fun Seq3NeedsTargetBanner(count: Int, onFixThese: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AppText("$count message${if (count == 1) "" else "s"} need a target", color = tc.warn, fontSize = 11.sp)
-        AppText(
-            "Fix these →", color = tc.warn, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.clickable(onClick = onFixThese),
-        )
+        HoverBox(
+            modifier = Modifier.pointerHoverIcon(
+                PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                overrideDescendants = true,
+            ),
+            onClick = onFixThese,
+        ) {
+            AppText("Fix these →", color = tc.warn, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 
@@ -207,12 +253,101 @@ private fun Seq3QueueFooter(counts: com.indagium.diagram3.Seq3FilterCounts, onRe
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AppText("${counts.all} messages · ${counts.needsTarget} need a target", color = tc.ts, fontSize = 11.sp)
-        AppText(
-            "Regenerate…", color = tc.ac, fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-            // Opens spec §08's review sheet — never a silent full rebuild, which is exactly what
-            // "Regenerate is a reviewed proposal, never a wholesale replace" rules out.
-            modifier = Modifier.clickable(onClick = onRegenerate),
-        )
+        // Opens spec §08's review sheet — never a silent full rebuild, which is exactly what
+        // "Regenerate is a reviewed proposal, never a wholesale replace" rules out.
+        HoverBox(
+            modifier = Modifier.pointerHoverIcon(
+                PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                overrideDescendants = true,
+            ),
+            onClick = onRegenerate,
+        ) {
+            AppText("Regenerate…", color = tc.ac, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+// ── Fragments & notes (item 3): visibility + rename for what `Group ▾`/`Note` create ───────────
+//
+// `Group ▾`/`Note` (in the selection action bar below) are structurally add-only — this is the
+// missing edit-in-place counterpart: a compact expandable list surfacing every existing fragment/
+// note by id with its current label/text, each double-click-to-edit inline (same convention as
+// `Seq3Canvas.kt`'s `Seq3InlineLabelEditor`/`Seq3LifelineChip` label editors). Both rename actions
+// are id-keyed, not selection-keyed (`Seq3BulkAction.SetFragmentLabel`/`SetNoteText`), so they route
+// through `Seq3Command.Bulk(emptySet(), …)` — `applySeq3BulkAction`'s own empty-selection guard
+// already exempts exactly these two actions (Seq3Queue.kt's own comment on that guard).
+
+@Composable
+private fun Seq3FragmentsAndNotesSection(state: AppState, session: Seq3WorkspaceSession, document: Seq3Document) {
+    val tc = tc()
+    var expanded by remember(session.id) { mutableStateOf(false) }
+    val total = document.fragments.size + document.notes.size
+    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+        Row(
+            Modifier.fillMaxWidth().clickable { expanded = !expanded },
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AppText("Fragments & notes · $total", color = tc.ts, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+            AppText(if (expanded) "▴" else "▾", color = tc.ts, fontSize = 9.sp)
+        }
+        if (expanded) {
+            document.fragments.forEach { fragment -> Seq3FragmentRenameRow(state, session, fragment) }
+            document.notes.forEach { note -> Seq3NoteRenameRow(state, session, note) }
+        }
+    }
+}
+
+@Composable
+private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession, fragment: Seq3Fragment) {
+    val tc = tc()
+    var editing by remember(fragment.id) { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+        AppText(fragment.kind.name.lowercase(), color = tc.td, fontSize = 10.sp)
+        Spacer(Modifier.width(6.dp))
+        if (editing) {
+            var text by remember(fragment.id) { mutableStateOf(fragment.label) }
+
+            fun commit() {
+                state.seq3Sessions.applyCommand(
+                    session.id,
+                    Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetFragmentLabel(fragment.id, text)),
+                )
+                editing = false
+            }
+            InlineField(value = text, onValue = { text = it }, fontSize = 10.sp, modifier = Modifier.weight(1f), onSubmit = ::commit)
+            SquareIconButton("✓", fontSize = 10.sp, onClick = ::commit, size = 16.dp)
+            SquareIconButton("×", fontSize = 10.sp, onClick = { editing = false }, size = 16.dp)
+        } else {
+            Box(Modifier.weight(1f).pointerInput(fragment.id) { detectTapGestures(onDoubleTap = { editing = true }) }) {
+                AppText(fragment.label, color = tc.tx, fontSize = 10.sp, maxLines = 1)
+            }
+        }
+    }
+}
+
+@Composable
+private fun Seq3NoteRenameRow(state: AppState, session: Seq3WorkspaceSession, note: Seq3Note) {
+    val tc = tc()
+    var editing by remember(note.id) { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+        AppText("note", color = tc.td, fontSize = 10.sp)
+        Spacer(Modifier.width(6.dp))
+        if (editing) {
+            var text by remember(note.id) { mutableStateOf(note.text) }
+
+            fun commit() {
+                state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetNoteText(note.id, text)))
+                editing = false
+            }
+            InlineField(value = text, onValue = { text = it }, fontSize = 10.sp, modifier = Modifier.weight(1f), onSubmit = ::commit)
+            SquareIconButton("✓", fontSize = 10.sp, onClick = ::commit, size = 16.dp)
+            SquareIconButton("×", fontSize = 10.sp, onClick = { editing = false }, size = 16.dp)
+        } else {
+            Box(Modifier.weight(1f).pointerInput(note.id) { detectTapGestures(onDoubleTap = { editing = true }) }) {
+                AppText(note.text, color = tc.tx, fontSize = 10.sp, maxLines = 1)
+            }
+        }
     }
 }
 
@@ -273,9 +408,7 @@ private fun Seq3QueueRow(
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(Modifier.width(16.dp).padding(top = 2.dp)) {
-                Seq3RowCheckbox(checked = selected) {
-                    view.selection = seq3Select(visibleIds, view.selection, message.id, additive = true)
-                }
+                Seq3RowCheckbox(checked = selected)
             }
             Column(Modifier.weight(1f)) {
                 Seq3RowPatternLine(message, collapsedCount)
@@ -284,25 +417,35 @@ private fun Seq3QueueRow(
                 if (hidden) {
                     Row(Modifier.fillMaxWidth().padding(top = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                         AppText("Hidden from canvas · evidence kept", color = tc.td, fontSize = 10.sp)
-                        AppText(
-                            "Show", color = tc.ac, fontSize = 10.sp,
-                            modifier = Modifier.clickable {
+                        HoverBox(
+                            modifier = Modifier.pointerHoverIcon(
+                                PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                                overrideDescendants = true,
+                            ),
+                            onClick = {
                                 state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(message.id), Seq3BulkAction.Show))
                             },
-                        )
+                        ) {
+                            AppText("Show", color = tc.ac, fontSize = 10.sp)
+                        }
                     }
                 } else if (collapsedCount != null) {
                     Row(Modifier.fillMaxWidth().padding(top = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                         AppText("Collapsed to one arrow · ×$collapsedCount", color = tc.td, fontSize = 10.sp)
-                        AppText(
-                            "Show occurrences", color = tc.ac, fontSize = 10.sp,
-                            modifier = Modifier.clickable {
+                        HoverBox(
+                            modifier = Modifier.pointerHoverIcon(
+                                PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                                overrideDescendants = true,
+                            ),
+                            onClick = {
                                 state.seq3Sessions.applyCommand(
                                     session.id,
                                     Seq3Command.Bulk(setOf(message.id), Seq3BulkAction.SetRepeat(Seq3Repeat.EVERY, message.repeatThreshold)),
                                 )
                             },
-                        )
+                        ) {
+                            AppText("Show occurrences", color = tc.ac, fontSize = 10.sp)
+                        }
                     }
                 }
             }
@@ -310,14 +453,20 @@ private fun Seq3QueueRow(
     }
 }
 
+/** Item 11 fix: a PURE visual indicator of [checked], no independent hit target. The checkbox used
+ *  to carry its own `Modifier.clickable` (hardcoded `additive = true`, no shift/⌘ awareness) that
+ *  fired alongside the row's own modifier-aware `pointerInput` Press handler on every click — Press
+ *  selected only this row first, then the checkbox's Release-driven toggle saw the id already
+ *  selected and (being an unconditional toggle) removed it, so a checkbox click always emptied the
+ *  selection. The row's Press handler is now the ONLY selection entry point for the whole row,
+ *  checkbox included, matching the design spec's click/⇧click/⌘click-on-the-row model. */
 @Composable
-private fun Seq3RowCheckbox(checked: Boolean, onToggle: () -> Unit) {
+private fun Seq3RowCheckbox(checked: Boolean) {
     val tc = tc()
     Box(
         Modifier.size(16.dp)
             .background(if (checked) tc.ac else Color.Transparent, RoundedCornerShape(3.dp))
-            .border(1.dp, if (checked) tc.ac else tc.br, RoundedCornerShape(3.dp))
-            .clickable(onClick = onToggle),
+            .border(1.dp, if (checked) tc.ac else tc.br, RoundedCornerShape(3.dp)),
         contentAlignment = Alignment.Center,
     ) {
         if (checked) AppText("✓", color = tc.bg, fontSize = 9.sp)
@@ -379,6 +528,21 @@ private fun Seq3RowEndpointsLine(
             Seq3PinControls(state, session, message, pinnable)
         }
         Spacer(Modifier.weight(1f))
+        // Item 15: "revert to generated" for ONE edited row — only ever shown once this message has
+        // actually drifted from what the engine would produce (state derives EDITED from `authoring`,
+        // Seq3Message's own doc), so an untouched AUTO/NEEDS_TARGET row never offers it.
+        if (message.state == Seq3State.EDITED) {
+            HoverBox(
+                modifier = Modifier.pointerHoverIcon(
+                    PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                    overrideDescendants = true,
+                ),
+                onClick = { state.seq3Sessions.revertMessage(session.id, message.id) },
+            ) {
+                AppText("Revert", color = tc.ac, fontSize = 10.sp)
+            }
+            Spacer(Modifier.width(4.dp))
+        }
         Seq3StateWord(message, hidden)
     }
 }
@@ -402,26 +566,41 @@ private fun Seq3PinControls(state: AppState, session: Seq3WorkspaceSession, mess
     val tc = tc()
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
         if (Seq3PinDirection.UP in pinnable) {
-            AppText(
-                "▲", color = tc.ts, fontSize = 9.sp,
-                modifier = Modifier.clickable {
+            HoverBox(
+                modifier = Modifier.pointerHoverIcon(
+                    PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                    overrideDescendants = true,
+                ),
+                onClick = {
                     state.seq3Sessions.applyCommand(session.id, Seq3Command.NudgePin(message.id, Seq3PinDirection.UP))
                 },
-            )
+            ) {
+                AppText("▲", color = tc.ts, fontSize = 9.sp)
+            }
         }
         if (Seq3PinDirection.DOWN in pinnable) {
-            AppText(
-                "▼", color = tc.ts, fontSize = 9.sp,
-                modifier = Modifier.clickable {
+            HoverBox(
+                modifier = Modifier.pointerHoverIcon(
+                    PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                    overrideDescendants = true,
+                ),
+                onClick = {
                     state.seq3Sessions.applyCommand(session.id, Seq3Command.NudgePin(message.id, Seq3PinDirection.DOWN))
                 },
-            )
+            ) {
+                AppText("▼", color = tc.ts, fontSize = 9.sp)
+            }
         }
         if (message.orderPin != null) {
-            AppText(
-                "pinned", color = tc.ac, fontSize = 9.sp,
-                modifier = Modifier.clickable { state.seq3Sessions.applyCommand(session.id, Seq3Command.ClearPin(message.id)) },
-            )
+            HoverBox(
+                modifier = Modifier.pointerHoverIcon(
+                    PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                    overrideDescendants = true,
+                ),
+                onClick = { state.seq3Sessions.applyCommand(session.id, Seq3Command.ClearPin(message.id)) },
+            ) {
+                AppText("pinned", color = tc.ac, fontSize = 9.sp)
+            }
         } else {
             AppText("same ms", color = tc.td, fontSize = 9.sp)
         }
@@ -508,7 +687,15 @@ private fun Seq3SelectionActionBar(state: AppState, session: Seq3WorkspaceSessio
 
 @Composable
 private fun Seq3ActionBarLabel(label: String, color: Color, onClick: () -> Unit) {
-    AppText(label, color = color, fontSize = 11.sp, fontWeight = FontWeight.Medium, modifier = Modifier.clickable(onClick = onClick))
+    HoverBox(
+        modifier = Modifier.pointerHoverIcon(
+            PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+            overrideDescendants = true,
+        ),
+        onClick = onClick,
+    ) {
+        AppText(label, color = color, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+    }
 }
 
 // ── Pure helpers — testable without a composition (Seq3QueuePanelTest) ─────────────────────────

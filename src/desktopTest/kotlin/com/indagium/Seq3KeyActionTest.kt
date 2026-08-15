@@ -1,10 +1,15 @@
 package com.indagium
 
+import com.indagium.diagram3.Seq3Range
 import com.indagium.ui.Seq3KeyAction
+import com.indagium.ui.seq3ClampDividerWidth
 import com.indagium.ui.seq3KeyAction
+import com.indagium.ui.seq3ScopeMenuState
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /** The pure §09 keyboard mapper in `ui/Seq3Workspace.kt`. Composition (the actual `onKeyEvent`
  *  wiring) is untested here, matching this phase's other Seq3*Test files — only the mapping
@@ -159,5 +164,75 @@ class Seq3KeyActionTest {
     @Test
     fun aDigitOutsideOneToNineMapsToNull() {
         assertNull(action("0"))
+    }
+
+    // ── seq3ScopeMenuState: the title-bar scope dropdown's pure enabled/active state (item 4a) ────
+    //
+    // Same "pure piece split out of the composable" rationale as seq3KeyAction itself — Seq3Workspace.
+    // kt's own Seq3ScopeDropdown reads this directly rather than recomputing the three menu rows'
+    // active/enabled state inline.
+
+    @Test
+    fun wholeViewIsActiveOnlyWhenTheRangeIsVisibleView() {
+        val menu = seq3ScopeMenuState(Seq3Range.VisibleView, selectedIds = setOf(1, 2))
+        assertTrue(menu.wholeViewActive)
+        assertFalse(menu.selectionActive)
+        assertFalse(menu.timeActive)
+    }
+
+    @Test
+    fun selectionIsActiveOnlyWhenTheRangeIsIds() {
+        val menu = seq3ScopeMenuState(Seq3Range.Ids(1, 2, setOf(1, 2)), selectedIds = setOf(1, 2))
+        assertFalse(menu.wholeViewActive)
+        assertTrue(menu.selectionActive)
+        assertFalse(menu.timeActive)
+    }
+
+    @Test
+    fun timeIsActiveOnlyWhenTheRangeIsTime() {
+        val menu = seq3ScopeMenuState(Seq3Range.Time("10:00:00.000", "10:00:05.000"), selectedIds = emptySet())
+        assertFalse(menu.wholeViewActive)
+        assertFalse(menu.selectionActive)
+        assertTrue(menu.timeActive)
+    }
+
+    @Test
+    fun selectionIsEnabledOnlyWhenTheSourceTabHasANonEmptySelection() {
+        assertTrue(seq3ScopeMenuState(Seq3Range.VisibleView, selectedIds = setOf(3)).selectionEnabled)
+        assertFalse(seq3ScopeMenuState(Seq3Range.VisibleView, selectedIds = emptySet()).selectionEnabled, "an empty selection must not be choosable")
+    }
+
+    // ── seq3ClampDividerWidth: the queue-panel/inspector divider drag math (item 14) ────────────
+    //
+    // Same "pure piece split out of the composable" rationale as seq3KeyAction/seq3ScopeMenuState —
+    // Seq3Workspace.kt's HDivider onDelta callbacks call this directly rather than inlining the
+    // coerceIn themselves.
+
+    @Test
+    fun addsTheDeltaWhenWithinBounds() {
+        assertEquals(300f, seq3ClampDividerWidth(current = 280f, delta = 20f, min = 200f, max = 400f))
+        assertEquals(260f, seq3ClampDividerWidth(current = 280f, delta = -20f, min = 200f, max = 400f))
+    }
+
+    @Test
+    fun clampsToMinWhenTheDragWouldShrinkPastIt() {
+        assertEquals(200f, seq3ClampDividerWidth(current = 210f, delta = -50f, min = 200f, max = 400f))
+    }
+
+    @Test
+    fun clampsToMaxWhenTheDragWouldGrowPastIt() {
+        assertEquals(400f, seq3ClampDividerWidth(current = 390f, delta = 50f, min = 200f, max = 400f))
+    }
+
+    @Test
+    fun aZeroDeltaLeavesTheWidthUnchanged() {
+        assertEquals(300f, seq3ClampDividerWidth(current = 300f, delta = 0f, min = 200f, max = 400f))
+    }
+
+    @Test
+    fun repeatedSmallDeltasAccumulateWithoutDrifting() {
+        var width = 280f
+        repeat(5) { width = seq3ClampDividerWidth(width, delta = 10f, min = 200f, max = 400f) }
+        assertEquals(330f, width)
     }
 }

@@ -203,6 +203,11 @@ private const val SELF_EXTRA = 26.0
 private const val STUB_W = 38.0
 private const val PILL_PAD_H = 8.0
 private const val PILL_H = 18.0
+
+// Vertical gap between the stub's label (drawn above the dashed line, same as an arrow's label)
+// and the "drop on a lifeline" pill (drawn below it) — see buildStubRow's own doc for why these
+// two boxes used to share the same origin and overlap (item 10 of the phase-5 post-ship plan).
+private const val STUB_LABEL_PILL_GAP = 6.0
 private const val BADGE_PAD_H = 6.0
 private const val BADGE_H = 16.0
 private const val NOTE_ROW_W = 130.0
@@ -626,14 +631,21 @@ private fun buildSelfRow(e: Emission.Self, req: RowRequirement, lifelineIndex: M
     return BuiltRow(row, ROW_H + loopH, rightEdge)
 }
 
+// labelBox sits ABOVE the dashed stub line (y range [y-ROW_H/2, y], mirroring buildArrowRow's own
+// label placement), and the pill sits BELOW it, separated by STUB_LABEL_PILL_GAP — the two boxes
+// used to share the same origin here and their y-ranges overlapped (item 10 of the phase-5
+// post-ship plan). The row's own pitch grows to fit both slots plus the same ROW_H/2 buffer every
+// other row leaves below its own content, so the pill never gets pushed into by the next row.
 private fun buildStubRow(e: Emission.Stub, req: RowRequirement, lifelineIndex: Map<String, Int>, centers: DoubleArray, y: Double): BuiltRow? {
     val idx = lifelineIndex[e.fromLifelineId] ?: return null
     val fromX = centers[idx]
     val stubEndX = fromX + STUB_W
-    val pill = Seq3Box(stubEndX + LABEL_PAD, y - PILL_H / 2, req.labelWidth.coerceAtLeast(1.0) + 2 * PILL_PAD_H, PILL_H)
-    val labelBox = Seq3Box(pill.x, y - ROW_H / 2, req.labelWidth, ROW_H / 2)
+    val originX = stubEndX + LABEL_PAD
+    val labelBox = Seq3Box(originX, y - ROW_H / 2, req.labelWidth, ROW_H / 2)
+    val pill = Seq3Box(originX, y + STUB_LABEL_PILL_GAP, req.labelWidth.coerceAtLeast(1.0) + 2 * PILL_PAD_H, PILL_H)
     val row = Seq3UnresolvedStubRow(e.messageId, y, e.entryId, e.fromLifelineId, fromX, stubEndX, e.label, labelBox, pill, e.repeatCount)
-    return BuiltRow(row, ROW_H, pill.x + pill.width)
+    val pitch = ROW_H / 2 + STUB_LABEL_PILL_GAP + PILL_H + ROW_H / 2
+    return BuiltRow(row, pitch, pill.x + pill.width)
 }
 
 private fun buildNoteRow(e: Emission.Note, req: RowRequirement, lifelineIndex: Map<String, Int>, centers: DoubleArray, y: Double): BuiltRow? {

@@ -29,6 +29,22 @@ sealed class Seq3Command {
 
     data class ApplyRegeneration(val review: Seq3RegenReview) : Seq3Command()
 
+    /** "Revert to generated" on ONE row (phase 2's `Seq3Session.revertMessage`, item 15) — unlike
+     *  [ApplyRegeneration]'s whole-document review, this replaces exactly the message [messageId]
+     *  names with [replacement] and touches nothing else. The async "regenerate fresh, find the
+     *  match via [matchOneMessage]" half lives in `ui.Seq3Session`; this command is the pure,
+     *  already-resolved apply step, kept a single undo step like every other command here. */
+    data class ReplaceMessage(val messageId: String, val replacement: Seq3Message) : Seq3Command()
+
+    /** Applies an externally-built WHOLE [Seq3Document] as one undo step (item 2, the queue panel's
+     *  "Add ＋") — the strict generalization of [ReplaceMessage] for a caller (`addSeq3MessageFromSelection`)
+     *  that builds a new document outside this file (a new lifeline plus a new message) rather than
+     *  mutating one field in place. Still routes through the same `Seq3Session.applyCommand` choke
+     *  point as every other verb; this is simply the pure, already-resolved apply step for "set the
+     *  document to X". Unapplied (nothing to undo) when [document] is byte-identical to the current
+     *  one — mirrors every other command's "a no-op edit pushes no undo entry" contract. */
+    data class ReplaceDocument(val document: Seq3Document) : Seq3Command()
+
     data class ReorderLifelines(val orderedLifelineIds: List<String>) : Seq3Command()
 
     data class RenameLifeline(val lifelineId: String, val name: String) : Seq3Command()
@@ -78,6 +94,8 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.GuidedSelfCall -> applied(applySeq3GuidedSelfCall(document, command.messageId), "Make self-call")
     is Seq3Command.GuidedNewLifeline -> applied(applySeq3GuidedNewLifeline(document, command.messageId, command.newLifeline), "Add lifeline")
     is Seq3Command.ApplyRegeneration -> applied(applySeq3Regeneration(document, command.review), "Regenerate")
+    is Seq3Command.ReplaceMessage -> dispatchReplaceMessage(document, command)
+    is Seq3Command.ReplaceDocument -> dispatchReplaceDocument(document, command)
     is Seq3Command.ReorderLifelines -> dispatchReorder(document, command)
     is Seq3Command.RenameLifeline -> dispatchRename(document, command)
     is Seq3Command.MergeLifelines -> dispatchMergeLifelines(document, command)
@@ -96,6 +114,8 @@ private fun bulkLabel(action: Seq3BulkAction): String = when (action) {
     Seq3BulkAction.Hide -> "Hide"
     Seq3BulkAction.Show -> "Show"
     is Seq3BulkAction.Note -> "Add note"
+    is Seq3BulkAction.SetFragmentLabel -> "Rename fragment"
+    is Seq3BulkAction.SetNoteText -> "Rename note"
     is Seq3BulkAction.SetKind -> "Set kind"
     is Seq3BulkAction.SetPattern -> "Set pattern"
     is Seq3BulkAction.SetLabel -> "Rename label"
@@ -105,6 +125,17 @@ private fun bulkLabel(action: Seq3BulkAction): String = when (action) {
 private fun dispatchNudge(document: Seq3Document, command: Seq3Command.NudgePin): Outcome {
     val result = nudgeSeq3OrderPin(document, command.messageId, command.direction)
     return if (result.applied) applied(result.document, "Pin order") else unapplied(document, result.reason ?: "Not applied")
+}
+
+private fun dispatchReplaceMessage(document: Seq3Document, command: Seq3Command.ReplaceMessage): Outcome {
+    if (document.messages.none { it.id == command.messageId }) return unapplied(document, "Unknown message")
+    val replaced = document.copy(messages = document.messages.map { if (it.id == command.messageId) command.replacement else it })
+    return applied(replaced, "Revert to generated")
+}
+
+private fun dispatchReplaceDocument(document: Seq3Document, command: Seq3Command.ReplaceDocument): Outcome {
+    if (command.document == document) return unapplied(document, "No change")
+    return applied(command.document, "Add message")
 }
 
 private fun dispatchReorder(document: Seq3Document, command: Seq3Command.ReorderLifelines): Outcome {

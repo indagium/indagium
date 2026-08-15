@@ -8,10 +8,13 @@ import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3PinDirection
 import com.indagium.diagram3.Seq3Repeat
+import com.indagium.model.LogEntry
+import com.indagium.model.LogLevel
 import com.indagium.ui.Seq3TemplateSegment
 import com.indagium.ui.seq3CollapsedOccurrenceCount
 import com.indagium.ui.seq3ParseTemplateCaptures
 import com.indagium.ui.seq3PinnableDirections
+import com.indagium.ui.seq3ResolveSelectedEntries
 import com.indagium.ui.seq3TemplateSegments
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -123,5 +126,20 @@ class Seq3QueuePanelTest {
     @Test
     fun parseTemplateCapturesOfALiteralTemplateIsEmpty() {
         assertTrue(seq3ParseTemplateCaptures("no tokens").isEmpty())
+    }
+
+    // ── seq3ResolveSelectedEntries: "Add ＋" wiring (item 2) ────────────────────────────────────
+
+    @Test
+    fun resolveSelectedEntriesReturnsOnlyTheEntriesWhoseIdIsSelected() {
+        val logData = (1..5).map { LogEntry(it, "10:00:00.00$it", LogLevel.I, "A", "line $it") }
+        val resolved = seq3ResolveSelectedEntries(logData, setOf(2, 4))
+        assertEquals(listOf(2, 4), resolved.map { it.id })
+    }
+
+    @Test
+    fun resolveSelectedEntriesIsEmptyForAnEmptySelection() {
+        val logData = listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "A", "line"))
+        assertTrue(seq3ResolveSelectedEntries(logData, emptySet()).isEmpty())
     }
 }

@@ -2,6 +2,9 @@ package com.indagium.diagram3
 
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.source.SourceIndex
+import com.indagium.source.SourceTraceInferenceEngine
+import com.indagium.utils.CancellationCheck
 import com.indagium.utils.TS_UNKNOWN
 import com.indagium.utils.parseMillisOfDay
 
@@ -10,14 +13,18 @@ import com.indagium.utils.parseMillisOfDay
 // Pipeline: resolve the range -> rank tags into lifelines (ported from
 // `diagram/SeqDiagramBuilder.kt:1004-1168`'s `tagStats`/`resolveTagParticipants`) -> group
 // near-identical occurrences per tag and tokenize each group into one Seq3Message (Seq3Tokenizer)
-// -> infer each message's target lifeline from adjacent-entry evidence (Seq3Correlation), above a
-// confidence bar, else leave it null.
+// -> infer each message's target lifeline from adjacent-entry evidence (Seq3Correlation, plus an
+// OPT-IN third signal from `source.SourceTraceInferenceEngine` when a caller supplies an already-
+// built `SourceIndex` — see [inferTarget]'s own doc), above a confidence bar, else leave it null.
 //
-// What this deliberately does NOT do (see this phase's brief): no source-index enrichment, no
-// `ArrowMode.RULES` path, no `DiagramCallOverride`/`DiagramSourceSiteOverride` machinery, no
-// activation spans. All of that belonged to the inference engine `diagram/SeqDiagramBuilder.kt`
-// is being deleted with; v3's answer to "I don't like what the generator inferred" is the queue's
-// own edit affordances (phase 2+), not more inference knobs here.
+// What this deliberately does NOT do (see this phase's brief): no `ArrowMode.RULES` path, no
+// `DiagramCallOverride`/`DiagramSourceSiteOverride` machinery, no activation spans. All of that
+// belonged to the inference engine `diagram/SeqDiagramBuilder.kt` is being deleted with; v3's
+// answer to "I don't like what the generator inferred" is the queue's own edit affordances
+// (phase 2+), not more inference knobs here. Source-trace enrichment is the one deliberate
+// exception (post-ship addition, see docs/plans/use-the-claude-design-mcp-compiled-lighthouse.md):
+// it is read-only against an index the caller already built — this file never triggers indexing
+// itself, and a null/disabled index degrades byte-for-byte to the original two-signal behaviour.
 //
 // Never throws: an unresolvable range (a bad Time bound, an empty entry list) degrades to a
 // smaller-than-expected (possibly empty) Seq3Document, matching the rest of this codebase's
@@ -33,13 +40,19 @@ private const val CANCELLATION_CHECK_INTERVAL = 512
  * every major phase boundary and periodically inside the two entry-count-sized scans, mirroring
  * `utils.Filter.computeItems`'s own polling convention (see that function's `CancellationCheck`
  * parameter) — a caller running this on a cancellable coroutine can make a long generation on a
- * huge range abort promptly by having it throw.
+ * huge range abort promptly by having it throw. [sourceIndex], when supplied, feeds the optional
+ * third target-inference signal (see [inferTarget]'s own doc) — this function only ever READS it
+ * (one [SourceTraceInferenceEngine.resolve] call, built ONCE for the whole call, never per-message);
+ * it never builds, refreshes, or otherwise triggers indexing itself, keeping this function UI-free
+ * and safe to call from the export path/MCP handler exactly as before. Defaulting to null keeps
+ * every pre-existing caller's behaviour byte-for-byte unchanged.
  */
 fun generateSeq3(
     entries: List<LogEntry>,
     range: Seq3Range,
     options: Seq3GenerateOptions = Seq3GenerateOptions(),
     cancellationCheck: () -> Unit = {},
+    sourceIndex: SourceIndex? = null,
 ): Seq3Document {
     cancellationCheck()
     val resolved = resolveRange(entries, range)
@@ -59,12 +72,14 @@ fun generateSeq3(
     val byTag = LinkedHashMap<String, MutableList<LogEntry>>()
     resolved.forEach { entry -> if (entry.tag in lifelineIdByTag) byTag.getOrPut(entry.tag) { mutableListOf() }.add(entry) }
 
+    val sourceTraceCallEntryIds = resolveSourceTraceCallEntryIds(resolved, options, sourceIndex, cancellationCheck)
+
     val messages = mutableListOf<Seq3Message>()
     byTag.forEach { (tag, tagEntries) ->
         cancellationCheck()
         groupByShape(tagEntries).forEach { group ->
             cancellationCheck()
-            messages += buildMessages(tag, group, lifelineIdByTag, resolved, entryIndexById, options)
+            messages += buildMessages(tag, group, lifelineIdByTag, resolved, entryIndexById, options, sourceTraceCallEntryIds)
         }
     }
 
@@ -238,11 +253,14 @@ private fun buildMessages(
     resolved: List<LogEntry>,
     entryIndexById: Map<Int, Int>,
     options: Seq3GenerateOptions,
+    sourceTraceCallEntryIds: Set<Int> = emptySet(),
 ): List<Seq3Message> {
     val result = tokenizeSeq3Messages(tag, group.map { Seq3TokenizeInput(it.id.toString(), it.msg) })
     val match = result.match
     if (result.compiled && match != null) {
-        return listOf(toMessage(tag, match, group, result.captureValuesByOccurrence, lifelineIdByTag, resolved, entryIndexById, options))
+        return listOf(
+            toMessage(tag, match, group, result.captureValuesByOccurrence, lifelineIdByTag, resolved, entryIndexById, options, sourceTraceCallEntryIds),
+        )
     }
     // The shape-grouped candidates turned out not to share a provable pattern — fall back to one
     // literal message per occurrence rather than dropping any log row. A single-occurrence
@@ -250,8 +268,28 @@ private fun buildMessages(
     // never actually fail.
     return group.map { entry ->
         val single = tokenizeSeq3Messages(tag, listOf(Seq3TokenizeInput(entry.id.toString(), entry.msg)))
-        toMessage(tag, single.match!!, listOf(entry), single.captureValuesByOccurrence, lifelineIdByTag, resolved, entryIndexById, options)
+        toMessage(
+            tag, single.match!!, listOf(entry), single.captureValuesByOccurrence, lifelineIdByTag, resolved, entryIndexById, options,
+            sourceTraceCallEntryIds,
+        )
     }
+}
+
+/** One [Seq3Occurrence] from a raw [LogEntry] plus whatever [captureValues] the tokenizer proved
+ *  for it — the exact shape every occurrence in this package is built from, shared by [toMessage]
+ *  and [addSeq3MessageFromSelection] so the two never drift on what an occurrence looks like. */
+private fun toOccurrence(entry: LogEntry, captureValues: Map<String, String>): Seq3Occurrence {
+    val millis = parseMillisOfDay(entry.ts)
+    return Seq3Occurrence(
+        entryId = entry.id,
+        timestampMillis = millis.takeIf { it != TS_UNKNOWN },
+        rawTimestamp = entry.ts,
+        pid = entry.pid,
+        tid = entry.tid,
+        level = entry.level.key,
+        text = entry.msg,
+        captureValues = captureValues,
+    )
 }
 
 private fun toMessage(
@@ -263,26 +301,15 @@ private fun toMessage(
     resolved: List<LogEntry>,
     entryIndexById: Map<Int, Int>,
     options: Seq3GenerateOptions,
+    sourceTraceCallEntryIds: Set<Int> = emptySet(),
 ): Seq3Message {
-    val occurrences = group.map { entry ->
-        val millis = parseMillisOfDay(entry.ts)
-        Seq3Occurrence(
-            entryId = entry.id,
-            timestampMillis = millis.takeIf { it != TS_UNKNOWN },
-            rawTimestamp = entry.ts,
-            pid = entry.pid,
-            tid = entry.tid,
-            level = entry.level.key,
-            text = entry.msg,
-            captureValues = captureValuesByOccurrence[entry.id.toString()].orEmpty(),
-        )
-    }
+    val occurrences = group.map { entry -> toOccurrence(entry, captureValuesByOccurrence[entry.id.toString()].orEmpty()) }
     return Seq3Message(
         // reassigned once every tag's messages are merged and sorted into log-clock order
         id = "",
         match = match,
         fromLifelineId = lifelineIdByTag.getValue(tag),
-        toLifelineId = inferTarget(tag, group, resolved, entryIndexById, lifelineIdByTag, options),
+        toLifelineId = inferTarget(tag, group, resolved, entryIndexById, lifelineIdByTag, options, sourceTraceCallEntryIds),
         labelTemplate = match.template,
         repeat = options.defaultRepeat,
         repeatThreshold = options.defaultRepeatThreshold,
@@ -300,9 +327,39 @@ private fun toMessage(
 // candidate tag is itself a lifeline this document actually kept. Anything short of that leaves
 // `toLifelineId == null` — never a guess, and never a fabricated lifeline for a tag that didn't
 // make the cut (see Seq3Model.kt's own doc on why a null target must never be defaulted away).
+//
+// [sourceTraceCallEntryIds] is the third, OPT-IN signal (post-ship addition): the entryIds of every
+// log line `SourceTraceInferenceEngine` independently proved is the callee-side evidence of a real
+// source-level call (see [resolveSourceTraceCallEntryIds]'s own doc for exactly what that means and
+// how it's computed once per [generateSeq3] call). It is folded into the SAME evidenced/considered
+// vote thread-handoff and correlation-token already use — never a bypass of [TARGET_CONFIDENCE_RATIO]
+// — so a caller who supplies no index, or turns the option off, sees byte-identical inference to
+// before this signal existed (the set is simply empty).
 
 private const val TARGET_CONFIDENCE_RATIO = 0.6
 private const val MIN_TARGET_EVIDENCE_COUNT = 1
+
+/**
+ * Runs [SourceTraceInferenceEngine.resolve] ONCE over [resolved] — never per-message, which would be
+ * wildly expensive — and reduces its result down to exactly what [inferTarget] needs: the set of
+ * entryIds the source trace independently confirmed as the CALLEE side of a real call (a
+ * `DiagramTraceCall.callEntryId`, per that type's own doc — the log line where source-level evidence
+ * first proves a call landed in a different method, which is exactly the "did control actually cross
+ * into this next tag" question target inference is trying to answer). Returns an empty set — the
+ * same as if this signal did not exist — whenever the option is off or no index was supplied; this
+ * function never builds or triggers a [SourceIndex] itself.
+ */
+private fun resolveSourceTraceCallEntryIds(
+    resolved: List<LogEntry>,
+    options: Seq3GenerateOptions,
+    sourceIndex: SourceIndex?,
+    cancellationCheck: () -> Unit,
+): Set<Int> {
+    if (!options.sourceTraceEnabled || sourceIndex == null) return emptySet()
+    return SourceTraceInferenceEngine(sourceIndex)
+        .resolve(resolved, CancellationCheck(cancellationCheck))
+        .calls.mapTo(HashSet()) { it.callEntryId }
+}
 
 private fun inferTarget(
     tag: String,
@@ -311,6 +368,7 @@ private fun inferTarget(
     entryIndexById: Map<Int, Int>,
     lifelineIdByTag: Map<String, String>,
     options: Seq3GenerateOptions,
+    sourceTraceCallEntryIds: Set<Int> = emptySet(),
 ): String? {
     val candidateCounts = LinkedHashMap<String, Int>()
     var consideredCount = 0
@@ -319,7 +377,8 @@ private fun inferTarget(
         val next = resolved.getOrNull(index + 1) ?: return@forEach
         if (next.tag == tag) return@forEach
         val evidenced = (options.threadHandoffEnabled && isThreadHandoff(next, entry)) ||
-            (options.correlationTokenEnabled && hasSharedCorrelationToken(next, entry))
+            (options.correlationTokenEnabled && hasSharedCorrelationToken(next, entry)) ||
+            next.id in sourceTraceCallEntryIds
         if (!evidenced) return@forEach
         consideredCount++
         if (next.tag in lifelineIdByTag) candidateCounts[next.tag] = (candidateCounts[next.tag] ?: 0) + 1
@@ -329,4 +388,70 @@ private fun inferTarget(
     if (best.value < MIN_TARGET_EVIDENCE_COUNT) return null
     if (best.value.toDouble() / consideredCount < TARGET_CONFIDENCE_RATIO) return null
     return lifelineIdByTag[best.key]
+}
+
+// ── Add one message from an arbitrary row selection (queue panel's "＋ Add") ────────────────────
+//
+// `generateSeq3` only ever discovers messages by scanning a whole range tag-by-tag; nothing lets a
+// user build ONE message from rows they picked themselves. This is that capability — deliberately
+// reusing [tokenizeSeq3Messages] and [toOccurrence] (the exact same pieces [buildMessages]/
+// [toMessage] are built from) rather than a second implementation of "log rows -> Seq3Message".
+
+/** Outcome of [addSeq3MessageFromSelection]. [Rejected.reason] is meant to be shown verbatim in the
+ *  queue panel — see that function's own doc for the exact strings it returns. */
+sealed class Seq3AddResult {
+    data class Added(val document: Seq3Document, val newMessageId: String) : Seq3AddResult()
+
+    data class Rejected(val reason: String) : Seq3AddResult()
+}
+
+/**
+ * Builds ONE new [Seq3Message] from [selectedEntries] and appends it (and, if needed, a new
+ * [Seq3Lifeline]) to [document]. [selectedEntries] must share exactly one [LogEntry.tag] — a
+ * message's [Seq3Match.tag] is singular by construction (mirrors every generated message), so a
+ * mixed-tag selection is rejected rather than guessing a dominant tag. An existing lifeline for that
+ * tag is reused; a brand-new tag gets a fresh lifeline appended at the end of [Seq3Document.lifelines]
+ * (`ordinal = document.lifelines.size`, same convention [rankLifelines] uses for a freshly ranked
+ * one). [Seq3Message.toLifelineId] is always left null — "needs a target", the same conservative
+ * default [inferTarget] leaves an unresolved message at; a user-picked row selection has no adjacent-
+ * entry evidence of its own to infer from, so this function never attempts to.
+ */
+fun addSeq3MessageFromSelection(document: Seq3Document, selectedEntries: List<LogEntry>): Seq3AddResult {
+    if (selectedEntries.isEmpty()) return Seq3AddResult.Rejected("Select at least one log row")
+    val tags = selectedEntries.mapTo(linkedSetOf()) { it.tag }
+    if (tags.size > 1) return Seq3AddResult.Rejected("Select rows from a single tag")
+    val tag = tags.single()
+
+    val existingLifeline = document.lifelines.firstOrNull { tag in it.tagIds }
+    val lifeline = existingLifeline ?: Seq3Lifeline(id = tag, name = tag, tagIds = setOf(tag), ordinal = document.lifelines.size)
+    val withLifeline = if (existingLifeline != null) document else document.copy(lifelines = document.lifelines + lifeline)
+
+    val sorted = selectedEntries.sortedBy { it.id }
+    val tokenized = tokenizeSeq3Messages(tag, sorted.map { Seq3TokenizeInput(it.id.toString(), it.msg) })
+    val match = tokenized.match ?: return Seq3AddResult.Rejected(tokenized.error ?: "Selected rows do not share a provable pattern")
+    val occurrences = sorted.map { entry -> toOccurrence(entry, tokenized.captureValuesByOccurrence[entry.id.toString()].orEmpty()) }
+
+    val newMessageId = nextSeq3MessageId(withLifeline)
+    val message = Seq3Message(
+        id = newMessageId,
+        match = match,
+        fromLifelineId = lifeline.id,
+        toLifelineId = null,
+        labelTemplate = match.template,
+        repeat = withLifeline.defaultRepeat,
+        occurrences = occurrences,
+    )
+    return Seq3AddResult.Added(withLifeline.copy(messages = withLifeline.messages + message), newMessageId)
+}
+
+/** The next free `"msg-N"` id — [generateSeq3]'s own naming scheme (`"msg-${index + 1}"`), extended
+ *  here to guarantee uniqueness against an EXISTING document's messages rather than a freshly
+ *  generated, empty-to-start list: an incremental single-message add can't just reuse
+ *  `document.messages.size + 1` blindly (a prior merge/split can leave that number already taken),
+ *  so this walks forward from it until a free one is found. */
+private fun nextSeq3MessageId(document: Seq3Document): String {
+    val existingIds = document.messages.mapTo(HashSet()) { it.id }
+    var candidate = document.messages.size + 1
+    while ("msg-$candidate" in existingIds) candidate++
+    return "msg-$candidate"
 }

@@ -183,10 +183,16 @@ class Seq3LibraryStoreTest {
         val dir = createTempDirectory("seq3-library-offline").toFile()
         val store = DiagramLibraryStore(File(dir, "diagram-library-v1"))
         val saved = store.create("Offline", "", source, snapshot("Offline"), now = 100L)
-        val state = AppState(autosaveFile = File(dir, "autosave.cache"), restoreOnCreate = false, autoExportNotes = false)
+        val state = AppState(
+            autosaveFile = File(dir, "autosave.cache"),
+            restoreOnCreate = false,
+            autoExportNotes = false,
+            diagramLibraryStore = DiagramLibraryStore(File(dir, "diagram-library-unused-v1")),
+        )
         try {
-            // A standalone Seq3Session pointed at the temp-file store — AppState.seq3Sessions
-            // itself always uses the real appDataDir() store (Seq3Session's production default).
+            // A standalone Seq3Session pointed at the temp-file store — state.seq3Sessions itself
+            // is given its own separate temp-file store above (never the real appDataDir() one),
+            // but is unused here in favor of this explicit `sessions` pointed at `store`.
             val sessions = Seq3Session(state, libraryStore = store)
             // No tabId argument: mirrors opening a saved diagram whose original log isn't open.
             assertTrue(sessions.openLibraryItem(saved.id))
@@ -202,7 +208,12 @@ class Seq3LibraryStoreTest {
     @Test
     fun confirmCapturesTheDefaultExportModeForANewNoteAndPreservesAnExistingOnesChoice() {
         val dir = createTempDirectory("seq3-export-default").toFile()
-        val state = AppState(autosaveFile = File(dir, "autosave.cache"), restoreOnCreate = false, autoExportNotes = false)
+        val state = AppState(
+            autosaveFile = File(dir, "autosave.cache"),
+            restoreOnCreate = false,
+            autoExportNotes = false,
+            diagramLibraryStore = DiagramLibraryStore(File(dir, "diagram-library-v1")),
+        )
         try {
             state.updateSettings { it.copy(diagramDefaultExportMode = DiagramExportMode.SOURCE) }
             state.tabs = listOf(

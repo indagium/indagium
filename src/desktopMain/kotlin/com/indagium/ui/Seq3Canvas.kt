@@ -3,9 +3,11 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.HorizontalScrollbar
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
@@ -14,6 +16,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
@@ -21,6 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
@@ -68,6 +72,7 @@ import com.indagium.diagram3.seq3Select
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import java.awt.Cursor as AwtCursor
 
 // ── The canvas — design spec §04 + §07 ──────────────────────────────────────────────────────────
 //
@@ -136,7 +141,7 @@ private fun Seq3CanvasToolbar(view: Seq3ViewState, layout: Seq3Layout) {
                 Seq3ZoomStepButton("+") { view.zoom = (view.zoom + ZOOM_STEP).coerceAtMost(MAX_ZOOM); view.zoomMode = Seq3ZoomMode.MANUAL }
             }
             SegmentedControl(
-                options = listOf("Fit", "Fit width", "Reset"),
+                options = listOf("Fit height", "Fit width", "Reset"),
                 selectedIndices = when (view.zoomMode) {
                     Seq3ZoomMode.FIT -> setOf(0)
                     Seq3ZoomMode.FIT_WIDTH -> setOf(1)
@@ -160,10 +165,11 @@ private fun Seq3CanvasToolbar(view: Seq3ViewState, layout: Seq3Layout) {
 @Composable
 private fun Seq3ZoomStepButton(label: String, onClick: () -> Unit) {
     val tc = tc()
-    Box(
-        Modifier.size(20.dp).background(tc.p2, CORNER_SM).border(1.dp, tc.br, CORNER_SM).clip(CORNER_SM).clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) { AppText(label, color = tc.ts, fontSize = 12.sp) }
+    HoverBox(
+        modifier = Modifier.size(20.dp).background(tc.p2, CORNER_SM).border(1.dp, tc.br, CORNER_SM).clip(CORNER_SM)
+            .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
+        onClick = onClick,
+    ) { AppText(label, color = tc.ts, fontSize = 12.sp, modifier = Modifier.align(Alignment.Center)) }
 }
 
 @Composable
@@ -193,35 +199,61 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
     val density = LocalDensity.current.density
     val hScroll = rememberScrollState()
     val vScroll = rememberScrollState()
+    // Live cursor position + candidate lifeline while an arrow-endpoint drag is in progress (item
+    // 13, phase-5 post-ship plan) — hoisted here rather than kept inside
+    // [seq3CanvasGestureModifier] because the DRAW code below (drawSeq3Diagram) needs to read it
+    // every frame, and that modifier function has no other output channel besides the Modifier it
+    // returns. `remember(session.id)` so switching to a different open v3 workspace never carries a
+    // stale preview over.
+    var dragPreview by remember(session.id) { mutableStateOf<Seq3EndpointDragPreview?>(null) }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val viewportWidth = maxWidth.value.toDouble()
         val viewportHeight = maxHeight.value.toDouble()
         LaunchedEffect(layout, viewportWidth, viewportHeight, view.zoomMode) {
             if (viewportWidth <= 0.0 || viewportHeight <= 0.0) return@LaunchedEffect
             val target = when (view.zoomMode) {
-                Seq3ZoomMode.FIT -> seq3FitZoom(layout.width, layout.height, viewportWidth, viewportHeight)
+                Seq3ZoomMode.FIT -> seq3FitHeightZoom(layout.height, viewportHeight)
                 Seq3ZoomMode.FIT_WIDTH -> seq3FitWidthZoom(layout.width, viewportWidth)
                 Seq3ZoomMode.MANUAL -> null
             }
             if (target != null) view.zoom = target
         }
-        Box(Modifier.fillMaxSize().horizontalScroll(hScroll).verticalScroll(vScroll)) {
-            val zoom = view.zoom
-            Box(Modifier.size((layout.width * zoom).dp, (layout.height * zoom).dp)) {
-                Box(
-                    Modifier.size(layout.width.dp, layout.height.dp)
-                        .graphicsLayer(scaleX = zoom, scaleY = zoom, transformOrigin = TransformOrigin(0f, 0f))
-                        .then(seq3CanvasGestureModifier(state, session, view, document, layout, density)),
-                ) {
-                    Canvas(Modifier.size(layout.width.dp, layout.height.dp)) {
-                        drawSeq3Diagram(layout, tc, view.hoveredMessageId, view.selection.selectedIds)
+        Box(Modifier.fillMaxSize()) {
+            Box(Modifier.fillMaxSize().horizontalScroll(hScroll).verticalScroll(vScroll)) {
+                val zoom = view.zoom
+                Box(Modifier.size((layout.width * zoom).dp, (layout.height * zoom).dp)) {
+                    Box(
+                        Modifier.size(layout.width.dp, layout.height.dp)
+                            .graphicsLayer(scaleX = zoom, scaleY = zoom, transformOrigin = TransformOrigin(0f, 0f))
+                            .then(
+                                seq3CanvasGestureModifier(state, session, view, document, layout, density, hScroll, vScroll) {
+                                    dragPreview = it
+                                },
+                            ),
+                    ) {
+                        Canvas(Modifier.size(layout.width.dp, layout.height.dp)) {
+                            drawSeq3Diagram(layout, tc, view.hoveredMessageId, view.selection.selectedIds, dragPreview)
+                        }
+                        layout.fragments.forEach { fragment -> Seq3FragmentLabelOverlay(fragment) }
+                        layout.rows.forEach { row -> Seq3RowOverlay(state, session, view, row) }
+                        layout.notes.forEach { note -> Seq3NoteTextOverlay(note) }
+                        layout.lifelines.forEach { column -> Seq3LifelineChip(state, session, view, document, layout, column, density) }
                     }
-                    layout.fragments.forEach { fragment -> Seq3FragmentLabelOverlay(fragment) }
-                    layout.rows.forEach { row -> Seq3RowOverlay(state, session, view, row) }
-                    layout.notes.forEach { note -> Seq3NoteTextOverlay(note) }
-                    layout.lifelines.forEach { column -> Seq3LifelineChip(state, session, view, document, layout, column, density) }
                 }
             }
+            // Same ScrollStates the scroll modifiers and the pan-drag gesture (item 12) both drive,
+            // so wheel scroll, scrollbar drag, and pan-drag can never disagree about position — same
+            // shared-style helper ui/LogViewer.kt already uses for its own scrollbars.
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(vScroll),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+                style = appScrollbarStyle(tc),
+            )
+            HorizontalScrollbar(
+                adapter = rememberScrollbarAdapter(hScroll),
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                style = appScrollbarStyle(tc),
+            )
         }
     }
 }
@@ -238,6 +270,9 @@ private fun seq3CanvasGestureModifier(
     document: Seq3Document,
     layout: Seq3Layout,
     density: Float,
+    hScroll: ScrollState,
+    vScroll: ScrollState,
+    onDragPreview: (Seq3EndpointDragPreview?) -> Unit,
 ): Modifier = Modifier
     .pointerInput(session.id, document, layout, density) {
         awaitPointerEventScope {
@@ -246,6 +281,20 @@ private fun seq3CanvasGestureModifier(
             var moved = false
             var lastClickTimeMs = 0L
             var lastClickMessageId: String? = null
+            // Drag-to-pan (item 12, phase-5 post-ship plan). `panning` arms IMMEDIATELY on a
+            // middle-button press (unambiguous — nothing else in this file uses the middle button),
+            // or LAZILY on a primary-button drag once it (a) exceeds the click-vs-drag slop
+            // threshold already used for row clicks and (b) started on truly empty background — no
+            // row, no endpoint — so a plain click/drag on real content keeps meaning what it always
+            // meant. `lastPanPosition` is the previous frame's raw pointer position; every Move
+            // converts its own delta from the graphicsLayer's already-inverse-transformed LOCAL
+            // pixel space back to real screen pixels (multiplying by `view.zoom`, the same factor
+            // Compose divided out — see this file's own header on why hit-testing works in
+            // unit-less coordinates regardless of zoom) before handing it to `dispatchRawDelta`, so
+            // wheel-scroll, scrollbar-drag, and pan-drag all agree on the SAME ScrollState.
+            var panning = false
+            var pressWasMiddle = false
+            var lastPanPosition: Offset? = null
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
                 val change = event.changes.firstOrNull() ?: continue
@@ -254,43 +303,81 @@ private fun seq3CanvasGestureModifier(
                 val xUnits = (change.position.x / density).toDouble()
                 val yUnits = (change.position.y / density).toDouble()
                 when (event.type) {
-                    PointerEventType.Press -> if (event.buttons.isPrimaryPressed) {
-                        downPosition = change.position
-                        moved = false
-                        dragEndpoint = seq3ResolveDragEndpoint(layout, xUnits, yUnits)
-                        if (dragEndpoint != null) change.consume()
+                    PointerEventType.Press -> {
+                        val isMiddle = event.buttons.isTertiaryPressed
+                        if (event.buttons.isPrimaryPressed || isMiddle) {
+                            downPosition = change.position
+                            moved = false
+                            pressWasMiddle = isMiddle
+                            dragEndpoint = if (isMiddle) null else seq3ResolveDragEndpoint(layout, xUnits, yUnits)
+                            when {
+                                dragEndpoint != null -> change.consume()
+                                isMiddle -> {
+                                    panning = true
+                                    lastPanPosition = change.position
+                                    change.consume()
+                                }
+                            }
+                        }
                     }
                     PointerEventType.Move -> {
                         val down = downPosition
                         if (down != null && (change.position - down).getDistance() > DRAG_CLICK_THRESHOLD_PX) moved = true
-                        if (dragEndpoint != null) {
-                            change.consume()
-                        } else if (downPosition == null) {
-                            view.hoveredMessageId = seq3RowAt(layout, xUnits, yUnits)?.messageId
+                        val drag = dragEndpoint
+                        when {
+                            drag != null -> {
+                                change.consume()
+                                onDragPreview(seq3DragPreview(layout, drag, xUnits))
+                            }
+                            panning -> {
+                                val last = lastPanPosition
+                                if (last != null) {
+                                    val zoom = view.zoom
+                                    hScroll.dispatchRawDelta(-(change.position.x - last.x) * zoom)
+                                    vScroll.dispatchRawDelta(-(change.position.y - last.y) * zoom)
+                                }
+                                lastPanPosition = change.position
+                                change.consume()
+                            }
+                            down != null && !pressWasMiddle && moved && seq3IsEmptyCanvasBackground(layout, xUnits, yUnits) -> {
+                                panning = true
+                                lastPanPosition = change.position
+                                change.consume()
+                            }
+                            downPosition == null -> view.hoveredMessageId = seq3RowAt(layout, xUnits, yUnits)?.messageId
                         }
                     }
                     PointerEventType.Release -> {
                         val drag = dragEndpoint
-                        if (drag != null) {
-                            seq3NearestLifelineId(layout, xUnits)?.let { targetLifelineId ->
-                                val action = if (drag.side == Seq3EndpointSide.FROM) {
-                                    Seq3BulkAction.SetFrom(targetLifelineId)
-                                } else {
-                                    Seq3BulkAction.SetTo(targetLifelineId)
+                        when {
+                            drag != null -> {
+                                seq3NearestLifelineId(layout, xUnits)?.let { targetLifelineId ->
+                                    val action = if (drag.side == Seq3EndpointSide.FROM) {
+                                        Seq3BulkAction.SetFrom(targetLifelineId)
+                                    } else {
+                                        Seq3BulkAction.SetTo(targetLifelineId)
+                                    }
+                                    state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(drag.messageId), action))
                                 }
-                                state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(drag.messageId), action))
+                                dragEndpoint = null
+                                onDragPreview(null)
                             }
-                            dragEndpoint = null
-                        } else if (!moved) {
-                            val hitRow = seq3RowAt(layout, xUnits, yUnits)
-                            if (hitRow != null) seq3HandleCanvasRowClick(view, document, hitRow, event) { now, id ->
-                                val doubleClick = now - lastClickTimeMs <= DOUBLE_CLICK_WINDOW_MS && lastClickMessageId == id
-                                lastClickTimeMs = now
-                                lastClickMessageId = id
-                                doubleClick
+                            panning -> {
+                                panning = false
+                                lastPanPosition = null
+                            }
+                            !moved && !pressWasMiddle -> {
+                                val hitRow = seq3RowAt(layout, xUnits, yUnits)
+                                if (hitRow != null) seq3HandleCanvasRowClick(view, document, hitRow, event) { now, id ->
+                                    val doubleClick = now - lastClickTimeMs <= DOUBLE_CLICK_WINDOW_MS && lastClickMessageId == id
+                                    lastClickTimeMs = now
+                                    lastClickMessageId = id
+                                    doubleClick
+                                }
                             }
                         }
                         downPosition = null
+                        pressWasMiddle = false
                     }
                     PointerEventType.Exit -> view.hoveredMessageId = null
                     else -> Unit
@@ -326,7 +413,13 @@ private fun seq3HandleCanvasRowClick(
 
 // ── Line/shape drawing — everything from `Seq3Layout`'s own unit-less coordinates ─────────────
 
-private fun DrawScope.drawSeq3Diagram(layout: Seq3Layout, tc: ThemeColors, hoveredMessageId: String?, selectedIds: Set<String>) {
+private fun DrawScope.drawSeq3Diagram(
+    layout: Seq3Layout,
+    tc: ThemeColors,
+    hoveredMessageId: String?,
+    selectedIds: Set<String>,
+    dragPreview: Seq3EndpointDragPreview? = null,
+) {
     val dash = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()))
     layout.fragments.forEach { fragment ->
         val topLeft = Offset(fragment.box.x.dp.toPx(), fragment.box.y.dp.toPx())
@@ -370,7 +463,33 @@ private fun DrawScope.drawSeq3Diagram(layout: Seq3Layout, tc: ThemeColors, hover
             is Seq3ElisionRow -> Unit // text-only marker, drawn by the overlay composable
         }
     }
+    // Live feedback while an arrow-endpoint drag is in progress (item 13, phase-5 post-ship plan) —
+    // drawn LAST so it sits on top of every row it might cross. The candidate lifeline gets a wash
+    // the same width as its own header chip (no new magic width), and the preview line uses the
+    // arrow-color the endpoint would render in once resolved, so the eye reads it as "this is where
+    // the arrow is about to land," not as a fourth kind of decoration.
+    if (dragPreview != null) {
+        dragPreview.candidateLifelineId
+            ?.let { id -> layout.lifelines.firstOrNull { it.lifelineId == id } }
+            ?.let { column ->
+                val half = column.header.width / 2
+                drawRect(
+                    color = tc.ac.copy(alpha = LIFELINE_CANDIDATE_WASH_ALPHA),
+                    topLeft = Offset((column.centerX - half).dp.toPx(), column.lifelineTop.dp.toPx()),
+                    size = Size(column.header.width.dp.toPx(), (column.lifelineBottom - column.lifelineTop).dp.toPx()),
+                )
+            }
+        drawLine(
+            color = tc.ac,
+            start = Offset(dragPreview.anchorX.dp.toPx(), dragPreview.y.dp.toPx()),
+            end = Offset(dragPreview.cursorX.dp.toPx(), dragPreview.y.dp.toPx()),
+            strokeWidth = 2.dp.toPx(),
+            pathEffect = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx())),
+        )
+    }
 }
+
+private const val LIFELINE_CANDIDATE_WASH_ALPHA = 0.12f
 
 private const val FRAGMENT_WASH_ALPHA = 0.07f
 private const val NOTE_FILL_ALPHA = 0.20f
@@ -681,6 +800,37 @@ internal fun seq3ResolveDragEndpoint(layout: Seq3Layout, x: Double, y: Double): 
 internal fun seq3NearestLifelineId(layout: Seq3Layout, x: Double): String? =
     layout.lifelines.minByOrNull { kotlin.math.abs(it.centerX - x) }?.lifelineId
 
+/** True when a press at ([x], [y]) lands on nothing at all — no message row, no arrow/stub endpoint
+ *  — the condition that arms drag-to-pan on a plain left-button drag (item 12, phase-5 post-ship
+ *  plan). A drag that starts ON content keeps meaning whatever it already means there (select,
+ *  resolve an endpoint); only genuinely empty background pans. */
+internal fun seq3IsEmptyCanvasBackground(layout: Seq3Layout, x: Double, y: Double): Boolean =
+    seq3RowAt(layout, x, y) == null && seq3ResolveDragEndpoint(layout, x, y) == null
+
+/** Live feedback while dragging an arrow endpoint (item 13, phase-5 post-ship plan): the FIXED end
+ *  of [endpoint]'s row (the one NOT being dragged), its shared y, the live cursor x, and whichever
+ *  lifeline the cursor is nearest right now — reusing [seq3NearestLifelineId], the exact function
+ *  [Release] already uses to resolve the drop, so the highlighted column during the drag and the
+ *  column that actually gets applied on release can never disagree. Null when [endpoint]'s row can
+ *  no longer be found (the document changed under an in-flight drag) or isn't a row this kind of
+ *  preview applies to. */
+internal fun seq3DragPreview(layout: Seq3Layout, endpoint: Seq3DragEndpoint, cursorX: Double): Seq3EndpointDragPreview? {
+    val row = layout.rows.firstOrNull { it.messageId == endpoint.messageId } ?: return null
+    val (anchorX, y) = when (row) {
+        is Seq3ArrowRow -> (if (endpoint.side == Seq3EndpointSide.FROM) row.toX else row.fromX) to row.y
+        is Seq3UnresolvedStubRow -> row.fromX to row.y
+        else -> return null
+    }
+    return Seq3EndpointDragPreview(anchorX, y, cursorX, seq3NearestLifelineId(layout, cursorX))
+}
+
+internal data class Seq3EndpointDragPreview(
+    val anchorX: Double,
+    val y: Double,
+    val cursorX: Double,
+    val candidateLifelineId: String?,
+)
+
 /** Moves [draggedId] to [targetIndex] within [order], clamped to a valid index. A caller passes
  *  [seq3LifelineDropIndex]'s own result — kept as two small pure functions so
  *  Seq3CanvasTest can assert the insertion-point math and the list-move math independently. */
@@ -697,9 +847,13 @@ internal fun seq3ReorderLifelineIds(order: List<String>, draggedId: String, targ
 internal fun seq3LifelineDropIndex(centers: List<Double>, dropX: Double): Int =
     centers.indexOfFirst { dropX < it }.let { if (it < 0) centers.size else it }
 
-internal fun seq3FitZoom(contentWidth: Double, contentHeight: Double, viewportWidth: Double, viewportHeight: Double): Float {
-    if (contentWidth <= 0.0 || contentHeight <= 0.0 || viewportWidth <= 0.0 || viewportHeight <= 0.0) return 1f
-    return min(viewportWidth / contentWidth, viewportHeight / contentHeight).toFloat().coerceIn(MIN_FIT_ZOOM, MAX_FIT_ZOOM)
+/** The genuine complement of [seq3FitWidthZoom] (item 5, phase-5 post-ship plan) — scales so the
+ *  diagram's full HEIGHT fits the viewport; width may then need horizontal scrolling. Renamed from
+ *  the old `seq3FitZoom`, which fit both axes at once (a redundant "fit everything" mode under a
+ *  "Fit" label that no longer matched what it did once "Fit width" existed alongside it). */
+internal fun seq3FitHeightZoom(contentHeight: Double, viewportHeight: Double): Float {
+    if (contentHeight <= 0.0 || viewportHeight <= 0.0) return 1f
+    return (viewportHeight / contentHeight).toFloat().coerceIn(MIN_FIT_ZOOM, MAX_FIT_ZOOM)
 }
 
 internal fun seq3FitWidthZoom(contentWidth: Double, viewportWidth: Double): Float {

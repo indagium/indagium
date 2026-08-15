@@ -10,6 +10,7 @@ import com.indagium.diagram3.Seq3RegenChangeKind
 import com.indagium.diagram3.Seq3RegenDecision
 import com.indagium.diagram3.acceptAllSeq3Regen
 import com.indagium.diagram3.applySeq3Regeneration
+import com.indagium.diagram3.matchOneMessage
 import com.indagium.diagram3.rejectAllSeq3Regen
 import com.indagium.diagram3.reviewSeq3Regeneration
 import com.indagium.diagram3.unlockSeq3RegenRow
@@ -151,5 +152,34 @@ class Seq3RegenerationTest {
         assertTrue("c-changed" in ids, "an unreviewed CHANGED row must keep the user's current message")
         assertTrue("c-removed" in ids, "an unreviewed REMOVED row must not silently delete anything")
         assertTrue("f-new" !in ids, "an unreviewed NEW row must not silently get added")
+    }
+
+    // ── matchOneMessage (single-message revert, item 15) ────────────────────────────────────────
+    //
+    // Same evidence-first/unique-template-fallback rule reviewSeq3Regeneration's whole-document
+    // diff uses (matchByEvidence/matchEvidenceFreeMessages), composed for one message at a time.
+
+    @Test
+    fun matchesByEvidenceFirst() {
+        val current = message("c-changed", "A", "B", 2, "changed-src")
+        val fresh = freshDocument().messages
+        val match = matchOneMessage(current, fresh)
+        assertEquals("f-changed", match?.id, "shared entryId 2 must win the match")
+    }
+
+    @Test
+    fun fallsBackToUniqueTemplateWhenNeitherSideHasEvidence() {
+        // Both sides must carry NO evidence at all for the fallback to engage (see
+        // matchEvidenceFreeMessages's own doc) — message() always attaches one occurrence, so this
+        // builds the messages directly with an empty occurrence list instead.
+        val current = Seq3Message("c-evidence-free", Seq3Match("A", "unique-template"), "A", "B", "unique-template")
+        val fresh = Seq3Message("f-evidence-free", Seq3Match("A", "unique-template"), "A", "B", "unique-template")
+        assertEquals("f-evidence-free", matchOneMessage(current, listOf(fresh))?.id)
+    }
+
+    @Test
+    fun returnsNullWhenNothingQualifies() {
+        val current = message("c-lonely", "A", "B", 999, "no-such-template")
+        assertEquals(null, matchOneMessage(current, freshDocument().messages))
     }
 }

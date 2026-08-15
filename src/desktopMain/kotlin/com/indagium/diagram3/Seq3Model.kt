@@ -256,7 +256,12 @@ data class Seq3GenerateOptions(
     val title: String = "",
     val sourceFile: String? = null,
     val maxLifelines: Int = DEFAULT_SEQ3_MAX_LIFELINES,
-    val defaultRepeat: Seq3Repeat = Seq3Repeat.COLLAPSE_ABOVE,
+    /** "As they are, not grouped" (design spec): a freshly generated message draws EVERY occurrence
+     *  as its own arrow by default — collapsing a repeated call behind a `×n` badge is something a
+     *  user opts into per-message via the Inspector, never the generator's own starting point. Only
+     *  this canvas/export fan-out changes; [Seq3Tokenizer]'s occurrence-merging into one queue row
+     *  is a completely separate axis and stays exactly as-is (see [Seq3Layout]'s `expandForLayout`). */
+    val defaultRepeat: Seq3Repeat = Seq3Repeat.EVERY,
     val defaultRepeatThreshold: Int = DEFAULT_SEQ3_REPEAT_THRESHOLD,
     /** Same-thread (pid+tid, bounded gap) handoff evidence — see Seq3Correlation.isThreadHandoff.
      *  Not exposed as a tunable gap, same as `diagram.THREAD_HANDOFF_MAX_GAP_MS`: a caller who
@@ -265,6 +270,11 @@ data class Seq3GenerateOptions(
     /** Shared correlation-token evidence between adjacent entries — see
      *  Seq3Correlation.hasSharedCorrelationToken. */
     val correlationTokenEnabled: Boolean = true,
+    /** Third target-inference signal (Seq3Generator.inferTarget): a source-index-backed call trace,
+     *  attempted only when the caller also supplies a non-null `SourceIndex` to `generateSeq3` — see
+     *  that function's own doc. Off has zero cost (no engine constructed, no `.resolve()` call);
+     *  on with no index supplied is equally a no-op, so this flag alone never triggers indexing. */
+    val sourceTraceEnabled: Boolean = true,
 )
 
 // ── Note export representation ──────────────────────────────────────────────────────────────

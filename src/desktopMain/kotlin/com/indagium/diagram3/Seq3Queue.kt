@@ -122,6 +122,26 @@ sealed class Seq3BulkAction {
 
     data class Note(val note: Seq3Note) : Seq3BulkAction()
 
+    // ── Fragment/note rename (spec §06's `Group ▾`/`Note` are add-only; these are the missing
+    //    edit-in-place counterparts) ───────────────────────────────────────────────────────────
+    //
+    // Unlike [Group]/[Note] above — which build a NEW fragment/note spanning the CURRENT message
+    // selection — these two identify the EXISTING fragment/note to rename by its own id, entirely
+    // independent of whatever messages happen to be selected when the rename fires. They are still
+    // routed through [Seq3Command.Bulk]/[applySeq3BulkAction] like every other verb (spec: "every
+    // editing verb goes through Seq3Session.applyCommand"), just with `selectedIds` unused by the
+    // action itself — mirrors how [Seq3BulkAction.Merge]'s `mergedId` already names a specific
+    // target independent of the selection's own ids.
+
+    /** Renames an EXISTING fragment's label in place. A no-op (unapplied) for an unknown
+     *  [fragmentId] — see [applySeq3BulkAction]'s own "invalid selection is always a safe no-op"
+     *  contract, extended here to "invalid target id" for a verb that isn't selection-keyed. */
+    data class SetFragmentLabel(val fragmentId: String, val label: String) : Seq3BulkAction()
+
+    /** Renames an EXISTING note's text in place. Same unknown-id-is-a-safe-no-op contract as
+     *  [SetFragmentLabel]. */
+    data class SetNoteText(val noteId: String, val text: String) : Seq3BulkAction()
+
     // ── Single-message field edits (Seq3Inspector, phase 4 — spec §03) ─────────────────────────
     //
     // These route the Inspector's per-message controls through the SAME bulk pipeline as every
@@ -164,7 +184,12 @@ private fun unapplied(document: Seq3Document, reason: String) = Seq3BulkResult(d
  */
 fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action: Seq3BulkAction): Seq3BulkResult {
     val selected = document.messages.filter { it.id in selectedIds }
-    if (selected.isEmpty()) return unapplied(document, "Select at least one message")
+    // [SetFragmentLabel]/[SetNoteText] name their target by [fragmentId]/[noteId], not by the
+    // message selection (see those variants' own doc) — "select at least one message" would be a
+    // pointless block on a rename that never reads `selectedIds` at all.
+    if (selected.isEmpty() && action !is Seq3BulkAction.SetFragmentLabel && action !is Seq3BulkAction.SetNoteText) {
+        return unapplied(document, "Select at least one message")
+    }
     return when (action) {
         is Seq3BulkAction.SetFrom -> applySetFrom(document, selectedIds, action)
         is Seq3BulkAction.SetTo -> applySetTo(document, selectedIds, action)
@@ -173,6 +198,8 @@ fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action
         Seq3BulkAction.Hide -> applyVisibility(document, selectedIds, Seq3Visibility.HIDDEN)
         Seq3BulkAction.Show -> applyVisibility(document, selectedIds, Seq3Visibility.VISIBLE)
         is Seq3BulkAction.Note -> applyNote(document, selectedIds, action)
+        is Seq3BulkAction.SetFragmentLabel -> applySetFragmentLabel(document, action)
+        is Seq3BulkAction.SetNoteText -> applySetNoteText(document, action)
         is Seq3BulkAction.SetKind -> applySetKind(document, selectedIds, action)
         is Seq3BulkAction.SetPattern -> applySetPattern(document, selectedIds, action)
         is Seq3BulkAction.SetLabel -> applySetLabel(document, selectedIds, action)
@@ -190,7 +217,15 @@ private fun applySetFrom(document: Seq3Document, selectedIds: Set<String>, actio
 
 private fun applySetTo(document: Seq3Document, selectedIds: Set<String>, action: Seq3BulkAction.SetTo): Seq3BulkResult {
     if (action.lifelineId != null && document.lifelines.none { it.id == action.lifelineId }) return unapplied(document, "Unknown target lifeline")
-    return Seq3BulkResult(editMessages(document, selectedIds) { it.copy(toLifelineId = action.lifelineId) }, applied = true)
+    return Seq3BulkResult(
+        editMessages(document, selectedIds) { m ->
+            // Picking a message's own `from` as its `to` must read as a self-call, not an ordinary
+            // arrow pointing at itself — same auto-flip [applySeq3GuidedTarget] performs for the
+            // guided pass, mirrored here for the Inspector's bulk "Set target" verb.
+            m.copy(toLifelineId = action.lifelineId, kind = if (action.lifelineId == m.fromLifelineId) Seq3Kind.SELF else m.kind)
+        },
+        applied = true,
+    )
 }
 
 private fun applySetKind(document: Seq3Document, selectedIds: Set<String>, action: Seq3BulkAction.SetKind): Seq3BulkResult =
@@ -249,6 +284,29 @@ private fun applyNote(document: Seq3Document, selectedIds: Set<String>, action: 
         note.messageIds.isEmpty() || !selectedIds.containsAll(note.messageIds) -> unapplied(document, "Note must span selected messages")
         else -> Seq3BulkResult(document.copy(notes = document.notes + note), applied = true)
     }
+}
+
+/** Renames an EXISTING fragment's label — the edit-in-place counterpart [applyGroup] doesn't have
+ *  (see [Seq3BulkAction.SetFragmentLabel]'s own doc for why this targets [action.fragmentId]
+ *  rather than the message selection). A safe no-op for an unknown id or a blank label. */
+private fun applySetFragmentLabel(document: Seq3Document, action: Seq3BulkAction.SetFragmentLabel): Seq3BulkResult {
+    if (document.fragments.none { it.id == action.fragmentId }) return unapplied(document, "Unknown fragment")
+    if (action.label.isBlank()) return unapplied(document, "Fragment label is required")
+    return Seq3BulkResult(
+        document.copy(fragments = document.fragments.map { if (it.id == action.fragmentId) it.copy(label = action.label) else it }),
+        applied = true,
+    )
+}
+
+/** Renames an EXISTING note's text — the edit-in-place counterpart [applyNote] doesn't have. Same
+ *  unknown-id/blank-text safe-no-op contract as [applySetFragmentLabel]. */
+private fun applySetNoteText(document: Seq3Document, action: Seq3BulkAction.SetNoteText): Seq3BulkResult {
+    if (document.notes.none { it.id == action.noteId }) return unapplied(document, "Unknown note")
+    if (action.text.isBlank()) return unapplied(document, "Note text is required")
+    return Seq3BulkResult(
+        document.copy(notes = document.notes.map { if (it.id == action.noteId) it.copy(text = action.text) else it }),
+        applied = true,
+    )
 }
 
 /**
