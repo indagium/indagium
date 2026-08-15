@@ -30,7 +30,9 @@ import java.security.MessageDigest
 // carries the whole [Seq3Document] (not a separate "spec" + "model" pair like v1's
 // SeqDiagramSpec/SeqDiagram split) because v3's document already IS both the generation inputs and
 // the current edited state — see Seq3Model.kt's own header for why there's no `editorVersion`
-// discriminator to carry either.
+// discriminator to carry either. Attachment metadata is intentionally small and orthogonal to
+// the document: a snapshot owns the encoded artifact, while a linked note retains the durable
+// library id that the workspace can refresh.
 //
 // [parseSeq3Note] must never throw and must return null for anything that isn't a complete,
 // version-supported header immediately followed by a matching fence — a plain user-written Note, a
@@ -56,6 +58,17 @@ private const val MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT = 5_000
 private const val MAX_SEQ3_HEADER_CHARS = 512 * 1024
 private const val MAX_SEQ3_SOURCE_CHARS = 2 * 1024 * 1024
 private const val MAX_SEQ3_STRING_CHARS = 16 * 1024
+
+/** How a diagram note relates to the library/workspace artifact that created it. */
+enum class Seq3AttachmentMode { SNAPSHOT, LINKED }
+
+/** Durable note attachment metadata. A LINKED attachment must carry [diagramId]. */
+data class Seq3AttachmentMetadata(
+    val diagramId: String? = null,
+    val mode: Seq3AttachmentMode = Seq3AttachmentMode.SNAPSHOT,
+    val revision: Long? = null,
+    val attachedAtEpochMs: Long? = null,
+)
 
 private fun fenceLanguage(dialect: Seq3Dialect): String = when (dialect) {
     Seq3Dialect.MERMAID -> "mermaid"
@@ -89,6 +102,8 @@ data class ParsedSeq3(
      *  source: a rasterized PNG or the source alone. Missing/unrecognized decodes as [DiagramExportMode.IMAGE],
      *  matching the v1/v2 codec's own "missing metadata means IMAGE" default. */
     val exportMode: DiagramExportMode = DiagramExportMode.IMAGE,
+    /** Optional durable relationship to the diagram library/workspace that produced this note. */
+    val attachment: Seq3AttachmentMetadata? = null,
 )
 
 /** Stable lowercase hexadecimal SHA-256 of [source] — the exact fenced body, never the header. */
@@ -109,6 +124,7 @@ fun encodeSeq3Note(
     dialect: Seq3Dialect = Seq3Dialect.MERMAID,
     caption: String = "",
     exportMode: DiagramExportMode = DiagramExportMode.IMAGE,
+    attachment: Seq3AttachmentMetadata? = null,
     // Verbatim fenced-body override for a metadata-only rewrite (updateSeq3NoteCaption/
     // updateSeq3NoteExportMode below): re-deriving the source from [document] on every such edit
     // would silently "fix" a hand-edited/drifted fence back into agreement, exactly the failure
@@ -128,6 +144,7 @@ fun encodeSeq3Note(
         "sourceHash" to seq3SourceHash(source),
         "caption" to caption,
         "exportMode" to exportMode.name,
+        "attachment" to attachment?.let(::attachmentToMap),
         "document" to documentToMap(document),
     )
     return buildString {
@@ -168,6 +185,8 @@ fun parseSeq3Note(text: String): ParsedSeq3? {
     val document = documentFromMap(documentMap) ?: return null
     val caption = boundedString(map.str("caption")) ?: ""
     val exportMode = enumFromName(map.str("exportMode"), DiagramExportMode.IMAGE)
+    val attachment = subMap(map, "attachment")?.let(::attachmentFromMap)
+    if (subMap(map, "attachment") != null && attachment == null) return null
 
     val markerLen = MARKER_HEAD.length + spaceIdx + 1 + tailIdx + MARKER_TAIL.length
     val headerEndIndex = leadingWs + markerLen
@@ -202,6 +221,7 @@ fun parseSeq3Note(text: String): ParsedSeq3? {
         fenceRange = fenceOpenStart until fenceCloseLineEnd,
         caption = caption,
         exportMode = exportMode,
+        attachment = attachment,
     )
 }
 
@@ -210,13 +230,27 @@ fun parseSeq3Note(text: String): ParsedSeq3? {
  *  source so the fenced body — and therefore [Seq3Codec]'s own hash — is preserved verbatim. */
 fun updateSeq3NoteCaption(noteText: String, caption: String): String? {
     val parsed = parseSeq3Note(noteText) ?: return null
-    return encodeSeq3Note(parsed.document, parsed.dialect, caption, parsed.exportMode, sourceOverride = parsed.source)
+    return encodeSeq3Note(
+        parsed.document,
+        parsed.dialect,
+        caption,
+        parsed.exportMode,
+        attachment = parsed.attachment,
+        sourceOverride = parsed.source,
+    )
 }
 
 /** Returns [noteText] rewritten with [exportMode], or null for a non-v3-diagram note. */
 fun updateSeq3NoteExportMode(noteText: String, exportMode: DiagramExportMode): String? {
     val parsed = parseSeq3Note(noteText) ?: return null
-    return encodeSeq3Note(parsed.document, parsed.dialect, parsed.caption, exportMode, sourceOverride = parsed.source)
+    return encodeSeq3Note(
+        parsed.document,
+        parsed.dialect,
+        parsed.caption,
+        exportMode,
+        attachment = parsed.attachment,
+        sourceOverride = parsed.source,
+    )
 }
 
 /** Strips the leading header comment (and the blank line right after it, if any), leaving just the
@@ -239,6 +273,28 @@ private fun subMap(map: Map<String, Any?>, key: String): Map<String, Any?>? = ma
 
 private inline fun <reified E : Enum<E>> enumFromName(name: String?, default: E): E =
     name?.let { n -> enumValues<E>().firstOrNull { it.name == n } } ?: default
+
+private fun attachmentToMap(attachment: Seq3AttachmentMetadata): Map<String, Any?> = mapOf(
+    "diagramId" to attachment.diagramId,
+    "mode" to attachment.mode.name,
+    "revision" to attachment.revision,
+    "attachedAtEpochMs" to attachment.attachedAtEpochMs,
+)
+
+private fun attachmentFromMap(map: Map<String, Any?>): Seq3AttachmentMetadata? {
+    val diagramId = map.str("diagramId")?.let(::boundedString) ?: map.str("diagramId")
+    if (map.str("diagramId") != null && diagramId == null) return null
+    val mode = enumValues<Seq3AttachmentMode>().firstOrNull { it.name == map.str("mode") }
+        ?: Seq3AttachmentMode.SNAPSHOT
+    val revision = (map["revision"] as? Number)?.toLong()
+    val attachedAt = (map["attachedAtEpochMs"] as? Number)?.toLong()
+    val attachment = Seq3AttachmentMetadata(diagramId, mode, revision, attachedAt)
+    return attachment.takeIf { validAttachment(it) }
+}
+
+private fun validAttachment(attachment: Seq3AttachmentMetadata): Boolean =
+    attachment.diagramId?.length?.let { it <= MAX_SEQ3_STRING_CHARS } != false &&
+        (attachment.mode != Seq3AttachmentMode.LINKED || !attachment.diagramId.isNullOrBlank())
 
 // ── Seq3Document <-> Map(JSON) ───────────────────────────────────────────────────────────────
 
@@ -397,6 +453,8 @@ private fun messageToMap(m: Seq3Message): Map<String, Any?> = mapOf(
     "authoring" to m.authoring.name,
     "orderPin" to m.orderPin?.let(::orderPinToMap),
     "occurrences" to m.occurrences.map(::occurrenceToMap),
+    "manualTimestampMillis" to m.manualTimestampMillis,
+    "manualRawTimestamp" to m.manualRawTimestamp,
 )
 
 private fun messageFromMap(map: Map<String, Any?>): Seq3Message? {
@@ -418,6 +476,8 @@ private fun messageFromMap(map: Map<String, Any?>): Seq3Message? {
         authoring = enumFromName(map.str("authoring"), Seq3Authoring.AUTO),
         orderPin = subMap(map, "orderPin")?.let(::orderPinFromMap),
         occurrences = occurrenceMaps.mapNotNull(::occurrenceFromMap),
+        manualTimestampMillis = (map["manualTimestampMillis"] as? Number)?.toLong(),
+        manualRawTimestamp = boundedString(map.str("manualRawTimestamp")) ?: "",
     )
 }
 

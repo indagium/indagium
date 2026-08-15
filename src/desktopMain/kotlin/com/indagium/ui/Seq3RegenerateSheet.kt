@@ -2,7 +2,6 @@ package com.indagium.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -266,17 +265,7 @@ private fun Seq3RegenTimeField(value: String, placeholder: String, onValue: (Str
 @Composable
 private fun Seq3RegenToggle(label: String, hint: String, checked: Boolean, onToggle: () -> Unit) {
     val tc = tc()
-    Row(
-        Modifier.fillMaxWidth().clip(CORNER_SM).clickable(onClick = onToggle).padding(vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(9.dp),
-    ) {
-        Box(
-            Modifier.width(13.dp).height(13.dp).clip(CORNER_SM)
-                .background(if (checked) tc.ac else Color.Transparent, CORNER_SM)
-                .border(1.5.dp, if (checked) tc.ac else tc.br, CORNER_SM),
-            contentAlignment = Alignment.Center,
-        ) { if (checked) AppText("✓", color = tc.p, fontSize = 9.sp) }
+    CheckRow(checked = checked, onToggle = onToggle) {
         AppText(label, color = tc.tx, fontSize = 12.sp)
         AppText(hint, color = tc.td, fontSize = 11.sp, maxLines = 1)
     }
@@ -348,13 +337,18 @@ private fun Seq3RegenRowActions(state: AppState, session: Seq3WorkspaceSession, 
     // (spec §08: "Edited means locked"). Its only verb is unlock, which converts it into an
     // ordinary decidable row.
     if (row.kind == Seq3RegenChangeKind.EDITED_KEPT && !row.unlocked) {
-        HoverBox(
-            modifier = Modifier.clip(CORNER_SM)
-                .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
+        AppButton(
+            "unlock",
             onClick = { state.seq3Sessions.updateRegenReview(session.id) { unlockSeq3RegenRow(it, row.id) } },
-        ) {
-            AppText("unlock", color = tc.ts, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
-        }
+            variant = ButtonVariant.Ghost,
+            textColor = tc.ts,
+            horizontalPadding = 6.dp,
+            shape = CORNER_SM,
+            modifier = Modifier.pointerHoverIcon(
+                PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                overrideDescendants = true,
+            ),
+        )
         return
     }
     val (rejectLabel, acceptLabel) = when (row.kind) {
@@ -380,19 +374,15 @@ private fun Seq3RegenRowActions(state: AppState, session: Seq3WorkspaceSession, 
 @Composable
 private fun Seq3RegenDecisionButton(label: String, active: Boolean, accent: Color, onClick: () -> Unit) {
     val tc = tc()
-    HoverBox(
-        modifier = Modifier.clip(RoundedCornerShape(5.dp))
-            .background(if (active) accent.copy(alpha = .18f) else Color.Transparent, RoundedCornerShape(5.dp))
-            .padding(horizontal = 10.dp, vertical = 3.dp),
+    AppButton(
+        label,
         onClick = onClick,
-    ) {
-        AppText(
-            label,
-            color = if (active) accent else tc.ts,
-            fontSize = 11.sp,
-            fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
-        )
-    }
+        variant = ButtonVariant.Ghost,
+        textColor = if (active) accent else tc.ts,
+        horizontalPadding = 10.dp,
+        shape = RoundedCornerShape(5.dp),
+        modifier = Modifier.padding(vertical = 1.dp),
+    )
 }
 
 @Composable
@@ -405,21 +395,23 @@ private fun Seq3RegenFooter(state: AppState, session: Seq3WorkspaceSession, view
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        HoverBox(
-            modifier = Modifier.clip(CORNER_SM)
-                .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
+        AppButton(
+            "Accept all",
             onClick = { state.seq3Sessions.updateRegenReview(session.id, ::acceptAllSeq3Regen) },
-        ) {
-            AppText("Accept all", color = tc.ac, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
-        }
+            variant = ButtonVariant.Ghost,
+            textColor = tc.ac,
+            horizontalPadding = 6.dp,
+            shape = CORNER_SM,
+        )
         AppText("·", color = tc.td, fontSize = 12.sp)
-        HoverBox(
-            modifier = Modifier.clip(CORNER_SM)
-                .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
+        AppButton(
+            "reject all",
             onClick = { state.seq3Sessions.updateRegenReview(session.id, ::rejectAllSeq3Regen) },
-        ) {
-            AppText("reject all", color = tc.ts, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
-        }
+            variant = ButtonVariant.Ghost,
+            textColor = tc.ts,
+            horizontalPadding = 6.dp,
+            shape = CORNER_SM,
+        )
         Spacer(Modifier.weight(1f))
         Seq3SheetButton("Cancel", primary = false) { closeSeq3RegenerateSheet(state, session, view) }
         Seq3SheetButton("Apply $pendingCount changes", primary = true, enabled = pendingCount > 0) {
@@ -448,26 +440,14 @@ private fun Seq3RegenEmptyState(state: AppState, session: Seq3WorkspaceSession, 
 
 @Composable
 private fun Seq3SheetButton(label: String, primary: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
-    val tc = tc()
-    HoverBox(
-        modifier = Modifier.clip(RoundedCornerShape(7.dp))
-            .background(if (primary && enabled) tc.ac else tc.p, RoundedCornerShape(7.dp))
-            .border(1.dp, if (primary && enabled) tc.ac else tc.br, RoundedCornerShape(7.dp))
-            .padding(horizontal = 14.dp, vertical = 6.dp),
-        hoverEnabled = enabled,
-        onClick = { if (enabled) onClick() },
-    ) {
-        AppText(
-            label,
-            color = when {
-                !enabled -> tc.td
-                primary -> tc.p
-                else -> tc.tx
-            },
-            fontSize = 12.sp,
-            fontWeight = if (primary) FontWeight.Medium else FontWeight.Normal,
-        )
-    }
+    AppButton(
+        label,
+        onClick = onClick,
+        variant = if (primary) ButtonVariant.Primary else ButtonVariant.Secondary,
+        enabled = enabled,
+        horizontalPadding = 14.dp,
+        shape = RoundedCornerShape(7.dp),
+    )
 }
 
 // ── Shared helpers (also used by Seq3WorkspaceTest / the keyboard handler) ─────────────────────

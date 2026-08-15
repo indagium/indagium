@@ -1,6 +1,8 @@
 package com.indagium
 
 import com.indagium.debug.Json
+import com.indagium.diagram3.Seq3AttachmentMetadata
+import com.indagium.diagram3.Seq3AttachmentMode
 import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3Capture
 import com.indagium.diagram3.Seq3CaptureSource
@@ -168,5 +170,26 @@ class Seq3CodecTest {
         val parsed = parseSeq3Note(text)
         assertNotNull(parsed)
         assertEquals(doc.toMermaid().trimEnd('\n'), parsed.source) // encode normalizes the trailing newline — see encodeSeq3Note's own doc
+    }
+
+    @Test
+    fun attachmentMetadataRoundTripsAndSurvivesNoteMetadataEdits() {
+        val attachment = Seq3AttachmentMetadata(
+            diagramId = "diagram-42",
+            mode = Seq3AttachmentMode.LINKED,
+            revision = 17L,
+            attachedAtEpochMs = 1234L,
+        )
+        val text = encodeSeq3Note(fixedDocument(), attachment = attachment)
+
+        val parsed = parseSeq3Note(text)
+        assertNotNull(parsed)
+        assertEquals(attachment, parsed.attachment)
+
+        val captionUpdated = com.indagium.diagram3.updateSeq3NoteCaption(text, "kept link")
+        val reparsed = parseSeq3Note(captionUpdated!!)
+        assertNotNull(reparsed)
+        assertEquals(attachment, reparsed.attachment)
+        assertEquals("kept link", reparsed.caption)
     }
 }

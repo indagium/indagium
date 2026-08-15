@@ -45,6 +45,19 @@ sealed class Seq3Command {
      *  one — mirrors every other command's "a no-op edit pushes no undo entry" contract. */
     data class ReplaceDocument(val document: Seq3Document) : Seq3Command()
 
+    /** Adds a message with explicit endpoints, timestamp, and queue position as one undoable edit. */
+    data class AddCustomMessage(val spec: Seq3CustomMessageSpec) : Seq3Command()
+
+    /** Updates an author-controlled timestamp without rewriting the message's log evidence. */
+    data class SetMessageTimestamp(
+        val messageId: String,
+        val timestampMillis: Long?,
+        val rawTimestamp: String = "",
+    ) : Seq3Command()
+
+    /** Moves one queue row to an explicit position as one undoable edit. */
+    data class MoveMessage(val messageId: String, val position: Seq3InsertionPosition) : Seq3Command()
+
     data class ReorderLifelines(val orderedLifelineIds: List<String>) : Seq3Command()
 
     data class RenameLifeline(val lifelineId: String, val name: String) : Seq3Command()
@@ -96,6 +109,9 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.ApplyRegeneration -> applied(applySeq3Regeneration(document, command.review), "Regenerate")
     is Seq3Command.ReplaceMessage -> dispatchReplaceMessage(document, command)
     is Seq3Command.ReplaceDocument -> dispatchReplaceDocument(document, command)
+    is Seq3Command.AddCustomMessage -> dispatchAddCustomMessage(document, command)
+    is Seq3Command.SetMessageTimestamp -> dispatchSetMessageTimestamp(document, command)
+    is Seq3Command.MoveMessage -> dispatchMoveMessage(document, command)
     is Seq3Command.ReorderLifelines -> dispatchReorder(document, command)
     is Seq3Command.RenameLifeline -> dispatchRename(document, command)
     is Seq3Command.MergeLifelines -> dispatchMergeLifelines(document, command)
@@ -137,6 +153,32 @@ private fun dispatchReplaceDocument(document: Seq3Document, command: Seq3Command
     if (command.document == document) return unapplied(document, "No change")
     return applied(command.document, "Add message")
 }
+
+private fun dispatchAddCustomMessage(document: Seq3Document, command: Seq3Command.AddCustomMessage): Outcome =
+    when (val result = addSeq3CustomMessage(document, command.spec)) {
+        is Seq3CustomMessageResult.Added -> applied(result.document, "Add custom message")
+        is Seq3CustomMessageResult.Rejected -> unapplied(document, result.reason)
+    }
+
+private fun dispatchSetMessageTimestamp(document: Seq3Document, command: Seq3Command.SetMessageTimestamp): Outcome =
+    when (val result = updateSeq3MessageTimestamp(document, command.messageId, command.timestampMillis, command.rawTimestamp)) {
+        is Seq3MessageEditResult.Updated -> if (result.document == document) {
+            unapplied(document, "No change")
+        } else {
+            applied(result.document, "Edit message timestamp")
+        }
+        is Seq3MessageEditResult.Rejected -> unapplied(document, result.reason)
+    }
+
+private fun dispatchMoveMessage(document: Seq3Document, command: Seq3Command.MoveMessage): Outcome =
+    when (val result = moveSeq3Message(document, command.messageId, command.position)) {
+        is Seq3MessageEditResult.Updated -> if (result.document == document) {
+            unapplied(document, "No change")
+        } else {
+            applied(result.document, "Move message")
+        }
+        is Seq3MessageEditResult.Rejected -> unapplied(document, result.reason)
+    }
 
 private fun dispatchReorder(document: Seq3Document, command: Seq3Command.ReorderLifelines): Outcome {
     if (command.orderedLifelineIds.toSet() != document.lifelines.map { it.id }.toSet()) return unapplied(document, "Must list every lifeline exactly once")

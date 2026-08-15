@@ -464,6 +464,137 @@ fun addSeq3MessageFromSelection(document: Seq3Document, selectedEntries: List<Lo
     return Seq3AddResult.Added(withLifeline.copy(messages = withLifeline.messages + message), newMessageId)
 }
 
+/**
+ * Adds a message authored without log evidence. The caller must provide both endpoint choices for
+ * arrow kinds, an explicit insertion position, and may optionally provide a timeline timestamp.
+ * No synthetic [Seq3Occurrence] is created: custom rows have no real log line to navigate to, and
+ * the renderer handles their evidence-free shape directly.
+ *
+ * If [Seq3CustomMessageSpec.fragmentId] is set, the new message is also added to that existing
+ * semantic fragment. This supports inserting an authored message into an existing OPT/ALT/LOOP/PAR
+ * section without manufacturing a second, overlapping fragment.
+ */
+@Suppress("ReturnCount")
+fun addSeq3CustomMessage(document: Seq3Document, spec: Seq3CustomMessageSpec): Seq3CustomMessageResult {
+    val text = spec.text.trim()
+    if (text.isEmpty()) return Seq3CustomMessageResult.Rejected("Message text is required")
+    val from = document.lifelines.firstOrNull { it.id == spec.fromLifelineId }
+        ?: return Seq3CustomMessageResult.Rejected("Unknown source lifeline")
+    val to = when (spec.kind) {
+        Seq3Kind.NOTE -> {
+            if (spec.toLifelineId != null) return Seq3CustomMessageResult.Rejected("A note message cannot have a target lifeline")
+            null
+        }
+        Seq3Kind.SELF -> {
+            if (spec.toLifelineId != null && spec.toLifelineId != from.id) {
+                return Seq3CustomMessageResult.Rejected("A self message must target its source lifeline")
+            }
+            from.id
+        }
+        else -> {
+            val targetId = spec.toLifelineId ?: return Seq3CustomMessageResult.Rejected("Target lifeline is required")
+            if (document.lifelines.none { it.id == targetId }) return Seq3CustomMessageResult.Rejected("Unknown target lifeline")
+            targetId
+        }
+    }
+    val fragment = spec.fragmentId?.let { id ->
+        document.fragments.firstOrNull { it.id == id }
+            ?: return Seq3CustomMessageResult.Rejected("Unknown fragment")
+    }
+    val insertionIndex = resolveSeq3InsertionIndex(document.messages, spec.position)
+        ?: return Seq3CustomMessageResult.Rejected("Invalid message insertion position")
+    val newMessageId = nextSeq3MessageId(document)
+    val tag = from.tagIds.firstOrNull() ?: from.id
+    val rawTimestamp = spec.rawTimestamp.trim()
+    val message = Seq3Message(
+        id = newMessageId,
+        match = Seq3Match(tag = tag, template = text),
+        fromLifelineId = from.id,
+        toLifelineId = to,
+        labelTemplate = text,
+        kind = spec.kind,
+        repeat = spec.repeat,
+        authoring = Seq3Authoring.EDITED,
+        occurrences = emptyList(),
+        manualTimestampMillis = spec.timestampMillis ?: parseSeq3Timestamp(rawTimestamp),
+        manualRawTimestamp = rawTimestamp,
+    )
+    val messages = document.messages.toMutableList().apply { add(insertionIndex, message) }
+    val updatedFragments = document.fragments.map { current ->
+        if (current.id != fragment?.id) {
+            current
+        } else {
+            val ids = (current.messageIds + newMessageId).distinct()
+            current.copy(messageIds = ids.sortedBy { id -> messages.indexOfFirst { it.id == id } })
+        }
+    }
+    return Seq3CustomMessageResult.Added(
+        document = document.copy(messages = messages, fragments = updatedFragments),
+        newMessageId = newMessageId,
+        insertionIndex = insertionIndex,
+    )
+}
+
+/** Changes only the author-controlled timestamp, retaining all immutable log evidence. Passing a
+ *  null millis value and a blank raw value clears the override and restores evidence-based order. */
+fun updateSeq3MessageTimestamp(
+    document: Seq3Document,
+    messageId: String,
+    timestampMillis: Long?,
+    rawTimestamp: String = "",
+): Seq3MessageEditResult {
+    if (document.messages.none { it.id == messageId }) return Seq3MessageEditResult.Rejected("Unknown message")
+    val normalizedRawTimestamp = rawTimestamp.trim()
+    val updated = document.copy(
+        messages = document.messages.map { message ->
+            if (message.id == messageId) {
+                message.copy(
+                    manualTimestampMillis = timestampMillis ?: parseSeq3Timestamp(normalizedRawTimestamp),
+                    manualRawTimestamp = normalizedRawTimestamp,
+                    authoring = Seq3Authoring.EDITED,
+                )
+            } else {
+                message
+            }
+        },
+    )
+    return Seq3MessageEditResult.Updated(updated)
+}
+
+/** Parses the same clock format used by log rows. Unknown/free-form text remains displayable as
+ *  [Seq3Message.manualRawTimestamp], but does not participate in chronological sorting. */
+fun parseSeq3Timestamp(rawTimestamp: String): Long? =
+    parseMillisOfDay(rawTimestamp.trim()).takeIf { it != TS_UNKNOWN }
+
+/** Moves one message to an explicit queue position without changing its endpoints, text, evidence,
+ *  or timestamp. The position is resolved after removing the message, so `AtIndex(0)` always means
+ *  the first final row and moving relative to the message itself is rejected safely. */
+fun moveSeq3Message(document: Seq3Document, messageId: String, position: Seq3InsertionPosition): Seq3MessageEditResult {
+    val currentIndex = document.messages.indexOfFirst { it.id == messageId }
+    if (currentIndex < 0) return Seq3MessageEditResult.Rejected("Unknown message")
+    val remaining = document.messages.toMutableList().apply { removeAt(currentIndex) }
+    val insertionIndex = resolveSeq3InsertionIndex(remaining, position)
+        ?: return Seq3MessageEditResult.Rejected("Invalid message insertion position")
+    if (insertionIndex == currentIndex && currentIndex <= remaining.size) {
+        return Seq3MessageEditResult.Updated(document)
+    }
+    remaining.add(insertionIndex, document.messages[currentIndex])
+    return Seq3MessageEditResult.Updated(document.copy(messages = remaining))
+}
+
+private fun resolveSeq3InsertionIndex(
+    messages: List<Seq3Message>,
+    position: Seq3InsertionPosition,
+): Int? = when (position) {
+    Seq3InsertionPosition.Start -> 0
+    Seq3InsertionPosition.End -> messages.size
+    is Seq3InsertionPosition.AtIndex -> position.index.takeIf { it in 0..messages.size }
+    is Seq3InsertionPosition.BeforeMessage -> messages.indexOfFirst { it.id == position.messageId }.takeIf { it >= 0 }
+    is Seq3InsertionPosition.AfterMessage -> messages.indexOfFirst { it.id == position.messageId }
+        .takeIf { it >= 0 }
+        ?.plus(1)
+}
+
 /** The next free `"msg-N"` id — [generateSeq3]'s own naming scheme (`"msg-${index + 1}"`), extended
  *  here to guarantee uniqueness against an EXISTING document's messages rather than a freshly
  *  generated, empty-to-start list: an incremental single-message add can't just reuse

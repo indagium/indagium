@@ -12,6 +12,7 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.ui.Seq3TemplateSegment
 import com.indagium.ui.seq3CollapsedOccurrenceCount
+import com.indagium.ui.seq3ParseRowNumbers
 import com.indagium.ui.seq3ParseTemplateCaptures
 import com.indagium.ui.seq3PinnableDirections
 import com.indagium.ui.seq3ResolveSelectedEntries
@@ -141,5 +142,10 @@ class Seq3QueuePanelTest {
     fun resolveSelectedEntriesIsEmptyForAnEmptySelection() {
         val logData = listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "A", "line"))
         assertTrue(seq3ResolveSelectedEntries(logData, emptySet()).isEmpty())
+    }
+
+    @Test
+    fun parseRowNumbersAcceptsSinglesRangesAndDeduplicates() {
+        assertEquals(listOf(2, 4, 5, 6, 8), seq3ParseRowNumbers("2, 4-6; 8, 6"))
     }
 }

@@ -210,6 +210,37 @@ class Seq3LayoutTest {
     }
 
     @Test
+    fun untimestampedAuthoredMessageKeepsItsDocumentInsertionPositionOnCanvas() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("before", "A", "B", occurrences = listOf(occurrence(1, 1_000L))),
+                message("custom", "A", "B", occurrences = emptyList()),
+                message("after", "A", "B", occurrences = listOf(occurrence(2, 2_000L))),
+            ),
+        )
+
+        val layout = layoutSeq3(doc, opts())
+
+        assertEquals(listOf("before", "custom", "after"), layout.rows.sortedBy { it.y }.map { it.messageId })
+    }
+
+    @Test
+    fun manualTimestampOverrideMovesEveryEmissionOfAnEvidenceBackedMessage() {
+        val moved = message("moved", "A", "B", occurrences = listOf(occurrence(1, 3_000L)))
+            .copy(manualTimestampMillis = 1_000L)
+        val later = message("later", "A", "B", occurrences = listOf(occurrence(2, 2_000L)))
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(moved, later),
+        )
+
+        val layout = layoutSeq3(doc, opts())
+
+        assertEquals(listOf("moved", "later"), layout.rows.sortedBy { it.y }.map { it.messageId })
+    }
+
+    @Test
     fun firstLastModeDrawsFirstElisionMarkerThenLast() {
         // Item 5 (phase-5 round-2): the canvas now sorts every drawn row into true timeline order,
         // so this fixture uses genuinely increasing timestamps (rather than the default helper's

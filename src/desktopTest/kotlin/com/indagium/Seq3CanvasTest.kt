@@ -309,9 +309,9 @@ class Seq3CanvasTest {
 
     @Test
     fun crossingLabelReadsSingularAndPluralCorrectly() {
-        assertEquals("No crossings", seq3CrossingLabel(0))
-        assertEquals("1 crossing", seq3CrossingLabel(1))
-        assertEquals("3 crossings", seq3CrossingLabel(3))
+        assertEquals("No arrow crossings", seq3CrossingLabel(0))
+        assertEquals("1 arrow crossing", seq3CrossingLabel(1))
+        assertEquals("3 arrow crossings", seq3CrossingLabel(3))
     }
 
     @Test
@@ -325,7 +325,7 @@ class Seq3CanvasTest {
         )
         val layout = layoutSeq3(doc, opts())
         assertEquals(1, layout.crossingCount)
-        assertEquals("1 crossing", seq3CrossingLabel(layout.crossingCount))
+        assertEquals("1 arrow crossing", seq3CrossingLabel(layout.crossingCount))
     }
 
     // ── Zoom helpers ─────────────────────────────────────────────────────────────────────────
