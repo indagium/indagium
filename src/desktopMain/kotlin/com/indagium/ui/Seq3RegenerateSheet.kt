@@ -124,9 +124,21 @@ private fun Seq3RegenChip(label: String, accent: Color) {
 }
 
 /**
- * Spec §08's "The scope controls belong here": selection / whole view / time range plus the
- * same-thread-handoff and correlation-token inputs to `Seq3GenerateOptions`. Changing one does not
- * regenerate anything by itself — it only seeds the "Build review" press below.
+ * Spec §08's "The scope controls belong here": rows / time range plus the same-thread-handoff and
+ * correlation-token inputs to `Seq3GenerateOptions`. Changing one does not regenerate anything by
+ * itself — it only seeds the "Build review" press below.
+ *
+ * Item 4b (phase-5 post-ship plan): "Whole view" is dropped here too (matches the title-bar dropdown,
+ * item 1) and "Selection (N rows)" — which only ever reflected whatever the log tab's live row
+ * selection happened to be when the sheet was drawn, invisible/unusable unless a user had already
+ * selected rows on the log tab BEFORE opening this sheet — is replaced by an explicit Rows scope: two
+ * numeric from/to fields that build a plain [Seq3Range.Ids] span directly, with no dependency on the
+ * tab's live selection. A caller who genuinely wants to snapshot the tab's current selection still
+ * has that in the title bar's OWN scope dropdown ([Seq3ScopeDropdown] in `Seq3Workspace.kt`, item
+ * 4a's "Selection" item, unaffected by this section) — that one continues to build a
+ * `Seq3Range.Ids(from, to, selectedIds)` immediately from the live selection; this sheet's own Rows
+ * fields always pass an empty `selectedIds`, so [Seq3Generator]'s `resolveIdsRange` takes the plain
+ * inclusive span.
  */
 @Composable
 private fun Seq3RegenScopeControls(state: AppState, session: Seq3WorkspaceSession) {
@@ -135,29 +147,40 @@ private fun Seq3RegenScopeControls(state: AppState, session: Seq3WorkspaceSessio
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        // Seeded from the CURRENT scope, not blanked, so reopening the sheet on a session whose
-        // scope is already a Time range (e.g. picked from the title-bar dropdown, item 4a) shows
-        // what's actually going to be scanned rather than two empty boxes.
-        var fromText by remember(session.id) { mutableStateOf((session.range as? Seq3Range.Time)?.fromTs.orEmpty()) }
-        var toText by remember(session.id) { mutableStateOf((session.range as? Seq3Range.Time)?.toTs.orEmpty()) }
+        // Seeded from the CURRENT scope when it's already that type, so reopening the sheet on a
+        // session whose scope is already a Time/Ids range shows what's actually going to be scanned
+        // rather than empty boxes. Item 4 (phase-5 round-2 post-ship plan): when the current range is
+        // a DIFFERENT type, seed from the scanned span's own real bounds (`scannedTimeRange`/
+        // `scannedIdRange`) instead of leaving the fields blank — a blank field showed nothing but the
+        // placeholder, forcing a user to already know a valid value to type. Both still fall back to
+        // blank only when there's truly nothing to seed from (no source tab / empty scan), matching
+        // how `scannedTimeRange`/`scannedIdRange` themselves return null in that case.
+        val scannedTime = state.seq3Sessions.scannedTimeRange(session.id)
+        val scannedIds = state.seq3Sessions.scannedIdRange(session.id)
+        var fromText by remember(session.id) {
+            mutableStateOf((session.range as? Seq3Range.Time)?.fromTs ?: scannedTime?.first.orEmpty())
+        }
+        var toText by remember(session.id) {
+            mutableStateOf((session.range as? Seq3Range.Time)?.toTs ?: scannedTime?.second.orEmpty())
+        }
+        var fromRowText by remember(session.id) {
+            mutableStateOf((session.range as? Seq3Range.Ids)?.from?.toString() ?: scannedIds?.first?.toString().orEmpty())
+        }
+        var toRowText by remember(session.id) {
+            mutableStateOf((session.range as? Seq3Range.Ids)?.to?.toString() ?: scannedIds?.second?.toString().orEmpty())
+        }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             AppText("Scope", color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             val scopeLabel = when (session.range) {
-                is Seq3Range.VisibleView -> "Whole view"
-                is Seq3Range.Ids -> "Selection"
+                is Seq3Range.Ids -> "Rows"
                 is Seq3Range.Time -> "Time range"
+                // Still decodable (a brand-new session opened with no prior row selection, or an old
+                // autosave) — never reachable by picking a menu item below anymore (item 4b).
+                is Seq3Range.VisibleView -> "Whole view"
             }
             Seq3DropdownButton(scopeLabel) { close ->
-                Seq3DropdownMenuItem("Whole view", active = session.range is Seq3Range.VisibleView) {
-                    state.seq3Sessions.updateScope(session.id, Seq3Range.VisibleView)
-                    close()
-                }
-                val tab = session.sourceTabId?.let(state::tab)
-                val selected = tab?.selected.orEmpty()
-                Seq3DropdownMenuItem("Selection (${selected.size} rows)", active = session.range is Seq3Range.Ids) {
-                    if (selected.isNotEmpty()) {
-                        state.seq3Sessions.updateScope(session.id, Seq3Range.Ids(selected.min(), selected.max(), selected))
-                    }
+                Seq3DropdownMenuItem("Rows", active = session.range is Seq3Range.Ids) {
+                    state.seq3Sessions.updateScope(session.id, Seq3Range.Ids(fromRowText.toIntOrNull() ?: 0, toRowText.toIntOrNull() ?: 0))
                     close()
                 }
                 // "Time range" has display support (scopeLabel above) but, until now, no menu item
@@ -167,6 +190,19 @@ private fun Seq3RegenScopeControls(state: AppState, session: Seq3WorkspaceSessio
                 Seq3DropdownMenuItem("Time range", active = session.range is Seq3Range.Time) {
                     state.seq3Sessions.updateScope(session.id, Seq3Range.Time(fromText, toText))
                     close()
+                }
+            }
+        }
+        if (session.range is Seq3Range.Ids) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Seq3RegenRowField(fromRowText, ROW_FIELD_PLACEHOLDER) {
+                    fromRowText = it
+                    state.seq3Sessions.updateScope(session.id, Seq3Range.Ids(it.toIntOrNull() ?: 0, toRowText.toIntOrNull() ?: 0))
+                }
+                AppText("to", color = tc.td, fontSize = 11.sp)
+                Seq3RegenRowField(toRowText, ROW_FIELD_PLACEHOLDER) {
+                    toRowText = it
+                    state.seq3Sessions.updateScope(session.id, Seq3Range.Ids(fromRowText.toIntOrNull() ?: 0, it.toIntOrNull() ?: 0))
                 }
             }
         }
@@ -203,7 +239,19 @@ private fun Seq3RegenScopeControls(state: AppState, session: Seq3WorkspaceSessio
 }
 
 private const val TIME_FIELD_PLACEHOLDER = "HH:MM:SS.mmm"
+private const val ROW_FIELD_PLACEHOLDER = "row id"
 private val TIME_FIELD_WIDTH = 110.dp
+
+/** One from/to box for [Seq3RegenScopeControls]'s Rows scope (item 4b) — the numeric sibling of
+ *  [Seq3RegenTimeField], same shape and same "every keystroke writes straight through to
+ *  [Seq3Session.updateScope], never a rebuild" contract. A non-numeric value degrades to `0` rather
+ *  than rejecting the keystroke — matches this field's own light-touch validation style (the Time
+ *  field doesn't validate its format either; `Seq3Generator.resolveIdsRange` is what actually
+ *  clamps an out-of-range bound). */
+@Composable
+private fun Seq3RegenRowField(value: String, placeholder: String, onValue: (String) -> Unit) {
+    InlineField(value = value, onValue = onValue, placeholder = placeholder, fontSize = 11.sp, modifier = Modifier.width(TIME_FIELD_WIDTH))
+}
 
 /** One from/to box for [Seq3RegenScopeControls]'s Time-range scope — `Seq3Range.Time` expects
  *  `"HH:MM:SS[.mmm]"` (see that class's own doc), same format `utils.parseMillisOfDay` parses

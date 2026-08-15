@@ -59,11 +59,27 @@ data class Seq3RegenReview(val rows: List<Seq3RegenRow>, val freshDocument: Seq3
 
 private fun evidenceIds(message: Seq3Message): Set<Int> = message.occurrences.mapTo(HashSet()) { it.entryId }
 
+/** [Seq3RegenRow.id] prefixes — see [reviewSeq3Regeneration]'s own doc on why a row's id must be
+ *  unique BY CONSTRUCTION rather than borrowed straight from [Seq3Message.id]. Every caller that
+ *  keys off a row id (`withSeq3RegenDecision`, `unlockSeq3RegenRow`, the review sheet's own
+ *  `LazyColumn(key = Seq3RegenRow::id)`) only ever needs it as a stable, unique row key — never as a
+ *  [Seq3Message.id] again — so the prefix is transparent to all of them. */
+private const val CURRENT_ROW_ID_PREFIX = "cur:"
+private const val FRESH_ROW_ID_PREFIX = "new:"
+
 /**
  * Builds the [Seq3RegenReview] for `current -> fresh`. See this file's header for the matching
  * rule. A row is emitted for EVERY current message (as [Seq3RegenChangeKind.UNCHANGED] when matched
  * and byte-identical — see that constant's own doc for why even a nothing-to-review pair still gets
  * a row) and for every unmatched fresh message ([Seq3RegenChangeKind.NEW]).
+ *
+ * [Seq3RegenRow.id] is prefixed ([CURRENT_ROW_ID_PREFIX]/[FRESH_ROW_ID_PREFIX]), NOT [current]'s or
+ * [fresh]'s own [Seq3Message.id] directly: `Seq3Generator.generateSeq3` assigns message ids
+ * POSITIONALLY (`"msg-${index+1}"`) on every call, independently numbered against whatever document
+ * happens to be on that side — a current-side id and an unrelated fresh-side [NEW] message's id can
+ * therefore collide purely by position (e.g. both happen to be `"msg-11"`), which used to crash the
+ * review sheet's `LazyColumn(key = Seq3RegenRow::id)` on a duplicate key. Prefixing by SIDE makes
+ * every row id unique regardless of what the two id spaces happen to contain.
  */
 fun reviewSeq3Regeneration(current: Seq3Document, fresh: Seq3Document): Seq3RegenReview {
     val freshById = fresh.messages.associateBy { it.id }
@@ -71,15 +87,26 @@ fun reviewSeq3Regeneration(current: Seq3Document, fresh: Seq3Document): Seq3Rege
 
     val rows = mutableListOf<Seq3RegenRow>()
     current.messages.forEach { c ->
+        val rowId = CURRENT_ROW_ID_PREFIX + c.id
         val freshMatch = pairing.freshIdByCurrentId[c.id]?.let(freshById::get)
         rows += when {
-            c.authoring == Seq3Authoring.EDITED -> Seq3RegenRow(c.id, Seq3RegenChangeKind.EDITED_KEPT, c, freshMatch)
-            freshMatch == null -> Seq3RegenRow(c.id, Seq3RegenChangeKind.REMOVED, c, null)
-            !sameContent(c, freshMatch) -> Seq3RegenRow(c.id, Seq3RegenChangeKind.CHANGED, c, freshMatch)
-            else -> Seq3RegenRow(c.id, Seq3RegenChangeKind.UNCHANGED, c, freshMatch)
+            c.authoring == Seq3Authoring.EDITED -> Seq3RegenRow(rowId, Seq3RegenChangeKind.EDITED_KEPT, c, freshMatch)
+            freshMatch == null -> Seq3RegenRow(rowId, Seq3RegenChangeKind.REMOVED, c, null)
+            !sameContent(c, freshMatch) -> Seq3RegenRow(rowId, Seq3RegenChangeKind.CHANGED, c, freshMatch)
+            else -> Seq3RegenRow(rowId, Seq3RegenChangeKind.UNCHANGED, c, freshMatch)
         }
     }
-    fresh.messages.forEach { f -> if (f.id !in pairing.matchedFreshIds) rows += Seq3RegenRow(f.id, Seq3RegenChangeKind.NEW, null, f) }
+    fresh.messages.forEach { f ->
+        // NEW rows default to ACCEPT (confirmed product decision, phase-5 post-ship plan): a fresh
+        // scan finding a message that genuinely doesn't exist yet is additive by nature, unlike
+        // CHANGED/REMOVED which touch something the user may have already relied on — those two (and
+        // EDITED_KEPT) keep PENDING's "safe, keep mine" default (see [resolveDecided]'s own doc).
+        // Without this, "Build review" -> "Apply" on a narrowed scope silently dropped every brand
+        // new message unless the user remembered to click "Accept all" or each row by hand.
+        if (f.id !in pairing.matchedFreshIds) {
+            rows += Seq3RegenRow(FRESH_ROW_ID_PREFIX + f.id, Seq3RegenChangeKind.NEW, null, f, decision = Seq3RegenDecision.ACCEPT)
+        }
+    }
     return Seq3RegenReview(rows, fresh)
 }
 

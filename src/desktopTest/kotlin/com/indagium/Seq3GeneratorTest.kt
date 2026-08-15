@@ -205,4 +205,39 @@ class Seq3GeneratorTest {
     }
 
     private fun emptyDocument() = Seq3Document()
+
+    // ── Section 3 (post-ship plan): shape-key grouping must survive short mixed-alnum ids ────────
+    //
+    // Root cause, confirmed here (not from static reading alone — see the plan's own step 0):
+    // `messageShapeKey`'s old digit mask was `\b\d+\b`-only. `\b` fires only at a transition between
+    // a "word" char (letter/digit/underscore) and a non-word char, so a digit embedded inside a
+    // longer alnum run (a USB device handle like "1a2b") never had a boundary to mask on either
+    // side and stayed literal. Every occurrence then produced a DIFFERENT masked shape, so
+    // `groupByShape` never even offered the tokenizer a chance to prove one shared pattern across
+    // them — each became its own single-occurrence Seq3Message, sorted into the document by its own
+    // exact timestamp and interleaved with an unrelated tag's messages instead of staying one
+    // grouped repeat (the reported "canvas arrows for a repeated message look wrong").
+
+    @Test
+    fun nearIdenticalOccurrencesWithShortMixedAlnumIdsStayOneMessageInsteadOfFragmenting() {
+        val usbDeviceIds = listOf("1a2b", "3c4d", "5e6f", "7890", "a1b2")
+        val usb = usbDeviceIds.mapIndexed { i, devId ->
+            entry(i * 2 + 1, "10:00:00.%03d".format(i * 10), "Usb", "usb poll tick from $devId")
+        }
+        // An unrelated tag firing at timestamps interleaved between the USB bursts — before the fix
+        // this tag's single message split the fragmented USB rows apart in `doc.messages`' sort.
+        val cpu = (0 until 4).map { i -> entry(i * 2 + 2, "10:00:00.%03d".format(i * 10 + 5), "Cpu", "cpu idle") }
+
+        val doc = generateSeq3(usb + cpu, Seq3Range.VisibleView)
+
+        val usbLifeline = doc.lifelines.single { it.name == "Usb" }
+        val usbMessages = doc.messages.filter { it.fromLifelineId == usbLifeline.id }
+        assertEquals(1, usbMessages.size, "the five near-identical USB occurrences must merge into one message, not fragment")
+        assertEquals(usbDeviceIds.size, usbMessages.single().occurrences.size)
+        assertEquals("usb poll tick from {id}", usbMessages.single().match.template)
+
+        // Exactly one Cpu message (its own occurrences already merge on their own, unaffected by
+        // this fix) and it must NOT sit between two halves of the now-unfragmented Usb message.
+        assertEquals(2, doc.messages.size)
+    }
 }

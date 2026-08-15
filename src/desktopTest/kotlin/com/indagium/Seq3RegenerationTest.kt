@@ -58,7 +58,7 @@ class Seq3RegenerationTest {
     @Test
     fun identicalMatchedMessagesAreUnchangedAndNeverCountedInTheSummary() {
         val review = reviewSeq3Regeneration(currentDocument(), freshDocument())
-        val row = review.rows.single { it.id == "c-kept" }
+        val row = review.rows.single { it.current?.id == "c-kept" }
         assertEquals(Seq3RegenChangeKind.UNCHANGED, row.kind)
         // The summary chips ("12 new · 3 changed · ...") only count actual differences — an
         // UNCHANGED row must not inflate any of them.
@@ -108,8 +108,8 @@ class Seq3RegenerationTest {
     @Test
     fun unlockingALockedRowMakesItOrdinaryReviewable() {
         val review = reviewSeq3Regeneration(currentDocument(), freshDocument())
-        val unlocked = unlockSeq3RegenRow(review, "c-edited")
-        val accepted = withSeq3RegenDecision(unlocked, "c-edited", Seq3RegenDecision.ACCEPT)
+        val unlocked = unlockSeq3RegenRow(review, "cur:c-edited")
+        val accepted = withSeq3RegenDecision(unlocked, "cur:c-edited", Seq3RegenDecision.ACCEPT)
         val applied = applySeq3Regeneration(currentDocument(), accepted)
 
         val survivor = applied.messages.single { it.id == "f-edited" }
@@ -128,9 +128,11 @@ class Seq3RegenerationTest {
     fun applyIsOneNewDocumentReflectingEveryDecision() {
         val current = currentDocument()
         var review = reviewSeq3Regeneration(current, freshDocument())
-        review = withSeq3RegenDecision(review, "c-changed", Seq3RegenDecision.ACCEPT)
-        review = withSeq3RegenDecision(review, "c-removed", Seq3RegenDecision.ACCEPT) // accept the removal
-        review = withSeq3RegenDecision(review, "f-new", Seq3RegenDecision.ACCEPT)
+        review = withSeq3RegenDecision(review, "cur:c-changed", Seq3RegenDecision.ACCEPT)
+        review = withSeq3RegenDecision(review, "cur:c-removed", Seq3RegenDecision.ACCEPT) // accept the removal
+        // "new:f-new" already defaults to ACCEPT (see reviewSeq3Regeneration's own doc) — set here
+        // anyway so this test reads as "every row decided", independent of that default.
+        review = withSeq3RegenDecision(review, "new:f-new", Seq3RegenDecision.ACCEPT)
 
         val applied = applySeq3Regeneration(current, review)
         val ids = applied.messages.map { it.id }.toSet()
@@ -143,15 +145,64 @@ class Seq3RegenerationTest {
     }
 
     @Test
-    fun pendingChangedAndRemovedRowsDefaultToKeepingTheCurrentMessage() {
+    fun pendingChangedAndRemovedRowsDefaultToKeepingTheCurrentMessageButANewRowDefaultsToAdded() {
         val current = currentDocument()
-        val review = reviewSeq3Regeneration(current, freshDocument()) // nothing decided yet
+        val review = reviewSeq3Regeneration(current, freshDocument()) // nothing decided by hand
         val applied = applySeq3Regeneration(current, review)
         val ids = applied.messages.map { it.id }.toSet()
 
         assertTrue("c-changed" in ids, "an unreviewed CHANGED row must keep the user's current message")
         assertTrue("c-removed" in ids, "an unreviewed REMOVED row must not silently delete anything")
-        assertTrue("f-new" !in ids, "an unreviewed NEW row must not silently get added")
+        // Confirmed product decision (phase-5 post-ship plan): unlike CHANGED/REMOVED, a brand-new
+        // message is additive by nature, so "Build review" -> "Apply" with nothing hand-decided must
+        // still add it — see reviewSeq3Regeneration's own doc.
+        assertTrue("f-new" in ids, "an unreviewed NEW row must default to ACCEPT (added), not be silently dropped")
+    }
+
+    @Test
+    fun aFreshlyBuiltNewRowDefaultsToAcceptDecision() {
+        val review = reviewSeq3Regeneration(currentDocument(), freshDocument())
+        val newRow = review.rows.single { it.kind == Seq3RegenChangeKind.NEW }
+        assertEquals(Seq3RegenDecision.ACCEPT, newRow.decision)
+    }
+
+    @Test
+    fun aFreshlyBuiltChangedOrRemovedRowDefaultsToPendingDecision() {
+        val review = reviewSeq3Regeneration(currentDocument(), freshDocument())
+        assertEquals(Seq3RegenDecision.PENDING, review.rows.single { it.kind == Seq3RegenChangeKind.CHANGED }.decision)
+        assertEquals(Seq3RegenDecision.PENDING, review.rows.single { it.kind == Seq3RegenChangeKind.REMOVED }.decision)
+    }
+
+    // ── Row ids are unique by construction (the crash regression) ──────────────────────────────
+    //
+    // `Seq3Generator.generateSeq3` numbers message ids POSITIONALLY ("msg-${index+1}") on every
+    // call, independently for whatever document happens to be on each side — so a current-side id
+    // and an unrelated fresh-side NEW message's id can coincide purely by position. Before the fix,
+    // `Seq3RegenRow.id` was borrowed straight from `Seq3Message.id`, so this collided and crashed
+    // the review sheet's `LazyColumn(key = Seq3RegenRow::id)` on a duplicate key ("Key msg-11 was
+    // already used").
+
+    @Test
+    fun rowIdsStayUniqueEvenWhenCurrentAndFreshMessageIdsCollide() {
+        // Both sides independently number their unmatched messages "msg-1" — current's own
+        // "msg-1" has no evidence overlap with anything fresh, so it's REMOVED; fresh's own
+        // "msg-1" has no evidence overlap with anything current, so it's NEW. Same literal id,
+        // two different rows, exactly the scenario that used to crash the LazyColumn.
+        val current = Seq3Document(
+            lifelines = listOf(Seq3Lifeline("A", "A", setOf("A"), 0)),
+            messages = listOf(message("msg-1", "A", null, 1, "current only, no evidence overlap")),
+        )
+        val fresh = Seq3Document(
+            lifelines = listOf(Seq3Lifeline("A", "A", setOf("A"), 0)),
+            messages = listOf(message("msg-1", "A", null, 99, "fresh only, no evidence overlap")),
+        )
+
+        val review = reviewSeq3Regeneration(current, fresh)
+
+        assertEquals(2, review.rows.size)
+        assertEquals(review.rows.map { it.id }.toSet().size, review.rows.size, "every row id must be unique")
+        assertEquals(Seq3RegenChangeKind.REMOVED, review.rows.single { it.id == "cur:msg-1" }.kind)
+        assertEquals(Seq3RegenChangeKind.NEW, review.rows.single { it.id == "new:msg-1" }.kind)
     }
 
     // ── matchOneMessage (single-message revert, item 15) ────────────────────────────────────────

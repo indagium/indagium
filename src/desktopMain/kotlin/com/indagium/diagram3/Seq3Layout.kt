@@ -243,7 +243,17 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     }
     val headerHeight = tm.lineHeight(Seq3FontRole.LIFELINE) + 2 * HEADER_PAD_V
 
+    // Item 5 (phase-5 round-2 post-ship plan): the canvas must draw every arrow at its true
+    // chronological position, interleaved with every other lifeline's activity exactly as it
+    // happened — grouping a message's repeated occurrences together (`expandForLayout`, per
+    // message) exists ONLY so the queue panel is convenient to edit; it must never dictate canvas
+    // row order. So `flatMap` still walks messages in doc order (cheap, and irrelevant once sorted),
+    // but the flat result is then re-sorted into TRUE timeline order before any geometry is derived
+    // from it — same fallback/tiebreak convention Seq3Generator.kt's own message-order sort already
+    // uses (`?: Long.MAX_VALUE`, then entryId), so an entry with no parseable timestamp degrades the
+    // same way it already does elsewhere in this codebase.
     val emissions = visibleMessages.flatMap(::expandForLayout)
+        .sortedWith(compareBy({ it.timestampMillis ?: Long.MAX_VALUE }, { it.entryId ?: Int.MAX_VALUE }))
     val requirements = emissions.map { measureRequirement(it, tm, opts.maxLabelLines) }
     val gapSolve = solveGaps(emissions, requirements, lifelineIndex, headerWidths)
 
@@ -316,6 +326,15 @@ private sealed class Emission {
     abstract val messageId: String
     abstract val fromLifelineId: String
 
+    /** True chronological position (item 5) — the sort key [layoutSeq3] reorders the flat emission
+     *  list by, AFTER the per-message `expandForLayout` grouping, so canvas row order reflects the
+     *  real log clock rather than which message it belongs to. */
+    abstract val timestampMillis: Long?
+
+    /** The real log line this emission jumps to on click — `null` only for [Elision] (which has no
+     *  occurrence of its own); kept on the base class purely as this sort's stable tiebreak. */
+    abstract val entryId: Int?
+
     data class Arrow(
         override val messageId: String,
         override val fromLifelineId: String,
@@ -323,7 +342,8 @@ private sealed class Emission {
         val kind: Seq3Kind,
         val label: String,
         val repeatCount: Int,
-        val entryId: Int?,
+        override val entryId: Int?,
+        override val timestampMillis: Long?,
     ) : Emission()
 
     data class Self(
@@ -331,7 +351,8 @@ private sealed class Emission {
         override val fromLifelineId: String,
         val label: String,
         val repeatCount: Int,
-        val entryId: Int?,
+        override val entryId: Int?,
+        override val timestampMillis: Long?,
     ) : Emission()
 
     data class Stub(
@@ -339,21 +360,31 @@ private sealed class Emission {
         override val fromLifelineId: String,
         val label: String,
         val repeatCount: Int,
-        val entryId: Int?,
+        override val entryId: Int?,
+        override val timestampMillis: Long?,
     ) : Emission()
 
     data class Note(
         override val messageId: String,
         override val fromLifelineId: String,
         val text: String,
-        val entryId: Int?,
+        override val entryId: Int?,
+        override val timestampMillis: Long?,
     ) : Emission()
 
+    /** The "N more" marker between a [Seq3Repeat.FIRST_LAST] message's first and last drawn rows —
+     *  represents the elided middle, so it has no occurrence (hence [entryId] is `null`) of its own.
+     *  [timestampMillis] is seeded from the FIRST occurrence's own timestamp (see
+     *  [firstLastEmissions]) so it sorts immediately after that row — a reasonable, defensible
+     *  placement, not required to be exact. */
     data class Elision(
         override val messageId: String,
         override val fromLifelineId: String,
         val count: Int,
-    ) : Emission()
+        override val timestampMillis: Long?,
+    ) : Emission() {
+        override val entryId: Int? get() = null
+    }
 }
 
 private fun occurrenceLabel(message: Seq3Message, occurrence: Seq3Occurrence): String {
@@ -368,29 +399,31 @@ private fun occurrenceLabel(message: Seq3Message, occurrence: Seq3Occurrence): S
 
 private fun expandForLayout(message: Seq3Message): List<Emission> {
     if (message.kind == Seq3Kind.NOTE) {
-        val entryId = message.occurrences.firstOrNull()?.entryId
-        return listOf(Emission.Note(message.id, message.fromLifelineId, message.labelTemplate, entryId))
+        val occ = message.occurrences.firstOrNull()
+        return listOf(Emission.Note(message.id, message.fromLifelineId, message.labelTemplate, occ?.entryId, occ?.timestampMillis))
     }
     if (message.toLifelineId == null) {
-        val entryId = message.occurrences.firstOrNull()?.entryId
-        return listOf(Emission.Stub(message.id, message.fromLifelineId, message.labelTemplate, message.occurrences.size, entryId))
+        val occ = message.occurrences.firstOrNull()
+        return listOf(
+            Emission.Stub(message.id, message.fromLifelineId, message.labelTemplate, message.occurrences.size, occ?.entryId, occ?.timestampMillis),
+        )
     }
     val occurrences = message.occurrences
     if (occurrences.isEmpty()) return emptyList()
     val isSelf = message.kind == Seq3Kind.SELF
 
-    fun arrow(label: String, count: Int, entryId: Int?): Emission = if (isSelf) {
-        Emission.Self(message.id, message.fromLifelineId, label, count, entryId)
+    fun arrow(label: String, count: Int, entryId: Int?, timestampMillis: Long?): Emission = if (isSelf) {
+        Emission.Self(message.id, message.fromLifelineId, label, count, entryId, timestampMillis)
     } else {
-        Emission.Arrow(message.id, message.fromLifelineId, message.toLifelineId, message.kind, label, count, entryId)
+        Emission.Arrow(message.id, message.fromLifelineId, message.toLifelineId, message.kind, label, count, entryId, timestampMillis)
     }
     return when (message.repeat) {
-        Seq3Repeat.EVERY -> occurrences.map { occ -> arrow(occurrenceLabel(message, occ), 1, occ.entryId) }
+        Seq3Repeat.EVERY -> occurrences.map { occ -> arrow(occurrenceLabel(message, occ), 1, occ.entryId, occ.timestampMillis) }
         Seq3Repeat.FIRST_LAST -> firstLastEmissions(message, occurrences, ::arrow)
         Seq3Repeat.COLLAPSE_ABOVE -> if (occurrences.size > message.repeatThreshold) {
-            listOf(arrow(message.labelTemplate, occurrences.size, occurrences.first().entryId))
+            listOf(arrow(message.labelTemplate, occurrences.size, occurrences.first().entryId, occurrences.first().timestampMillis))
         } else {
-            occurrences.map { occ -> arrow(occurrenceLabel(message, occ), 1, occ.entryId) }
+            occurrences.map { occ -> arrow(occurrenceLabel(message, occ), 1, occ.entryId, occ.timestampMillis) }
         }
     }
 }
@@ -398,14 +431,17 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
 private fun firstLastEmissions(
     message: Seq3Message,
     occurrences: List<Seq3Occurrence>,
-    arrow: (String, Int, Int?) -> Emission,
+    arrow: (String, Int, Int?, Long?) -> Emission,
 ): List<Emission> {
-    if (occurrences.size <= 1) return listOf(arrow(occurrenceLabel(message, occurrences.first()), 1, occurrences.firstOrNull()?.entryId))
+    if (occurrences.size <= 1) {
+        val only = occurrences.firstOrNull()
+        return listOf(arrow(occurrenceLabel(message, occurrences.first()), 1, only?.entryId, only?.timestampMillis))
+    }
     val elided = occurrences.size - 2
     return buildList {
-        add(arrow(occurrenceLabel(message, occurrences.first()), 1, occurrences.first().entryId))
-        if (elided > 0) add(Emission.Elision(message.id, message.fromLifelineId, elided))
-        add(arrow(occurrenceLabel(message, occurrences.last()), 1, occurrences.last().entryId))
+        add(arrow(occurrenceLabel(message, occurrences.first()), 1, occurrences.first().entryId, occurrences.first().timestampMillis))
+        if (elided > 0) add(Emission.Elision(message.id, message.fromLifelineId, elided, occurrences.first().timestampMillis))
+        add(arrow(occurrenceLabel(message, occurrences.last()), 1, occurrences.last().entryId, occurrences.last().timestampMillis))
     }
 }
 

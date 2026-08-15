@@ -15,7 +15,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,7 +54,6 @@ import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3GuidedPassState
-import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3Visibility
@@ -90,51 +91,71 @@ fun Seq3Workspace(state: AppState, sessionId: String) {
     // Session-scoped, ephemeral VIEW state — see [Seq3ViewState]'s own doc for why this is never
     // part of [Seq3WorkspaceSession]. `remember(sessionId)` gives every open v3 workspace its own
     // instance and resets it when a session closes and a different one is opened in its place.
+    // [Seq3ViewState.focusRequester] lives ON the view (not a separately remembered local) so every
+    // composable already holding `view` — the row press/checkbox handlers in Seq3QueuePanel.kt,
+    // [Seq3DropdownButton] via [LocalSeq3FocusRequester] below — can reclaim keyboard focus after a
+    // click without a new parameter threaded through every call site.
     val view = remember(sessionId) { Seq3ViewState() }
-    val focusRequester = remember(sessionId) { FocusRequester() }
     // The workspace root owns the §09 keyboard map. `onPreviewKeyEvent` (not onKeyEvent) so a key
     // is seen before a child consumes it, and the handler itself no-ops whenever a text field has
     // focus — see Seq3ViewState.textFieldFocused.
-    LaunchedEffect(sessionId) { runCatching { focusRequester.requestFocus() } }
-    Column(
-        Modifier.fillMaxSize().background(tc.bg)
-            .focusRequester(focusRequester).focusable()
-            .onPreviewKeyEvent { event -> handleSeq3Key(state, session, view, event) },
-    ) {
-        Seq3TitleBar(state, session, view)
-        if (view.guidedPass != null) {
-            Seq3GuidedPass(state, session, view, Modifier.fillMaxSize())
-        } else {
-            Row(Modifier.fillMaxSize()) {
-                Seq3QueuePanel(state, session, view, Modifier.width(view.panelWidthDp.dp).fillMaxHeight())
-                HDivider { delta ->
-                    view.panelWidthDp = seq3ClampDividerWidth(view.panelWidthDp, delta, PANEL_WIDTH_MIN_DP, PANEL_WIDTH_MAX_DP)
-                }
-                Seq3Canvas(state, session, view, Modifier.weight(1f).fillMaxHeight())
-                if (view.inspectorMessageId != null) {
-                    // Inspector sits on the right, so a rightward (positive) drag should SHRINK it —
-                    // mirrors AppState.updateAnnotationPanelWidth's `width - delta` for the same reason.
+    LaunchedEffect(sessionId) { runCatching { view.focusRequester.requestFocus() } }
+    // Item 4's Esc-reliability fix: `Modifier.clickable` (checkboxes, dropdown pills, action-bar
+    // buttons — used throughout this surface) is focusable by default and can steal keyboard focus
+    // from the workspace root, and a dismissed [Seq3DropdownButton] popup doesn't hand focus back
+    // either — so `handleSeq3Key`'s Esc handling would silently stop firing after the very first
+    // click on either. [LocalSeq3FocusRequester] makes [view.focusRequester] reachable from
+    // [Seq3DropdownButton] (defined below) without adding a parameter to its 9 call sites; providing
+    // it here, wrapping BOTH the root Column and the regenerate sheet (which renders as a sibling,
+    // not a child, of the Column — see the `if` below), covers every dropdown/checkbox this surface
+    // draws, sheet included.
+    CompositionLocalProvider(LocalSeq3FocusRequester provides view.focusRequester) {
+        Column(
+            Modifier.fillMaxSize().background(tc.bg)
+                .focusRequester(view.focusRequester).focusable()
+                .onPreviewKeyEvent { event -> handleSeq3Key(state, session, view, event) },
+        ) {
+            Seq3TitleBar(state, session)
+            if (view.guidedPass != null) {
+                Seq3GuidedPass(state, session, view, Modifier.fillMaxSize())
+            } else {
+                Row(Modifier.fillMaxSize()) {
+                    Seq3QueuePanel(state, session, view, Modifier.width(view.panelWidthDp.dp).fillMaxHeight())
                     HDivider { delta ->
-                        view.inspectorWidthDp = seq3ClampDividerWidth(view.inspectorWidthDp, -delta, INSPECTOR_WIDTH_MIN_DP, INSPECTOR_WIDTH_MAX_DP)
+                        view.panelWidthDp = seq3ClampDividerWidth(view.panelWidthDp, delta, PANEL_WIDTH_MIN_DP, PANEL_WIDTH_MAX_DP)
                     }
-                    Seq3Inspector(state, session, view, Modifier.width(view.inspectorWidthDp.dp).fillMaxHeight())
+                    Seq3Canvas(state, session, view, Modifier.weight(1f).fillMaxHeight())
+                    if (view.inspectorMessageId != null) {
+                        // Inspector sits on the right, so a rightward (positive) drag should SHRINK it —
+                        // mirrors AppState.updateAnnotationPanelWidth's `width - delta` for the same reason.
+                        HDivider { delta ->
+                            view.inspectorWidthDp = seq3ClampDividerWidth(view.inspectorWidthDp, -delta, INSPECTOR_WIDTH_MIN_DP, INSPECTOR_WIDTH_MAX_DP)
+                        }
+                        Seq3Inspector(state, session, view, Modifier.width(view.inspectorWidthDp.dp).fillMaxHeight())
+                    }
                 }
             }
         }
+        if (view.regenerateSheetOpen) Seq3RegenerateSheet(state, session, view)
     }
-    if (view.regenerateSheetOpen) Seq3RegenerateSheet(state, session, view)
 }
 
 @Composable
-private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
+private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession) {
     val tc = tc()
     val tabName = session.sourceTabId?.let(state::tab)?.filename?.substringAfterLast('/') ?: "log closed"
-    val scopeLabel = when (session.range) {
-        is Seq3Range.VisibleView -> "whole log range"
-        is Seq3Range.Ids -> "selected range"
-        is Seq3Range.Time -> "time range"
-    }
     val scanned = state.seq3Sessions.scannedEntryCount(session.id)
+    val timeRange = state.seq3Sessions.scannedTimeRange(session.id)
+    // Item 3 (phase-5 round 2): the scope-kind word ("rows"/"time range"/"whole log range") is
+    // dropped entirely — it said nothing the actual time span and row count don't already say, and
+    // repeated "rows" once as the scope label and again as the count's unit. The title-bar scope
+    // dropdown this label used to feed is gone too (item 2) — actual scope changes now only happen
+    // through the regenerate sheet's own scope controls (Seq3RegenScopeControls).
+    val subtitle = if (timeRange != null) {
+        "$tabName · ${timeRange.first}–${timeRange.second} · $scanned rows"
+    } else {
+        "$tabName · $scanned rows"
+    }
     Row(
         Modifier.fillMaxWidth().background(tc.p)
             .padding(horizontal = 12.dp, vertical = 8.dp),
@@ -143,9 +164,8 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
     ) {
         Column(Modifier.weight(1f)) {
             Seq3TitleField(state, session)
-            AppText("$tabName · $scopeLabel · $scanned rows", color = tc.ts, fontSize = 11.sp)
+            AppText(subtitle, color = tc.ts, fontSize = 11.sp)
         }
-        Seq3ScopeDropdown(state, session, view, scopeLabel)
         if (session.generating) AppText("Generating…", color = tc.ts, fontSize = 11.sp)
         CloseButton(onClick = { state.seq3Sessions.close(session.id) })
     }
@@ -155,7 +175,10 @@ private val TITLE_FIELD_WIDTH = 220.dp
 
 /** The title bar's editable title (item 6c) — double-click to rename, same convention as the
  *  canvas's own inline editors ([Seq3InlineLabelEditor]'s double-click-to-edit label,
- *  [Seq3LifelineChip]'s double-click-to-rename chip, both in `Seq3Canvas.kt`). Commits through the
+ *  [Seq3LifelineChip]'s double-click-to-rename chip, both in `Seq3Canvas.kt`) — PLUS a small pencil
+ *  icon button next to the title text (item 1's own "discoverable rename affordance": double-click
+ *  alone isn't discoverable without already knowing the convention). Both open the exact same
+ *  [Seq3TitleEditor]; the icon is simply a second, visible entry point into it. Commits through the
  *  already-existing [Seq3Session.updateTitle] — which already marks the session dirty and now
  *  auto-saves per the debounce in [markDirty] — never a new session method. */
 @Composable
@@ -165,11 +188,14 @@ private fun Seq3TitleField(state: AppState, session: Seq3WorkspaceSession) {
     if (editing) {
         Seq3TitleEditor(state, session) { editing = false }
     } else {
-        Box(Modifier.pointerInput(session.id) { detectTapGestures(onDoubleTap = { editing = true }) }) {
-            AppText(
-                session.document.title.ifBlank { "Sequence diagram v3" },
-                color = tc.tx, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-            )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Box(Modifier.pointerInput(session.id) { detectTapGestures(onDoubleTap = { editing = true }) }) {
+                AppText(
+                    session.document.title.ifBlank { "Sequence diagram v3" },
+                    color = tc.tx, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                )
+            }
+            SquareIconButton("✎", fontSize = 10.sp, onClick = { editing = true }, size = 16.dp)
         }
     }
 }
@@ -191,52 +217,6 @@ private fun Seq3TitleEditor(state: AppState, session: Seq3WorkspaceSession, onDo
         SquareIconButton("×", fontSize = 11.sp, onClick = onDone, size = 18.dp)
     }
 }
-
-/** Item 4a: a real scope control, reflecting and changing [Seq3WorkspaceSession.range]
- *  immediately — unlike the regenerate sheet's own scope picker ([Seq3RegenScopeControls]), which
- *  deliberately only seeds the NEXT "Build review" via [Seq3Session.updateScope], picking an option
- *  here regenerates right away via [Seq3Session.updateRangeAndRegenerate] (design spec: the
- *  title-bar control must always be immediately actionable). [scopeLabel] is the SAME computation
- *  the subtitle line below the title already gets right — reused here rather than a second
- *  session.range `when`, so the pill and the subtitle can never disagree. */
-@Composable
-private fun Seq3ScopeDropdown(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, scopeLabel: String) {
-    val tc = tc()
-    val selected = session.sourceTabId?.let(state::tab)?.selected.orEmpty()
-    val menu = seq3ScopeMenuState(session.range, selected)
-    Seq3DropdownButton("Scope: $scopeLabel", labelColor = tc.ts, fillColor = tc.p2) { close ->
-        Seq3DropdownMenuItem("Whole view", active = menu.wholeViewActive) {
-            state.seq3Sessions.updateRangeAndRegenerate(session.id, Seq3Range.VisibleView)
-            close()
-        }
-        Seq3DropdownMenuItem("Selection (${selected.size} rows)", active = menu.selectionActive, enabled = menu.selectionEnabled) {
-            if (selected.isNotEmpty()) {
-                state.seq3Sessions.updateRangeAndRegenerate(session.id, Seq3Range.Ids(selected.min(), selected.max(), selected))
-            }
-            close()
-        }
-        // A full inline from/to time-entry control would be heavier than warranted for the title
-        // bar (this phase's own judgement call, per its brief) — Time instead opens the regenerate
-        // sheet, whose scope section (item 4b) already carries that affordance; a value picked
-        // there still only regenerates on the sheet's own explicit "Build review" press.
-        Seq3DropdownMenuItem("Time…", active = menu.timeActive) {
-            view.regenerateSheetOpen = true
-            close()
-        }
-    }
-}
-
-/** Pure menu-enabled-state computation behind [Seq3ScopeDropdown], split out (same rationale as
- *  [seq3KeyAction]) so [Seq3KeyActionTest] can assert it directly without a composition. Selection
- *  is only ever choosable when the source tab actually has a non-empty row selection. */
-internal data class Seq3ScopeMenuState(val wholeViewActive: Boolean, val selectionActive: Boolean, val selectionEnabled: Boolean, val timeActive: Boolean)
-
-internal fun seq3ScopeMenuState(range: Seq3Range, selectedIds: Set<Int>): Seq3ScopeMenuState = Seq3ScopeMenuState(
-    wholeViewActive = range is Seq3Range.VisibleView,
-    selectionActive = range is Seq3Range.Ids,
-    selectionEnabled = selectedIds.isNotEmpty(),
-    timeActive = range is Seq3Range.Time,
-)
 
 /** Pure bounds-clamping behind the queue-panel/inspector divider drags (item 14) — same
  *  split-out-for-testability rationale as [seq3KeyAction]/[seq3ScopeMenuState], so
@@ -310,9 +290,24 @@ internal class Seq3ViewState {
      *  the filter box or the inline label editor would fire a destructive command — the classic
      *  bug in keyboard-driven panels. Every text field in the v3 surface sets this. */
     var textFieldFocused by mutableStateOf(false)
+
+    /** Item 4's Esc-reliability fix: the workspace root's own [androidx.compose.ui.focus.
+     *  FocusRequester], kept here (rather than a separately `remember`ed local in [Seq3Workspace])
+     *  so every composable already holding a `view: Seq3ViewState` — the queue-row press/checkbox
+     *  handlers, [Seq3DropdownButton] via [LocalSeq3FocusRequester] — can reclaim keyboard focus
+     *  after a click without a new parameter threaded through every call site. Plain `val`, not
+     *  `mutableStateOf`: a [androidx.compose.ui.focus.FocusRequester] is itself a mutable handle,
+     *  not a value Compose needs to observe for recomposition. */
+    val focusRequester = FocusRequester()
 }
 
 internal enum class Seq3ZoomMode { FIT, FIT_WIDTH, MANUAL }
+
+/** Item 4's Esc-reliability fix (see [Seq3ViewState.focusRequester]'s own doc): makes the
+ *  workspace's focus requester reachable from [Seq3DropdownButton] without adding a parameter to
+ *  its 9 call sites across this file, `Seq3QueuePanel.kt`, `Seq3Canvas.kt` and
+ *  `Seq3RegenerateSheet.kt`. Null outside a v3 workspace (there is no requester to reclaim). */
+internal val LocalSeq3FocusRequester = compositionLocalOf<FocusRequester?> { null }
 
 // ── Shared small dropdown-button (Set from ▾ / Set to ▾ / Group ▾ / sort / target lifeline) ───
 //
@@ -326,16 +321,35 @@ internal fun Seq3DropdownButton(
     modifier: Modifier = Modifier,
     labelColor: Color = tc().tx,
     fillColor: Color = tc().p2,
+    // Item 1 (phase-5 round 2): almost every call site should read as an ordinary at-rest control —
+    // transparent until opened, tinted on hover via HoverBox's own hover layer, `fillColor` only
+    // while the menu is `open` (mirrors PillBtn's `active` tint). The one exception is a genuine
+    // semantic warning highlight riding on this same component — Seq3QueuePanel.kt's "set target"
+    // chip — which must stay filled regardless of open/hover state; that call site passes
+    // `alwaysFilled = true` instead of relying on `open`.
+    alwaysFilled: Boolean = false,
     menuWidth: androidx.compose.ui.unit.Dp = 160.dp,
     menu: @Composable (close: () -> Unit) -> Unit,
 ) {
     val tc = tc()
     val density = LocalDensity.current
+    val focusRequester = LocalSeq3FocusRequester.current
     var open by remember { mutableStateOf(false) }
     var suppressUntilMs by remember { mutableStateOf(0L) }
+
+    // Item 4's Esc-reliability fix: a dismissed Popup doesn't hand keyboard focus back to the
+    // workspace root on its own — without this, Esc (and every other §09 key) would silently stop
+    // firing after the first dropdown open/close. Shared by both ways this dropdown closes (picking
+    // a menu item below, or dismissing via an outside click/Popup's own onDismissRequest).
+    fun closeAndReclaimFocus() {
+        open = false
+        suppressUntilMs = System.currentTimeMillis() + 200
+        focusRequester?.let { runCatching { it.requestFocus() } }
+    }
     Box(modifier) {
         HoverBox(
-            modifier = Modifier.clip(CORNER_SM).background(fillColor, CORNER_SM).border(1.dp, tc.br, CORNER_SM)
+            modifier = Modifier.clip(CORNER_SM).background(if (open || alwaysFilled) fillColor else Color.Transparent, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM)
                 .padding(horizontal = 8.dp, vertical = 4.dp),
             onClick = { if (System.currentTimeMillis() >= suppressUntilMs) open = !open },
         ) {
@@ -348,7 +362,7 @@ internal fun Seq3DropdownButton(
             Popup(
                 alignment = Alignment.TopStart,
                 offset = IntOffset(0, with(density) { 26.dp.roundToPx() }),
-                onDismissRequest = { open = false; suppressUntilMs = System.currentTimeMillis() + 200 },
+                onDismissRequest = ::closeAndReclaimFocus,
                 properties = PopupProperties(focusable = false),
             ) {
                 Column(
@@ -358,7 +372,7 @@ internal fun Seq3DropdownButton(
                         .border(1.dp, tc.br, RoundedCornerShape(8.dp))
                         .padding(4.dp),
                 ) {
-                    menu { open = false; suppressUntilMs = System.currentTimeMillis() + 200 }
+                    menu(::closeAndReclaimFocus)
                 }
             }
         }
