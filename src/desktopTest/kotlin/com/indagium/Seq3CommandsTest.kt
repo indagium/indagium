@@ -94,6 +94,44 @@ class Seq3CommandsTest {
     }
 
     @Test
+    fun replaceMessageSwapsExactlyOneMessageAndIsUndoable() {
+        val doc = baseDocument()
+        val replacement = message("m2", "A", "B", 99) // same id, different content
+        val result = applySeq3Command(doc, Seq3Command.ReplaceMessage("m2", replacement))
+        assertTrue(result.applied)
+        assertEquals(listOf(message("m1", "A", "B", 1), replacement), result.document.messages)
+        assertEquals(doc, result.undo?.let(::undoSeq3Command))
+    }
+
+    @Test
+    fun replaceMessageIsUnappliedForAnUnknownId() {
+        val doc = baseDocument()
+        val result = applySeq3Command(doc, Seq3Command.ReplaceMessage("no-such-id", message("x", "A", "B", 1)))
+        assertFalseApplied(result)
+        assertEquals(doc, result.document)
+        assertNull(result.undo)
+    }
+
+    @Test
+    fun replaceDocumentSwapsTheWholeDocumentAndIsUndoable() {
+        val doc = baseDocument()
+        val replacement = doc.copy(messages = doc.messages + message("m3", "A", "B", 3))
+        val result = applySeq3Command(doc, Seq3Command.ReplaceDocument(replacement))
+        assertTrue(result.applied)
+        assertEquals(replacement, result.document)
+        assertEquals(doc, result.undo?.let(::undoSeq3Command))
+    }
+
+    @Test
+    fun replaceDocumentIsUnappliedWhenTheDocumentIsUnchanged() {
+        val doc = baseDocument()
+        val result = applySeq3Command(doc, Seq3Command.ReplaceDocument(doc))
+        assertFalseApplied(result)
+        assertEquals(doc, result.document)
+        assertNull(result.undo)
+    }
+
+    @Test
     fun regenerationApplyIsExactlyOneUndoStep() {
         val current = baseDocument()
         // m2 gone, m3 is genuinely new

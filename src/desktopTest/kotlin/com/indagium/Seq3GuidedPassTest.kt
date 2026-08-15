@@ -123,6 +123,26 @@ class Seq3GuidedPassTest {
     }
 
     @Test
+    fun pickingAMessagesOwnFromLifelineAsItsTargetAutoFlipsKindToSelf() {
+        // Bug fix: applySeq3GuidedTarget let a user pick `to == from` without ever becoming a
+        // self-call — the arrow would render as a straight line to itself. Same rule
+        // applySeq3GuidedSelfCall already applies explicitly, now enforced here too.
+        val doc = document(message("m1", "A", null, listOf(occurrence(1))))
+        val message = applySeq3GuidedTarget(doc, "m1", "A").messages.single()
+        assertEquals("A", message.toLifelineId)
+        assertEquals(Seq3Kind.SELF, message.kind)
+        assertEquals(Seq3Authoring.EDITED, message.authoring)
+    }
+
+    @Test
+    fun pickingADifferentLifelineAsTargetLeavesKindAlone() {
+        val doc = document(message("m1", "A", null, listOf(occurrence(1))))
+        val message = applySeq3GuidedTarget(doc, "m1", "B").messages.single()
+        assertEquals("B", message.toLifelineId)
+        assertEquals(Seq3Kind.CALL, message.kind)
+    }
+
+    @Test
     fun aSkippedRowIsNotRevisitedInThisPassButStaysUnresolved() {
         val doc = document(
             message("m1", "A", null, listOf(occurrence(1))),

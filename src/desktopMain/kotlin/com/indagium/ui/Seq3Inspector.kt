@@ -21,6 +21,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -32,6 +34,7 @@ import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Repeat
+import java.awt.Cursor as AwtCursor
 
 // ── The inspector — design spec §03 ─────────────────────────────────────────────────────────────
 //
@@ -216,10 +219,18 @@ private fun Seq3EvidenceList(state: AppState, session: Seq3WorkspaceSession, mes
             Column(Modifier.fillMaxWidth()) {
                 shown.forEach { occurrence -> Seq3EvidenceRow(state, session, occurrence) }
                 if (occurrences.size > EVIDENCE_COLLAPSED_PREVIEW) {
-                    AppText(
-                        "+${occurrences.size - EVIDENCE_COLLAPSED_PREVIEW} more — expand to see all",
-                        color = tc.td, fontSize = 9.sp, modifier = Modifier.clickable { expanded = true }.padding(top = 2.dp),
-                    )
+                    HoverBox(
+                        modifier = Modifier.pointerHoverIcon(
+                            PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                            overrideDescendants = true,
+                        ),
+                        onClick = { expanded = true },
+                    ) {
+                        AppText(
+                            "+${occurrences.size - EVIDENCE_COLLAPSED_PREVIEW} more — expand to see all",
+                            color = tc.td, fontSize = 9.sp, modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
                 }
             }
         }

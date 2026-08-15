@@ -1,8 +1,13 @@
 package com.indagium
 
+import com.indagium.diagram3.Seq3AddResult
+import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3GenerateOptions
+import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Range
+import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3State
+import com.indagium.diagram3.addSeq3MessageFromSelection
 import com.indagium.diagram3.generateSeq3
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
@@ -119,13 +124,85 @@ class Seq3GeneratorTest {
     }
 
     @Test
+    fun freshlyGeneratedMessagesDefaultToEveryOccurrenceNotCollapsed() {
+        // "As they are, not grouped" — a freshly generated diagram must draw every occurrence as
+        // its own arrow by default; collapsing behind a ×n badge is an opt-in Inspector choice.
+        val entries = (1..5).map { entry(it, "10:00:00.%03d".format(it), "A", "repeated line") }
+        val doc = generateSeq3(entries, Seq3Range.VisibleView)
+        assertTrue(doc.messages.isNotEmpty())
+        assertTrue(doc.messages.all { it.repeat == Seq3Repeat.EVERY })
+    }
+
+    @Test
     fun cancellationCheckAbortsGeneration() {
         val entries = (1..50).map { entry(it, "10:00:00.%03d".format(it % 1000), "A", "line $it") }
 
         assertFailsWith<IllegalStateException> {
-            generateSeq3(entries, Seq3Range.VisibleView, Seq3GenerateOptions()) {
-                throw IllegalStateException("cancelled")
-            }
+            generateSeq3(
+                entries,
+                Seq3Range.VisibleView,
+                Seq3GenerateOptions(),
+                cancellationCheck = { throw IllegalStateException("cancelled") },
+            )
         }
     }
+
+    // ── addSeq3MessageFromSelection (queue panel's "＋ Add") ────────────────────────────────────
+
+    @Test
+    fun emptySelectionIsRejected() {
+        val doc = generateSeq3(listOf(entry(1, "10:00:00.000", "A", "line")), Seq3Range.VisibleView)
+        val result = addSeq3MessageFromSelection(doc, emptyList())
+        assertTrue(result is Seq3AddResult.Rejected)
+        assertEquals("Select at least one log row", result.reason)
+    }
+
+    @Test
+    fun mixedTagSelectionIsRejectedWithTheExactReason() {
+        val doc = emptyDocument()
+        val selection = listOf(entry(1, "10:00:00.000", "A", "line one"), entry(2, "10:00:00.100", "B", "line two"))
+        val result = addSeq3MessageFromSelection(doc, selection)
+        assertTrue(result is Seq3AddResult.Rejected)
+        assertEquals("Select rows from a single tag", result.reason)
+    }
+
+    @Test
+    fun singleTagSelectionAddsOneNeedsTargetMessageAndCreatesALifeline() {
+        val doc = emptyDocument()
+        val selection = listOf(entry(10, "10:00:00.000", "NewTag", "hello world"))
+        val result = addSeq3MessageFromSelection(doc, selection)
+        val added = result as? Seq3AddResult.Added ?: error("expected Added, got $result")
+
+        val lifeline = added.document.lifelines.single { it.name == "NewTag" }
+        val message = added.document.messages.single { it.id == added.newMessageId }
+        assertEquals(lifeline.id, message.fromLifelineId)
+        assertEquals(null, message.toLifelineId, "a row selection has no adjacent-entry evidence to infer a target from")
+        assertEquals(Seq3State.NEEDS_TARGET, message.state)
+        assertEquals(setOf(10), message.occurrences.map { it.entryId }.toSet())
+    }
+
+    @Test
+    fun selectingRowsForATagThatAlreadyHasALifelineReusesItInsteadOfDuplicating() {
+        val existing = emptyDocument().copy(
+            lifelines = listOf(Seq3Lifeline("A", "A", setOf("A"), 0)),
+        )
+        val selection = listOf(entry(1, "10:00:00.000", "A", "line one"))
+        val result = addSeq3MessageFromSelection(existing, selection) as? Seq3AddResult.Added ?: error("expected Added")
+
+        assertEquals(1, result.document.lifelines.size, "must reuse the existing lifeline, never duplicate it")
+        assertEquals("A", result.document.messages.single().fromLifelineId)
+    }
+
+    @Test
+    fun newMessageIdNeverCollidesWithAnExistingOne() {
+        val entries = (1..3).map { entry(it, "10:00:00.%03d".format(it), "A", "line $it") }
+        val generated = generateSeq3(entries, Seq3Range.VisibleView) // produces "msg-1"
+        val selection = listOf(entry(10, "10:00:01.000", "B", "extra"))
+        val result = addSeq3MessageFromSelection(generated, selection) as? Seq3AddResult.Added ?: error("expected Added")
+
+        assertTrue(result.newMessageId !in generated.messages.map { it.id })
+        assertTrue(result.document.messages.any { it.id == result.newMessageId })
+    }
+
+    private fun emptyDocument() = Seq3Document()
 }

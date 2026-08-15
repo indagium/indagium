@@ -1,14 +1,21 @@
 package com.indagium
 
+import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
+import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Range
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 import com.indagium.ui.ActiveSurface
 import com.indagium.ui.AppState
+import com.indagium.ui.DiagramLibrarySnapshot
+import com.indagium.ui.DiagramLibraryStore
+import com.indagium.ui.DiagramSourceIdentity
 import com.indagium.ui.Seq3Session
+import com.indagium.ui.defaultSeq3Title
 import com.indagium.ui.mkTab
+import com.indagium.utils.computeLogFingerprint
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -47,7 +54,11 @@ class Seq3SessionTest {
 
     private fun stateFor(tab: LogTab): AppState {
         val root = createTempDirectory("indagium-seq3-sessions").toFile()
-        return AppState(File(root, "state.cache"), notesDir = File(root, "notes")).also { state ->
+        return AppState(
+            File(root, "state.cache"),
+            notesDir = File(root, "notes"),
+            diagramLibraryStore = DiagramLibraryStore(File(root, "library.cache")),
+        ).also { state ->
             state.tabs = listOf(tab)
             state.activateTab(tab.id)
         }
@@ -270,14 +281,15 @@ class Seq3SessionTest {
         assertFalse(state.seq3Sessions.canUndo(first))
     }
 
-    // ── Dirty flag / draft-saved timestamp ──────────────────────────────────────────────────────
+    // ── Dirty flag / draft-saved timestamp / auto-save (item 6a) ───────────────────────────────
 
     @Test
-    fun applyCommandMarksDirtyImmediatelyThenSettlesToDraftSavedAfterTheDebounce() {
+    fun applyCommandMarksDirtyImmediatelyThenAutoSavesANoteAfterTheDebounce() {
         val state = state()
         val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
         awaitGenerated(state, id)
         assertNull(state.seq3Sessions.sessions.single().draftSavedAtMillis)
+        assertNull(state.seq3Sessions.sessions.single().confirmedBlockId, "nothing written yet — no edit has happened")
         val lifelineIds = state.seq3Sessions.sessions.single().document.lifelines.map { it.id }
 
         state.seq3Sessions.applyCommand(id, Seq3Command.ReorderLifelines(lifelineIds.reversed()))
@@ -286,7 +298,30 @@ class Seq3SessionTest {
 
         await { !state.seq3Sessions.sessions.single().dirty }
 
-        assertNotNull(state.seq3Sessions.sessions.single().draftSavedAtMillis)
+        val settled = state.seq3Sessions.sessions.single()
+        assertNotNull(settled.draftSavedAtMillis)
+        // The debounce now calls confirm() — a real write, not just a cosmetic timestamp flip — so
+        // a note block must actually exist in the source tab's annotations by the time it settles.
+        assertNotNull(settled.confirmedBlockId, "the debounce settling must have called confirm()")
+        assertEquals(1, state.tab("log")!!.annotations.blocks.count { it.id == settled.confirmedBlockId })
+    }
+
+    @Test
+    fun generatingADiagramWithNoEditNeverAutoSaves() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+
+        // Well past the 400ms auto-save debounce — nobody has touched the document, so nothing
+        // must have been written. markDirty is called only from applyCommand/undo/updateTitle,
+        // never from generation completing on its own.
+        Thread.sleep(600)
+
+        val session = state.seq3Sessions.sessions.single()
+        assertFalse(session.dirty)
+        assertNull(session.draftSavedAtMillis)
+        assertNull(session.confirmedBlockId)
+        assertTrue(state.tab("log")!!.annotations.blocks.isEmpty(), "opening/generating a diagram must never write a note by itself")
     }
 
     @Test
@@ -326,6 +361,77 @@ class Seq3SessionTest {
         assertEquals(runsBefore, state.seq3Sessions.generateRunCount.get(), "a metadata-only edit must never call generateSeq3")
     }
 
+    @Test
+    fun updateTitleRejectsABlankStringAndKeepsThePreviousTitle() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        state.seq3Sessions.updateTitle(id, "Kept title")
+        await { !state.seq3Sessions.sessions.single().dirty }
+
+        state.seq3Sessions.updateTitle(id, "   ")
+
+        assertEquals("Kept title", state.seq3Sessions.sessions.single().document.title)
+        assertFalse(state.seq3Sessions.sessions.single().dirty, "a rejected (no-op) title update must not start the auto-save debounce")
+    }
+
+    @Test
+    fun updateTitleTrimsSurroundingWhitespace() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+
+        state.seq3Sessions.updateTitle(id, "  Padded title  ")
+
+        assertEquals("Padded title", state.seq3Sessions.sessions.single().document.title)
+    }
+
+    // ── Unique default title (item 6b) ──────────────────────────────────────────────────────────
+
+    @Test
+    fun defaultSeq3TitleIsUntitledDiagramWhenNothingCollides() {
+        assertEquals("Untitled diagram", defaultSeq3Title(emptySet()))
+    }
+
+    @Test
+    fun defaultSeq3TitlePicksTheLowestFreeNumberWhenTheBaseIsTaken() {
+        assertEquals("Untitled diagram 2", defaultSeq3Title(setOf("Untitled diagram")))
+        assertEquals("Untitled diagram 3", defaultSeq3Title(setOf("Untitled diagram", "Untitled diagram 2")))
+        // "3" is free even though "4" is taken — the lowest free N, not "one past the highest used".
+        assertEquals("Untitled diagram 3", defaultSeq3Title(setOf("Untitled diagram", "Untitled diagram 2", "Untitled diagram 4")))
+    }
+
+    @Test
+    fun defaultSeq3TitleIgnoresUnrelatedTitles() {
+        assertEquals("Untitled diagram", defaultSeq3Title(setOf("Login flow", "Untitled diagram 2")))
+    }
+
+    @Test
+    fun beginSeedsAUniqueDefaultTitleAgainstOnlyThisLogsLibraryEntries() {
+        val root = createTempDirectory("indagium-seq3-default-title").toFile()
+        val tab = mkTab("log", "sample.log", twoTagEntries())
+        val libraryStore = DiagramLibraryStore(File(root, "library.cache"))
+        val state = AppState(
+            File(root, "state.cache"),
+            notesDir = File(root, "notes"),
+            diagramLibraryStore = libraryStore,
+        ).also {
+            it.tabs = listOf(tab)
+            it.activateTab(tab.id)
+        }
+        val sameLogIdentity = DiagramSourceIdentity(tab.sourcePath ?: tab.filename, computeLogFingerprint(tab.logData))
+        val otherLogIdentity = DiagramSourceIdentity("other.log", "different-fingerprint")
+        val snapshot = DiagramLibrarySnapshot.create(Seq3Document())
+        libraryStore.create("Untitled diagram", "", sameLogIdentity, snapshot)
+        // A same-named diagram under a DIFFERENT log's identity must not affect this log's numbering.
+        libraryStore.create("Untitled diagram", "", otherLogIdentity, snapshot)
+        val session = Seq3Session(state, libraryStore = libraryStore)
+
+        val id = session.begin("log", setOf(1, 2))!!
+
+        assertEquals("Untitled diagram 2", session.sessions.single { it.id == id }.document.title)
+    }
+
     // ── Confirm: writes the document into a note ────────────────────────────────────────────────
 
     @Test
@@ -362,6 +468,66 @@ class Seq3SessionTest {
         state.closeTab("log")
 
         assertNull(state.seq3Sessions.confirm(id))
+    }
+
+    // ── revertMessage: "revert to generated" on one edited row (item 15) ───────────────────────────
+
+    @Test
+    fun revertMessageReplacesTheEditedMessageWithItsFreshCounterpartAsOneUndoStep() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val original = state.seq3Sessions.sessions.single().document.messages.first()
+        state.seq3Sessions.applyCommand(id, Seq3Command.Bulk(setOf(original.id), Seq3BulkAction.SetLabel("hand-edited label")))
+        await { !state.seq3Sessions.sessions.single().dirty }
+        assertEquals(
+            "hand-edited label",
+            state.seq3Sessions.sessions.single().document.messages.single { it.id == original.id }.labelTemplate,
+        )
+
+        state.seq3Sessions.revertMessage(id, original.id)
+
+        await { state.seq3Sessions.sessions.single().document.messages.single { it.id == original.id }.labelTemplate != "hand-edited label" }
+        val reverted = state.seq3Sessions.sessions.single().document.messages.single { it.id == original.id }
+        assertEquals(original.labelTemplate, reverted.labelTemplate)
+        assertTrue(state.seq3Sessions.canUndo(id))
+
+        assertTrue(state.seq3Sessions.undo(id))
+        assertEquals(
+            "hand-edited label",
+            state.seq3Sessions.sessions.single().document.messages.single { it.id == original.id }.labelTemplate,
+            "undo must restore exactly the pre-revert (hand-edited) message",
+        )
+    }
+
+    @Test
+    fun revertMessageIsASafeNoOpWhenTheSourceTabIsClosed() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val before = state.seq3Sessions.sessions.single().document
+        val messageId = before.messages.first().id
+        state.closeTab("log")
+
+        state.seq3Sessions.revertMessage(id, messageId)
+        Thread.sleep(300)
+
+        assertEquals(before, state.seq3Sessions.sessions.single().document)
+        assertFalse(state.seq3Sessions.canUndo(id))
+    }
+
+    @Test
+    fun revertMessageOnAnUnknownMessageIdIsASafeNoOp() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val before = state.seq3Sessions.sessions.single().document
+
+        state.seq3Sessions.revertMessage(id, "not-a-real-message-id")
+        Thread.sleep(300)
+
+        assertEquals(before, state.seq3Sessions.sessions.single().document)
+        assertFalse(state.seq3Sessions.canUndo(id))
     }
 
     // ── Status-bar support ───────────────────────────────────────────────────────────────────────

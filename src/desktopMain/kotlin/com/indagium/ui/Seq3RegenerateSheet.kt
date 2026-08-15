@@ -18,12 +18,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -38,6 +41,7 @@ import com.indagium.diagram3.acceptAllSeq3Regen
 import com.indagium.diagram3.rejectAllSeq3Regen
 import com.indagium.diagram3.unlockSeq3RegenRow
 import com.indagium.diagram3.withSeq3RegenDecision
+import java.awt.Cursor as AwtCursor
 
 // ── Regenerate is a reviewed proposal (design spec §08) ────────────────────────────────────────
 //
@@ -131,6 +135,11 @@ private fun Seq3RegenScopeControls(state: AppState, session: Seq3WorkspaceSessio
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        // Seeded from the CURRENT scope, not blanked, so reopening the sheet on a session whose
+        // scope is already a Time range (e.g. picked from the title-bar dropdown, item 4a) shows
+        // what's actually going to be scanned rather than two empty boxes.
+        var fromText by remember(session.id) { mutableStateOf((session.range as? Seq3Range.Time)?.fromTs.orEmpty()) }
+        var toText by remember(session.id) { mutableStateOf((session.range as? Seq3Range.Time)?.toTs.orEmpty()) }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             AppText("Scope", color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             val scopeLabel = when (session.range) {
@@ -151,6 +160,27 @@ private fun Seq3RegenScopeControls(state: AppState, session: Seq3WorkspaceSessio
                     }
                     close()
                 }
+                // "Time range" has display support (scopeLabel above) but, until now, no menu item
+                // that actually chose it (item 4). Picking it seeds the scope from whatever the
+                // from/to fields below already hold (empty on first pick — the fields are where a
+                // user actually fills them in).
+                Seq3DropdownMenuItem("Time range", active = session.range is Seq3Range.Time) {
+                    state.seq3Sessions.updateScope(session.id, Seq3Range.Time(fromText, toText))
+                    close()
+                }
+            }
+        }
+        if (session.range is Seq3Range.Time) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Seq3RegenTimeField(fromText, TIME_FIELD_PLACEHOLDER) {
+                    fromText = it
+                    state.seq3Sessions.updateScope(session.id, Seq3Range.Time(it, toText))
+                }
+                AppText("to", color = tc.td, fontSize = 11.sp)
+                Seq3RegenTimeField(toText, TIME_FIELD_PLACEHOLDER) {
+                    toText = it
+                    state.seq3Sessions.updateScope(session.id, Seq3Range.Time(fromText, it))
+                }
             }
         }
         Seq3RegenToggle(
@@ -163,8 +193,26 @@ private fun Seq3RegenScopeControls(state: AppState, session: Seq3WorkspaceSessio
             "Infer a target from a shared id/uuid between adjacent entries.",
             session.generateOptions.correlationTokenEnabled,
         ) { state.seq3Sessions.updateGenerateOptions(session.id) { it.copy(correlationTokenEnabled = !it.correlationTokenEnabled) } }
+        Seq3RegenToggle(
+            "Source trace",
+            "Infer a target from the source-code call trace, when a source index already exists for this log.",
+            session.generateOptions.sourceTraceEnabled,
+        ) { state.seq3Sessions.updateGenerateOptions(session.id) { it.copy(sourceTraceEnabled = !it.sourceTraceEnabled) } }
     }
     Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+}
+
+private const val TIME_FIELD_PLACEHOLDER = "HH:MM:SS.mmm"
+private val TIME_FIELD_WIDTH = 110.dp
+
+/** One from/to box for [Seq3RegenScopeControls]'s Time-range scope — `Seq3Range.Time` expects
+ *  `"HH:MM:SS[.mmm]"` (see that class's own doc), same format `utils.parseMillisOfDay` parses
+ *  everywhere else in the app. Every keystroke calls [onValue] straight through to
+ *  [Seq3Session.updateScope] — cheap (no regenerate) — since the scope section is only ever an
+ *  input to the sheet's own later "Build review" press. */
+@Composable
+private fun Seq3RegenTimeField(value: String, placeholder: String, onValue: (String) -> Unit) {
+    InlineField(value = value, onValue = onValue, placeholder = placeholder, fontSize = 11.sp, modifier = Modifier.width(TIME_FIELD_WIDTH))
 }
 
 @Composable
@@ -252,12 +300,13 @@ private fun Seq3RegenRowActions(state: AppState, session: Seq3WorkspaceSession, 
     // (spec §08: "Edited means locked"). Its only verb is unlock, which converts it into an
     // ordinary decidable row.
     if (row.kind == Seq3RegenChangeKind.EDITED_KEPT && !row.unlocked) {
-        AppText(
-            "unlock", color = tc.ts, fontSize = 11.sp,
+        HoverBox(
             modifier = Modifier.clip(CORNER_SM)
-                .clickable { state.seq3Sessions.updateRegenReview(session.id) { unlockSeq3RegenRow(it, row.id) } }
-                .padding(horizontal = 6.dp, vertical = 3.dp),
-        )
+                .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
+            onClick = { state.seq3Sessions.updateRegenReview(session.id) { unlockSeq3RegenRow(it, row.id) } },
+        ) {
+            AppText("unlock", color = tc.ts, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
+        }
         return
     }
     val (rejectLabel, acceptLabel) = when (row.kind) {
@@ -308,19 +357,21 @@ private fun Seq3RegenFooter(state: AppState, session: Seq3WorkspaceSession, view
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        AppText(
-            "Accept all", color = tc.ac, fontSize = 12.sp,
+        HoverBox(
             modifier = Modifier.clip(CORNER_SM)
-                .clickable { state.seq3Sessions.updateRegenReview(session.id, ::acceptAllSeq3Regen) }
-                .padding(horizontal = 6.dp, vertical = 3.dp),
-        )
+                .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
+            onClick = { state.seq3Sessions.updateRegenReview(session.id, ::acceptAllSeq3Regen) },
+        ) {
+            AppText("Accept all", color = tc.ac, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
+        }
         AppText("·", color = tc.td, fontSize = 12.sp)
-        AppText(
-            "reject all", color = tc.ts, fontSize = 12.sp,
+        HoverBox(
             modifier = Modifier.clip(CORNER_SM)
-                .clickable { state.seq3Sessions.updateRegenReview(session.id, ::rejectAllSeq3Regen) }
-                .padding(horizontal = 6.dp, vertical = 3.dp),
-        )
+                .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
+            onClick = { state.seq3Sessions.updateRegenReview(session.id, ::rejectAllSeq3Regen) },
+        ) {
+            AppText("reject all", color = tc.ts, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp))
+        }
         Spacer(Modifier.weight(1f))
         Seq3SheetButton("Cancel", primary = false) { closeSeq3RegenerateSheet(state, session, view) }
         Seq3SheetButton("Apply $pendingCount changes", primary = true, enabled = pendingCount > 0) {

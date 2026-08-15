@@ -173,6 +173,26 @@ class Seq3QueueTest {
     }
 
     @Test
+    fun setToTheMessagesOwnFromLifelineAutoFlipsKindToSelf() {
+        // Bug fix: the Inspector's bulk SetTo let a user pick `to == from` without becoming a
+        // self-call, same class of bug as the guided pass's applySeq3GuidedTarget.
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, setOf("m2"), Seq3BulkAction.SetTo("A"))
+        assertTrue(result.applied)
+        val m2 = result.document.messages.single { it.id == "m2" }
+        assertEquals("A", m2.toLifelineId)
+        assertEquals(Seq3Kind.SELF, m2.kind)
+    }
+
+    @Test
+    fun setToADifferentLifelineLeavesKindAlone() {
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, setOf("m2"), Seq3BulkAction.SetTo("C"))
+        assertTrue(result.applied)
+        assertEquals(Seq3Kind.CALL, result.document.messages.single { it.id == "m2" }.kind)
+    }
+
+    @Test
     fun hideKeepsEvidenceAndDoesNotFlipAuthoring() {
         val doc = baseDocument()
         val result = applySeq3BulkAction(doc, setOf("m1"), Seq3BulkAction.Hide)
@@ -215,6 +235,46 @@ class Seq3QueueTest {
         val result = applySeq3BulkAction(doc, setOf("m1", "m3"), Seq3BulkAction.Note(note))
         assertTrue(result.applied)
         assertEquals(listOf(note), result.document.notes)
+    }
+
+    // ── Fragment/note rename (edit-in-place counterpart to Group/Note's add-only behaviour) ────
+
+    @Test
+    fun setFragmentLabelRenamesAnExistingFragmentByIdIndependentOfSelection() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.ALT, "original", listOf("m1", "m3"))
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+        // The selection below is unrelated to the fragment's own messageIds — the rename must
+        // still find "frag1" purely by id, per the action's own contract.
+        val result = applySeq3BulkAction(doc, setOf("m4"), Seq3BulkAction.SetFragmentLabel("frag1", "renamed"))
+        assertTrue(result.applied)
+        val renamed = result.document.fragments.single { it.id == "frag1" }
+        assertEquals("renamed", renamed.label)
+        assertEquals(listOf("m1", "m3"), renamed.messageIds, "rename must not touch the fragment's own span")
+    }
+
+    @Test
+    fun setFragmentLabelIsASafeNoOpForAnUnknownId() {
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, setOf("m1"), Seq3BulkAction.SetFragmentLabel("no-such-fragment", "renamed"))
+        assertFalse(result.applied)
+        assertEquals(doc, result.document)
+    }
+
+    @Test
+    fun setNoteTextRenamesAnExistingNoteByIdIndependentOfSelection() {
+        val note = Seq3Note("n1", "original text", listOf("m1"))
+        val doc = baseDocument().copy(notes = listOf(note))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetNoteText("n1", "updated text"))
+        assertTrue(result.applied)
+        assertEquals("updated text", result.document.notes.single { it.id == "n1" }.text)
+    }
+
+    @Test
+    fun setNoteTextIsASafeNoOpForAnUnknownId() {
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetNoteText("no-such-note", "updated"))
+        assertFalse(result.applied)
+        assertEquals(doc, result.document)
     }
 
     @Test

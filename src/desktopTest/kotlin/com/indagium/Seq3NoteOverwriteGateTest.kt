@@ -5,6 +5,7 @@ import com.indagium.model.Annotations
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.ui.AppState
+import com.indagium.ui.DiagramLibraryStore
 import com.indagium.ui.annotationsToken
 import com.indagium.ui.mkTab
 import java.io.File
@@ -39,7 +40,11 @@ class Seq3NoteOverwriteGateTest {
         File(notesDir, "sample_analysis.ann").writeText(
             Annotations(blocks = listOf(AnnBlock.Note(id = "n1", text = "earlier note"))).annotationsToken(sourcePath),
         )
-        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        val state = AppState(
+            File(dir, "state.cache"),
+            notesDir = notesDir,
+            diagramLibraryStore = DiagramLibraryStore(File(dir, "library.cache")),
+        )
         state.tabs = listOf(mkTab("log", "sample.log", entries).copy(sourcePath = sourcePath))
         return Triple(state, existingMd, sourcePath)
     }

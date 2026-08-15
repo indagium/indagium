@@ -99,13 +99,17 @@ fun seq3GuidedContext(message: Seq3Message, entries: List<LogEntry>): Seq3Guided
  * [Seq3State.NEEDS_TARGET] — mirrors `diagram.setManualMessageTargetForOccurrences`'s own partial-
  * resolution split, adapted to v3's single durable message (no separate interaction list to edit).
  * Either way, accepting a suggestion marks the touched message(s) [Seq3Authoring.EDITED] so a later
- * regeneration will not undo the choice (spec §05's own closing line).
+ * regeneration will not undo the choice (spec §05's own closing line). Choosing the message's OWN
+ * `from` lifeline as its target also snaps [Seq3Message.kind] to [Seq3Kind.SELF], the same auto-flip
+ * [applySeq3GuidedSelfCall] performs explicitly — a manually-picked same/same target must never read
+ * as an ordinary arrow pointing at itself.
  */
 fun applySeq3GuidedTarget(document: Seq3Document, messageId: String, lifelineId: String, applyToAllOccurrences: Boolean = true): Seq3Document {
     val message = document.messages.firstOrNull { it.id == messageId } ?: return document
+    val kind = if (lifelineId == message.fromLifelineId) Seq3Kind.SELF else message.kind
     if (applyToAllOccurrences || message.occurrences.size <= 1) {
         return document.copy(messages = document.messages.map {
-            if (it.id == messageId) it.copy(toLifelineId = lifelineId, authoring = Seq3Authoring.EDITED) else it
+            if (it.id == messageId) it.copy(toLifelineId = lifelineId, kind = kind, authoring = Seq3Authoring.EDITED) else it
         })
     }
     val first = message.occurrences.first()
@@ -113,6 +117,7 @@ fun applySeq3GuidedTarget(document: Seq3Document, messageId: String, lifelineId:
         id = "$messageId:resolved:${first.entryId}",
         occurrences = listOf(first),
         toLifelineId = lifelineId,
+        kind = kind,
         authoring = Seq3Authoring.EDITED,
     )
     val remaining = message.copy(occurrences = message.occurrences.drop(1))
