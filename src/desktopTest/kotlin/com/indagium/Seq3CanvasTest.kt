@@ -29,6 +29,7 @@ import com.indagium.ui.seq3PointInBox
 import com.indagium.ui.seq3ReorderLifelineIds
 import com.indagium.ui.seq3ResolveDragEndpoint
 import com.indagium.ui.seq3RowAt
+import com.indagium.ui.seq3RowIsEmphasized
 import com.indagium.ui.seq3ZoomPercentLabel
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -70,6 +71,14 @@ class Seq3CanvasTest {
         lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
         messages = listOf(message("m1", "A", "B")),
     )
+
+    @Test
+    fun focusedQueueMessageAndFocusedOccurrenceEmphasizeTheCanvasArrow() {
+        val row = layoutSeq3(twoLifelineArrowDoc(), opts()).rows.single()
+
+        assertTrue(seq3RowIsEmphasized(row, null, emptySet(), "m1", null, null))
+        assertTrue(seq3RowIsEmphasized(row, null, emptySet(), null, "m1", 1))
+    }
 
     // ── seq3RowAt: canvas click/hover hit-testing ───────────────────────────────────────────────
 

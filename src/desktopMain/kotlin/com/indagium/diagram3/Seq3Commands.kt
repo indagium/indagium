@@ -34,7 +34,12 @@ sealed class Seq3Command {
      *  names with [replacement] and touches nothing else. The async "regenerate fresh, find the
      *  match via [matchOneMessage]" half lives in `ui.Seq3Session`; this command is the pure,
      *  already-resolved apply step, kept a single undo step like every other command here. */
-    data class ReplaceMessage(val messageId: String, val replacement: Seq3Message) : Seq3Command()
+    data class ReplaceMessage(
+        val messageId: String,
+        val replacement: Seq3Message,
+        /** Other split rows representing the same generated message to remove atomically. */
+        val removeMessageIds: Set<String> = emptySet(),
+    ) : Seq3Command()
 
     /** Applies an externally-built WHOLE [Seq3Document] as one undo step (item 2, the queue panel's
      *  "Add ＋") — the strict generalization of [ReplaceMessage] for a caller (`addSeq3MessageFromSelection`)
@@ -62,6 +67,12 @@ sealed class Seq3Command {
      *  timestamp. The remaining grouped message stays in place; both rows remain undoable as one
      *  queue edit. */
     data class MoveOccurrenceOut(val messageId: String, val entryId: Int) : Seq3Command()
+
+    /** Splits several checked occurrences in one undoable queue edit. */
+    data class MoveOccurrencesOut(val occurrences: List<Seq3OccurrenceRef>) : Seq3Command()
+
+    /** Returns one standalone Move out row to the exact group it came from. */
+    data class MoveOccurrenceBack(val messageId: String) : Seq3Command()
 
     /** Hides or shows one occurrence without changing any of its sibling occurrences. */
     data class SetOccurrenceVisibility(
@@ -125,6 +136,8 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.SetMessageTimestamp -> dispatchSetMessageTimestamp(document, command)
     is Seq3Command.MoveMessage -> dispatchMoveMessage(document, command)
     is Seq3Command.MoveOccurrenceOut -> dispatchMoveOccurrenceOut(document, command)
+    is Seq3Command.MoveOccurrencesOut -> dispatchMoveOccurrencesOut(document, command)
+    is Seq3Command.MoveOccurrenceBack -> dispatchMoveOccurrenceBack(document, command)
     is Seq3Command.SetOccurrenceVisibility -> dispatchSetOccurrenceVisibility(document, command)
     is Seq3Command.ReorderLifelines -> dispatchReorder(document, command)
     is Seq3Command.RenameLifeline -> dispatchRename(document, command)
@@ -163,7 +176,15 @@ private fun dispatchReplaceMessage(document: Seq3Document, command: Seq3Command.
     // the durable queue row id, otherwise moving an occurrence out and reverting it can introduce
     // a duplicate LazyColumn key when the group is uncollapsed.
     val replacement = command.replacement.copy(id = command.messageId)
-    val replaced = document.copy(messages = document.messages.map { if (it.id == command.messageId) replacement else it })
+    val removedIds = command.removeMessageIds - command.messageId
+    val repointIds = { ids: List<String> -> ids.map { if (it in removedIds) command.messageId else it }.distinct() }
+    val replaced = document.copy(
+        messages = document.messages
+            .filterNot { it.id in removedIds }
+            .map { if (it.id == command.messageId) replacement else it },
+        fragments = document.fragments.map { it.copy(messageIds = repointIds(it.messageIds)) },
+        notes = document.notes.map { it.copy(messageIds = repointIds(it.messageIds)) },
+    )
     return applied(replaced, "Revert to generated")
 }
 
@@ -207,6 +228,27 @@ private fun dispatchMoveOccurrenceOut(document: Seq3Document, command: Seq3Comma
         }
         is Seq3MessageEditResult.Rejected -> unapplied(document, result.reason)
     }
+
+private fun dispatchMoveOccurrencesOut(document: Seq3Document, command: Seq3Command.MoveOccurrencesOut): Outcome =
+    when (val result = moveSeq3OccurrencesOut(document, command.occurrences)) {
+        is Seq3MessageEditResult.Updated -> if (result.document == document) {
+            unapplied(document, "No change")
+        } else {
+            applied(result.document, "Move occurrences out")
+        }
+        is Seq3MessageEditResult.Rejected -> unapplied(document, result.reason)
+    }
+
+private fun dispatchMoveOccurrenceBack(document: Seq3Document, command: Seq3Command.MoveOccurrenceBack): Outcome {
+    val moved = document.messages.firstOrNull { it.id == command.messageId }
+        ?: return unapplied(document, "Unknown message")
+    val targetId = moved.movedOutFromMessageId ?: return unapplied(document, "Message was not moved out")
+    if (document.messages.none { it.id == targetId }) return unapplied(document, "Original message group is unavailable")
+    val result = applySeq3BulkAction(document, setOf(targetId, moved.id), Seq3BulkAction.Merge(targetId))
+    return if (result.applied) applied(result.document, "Move occurrence back") else {
+        unapplied(document, result.reason ?: "Move back was rejected")
+    }
+}
 
 private fun dispatchSetOccurrenceVisibility(document: Seq3Document, command: Seq3Command.SetOccurrenceVisibility): Outcome =
     when (val result = setSeq3OccurrenceVisibility(document, command.messageId, command.entryId, command.visibility)) {
