@@ -18,12 +18,14 @@ import com.indagium.diagram3.addSeq3CustomMessage
 import com.indagium.diagram3.applySeq3Command
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.moveSeq3Message
+import com.indagium.diagram3.moveSeq3OccurrenceOut
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.undoSeq3Command
 import com.indagium.diagram3.updateSeq3MessageTimestamp
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -110,6 +112,40 @@ class Seq3CustomMessageTest {
         val moved = moveSeq3Message(timestampDocument, added.newMessageId, Seq3InsertionPosition.AtIndex(1))
         val movedDocument = (moved as Seq3MessageEditResult.Updated).document
         assertEquals(listOf("m1", added.newMessageId, "m2"), movedDocument.messages.map { it.id })
+    }
+
+    @Test
+    fun generatedMessagesCannotBeMoved() {
+        val document = baseDocument()
+        val result = moveSeq3Message(document, "m1", Seq3InsertionPosition.End)
+        assertFalse(result is Seq3MessageEditResult.Updated)
+        val rejected = result as? Seq3MessageEditResult.Rejected ?: error("expected move to be rejected")
+        assertEquals("Only custom messages can be moved", rejected.reason)
+    }
+
+    @Test
+    fun oneRepeatedOccurrenceCanBeMovedOutAtItsOwnTimestamp() {
+        val grouped = baseDocument().copy(
+            messages = baseDocument().messages.map { message ->
+                if (message.id == "m1") message.copy(
+                    occurrences = listOf(
+                        message.occurrences.single(),
+                        Seq3Occurrence(150, 150L, "10:00:00.150", 1, 1, 'I', "m1 later evidence"),
+                    ),
+                ) else message
+            },
+        )
+
+        val result = moveSeq3OccurrenceOut(grouped, "m1", 150)
+        val updated = (result as? Seq3MessageEditResult.Updated)?.document ?: error("expected split")
+
+        assertEquals(3, updated.messages.size)
+        assertEquals(listOf(100L, 150L, 200L), updated.messages.map { it.primaryTimestampMillis })
+        assertEquals(listOf(100), updated.messages[0].occurrences.map { it.entryId })
+        assertEquals(listOf(150), updated.messages[1].occurrences.map { it.entryId })
+        assertEquals(Seq3Authoring.EDITED, updated.messages[0].authoring)
+        assertEquals(Seq3Authoring.EDITED, updated.messages[1].authoring)
+        assertEquals(updated.messages.map { it.id }.toSet(), updated.fragments.single().messageIds.toSet())
     }
 
     @Test

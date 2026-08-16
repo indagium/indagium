@@ -408,6 +408,7 @@ private fun occurrenceToMap(o: Seq3Occurrence): Map<String, Any?> = mapOf(
     "level" to o.level.toString(),
     "text" to o.text,
     "captureValues" to o.captureValues,
+    "visibility" to o.visibility.name,
 )
 
 @Suppress("UNCHECKED_CAST")
@@ -426,6 +427,7 @@ private fun occurrenceFromMap(map: Map<String, Any?>): Seq3Occurrence? {
         level = map.str("level")?.firstOrNull() ?: '?',
         text = text,
         captureValues = captureValues,
+        visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
     )
 }
 

@@ -58,6 +58,18 @@ sealed class Seq3Command {
     /** Moves one queue row to an explicit position as one undoable edit. */
     data class MoveMessage(val messageId: String, val position: Seq3InsertionPosition) : Seq3Command()
 
+    /** Splits one occurrence out of a grouped generated message and places it at its evidence
+     *  timestamp. The remaining grouped message stays in place; both rows remain undoable as one
+     *  queue edit. */
+    data class MoveOccurrenceOut(val messageId: String, val entryId: Int) : Seq3Command()
+
+    /** Hides or shows one occurrence without changing any of its sibling occurrences. */
+    data class SetOccurrenceVisibility(
+        val messageId: String,
+        val entryId: Int,
+        val visibility: Seq3Visibility,
+    ) : Seq3Command()
+
     data class ReorderLifelines(val orderedLifelineIds: List<String>) : Seq3Command()
 
     data class RenameLifeline(val lifelineId: String, val name: String) : Seq3Command()
@@ -112,6 +124,8 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.AddCustomMessage -> dispatchAddCustomMessage(document, command)
     is Seq3Command.SetMessageTimestamp -> dispatchSetMessageTimestamp(document, command)
     is Seq3Command.MoveMessage -> dispatchMoveMessage(document, command)
+    is Seq3Command.MoveOccurrenceOut -> dispatchMoveOccurrenceOut(document, command)
+    is Seq3Command.SetOccurrenceVisibility -> dispatchSetOccurrenceVisibility(document, command)
     is Seq3Command.ReorderLifelines -> dispatchReorder(document, command)
     is Seq3Command.RenameLifeline -> dispatchRename(document, command)
     is Seq3Command.MergeLifelines -> dispatchMergeLifelines(document, command)
@@ -145,7 +159,11 @@ private fun dispatchNudge(document: Seq3Document, command: Seq3Command.NudgePin)
 
 private fun dispatchReplaceMessage(document: Seq3Document, command: Seq3Command.ReplaceMessage): Outcome {
     if (document.messages.none { it.id == command.messageId }) return unapplied(document, "Unknown message")
-    val replaced = document.copy(messages = document.messages.map { if (it.id == command.messageId) command.replacement else it })
+    // A freshly generated counterpart can carry the original generated id. Revert must retain
+    // the durable queue row id, otherwise moving an occurrence out and reverting it can introduce
+    // a duplicate LazyColumn key when the group is uncollapsed.
+    val replacement = command.replacement.copy(id = command.messageId)
+    val replaced = document.copy(messages = document.messages.map { if (it.id == command.messageId) replacement else it })
     return applied(replaced, "Revert to generated")
 }
 
@@ -176,6 +194,26 @@ private fun dispatchMoveMessage(document: Seq3Document, command: Seq3Command.Mov
             unapplied(document, "No change")
         } else {
             applied(result.document, "Move message")
+        }
+        is Seq3MessageEditResult.Rejected -> unapplied(document, result.reason)
+    }
+
+private fun dispatchMoveOccurrenceOut(document: Seq3Document, command: Seq3Command.MoveOccurrenceOut): Outcome =
+    when (val result = moveSeq3OccurrenceOut(document, command.messageId, command.entryId)) {
+        is Seq3MessageEditResult.Updated -> if (result.document == document) {
+            unapplied(document, "No change")
+        } else {
+            applied(result.document, "Move occurrence out")
+        }
+        is Seq3MessageEditResult.Rejected -> unapplied(document, result.reason)
+    }
+
+private fun dispatchSetOccurrenceVisibility(document: Seq3Document, command: Seq3Command.SetOccurrenceVisibility): Outcome =
+    when (val result = setSeq3OccurrenceVisibility(document, command.messageId, command.entryId, command.visibility)) {
+        is Seq3MessageEditResult.Updated -> if (result.document == document) {
+            unapplied(document, "No change")
+        } else {
+            applied(result.document, "Set occurrence visibility")
         }
         is Seq3MessageEditResult.Rejected -> unapplied(document, result.reason)
     }

@@ -88,6 +88,8 @@ data class Seq3Occurrence(
     val text: String,
     /** This occurrence's values for every [Seq3Capture] its message's [Seq3Match] declares. */
     val captureValues: Map<String, String> = emptyMap(),
+    /** Per-occurrence display flag. Unlike a message hide, this never affects sibling evidence. */
+    val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
 )
 
 // ── Message ──────────────────────────────────────────────────────────────────────────────────
@@ -155,6 +157,11 @@ data class Seq3Message(
     /** The timestamp text entered by the author, if it cannot or should not be normalized to millis. */
     val manualRawTimestamp: String = "",
 ) {
+    /** True for an author-created message without log evidence. Generated messages always retain
+     *  at least one occurrence, so this is the durable distinction used by custom-only actions. */
+    val isCustom: Boolean
+        get() = occurrences.isEmpty()
+
     /** Timeline value shared by queue sorting, canvas layout, and authored-message editing. */
     val primaryTimestampMillis: Long?
         get() = manualTimestampMillis ?: occurrences.firstOrNull()?.timestampMillis

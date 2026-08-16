@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -100,7 +101,10 @@ internal fun Seq3GuidedPass(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Seq3GuidedHeader(pass) { view.guidedPass = null }
+            Seq3GuidedHeader(pass) {
+                view.guidedPass = null
+                runCatching { view.focusRequester.requestFocus() }
+            }
             Seq3GuidedEvidence(message)
             Seq3GuidedSurroundingLines(message, entries)
             Seq3GuidedTargetGrid(state, session, view, document, message, suggestion)
@@ -232,7 +236,10 @@ private fun Seq3GuidedTargetGrid(
                             selected = lifeline.id == chosenId,
                             suggested = lifeline.id == suggestion?.id,
                             modifier = Modifier.weight(1f),
-                        ) { chosenId = lifeline.id }
+                        ) {
+                            chosenId = lifeline.id
+                            runCatching { view.focusRequester.requestFocus() }
+                        }
                     }
                     if (rowItems.size == 1) Spacer(Modifier.weight(1f))
                 }
@@ -242,7 +249,10 @@ private fun Seq3GuidedTargetGrid(
         Seq3GuidedFooter(
             occurrenceCount = message.occurrences.size,
             applyToAll = applyToAll,
-            onToggleApplyToAll = { applyToAll = !applyToAll },
+            onToggleApplyToAll = {
+                applyToAll = !applyToAll
+                runCatching { view.focusRequester.requestFocus() }
+            },
             enabled = chosenId != null,
         ) {
             val target = chosenId ?: return@Seq3GuidedFooter
@@ -261,13 +271,14 @@ private fun Seq3GuidedLifelineCard(
     onClick: () -> Unit,
 ) {
     val tc = tc()
-    HoverBox(
-        modifier = modifier.clip(RoundedCornerShape(8.dp))
+    DisableSelection {
+        HoverBox(
+            modifier = modifier.clip(RoundedCornerShape(8.dp))
             .background(if (selected) tc.abg else tc.p, RoundedCornerShape(8.dp))
             .border(if (selected) 1.5.dp else 1.dp, if (selected) tc.ac else tc.br, RoundedCornerShape(8.dp))
             .padding(horizontal = 12.dp, vertical = 10.dp),
-        onClick = onClick,
-    ) {
+            onClick = onClick,
+        ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             Box(
                 Modifier.width(18.dp).height(18.dp).clip(CORNER_SM)
@@ -290,6 +301,7 @@ private fun Seq3GuidedLifelineCard(
                 Spacer(Modifier.weight(1f))
                 AppText("suggested", color = tc.ac, fontSize = 11.sp)
             }
+        }
         }
     }
 }
@@ -323,7 +335,10 @@ private fun Seq3GuidedSecondaryActions(
                 PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
                 overrideDescendants = true,
             ),
-            onClick = { skipSeq3Guided(session, view) },
+            onClick = {
+                skipSeq3Guided(session, view)
+                runCatching { view.focusRequester.requestFocus() }
+            },
         )
     }
 }
@@ -389,6 +404,7 @@ internal fun applySeq3GuidedChoice(
     state.seq3Sessions.applyCommand(session.id, command)
     val updated = state.seq3Sessions.sessions.firstOrNull { it.id == session.id }?.document ?: return
     view.guidedPass = advanceSeq3GuidedPass(updated, pass)
+    runCatching { view.focusRequester.requestFocus() }
 }
 
 /** "Skip · S" — drops the current row from this pass without editing it. A skipped row is never

@@ -391,6 +391,15 @@ internal fun seq3ClampDividerWidth(current: Float, delta: Float, min: Float, max
  */
 internal class Seq3ViewState {
     var selection by mutableStateOf(Seq3Selection())
+    /** Expanded repeated-message rows in the queue. This is view state only; grouping remains part
+     *  of the durable message and the extracted occurrence command is the only document edit. */
+    var expandedOccurrenceMessageIds by mutableStateOf<Set<String>>(emptySet())
+    /** Independent checkbox state for the evidence rows shown inside an expanded group. */
+    var selectedOccurrenceIds by mutableStateOf<Set<String>>(emptySet())
+    /** The queue row selected by its message body. When set, the canvas emphasizes this exact
+     *  occurrence instead of every drawn occurrence owned by the message. */
+    var selectedOccurrenceMessageId by mutableStateOf<String?>(null)
+    var selectedOccurrenceEntryId by mutableStateOf<Int?>(null)
     var filter by mutableStateOf(Seq3Filter.ALL)
     var textFilter by mutableStateOf("")
     var sort by mutableStateOf(Seq3Sort.LOG_ORDER)
@@ -490,6 +499,7 @@ internal fun Seq3DropdownButton(
     // `alwaysFilled = true` instead of relying on `open`.
     alwaysFilled: Boolean = false,
     menuWidth: androidx.compose.ui.unit.Dp = 160.dp,
+    fixedHeight: androidx.compose.ui.unit.Dp? = null,
     menu: @Composable (close: () -> Unit) -> Unit,
 ) {
     val tc = tc()
@@ -507,19 +517,22 @@ internal fun Seq3DropdownButton(
         suppressUntilMs = System.currentTimeMillis() + 200
         focusRequester?.let { runCatching { it.requestFocus() } }
     }
-    Box(modifier) {
+    val fixedHeightModifier = fixedHeight?.let { Modifier.height(it) } ?: Modifier
+    val fixedSurfaceModifier = if (fixedHeight != null) Modifier.fillMaxHeight() else Modifier
+    Box(modifier.then(fixedHeightModifier)) {
         HoverBox(
             // Keep the padding inside the clickable Box. `HoverBox` appends its clickable
             // modifier after the supplied modifier, so padding on the supplied chain would
             // leave only the label text as the effective hit target (the same bug users see
             // in the Log order control). The log-view pills put their padding inside the
             // clickable surface; keep this shared dropdown consistent with that behavior.
-            modifier = Modifier.clip(CORNER_MD).background(if (open || alwaysFilled) fillColor else Color.Transparent, CORNER_MD)
+            modifier = fixedSurfaceModifier
+                .clip(CORNER_MD).background(if (open || alwaysFilled) fillColor else Color.Transparent, CORNER_MD)
                 .border(1.dp, tc.br, CORNER_MD),
             onClick = { if (System.currentTimeMillis() >= suppressUntilMs) open = !open },
         ) {
             Row(
-                Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                fixedSurfaceModifier.padding(horizontal = 8.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(3.dp),
             ) {
@@ -707,7 +720,12 @@ private fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, view
     view.textFieldFocused -> { view.textFieldFocused = false; true }
     view.regenerateSheetOpen -> { closeSeq3RegenerateSheet(state, session, view); true }
     view.guidedPass != null -> { view.guidedPass = null; true }
-    view.selection.selectedIds.isNotEmpty() -> { view.selection = Seq3Selection(); true }
+    view.selection.selectedIds.isNotEmpty() -> {
+        view.selection = Seq3Selection()
+        view.selectedOccurrenceMessageId = null
+        view.selectedOccurrenceEntryId = null
+        true
+    }
     else -> false
 }
 

@@ -119,6 +119,8 @@ private fun occurrenceLabel(message: Seq3Message, occurrence: Seq3Occurrence): S
 
 private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>): List<Seq3Emission> {
     val fromIdx = lifelineIndex[message.fromLifelineId] ?: return emptyList()
+    val occurrences = message.occurrences.filter { it.visibility == Seq3Visibility.VISIBLE }
+    if (message.occurrences.isNotEmpty() && occurrences.isEmpty()) return emptyList()
     if (message.kind == Seq3Kind.NOTE) {
         return listOf(Seq3Emission.NoteLine(message.id, fromIdx, templatedLabel(message)))
     }
@@ -126,7 +128,6 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
     if (toIdx == null) {
         return listOf(Seq3Emission.NeedsTarget(message.id, fromIdx, templatedLabel(message)))
     }
-    val occurrences = message.occurrences
     // Authored messages intentionally have no fabricated log occurrence. They still need one
     // drawable arrow in both source dialects, using the authored label and no evidence expansion.
     if (occurrences.isEmpty()) {
