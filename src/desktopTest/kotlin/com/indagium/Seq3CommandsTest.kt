@@ -8,6 +8,8 @@ import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
+import com.indagium.diagram3.Seq3OccurrenceRef
+import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3RegenDecision
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3Command
@@ -116,6 +118,49 @@ class Seq3CommandsTest {
     }
 
     @Test
+    fun replaceMessageCanRestoreAGroupAndRemoveItsSplitSiblingAtomically() {
+        val original = message("m1", "A", "B", 1).copy(
+            match = Seq3Match("A", "USB poll devices={devices}"),
+            labelTemplate = "USB poll devices={devices}",
+            occurrences = listOf(occ(1).copy(text = "USB poll devices=3"), occ(2).copy(text = "USB poll devices=2")),
+        )
+        val split = original.copy(id = "m2", authoring = Seq3Authoring.EDITED, occurrences = listOf(original.occurrences.last()))
+        val doc = baseDocument().copy(messages = listOf(original.copy(occurrences = listOf(original.occurrences.first())), split))
+        val restored = applySeq3Command(
+            doc,
+            Seq3Command.ReplaceMessage(
+                messageId = "m1",
+                replacement = original.copy(authoring = Seq3Authoring.AUTO),
+                removeMessageIds = setOf("m2"),
+            ),
+        )
+
+        assertTrue(restored.applied)
+        assertEquals(listOf("m1"), restored.document.messages.map { it.id })
+        assertEquals(listOf(1, 2), restored.document.messages.single().occurrences.map { it.entryId })
+    }
+
+    @Test
+    fun mergeRequiresTwoMessagesAndPreservesTheFirstSelectedQueuePosition() {
+        val first = message("m1", "A", "B", 1).copy(
+            match = Seq3Match("A", "USB poll devices={devices}"),
+            labelTemplate = "USB poll devices={devices}",
+            occurrences = listOf(occ(1).copy(text = "USB poll devices=3")),
+        )
+        val second = first.copy(id = "m2", occurrences = listOf(occ(2).copy(text = "USB poll devices=2")))
+        val doc = baseDocument().copy(messages = listOf(first, second, message("m3", "A", "B", 3)))
+
+        val one = applySeq3Command(doc, Seq3Command.Bulk(setOf("m1"), Seq3BulkAction.Merge("m1")))
+        assertFalseApplied(one)
+        assertEquals(doc, one.document)
+
+        val merged = applySeq3Command(doc, Seq3Command.Bulk(setOf("m1", "m2"), Seq3BulkAction.Merge("m1")))
+        assertTrue(merged.applied)
+        assertEquals(listOf("m1", "m3"), merged.document.messages.map { it.id })
+        assertEquals(listOf(1, 2), merged.document.messages.first().occurrences.map { it.entryId })
+    }
+
+    @Test
     fun occurrenceVisibilityChangesOnlyTheRequestedOccurrence() {
         val doc = baseDocument().copy(
             messages = listOf(
@@ -131,6 +176,40 @@ class Seq3CommandsTest {
         val occurrences = result.document.messages.single().occurrences
         assertEquals(Seq3Visibility.HIDDEN, occurrences.first { it.entryId == 1 }.visibility)
         assertEquals(Seq3Visibility.VISIBLE, occurrences.first { it.entryId == 2 }.visibility)
+    }
+
+    @Test
+    fun movedOutOccurrenceCanBeMovedBackToItsOriginalGroup() {
+        val grouped = message("m1", "A", "B", 1).copy(occurrences = listOf(occ(1), occ(2)))
+        val doc = baseDocument().copy(messages = listOf(grouped))
+
+        val moved = applySeq3Command(doc, Seq3Command.MoveOccurrenceOut("m1", 2))
+        assertTrue(moved.applied)
+        val standalone = moved.document.messages.single { it.id != "m1" }
+        assertEquals("m1", standalone.movedOutFromMessageId)
+
+        val restored = applySeq3Command(moved.document, Seq3Command.MoveOccurrenceBack(standalone.id))
+        assertTrue(restored.applied)
+        assertEquals(listOf("m1"), restored.document.messages.map { it.id })
+        assertEquals(listOf(1, 2), restored.document.messages.single().occurrences.map { it.entryId })
+        assertNull(restored.document.messages.single().movedOutFromMessageId)
+    }
+
+    @Test
+    fun checkedOccurrencesMoveOutAsOneCommandAndKeepOneGroupOccurrence() {
+        val grouped = message("m1", "A", "B", 1).copy(occurrences = listOf(occ(1), occ(2), occ(3)))
+        val doc = baseDocument().copy(messages = listOf(grouped))
+        val moved = applySeq3Command(
+            doc,
+            Seq3Command.MoveOccurrencesOut(
+                listOf(Seq3OccurrenceRef("m1", 2), Seq3OccurrenceRef("m1", 3)),
+            ),
+        )
+
+        assertTrue(moved.applied)
+        assertEquals(3, moved.document.messages.size)
+        assertEquals(listOf(1), moved.document.messages.single { it.id == "m1" }.occurrences.map { it.entryId })
+        assertEquals(2, moved.document.messages.count { it.movedOutFromMessageId == "m1" })
     }
 
     @Test

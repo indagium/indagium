@@ -324,22 +324,35 @@ private fun applySetNoteText(document: Seq3Document, action: Seq3BulkAction.SetN
  * never orphans a fragment bracket or note anchor.
  */
 private fun applyMerge(document: Seq3Document, selected: List<Seq3Message>, action: Seq3BulkAction.Merge): Seq3BulkResult {
-    val first = selected.first()
-    if (selected.any { it.fromLifelineId != first.fromLifelineId || it.toLifelineId != first.toLifelineId || it.kind != first.kind }) {
+    if (selected.size < 2) return unapplied(document, "Select at least two messages to merge")
+    val first = selected.firstOrNull { it.id == action.mergedId } ?: selected.first()
+    val orderedSelected = listOf(first) + selected.filterNot { it.id == first.id }
+    if (orderedSelected.any { it.fromLifelineId != first.fromLifelineId || it.toLifelineId != first.toLifelineId || it.kind != first.kind }) {
         return unapplied(document, "Merged messages must share the same From, To, and kind")
     }
-    val occurrences = selected.flatMap { it.occurrences }.sortedBy { it.entryId }
+    val occurrences = orderedSelected.flatMap { it.occurrences }.sortedBy { it.entryId }
     if (occurrences.isEmpty()) return unapplied(document, "Nothing to merge")
     val tokenizeResult = tokenizeSeq3Messages(first.match.tag, occurrences.map { Seq3TokenizeInput(it.entryId.toString(), it.text) })
     val match = tokenizeResult.match ?: return unapplied(document, tokenizeResult.error ?: "Selected messages do not share a provable pattern")
     val mergedOccurrences = occurrences.map { it.copy(captureValues = tokenizeResult.captureValuesByOccurrence[it.entryId.toString()].orEmpty()) }
     val mergedId = action.mergedId.ifBlank { first.id }
-    val merged = first.copy(id = mergedId, match = match, labelTemplate = match.template, authoring = Seq3Authoring.EDITED, occurrences = mergedOccurrences)
-    val removedIds = selected.map { it.id }.toSet()
+    val merged = first.copy(
+        id = mergedId,
+        match = match,
+        labelTemplate = match.template,
+        authoring = Seq3Authoring.EDITED,
+        movedOutFromMessageId = null,
+        occurrences = mergedOccurrences,
+    )
+    val removedIds = orderedSelected.map { it.id }.toSet()
     val repointIds = { ids: List<String> -> ids.map { if (it in removedIds) mergedId else it }.distinct() }
+    val firstSelectedIndex = document.messages.indexOfFirst { it.id in removedIds }
+    val mergedMessages = document.messages.filterNot { it.id in removedIds }.toMutableList().apply {
+        add(firstSelectedIndex.coerceIn(0, size), merged)
+    }
     return Seq3BulkResult(
         document.copy(
-            messages = document.messages.filterNot { it.id in removedIds } + merged,
+            messages = mergedMessages,
             fragments = document.fragments.map { it.copy(messageIds = repointIds(it.messageIds)) },
             notes = document.notes.map { it.copy(messageIds = repointIds(it.messageIds)) },
         ),

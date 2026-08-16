@@ -271,6 +271,7 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
                                 tc,
                                 view.hoveredMessageId,
                                 view.selection.selectedIds,
+                                view.inspectorMessageId,
                                 view.selectedOccurrenceMessageId,
                                 view.selectedOccurrenceEntryId,
                                 dragPreview,
@@ -455,6 +456,7 @@ private fun DrawScope.drawSeq3Diagram(
     tc: ThemeColors,
     hoveredMessageId: String?,
     selectedIds: Set<String>,
+    focusedMessageId: String?,
     selectedOccurrenceMessageId: String?,
     selectedOccurrenceEntryId: Int?,
     dragPreview: Seq3EndpointDragPreview? = null,
@@ -485,6 +487,7 @@ private fun DrawScope.drawSeq3Diagram(
             row,
             hoveredMessageId,
             selectedIds,
+            focusedMessageId,
             selectedOccurrenceMessageId,
             selectedOccurrenceEntryId,
         )
@@ -590,6 +593,7 @@ private fun Seq3RowOverlay(state: AppState, session: Seq3WorkspaceSession, view:
         row,
         view.hoveredMessageId,
         view.selection.selectedIds,
+        view.inspectorMessageId,
         view.selectedOccurrenceMessageId,
         view.selectedOccurrenceEntryId,
     )
@@ -626,20 +630,19 @@ private fun Seq3RowOverlay(state: AppState, session: Seq3WorkspaceSession, view:
     }
 }
 
-private fun seq3RowIsEmphasized(
+internal fun seq3RowIsEmphasized(
     row: Seq3RowGeometry,
     hoveredMessageId: String?,
     selectedIds: Set<String>,
+    focusedMessageId: String?,
     selectedOccurrenceMessageId: String?,
     selectedOccurrenceEntryId: Int?,
 ): Boolean {
     if (row.messageId == hoveredMessageId) return true
-    if (row.messageId !in selectedIds) return false
-    return if (selectedOccurrenceMessageId == null) {
-        true
-    } else {
-        row.messageId == selectedOccurrenceMessageId && row.occurrenceEntryId == selectedOccurrenceEntryId
+    if (selectedOccurrenceMessageId != null) {
+        return row.messageId == selectedOccurrenceMessageId && row.occurrenceEntryId == selectedOccurrenceEntryId
     }
+    return row.messageId in selectedIds || row.messageId == focusedMessageId
 }
 
 @Composable

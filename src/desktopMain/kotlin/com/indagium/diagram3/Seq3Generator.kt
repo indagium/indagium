@@ -604,6 +604,7 @@ fun moveSeq3OccurrenceOut(document: Seq3Document, messageId: String, entryId: In
         id = newMessageId,
         occurrences = listOf(occurrence),
         authoring = Seq3Authoring.EDITED,
+        movedOutFromMessageId = source.id,
         orderPin = null,
         manualTimestampMillis = null,
         manualRawTimestamp = "",
@@ -641,6 +642,30 @@ fun moveSeq3OccurrenceOut(document: Seq3Document, messageId: String, entryId: In
             notes = document.notes.map { it.copy(messageIds = repoint(it.messageIds)) },
         ),
     )
+}
+
+/** Moves several checked occurrences out as one undoable command. At least one occurrence must
+ * remain in every source group; otherwise the group itself would disappear and the operation
+ * would no longer mean "move out". */
+fun moveSeq3OccurrencesOut(document: Seq3Document, references: List<Seq3OccurrenceRef>): Seq3MessageEditResult {
+    val distinctReferences = references.distinct()
+    if (distinctReferences.isEmpty()) return Seq3MessageEditResult.Rejected("Select at least one occurrence")
+    val selectedByMessage = distinctReferences.groupBy { it.messageId }
+    selectedByMessage.forEach { (messageId, refs) ->
+        val message = document.messages.firstOrNull { it.id == messageId }
+            ?: return Seq3MessageEditResult.Rejected("Unknown message")
+        if (refs.size >= message.occurrences.size) {
+            return Seq3MessageEditResult.Rejected("Keep at least one occurrence in each message group")
+        }
+    }
+    var current = document
+    distinctReferences.forEach { reference ->
+        current = when (val result = moveSeq3OccurrenceOut(current, reference.messageId, reference.entryId)) {
+            is Seq3MessageEditResult.Updated -> result.document
+            is Seq3MessageEditResult.Rejected -> return result
+        }
+    }
+    return Seq3MessageEditResult.Updated(current)
 }
 
 /** Parses the same clock format used by log rows. Unknown/free-form text remains displayable as

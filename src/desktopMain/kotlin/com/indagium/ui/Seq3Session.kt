@@ -11,6 +11,7 @@ import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3GenerateOptions
+import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3RegenReview
 import com.indagium.diagram3.Seq3UndoEntry
@@ -869,9 +870,25 @@ class Seq3Session(
             }
             coroutineContext.ensureActive()
             result.onSuccess { fresh ->
-                val latestMessage = session(id)?.document?.messages?.firstOrNull { it.id == messageId } ?: return@onSuccess
+                val latestDocument = session(id)?.document ?: return@onSuccess
+                val latestMessage = latestDocument.messages.firstOrNull { it.id == messageId } ?: return@onSuccess
                 val matched = matchOneMessage(latestMessage, fresh.messages) ?: return@onSuccess
-                applyCommand(id, Seq3Command.ReplaceMessage(messageId, matched))
+                // Move out splits one generated group into multiple edited rows. Reverting one
+                // split row must restore the fresh group and remove its sibling split rows in the
+                // same undoable command; otherwise reverting both halves duplicates every piece of
+                // evidence (the exact failure reproduced in the screen recording).
+                val matchedEvidenceIds = matched.occurrences.map { it.entryId }.toSet()
+                val splitSiblingIds = if (matchedEvidenceIds.isEmpty()) {
+                    emptySet()
+                } else {
+                    latestDocument.messages
+                        .filter { it.id != messageId && it.occurrences.any { occurrence -> occurrence.entryId in matchedEvidenceIds } }
+                        .mapTo(linkedSetOf(), Seq3Message::id)
+                }
+                applyCommand(
+                    id,
+                    Seq3Command.ReplaceMessage(messageId, matched, removeMessageIds = splitSiblingIds),
+                )
             }.onFailure { e -> if (e is CancellationException) throw e }
         }
         revertJobs[id] = job

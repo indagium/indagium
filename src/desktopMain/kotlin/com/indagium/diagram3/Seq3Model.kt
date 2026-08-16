@@ -92,6 +92,12 @@ data class Seq3Occurrence(
     val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
 )
 
+/** Stable reference used by occurrence-level commands. */
+data class Seq3OccurrenceRef(
+    val messageId: String,
+    val entryId: Int,
+)
+
 // ── Message ──────────────────────────────────────────────────────────────────────────────────
 
 /** Arrow kind. [NOTE] is a message that renders as a canvas/text note anchored on
@@ -149,6 +155,9 @@ data class Seq3Message(
     val repeatThreshold: Int = DEFAULT_SEQ3_REPEAT_THRESHOLD,
     val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
     val authoring: Seq3Authoring = Seq3Authoring.AUTO,
+    /** Set only on a standalone row created by Move out, so Move back can target its exact
+     * original group instead of guessing from a compatible label. */
+    val movedOutFromMessageId: String? = null,
     val orderPin: Seq3OrderPin? = null,
     val occurrences: List<Seq3Occurrence> = emptyList(),
     /** Optional author-supplied timeline timestamp. When present it overrides the first evidence

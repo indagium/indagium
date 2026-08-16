@@ -56,6 +56,7 @@ class Seq3CodecTest {
             repeatThreshold = 3,
             visibility = Seq3Visibility.VISIBLE,
             authoring = Seq3Authoring.EDITED,
+            movedOutFromMessageId = "origin",
             occurrences = listOf(occurrence),
         )
         return Seq3Document(
