@@ -910,9 +910,16 @@ class Seq3Session(
         return when (val range = current.range) {
             is Seq3Range.VisibleView -> tab.logData
             is Seq3Range.Ids -> {
-                val lo = minOf(range.from, range.to)
-                val hi = maxOf(range.from, range.to)
-                tab.logData.filter { it.id in lo..hi }
+                if (range.selectedIds.isNotEmpty()) {
+                    // Generation honors the exact selection when it is present. Keep the status
+                    // counts aligned with that behavior instead of reporting the whole inclusive
+                    // ID span around a sparse or collapsed-block selection.
+                    tab.logData.filter { it.id in range.selectedIds }
+                } else {
+                    val lo = minOf(range.from, range.to)
+                    val hi = maxOf(range.from, range.to)
+                    tab.logData.filter { it.id in lo..hi }
+                }
             }
             is Seq3Range.Time -> tab.logData
         }

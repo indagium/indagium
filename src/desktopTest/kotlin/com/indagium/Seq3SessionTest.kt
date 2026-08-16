@@ -662,6 +662,15 @@ class Seq3SessionTest {
     }
 
     @Test
+    fun scannedEntryCountHonorsSparseExactSelectionInsteadOfItsInclusiveSpan() {
+        val entries = (1..30).map { LogEntry(it, "10:00:00.$it", LogLevel.I, "T", "m$it") }
+        val state = stateFor(mkTab("log", "sample.log", entries))
+        val id = state.seq3Sessions.begin("log", setOf(3, 30))!!
+
+        assertEquals(2, state.seq3Sessions.scannedEntryCount(id))
+    }
+
+    @Test
     fun scannedEntryCountForVisibleViewIsTheWholeTab() {
         val state = state()
         val id = state.seq3Sessions.begin("log")!!

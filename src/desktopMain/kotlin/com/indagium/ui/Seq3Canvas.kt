@@ -354,12 +354,18 @@ private fun seq3CanvasGestureModifier(
             var pressWasMiddle = false
             var lastPanPosition: Offset? = null
             var primaryPanEligible = false
+            var childOwnsGesture = false
             fun panViewportPosition(position: Offset): Offset = Offset(
                 position.x - currentHScroll.value.value,
                 position.y - currentVScroll.value.value,
             )
             while (true) {
-                val event = awaitPointerEvent(PointerEventPass.Initial)
+                // Let interactive overlays (lifeline chips, the inline label editor, and its
+                // buttons) see the press before the canvas decides to own it. The old Initial-pass
+                // handler consumed every primary press before those children could recognize a
+                // tap or focus a text field, which made click selection and double-click editing
+                // look broken while drag-to-reorder still appeared to work.
+                val event = awaitPointerEvent(PointerEventPass.Main)
                 val change = event.changes.firstOrNull() ?: continue
                 val activeLayout = currentLayout.value
                 val activeDensity = currentDensity.value
@@ -372,6 +378,20 @@ private fun seq3CanvasGestureModifier(
                     PointerEventType.Press -> {
                         val isMiddle = event.buttons.isTertiaryPressed
                         if (event.buttons.isPrimaryPressed || isMiddle) {
+                            if (change.isConsumed) {
+                                // A child owns this gesture (for example a lifeline chip or an
+                                // already-open text editor). Keep the canvas completely out of its
+                                // move/release sequence.
+                                childOwnsGesture = true
+                                dragEndpoint = null
+                                downPosition = null
+                                moved = false
+                                panning = false
+                                pressWasMiddle = false
+                                primaryPanEligible = false
+                                continue
+                            }
+                            childOwnsGesture = false
                             downPosition = change.position
                             moved = false
                             pressWasMiddle = isMiddle
@@ -399,6 +419,7 @@ private fun seq3CanvasGestureModifier(
                         }
                     }
                     PointerEventType.Move -> {
+                        if (childOwnsGesture) continue
                         val down = downPosition
                         if (down != null && (change.position - down).getDistance() > DRAG_CLICK_THRESHOLD_PX) moved = true
                         val drag = dragEndpoint
@@ -426,6 +447,10 @@ private fun seq3CanvasGestureModifier(
                         }
                     }
                     PointerEventType.Release -> {
+                        if (childOwnsGesture) {
+                            childOwnsGesture = false
+                            continue
+                        }
                         val drag = dragEndpoint
                         when {
                             drag != null -> {
@@ -488,7 +513,12 @@ private fun seq3HandleCanvasRowClick(
     view.inspectorMessageId = hitRow.messageId
     view.scrollRequestId = hitRow.messageId
     val doubleClick = registerClick(System.currentTimeMillis(), hitRow.messageId)
-    if (doubleClick && hitRow is Seq3ArrowRow) view.editingLabelMessageId = hitRow.messageId
+    view.editingLabelMessageId = null
+    view.editingLabelOccurrenceEntryId = null
+    if (doubleClick && hitRow is Seq3ArrowRow) {
+        view.editingLabelMessageId = hitRow.messageId
+        view.editingLabelOccurrenceEntryId = hitRow.occurrenceEntryId
+    }
 }
 
 // ── Line/shape drawing — everything from `Seq3Layout`'s own unit-less coordinates ─────────────
@@ -681,8 +711,26 @@ private fun Seq3RowOverlay(state: AppState, session: Seq3WorkspaceSession, view:
         is Seq3ArrowRow -> {
             Seq3LabelText(row.labelBox, row.label, labelColor)
             row.badgeBox?.let { Seq3BadgeChip(it, row.repeatCount) }
-            if (view.editingLabelMessageId == row.messageId) {
-                Seq3InlineLabelEditor(state, session, view, row.messageId, row.label, row.labelBox)
+            if (view.editingLabelMessageId == row.messageId &&
+                (view.editingLabelOccurrenceEntryId == null || view.editingLabelOccurrenceEntryId == row.occurrenceEntryId)
+            ) {
+                // A row label can be a rendered occurrence (for example, `vendorId=04E8`),
+                // while SetLabel edits the shared message template. Seed the editor from that
+                // template so saving a rename cannot accidentally replace `{vendorId}` and
+                // `{productId}` with one occurrence's concrete values for every sibling row.
+                val labelTemplate = session.document.messages
+                    .firstOrNull { it.id == row.messageId }
+                    ?.labelTemplate
+                    ?: row.label
+                Seq3InlineLabelEditor(
+                    state,
+                    session,
+                    view,
+                    row.messageId,
+                    row.occurrenceEntryId,
+                    labelTemplate,
+                    row.labelBox,
+                )
             }
         }
         is Seq3SelfLoopRow -> {
@@ -764,15 +812,20 @@ private fun Seq3InlineLabelEditor(
     session: Seq3WorkspaceSession,
     view: Seq3ViewState,
     messageId: String,
-    currentLabel: String,
+    occurrenceEntryId: Int?,
+    currentLabelTemplate: String,
     box: Seq3Box,
 ) {
     val tc = tc()
-    var text by remember(messageId) { mutableStateOf(currentLabel) }
+    // This is intentionally the template, not the rendered label for the clicked occurrence.
+    // Template slots are the durable representation used by Seq3BulkAction.SetLabel and keep
+    // each occurrence's captured parameter values distinct after a rename.
+    var text by remember(messageId, occurrenceEntryId) { mutableStateOf(currentLabelTemplate) }
 
     fun commit() {
         state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(messageId), Seq3BulkAction.SetLabel(text)))
         view.editingLabelMessageId = null
+        view.editingLabelOccurrenceEntryId = null
     }
     Row(
         Modifier.offset(box.x.dp, (box.y - LABEL_EDITOR_Y_OFFSET_DP).dp)
@@ -781,13 +834,16 @@ private fun Seq3InlineLabelEditor(
     ) {
         InlineField(value = text, onValue = { text = it }, fontSize = 10.sp, modifier = Modifier.width(140.dp), onSubmit = ::commit)
         SquareIconButton("✓", fontSize = 10.sp, onClick = ::commit, size = 16.dp)
-        SquareIconButton("×", fontSize = 10.sp, onClick = { view.editingLabelMessageId = null }, size = 16.dp)
+        SquareIconButton("×", fontSize = 10.sp, onClick = {
+            view.editingLabelMessageId = null
+            view.editingLabelOccurrenceEntryId = null
+        }, size = 16.dp)
     }
 }
 
 private const val LABEL_EDITOR_Y_OFFSET_DP = 20.0
 
-// ── Lifeline header chips — draggable to reorder, double-click to rename, merge (spec §07) ────
+// ── Lifeline header chips — draggable to reorder and double-click to rename (spec §07) ─────────
 
 @Composable
 private fun Seq3LifelineChip(
@@ -842,6 +898,12 @@ private fun Seq3LifelineChip(
                 }
                 .pointerInput(session.id, column.lifelineId) {
                     detectTapGestures(
+                        // Select on press so a plain click gives immediate feedback even though
+                        // this same surface also owns drag-to-reorder and double-click-to-rename.
+                        onPress = {
+                            view.selectedLifelineId = column.lifelineId
+                            tryAwaitRelease()
+                        },
                         onTap = { view.selectedLifelineId = column.lifelineId },
                         onDoubleTap = { renaming = true },
                     )
@@ -862,24 +924,6 @@ private fun Seq3LifelineChip(
                     column.label, color = if (selected) tc.ac else tc.tx, fontSize = 11.sp,
                     fontWeight = FontWeight.Medium, maxLines = 1,
                 )
-            }
-        }
-        // "merge two lifelines that are the same actor under two tags" (spec §07) — click-based
-        // (not right-click, matching every other verb in this file), reusing Seq3DropdownButton.
-        if (document.lifelines.size > 1) {
-            Box(
-                Modifier.offset {
-                    IntOffset((column.header.x * density + dragPx).roundToInt(), ((column.header.y + column.header.height) * density).roundToInt())
-                },
-            ) {
-                Seq3DropdownButton(label = "merge", labelColor = tc.td, fillColor = Color.Transparent, menuWidth = 150.dp) { close ->
-                    document.lifelines.filter { it.id != column.lifelineId }.sortedBy { it.ordinal }.forEach { other ->
-                        Seq3DropdownMenuItem("Into ${other.name}") {
-                            state.seq3Sessions.applyCommand(session.id, Seq3Command.MergeLifelines(other.id, column.lifelineId))
-                            close()
-                        }
-                    }
-                }
             }
         }
     }

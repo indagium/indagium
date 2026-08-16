@@ -420,6 +420,9 @@ internal class Seq3ViewState {
 
     /** Canvas double-click inline label editor target (spec §04). */
     var editingLabelMessageId by mutableStateOf<String?>(null)
+    /** The exact repeated occurrence whose label editor is open; prevents one editor per drawn
+     *  occurrence when a message is expanded on the canvas. */
+    var editingLabelOccurrenceEntryId by mutableStateOf<Int?>(null)
 
     /** The lifeline header chip drawn in the accent color (spec §04's "the selected one in
      *  accent"). Purely a highlight — never gates which lifelines a dropdown/drag can target. */
@@ -710,7 +713,7 @@ private fun applySeq3KeyAction(
         is Seq3KeyAction.ToggleHide -> applySeq3ToggleHide(state, session, view, document)
         is Seq3KeyAction.MergeSelection -> applySeq3MergeSelection(state, session, view)
         is Seq3KeyAction.GroupSelection -> applySeq3GroupSelection(state, session, view)
-        is Seq3KeyAction.EditLabel -> applySeq3EditLabel(view)
+        is Seq3KeyAction.EditLabel -> applySeq3EditLabel(view, document)
         is Seq3KeyAction.JumpToLog -> applySeq3JumpToLog(state, session, view, document)
         is Seq3KeyAction.FocusFilter -> { view.textFieldFocused = true; true }
     }
@@ -787,9 +790,14 @@ private fun applySeq3GroupSelection(state: AppState, session: Seq3WorkspaceSessi
     return true
 }
 
-private fun applySeq3EditLabel(view: Seq3ViewState): Boolean {
+private fun applySeq3EditLabel(view: Seq3ViewState, document: Seq3Document): Boolean {
     val messageId = view.inspectorMessageId ?: return false
     view.editingLabelMessageId = messageId
+    view.editingLabelOccurrenceEntryId = document.messages
+        .firstOrNull { it.id == messageId }
+        ?.occurrences
+        ?.firstOrNull()
+        ?.entryId
     return true
 }
 
