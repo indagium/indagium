@@ -212,7 +212,21 @@ private fun editMessages(document: Seq3Document, selectedIds: Set<String>, trans
 
 private fun applySetFrom(document: Seq3Document, selectedIds: Set<String>, action: Seq3BulkAction.SetFrom): Seq3BulkResult {
     if (document.lifelines.none { it.id == action.lifelineId }) return unapplied(document, "Unknown source lifeline")
-    return Seq3BulkResult(editMessages(document, selectedIds) { it.copy(fromLifelineId = action.lifelineId) }, applied = true)
+    return Seq3BulkResult(
+        editMessages(document, selectedIds) { message ->
+            message.copy(
+                fromLifelineId = action.lifelineId,
+                // Moving one endpoint away from a self-loop must turn it back into an ordinary
+                // message; otherwise the layout keeps drawing the old loop and ignores `to`.
+                kind = when {
+                    action.lifelineId == message.toLifelineId -> Seq3Kind.SELF
+                    message.kind == Seq3Kind.SELF -> Seq3Kind.CALL
+                    else -> message.kind
+                },
+            )
+        },
+        applied = true,
+    )
 }
 
 private fun applySetTo(document: Seq3Document, selectedIds: Set<String>, action: Seq3BulkAction.SetTo): Seq3BulkResult {
@@ -222,7 +236,17 @@ private fun applySetTo(document: Seq3Document, selectedIds: Set<String>, action:
             // Picking a message's own `from` as its `to` must read as a self-call, not an ordinary
             // arrow pointing at itself — same auto-flip [applySeq3GuidedTarget] performs for the
             // guided pass, mirrored here for the Inspector's bulk "Set target" verb.
-            m.copy(toLifelineId = action.lifelineId, kind = if (action.lifelineId == m.fromLifelineId) Seq3Kind.SELF else m.kind)
+            m.copy(
+                toLifelineId = action.lifelineId,
+                // The canvas can start a drag on a self-loop's arrowhead. Once its target moves
+                // away from the source, it must render as a normal arrow instead of remaining a
+                // SELF kind that ignores the new destination in Seq3Layout.
+                kind = when {
+                    action.lifelineId == m.fromLifelineId -> Seq3Kind.SELF
+                    m.kind == Seq3Kind.SELF -> Seq3Kind.CALL
+                    else -> m.kind
+                },
+            )
         },
         applied = true,
     )

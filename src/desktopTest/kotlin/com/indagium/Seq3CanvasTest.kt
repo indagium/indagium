@@ -30,6 +30,7 @@ import com.indagium.ui.seq3ReorderLifelineIds
 import com.indagium.ui.seq3ResolveDragEndpoint
 import com.indagium.ui.seq3RowAt
 import com.indagium.ui.seq3RowIsEmphasized
+import com.indagium.ui.seq3SelfLoopEndpointAt
 import com.indagium.ui.seq3ZoomPercentLabel
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -170,7 +171,7 @@ class Seq3CanvasTest {
         val layout = layoutSeq3(twoLifelineArrowDoc(), opts())
         val row = layout.rows.single() as Seq3ArrowRow
         val drag = seq3ResolveDragEndpoint(layout, x = row.toX - 1.0, y = row.y)
-        assertEquals(Seq3DragEndpoint("m1", Seq3EndpointSide.TO), drag)
+        assertEquals(Seq3DragEndpoint("m1", Seq3EndpointSide.TO, occurrenceEntryId = 1), drag)
     }
 
     @Test
@@ -179,7 +180,39 @@ class Seq3CanvasTest {
         val layout = layoutSeq3(doc, opts())
         val row = layout.rows.single() as Seq3UnresolvedStubRow
         val drag = seq3ResolveDragEndpoint(layout, x = row.dropPill.x + 1.0, y = row.y)
-        assertEquals(Seq3DragEndpoint("m1", Seq3EndpointSide.TO), drag)
+        assertEquals(Seq3DragEndpoint("m1", Seq3EndpointSide.TO, occurrenceEntryId = 1), drag)
+    }
+
+    @Test
+    fun resolveDragEndpointKeepsTheSpecificOccurrenceRowInsideAGroupedMessage() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message(
+                    "m1",
+                    "A",
+                    "B",
+                    occurrences = listOf(occurrence(1, ts = 1_000L), occurrence(2, ts = 2_000L)),
+                ),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val second = layout.rows[1] as Seq3ArrowRow
+        val drag = seq3ResolveDragEndpoint(layout, x = second.toX - 1.0, y = second.y)
+
+        assertEquals(Seq3EndpointSide.TO, drag?.side)
+        assertEquals("m1", drag?.messageId)
+        assertEquals(2, drag?.occurrenceEntryId)
+        assertEquals(second.y, seq3DragPreview(layout, drag!!, cursorX = second.toX + 5.0)?.y)
+    }
+
+    @Test
+    fun selfLoopEndpointAtRecognizesItsVisibleArrowhead() {
+        val doc = Seq3Document(lifelines = listOf(lifeline("A", 0)), messages = listOf(message("m1", "A", "A", kind = Seq3Kind.SELF)))
+        val row = layoutSeq3(doc, opts()).rows.single() as Seq3SelfLoopRow
+
+        assertEquals(Seq3EndpointSide.TO, seq3SelfLoopEndpointAt(row, row.x + 1.0, row.loopBottomY))
+        assertEquals(Seq3EndpointSide.FROM, seq3SelfLoopEndpointAt(row, row.x, row.y))
     }
 
     @Test
@@ -210,6 +243,14 @@ class Seq3CanvasTest {
     fun emptyCanvasBackgroundIsTrueFarFromEveryRow() {
         val layout = layoutSeq3(twoLifelineArrowDoc(), opts())
         assertTrue(seq3IsEmptyCanvasBackground(layout, x = -1000.0, y = -1000.0))
+    }
+
+    @Test
+    fun emptyCanvasBackgroundIsFalseOnALifelineHeaderSoHeaderDragOwnsTheGesture() {
+        val layout = layoutSeq3(twoLifelineArrowDoc(), opts())
+        val header = layout.lifelines.first().header
+
+        assertTrue(!seq3IsEmptyCanvasBackground(layout, header.x + header.width / 2, header.y + header.height / 2))
     }
 
     // ── seq3DragPreview: live feedback while dragging an endpoint (item 13) ─────────────────────
@@ -311,7 +352,18 @@ class Seq3CanvasTest {
         val centers = listOf(0.0, 100.0, 200.0, 300.0)
         assertEquals(0, seq3LifelineDropIndex(centers, -50.0))
         assertEquals(2, seq3LifelineDropIndex(centers, 150.0))
+        assertEquals(1, seq3LifelineDropIndex(centers, 100.0))
         assertEquals(4, seq3LifelineDropIndex(centers, 999.0))
+    }
+
+    @Test
+    fun lifelineDropIndexCanBeUsedAfterRemovingTheDraggedColumn() {
+        val order = listOf("A", "B", "C")
+        val remainingCenters = listOf(100.0, 300.0) // B is being dragged; A and C remain.
+
+        val targetIndex = seq3LifelineDropIndex(remainingCenters, 350.0)
+
+        assertEquals(listOf("A", "C", "B"), seq3ReorderLifelineIds(order, "B", targetIndex))
     }
 
     // ── Crossing count surfaced through the toolbar label ───────────────────────────────────────

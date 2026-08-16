@@ -193,6 +193,21 @@ class Seq3QueueTest {
     }
 
     @Test
+    fun movingTheTargetAwayFromASelfMessageTurnsItBackIntoACall() {
+        val doc = baseDocument().copy(
+            messages = baseDocument().messages.map { message ->
+                if (message.id == "m2") message.copy(toLifelineId = "A", kind = Seq3Kind.SELF) else message
+            },
+        )
+        val result = applySeq3BulkAction(doc, setOf("m2"), Seq3BulkAction.SetTo("C"))
+
+        assertTrue(result.applied)
+        val message = result.document.messages.single { it.id == "m2" }
+        assertEquals("C", message.toLifelineId)
+        assertEquals(Seq3Kind.CALL, message.kind)
+    }
+
+    @Test
     fun hideKeepsEvidenceAndDoesNotFlipAuthoring() {
         val doc = baseDocument()
         val result = applySeq3BulkAction(doc, setOf("m1"), Seq3BulkAction.Hide)
